@@ -19,7 +19,7 @@ import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 
 from halo.trainers.embedding.injected_lora import folded_backbone_chunks
-from tests.common.peft_helpers import merged_lora_targets, randomize_adapters
+from tests.common.adapters import merged_lora_targets, randomize_adapters
 
 VOCAB = 11
 HIDDEN = 6

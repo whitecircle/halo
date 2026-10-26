@@ -1,16 +1,19 @@
 """Readers for the artifacts the toolkit's checkpoint writers produce, and the probes save, reload and resume
-tests compare them by: key sets through the production reader (``load_full_state_dict``), the files a save
-must leave, the same fixed batch's loss before a save and after its reload or resume, and the optimizer and
-scheduler state a resume restored (:func:`run_two_phase_resume` drives the whole save-then-resume shape).
+tests compare them by: the tensors as written, key sets through the production reader (``load_full_state_dict``),
+the files a save must leave, the same fixed batch's loss before a save and after its reload or resume, and the
+optimizer and scheduler state a resume restored (:func:`run_two_phase_resume` drives the whole save-then-resume
+shape).
 """
 
 import json
 import math
 import os
 from collections.abc import Callable
+from pathlib import Path
 
 import torch
 import torch.nn as nn
+from safetensors import safe_open
 from transformers import TrainerCallback
 from transformers.trainer import OPTIMIZER_NAME, SCHEDULER_NAME, TRAINER_STATE_NAME
 from transformers.utils import CONFIG_NAME
@@ -25,17 +28,14 @@ from halo.checkpoint.parallel.context import CheckpointContext, CheckpointLoadCo
 from halo.checkpoint.reading import has_whole_model_weight_file, load_full_state_dict
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.runtime.filesystem import is_fs_save_rank
+from tests.common.adapters import snapshot_adapters, unwrap
+from tests.common.memory import cleanup_memory
+from tests.common.optimizer_state import local_optimizer_state, optimizer_state_matches
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.parallelism import make_parallelism_config
-from tests.common.peft_helpers import snapshot_adapters, unwrap
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    cleanup_memory,
-    local_optimizer_state,
-    log,
-    optimizer_state_matches,
-    training_run_checks,
-)
+from tests.common.training_checks import training_run_checks
 
 # The key lists ``from_pretrained``'s loading info reports; a clean load leaves every one empty.
 LOADING_INFO_KINDS = ("missing_keys", "unexpected_keys", "mismatched_keys")
@@ -52,6 +52,20 @@ RESUME_PROBE_TEXT = (
     "User: What is 17 plus 25?\nAssistant: The answer is 42. "
     "Weights must survive a checkpoint save and resume intact across parallelism modes."
 )
+
+
+def safetensors_state_dict(checkpoint_dir: str | Path) -> dict[str, torch.Tensor]:
+    """Every tensor across a checkpoint directory's ``*.safetensors`` parts, keyed exactly as written.
+
+    Reads the parts directly, since the files are the artifact under test and nothing may re-spell or
+    re-cast them on the way in as ``from_pretrained`` does.
+    """
+    tensors: dict[str, torch.Tensor] = {}
+    for part in sorted(Path(checkpoint_dir).glob("*.safetensors")):
+        with safe_open(str(part), framework="pt") as reader:
+            for key in reader.keys():  # noqa: SIM118 - safe_open has .keys() but is not a mapping
+                tensors[key] = reader.get_tensor(key)
+    return tensors
 
 
 def written_keys(output_dir: str) -> set[str]:
@@ -98,7 +112,7 @@ def model_save_checks(save_dir: str, rank: int) -> dict[str, bool]:
     """Named checks that a ``save_model`` directory holds a loadable whole model: ``config.json`` and the
     weights.
 
-    The full-model counterpart of :func:`tests.common.peft_helpers.adapter_save_checks`. Only rank 0
+    The full-model counterpart of :func:`tests.common.adapters.adapter_save_checks`. Only rank 0
     reads the disk; the other ranks return no checks.
     """
     if rank != 0:
@@ -364,7 +378,7 @@ class ResumeCapture(TrainerCallback):
     * ``moments_materialized`` / ``moments_nonzero`` / ``moments_finite``: :func:`optimizer_moments_stats`;
     * ``sched_last_epoch``: the LR scheduler's ``last_epoch``, ``None`` without a scheduler;
     * ``optimizer_state``, only with ``optimizer_state=True``: this rank's
-      :func:`~tests.common.utils.local_optimizer_state`, for a bit-exact compare. Opt-in because it
+      :func:`~tests.common.optimizer_state.local_optimizer_state`, for a bit-exact compare. Opt-in because it
       copies the rank's whole optimizer state to host memory.
     """
 

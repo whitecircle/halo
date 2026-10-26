@@ -32,7 +32,7 @@ from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpoint
 from halo.models.moe.router_logits import declared_routers
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 EP_SIZE = 2
 BATCH, SEQ = 2, 64

@@ -25,7 +25,7 @@ import torch
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 EXPERTS_PER_RANK = 8
 TOP_K = 4

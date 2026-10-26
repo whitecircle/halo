@@ -54,11 +54,11 @@ from halo.checkpoint.reading import load_full_state_dict
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
+from tests.common.adapters import randomize_adapters
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import load_context, mark_resume_adapter, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
-from tests.common.peft_helpers import randomize_adapters
 
 BASE = "org/base-model"
 _EP = make_parallelism_config(world_size=8, gpus_per_node=8, ep_size=8, use_grouped_gemm=True)

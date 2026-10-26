@@ -35,7 +35,8 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
-from tests.common.utils import log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_FSDP_STEPS", 4)

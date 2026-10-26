@@ -64,9 +64,6 @@ MCP_SERVERS = {
     },
 }
 
-# Preset used when a config names none: no credentials, no network, restricted to its own scratch directory.
-_DEFAULT_MCP_SERVER = "filesystem"
-
 
 class _ServerConnection:
     """One spawned MCP server, held open by an owner task that enters and exits its transport and session contexts,
@@ -381,7 +378,8 @@ def build_mcp_environment(
                 f"silently ignored. Drop them, or drop transport='sse' to spawn the preset."
             )
         return NativeMCPClientEnvironment(**kwargs)
-    mcp_server = mcp_server or _DEFAULT_MCP_SERVER
+    # A config naming no server gets the preset with no credentials and no network, held to its own scratch dir.
+    mcp_server = mcp_server or "filesystem"
     config = get_mcp_server_config(mcp_server)
     explicit = dict(env_vars or {})
     declared = [name for name in config["env"] if name not in explicit]

@@ -50,8 +50,9 @@ from accelerate import PartialState
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer
 
 from tests.common.distributed import init_distributed, teardown_distributed
+from tests.common.memory import cleanup_memory, gpu_mem_gb, gpu_peak_mem_gb
 from tests.common.models import MODEL_CONFIGS
-from tests.common.utils import cleanup_memory, gpu_mem_gb, gpu_peak_mem_gb, log
+from tests.common.rank_log import log
 
 # Configuration
 

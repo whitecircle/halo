@@ -39,7 +39,7 @@ from halo.model_loading import model_preparation
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
-from tests.common.utils import imports_name
+from tests.common.source_sweep import imports_name
 
 # The shared model loader: a script that binds it builds a transformers model from a checkpoint
 # directory, remote-code families included. Derived rather than listed, so a new tool is swept in.

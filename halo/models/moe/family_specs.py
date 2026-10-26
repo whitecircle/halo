@@ -265,13 +265,13 @@ def find_moe_family_spec_for_config(config) -> MoEFamilySpec | None:
     return None
 
 
-def wraps_experts(config, *, wrappers_requested: bool) -> bool:
+def wraps_experts(config, *, ep_layers_requested: bool) -> bool:
     """Whether the run replaces this model's expert FFN with an EP layer.
 
-    ``wrappers_requested`` is the run's intent (``ParallelismConfig.needs_ep_wrappers``: EP distribution or
+    ``ep_layers_requested`` is the run's intent (``ParallelismConfig.needs_ep_layers``: EP distribution or
     grouped GEMM); only a family with a spec has a layer to put in place (Qwen3-Next keeps the stock loop).
     """
-    return wrappers_requested and has_routed_experts(config) and find_moe_family_spec_for_config(config) is not None
+    return ep_layers_requested and has_routed_experts(config) and find_moe_family_spec_for_config(config) is not None
 
 
 @lru_cache(maxsize=1)

@@ -16,7 +16,7 @@ import torch
 from numpy.lib.format import MAGIC_PREFIX as NPY_MAGIC_PREFIX
 from torch import nn
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.models.config_access import text_config
 from halo.models.module_tree import decoder_layer_index
@@ -295,8 +295,8 @@ class RoutingReplayMixin:
 
     def _build_routing_replay_injector(self, mode: str) -> RoutingReplayInjector | None:
         """The routing-replay injector for ``mode`` (``None`` when off), refusing an unknown mode, a model
-        without EP MoE wrappers or whose family cannot re-derive gate weights, and an unsupported mode setup."""
-        modes = get_args(AsyncTrainingConfig.__annotations__["routing_replay"])
+        without EP layers or whose family cannot re-derive gate weights, and an unsupported mode setup."""
+        modes = get_args(AsyncRolloutConfig.__annotations__["routing_replay"])
         if mode not in modes:
             raise ValueError(f"routing_replay must be one of {list(modes)}, got {mode!r}")
         self._rollout_routing_replay = mode == "rollout"

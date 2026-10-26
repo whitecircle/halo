@@ -27,7 +27,8 @@ from halo.env import env_str
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", QWEN3_0_6B)
 NUM_TRAIN_SAMPLES = 16
@@ -70,6 +71,7 @@ def run(ctx) -> dict:
         hint_template="\n[Hint] The correct answer is: {answer}.\n",
         answer_field="answer",
         solution_field=None,
+        confidence_power=1.0,
         response_prompt_template="<|im_start|>assistant\n",
         train_on_completions_only=True,
     )

@@ -18,7 +18,7 @@ import halo.kernels.logprobs as logprob_kernels
 from halo.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss, fused_causal_lm_token_loss
 from halo.kernels.logprobs import token_logprobs
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
-from tests.common.utils import autograd_nodes
+from tests.common.numerics import autograd_nodes
 
 
 def _naive_reference(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

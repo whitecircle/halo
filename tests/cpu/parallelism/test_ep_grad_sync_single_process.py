@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests: EP grad-sync hooks must be no-ops on a single-process launch.
 
-A bare ``python`` run (dist never initialized) still builds EP wrappers at ``ep_size=1`` (grouped
+A bare ``python`` run (dist never initialized) still builds EP layers at ``ep_size=1`` (grouped
 GEMM default); with ``fsdp_shard_ep1_experts=False`` the layer registers its router/expert
 post-accumulate hooks. A router hook built without consulting the live process state issues
 ``dist.all_reduce(group=None)``, and the first backward crashes with "Default process group has not

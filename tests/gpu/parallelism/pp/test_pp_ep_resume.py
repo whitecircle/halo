@@ -51,7 +51,7 @@ from tests.common.pp_trainers import (
     reload_reproduces_probe_loss,
     restored_moments_match_shard,
 )
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 SEQ_LEN = 64

@@ -66,7 +66,7 @@ class LigerFamilySpec:
     # Upstream Liger covers these model types: its applier runs first, and the roles above are added on top.
     delegates_to_upstream: bool = False
     # Upstream flags a delegating spec passes as False because it fills that role itself, where upstream's
-    # variant is not the family's function or does not survive the EP wrapper.
+    # variant is not the family's function or does not survive the EP layer.
     upstream_off: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -135,7 +135,7 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         glu_mlp=("Mistral4MLP",),
         causal_lm=("Mistral4ForCausalLM",),
     ),
-    # Zaya. RMSNorm only besides the loss: the EP wrapper replaces `ZayaSparseMoeBlock`, and the
+    # Zaya. RMSNorm only besides the loss: the EP layer replaces `ZayaSparseMoeBlock`, and the
     # rotary is partial. FLCE by default — the `[B*S, 262272]` logits plane is the binding limit.
     LigerFamilySpec(
         model_types=("zaya",),
@@ -166,7 +166,7 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         flce_default=True,
     ),
     # Laguna. `LagunaMLP` serves both the dense layers and every block's shared expert, which the EP
-    # wrapper adopts unchanged. Rotary is half-width on the full-attention layers and full-width on
+    # layer adopts unchanged. Rotary is half-width on the full-attention layers and full-width on
     # the sliding ones, through one shared function. The head adds the router aux loss after the
     # projection. The released repos also ship their own modeling file through `auto_map`, whose norm,
     # MLP and head are the in-library classes verbatim, so a `trust_remote_code` load takes the same swaps.
@@ -198,9 +198,9 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         delegates_to_upstream=True,
     ),
     # Upstream's `swiglu` would also put `LigerExperts` in place of the routed experts, which the EP
-    # wrapper or the model's own experts implementation must run instead. Withheld, so the flag
+    # layer or the model's own experts implementation must run instead. Withheld, so the flag
     # fuses only `Qwen3_5MoeMLP`, the sigmoid-gated shared expert (the gate lives in the block, so
-    # the MLP is the canonical GLU body), which the EP wrapper adopts unchanged.
+    # the MLP is the canonical GLU body), which the EP layer adopts unchanged.
     LigerFamilySpec(
         model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
         modeling_module="transformers.models.qwen3_5_moe.modeling_qwen3_5_moe",
@@ -210,7 +210,7 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         upstream_off=("swiglu",),
     ),
     # `Qwen3NextMLP` serves both the dense layers and every sparse block's shared expert. `swiglu`
-    # is withheld from upstream as above; the family has no EP wrapper, so its routed experts run
+    # is withheld from upstream as above; the family has no EP layer, so its routed experts run
     # the model's own experts implementation.
     LigerFamilySpec(
         model_types=("qwen3_next",),

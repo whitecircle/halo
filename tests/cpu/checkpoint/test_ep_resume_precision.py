@@ -83,7 +83,7 @@ _LAYER_KEY = re.compile(r"^model\.layers\.(\d+)\.(.+)$")
 
 
 def _ownership(model):
-    """Checkpoint scopes derived from the same family registry that constructs the EP wrappers."""
+    """Checkpoint scopes derived from the same family registry that constructs the EP layers."""
     routers, experts, blocks = [], [], []
     for path, block in ep_claimed_blocks(model):
         wrapper = MOE_LAYER_MAP[type(block).__name__]
@@ -459,7 +459,7 @@ def _construct_pp_stage(
         pp_split=None,
         ep_size=1,
         data_parallel_size=1,
-        needs_ep_wrappers=True,
+        needs_ep_layers=True,
         fp32_non_ep_params=fp32_non_ep,
         ep_config=lambda: ep_config,
     )
@@ -628,7 +628,7 @@ def _construct_tp(path, mode, *, fp32_router, fp32_experts, fp32_non_ep, preserv
         ep_lazy_loading=mode == "ep_tp_lazy",
         max_concurrent_loading=1,
         fp32_non_ep_params=fp32_non_ep,
-        needs_ep_wrappers=True,
+        needs_ep_layers=True,
         ep_config=lambda: ep_config,
     )
     config = AutoConfig.from_pretrained(path)
@@ -637,7 +637,7 @@ def _construct_tp(path, mode, *, fp32_router, fp32_experts, fp32_non_ep, preserv
     load_class = model_class or TINY_MOE_FAMILIES[config.model_type].load_class
     if mode == "tp_moe":
         model = load_tp_moe_model(
-            source, pc, load_class, kwargs, preserve_checkpoint_precision=preserve, wraps_experts=pc.needs_ep_wrappers
+            source, pc, load_class, kwargs, preserve_checkpoint_precision=preserve, wraps_experts=pc.needs_ep_layers
         )
     else:
         model = load_ep_tp_model(source, pc, load_class, kwargs, preserve_checkpoint_precision=preserve)

@@ -10,7 +10,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.trainers.preference.smpo_objective import MARGIN_LOSSES, SMPOObjective
 
 BETA = 1.5
@@ -27,7 +27,7 @@ DEFINITIONS = {
 
 
 def test_every_configurable_loss_type_has_exactly_one_margin_loss():
-    assert set(MARGIN_LOSSES) == set(typing.get_args(typing.get_type_hints(SmoothMarginPOConfig)["loss_type"]))
+    assert set(MARGIN_LOSSES) == set(typing.get_args(typing.get_type_hints(SMPOConfig)["loss_type"]))
 
 
 @pytest.mark.parametrize("loss_type", sorted(DEFINITIONS))

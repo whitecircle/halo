@@ -21,7 +21,7 @@ import torch.nn as nn
 
 from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import assert_optimizer_state_bit_exact
+from tests.common.optimizer_state import assert_optimizer_state_bit_exact
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 

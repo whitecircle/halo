@@ -30,7 +30,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.attention import sdpa_flex_sliding
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
@@ -39,7 +39,7 @@ from tests.common.parallelism import create_config
 TRAINERS = [
     DistributedSFTTrainer,
     DistributedDPOTrainer,
-    DistributedGRPOTrainer,
+    DistributedOnlineGRPOTrainer,
     DistributedAsyncEnvironmentalGRPOTrainer,
 ]
 

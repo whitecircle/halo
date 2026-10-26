@@ -23,7 +23,7 @@ Dataset: text → {"prompt", "chosen", "rejected"} message lists; VLM → the sa
 
 from halo.config_validation import reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
-from halo.configs.preference import SmoothMarginPOConfig, SMPOScriptArguments
+from halo.configs.preference import SMPOConfig, SMPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
 from halo.entrypoints.model_setup import (
@@ -44,16 +44,16 @@ from halo.entrypoints.script import (
 )
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.runtime.collectives import barrier
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 
 
 def main():
     args, smpo_config, model_config, dist_args = parse_script_args(
-        SMPOScriptArguments, SmoothMarginPOConfig, ModelArguments, ParallelismArguments
+        SMPOScriptArguments, SMPOConfig, ModelArguments, ParallelismArguments
     )
 
     context = init_training_script(
-        args, smpo_config, model_config, dist_args, script_prefix="smpo", trainer_cls=SmoothMarginPOTrainer
+        args, smpo_config, model_config, dist_args, script_prefix="smpo", trainer_cls=SMPOTrainer
     )
     parallelism_config = context.parallelism_config
 
@@ -111,7 +111,7 @@ def main():
 
     barrier()
 
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=smpo_config,
         train_dataset=train_dataset,

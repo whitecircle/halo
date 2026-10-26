@@ -105,7 +105,7 @@ is logged at startup.
 
 A stage is the **real backbone** with its layer list sliced, the final norm neutralized on non-last
 stages, and non-first stages driven through `inputs_embeds`, so each family's rotary embeddings, mask
-construction, `layer_types` handling and MoE wrappers are inherited. The input embedding is located
+construction, `layer_types` handling and EP layers are inherited. The input embedding is located
 by identity (`get_input_embeddings`).
 
 Families are registered in `PP_FAMILY_SPECS` (`halo/distributed/pipeline_parallel/families.py`), one
@@ -186,7 +186,7 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
   stage runs a different collective program than its MoE peers and deadlocks at the gradient norm,
   so such a partition raises at setup. Choose a `pipeline_parallel_size` or `pipeline_split` that
   reaches the MoE layers on every stage.
-- The stage FSDP wrap is EP-aware: expert wrappers are FSDP-ignored (`ep_size>1`) or sharded as
+- The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_size>1`) or sharded as
   stage-mesh DTensors (`ep_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
   rejected under PP.
 - EP gradient sync runs in one deferred post-backward sweep (`EPConfig.defer_grad_sync`): PP forces

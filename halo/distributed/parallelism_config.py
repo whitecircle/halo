@@ -59,7 +59,7 @@ class ParallelismConfig:
     fp32_non_ep_params: bool = False  # fp32 non-expert masters; compute stays bf16 via autocast
     fp32_grad_reduce: bool = False
     bf16_optimizer: bool | None = None  # AdamWBF16; None = on under bf16 with a default optim, off under DDP
-    use_grouped_gemm: bool = True  # at ep_size=1 this alone applies the EP wrappers
+    use_grouped_gemm: bool = True  # at ep_size=1 this alone applies the EP layers
 
     lowp: LowpSpec = field(default_factory=LowpSpec)
 
@@ -315,8 +315,8 @@ class ParallelismConfig:
         return self.ep_group_size > 1
 
     @property
-    def needs_ep_wrappers(self) -> bool:
-        """EP MoE layer wrappers apply: an EP group, or grouped GEMM alone (applied on MoE models only)."""
+    def needs_ep_layers(self) -> bool:
+        """EP layers apply: an EP group, or grouped GEMM alone (applied on MoE models only)."""
         return self.ep_group_size > 1 or self.use_grouped_gemm
 
     @property

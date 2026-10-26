@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 import torch
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.grpo.environmental import async_rollouts, importance_sampling
 from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_engine_reference
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -126,7 +126,7 @@ def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
     host = types.SimpleNamespace(
         _weight_sync_client=None,
         _train_loader_batch_size=lambda: 8,
-        async_config=AsyncTrainingConfig(
+        async_config=AsyncRolloutConfig(
             rollout_connection_timeout=7.0,
             rollout_server_url="http://single:8000",
             rollout_server_configs=[{"url": "http://a:8000"}, {"url": "http://b:8001"}],
@@ -262,7 +262,7 @@ def test_rescore_rejects_a_length_mismatch_as_that_rows_miss():
 
 def _gate(client_cls, *, is_correction=True, **sampler) -> None:
     """The gate over a rollout config at the identity sampler, with ``sampler`` overriding its knobs."""
-    config = AsyncTrainingConfig(**{"rollout_temperature": 1.0, "rollout_top_p": 1.0, **sampler})
+    config = AsyncRolloutConfig(**{"rollout_temperature": 1.0, "rollout_top_p": 1.0, **sampler})
     reject_unsupported_engine_reference(client_cls, config, is_correction)
 
 

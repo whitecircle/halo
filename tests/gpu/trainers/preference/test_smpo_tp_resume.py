@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""SmoothMarginPOTrainer at TP=2 saves a mid-training checkpoint and resumes from it on Qwen3-0.6B.
+"""SMPOTrainer at TP=2 saves a mid-training checkpoint and resumes from it on Qwen3-0.6B.
 
 The DTensor parameters are gathered for the save and re-sharded on the resume, which streams the
 checkpoint's weights into a base-loaded TP model; the checks are
@@ -9,10 +9,10 @@ checkpoint's weights into a base-loaded TP model; the checks are
 import torch
 from transformers import AutoTokenizer
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.checkpoint_io import RESUME_PROBE_TEXT, fixed_text_batch, run_two_phase_resume
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import shared_output_dir
@@ -31,7 +31,7 @@ def run(ctx) -> dict:
     train_dataset = create_preference_dataset(64, tokenizer, seed=SEED)
     eval_dataset = create_preference_dataset(8, tokenizer, seed=SEED + 100)
 
-    def build_trainer(checkpoint: str | None, **schedule) -> SmoothMarginPOTrainer:
+    def build_trainer(checkpoint: str | None, **schedule) -> SMPOTrainer:
         # Both phases build on the base weights: the resume's own TP reload streams the checkpoint's in.
         parallelism_config = ParallelismConfig(tp_size=TP_SIZE)
         model, _ = load_distributed_model(
@@ -42,9 +42,9 @@ def run(ctx) -> dict:
             use_liger_kernel=True,
             attn_implementation="sdpa",  # padded preference: avoid FA4 varlen-bwd cold-compile (see test_smpo_tp)
         )
-        return SmoothMarginPOTrainer(
+        return SMPOTrainer(
             model=model,
-            args=SmoothMarginPOConfig(
+            args=SMPOConfig(
                 **schedule,
                 per_device_train_batch_size=1,
                 gradient_accumulation_steps=1,

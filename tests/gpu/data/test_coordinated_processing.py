@@ -36,7 +36,7 @@ from halo.runtime.filesystem import is_fs_load_rank, is_input_shared_filesystem
 from halo.runtime.ranks import is_global_main_process
 from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import log, log_all
+from tests.common.rank_log import log, log_all
 
 # Configuration
 

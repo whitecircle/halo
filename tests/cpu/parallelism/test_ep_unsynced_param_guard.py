@@ -40,7 +40,7 @@ _RANK_UNIFORM_ENV = "halo.trainers.distributed_trainer.agree_rank_uniform_env"
 # dispatches it to: ep_group_size > 1, or plain DP with fsdp_shard_ep1_experts off. CP and TP refuse that
 # flag at config time, so their wraps shard every ep1 expert. The PP rows span two nodes, one pipeline
 # stage each.
-_EP_WRAPPER_MODES = {
+_EP_LAYER_MODES = {
     "dp": ({"fsdp_shard_ep1_experts": False}, "_apply_ep_fsdp2"),
     "ep": ({"ep_size": 8}, "_apply_ep_fsdp2"),
     "etp": ({"expert_tp_size": 2}, "_apply_ep_fsdp2"),
@@ -189,13 +189,13 @@ def test_expert_tp_implies_an_ep_group():
     assert config.is_expert_tp_mode and config.has_ep_group
 
 
-@pytest.mark.parametrize("mode", sorted(_EP_WRAPPER_MODES))
-def test_construction_refuses_an_unsynced_param_in_every_ep_wrapper_mode(mode):
+@pytest.mark.parametrize("mode", sorted(_EP_LAYER_MODES))
+def test_construction_refuses_an_unsynced_param_in_every_ep_layer_mode(mode):
     """The construction check is the only one over what the wraps leave out, so it must refuse the
     undeclared parameter in every mode that wraps around an EP layer."""
-    kwargs, expected_setup = _EP_WRAPPER_MODES[mode]
+    kwargs, expected_setup = _EP_LAYER_MODES[mode]
     config = _config(**kwargs)
-    assert config.needs_ep_wrappers
+    assert config.needs_ep_layers
     host = _ModeHost(config, [_StubEPLayer(rogue=True)])
 
     with patch(_RANK_UNIFORM_ENV), pytest.raises(RuntimeError, match="rogue_scale"):
@@ -205,10 +205,10 @@ def test_construction_refuses_an_unsynced_param_in_every_ep_wrapper_mode(mode):
 
 
 def test_construction_refuses_ep_layers_a_hand_built_config_does_not_declare():
-    """A model carrying EP layers under a config without EP wrappers: the plain-DP wrap leaves them out
+    """A model carrying EP layers under a config without EP layers: the plain-DP wrap leaves them out
     of FSDP2 (fsdp_shard_ep1_experts off) and nothing else syncs the undeclared parameter."""
     config = _config(use_grouped_gemm=False, fsdp_shard_ep1_experts=False)
-    assert not config.needs_ep_wrappers, "premise: the config declares no EP wrappers"
+    assert not config.needs_ep_layers, "premise: the config declares no EP layers"
     host = _ModeHost(config, [_StubEPLayer(rogue=True)])
 
     with patch(_RANK_UNIFORM_ENV), pytest.raises(RuntimeError, match="rogue_scale"):

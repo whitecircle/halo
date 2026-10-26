@@ -52,12 +52,12 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_flag, env_int, env_str
 from halo.models.unwrapping import find_peft_model, plain_peft_param_name
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import load_peft_model
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import load_peft_model
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import lora_bases_and_merges
 
 # Model/attn/EP are env-overridable exactly as in test_lora_ep_experts.py, so one file sweeps the

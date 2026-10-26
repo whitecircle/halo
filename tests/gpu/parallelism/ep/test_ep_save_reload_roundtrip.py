@@ -8,7 +8,7 @@ init. A *finite* reload loss does not prove correctness (uninitialized experts
 still give a finite loss); the decisive check is that the reloaded forward loss
 matches the pre-save loss, plus a key-layout assertion on the saved index.
 
-This guards the Gemma4 layout class, where the EP wrapper replaces the experts
+This guards the Gemma4 layout class, where the EP layer replaces the experts
 *container* (``model.layers.{i}.experts``) rather than an encapsulating
 ``*MoeBlock``: a base ``experts.``-prefixed gather doubles the prefix to
 ``...experts.experts.gate_up_proj``, which never reloads.
@@ -51,9 +51,10 @@ from halo.runtime.ranks import is_global_main_process
 from tests.common.checkpoint_io import fixed_batch_loss, fixed_text_batch, save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
+from tests.common.memory import cleanup_memory
 from tests.common.models import GEMMA4_26B_A4B_PATCHED
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 MODEL = env_str("HALO_TEST_EP_RT_MODEL", GEMMA4_26B_A4B_PATCHED)
 ATTN = env_str("HALO_TEST_EP_RT_ATTN", "sdpa")

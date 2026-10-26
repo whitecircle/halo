@@ -22,6 +22,7 @@ what a real engine would find when it dials in.
     python tests/cpu/weight_sync/test_bind_address.py
 """
 
+import ipaddress
 import logging
 import socket
 from pathlib import Path
@@ -43,7 +44,7 @@ from tests.common.ports import free_port
 from tests.common.weight_sync import offline_client
 
 BIND_ALL_ENV = "HALO_WEIGHT_SYNC_BIND_ALL"
-# RFC 5737 documentation range: never an address of the test host.
+# RFC 5737 documentation ranges here and in _TwoNicHost: never an address of the test host.
 NON_LOCAL_ADDRESS = "203.0.113.7"
 _TCP_LISTEN = "0A"
 
@@ -356,9 +357,10 @@ class _TwoNicHost:
     """A host whose default route leaves through a management NIC while the cluster subnet, where the server
     sits, is reached through another; it binds neither address the tests name, so the server is remote."""
 
-    MANAGEMENT_NIC = "192.168.1.5"
-    CLUSTER_NIC = "10.0.0.5"
-    CLUSTER_SERVER = "10.1.2.3"
+    MANAGEMENT_NIC = "192.0.2.5"
+    CLUSTER_SUBNET = ipaddress.ip_network("198.51.100.0/24")
+    CLUSTER_NIC = "198.51.100.5"
+    CLUSTER_SERVER = "198.51.100.23"
 
     def __init__(self, *, routes: bool = True):
         self.routes = routes
@@ -388,7 +390,7 @@ class _FakeSocket:
         self.target = address[0]
 
     def getsockname(self):
-        on_cluster = self.target is not None and self.target.startswith("10.")
+        on_cluster = self.target is not None and ipaddress.ip_address(self.target) in _TwoNicHost.CLUSTER_SUBNET
         return (_TwoNicHost.CLUSTER_NIC if on_cluster else _TwoNicHost.MANAGEMENT_NIC, 0)
 
 

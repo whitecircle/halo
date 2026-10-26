@@ -34,7 +34,7 @@ from halo.environments.rollout_config import RolloutConfig
 from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import SGLANG_SERVER_URL, push, weight_transfer_port
 
 PROBE_PROMPT = "Count: 1 2 3"

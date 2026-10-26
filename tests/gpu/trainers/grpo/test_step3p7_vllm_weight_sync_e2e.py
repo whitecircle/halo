@@ -60,7 +60,8 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model, sync_weights_to_client
 from halo.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
-from tests.common.utils import log, max_or_nan
+from tests.common.numerics import max_or_nan
+from tests.common.rank_log import log
 from tests.common.weight_sync import weight_transfer_port
 
 VLLM_SERVER_URL = env_str("VLLM_SERVER_URL") or "http://localhost:8000"

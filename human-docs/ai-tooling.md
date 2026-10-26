@@ -27,7 +27,7 @@ their own when relevant. The other six are user-invoked only: name them with
 | `checkpoints` | merging shards and adapters, converting, resuming, loading into vLLM |
 | `data` | dataset format per method, and offline tokenize/pack/shard when worth it |
 | `rl-setup` | wires up the online RL methods: rollout container, NCCL weight sync, environments |
-| `add-model` | integrates a new model family (EP wrapper, registries, tests) |
+| `add-model` | integrates a new model family (EP layer, registries, tests) |
 | `write-tests` | writes CPU/GPU tests that actually fail when behavior breaks |
 | `docs` | maintains both doc trees — `agent-docs/` and this guide — under the style charter |
 

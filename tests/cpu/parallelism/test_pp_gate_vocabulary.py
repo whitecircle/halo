@@ -23,16 +23,23 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from tokenizers import Tokenizer
+from tokenizers.models import WordLevel
+from transformers import PretrainedConfig, PreTrainedTokenizerFast
 
+from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from halo.trainers.grpo.offline.offline_rules import reject_offline_pp_options
 from halo.trainers.parallelism.pipeline_rules import (
     reject_missing_precomputed_columns,
     reject_missing_precomputed_reference,
     reject_positional_model_or_args,
+    reject_pp_collator,
     reject_pp_compute_metrics,
     reject_pp_peft,
     reject_pp_ref_model,
     reject_unsupported_pp_training_args,
+    require_pad_token_id,
+    require_pooling_pad_id,
 )
 from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from halo.trainers.preference.dpo import DistributedDPOTrainer
@@ -157,6 +164,84 @@ def test_activation_offloading_rejection_names_the_bypassed_wrapper():
             _training_args(activation_offloading=True), save_sharded_ep=False, evaluates=False
         )
     assert "training_step" in str(err.value) and "never engage" in str(err.value)
+
+
+def _right_padded_tokenizer(pad_token: str | None = "<pad>") -> PreTrainedTokenizerFast:
+    backend = Tokenizer(WordLevel({"<unk>": 0, "<pad>": 1, "a": 2}, unk_token="<unk>"))
+    tokenizer = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", pad_token=pad_token)
+    tokenizer.padding_side = "right"
+    return tokenizer
+
+
+def _pooling_config(pad_token_id: int | None) -> PretrainedConfig:
+    return PretrainedConfig(pad_token_id=pad_token_id)
+
+
+def test_the_fixed_shape_helpers_accept_what_the_pipeline_can_take():
+    """Anti-vacuity for the shape refusals below: each one passes the input a pipeline does take."""
+    tokenizer = _right_padded_tokenizer()
+    reject_pp_collator(DataCollatorWithPacking(tokenizer), per_device_train_batch_size=2, n_microbatches=2)
+    reject_pp_collator(object(), per_device_train_batch_size=4, n_microbatches=2)
+    assert require_pad_token_id(tokenizer, "why") == tokenizer.pad_token_id
+    assert require_pooling_pad_id(_pooling_config(1), tokenizer_pad_id=1) == 1
+    assert require_pooling_pad_id(_pooling_config(1), tokenizer_pad_id=None) == 1
+
+
+@pytest.mark.parametrize(
+    ("refusal", "match"),
+    [
+        (
+            lambda: reject_unsupported_pp_training_args(
+                _training_args(max_length=None), save_sharded_ep=False, evaluates=False
+            ),
+            r"requires a fixed sequence length .* Set max_length",
+        ),
+        (
+            lambda: reject_unsupported_pp_training_args(
+                _training_args(torch_compile=True), save_sharded_ep=False, evaluates=False
+            ),
+            r"torch_compile .* the schedule captures the stage module at setup",
+        ),
+        (
+            lambda: reject_pp_collator(None, per_device_train_batch_size=1, n_microbatches=1),
+            r"requires a data collator; the trainer has none",
+        ),
+        (
+            lambda: reject_pp_collator(
+                DataCollatorWithFlattening(tokenizer=_right_padded_tokenizer()),
+                per_device_train_batch_size=1,
+                n_microbatches=1,
+            ),
+            r"DataCollatorWithFlattening \(padding-free\) .* summed document length",
+        ),
+        (
+            lambda: reject_pp_collator(
+                DataCollatorWithPacking(_right_padded_tokenizer()), per_device_train_batch_size=2, n_microbatches=1
+            ),
+            r"one packed row per microbatch, .* leaks attention across documents",
+        ),
+        (
+            lambda: require_pad_token_id(_right_padded_tokenizer(pad_token=None), "PP pads every batch"),
+            r"^PP pads every batch and needs the tokenizer's pad_token_id",
+        ),
+        (
+            lambda: require_pooling_pad_id(_pooling_config(0), tokenizer_pad_id=1),
+            r"config.pad_token_id \(0\) disagrees with the tokenizer's pad_token_id \(1\)",
+        ),
+    ],
+    ids=[
+        "no-max-length",
+        "torch-compile",
+        "no-collator",
+        "padding-free-collator",
+        "packing-rows-per-microbatch",
+        "no-pad-token",
+        "pooling-pad-disagrees",
+    ],
+)
+def test_each_fixed_shape_refusal_names_its_mechanism(refusal, match):
+    with pytest.raises(ValueError, match=match):
+        refusal()
 
 
 @pytest.mark.parametrize("missing", ["model", "args"])

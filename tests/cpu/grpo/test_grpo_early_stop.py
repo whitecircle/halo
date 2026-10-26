@@ -21,13 +21,13 @@ from transformers import TrainerControl, TrainerState
 
 from halo.callbacks.early_stop import StopsTrainingEarly
 from halo.configs.grpo import EarlyStopConfig
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from halo.entrypoints.script import EarlyStopExit, run_trainer
 from halo.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY, UPDATE_SKIPPED_KEY
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.repo import REPO_ROOT
 
 
@@ -187,8 +187,8 @@ def test_conditions_keep_separate_streaks():
 
 
 def test_the_env_config_adds_the_breaker_condition_to_the_shared_ones():
-    assert not AsyncTrainingConfig().build_early_stop_config().active
-    config = AsyncTrainingConfig(
+    assert not AsyncRolloutConfig().build_early_stop_config().active
+    config = AsyncRolloutConfig(
         early_stop_entropy_band=[0.15, 0.35],
         early_stop_on_skipped_updates=True,
         skip_update_masked_frac=0.4,
@@ -237,7 +237,11 @@ def test_a_gap_the_run_never_logs_is_refused_and_no_condition_attaches_nothing()
             "LOGRATIO_MEAN_KEY",
             "self._is_correction",
         ),
-        (DistributedGRPOTrainer.__init__, "SAMPLING_LOGP_GAP_KEY", "grpo_args.vllm_importance_sampling_correction"),
+        (
+            DistributedOnlineGRPOTrainer.__init__,
+            "SAMPLING_LOGP_GAP_KEY",
+            "grpo_args.vllm_importance_sampling_correction",
+        ),
     ],
     ids=["environmental", "online"],
 )
@@ -274,7 +278,7 @@ def test_each_trainer_attaches_the_stop_on_the_gap_it_logs(setup, gap_key, gap_l
 )
 def test_a_condition_that_could_never_or_always_fire_is_refused(config, message):
     with pytest.raises(ValueError, match=message):
-        AsyncTrainingConfig(**config)
+        AsyncRolloutConfig(**config)
 
 
 if __name__ == "__main__":

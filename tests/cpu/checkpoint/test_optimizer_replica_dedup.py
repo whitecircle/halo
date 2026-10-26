@@ -43,7 +43,7 @@ class _StubEpConfig:
 
 
 def _ep_model(replica_ranks, *, experts_fsdp_managed=False) -> nn.Module:
-    """A model whose ``mlp`` is a real EP wrapper instance (class only, as the seam reads nothing
+    """A model whose ``mlp`` is a real EP layer instance (class only, as the seam reads nothing
     else) carrying the FSDP-ignored expert + router params, beside one FSDP-sharded param."""
     model = nn.Module()
     model.fc = nn.Linear(4, 4, bias=False)

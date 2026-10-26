@@ -24,14 +24,14 @@ LoRA is tiny-model verified by `tests/gpu/trainers/lora/test_lora_merged_save_re
 (expert and mixed adapters at ep2 / ep1 / ep2+cp2, merged save and exact resume); no full-scale LoRA
 run.
 
-## EP wrapper
+## EP layer
 
 `EPCohere2MoELayer` (`halo/distributed/expert_parallel/families/cohere2_moe.py`) replaces
 `Cohere2MoeSparseMoeBlock`. Layers whose `mlp_layer_types` entry is `dense` instantiate a plain MLP
 and are never wrapped.
 
 - Routing: `Cohere2MoeTopKRouter` picks top-k on the RAW logits, then activates only the selected
-  scores — softmax over the k scores, or sigmoid with `norm_topk_prob` renorm. The wrapper re-derives
+  scores — softmax over the k scores, or sigmoid with `norm_topk_prob` renorm. The EP layer re-derives
   exactly that from the router's logits.
 
     The router module itself is still called, so the HF `router_logits` recorder keeps firing.
@@ -49,7 +49,7 @@ and are never wrapped.
   fused SwiGLU Triton combine).
 - Shared experts: one fused `Cohere2MoeMLP` (intermediate = `intermediate_size *
   num_shared_experts`), replicated per rank, combined after DeepEP combine by `sum` or `average`
-  (the wrapper scales the summed output by 0.5).
+  (the EP layer scales the summed output by 0.5).
 - Checkpoints: the hub stores one tensor per expert (`experts.{i}.{gate,up,down}_proj.weight`);
   transformers fuses on load and reverts on save. The gather emits the fused pair, and
   `scripts/after_training/unfuse_moe_experts.py` rewrites a gathered save into the hub's per-expert

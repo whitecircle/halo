@@ -68,7 +68,7 @@ def test_the_derived_roster_covers_the_trainer_families():
     """Anti-vacuity: an empty or tiny roster would make the contract test below assert nothing."""
     names = {cls.__name__ for cls in CUSTOM_LOSS_TRAINERS}
     assert len(names) >= 6, f"the roster collapsed to {sorted(names)} — the derivation stopped finding trainers"
-    assert {"SmoothMarginPOTrainer", "OfflineGRPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
+    assert {"SMPOTrainer", "OfflineGRPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
 
 
 @pytest.mark.parametrize("trainer", CUSTOM_LOSS_TRAINERS, ids=lambda cls: cls.__name__)

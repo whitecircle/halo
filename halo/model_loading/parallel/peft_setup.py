@@ -271,7 +271,7 @@ def configure_adapter_training(
     """
     # lora_target_parameters makes PEFT wrap the module holding the parameter, which for an expert weight
     # is the EP layer itself: its adapters would sit outside the EP validators and gradient sync. Without
-    # EP wrappers the experts are ordinary modules stock PEFT handles.
+    # EP layers the experts are ordinary modules stock PEFT handles.
     if getattr(model_config, "lora_target_parameters", None) and named_ep_layers(model):
         raise ValueError(
             f"lora_target_parameters={list(model_config.lora_target_parameters)} is not supported under "

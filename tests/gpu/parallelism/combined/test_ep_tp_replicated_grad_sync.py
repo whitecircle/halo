@@ -40,7 +40,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2

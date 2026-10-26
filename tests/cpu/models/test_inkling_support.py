@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for Inkling (Thinking Machines) EP support: contracts, registration, router parity.
 
-The contract tests exercise the toolkit's own registries; the parity tests run the EP wrapper's
+The contract tests exercise the toolkit's own registries; the parity tests run the EP layer's
 router against the real ``transformers.models.inkling`` block. Inkling normalises the routed top-k
 and the shared experts JOINTLY, so the wrapper must reproduce that single logsumexp — computing the
 routed weights alone changes every weight.

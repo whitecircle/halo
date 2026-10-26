@@ -20,11 +20,11 @@ FSDP2 with parallelism-specific gradient hooks ([How the mixin manages FSDP](#ho
 `accelerate launch` reads an accelerate config YAML (FSDP or DDP) and is for standard multi-GPU
 without EP/CP/TP/ETP/PP; those modes raise under it (`reject_accelerate_launch`). Both paths produce
 equivalent results there. Dense models run under `accelerate launch` (FSDP or DDP) even
-at the default `use_grouped_gemm: true`: the grouped-GEMM expert wrappers only activate for MoE
+at the default `use_grouped_gemm: true`: the grouped-GEMM EP layers only activate for MoE
 models.
 
 An **MoE** model with `use_grouped_gemm: true` is rejected at load under any `accelerate launch`:
-the wrappers require the mixin-managed FSDP2 path. Launch with `torchrun`, or set
+the EP layers require the mixin-managed FSDP2 path. Launch with `torchrun`, or set
 `use_grouped_gemm: false` to train the MoE under accelerate.
 
 ## FSDP2 strategy by mode
@@ -344,7 +344,7 @@ MoE.
 
 | Knob | Under plain DP | Gate |
 |---|---|---|
-| `use_grouped_gemm: true` + MoE + `accelerate launch` | rejected — the wrappers need the mixin-managed FSDP2 path. Use `torchrun`, or `use_grouped_gemm: false` | `reject_unsupported_model` |
+| `use_grouped_gemm: true` + MoE + `accelerate launch` | rejected — the EP layers need the mixin-managed FSDP2 path. Use `torchrun`, or `use_grouped_gemm: false` | `reject_unsupported_model` |
 | multi-device `device_map` (e.g. `"auto"`) under `torchrun` | rejected — the FSDP2 setup cannot skip a rank-local bail-out before a collective mesh build | `halo/distributed/fsdp.py` |
 | `bf16_optimizer: false` with a stock AdamW `optim` on a MoE with `fsdp_shard_ep1_experts: false` | rejected — fused AdamW cannot mix the unsharded plain expert tensors with FSDP2 DTensors. At the default `fsdp_shard_ep1_experts: true` the experts are DTensors too and it is allowed | `reject_stock_adamw_on_mixed_params` |
 | `fp32_non_ep_params` on a MoE at the default `fsdp_shard_ep1_experts: true` | rejected — the FSDP-managed experts stay bf16 beside fp32 dense params in one shard group, which FSDP2 refuses. Set `fsdp_shard_ep1_experts: false` | `reject_unsupported_model` |

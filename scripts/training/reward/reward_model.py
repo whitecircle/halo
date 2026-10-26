@@ -33,7 +33,7 @@ from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.reward import RewardScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.render_columns import alias_images_column, alias_tools_column
-from halo.data.vlm_routing import is_vlm_run
+from halo.data.vlm_detection import is_vlm_run
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_max_length,

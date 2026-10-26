@@ -6,7 +6,7 @@ The per-kernel suites pin each kernel against its own reference: ``test_fused_gl
 combines), ``test_moe_permute.py`` (the fused un-permute), ``test_liger_family_kernels.py`` and
 ``tests/cpu/model_loading/test_native_rms_norm.py`` (each Liger role and norm casting mode). This file checks
 that nothing breaks where they meet, per family: the family's Liger applier as the loader calls it and
-the EP wrapper with grouped GEMM (ep_size 1, so every expert is local and the fused weighted un-permute
+the EP layer with grouped GEMM (ep_size 1, so every expert is local and the fused weighted un-permute
 runs). A family whose wrapper latched the wrong combine, whose packed GLU read the wrong half, or whose
 experts lost a gradient moves the loss or a gradient by far more than the tolerances below.
 
@@ -59,9 +59,10 @@ from halo.models.config_access import text_config
 from halo.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.harness import gpu_test_main, record_check
+from tests.common.numerics import cos_sim, fro_rel_err
 from tests.common.parallelism import single_process_ep_config
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.utils import cos_sim, fro_rel_err, log
 
 SEED = 0
 BATCH, SEQ = 2, 96
@@ -98,7 +99,7 @@ def _loss_and_grads(model, input_ids) -> tuple[float, dict[str, torch.Tensor]]:
 
 
 def _hf_named_grads(model_type: str, model_cls: type, config, grads: dict[str, torch.Tensor]):
-    """EP-wrapper gradients under the stock model's parameter names.
+    """EP-layer gradients under the stock model's parameter names.
 
     The family's own merge maps the wrapper's tensors to the checkpoint layout, and the model class's
     ``from_pretrained`` then converts that layout to the live one, exactly as a real save and load would
@@ -122,7 +123,7 @@ def _stock_model(model_cls: type, config, state: dict, dtype: torch.dtype):
 
 def _stack_model(model_cls: type, config, state: dict, dtype: torch.dtype):
     """The model as the production loader assembles it: the applier's class swaps (already applied),
-    the reference weights, the EP wrapper."""
+    the reference weights, the EP layer."""
     model = _stock_model(model_cls, config, state, dtype)
     apply_ep_layers(model, single_process_ep_config(require_expert_count(config), use_grouped_gemm=True))
     return model
@@ -174,7 +175,7 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     ref16_loss, ref16_grads = _loss_and_grads(_stock_model(model_cls, config, state, torch.bfloat16), input_ids)
     del reference
 
-    applied = apply_liger_kernel(copy.deepcopy(config), None, needs_ep_wrappers=True)
+    applied = apply_liger_kernel(copy.deepcopy(config), None, needs_ep_layers=True)
     result = {"model_type": model_type, "ref_loss": ref_loss, "round_off_spread": spread}
     for label, dtype in (("fp32", torch.float32), ("bf16", torch.bfloat16)):
         model = _stack_model(model_cls, config, state, dtype)

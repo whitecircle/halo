@@ -30,7 +30,7 @@ from halo.data.pipeline.chat_render import tokenize_rendered
 from halo.data.pipeline.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.sources.paths import EVAL_SPLIT_NAMES
-from halo.data.vlm_routing import reject_image_columns
+from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_max_length,

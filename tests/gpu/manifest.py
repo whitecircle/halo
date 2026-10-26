@@ -58,6 +58,7 @@ Markers (selection):
 
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
+from typing import Literal
 
 GPU_DIR = Path(__file__).parent
 # The pytest modules under tests/gpu/, relative to it like the MANIFEST keys: the manifest launcher
@@ -91,6 +92,9 @@ class TestSpec:
         timeout: seconds before the launcher kills the process group (a hard kill, since
             NCCL / FA hangs do not return).
         flaky: known-transient; the conftest applies scoped reruns.
+        launcher: ``"torchrun"`` launches ``nproc`` ranks of the script; ``"python"`` runs the script as
+            one process that starts its own ``nproc`` ranks (a ``halo launch`` driver), handed the count
+            in ``HALO_TEST_NPROC``.
 
     World-size strictness is not declared here: each script owns it via
     ``gpu_test_main(exact_world_size=N)``, which is authoritative and more precise than a
@@ -106,6 +110,7 @@ class TestSpec:
     args_matrix: tuple = ("",)
     timeout: int = 1200
     flaky: bool = False
+    launcher: Literal["torchrun", "python"] = "torchrun"
 
     def launches(self) -> list[tuple[str, "TestSpec"]]:
         """``(args, spec)`` per ``args_matrix`` entry, the spec carrying that entry's own launch values."""
@@ -683,7 +688,7 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=8, markers=("gpu", "full", "8gpu", "pp", "etp", "moe", "gptoss"), timeout=1500
     ),
     # The pipeline-registered MoE families tiny_family_model builds, through the real trainer against their unsplit
-    # ep1 twin: Qwen3.5-MoE on the ep1 grouped-GEMM wrappers, and each family with its experts distributed.
+    # ep1 twin: Qwen3.5-MoE on the ep1 grouped-GEMM EP layers, and each family with its experts distributed.
     "parallelism/pp/test_pp_family_vs_reference.py": TestSpec(
         nproc=4,
         markers=("gpu", "full", "4gpu", "pp", "ep", "moe", *_family_markers(_PP_MOE_FAMILIES)),
@@ -847,7 +852,7 @@ MANIFEST: dict[str, TestSpec] = {
     # --resume R3 rows are the ones whose post-sync policy produces runaway completions, the zero-gradient
     # batch the replay gate exempts. The resume rows set the two-rank budget (two model builds and a
     # checkpoint round-trip), EP+TP the four-rank one (a DTensor attention plan on top of the EP
-    # wrappers), each with room for the FA4-JIT and checkpoint-download cold paths.
+    # layers), each with room for the FA4-JIT and checkpoint-download cold paths.
     "trainers/grpo/test_env_grpo_e2e.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "etp", "tp", "lora", "moe", "qwen3", "vllm_server"),
@@ -1248,6 +1253,32 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "gptoss"), timeout=1500
     ),
     "trainers/other/test_embedding.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
+    # One row per method under scripts/training, which tests/cpu/config/test_entry_script_recipes.py holds them
+    # to: `halo launch` on two ranks, a save per step, a resume and the export read back. The script starts
+    # the ranks, so each row runs it as one process. The two engine-driven methods train the dense vLLM tier's
+    # served checkpoint against it.
+    "trainers/other/test_entry_scripts.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=(
+            "--method classification",
+            "--method distillation/self-distill",
+            "--method distillation/teacher-distill",
+            "--method embedding",
+            "--method grpo/offline",
+            "--method preference/dpo",
+            "--method preference/kto",
+            "--method preference/smpo",
+            "--method reward/reward-model",
+            "--method sft",
+            *_rows(
+                ("--method grpo/environmental", "--method grpo/online"),
+                markers=("gpu", "full", "2gpu", "vllm_server", "qwen3"),
+            ),
+        ),
+        timeout=1500,
+        launcher="python",
+    ),
     "trainers/other/test_reward.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
     "trainers/other/test_reward_vlm_e2e.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "vlm"), timeout=1200),
     "trainers/preference/test_dpo.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),

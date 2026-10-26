@@ -32,7 +32,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import RecordingSender
 
 ETP_SIZE = 2

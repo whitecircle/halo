@@ -17,7 +17,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.episode import RolloutResult
 from halo.environments.messages import Message, Trajectory
 from halo.trainers.grpo.environmental.reasoning import reasoning_token_counts
@@ -35,7 +35,7 @@ class _StubTokenizer:
 
 def _trainer(floor_weight: float, carry_reasoning: bool, price: dict[str, float] | None = None):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncTrainingConfig(reasoning_floor=floor_weight, reasoning_price=price)
+    trainer.async_config = AsyncRolloutConfig(reasoning_floor=floor_weight, reasoning_price=price)
     trainer.num_generations = 1
     trainer._tokenizer = _StubTokenizer()
     attach_world_metrics(trainer)

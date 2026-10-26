@@ -155,10 +155,10 @@ same wrapper runs with EP params in `ignored_params`.
 EP+CP needs node-local EP filling the NVLink domain: on 8 GPUs ep8/cp2 → DP4, ep8/cp4 → DP2,
 ep8/cp8 → DP1 ([Topology rules](README.md#topology-rules)).
 
-**Pure CP on a MoE still gets expert wrappers.** `load_cp_model` builds an `ep_size == 1` EP
-config whenever `needs_ep_wrappers` holds and the model declares experts, so the
+**Pure CP on a MoE still gets EP layers.** `load_cp_model` builds an `ep_size == 1` EP
+config whenever `needs_ep_layers` holds and the model declares experts, so the
 MoE blocks run the [grouped-GEMM](../optimization/grouped-gemm.md) expert path rather than the stock
-per-expert loop — `needs_ep_wrappers` forces Liger's routed-expert swiglu/geglu off either way, so
+per-expert loop — `needs_ep_layers` forces Liger's routed-expert swiglu/geglu off either way, so
 without it the model would pay that cost for no speedup. Dense models under CP get no EP config.
 
 ## Usage
@@ -181,7 +181,7 @@ Programmatic: `parallelism_config=ParallelismConfig(ep_size=8, cp_size=8)`.
 
 ### Checkpoint saving
 
-`save_cp_checkpoint` serves **dense** CP runs only. An MoE carries EP wrappers (grouped GEMM is
+`save_cp_checkpoint` serves **dense** CP runs only. An MoE carries EP layers (grouped GEMM is
 on by default), and the saver ladder checks for EP layers first, so EP+CP and even `ep_size=1`
 MoE take the EP save — which strips the `.original_attention.` prefix itself.
 

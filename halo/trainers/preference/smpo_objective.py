@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from halo.distributed.context_parallel.sequence_chunks import cp_sum_rows
 
 # Per-pair margin losses of ``beta * (logratio - margin)``, positive when the margin holds; keyed by
-# ``SmoothMarginPOConfig.loss_type``.
+# ``SMPOConfig.loss_type``.
 MARGIN_LOSSES: dict[str, Callable[[torch.Tensor], torch.Tensor]] = {
     "sigmoid": lambda scaled: -F.logsigmoid(scaled),
     "hinge": lambda scaled: torch.relu(-scaled),

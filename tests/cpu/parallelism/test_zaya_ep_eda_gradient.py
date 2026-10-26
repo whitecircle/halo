@@ -27,8 +27,8 @@ from transformers.models.zaya.configuration_zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaSparseMoeBlock
 
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from tests.common.numerics import fro_rel_err
 from tests.common.parallelism import single_process_ep_config
-from tests.common.utils import fro_rel_err
 
 E, H, M, ROUTER_H = 4, 64, 32, 32
 # ``ZayaRouter`` disables EDA on layer 0, so a chain from 0 covers the dead link and the live ones.

@@ -25,7 +25,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 # Overridable so the same harness can validate resume across model families.
 DEFAULT_MODEL = env_str("HALO_TEST_RESUME_MODEL", QWEN3_0_6B)

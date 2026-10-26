@@ -23,7 +23,7 @@ from trl import SFTConfig
 
 from halo.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
 from halo.configs.grpo import RLRRConfig
-from halo.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
 from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.entrypoints.data_setup import reject_trl_dataset_prep_args
@@ -31,11 +31,11 @@ from halo.entrypoints.script import distributed_trainer_kwargs
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.optimizer_selection import resolve_bf16_optimizer
-from halo.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
 from halo.trainers.preference.trl_preference import TRLPreferenceMixin
 from halo.trainers.sft import DistributedSFTTrainer
+from halo.trainers.trainer_rules import reject_stock_adamw_on_mixed_params
 from tests.common.repo import REPO_ROOT, load_script_module
 
 # bf16_optimizer: YAML/CLI reachable, tri-state, and honored by the mixin
@@ -78,7 +78,7 @@ def _mixed_precision_config(*, ep_group_size: int, bf16_optimizer=False, fp32_no
     return SimpleNamespace(
         bf16_optimizer=bf16_optimizer,
         ep_group_size=ep_group_size,
-        needs_ep_wrappers=True,
+        needs_ep_layers=True,
         experts_fsdp_managed=False,
         fp32_non_ep_params=fp32_non_ep_params,
     )
@@ -88,11 +88,11 @@ def _optimizer_build_stub(
     *, ep_group_size: int, experts_fsdp_managed: bool = False, moe: bool = True, model_type: str = "qwen3_moe"
 ):
     """Stub carrying exactly what the optimizer-build refusal reads: the parallelism shape and the
-    model config it resolves the family's EP wrapper class from."""
+    model config it resolves the family's EP layer class from."""
     return SimpleNamespace(
         parallelism_config=SimpleNamespace(
             ep_group_size=ep_group_size,
-            needs_ep_wrappers=True,
+            needs_ep_layers=True,
             experts_fsdp_managed=experts_fsdp_managed,
             fp32_non_ep_params=False,
         ),
@@ -120,7 +120,7 @@ def test_stock_adamw_refused_where_plain_experts_meet_dtensor_peers():
 def test_stock_adamw_allowed_where_every_param_is_a_dtensor():
     """The refusal is about a plain/DTensor MIX, not about the model being MoE. At ``ep_group_size
     == 1`` with ``fsdp_shard_ep1_experts`` FSDP2 shards the experts too; a dense model has no expert
-    tensors at all; and a MoE family with NO registered EP wrapper class (qwen3_next) never gets
+    tensors at all; and a MoE family with NO registered EP layer class (qwen3_next) never gets
     wrapped, so its experts are ordinary FSDP2 DTensors. Refusing any of the three would block a
     shape that steps fine — which is what makes ``experts_fsdp_managed`` and the registry resolution
     load-bearing rather than decorative."""
@@ -555,6 +555,8 @@ _SDPG_TUNABLES = {
     "sdpg_beta_warmup_steps": 7,
     "sdpg_beta_decay_steps": 9,
 }
+# What the RLVR builder passes beside the tunables, which the trainer requires rather than defaults.
+_RLVR_TRAINER_FIELDS = {"sdpg_answer_field": "answer", "opd_positive_advantage_only": True}
 
 
 def _sdpg_params(trainer_cls) -> set[str]:
@@ -574,8 +576,8 @@ def _construct_sdpg_shell(**kwargs) -> tuple[DistributedSDPGTrainer, dict]:
         leaked.update(kw)
         self.train_dataset = None
 
-    with mock.patch.object(DistributedGRPOTrainer, "__init__", parent_init):
-        return DistributedSDPGTrainer(**kwargs), leaked
+    with mock.patch.object(DistributedOnlineGRPOTrainer, "__init__", parent_init):
+        return DistributedSDPGTrainer(**{**_RLVR_TRAINER_FIELDS, **kwargs}), leaked
 
 
 def test_sdpg_tunables_cover_the_shared_mixin():
@@ -775,13 +777,13 @@ def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():
     assert leaked == {"sdpg_temprature": 0.5}
 
 
-# Importance-sampling mask knobs: the AsyncTrainingConfig -> ISMaskConfig contract
+# Importance-sampling mask knobs: the AsyncRolloutConfig -> ISMaskConfig contract
 
 # The package that consumes the knobs. Searched for the construction rather than pinned to a file, so
 # the trainer may move it into a helper or a mixin without this test going quiet.
 _IS_MASK_CONSUMER_ROOT = "halo/trainers/grpo"
 
-# ISMaskConfig field -> the AsyncTrainingConfig knob that must supply it, under the ``isr_`` prefix
+# ISMaskConfig field -> the AsyncRolloutConfig knob that must supply it, under the ``isr_`` prefix
 # the YAML surface spells them with. Derived, so a stage added to the mask config is covered here.
 _IS_MASK_SOURCES = {f.name: f"isr_{f.name}" for f in dataclasses.fields(ISMaskConfig)}
 
@@ -800,7 +802,7 @@ def test_every_is_mask_knob_reaches_the_mask_config():
     run keeps training on exactly the drifted tokens the band exists to mask — with nothing in the logs."""
     stages = {"geo_band_min": 0.98, "geo_band_max": 1.02, "veto_min": 1e-4, "opsm_delta": 0.3}
     assert set(stages) == set(_IS_MASK_SOURCES), "a mask stage this test does not set"
-    config = AsyncTrainingConfig(**{_IS_MASK_SOURCES[name]: value for name, value in stages.items()})
+    config = AsyncRolloutConfig(**{_IS_MASK_SOURCES[name]: value for name, value in stages.items()})
     assert dataclasses.asdict(config.build_is_mask_config()) == stages
 
 
@@ -823,15 +825,15 @@ def test_the_trainer_reads_the_configs_mask_config():
 
 def test_every_is_mask_stage_has_a_config_knob():
     """Reverse direction: a mask stage with no ``isr_`` knob is unreachable from a config file."""
-    declared = {f.name for f in dataclasses.fields(AsyncTrainingConfig)}
+    declared = {f.name for f in dataclasses.fields(AsyncRolloutConfig)}
     unreachable = sorted(knob for knob in _IS_MASK_SOURCES.values() if knob not in declared)
-    assert unreachable == [], f"ISMaskConfig stages with no AsyncTrainingConfig knob: {unreachable}"
+    assert unreachable == [], f"ISMaskConfig stages with no AsyncRolloutConfig knob: {unreachable}"
 
 
 def test_the_masked_fraction_circuit_breaker_is_read_from_the_config():
     """``skip_update_masked_frac`` zeroes a whole step's policy gradient. Unread, it is a trust region
     that never fires: the run trains on the selection-biased survivors the knob was set to refuse."""
-    assert _MASK_FRACTION_KNOB in {f.name for f in dataclasses.fields(AsyncTrainingConfig)}
+    assert _MASK_FRACTION_KNOB in {f.name for f in dataclasses.fields(AsyncRolloutConfig)}
     reads = {node.attr for tree in _grpo_trainer_trees() for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     assert _MASK_FRACTION_KNOB in reads, (
         f"nothing under {_IS_MASK_CONSUMER_ROOT} reads config.{_MASK_FRACTION_KNOB} any more"

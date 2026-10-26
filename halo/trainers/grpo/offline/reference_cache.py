@@ -41,8 +41,6 @@ REFERENCE_BUFFER_VALUES = 1 << 18
 _PAYLOAD_KINDS = (("lengths", torch.int64), ("values", torch.float32))
 # NFS's stand-in for a removed file some process still has open; removing it breaks that process.
 _NFS_REMNANT_PREFIX = ".nfs"
-# Beside each launch's directory: held exclusively by that launch's writer for as long as it runs.
-_LAUNCH_LOCK_SUFFIX = ".lock"
 # The descriptors holding this process's launch locks, by scratch root; closed only by process exit.
 _held_launch_locks: dict[str, int | None] = {}
 
@@ -86,7 +84,8 @@ def _remove_scratch(path: str) -> None:
 
 
 def _lock_path(root: str, launch: str) -> str:
-    return os.path.join(root, f"{launch}{_LAUNCH_LOCK_SUFFIX}")
+    """The lock file beside a launch's directory, held exclusively by that launch's writer while it runs."""
+    return os.path.join(root, f"{launch}.lock")
 
 
 def _try_lock(path: str) -> int | None:

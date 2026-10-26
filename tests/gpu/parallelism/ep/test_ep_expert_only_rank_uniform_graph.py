@@ -42,12 +42,12 @@ from halo.distributed.expert_parallel.parallelize import (
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from tests.common.adapters import freeze_base_keep_expert_adapters
 from tests.common.ep_reference import ep_layers, score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import freeze_base_keep_expert_adapters
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import log, log_all
 
 EP_SIZE = 2
 BATCH, SEQ = 2, 48

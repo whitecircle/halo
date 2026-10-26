@@ -31,7 +31,7 @@ class _Attention(nn.Module):
 
 
 def _ep_wrapped_moe() -> nn.Module:
-    """A live GptOss EP wrapper (the ``nn.Module`` half; the base ``__init__`` needs a process group):
+    """A live GptOss EP layer (the ``nn.Module`` half; the base ``__init__`` needs a process group):
     the RL shape the gate admits, since a wrapper-less MoE is refused before the sink verdict matters."""
     layer = object.__new__(EPGptOssMoELayer)
     nn.Module.__init__(layer)

@@ -62,29 +62,25 @@ from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
-from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_all
-from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     attention_target_modules,
     load_peft_model,
     mixed_targets,
     unwrap,
 )
+from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
+from tests.common.datasets import create_sft_dataset
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_all
+from tests.common.memory import finish_phase
+from tests.common.models import QWEN3_0_6B
+from tests.common.numerics import relative_l2
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TinyFamily, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    finish_phase,
-    log,
-    relative_l2,
-    resumed_loss_deltas,
-    snapshot_trainable,
-    step_losses,
-)
+from tests.common.training_checks import resumed_loss_deltas, snapshot_trainable, step_losses
 from tests.common.weight_sync import local_parameters, moved_parameters
 
-# The peft_helpers mode each adapter shape loads through.
+# The adapters mode each adapter shape loads through.
 ADAPTER_MODES = {"expert": "expert_lora", "mixed": "mixed"}
 # (ep_size, cp_size) on two ranks: the layouts merge-on-save runs under.
 LAYOUTS = ((2, 1), (1, 1), (2, 2))

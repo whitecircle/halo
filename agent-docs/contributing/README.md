@@ -140,7 +140,8 @@ AI-assisted contributions are welcome on the terms in [`CONTRIBUTING.md`](../../
 ## Tests
 
 CPU tests run directly under pytest; GPU tests are external `torchrun` scripts launched through a
-manifest.
+manifest, except a `launcher="python"` row, whose script runs as one process and starts its own ranks
+(a `halo launch` driver).
 
 - **Test behavior, not implementation.** Assert on loss finiteness, loss decrease, output shapes,
   and rejection of unsupported configs — never on private internals.
@@ -283,7 +284,9 @@ manifest.
   helper table are in [`skills/write-tests/harness.md`](../../skills/write-tests/harness.md). Every
   manifest script runs under it, except a script whose lifecycle the harness cannot express, listed in
   `_OWN_LIFECYCLE` (`tests/cpu/conventions/test_gpu_harness_conventions.py`) with the reason; an entry
-  whose script moves onto the harness fails the suite until it is dropped.
+  whose script moves onto the harness fails the suite until it is dropped. The shared helpers in
+  `tests/common/` keep one concern per module under the naming rule `halo/` follows: no `utils`,
+  `helpers` or other grab-bag word in a module name (`tests/cpu/conventions/test_module_names.py`).
 - **Cover the matrix and the rejections.** Markers select the tier (`core` or `full`), the world size
   every entry declares (`1gpu 2gpu 4gpu 8gpu`) and capabilities (`ep cp tp etp pp hsdp vlm lora moe` +
   model family).
@@ -301,6 +304,7 @@ infrastructure sets:
 |---|---|---|
 | `VLLM_SERVER_URL` / `SGLANG_SERVER_URL` | `http://localhost:8000` / `:30000` | Live rollout server the `vllm_server` / `sglang_server` tiers probe and drive. Both are set by the shipped infrastructure itself (`Makefile`, `docker-compose.vllm.yml`), which is why they carry no `HALO_TEST_` prefix — every other test knob does. |
 | `HALO_TEST_LAUNCH_ID` | per launch | Set BY the launcher, not for it: a unique id stamped into every torchrun launch's environment so the orphan sweep can identify surviving workers from `/proc` without matching on a script name a co-tenant might also be running. Do not export it. |
+| `HALO_TEST_NPROC` | the row's `nproc` | Set BY the launcher for a `launcher="python"` row: the rank count its script starts on its own (`halo launch -n`), since such a script runs as one process. |
 | `HALO_TEST_REQUIRE_SERVER` | unset | The **engine name** (`vllm` / `sglang`, set by the `make` server tiers) whose tests must not be skipped: a node carrying the `<value>_server` marker raises a `UsageError` instead of skipping when the endpoint is unreachable, so a dead container cannot pass as a skip. Any other engine's tests still skip. |
 
 Test scripts read their own knobs through `halo/env.py`, `HALO_TEST_`-prefixed so a stray `export` or

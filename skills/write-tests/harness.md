@@ -12,6 +12,7 @@ def gpu_test_main(
     exact_world_size: int | None = None,  # if set, world_size must equal it exactly
     prefix: str = "halo_test",       # temp-dir prefix for this test's isolated output/cache dirs
     partial_state: bool = True,      # build accelerate.PartialState() (needed by Trainer tests; off for pure-kernel)
+    process_group: bool = True,      # join the torchrun group; off for a launcher="python" driver (rank 0 of a world of one)
 ): ...
 ```
 
@@ -71,9 +72,9 @@ Build checks from these rather than re-deriving them per file:
 
 | Helper | Module | What it gives |
 |---|---|---|
-| `step_losses(trainer)` | `tests/common/utils.py` | the per-step training losses, eval entries and the run summary excluded |
-| `training_run_checks(result, trainer, max_steps, *, loss_band=, grad_norms=, loss_decreased=)` | `tests/common/utils.py` | `loss_finite`, `all_steps_finite`, `steps_completed`, and on request `loss_reasonable`, `grad_norms_finite`, `loss_decreased` |
-| `parallel_shape_checks(model, parallelism_config)` | `tests/common/parallel_shape.py` | one model-side probe per axis the config enables: EP wrappers, the expert bank split EP-way, ETP sharding, TP-sharded params, Ulysses attention layers |
+| `step_losses(trainer)` | `tests/common/training_checks.py` | the per-step training losses, eval entries and the run summary excluded |
+| `training_run_checks(result, trainer, max_steps, *, loss_band=, grad_norms=, loss_decreased=)` | `tests/common/training_checks.py` | `loss_finite`, `all_steps_finite`, `steps_completed`, and on request `loss_reasonable`, `grad_norms_finite`, `loss_decreased` |
+| `parallel_shape_checks(model, parallelism_config)` | `tests/common/parallel_shape.py` | one model-side probe per axis the config enables: EP layers, the expert bank split EP-way, ETP sharding, TP-sharded params, Ulysses attention layers |
 | `ep_layers(model)` | `tests/common/ep_reference.py` | every EP/ETP-wrapped MoE layer |
 | `group_max_abs_diff(tensor, group)` | `tests/common/distributed.py` | the replica-identity probe: the largest elementwise difference across a group, NaN-propagating (collective) |
 | `pin_deterministic_ep_dispatch()` | `tests/common/distributed.py` | every DeepEP `ElasticBuffer` of the process built in deterministic mode, for an EP body that replays a run exactly without `full_determinism` (under it the dispatcher does this itself); the default dispatch claims receive slots with atomics, so expert weight gradients round differently run to run. A forward-only comparison on the grouped-GEMM path needs no pin: each expert row is independent of arrival order and the combine sums in top-k slot order ([EP → Determinism](../../agent-docs/parallelism/expert-parallelism.md#determinism)) |
@@ -84,7 +85,7 @@ Build checks from these rather than re-deriving them per file:
 | `train_recording_first_step` / `score_first_step` / `first_step_checks` / `first_step_gradient_checks` | `tests/common/first_step.py` | a parallel run's first optimizer step (microbatch losses, logged loss, sharded gradients, c10d autograd fallbacks) scored against a reference trainer on the same microbatches, for an objective a parallel axis could miscount |
 | `skip_unless_local_checkpoint(path, env_var)` | `tests/common/harness.py` | the `SKIP:` exit for a suite whose local checkpoint is absent, called under `__main__` before `run()` |
 | `skip_unless_blackwell(what)` | `tests/common/harness.py` | the same `SKIP:` exit for a suite or row that runs FlashAttention 4, on a pre-Blackwell GPU |
-| `max_or_nan(values, *, default=)` | `tests/common/utils.py` | the largest value, NaN when any is NaN; the builtin `max` drops a NaN anywhere but first, so a bound on it would pass |
+| `max_or_nan(values, *, default=)` | `tests/common/numerics.py` | the largest value, NaN when any is NaN; the builtin `max` drops a NaN anywhere but first, so a bound on it would pass |
 | `run_gloo_ranks(worker, nprocs, *args, pg_timeout=, env=)` | `tests/common/gloo.py` | `nprocs` spawned ranks sharing one gloo group, for a CPU test that needs a real process group; a rank that raises, dies or hangs fails the call. The rendezvous store is served from the calling process, and no worker starts before every rank has initialized the group: a rank that finishes first tears down neither the store nor a pair a peer is still connecting |
 | `UnsplitReference` / `build_pp_sft_trainer` / `compare_stage_grads_vs_reference` / `check_expert_grads_vs_reference` | `tests/common/pp_equivalence.py` | the PP gradient-equivalence blocks: an unsplit reference's loss and gradients, a real trainer on a hand-built PP config, and each stage's parameter and expert gradients scored against that reference |
 | `build_pp_trainer` / `build_pp_args` / `expect_construction_error` / `losses_identical_across_ranks` | `tests/common/pp_trainers.py` | a real trainer under PP with its runner's `step` and `eval_loss` spied (each call's batch, normalizer and extra targets), its PP training args, a construction refusal recorded as a check, and whether every rank logged the same losses (collective) |
@@ -105,7 +106,7 @@ from tests.common.models import QWEN3_0_6B
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tokenizers import load_cached_tokenizer
-from tests.common.utils import training_run_checks
+from tests.common.training_checks import training_run_checks
 
 MAX_STEPS = 5
 
@@ -170,7 +171,9 @@ MANIFEST: dict[str, TestSpec] = {
 `TestSpec` fields: `nproc` (required), `markers` (`'gpu'`, exactly one tier `core` or `full`, the
 `Ngpu` tag of the row's `nproc`, plus capability/model tags, all from `ALL_MARKERS`),
 `args_matrix` (default `("",)`; a multi-mode script like `('--mode fsdp', '--mode ep')`
-becomes several nodes), `timeout` (default 1200) and `flaky` (default `False`). An `args_matrix` entry
+becomes several nodes), `timeout` (default 1200), `flaky` (default `False`) and `launcher` (default
+`"torchrun"`; `"python"` runs the script as one process that starts its own `nproc` ranks, a `halo launch`
+driver, handed the count in `HALO_TEST_NPROC`). An `args_matrix` entry
 may be a `Row(args, nproc=..., markers=..., timeout=..., flaky=...)` whose set fields replace the spec's
 for that node, so one script runs rows at several widths, tiers or engines. Each row's args must be
 unique within the script; `tests/cpu/conventions/test_gpu_harness_conventions.py` enforces that and the
@@ -242,7 +245,9 @@ python -m torch.distributed.run --nproc_per_node=<nproc> --master_port=<free> <s
 ```
 
 with the spec `timeout` (on expiry the agent and every worker are killed — NCCL/FA hangs are
-live) and `MASTER_PORT` / `HALO_TEST_LAUNCH_ID` / `TMPDIR` in the env. `TORCHELASTIC_ERROR_FILE` is
+live) and `MASTER_PORT` / `HALO_TEST_LAUNCH_ID` / `TMPDIR` in the env. A `launcher="python"` row runs
+`python <script> <args>` instead, with `HALO_TEST_NPROC` in place of `MASTER_PORT`; its own launches
+inherit the launch id, so the timeout sweep reaches their ranks. `TORCHELASTIC_ERROR_FILE` is
 deliberately left unset: one shared path makes the last writer win, and the agent's collateral
 SIGTERMs would overwrite the real cause. It then classifies:
 

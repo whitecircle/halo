@@ -3,7 +3,7 @@
 
 Each path below reports partial or failed work as clean work unless the accounting holds:
 
-* ``reward_model/rm_scoring.py`` must count each per-row failure, or neither its own summary nor the
+* ``reward_model/score.py`` must count each per-row failure, or neither its own summary nor the
   guard's tally can say how many rows the endpoint lost.
 * ``resumable_generation.run_async_cli``'s signal handler must not exit 0: a SIGTERM'd (or Ctrl-C'd) job then
   reports success to whatever ran it and the next pipeline stage consumes a partial output dataset.
@@ -28,14 +28,14 @@ from openai.types.chat import ChatCompletionMessage
 from halo.entrypoints import rejection_sampling, resumable_generation, reward_scoring
 from halo.inference.openai_client import EmptyChoicesError
 from scripts.inference import inference_arguments
-from scripts.inference.reward_model import rm_scoring
+from scripts.inference.reward_model import score as score_script
 
 
 def _prompt_rows(count: int) -> list[dict]:
     return [{"id": i, "prompt": [{"role": "user", "content": f"q{i}"}]} for i in range(count)]
 
 
-# --- rm_scoring: per-row failures reach the guard's tally -----------------------------------------
+# --- score: per-row failures reach the guard's tally ----------------------------------------------
 
 
 class _DeadClient:
@@ -48,7 +48,7 @@ class _DeadClient:
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
 
 
-def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path):
+def test_score_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path):
     """A guard firing on "nothing produced" cannot say why; the failure count is what points at the
     endpoint rather than at the input columns."""
     prompts = tmp_path / "prompts.jsonl"
@@ -61,7 +61,7 @@ def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path)
         sys,
         "argv",
         [
-            "rm_scoring.py",
+            "score.py",
             "--model",
             "gen-model",
             "--dataset",
@@ -74,7 +74,7 @@ def test_rm_scoring_names_how_many_rows_the_endpoint_lost(monkeypatch, tmp_path)
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        asyncio.run(rm_scoring.main())
+        asyncio.run(score_script.main())
 
     assert "failed=3" in str(excinfo.value), str(excinfo.value)
 
@@ -140,7 +140,7 @@ def test_generate_chat_message_names_a_reply_without_choices():
         )
 
 
-def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_path):
+def test_score_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_path):
     """A hypothesis cut at the token cap is a fragment; scoring it writes a reward for text the
     policy never finished, so the row is dropped and named in the tally."""
     prompts = tmp_path / "prompts.jsonl"
@@ -154,7 +154,7 @@ def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_pat
         sys,
         "argv",
         [
-            "rm_scoring.py",
+            "score.py",
             "--model",
             "gen-model",
             "--dataset",
@@ -167,12 +167,12 @@ def test_rm_scoring_drops_and_counts_a_truncated_hypothesis(monkeypatch, tmp_pat
     )
 
     with pytest.raises(RuntimeError) as excinfo:
-        asyncio.run(rm_scoring.main())
+        asyncio.run(score_script.main())
 
     assert "truncated=3" in str(excinfo.value), str(excinfo.value)
 
 
-def test_rm_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
+def test_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
     """Fewer than two usable hypotheses cannot form a preference pair, so the row never reaches the
     scorer — counted, not silently queued with a fragment as the chosen or rejected side."""
     stats = {"failed": 0, "truncated": 0, "skipped_truncated": 0}
@@ -191,7 +191,7 @@ def test_rm_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
     assert queue.empty()
 
 
-def test_rm_scoring_output_path_helper_is_the_one_under_test(tmp_path):
+def test_score_output_path_helper_is_the_one_under_test(tmp_path):
     """Pins the driver above to the real output-path contract rather than a path it invented."""
     assert reward_scoring.build_output_path(str(tmp_path), "p.jsonl", "m", "rm_scoring").parent == tmp_path
 
@@ -217,7 +217,7 @@ def test_the_saved_progress_hint_survives(caplog):
     assert any("resume by re-running" in message for message in caplog.messages), caplog.messages
 
 
-# --- rm_rejection_sampling: a dying worker is never mistaken for a drained queue ------------------
+# --- rejection_sample: a dying worker is never mistaken for a drained queue -----------------------
 
 
 def test_a_worker_that_dies_on_the_last_item_still_surfaces_its_exception():

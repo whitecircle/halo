@@ -25,7 +25,7 @@ from halo.hardware import current_device
 from halo.runtime.collectives import all_gather_cat
 from halo.runtime.consensus import rank_consensus, rank_max
 from halo.runtime.ranks import get_global_world_size, has_process_group, is_global_main_process, is_multi_rank_run
-from halo.trainers.parallelism.trainer_rules import (
+from halo.trainers.trainer_rules import (
     reject_batch_rebalance_on_dp_sharded_loader,
     reject_dispatch_batches,
 )

@@ -25,8 +25,8 @@ import torch
 import torch.nn as nn
 
 from halo.optimizers.muon import build_muon_optimizer
+from tests.common.numerics import assert_orthogonalized, log_spectrum_matrix
 from tests.common.tolerances import TOL
-from tests.common.utils import assert_orthogonalized, log_spectrum_matrix
 
 
 @pytest.fixture(scope="module")

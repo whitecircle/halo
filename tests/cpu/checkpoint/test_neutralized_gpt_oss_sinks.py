@@ -130,7 +130,7 @@ def test_dtype_inferred_from_q_proj():
 
 
 def test_nested_model_wrapper_unwrapped():
-    """A wrapper that nests ``.model.model.layers`` (e.g. a CP/EP wrapper) is
+    """A wrapper that nests ``.model.model.layers`` (e.g. a CP/EP layer) is
     unwrapped to the decoder that owns ``.layers``."""
 
     class _Wrapper(nn.Module):

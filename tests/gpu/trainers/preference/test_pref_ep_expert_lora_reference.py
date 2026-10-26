@@ -49,11 +49,12 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_int, env_str
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
 from halo.trainers.preference.dpo import DistributedDPOTrainer
+from tests.common.adapters import load_peft_model_from_config, peft_model_config
 from tests.common.distributed import ensure_model_downloaded, world_all, world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import load_peft_model_from_config, peft_model_config
-from tests.common.utils import log, step_losses
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
 # SDPA is what the DPO script picks for padded preference batches when the sinks are reset.

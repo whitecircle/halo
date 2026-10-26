@@ -37,9 +37,10 @@ class VLMDataCollator:
         self,
         processor,
         tokenizer,
-        max_length=2048,
+        max_length: int,
+        *,
+        train_on_completions_only: bool,
         response_prompt_template=None,
-        train_on_completions_only=False,
         model_config=None,
     ):
         reject_missing_response_marker(response_prompt_template, train_on_completions_only, type(self).__name__)
@@ -120,7 +121,7 @@ class PreprocessedVLMDataCollator:
     # Unioned into HF's signature columns, which would otherwise prune pixel_values_shape and the rest.
     required_dataset_columns: tuple[str, ...] = tuple(VLM_OUTPUT_FEATURES)
 
-    def __init__(self, tokenizer, max_length: int = 2048):
+    def __init__(self, tokenizer, max_length: int):
         self.tokenizer = tokenizer
         self.max_length = max_length
         self.pad_token_id = tokenizer.pad_token_id or 0
@@ -166,10 +167,10 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
         self,
         *args,
         hint_template: str | None,
-        answer_field: str | None = "answer",
-        solution_field: str | None = "solution",
+        answer_field: str | None,
+        solution_field: str | None,
+        confidence_power: float,
         confidence_field: str | None = None,
-        confidence_power: float = 4.0,
         confidence_normalizer: float | None = None,
         **kwargs,
     ):

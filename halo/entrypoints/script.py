@@ -11,7 +11,6 @@ from typing import Any, NamedTuple
 
 import torch
 import torch.distributed as dist
-from accelerate import PartialState
 from huggingface_hub import constants as hub_constants
 from transformers import TrainingArguments
 
@@ -142,7 +141,6 @@ def init_training_script(
     model, reference or rollout probe loads. ``split_expert_lora`` peels MoE expert targets out of
     ``lora_target_modules`` into native EP grouped LoRA; only SFT passes ``supports_init_from_scratch``.
     """
-    PartialState()
     local_rank = get_local_rank()
     if torch.cuda.is_available():  # CUDA-less interpreters (config-parse checks, CPU boxes) stay usable
         torch.cuda.set_device(local_rank)
@@ -251,8 +249,6 @@ def run_trainer(
         for line in extra_start_log or ():
             logger.info(f"  {line}")
 
-    if context.resume_checkpoint and is_global_main_process():
-        logger.info(f"Resuming from checkpoint: {context.resume_checkpoint}")
     trainer.train(resume_from_checkpoint=context.resume_checkpoint)
 
     trainer.cleanup_ep()

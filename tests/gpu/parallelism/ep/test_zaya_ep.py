@@ -26,7 +26,8 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
-from tests.common.utils import log, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_EP_STEPS", 4)
@@ -73,7 +74,7 @@ def run(ctx):
     ep_layers = [m for m in model.modules() if isinstance(m, EPZayaMoELayer)]
     assert ep_layers, "no EP layers were installed on the Zaya model"
     first = ep_layers[0]
-    # ZAYA1-8B has 80 layers, 40 odd-index MLP layers → 40 EP wrappers.
+    # ZAYA1-8B has 80 layers, 40 odd-index MLP layers → 40 EP layers.
     log(f"  EPZayaMoELayer count: {len(ep_layers)}")
     log(f"  Local experts per layer: {first.experts_per_rank} (of {first.num_experts} total)")
     gate_up_shape = tuple(first.gate_up_proj.shape)

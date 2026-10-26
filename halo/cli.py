@@ -313,7 +313,7 @@ def launch(
 def run(
     ctx: typer.Context,
     tool: Annotated[
-        str | None, typer.Argument(help="Tool name, e.g. merge-ep-shards or inference/reward-model/rm-scoring")
+        str | None, typer.Argument(help="Tool name, e.g. merge-ep-shards or inference/reward-model/score")
     ] = None,
     list_tools: Annotated[bool, typer.Option("--list", help="List indexed tools")] = False,
     dry_run: Annotated[bool, typer.Option("--dry-run", help="Print command without executing")] = False,

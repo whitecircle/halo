@@ -52,8 +52,9 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 from tests.common.weight_sync import RecordingSender
 
 # Default gpt-oss; override HALO_TEST_EP1_KNOB_MODEL / HALO_TEST_EP1_KNOB_ATTN to validate another MoE family

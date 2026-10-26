@@ -189,7 +189,7 @@ A stream is an **ordering constraint, not a hardware lane**. Kernels in one stre
 
 The block scheduler fills SMs from any resident grid, so real overlap happens only when one kernel leaves SMs idle. Two large GEMMs mostly serialize, while an NCCL collective (a few SMs' worth of copy work) does run beside compute.
 
-Every overlap trick in §9 rests on that. Data-parallel training hides each layer's gradient collective behind the next layer's backward, and the EP wrapper can run the always-active shared experts beside the token exchange (`HALO_EP_SHARED_OVERLAP`). Cross-stream ordering is expressed with **events**: record on one stream, wait on it from another.
+Every overlap trick in §9 rests on that. Data-parallel training hides each layer's gradient collective behind the next layer's backward, and the EP layer can run the always-active shared experts beside the token exchange (`HALO_EP_SHARED_OVERLAP`). Cross-stream ordering is expressed with **events**: record on one stream, wait on it from another.
 
 Streams also shape **memory**. The caching allocator pools freed blocks *per stream*, since reuse within a stream is safe by ordering alone while cross-stream reuse would need per-block event tracking.
 
@@ -215,7 +215,7 @@ A naive activation is several such kernels, each a separate HBM round trip. Fusi
 
 The toolkit gets this fusion from two places:
 
-- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP wrapper replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab or CP computes its own loss. [Liger Kernels](../optimization/liger-kernels.md).
+- **Liger**: hand-written Triton kernels (fused RMSNorm, RoPE, SwiGLU, cross-entropy, fused-linear-cross-entropy), auto-applied per model type. Conflicting ones auto-disable: SwiGLU when an EP layer replaced the MoE layer or when upstream holds it on a MoE whose routed experts Halo leaves unwrapped, the cross-entropy variants when TP shards the vocab or CP computes its own loss. [Liger Kernels](../optimization/liger-kernels.md).
 - **torch.compile** (Inductor) auto-fuses pointwise chains. [torch.compile](../optimization/torch-compile.md).
 
 ### Fused-linear-cross-entropy (FLCE)

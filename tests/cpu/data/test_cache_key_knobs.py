@@ -49,7 +49,7 @@ def _ds() -> Dataset:
 def _name_for(**proc_kwargs) -> str:
     """Build a processor with the given knobs and return its cache file name."""
     tok = _MockTokenizer()
-    proc = build_chat_row_processor(tok, max_length=512, **proc_kwargs)
+    proc = build_chat_row_processor(tok, max_length=512, **{"conversation_field": "messages", **proc_kwargs})
     return map_cache_file_name("map", proc, _ds(), "tokenize", {})
 
 

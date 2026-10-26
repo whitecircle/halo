@@ -40,7 +40,7 @@ from tests.common.pp_trainers import (
     right_pad,
     tiny_vocab_tokenizer,
 )
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 SEQ_LEN = 48

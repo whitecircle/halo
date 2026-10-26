@@ -13,7 +13,7 @@ from dataclasses import replace
 
 import pytest
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.engine_wire import generation_control_fields
 from halo.environments.rollout_config import (
     REASONING_BUDGET_SOFT_TEMPLATE_VAR,
@@ -38,7 +38,7 @@ def test_the_template_states_the_levels_cap_while_the_engine_enforces_the_turns(
     """Under an output budget the two diverge: the engine enforces the narrowed cap of this turn, the
     template states the level's whole per-turn cap — the one value the trajectory carries and every
     trainer-side render reproduces. Omitted, the template is told no budget: the drivers always pass the level's."""
-    run = AsyncTrainingConfig(
+    run = AsyncRolloutConfig(
         rollout_max_thinking_tokens=4000, rollout_chat_template_kwargs={"preserve_thinking": True}
     )
     # What the drivers send on a turn the output budget narrowed to 2500 of the level's 4000.
@@ -58,7 +58,7 @@ def test_the_template_states_the_levels_cap_while_the_engine_enforces_the_turns(
 def test_a_soft_budget_is_flagged_on_both_sides_and_only_beside_a_budget():
     """A soft budget rides with its flag so the template states a target, not a cut; the engine meanwhile
     enforces only the run's ceiling. The flag never travels without a budget, and an enforced budget sends none."""
-    run = AsyncTrainingConfig(rollout_max_thinking_tokens=21800, rollout_max_tokens=30000)
+    run = AsyncRolloutConfig(rollout_max_thinking_tokens=21800, rollout_max_tokens=30000)
     fields = generation_control_fields(run.get_rollout_config(), "high", 16384, budget_soft=True)
     assert fields["thinking_token_budget"] == 21800
     assert fields["chat_template_kwargs"] == {
@@ -105,11 +105,11 @@ def test_episodes_without_a_level_or_budget_carry_neither_variable():
 
 def test_run_wide_template_kwargs_refuse_the_per_episode_variables():
     with pytest.raises(ValueError, match="reasoning_budget"):
-        AsyncTrainingConfig(rollout_chat_template_kwargs={REASONING_BUDGET_TEMPLATE_VAR: 8192})
+        AsyncRolloutConfig(rollout_chat_template_kwargs={REASONING_BUDGET_TEMPLATE_VAR: 8192})
     with pytest.raises(ValueError, match="reasoning_effort"):
-        AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
+        AsyncRolloutConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
     with pytest.raises(ValueError, match="reasoning_budget_soft"):
-        AsyncTrainingConfig(rollout_chat_template_kwargs={REASONING_BUDGET_SOFT_TEMPLATE_VAR: True})
+        AsyncRolloutConfig(rollout_chat_template_kwargs={REASONING_BUDGET_SOFT_TEMPLATE_VAR: True})
 
 
 def test_run_wide_template_kwargs_must_be_a_mapping():
@@ -118,9 +118,9 @@ def test_run_wide_template_kwargs_must_be_a_mapping():
     rejects the value."""
     for wrong in ('{"preserve_thinking": true}', ["preserve_thinking"], 3):
         with pytest.raises(ValueError, match="must be a mapping"):
-            AsyncTrainingConfig(rollout_chat_template_kwargs=wrong)
+            AsyncRolloutConfig(rollout_chat_template_kwargs=wrong)
     kwargs = {"preserve_thinking": True}
-    assert AsyncTrainingConfig(rollout_chat_template_kwargs=kwargs).rollout_chat_template_kwargs == kwargs
+    assert AsyncRolloutConfig(rollout_chat_template_kwargs=kwargs).rollout_chat_template_kwargs == kwargs
 
 
 if __name__ == "__main__":

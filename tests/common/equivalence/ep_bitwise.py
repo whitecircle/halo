@@ -31,6 +31,7 @@ from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.moe.family_specs import find_moe_family_spec
 from halo.optimizers.param_groups import decay_groups
 from halo.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
+from tests.common.adapters import mixer_linear_leaves, randomize_adapters
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.ep_reference import random_token_batch, roll_expert_banks
 from tests.common.equivalence.revisions import (
@@ -53,7 +54,6 @@ from tests.common.equivalence.tensor_records import (
     record_paths,
 )
 from tests.common.parallelism import single_process_ep_config, stubbed_process_groups
-from tests.common.peft_helpers import mixer_linear_leaves, randomize_adapters
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 

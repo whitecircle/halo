@@ -130,7 +130,7 @@ has its own kernel (`GluCombine.gptoss`, `halo/kernels/fused_glu.py`).
 
 ## Standalone grouped GEMM mode
 
-`--use_grouped_gemm` applies EP wrappers with `ep_size=1` (all experts local, DeepEP dispatch/combine no-op), giving the grouped GEMM benefit on SM90+ without multi-GPU EP:
+`--use_grouped_gemm` applies EP layers with `ep_size=1` (all experts local, DeepEP dispatch/combine no-op), giving the grouped GEMM benefit on SM90+ without multi-GPU EP:
 
 ```bash
 # Multi-GPU FSDP, no EP distribution (--nproc_per_node=1 for a single GPU)
@@ -139,9 +139,9 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
     --expert_parallel_size=1 --use_grouped_gemm=true
 ```
 
-The wrapper keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: an MoE with `use_grouped_gemm: true` under any `accelerate launch` is rejected at load (the wrappers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`.
+The EP layer keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: an MoE with `use_grouped_gemm: true` under any `accelerate launch` is rejected at load (the EP layers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`.
 
-Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under this wrapper (EP=1 included), which replaces the very module the swap targets, and is kept off wherever no wrapper is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp--pp-behavior).
+Liger's fused MoE kernel never runs the routed experts: its `LigerExperts` swap is inert under the EP layer (EP=1 included), which replaces the very module the swap targets, and is kept off wherever no EP layer is installed ([Liger Kernels](liger-kernels.md#routed-experts)). Non-expert Liger kernels (RMSNorm, RoPE, CrossEntropy/FusedLinearCE) still apply, and a family whose toolkit spec also names the dense and shared-expert MLPs keeps its fused GLU: [Liger Kernels](liger-kernels.md#ep--cp--tp--pp-behavior).
 
 ## Weight layout
 

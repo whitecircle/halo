@@ -36,7 +36,7 @@ from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 from halo.trainers.dataloaders import DataParallelLoaderMixin
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 N_EXAMPLES = 100
 N_SHARDS = 17  # > world_size at every supported nproc (2/4/8) so the partition stays non-trivial

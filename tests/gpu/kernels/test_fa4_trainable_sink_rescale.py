@@ -14,7 +14,8 @@ import torch
 
 from halo.models.attention.gpt_oss_sinks import install_fa4_trainable_sink_rescale
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log, max_abs_rel_err
+from tests.common.numerics import max_abs_rel_err
+from tests.common.rank_log import log
 
 H, HKV, D, S, B = 8, 2, 64, 256, 2
 FWD_REL_TOL = 2e-2  # bf16 output: two roundings (kernel out, gate multiply) vs the fused kernel's one

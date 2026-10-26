@@ -32,8 +32,10 @@ from halo.runtime.collectives import barrier
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers, find_router_weight, fixed_chat_batch, full_grad
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, cos_sim, log, log_all
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log, log_all
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2

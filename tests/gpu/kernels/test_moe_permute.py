@@ -14,7 +14,7 @@ import torch
 from halo.kernels import moe_permute
 from halo.kernels.moe_permute import MoEWeightedUnpermute, build_inv_map, gather_reduce_rows
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import fro_rel_err, max_abs_rel_err
+from tests.common.numerics import fro_rel_err, max_abs_rel_err
 
 DTYPE_TOLS = ((torch.float32, 1e-5), (torch.bfloat16, 2e-2))
 # A bf16 result accumulated in fp32 is the exact result rounded once; a partial sum or a weighted row rounded to

@@ -29,9 +29,10 @@ from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from tests.common.distributed import ensure_model_downloaded, world_mean
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import QWEN3_VL_2B
+from tests.common.rank_log import log, log_all
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
 
 MODEL_NAME = QWEN3_VL_2B
 CP_SIZE = 2

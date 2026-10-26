@@ -34,12 +34,13 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
-from halo.model_loading.liger.dispatch import resolve_liger_applier
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from tests.common.ep_reference import compare_grad, ep_layers
 from tests.common.harness import gpu_test_main, record_check
+from tests.common.liger_appliers import liger_applier
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN35_MOE_CONFIG
-from tests.common.utils import cos_sim, log, max_abs_rel_err, max_or_nan
+from tests.common.numerics import cos_sim, max_abs_rel_err, max_or_nan
+from tests.common.rank_log import log
 
 SEED = 42
 BATCH, SEQ, HIDDEN, INTERMEDIATE, HEAD_DIM = 2, 64, 256, 512, 128
@@ -81,7 +82,7 @@ FUSED_HEAD_FAMILIES = {
     "glm4_moe_lite": TINY_GLM4_MOE_LITE_CONFIG,
 }
 
-# Delegating families whose shared expert survives the EP wrapper, keyed by the TEXT model_type: the
+# Delegating families whose shared expert survives the EP layer, keyed by the TEXT model_type: the
 # composite config ignores flat decoder kwargs, so only the text one builds at tiny scale.
 EP_SHARED_EXPERT_FAMILIES = {"qwen3_5_moe_text": TINY_QWEN35_MOE_CONFIG}
 
@@ -132,7 +133,7 @@ def _snapshot_stock_classes(spec) -> dict[str, type]:
 
 def _check_norms(spec, originals, device) -> None:
     module = importlib.import_module(spec.modeling_module)
-    applier = resolve_liger_applier(spec.model_types[0])
+    applier = liger_applier(spec.model_types[0])
     applier(**_flags(applier, rms_norm=True))
 
     for name in spec.rms_norm:
@@ -256,7 +257,7 @@ def _check_gated_norms(spec, originals, device) -> None:
     bf16 gradient is an optimizer bug the shapes alone would not show.
     """
     module = importlib.import_module(spec.modeling_module)
-    applier = resolve_liger_applier(spec.model_types[0])
+    applier = liger_applier(spec.model_types[0])
     applier(**_flags(applier, rms_norm=True))
 
     for name in spec.gated_rms_norm:
@@ -290,7 +291,7 @@ def _check_glu_mlps(spec, originals, device) -> None:
     config = CONFIG_MAPPING[spec.model_types[0]](
         hidden_size=HIDDEN, intermediate_size=INTERMEDIATE, num_hidden_layers=2, vocab_size=128
     ).get_text_config()
-    applier = resolve_liger_applier(spec.model_types[0])
+    applier = liger_applier(spec.model_types[0])
     # Both spellings: a delegating spec offers whichever flag upstream declares for the role.
     applier(**_flags(applier, swiglu=True, geglu=True))
 
@@ -314,7 +315,7 @@ def _loss_and_grads(model, input_ids) -> tuple[float, dict[str, torch.Tensor]]:
 
 
 def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
-    """The shared-expert MLP a delegating spec names must arrive fused THROUGH the EP wrapper.
+    """The shared-expert MLP a delegating spec names must arrive fused THROUGH the EP layer.
 
     The routed experts are the wrapper's own (upstream's ``LigerExperts`` swap is withheld); the
     shared expert is adopted unchanged, so it is fused only because the spec names its class — the
@@ -326,7 +327,7 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     hidden states by a bf16 ULP, which flips a near-tied top-k pick and rewrites one expert's
     gradient wholesale. That is the router's behaviour, not the kernel's.
     """
-    applier = resolve_liger_applier(model_type)
+    applier = liger_applier(model_type)
     spec = applier.spec
     originals = stock[spec.model_types[0]]
     # All-full-attention: the gated-delta-net layers pull in `fla`'s autotuned delta-rule kernels and
@@ -369,9 +370,9 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
         if type(module).__name__ in spec.glu_mlp
         for parameter, _ in module.named_parameters()
     ]
-    assert shared, "the EP wrapper kept no MLP the spec names"
+    assert shared, "the EP layer kept no MLP the spec names"
     assert all(getattr(module, "_halo_glu_mul", None) is not None for _, module in shared), (
-        "the shared expert the EP wrapper adopted is not fused"
+        "the shared expert the EP layer adopted is not fused"
     )
 
     fused_loss, fused_grads = _loss_and_grads(fused, input_ids)
@@ -403,7 +404,7 @@ def _check_rope(spec, device) -> None:
     """
     module = importlib.import_module(spec.modeling_module)
     original = module.apply_rotary_pos_emb
-    applier = resolve_liger_applier(spec.model_types[0])
+    applier = liger_applier(spec.model_types[0])
     applier(**_flags(applier, rope=True))
     patched = module.apply_rotary_pos_emb
     assert patched is not original, "the rotary was not swapped"
@@ -442,7 +443,7 @@ def _check_fused_head(model_type, tiny_config, device) -> None:
     reference_output.loss.backward()
     reference_grads = {name: p.grad.detach().clone() for name, p in reference.named_parameters() if p.grad is not None}
 
-    applier = resolve_liger_applier(model_type)
+    applier = liger_applier(model_type)
     applier(**_flags(applier, fused_linear_cross_entropy=True))
 
     torch.manual_seed(SEED)
@@ -510,7 +511,7 @@ def run(ctx) -> dict:
             )
 
     # Before the per-module GLU check: it needs an EP-wrapped model built from the STOCK classes.
-    log("\n--- shared expert under the EP wrapper ---")
+    log("\n--- shared expert under the EP layer ---")
     for model_type, tiny_config in EP_SHARED_EXPERT_FAMILIES.items():
         record_check(
             checks,

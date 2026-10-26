@@ -29,7 +29,7 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model
 from tests.common.pp_trainers import build_pp_args, tiny_vocab_tokenizer
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 N_STEPS = 6

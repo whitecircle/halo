@@ -10,7 +10,7 @@ from halo.data.render_columns import (
     reject_missing_render_column,
 )
 from halo.data.sources.paths import reject_partial_splits
-from halo.data.vlm_routing import VLM_IMAGE_COLUMNS
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
 from halo.log import info_logger
 from halo.runtime.ranks import is_global_main_process
 

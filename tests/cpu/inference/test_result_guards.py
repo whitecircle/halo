@@ -3,7 +3,7 @@
 
 Unguarded, the script here would reach the end of a totally failed run and report success:
 
-* ``reward_model/rm_scoring.py`` cannot guard on ``if not rewards``: ``rewards`` is pre-seeded from
+* ``reward_model/score.py`` cannot guard on ``if not rewards``: ``rewards`` is pre-seeded from
   the rows a previous run already wrote, so one resumed row makes the list truthy and the guard can
   only ever fire on a cold start — the run least likely to be silently misconfigured. The count
   that decides whether THIS run produced anything is the growth, not the length.
@@ -21,9 +21,9 @@ import pytest
 from openai.types.chat import ChatCompletionMessage
 
 from halo.entrypoints import reward_scoring
-from scripts.inference.reward_model import rm_scoring
+from scripts.inference.reward_model import score as score_script
 
-# --- rm_scoring: reward-model scoring ------------------------------------------------------------
+# --- score: reward-model scoring ------------------------------------------------------------------
 
 
 class _DeadClient:
@@ -36,8 +36,8 @@ class _DeadClient:
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
 
 
-def _prepare_rm_scoring(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, client):
-    """Stub rm_scoring's model + endpoint edges; returns (argv, output_path)."""
+def _prepare_score(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, client):
+    """Stub the scorer's model + endpoint edges; returns (argv, output_path)."""
     prompts = tmp_path / "prompts.jsonl"
     prompts.touch()
     df = pd.DataFrame({"id": prompt_ids, "prompt": [[{"role": "user", "content": f"q{i}"}] for i in prompt_ids]})
@@ -58,7 +58,7 @@ def _prepare_rm_scoring(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, clie
         )
 
     argv = [
-        "rm_scoring.py",
+        "score.py",
         "--model",
         "gen-model",
         "--dataset",
@@ -76,29 +76,29 @@ def _resumed(row_id: int, reward: float = 0.5):
     return {"id": row_id, "response": "old", "reward": reward, "full_conversation": []}
 
 
-def test_rm_scoring_raises_when_every_pending_row_failed(monkeypatch, tmp_path):
+def test_score_raises_when_every_pending_row_failed(monkeypatch, tmp_path):
     """Cold run against a dead endpoint: nothing scored, so the run is a failure."""
-    _prepare_rm_scoring(monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[], client=_DeadClient())
+    _prepare_score(monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[], client=_DeadClient())
 
     with pytest.raises(RuntimeError, match="No usable result"):
-        asyncio.run(rm_scoring.main())
+        asyncio.run(score_script.main())
 
 
-def test_rm_scoring_resumed_rows_do_not_satisfy_the_guard(monkeypatch, tmp_path):
+def test_score_resumed_rows_do_not_satisfy_the_guard(monkeypatch, tmp_path):
     """THE regression: the resumed rows are already in `rewards`, so a length check passes and the
     run reports the PREVIOUS run's rows as its own output. Every pending row failed here — a resume
     is not exempt from the guard just because an earlier run left something behind."""
-    _prepare_rm_scoring(monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[_resumed(1)], client=_DeadClient())
+    _prepare_score(monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[_resumed(1)], client=_DeadClient())
 
     with pytest.raises(RuntimeError, match="No usable result"):
-        asyncio.run(rm_scoring.main())
+        asyncio.run(score_script.main())
 
 
-def test_rm_scoring_all_rows_already_processed_is_not_a_failure(monkeypatch, tmp_path):
+def test_score_all_rows_already_processed_is_not_a_failure(monkeypatch, tmp_path):
     """Nothing pending means nothing to produce — a completed run re-run must stay a success."""
-    _prepare_rm_scoring(monkeypatch, tmp_path, prompt_ids=[1], resumed_rows=[_resumed(1)], client=_DeadClient())
+    _prepare_score(monkeypatch, tmp_path, prompt_ids=[1], resumed_rows=[_resumed(1)], client=_DeadClient())
 
-    asyncio.run(rm_scoring.main())
+    asyncio.run(score_script.main())
 
 
 class _LiveClient:
@@ -112,13 +112,13 @@ class _LiveClient:
         self.chat = types.SimpleNamespace(completions=types.SimpleNamespace(create=_create))
 
 
-def test_rm_scoring_one_scored_row_is_the_other_side_of_the_boundary(monkeypatch, tmp_path):
+def test_score_one_scored_row_is_the_other_side_of_the_boundary(monkeypatch, tmp_path):
     """The guard keys on producing NOTHING, so a resume that scores its pending rows still passes."""
-    output_path = _prepare_rm_scoring(
+    output_path = _prepare_score(
         monkeypatch, tmp_path, prompt_ids=[1, 2], resumed_rows=[_resumed(1)], client=_LiveClient()
     )
 
-    asyncio.run(rm_scoring.main())
+    asyncio.run(score_script.main())
 
     assert len(pd.read_json(output_path, lines=True)) == 2, "the resumed row plus the one scored now"
 

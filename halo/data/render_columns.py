@@ -5,7 +5,7 @@ from datasets import Dataset, DatasetDict
 from halo.data.pipeline.coordinated_map import coordinated_filter
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.sources.paths import TRAIN_TEST_SPLITS, eval_split_name
-from halo.data.vlm_routing import VLM_RAW_IMAGE_COLUMNS
+from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
 
 
 def _rendered_splits(dataset: DatasetDict) -> list[str]:
@@ -79,7 +79,7 @@ def _alias_render_column(
 
 def alias_images_column(dataset: DatasetDict, images_field: str | None, path: str) -> DatasetDict:
     """Rename a declared image column to ``images``: TRL's preference trainers route on an ``image``/``images``
-    key and prune every other column, while :func:`~halo.data.vlm_routing.is_vlm_run` reads ``images_field``."""
+    key and prune every other column, while :func:`~halo.data.vlm_detection.is_vlm_run` reads ``images_field``."""
     return _alias_render_column(
         dataset, "images_field", images_field, VLM_RAW_IMAGE_COLUMNS[0], VLM_RAW_IMAGE_COLUMNS, path
     )

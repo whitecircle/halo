@@ -45,9 +45,10 @@ from halo.models.attention.tree import (
 )
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
 from tests.common.harness import gpu_test_main
+from tests.common.numerics import max_abs_rel_err
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.trees import concat_columns, example_rows, randomize_sinks, reference_varlen, tree_columns
-from tests.common.utils import log, max_abs_rel_err
 
 WINDOW = 16
 VOCAB = 1024

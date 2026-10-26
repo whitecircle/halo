@@ -518,22 +518,22 @@ def test_requires_rdma_multi_domain_global_small_group():
     assert cfg.requires_rdma is True
 
 
-def test_needs_ep_wrappers_ep():
+def test_needs_ep_layers_ep():
     """EP mode needs wrappers."""
     cfg = create_config(ep_size=8, world_size=8, gpus_per_node=8)
-    assert cfg.needs_ep_wrappers is True
+    assert cfg.needs_ep_layers is True
 
 
-def test_needs_ep_wrappers_gmm():
+def test_needs_ep_layers_gmm():
     """Grouped GEMM mode (no EP) also needs wrappers."""
     cfg = create_config(use_grouped_gemm=True, world_size=8, gpus_per_node=8)
-    assert cfg.needs_ep_wrappers is True
+    assert cfg.needs_ep_layers is True
 
 
-def test_no_ep_wrappers_disabled():
-    """Config with use_grouped_gemm=False and no EP does not need EP wrappers."""
+def test_no_ep_layers_disabled():
+    """Config with use_grouped_gemm=False and no EP does not need EP layers."""
     cfg = create_config(use_grouped_gemm=False, world_size=8, gpus_per_node=8)
-    assert cfg.needs_ep_wrappers is False
+    assert cfg.needs_ep_layers is False
 
 
 def test_boolean_mode_properties():
@@ -547,12 +547,12 @@ def test_boolean_mode_properties():
 
 
 def test_default_sizes_and_mode_flags():
-    """Default config: every axis at 1, no mode flag set, grouped GEMM (and so the EP wrappers) on."""
+    """Default config: every axis at 1, no mode flag set, grouped GEMM (and so the EP layers) on."""
     cfg = create_config(world_size=8, gpus_per_node=8)
     assert (cfg.ep_size, cfg.cp_size, cfg.tp_size, cfg.expert_tp_size) == (1, 1, 1, 1)
     assert not (cfg.has_ep_group or cfg.is_cp_mode or cfg.is_tp_mode)
     assert cfg.use_grouped_gemm is True
-    assert cfg.needs_ep_wrappers is True
+    assert cfg.needs_ep_layers is True
 
 
 @pytest.mark.parametrize(
@@ -765,6 +765,22 @@ def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_i
             parallelism_config_from_args(pp_tp, trainer_cls=DistributedSFTTrainer)
         assert "pipeline_parallel_size=2" in str(excinfo.value)
         assert "tensor_parallel_size=2" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("pp_split", "match"),
+    [
+        ([4], r"pipeline_split has 1 entries but pipeline_parallel_size=2"),
+        ([0, 4], r"pipeline_split entries must be >= 1 decoder layer, got \[0, 4\]"),
+        ([3, -1], r"pipeline_split entries must be >= 1 decoder layer, got \[3, -1\]"),
+    ],
+    ids=["wrong-length", "empty-stage", "negative-stage"],
+)
+def test_a_pipeline_split_must_give_every_stage_a_decoder_layer(pp_split, match):
+    """One layer count per stage, each at least one: an empty stage has nothing to run between its P2P edges."""
+    assert create_config(world_size=16, pp_size=2, pp_split=[3, 1]).pp_split == [3, 1]
+    with pytest.raises(ValueError, match=match):
+        create_config(world_size=16, pp_size=2, pp_split=pp_split)
 
 
 def test_parallelism_config_from_args_names_the_trainers_own_pp_refusal():

@@ -16,7 +16,7 @@ Hub `Zyphra/ZAYA1-8B` `main` is the native format: 40 layers, fused `model.layer
 
 `Zyphra/ZAYA1-8B-legacy` preserves the pre-native layout — 80 alternating layers, per-expert `zaya_block.experts.local_experts.{i}.linear_fc{1,2}` — which transformers **cannot** read. Derive any vocab-patched training base from `main` instead (`scripts/before_training/patch_vocab.py`).
 
-## EP wrapper
+## EP layer
 
 `EPZayaMoELayer` (`halo/distributed/expert_parallel/families/zaya.py`) wraps `ZayaSparseMoeBlock` (router + experts).
 
@@ -24,7 +24,7 @@ Hub `Zyphra/ZAYA1-8B` `main` is the native format: 40 layers, fused `model.layer
 
     That state is the only gradient path from layer N+1's routing loss to layer N's `router.down_proj` and `router_states_scale`, so detaching it silently trains the EP path on a different router objective than plain FSDP2. A severed edge moves those gradients by ~1e-2 relative, against the ~1e-7 floor the fp32 dispatch boundary leaves. Pinned in `tests/cpu/parallelism/test_zaya_ep_eda_gradient.py`.
 
-- **Discard slot**: the router emits `num_experts + 1` logits, the extra one a learned "send to nowhere" bucket. `ZayaRouter.forward` masks tokens routed to it (weight → 0, index → 0) before returning. Under EP (`ep_size > 1`) the wrapper dispatches those zero-weight picks as `-1`, DeepEP's "no expert", so they never ride the all-to-all to expert 0's rank; at ep1 nothing is dispatched and the upstream masking stands.
+- **Discard slot**: the router emits `num_experts + 1` logits, the extra one a learned "send to nowhere" bucket. `ZayaRouter.forward` masks tokens routed to it (weight → 0, index → 0) before returning. Under EP (`ep_size > 1`) the EP layer dispatches those zero-weight picks as `-1`, DeepEP's "no expert", so they never ride the all-to-all to expert 0's rank; at ep1 nothing is dispatched and the upstream masking stands.
 - Topology: top-1 only, enforced by the config.
 - Storage: fused `gate_up_proj [E, H, 2M]` and `down_proj [E, M, H]` in matmul convention (the checkpoint is `[E, 2M, H]` / `[E, H, M]`, transposed on load). SwiGLU, Grouped GEMM compute.
 - Loading and saving both use the base fused path: lazy safetensors loading is supported (each rank reads only its expert slice), and the gathered save emits the two native fused tensors per layer, which `from_pretrained` reads back. The loader's structural probe declines a per-expert checkpoint in the `-legacy` layout.
@@ -75,7 +75,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when bias_update is active
 - **Grouped GEMM** (`F.grouped_mm`) — default on SM90+; disable with `use_grouped_gemm: false`.
 - **Liger** — upstream has no `zaya` applier; the toolkit covers it from its own spec (`halo/model_loading/liger/family_specs.py`). It defaults to the fused loss plus Liger RMSNorm; CE is off when the fused loss is on.
 
-    The fused loss skips the `[B*S, 262272]` logits plane (~17 GB at batch 1, `S=32k`), which fits `b=1,S=32k` / `b=2,S=16k`. RoPE is not swapped (partial rotary: `rope_parameters` carries `partial_rotary_factor: 0.5` per layer type), and no GLU is swapped (the EP wrapper replaces the whole MoE block).
+    The fused loss skips the `[B*S, 262272]` logits plane (~17 GB at batch 1, `S=32k`), which fits `b=1,S=32k` / `b=2,S=16k`. RoPE is not swapped (partial rotary: `rope_parameters` carries `partial_rotary_factor: 0.5` per layer type), and no GLU is swapped (the EP layer replaces the whole MoE block).
 
 - **`torch.compile`** — untested, default off; expect graph breaks at DeepEP dispatch boundaries.
 

@@ -2,7 +2,7 @@
 
 A trainer's ``has_ep_group`` / ``is_tp_mode`` / ``is_cp_mode`` return the ``ParallelismConfig`` it was
 handed, so a check on them passes on a run whose loader silently skipped the axis. These probes read
-what the loader and the trainer's wrap left on the model instead: the EP wrappers and the expert
+what the loader and the trainer's wrap left on the model instead: the EP layers and the expert
 weights they hold, the TP-sharded parameters, the Ulysses attention layers.
 """
 
@@ -12,7 +12,7 @@ from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from halo.distributed.mesh import has_tp_dim
 from halo.models.moe.config_fields import has_routed_experts
 from tests.common.ep_reference import ep_layers
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 
 def tp_sharded_param_names(model) -> list[str]:
@@ -45,7 +45,7 @@ def _bank_split_ep_way(layer) -> bool:
 def parallel_shape_checks(model, parallelism_config) -> dict[str, bool]:
     """One named check per parallel axis ``parallelism_config`` enables, each read off ``model``.
 
-    * EP wrappers (``ep_layers_wrapped``) wherever the run needs them and the checkpoint is a MoE: EP
+    * EP layers (``ep_layers_wrapped``) wherever the run needs them and the checkpoint is a MoE: EP
       distribution, or grouped-GEMM expert compute at ``ep_size=1``;
     * ``expert_bank_split_ep_way`` under ``ep_size > 1``, on every EP layer;
     * ``expert_ffn_sharded_etp_way`` under ETP, on every EP layer;
@@ -57,7 +57,7 @@ def parallel_shape_checks(model, parallelism_config) -> dict[str, bool]:
     pc = parallelism_config
     checks: dict[str, bool] = {}
     layers = ep_layers(model)
-    if pc.needs_ep_wrappers and has_routed_experts(model.config):
+    if pc.needs_ep_layers and has_routed_experts(model.config):
         checks["ep_layers_wrapped"] = bool(layers)
         log(f"  EP layers wrapped: {'PASS' if layers else 'FAIL'} ({len(layers)})")
     if pc.ep_size > 1:

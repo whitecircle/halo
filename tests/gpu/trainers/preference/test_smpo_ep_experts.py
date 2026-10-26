@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-Test: native grouped-LoRA on EP experts with a NON-SFT trainer (SmoothMarginPOTrainer, EP=2).
+Test: native grouped-LoRA on EP experts with a NON-SFT trainer (SMPOTrainer, EP=2).
 
 Expert-LoRA mechanics (adapter build, grad-sync, save) live in the shared DistributedTrainerMixin /
 EP layers, so this confirms they ride a preference trainer's path end to end — frozen base + only
@@ -19,19 +19,20 @@ from accelerate.utils import extract_model_from_parallel
 from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
+from tests.common.adapters import freeze_base_keep_expert_adapters
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import freeze_base_keep_expert_adapters
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -76,7 +77,7 @@ def run(ctx) -> dict:
     base_before = {k: v.clone() for k, v in ep_layers(model)[0].gather_expert_state_dict().items()}
     adapters_before = gather_expert_lora_adapters(model)
 
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=1,
@@ -95,7 +96,7 @@ def run(ctx) -> dict:
         remove_unused_columns=False,
         dataloader_num_workers=0,
     )
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=config,
         train_dataset=train_dataset,

@@ -134,7 +134,7 @@ def test_the_verdict_is_deterministic_and_per_activation():
 
 
 def test_an_ambient_meta_default_device_does_not_break_the_probe():
-    """EP wrappers are constructed near meta-device scopes (the lazy expert loader). The probe pins its
+    """EP layers are constructed near meta-device scopes (the lazy expert loader). The probe pins its
     own tensor to CPU, so an ambient `torch.device("meta")` must neither flip the verdict nor raise out
     of a layer's `__init__` — `torch.equal` has no Meta kernel."""
     with torch.device("meta"):

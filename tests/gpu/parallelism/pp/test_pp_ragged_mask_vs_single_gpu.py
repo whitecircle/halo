@@ -33,7 +33,7 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_min
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
-from tests.common.utils import log, log_all
+from tests.common.rank_log import log, log_all
 
 GLOBAL_BATCH = 8
 SEQ_LEN = 32

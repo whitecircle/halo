@@ -94,7 +94,9 @@ def test_the_online_trainer_refuses_it_at_construction_too():
         "sdpg_hint_template names ['{solution}'], which SDPGArguments's hint does not fill; it fills ['{answer}']."
     )
     with pytest.raises(ValueError, match=f"^{re.escape(refusal)}$"):
-        DistributedSDPGTrainer(sdpg_hint_template="{solution}")
+        DistributedSDPGTrainer(
+            sdpg_hint_template="{solution}", sdpg_answer_field="answer", opd_positive_advantage_only=True
+        )
 
 
 @pytest.mark.parametrize("arm", ALL_ARMS, ids=lambda c: c.__name__)

@@ -11,7 +11,7 @@ silence.
   merged checkpoint lands ``adapter_config.json`` beside full merged weights, and every
   from_pretrained-based tool downstream then reads the result as an unmerged adapter — and
   re-exports the bare base.
-* ``dataset_deduplication.py`` silently ignoring an ``--additional_fields`` name the dataset does not
+* ``deduplicate_dataset.py`` silently ignoring an ``--additional_fields`` name the dataset does not
   carry writes an output missing exactly the column the caller asked to keep.
 
 Run: pytest tests/cpu/checkpoint/test_after_training_tool_guards.py
@@ -25,7 +25,7 @@ import pytest
 from datasets import Dataset
 
 from halo.checkpoint import adapter_merge, model_merge, sink_reset
-from scripts.inference.generation import dataset_deduplication
+from scripts.inference import deduplicate_dataset
 
 # --- merge_models: a tokenizer-less artifact is not a deliverable ---------------------------------
 
@@ -201,14 +201,14 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
     )
 
 
-# --- dataset_deduplication: an unknown keep-column is a typo, not an opt-out ----------------------
+# --- deduplicate_dataset: an unknown keep-column is a typo, not an opt-out ----------------------
 
 
 def test_an_unknown_additional_field_raises(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
 
     with pytest.raises(ValueError) as excinfo:
-        dataset_deduplication.save_deduplicated_dataset(
+        deduplicate_dataset.save_deduplicated_dataset(
             dataset,
             np.array([0, 1]),
             str(tmp_path / "out.jsonl"),
@@ -223,7 +223,7 @@ def test_known_additional_fields_still_narrow_the_output(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
     output = tmp_path / "out.jsonl"
 
-    dataset_deduplication.save_deduplicated_dataset(dataset, np.array([0]), str(output), additional_fields=["text"])
+    deduplicate_dataset.save_deduplicated_dataset(dataset, np.array([0]), str(output), additional_fields=["text"])
 
     written = json.loads(output.read_text().splitlines()[0])
     assert written == {"text": "a"}

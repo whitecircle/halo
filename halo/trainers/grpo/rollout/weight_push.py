@@ -111,7 +111,7 @@ def _reject_model_state(model: torch.nn.Module, ep_layers: dict[str, EPMoELayerB
 
 def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
     """Refuse a family the engine cannot serve, one whose spec carries a ``weight_sync_refusal``, and an EP family
-    without the live wrapper whose gather emits the layout the engine loads."""
+    without the live EP layer whose gather emits the layout the engine loads."""
     client_cls = resolve_weight_sync_client(backend)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     unservable = sorted(client_cls.UNSERVABLE_MODEL_TYPES.keys() & config_model_types(config))
@@ -141,12 +141,12 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
     if families and not ep_layers:
         raise ValueError(
             f"{', '.join(sorted({cls.__name__ for _where, cls in families}))} resolves for model_type "
-            f"{sorted(config_model_types(config))}, but the model carries no live EP wrapper "
+            f"{sorted(config_model_types(config))}, but the model carries no live EP layer "
             f"(expert_parallel_size 1 with use_grouped_gemm: false): weight sync ships experts in the layout "
-            f"the family's gather_expert_state_dict emits, and without a wrapper it would forward the stock "
+            f"the family's gather_expert_state_dict emits, and without an EP layer it would forward the stock "
             f"module tree's fused expert tensors under module names, which the engine's loader drops with no "
             f"error — attention, norms and routers would sync while the experts keep serving launch weights. "
-            f"Set use_grouped_gemm: true (the torchrun default), which installs the EP wrappers at "
+            f"Set use_grouped_gemm: true (the torchrun default), which installs the EP layers at "
             f"expert_parallel_size 1 too."
         )
 

@@ -27,8 +27,8 @@ from datasets import Image as ImageFeature
 from PIL import Image as PILImage
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from halo.data import vlm_detection as vlm_detection_module
 from halo.data import vlm_render as vlm_render_module
-from halo.data import vlm_routing as vlm_routing_module
 from halo.data.collators.self_distill import SelfDistillTextCollator
 from halo.data.pipeline import conversation as conversation_module
 from halo.data.pipeline import vlm_rows as vlm_rows_module
@@ -42,8 +42,8 @@ from halo.data.pipeline.preferences import render_preference_row
 from halo.data.pipeline.text_rows import prepare_generative_row, render_row_conversation
 from halo.data.pipeline.vlm_rows import normalize_vlm_conversation
 from halo.data.preprocessed import tokenization as tokenization_module
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS, dataset_declares_images, dataset_image_evidence, is_vlm_run
 from halo.data.vlm_render import extract_conversation_images
-from halo.data.vlm_routing import VLM_IMAGE_COLUMNS, dataset_declares_images, dataset_image_evidence, is_vlm_run
 from halo.entrypoints import data_setup
 from halo.entrypoints.data_setup import resolve_vlm_run
 from halo.entrypoints.model_setup import apply_text_path_padding_side
@@ -323,6 +323,9 @@ def test_self_distill_text_collator_refuses_an_image_content_part():
         max_length=256,
         conversation_field="prompt",
         hint_template="{answer}",
+        answer_field="answer",
+        solution_field="solution",
+        confidence_power=1.0,
         train_on_completions_only=False,
         model_config=None,
     )
@@ -399,7 +402,7 @@ def test_every_image_part_site_reads_the_shared_constants(monkeypatch):
     for module in (conversation_module, vlm_render_module, vlm_rows_module):
         monkeypatch.setattr(module, "IMAGE_PART_TYPE", alt_type)
         monkeypatch.setattr(module, "IMAGE_PART_PAYLOAD_KEY", alt_key)
-    monkeypatch.setattr(vlm_routing_module, "IMAGE_PART_PAYLOAD_KEY", alt_key)
+    monkeypatch.setattr(vlm_detection_module, "IMAGE_PART_PAYLOAD_KEY", alt_key)
     # The offline preprocessor extracts through extract_conversation_images rather than walking the
     # parts itself, so it has no spelling of its own; a re-inlined extractor would re-import these.
     assert not hasattr(tokenization_module, "IMAGE_PART_TYPE"), (

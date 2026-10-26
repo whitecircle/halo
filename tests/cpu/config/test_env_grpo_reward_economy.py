@@ -30,7 +30,7 @@ from pathlib import Path
 import pytest
 from ruamel.yaml import YAML
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.environments.tasks.coding.code_contests_prompts import AUDIT_CHECKS
 from halo.rewards.terms import (
@@ -50,7 +50,7 @@ from tests.common.repo import REPO_ROOT
 
 RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*code-contests*.yaml"))
 _yaml = YAML(typ="safe")
-_DEFAULTS = AsyncTrainingConfig()
+_DEFAULTS = AsyncRolloutConfig()
 # The most tokens a shipped recipe lets one episode sample: its worst-case trajectory beside the prompt
 # budget is what the rollout servers' context window is sized for, and Qwen3.6 serves twice the others'.
 _EPISODE_TOKENS_CEILING = 131072

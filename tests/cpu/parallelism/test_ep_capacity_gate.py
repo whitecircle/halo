@@ -334,7 +334,7 @@ def test_the_prologue_separates_a_null_max_length_from_an_absent_one():
 # nothing fails rather than silently inheriting the base's ``FORWARD_ROWS_PER_EXAMPLE = 1``.
 _ROWS_PER_EXAMPLE: dict[str, int] = {
     # One concatenated forward over the chosen|rejected pair: twice the rows in one model call.
-    "SmoothMarginPOTrainer": 2,
+    "SMPOTrainer": 2,
     "DistributedDPOTrainer": 2,
     "DistributedRewardTrainer": 2,
     # One row per example. KTO's KL completion is a SEPARATE forward, never a dim-0 concat; the
@@ -344,7 +344,7 @@ _ROWS_PER_EXAMPLE: dict[str, int] = {
     "ClassificationTrainer": 1,
     "DistributedAsyncEnvironmentalGRPOTrainer": 1,
     "DistributedDistillationTrainer": 1,
-    "DistributedGRPOTrainer": 1,
+    "DistributedOnlineGRPOTrainer": 1,
     "DistributedKTOTrainer": 1,
     "DistributedSDPGTrainer": 1,
     "DistributedSFTTrainer": 1,
@@ -361,7 +361,7 @@ def test_the_derived_roster_covers_the_trainer_families():
     """Anti-vacuity: an empty or collapsed roster would make the coverage test below assert nothing."""
     names = {cls.__name__ for cls in TRAINER_ROSTER}
     assert len(names) >= 12, f"the roster collapsed to {sorted(names)} — the derivation stopped finding trainers"
-    assert {"DistributedSFTTrainer", "SmoothMarginPOTrainer", "OfflineGRPOTrainer"} <= names, sorted(names)
+    assert {"DistributedSFTTrainer", "SMPOTrainer", "OfflineGRPOTrainer"} <= names, sorted(names)
 
 
 @pytest.mark.parametrize("trainer", TRAINER_ROSTER, ids=lambda cls: cls.__name__)

@@ -16,12 +16,12 @@ The `scripts.*` flag helpers are the shared flag surfaces:
 
 | Helper | Flags |
 |---|---|
-| `scripts/cli_arguments.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, each taken by the `before_training/` and `after_training/` tools that need it (`quantize_to_lowp.py` and `s3_datasets.py` take none, `prepare_dataset.py` only `--trust_remote_code`); `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers `rm_scoring.py` and `rm_rejection_sampling.py` (their device flag is their own `--rm_device`); the Hub source block (`--model_id` without `--revision`) and `--trust_remote_code` by `inference/generation/dataset_deduplication.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every CLI that drives a served model — `openai_batched_generation.py`, the two reward-model scorers, `run_env.py`, `run_code_contests.py` and the two Gradio playgrounds — with a required `--model` on all but the playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
+| `scripts/cli_arguments.py` | The shard cap, the Hub source block, `--dtype`, `--device_map` and `--trust_remote_code`, each taken by the `before_training/` and `after_training/` tools that need it (`quantize_to_lowp.py` and `s3.py` take none, `prepare_dataset.py` only `--trust_remote_code`); `--trust_remote_code` and the dtype flag, spelled `--rm_dtype`, by the reward-model scorers `score.py` and `rejection_sample.py` (their device flag is their own `--rm_device`); the Hub source block (`--model_id` without `--revision`) and `--trust_remote_code` by `inference/deduplicate_dataset.py`; the OpenAI-compatible endpoint block (`--base_url`, `--api_key`), taken by every CLI that drives a served model — `openai_batched_generation.py`, the two reward-model scorers, `run_env.py`, `run_code_contests.py` and the two Gradio playgrounds — with a required `--model` on all but the playgrounds (the chatbot declares its own optional `--model`; the environment playground takes the name in its UI) |
 | `scripts/inference/inference_arguments.py` | The generation block (`--max_workers`, `--temperature`, `--max_tokens`) and the prompt-row fields (`--id_field`, `--prompt_field`, `--local_system_prompt_field`, `--global_system_prompt`), shared by the S3 generation CLI and the reward-model scorers; the S3 dataset block (`--dataset`, `--output_path`, `--subfolder`) and `--checkpoint_interval` of the S3 generation CLI; the Gradio server block (`--host`, `--port`, `--share`) of the two playgrounds |
 | `scripts/inference/reward_model/reward_model_arguments.py` | The reward-model scoring block, on top of the previous two |
 | `scripts/environments/eval_arguments.py` | The env-eval dataset/endpoint/training-contract/sampling/trajectory flags; their readers, the output writer and `TrainingContract` (the `--training_config` YAML read with the training script's config classes) live in `halo/entrypoints/environment_eval.py` |
 
-The generation CLIs' runs live in `halo/entrypoints/`: `resumable_generation.py` (the S3 prompt dataset and its resume, the merged push, the empty-run refusal, the batched generation run and `run_async_cli`), `reward_scoring.py` (the reward-model load, the batched scorer and the `rm_scoring.py` run) and `rejection_sampling.py` (the `rm_rejection_sampling.py` run).
+The generation CLIs' runs live in `halo/entrypoints/`: `resumable_generation.py` (the S3 prompt dataset and its resume, the merged push, the empty-run refusal, the batched generation run and `run_async_cli`), `reward_scoring.py` (the reward-model load, the batched scorer and the `score.py` run) and `rejection_sampling.py` (the `rejection_sample.py` run).
 
 Multi-word flags use underscores (`--base_url`), matching the YAML field names a training flag overrides; `weight_sync_transport.py` alone keeps its dashed spellings (`--server-url`). One concept has one spelling across the tools: `--output_dir` for an output directory, `--output_path` for an output file, `--dataset` / `--split` / `--config` for a dataset source, `--model_id` for a model that may be a Hub repo, `--max_tokens` for a generation cap and `--max_workers` for request or episode concurrency.
 
@@ -59,9 +59,9 @@ Which parallelism axes each trainer takes: [Trainer compatibility](trainer-archi
 | Script | Description |
 |--------|-------------|
 | `scripts/inference/generation/openai_batched_generation.py` | Async batched generation with OpenAI-compatible API. Every request goes out as plain text, so rows carrying a structured `response_format` (any `type` but `text`) are refused before generation; the reward-model scripts honor one |
-| `scripts/inference/generation/dataset_deduplication.py` | FAISS-based semantic deduplication. Keyed on `--text_field` alone: two rows with the same text collapse to one however they differ elsewhere, so an images column does **not** make them distinct — deduplicate a VLM dataset before pairing its images, or on a field that carries the difference |
-| `scripts/inference/reward_model/rm_rejection_sampling.py` | Rejection-sampled preference (or offline-GRPO) dataset generation: hypotheses from any OpenAI-compatible endpoint, scored by a local reward model. A hypothesis the endpoint cut at `--max_tokens` is dropped rather than scored as if it had finished, and a row left with fewer than two usable hypotheses is skipped; both counts are in the run summary. Each generated turn is written as `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`); null reply fields are dropped |
-| `scripts/inference/reward_model/rm_scoring.py` | Score datasets using reward models. A response cut at `--max_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished. The scored turn is `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`) |
+| `scripts/inference/deduplicate_dataset.py` | FAISS-based semantic deduplication. Keyed on `--text_field` alone: two rows with the same text collapse to one however they differ elsewhere, so an images column does **not** make them distinct — deduplicate a VLM dataset before pairing its images, or on a field that carries the difference |
+| `scripts/inference/reward_model/rejection_sample.py` | Rejection-sampled preference (or offline-GRPO) dataset generation: hypotheses from any OpenAI-compatible endpoint, scored by a local reward model. A hypothesis the endpoint cut at `--max_tokens` is dropped rather than scored as if it had finished, and a row left with fewer than two usable hypotheses is skipped; both counts are in the run summary. Each generated turn is written as `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`); null reply fields are dropped |
+| `scripts/inference/reward_model/score.py` | Score datasets using reward models. A response cut at `--max_tokens` is dropped and counted (`truncated=`) rather than scored as if it had finished. The scored turn is `{role, content}` plus the reply's non-null extras (an engine's `reasoning_content`) |
 | `scripts/inference/playground/gradio_openai_chatbot.py` | Chatbot UI (Gradio + OpenAI API). `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder |
 | `scripts/inference/playground/gradio_environment_playground.py` | Environment playground (Gradio) for testing GRPO environments against a rollout server. Episodes run through the shared eval driver (`run_episode` in `halo/environments/eval_runner.py`), so a turn the engine cut off at its token cap, or one the model ended on nothing, is recovered here exactly as in training. `--base_url` prefills the rollout server base URL; `--api_key` defaults to `$VLLM_API_KEY`, else `$OPENAI_API_KEY`, else vLLM's `EMPTY` placeholder, and stays server-side; `--host` binds loopback (`127.0.0.1`), so publishing the UI — and that key's spend — takes an explicit `--host 0.0.0.0` |
 | `scripts/environments/inference/run_code_contests.py` | Evaluate a served model on competitive programming, success@k per rating, difficulty or contest: [Code Contests → Evaluation](../training-methods/async-grpo/environments/tasks/code-contests/evaluation.md) |
@@ -70,10 +70,10 @@ Which parallelism axes each trainer takes: [Trainer compatibility](trainer-archi
 
 In `openai_batched_generation.py`, `--dataset` / `--output_path` are S3 **keys**, not URIs:
 `build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
-(default `datasets`, `None` to skip). On `dataset_deduplication.py`, `--dataset` is a
+(default `datasets`, `None` to skip). On `deduplicate_dataset.py`, `--dataset` is a
 local file or a Hub dataset id and `--output_path` a local path.
 
-The three async CLIs — `openai_batched_generation.py`, `rm_rejection_sampling.py`, `rm_scoring.py`
+The three async CLIs — `openai_batched_generation.py`, `rejection_sample.py`, `score.py`
 — run under a shared SIGINT/SIGTERM handler
 (`run_async_cli`) that exits `128 + signo`, the shell's own convention for a signalled process.
 Progress is stored for resume (generation through `parallel_openai_requests` and its JSONL resume store under `$HALO_DATA_ROOT/inference/resume`, `halo/inference/batch_requests.py`; the two `rm_*` CLIs in their own JSONL output), so re-running resumes; the non-zero exit is what stops a wrapper script or
@@ -95,7 +95,7 @@ HALO_S3_DEFAULT_BUCKET=your-bucket \
 python scripts/inference/generation/openai_batched_generation.py \
     --model my-model --dataset prompts --output_path responses
 
-python scripts/inference/reward_model/rm_scoring.py \
+python scripts/inference/reward_model/score.py \
     --model my-model --dataset data/prompts.jsonl --rm_model_id path/to/reward-model
 ```
 
@@ -165,8 +165,8 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
   `scripts/cli_arguments.py`): `merge_peft_adapters.py`, `merge_models.py`,
   `convert_to_bf16.py`, `reattach_vision_tower.py`, `patch_vocab.py`,
   `prepare_dataset.py`, `convert_deepseek_v4_bf16.py`, the reward-model scoring CLIs
-  (`rm_scoring.py`, `rm_rejection_sampling.py`) through `scripts/inference/reward_model/reward_model_arguments.py`,
-  and `dataset_deduplication.py`.
+  (`score.py`, `rejection_sample.py`) through `scripts/inference/reward_model/reward_model_arguments.py`,
+  and `deduplicate_dataset.py`.
 
     **The default follows the input source.** A local checkpoint, adapter or merge input
     (`--input_dir`, `--adapter_dir`, `merge_models.py`'s `--models`, `--base_model` and
@@ -174,7 +174,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
     (Bailing/Ling, Laguna) do not load without it, and the operator already produced that artifact.
 
     A source that may be a Hub repo (the `--model_id` of `patch_vocab.py`, `convert_deepseek_v4_bf16.py`,
-    `reattach_vision_tower.py` and `dataset_deduplication.py`, the scorers' `--rm_model_id`, and
+    `reattach_vision_tower.py` and `deduplicate_dataset.py`, the scorers' `--rm_model_id`, and
     `prepare_dataset.py`'s `--model_name_or_path`) defaults **off**: a freshly downloaded
     third-party repo must not execute its own code merely because a tool was pointed at it. Either
     way the opposite is one flag away (`--trust_remote_code` / `--no-trust_remote_code`).
@@ -222,7 +222,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 | Script | Description |
 |--------|-------------|
 | `scripts/before_training/prepare_dataset.py` | Pre-process SFT or raw-text datasets: tokenization, packing, sharding. `--mode chat` (default) applies the chat template; `--mode text` tokenizes `--text_field` directly and appends EOS per document — the (continued) pre-training path. The output holds `train` and `test` (an input with no `test` bakes its `validation` split as `test`); any other input split is left out with a warning. A `--conversation_field` / `--text_field` / `--tools_field` / `--images_field` the run reads but a baked split does not carry is refused before tokenization |
-| `scripts/before_training/s3_datasets.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`). `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
+| `scripts/before_training/s3.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`). `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
 | `scripts/before_training/patch_vocab.py` | Patch vocabulary with new tokens, reset attention sinks |
 | `scripts/before_training/convert_deepseek_v4_bf16.py` | Dequantize a FineGrained-FP8 DeepSeek-V4 checkpoint to uniform bf16 for training; `--max_shard_size` sizes the output shards (default `5GB`; see [DeepSeek-V4](../models/deepseek-v4.md)) |
 | `scripts/before_training/convert_mistral4_bf16.py` | Dequantize a public FP8 Mistral Small 4 checkpoint to bf16, streaming shard-by-shard (no full-model RAM footprint); `--max_shard_size` caps the output shards (default `5GB`; see [Mistral4](../models/mistral4.md)) |

@@ -27,13 +27,14 @@ from trl import SFTConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import load_peft_model
 from tests.common.datasets import create_sft_dataset
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import load_peft_model
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
-from tests.common.utils import log, log_all, step_losses, training_run_checks
+from tests.common.training_checks import step_losses, training_run_checks
 
 EP_SIZE = 2
 STEPS = 4

@@ -30,9 +30,10 @@ from tests.common.cp_grpo import (
     optimizer_step_agreement,
 )
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 SEED = 918
 SEQ = 64

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""End-to-end pipeline parallelism through the real SmoothMarginPOTrainer.
+"""End-to-end pipeline parallelism through the real SMPOTrainer.
 
 SMPO under PP re-lays the [chosen ⧺ rejected] concat out as interleaved pairs and folds its three
 normalizers (pair count, chosen/rejected token counts) into the microbatch loss as per-step
@@ -30,9 +30,9 @@ import torch
 import torch.nn.functional as F
 from datasets import Dataset
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.distributed import hf_eval_loss_reference, world_any, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -44,7 +44,7 @@ from tests.common.pp_trainers import (
     losses_identical_across_ranks,
     tiny_vocab_tokenizer,
 )
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 SEQ_LEN = 48  # pipeline fixed shape; batch-max concat lengths stay below it on purpose
@@ -111,9 +111,9 @@ def smpo_reference(model, input_ids, attention_mask, labels, *, margin, min_log_
     return float(pair_losses.mean() + sft)
 
 
-def build_args(output_dir: str, **overrides) -> SmoothMarginPOConfig:
+def build_args(output_dir: str, **overrides) -> SMPOConfig:
     return build_pp_args(
-        SmoothMarginPOConfig,
+        SMPOConfig,
         output_dir,
         **{
             "max_steps": N_STEPS,
@@ -155,7 +155,7 @@ def run_trainer(config, args, dataset, tokenizer, eval_dataset=None):
     init-weights eval calls and metrics, and the init-weights shards taken before that eval.
     """
     trainer, steps, evals = build_pp_trainer(
-        SmoothMarginPOTrainer,
+        SMPOTrainer,
         also_record=lambda trainer: {"margin": float(trainer._pp_loss.constants.target_margin)},
         model=build_dense_model(),
         args=args,
@@ -184,7 +184,7 @@ def run(ctx):
     # ── Construction-time rejections (all raise before any collective) ───────────────────────────
     # Percentile clip: the config default (lower_clip_percentile=0.02) must be rejected under PP.
     expect_construction_error(
-        SmoothMarginPOTrainer,
+        SMPOTrainer,
         "percentile_clip_rejected",
         checks,
         "quantile",
@@ -196,7 +196,7 @@ def run(ctx):
     )
     # Pair alignment: bs=3 with 2 microbatches would split a chosen/rejected pair.
     expect_construction_error(
-        SmoothMarginPOTrainer,
+        SMPOTrainer,
         "pair_splitting_batch_rejected",
         checks,
         "divisible",
@@ -338,7 +338,7 @@ def run(ctx):
         seen_shapes.append(tuple(predictions.shape))
         return {"reward_gap": float(predictions[:, 0].mean() - predictions[:, 1].mean())}
 
-    metrics_trainer = SmoothMarginPOTrainer(
+    metrics_trainer = SMPOTrainer(
         model=build_dense_model(),
         args=build_args(ctx.output_dir + "/metrics", max_steps=1, use_margin_schedule=False),
         train_dataset=dataset,

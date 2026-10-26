@@ -18,8 +18,8 @@ trains nothing).
 
 `completions` holds one message list per completion (usually 4–16) and `rewards` one float per
 completion, in the same order. The method is text-only. No dataset yet?
-`halo run rm-rejection-sampling --output_format offline_grpo` generates candidates against a served
-model, scores them with a reward model, and writes this shape.
+`halo run inference/reward-model/rejection-sample --output_format offline_grpo` generates candidates
+against a served model, scores them with a reward model, and writes this shape.
 
 ## Run
 

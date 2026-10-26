@@ -215,4 +215,4 @@ PIDs show as `ray::EnvironmentActor` in `ps`).
 | Rollouts fail with connection refused on some ranks only | Loopback/unresolvable server URL from an actor node → use routable hostnames in `rollout_server_configs` |
 | Search/MCP env scores all zero on a shared cluster | Backend key or `npx`/`uvx` missing from the actor node's env → export before `ray start` |
 | Sandbox runs queue far beyond core count | Per-process gate × many actors → set `HALO_SANDBOX_MAX_CONCURRENCY` so slots sum to cores |
-| `episode_timeout` errors while the env is healthy | Deadline below real episode latency (long SWE sessions hit this first) → raise it; it must stay under the NCCL watchdog ([`episode_timeout`](../reference/configuration-reference.md#asynctrainingconfig)) |
+| `episode_timeout` errors while the env is healthy | Deadline below real episode latency (long SWE sessions hit this first) → raise it; it must stay under the NCCL watchdog ([`episode_timeout`](../reference/configuration-reference.md#asyncrolloutconfig)) |

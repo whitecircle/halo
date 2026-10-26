@@ -20,7 +20,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import EPISODE_INVALID_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
 from halo.environments.messages import Message, Trajectory
@@ -105,7 +105,7 @@ class _CharTokenizer:
 
 def _reward_host(num_generations=1, **config) -> DistributedAsyncEnvironmentalGRPOTrainer:
     trainer = attach_world_metrics(object.__new__(DistributedAsyncEnvironmentalGRPOTrainer))
-    trainer.async_config = AsyncTrainingConfig(**config)
+    trainer.async_config = AsyncRolloutConfig(**config)
     trainer.num_generations = num_generations
     trainer._tokenizer = _CharTokenizer()
     trainer._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
@@ -269,45 +269,45 @@ def test_a_missing_trajectory_is_free():
 
 
 def test_config_refuses_values_that_would_invert_or_poison_the_terms():
-    defaults = AsyncTrainingConfig()
+    defaults = AsyncRolloutConfig()
     assert defaults.reasoning_price is None, "the price is off by default"
     assert defaults.reasoning_floor == 0.0, "the floor is off by default"
     assert defaults.reasoning_price_cap == 0.1
     for empty in ({}, [0.01], 0.01, "low: 0.01"):
         with pytest.raises(ValueError, match="reasoning_price must map each effort level to a price"):
-            AsyncTrainingConfig(reasoning_price=empty)
+            AsyncRolloutConfig(reasoning_price=empty)
     for bad in (-0.01, float("nan"), float("inf"), True, "0.01", None):
         with pytest.raises(ValueError, match=r"reasoning_price\['low'\] must be (a finite number|>= 0)"):
-            AsyncTrainingConfig(reasoning_price={**PRICE, "low": bad})
+            AsyncRolloutConfig(reasoning_price={**PRICE, "low": bad})
     for bad in (0.0, -1.0, float("nan"), float("inf")):
         with pytest.raises(ValueError, match=r"reasoning_price_cap must be (a finite number|> 0)"):
-            AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_cap=bad)
+            AsyncRolloutConfig(reasoning_price=PRICE, reasoning_price_cap=bad)
     for bad in (-0.01, float("nan"), float("inf")):
         with pytest.raises(ValueError, match=r"reasoning_floor must be (a finite number|>= 0 \(0 = off\))"):
-            AsyncTrainingConfig(reasoning_floor=bad)
+            AsyncRolloutConfig(reasoning_floor=bad)
     # A price of zero on one level is a priced level that pays nothing, not a mistake.
-    assert AsyncTrainingConfig(reasoning_price={**PRICE, "high": 0}).reasoning_price["high"] == 0
-    assert AsyncTrainingConfig(reasoning_price=TEMPLATE_PRICE, reasoning_floor=0.05).reasoning_price == TEMPLATE_PRICE
+    assert AsyncRolloutConfig(reasoning_price={**PRICE, "high": 0}).reasoning_price["high"] == 0
+    assert AsyncRolloutConfig(reasoning_price=TEMPLATE_PRICE, reasoning_floor=0.05).reasoning_price == TEMPLATE_PRICE
 
 
 def test_a_price_cap_with_the_price_off_is_refused_as_inert():
     """The cap is read only beside a price: set alone it parses and changes nothing. Its default value
     passes with the price off, and any value is free while the price is on."""
     with pytest.raises(ValueError, match="reasoning_price_cap set with reasoning_price unset"):
-        AsyncTrainingConfig(reasoning_price_cap=0.2)
-    assert AsyncTrainingConfig(reasoning_price_cap=0.1).reasoning_price is None
-    assert AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_cap=0.2).reasoning_price_cap == 0.2
+        AsyncRolloutConfig(reasoning_price_cap=0.2)
+    assert AsyncRolloutConfig(reasoning_price_cap=0.1).reasoning_price is None
+    assert AsyncRolloutConfig(reasoning_price=PRICE, reasoning_price_cap=0.2).reasoning_price_cap == 0.2
 
 
 def test_the_failed_group_knob_with_both_terms_off_is_refused_as_inert():
     with pytest.raises(ValueError, match="reasoning_terms_in_failed_groups set with reasoning_price and"):
-        AsyncTrainingConfig(reasoning_terms_in_failed_groups=True)
-    assert AsyncTrainingConfig(reasoning_floor=0.05, reasoning_terms_in_failed_groups=True).reasoning_floor == 0.05
+        AsyncRolloutConfig(reasoning_terms_in_failed_groups=True)
+    assert AsyncRolloutConfig(reasoning_floor=0.05, reasoning_terms_in_failed_groups=True).reasoning_floor == 0.05
 
 
 def _constructing(budgets, effort="random", soft=(), objective_term=OBJECTIVE_TERM, **config):
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    trainer.async_config = AsyncTrainingConfig(**config)
+    trainer.async_config = AsyncRolloutConfig(**config)
     trainer._rollout_env = types.SimpleNamespace(
         reasoning_effort=effort,
         thinking_budget_for_effort=budgets.get,
@@ -418,10 +418,10 @@ def test_the_trainer_prices_past_a_budget_only_where_it_was_soft():
 
 
 def test_pricing_past_a_budget_needs_a_price():
-    assert AsyncTrainingConfig().reasoning_price_past_budget is False
+    assert AsyncRolloutConfig().reasoning_price_past_budget is False
     with pytest.raises(ValueError, match="reasoning_price_past_budget set with reasoning_price unset"):
-        AsyncTrainingConfig(reasoning_price_past_budget=True)
-    assert AsyncTrainingConfig(reasoning_price=PRICE, reasoning_price_past_budget=True).reasoning_price_past_budget
+        AsyncRolloutConfig(reasoning_price_past_budget=True)
+    assert AsyncRolloutConfig(reasoning_price=PRICE, reasoning_price_past_budget=True).reasoning_price_past_budget
 
 
 def test_construction_refuses_pricing_past_a_budget_unless_every_drawable_budget_is_soft():

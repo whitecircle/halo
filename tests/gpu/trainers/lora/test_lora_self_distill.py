@@ -23,8 +23,7 @@ from halo.data.collators.self_distill import SelfDistillTextCollator
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.collectives import barrier
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
-from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     assert_adapter_checkpoint,
     assert_adapters_moved,
     assert_only_adapters_trainable,
@@ -33,7 +32,8 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import log
+from tests.common.harness import gpu_test_main
+from tests.common.rank_log import log
 
 MAX_STEPS = 3
 NUM_TRAIN_SAMPLES = 32
@@ -94,6 +94,7 @@ def run(ctx) -> dict:
         hint_template="\n[Hint] The correct answer is: {answer}.\n",
         answer_field="answer",
         solution_field=None,
+        confidence_power=1.0,
         response_prompt_template=_assistant_marker(tokenizer),
         train_on_completions_only=True,
     )

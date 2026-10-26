@@ -43,10 +43,11 @@ from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4Mo
 from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.models.moe.balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR
+from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.ep_sft_roundtrip import EPSftRoundTrip
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_STEP3P7_CONFIG
-from tests.common.utils import log, safetensors_state_dict
+from tests.common.rank_log import log
 
 _STEP3P7_SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
 _STEP3P7_HUB_MOE_KEYS = {

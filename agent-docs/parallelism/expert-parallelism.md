@@ -15,7 +15,7 @@ gradients sync via the EP layer's own backward hooks, or a post-backward sweep w
 one EP group ([Gradient synchronization](#gradient-synchronization)). [Expert Tensor
 Parallelism](expert-tensor-parallelism.md) further shards each expert's FFN inside the EP group.
 
-Every family wrapper subclasses `EPMoELayerBase` (`halo/distributed/expert_parallel/moe_layer/layer.py`):
+Every family's EP layer subclasses `EPMoELayerBase` (`halo/distributed/expert_parallel/moe_layer/layer.py`):
 construction, the dispatch → expert compute → combine forward and the expert-parameter views. Each other
 concern is one mixin in `moe_layer/` — expert compute (`compute.py`), routing and routing replay
 (`routing.py`), gradient-sync hooks (`grad_sync.py`), native expert LoRA (`expert_lora.py`), the balancing
@@ -30,7 +30,7 @@ reach that behavior through the layers `named_ep_layers(model)` walks.
 
 ## Supported models
 
-| Model | HF Class | EP Wrapper | Per-family page |
+| Model | HF Class | EP Layer | Per-family page |
 |---|---|---|---|
 | GPT-OSS | `GptOssMLP` | `EPGptOssMoELayer` | [gpt-oss.md](../models/gpt-oss.md) |
 | Qwen3 MoE | `Qwen3MoeSparseMoeBlock` | `EPQwen3MoELayer` | [qwen3.md](../models/qwen3.md#qwen3-moe) |
@@ -212,11 +212,11 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 Training checkpoints keep these masters in fp32 and exports write them bf16
 ([What gets saved](../reference/checkpoints.md#what-gets-saved)).
 
-Construction restores their checkpoint values before the wrappers adopt them, through one shared
+Construction restores their checkpoint values before the EP layers adopt them, through one shared
 selector (`halo/model_loading/parallel/fp32_masters.py`): [Load precision](../models/README.md#load-precision).
 
 `fp32_non_ep_params: true` unconditionally implies `fp32_router: true`: every family except Gemma 4
-keeps its router inside the EP wrapper, which that upcast skips, so the implication keeps every
+keeps its router inside the EP layer, which that upcast skips, so the implication keeps every
 non-expert weight an FP32 master.
 
 **Gemma 4: `fp32_non_ep_params` under EP is refused at load**, off the family spec's
@@ -224,7 +224,7 @@ non-expert weight an FP32 master.
 lives in the parent decoder layer and its norms re-emit activations at weight dtype, so the upcast
 would feed fp32 tokens into DeepEP's 2-byte transport.
 
-`fp32_router` is a warned no-op there for the same reason: the router is outside the wrapper and
+`fp32_router` is a warned no-op there for the same reason: the router is outside the EP layer and
 stays BF16. Only `fp32_experts` applies.
 
 **AdamWBF16** is auto-enabled with `bf16=True` (6 vs 12 bytes/param, stochastic rounding on the
@@ -522,7 +522,7 @@ the save) whenever any of these holds:
   through transformers' save-side revert (Step-3.7 Flash, a SigLIP tower, a vendor namespace; the
   merge streams key by key and cannot apply it);
 - a non-shared multi-node filesystem;
-- **no EP layers at all** (dense, or an MoE without EP wrappers): every save would be an ordinary
+- **no EP layers at all** (dense, or an MoE without EP layers): every save would be an ordinary
   gathered checkpoint while a planned merge waits for shards that never appear.
 
 The merge raises on an incomplete shard set.
@@ -550,7 +550,7 @@ replicas from rank 0. All ranks must enter the collectives even though only one 
 
 ## Limitations
 
-**Trainers.** Every trainer supports EP, and the `ep_size == 1` grouped-GEMM wrappers with it.
+**Trainers.** Every trainer supports EP, and the `ep_size == 1` grouped-GEMM EP layers with it.
 The families whose spec declares a
 `weight_sync_refusal` narrow this — online and async GRPO raise at construction for
 each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix:
@@ -571,7 +571,7 @@ on top of it: [Supported combinations](README.md#supported-combinations).
 | fp32 training (`bf16: false`) | rejected at `expert_parallel_size > 1` — DeepEP's buffer carries 2-byte tokens; FP32 storage comes from the `fp32_*` masters ([Precision control](#precision-control)) | `reject_unsupported_run` |
 | `use_peft` / LoRA | attention adapters are fine; a PEFT `LoraLayer` **inside** an EP layer is rejected — expert LoRA must go through the native grouped adapters | `reject_peft_lora_in_ep_layers` |
 | expert LoRA | rejected with `expert_tp_size > 1` at config time, before the checkpoint downloads; rejected under [TP](tensor-parallelism.md#limitations) and alongside `save_sharded_ep`; a `merge_lora` gather under ETP raises | `_reject_expert_tp`, `reject_lora_under_tp`, `halo/checkpoint/parallel/ep.py` |
-| `use_grouped_gemm: false` | drops the wrappers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `reject_unrealized_expert_lora` |
+| `use_grouped_gemm: false` | drops the EP layers at `ep_size == 1`; peeled expert-LoRA targets then raise rather than silently vanish | `reject_unrealized_expert_lora` |
 | `fsdp_reshard_after_forward` | rejected — the backward all-gather can race the DeepEP combine | `_reject_fsdp_settings` |
 | `use_hsdp` | rejected — EP already shards over the EP group | `_reject_hsdp` |
 | `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#usage)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `reject_stock_adamw_on_mixed_params` |
@@ -581,8 +581,8 @@ on top of it: [Supported combinations](README.md#supported-combinations).
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (non-reentrant under PP). `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_install_ep_gradient_checkpointing` |
 | `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
-| `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `halo/model_loading/liger/dispatch.py` |
-| `moe_balancing` | `aux_loss` is inert on families whose EP wrapper severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
+| `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the EP layers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `halo/model_loading/liger/dispatch.py` |
+| `moe_balancing` | `aux_loss` is inert on families whose EP layer severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |
 | `ddp_find_unused_parameters` | must be `True`; the entry scripts set it — do not rely on setting it yourself | — |
 | `packing`, `padding_free`, `torch_compile`, `lowp_precision`, `dataset_num_proc` | not gated under EP | — |

@@ -190,6 +190,6 @@ Rejected at config/load time, loudly: any trainer but SFT; a `quantization_confi
 
 `lowp_apply_moe_experts` reaches the experts only on the grouped-GEMM path (`EPMoELayerBase._grouped_mm`). A layer running the per-expert loop instead (`use_grouped_gemm: false`, e.g. `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` at ep16, or ETP on gpt-oss) ignores the precision and stays bf16 on its experts. Set `use_grouped_gemm: true` to apply low precision to the experts.
 
-`apply_lowp_compute` warns with the count of loop-path layers, and raises when the whole request converted zero modules (a fused-expert MoE with no EP wrappers would otherwise train pure bf16 with no signal).
+`apply_lowp_compute` warns with the count of loop-path layers, and raises when the whole request converted zero modules (a fused-expert MoE with no EP layers would otherwise train pure bf16 with no signal).
 
 Native expert-LoRA adapters always compute in bf16 under lowp: block-scale quantization along the rank axis is unrepresentable for common ranks and no serving stack quantizes adapters.

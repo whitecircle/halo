@@ -29,7 +29,7 @@ def text_render_kwargs(args) -> dict[str, Any]:
 def render_row_conversation(
     row: dict[str, Any],
     tokenizer: PreTrainedTokenizer,
-    conversation_field: str = "messages",
+    conversation_field: str,
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
     add_generation_prompt: bool = False,
@@ -79,7 +79,7 @@ def prepare_generative_row(row, tokenizer, max_length, tools_field=None):
 def build_chat_row_processor(
     tokenizer: PreTrainedTokenizer,
     max_length: int,
-    conversation_field: str = "messages",
+    conversation_field: str,
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
     add_generation_prompt: bool = False,

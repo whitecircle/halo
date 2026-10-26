@@ -1,4 +1,4 @@
-"""EP wrapper for Laguna's MoE block: GLM-4 MoE Lite's shape with a normalizing router."""
+"""EP layer for Laguna's MoE block: GLM-4 MoE Lite's shape with a normalizing router."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from halo.models.moe.family_specs import LAGUNA
 
 
 class EPLagunaMoELayer(EPGlm4MoELayer):
-    """EP wrapper for ``LagunaSparseMoeBlock``, sharing GLM-4 MoE Lite's whole EP contract.
+    """EP layer for ``LagunaSparseMoeBlock``, sharing GLM-4 MoE Lite's whole EP contract.
 
     Same sigmoid routing, fused ``gate_up_proj``/``down_proj`` storage, shared expert on every token
     and per-expert hub layout; the families differ only in the top-k weight default.

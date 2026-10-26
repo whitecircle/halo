@@ -138,7 +138,7 @@ A non-finite mass raises on every rank, knob on or off. The balance raises unles
 - `recompute` (R2) captures the mask in the trainer's no-grad log-prob pass, so it needs a config that runs that pass: the IS correction, a nonzero `beta`, `num_iterations > 1`, or misaligned gradient accumulation.
 - `rollout` (R3, experimental) replays the engine's own selection; it needs `train_on_sampled_tokens` and a capture-capable server. Positions the engine did not cover (prefix-cache hits) keep natural routing, so check the capture coverage on your serving shape before a long run. The gpt-oss `-ep1` recipes ship it.
 
-Both need MoE EP wrappers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of selections the live top-k would have flipped.
+Both need MoE EP layers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of selections the live top-k would have flipped.
 
 Under `rollout`, the step fails on every rank when a trainable batch carries no mask, or when no routed row on some rank matches an engine coverage convention. `routing/rollout_unresolved_frac` is a world share: a rank can fail the step while the share last logged sat below 1.
 

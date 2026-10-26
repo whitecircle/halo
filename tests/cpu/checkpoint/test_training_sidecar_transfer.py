@@ -39,7 +39,7 @@ class _Gate(nn.Module):
 
 
 class _Model(nn.Module):
-    """The shape of a hub MoE model as a conversion tool holds it: no EP wrappers, no adoption
+    """The shape of a hub MoE model as a conversion tool holds it: no EP layers, no adoption
     marks — only the checkpoint key spelling identifies the balancing tensor."""
 
     def __init__(self, dtype=torch.bfloat16):

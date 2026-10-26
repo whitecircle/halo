@@ -50,7 +50,7 @@ from datasets import Dataset, load_dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import GRPOConfig
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_int, env_str
 from halo.environments.protocols.react import ReActEnvironment
@@ -60,9 +60,10 @@ from halo.environments.tools.toolsets import build_math_tools, build_python_tool
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.harness import gpu_test_main, record_check
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, step_losses
-from tests.common.utils import log as rank0_log
+from tests.common.rank_log import log as rank0_log
+from tests.common.training_checks import step_losses
 from tests.common.weight_sync import weight_transfer_port
 
 # Same knob as docker-compose.vllm.yml: the trainer broadcasts its own weights into the served
@@ -282,7 +283,7 @@ def run_env_grpo_training(
 
         grpo_config = GRPOConfig(**grpo_kwargs)
 
-        async_config = AsyncTrainingConfig(
+        async_config = AsyncRolloutConfig(
             rollout_server_url=VLLM_SERVER_URL,
             rollout_group_port=GROUP_PORT,
             rollout_connection_timeout=120.0,

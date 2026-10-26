@@ -60,7 +60,7 @@ from tests.common.pp_trainers import (
     expect_construction_error,
     losses_identical_across_ranks,
 )
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 SEQ_LEN = 64

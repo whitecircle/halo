@@ -114,7 +114,7 @@ SGLANG_MODEL="$HALO_SCRATCH/checkpoints/lfm2.5-8b-a1b-sft" \
 
 ## Reference
 
-- [LFM-2 model notes](../../agent-docs/models/lfm2.md) ↗: the EP wrapper, packing across the conv
+- [LFM-2 model notes](../../agent-docs/models/lfm2.md) ↗: the EP layer, packing across the conv
   layers, balancing
 - [Async GRPO with Environments](../training-methods/async-grpo-environments.md)
 - Model cards: [LFM2.5-8B-A1B](https://huggingface.co/LiquidAI/LFM2.5-8B-A1B),

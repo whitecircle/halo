@@ -37,7 +37,9 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import group_max_abs_diff
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, max_or_nan, training_run_checks
+from tests.common.numerics import max_or_nan
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 10

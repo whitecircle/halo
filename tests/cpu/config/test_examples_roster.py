@@ -395,7 +395,7 @@ def test_rollout_timeouts_fit_the_documented_nccl_watchdog(config, monkeypatch):
     async_config = next(
         obj
         for obj in parser_for(script_for(config)).parse_yaml_file(str(config))
-        if type(obj).__name__ == "AsyncTrainingConfig"
+        if type(obj).__name__ == "AsyncRolloutConfig"
     )
     async_config.get_rollout_config()
 

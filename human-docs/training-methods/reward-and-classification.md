@@ -23,8 +23,9 @@ halo launch reward/reward-model examples/reward/qwen3_5/rm-qwen3.5-9b-skywork-pr
 ```
 
 `max_length` is a filter here: pairs longer than it are dropped. LoRA needs `lora_task_type: SEQ_CLS`,
-which keeps the new `score` head trainable. Once trained, `halo run rm-scoring` and
-`halo run rm-rejection-sampling` generate against a served endpoint and score the results.
+which keeps the new `score` head trainable. Once trained, `halo run inference/reward-model/score` and
+`halo run inference/reward-model/rejection-sample` generate against a served endpoint and score the
+results.
 
 **What to watch.** `accuracy` is the share of pairs ranked correctly (0.5 is chance), and `margin` the
 mean score gap. Watch `min_reward` / `max_reward` for a distribution drifting far from zero.

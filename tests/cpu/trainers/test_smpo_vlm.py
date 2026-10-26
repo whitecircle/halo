@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-CPU tests for SMPO VLM support (SmoothMarginPOTrainer VLM mode + DataCollatorForVLMSMPO).
+CPU tests for SMPO VLM support (SMPOTrainer VLM mode + DataCollatorForVLMSMPO).
 
 Covers the pieces GPU tests can't cheaply exercise:
   - ``tokenize_vlm_preference_row``: raw-row normalization, image injection/extraction, prefix-strip
@@ -132,7 +132,7 @@ class StubProcessor:
 
 
 def make_trainer(*, is_vlm: bool = True, max_prompt_length: int = 512, max_completion_length: int = 64, **args):
-    """Bare SmoothMarginPOTrainer with just the attributes the tested methods read."""
+    """Bare SMPOTrainer with just the attributes the tested methods read."""
     # cp_size is a read-only mixin property; has_ep_group gates dataset-map workers (EP pins 1).
     trainer = smpo_trainer(parallelism_config=SimpleNamespace(cp_size=1, has_ep_group=False), **args)
     trainer.is_vlm = is_vlm

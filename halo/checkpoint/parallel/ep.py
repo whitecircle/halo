@@ -275,7 +275,7 @@ def reject_unmergeable_ep_sharded_save(
         # while a planned merge_ep_shards.py step waits for shards that never exist.
         raise ValueError(
             "save_sharded_ep=True, but this run has no EP MoE layers (dense model, or a MoE without "
-            "EP wrappers — e.g. accelerate launch with use_grouped_gemm=false): every save would be "
+            "EP layers — e.g. accelerate launch with use_grouped_gemm=false): every save would be "
             "an ordinary gathered checkpoint, not the sharded format this flag names. Remove "
             "save_sharded_ep, or run an EP mode."
         )

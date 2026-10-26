@@ -29,8 +29,9 @@ from halo.runtime.collectives import barrier
 from tests.common.distributed import ensure_model_downloaded, world_mean, world_spread
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
+from tests.common.rank_log import log, log_all
 
 # Test Configuration
 

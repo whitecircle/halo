@@ -159,9 +159,9 @@ def test_lagunas_hub_modeling_code_takes_the_library_swaps(tmp_path):
 import inspect, sys, types
 import transformers.dynamic_module_utils as dmu
 from transformers.models.laguna import modeling_laguna
-from halo.model_loading.liger.dispatch import resolve_liger_applier
+from tests.common.liger_appliers import liger_applier
 
-applier = resolve_liger_applier("laguna")
+applier = liger_applier("laguna")
 requested = {{"rms_norm", "swiglu", "fused_linear_cross_entropy"}}
 applier(**{{name: name in requested for name in set(inspect.signature(applier).parameters) - {{"model"}}}})
 hub = sys.modules[dmu.get_class_in_module("LagunaForCausalLM", {str(module_file)!r}).__module__]

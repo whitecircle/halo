@@ -4,13 +4,13 @@ Liquid AI's `Lfm2MoeForCausalLM` — a hybrid MoE (interleaved short-convolution
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism refuses the checkpoints at the tie gate, before the registry check: they tie their head (`tie_word_embeddings` is the config-class default) and ship no `lm_head` tensor.
 
-## EP wrapper
+## EP layer
 
 `EPLfm2MoELayer` (`halo/distributed/expert_parallel/families/lfm2.py`) replaces `Lfm2MoeSparseMoeBlock`.
 
 - Routing: sigmoid scores, plus optional `expert_bias` for top-k selection only; the selected weights come from the unbiased scores, normalized to sum 1 when `norm_topk_prob` (default), then scaled by `routed_scaling_factor`. `expert_bias` is a buffer (not trainable), so it affects selection but doesn't appear in gradients and needs no grad-sync hook.
 - Storage: fused `gate_up_proj` and `down_proj` as 3D tensors. Compute via Grouped GEMM (fused-GLU path).
-- No shared experts (the wrapper extends `EPSharedExpertsMoELayerBase` with `shared_experts=None`, so the shared leg is skipped).
+- No shared experts (the EP layer extends `EPSharedExpertsMoELayerBase` with `shared_experts=None`, so the shared leg is skipped).
 - Gathered saves write the per-expert hub layout (`experts.{i}.w{1,3,2}.weight`) via the spec's `FUSED_SPLIT_PER_EXPERT` `ExpertLayout` — the names both pinned engines' per-expert loaders read, so either serves the export and takes the RL weight sync. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm--sglang).
 
 ## TP and ETP
@@ -47,6 +47,6 @@ no experts), so none of the MoE columns above apply to it.
 
 On a `use_expert_bias: false` checkpoint the slot is **materialized** at enable time (a zero buffer in the same sigmoid-score space, a semantic no-op at creation) and `use_expert_bias` flips in the exported config, so serving engines load and apply the trained bias there too.
 
-`moe_balancing: auto` picks `bias_update` here. `Lfm2MoeForCausalLM` has no aux-loss path — no `output_router_logits` / `router_aux_loss_coef` config field, no router-logit output, no aux term in the loss — and a `forward` that declares no `output_router_logits` parameter is the signal `auto` keys on, so it takes the EP-wrapper bias wherever the wrappers apply (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun).
+`moe_balancing: auto` picks `bias_update` here. `Lfm2MoeForCausalLM` has no aux-loss path — no `output_router_logits` / `router_aux_loss_coef` config field, no router-logit output, no aux term in the loss — and a `forward` that declares no `output_router_logits` parameter is the signal `auto` keys on, so it takes the EP-layer bias wherever the EP layers apply (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun).
 
-Without the wrappers nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning; freeze the router there. See [Performance & Balancing Flags](../reference/configuration-reference.md#performance--balancing-flags) and [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).
+Without the EP layers nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning; freeze the router there. See [Performance & Balancing Flags](../reference/configuration-reference.md#performance--balancing-flags) and [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).

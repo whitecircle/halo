@@ -1,7 +1,7 @@
 """Is this checkpoint multimodal? The verdict every loader and data path shares, read off a config in
 hand or a name. The collective read of a checkpoint's config is
 :func:`~halo.model_loading.parallel.model_source.probe_checkpoint`; whether a RUN takes the VLM path
-(checkpoint AND image data) is :func:`~halo.data.vlm_routing.is_vlm_run`.
+(checkpoint AND image data) is :func:`~halo.data.vlm_detection.is_vlm_run`.
 """
 
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING

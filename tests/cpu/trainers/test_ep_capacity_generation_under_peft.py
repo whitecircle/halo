@@ -46,7 +46,7 @@ def _tokenizer() -> PreTrainedTokenizerFast:
 
 
 def _ep_patched_model() -> Gemma4ForCausalLM:
-    """A tiny MoE model carrying EP wrappers — and the generation hook EP patching registers with them."""
+    """A tiny MoE model carrying EP layers — and the generation hook EP patching registers with them."""
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(Gemma4TextConfig(**TINY_GEMMA4_MOE_CONFIG))
     apply_ep_layers(model, single_process_ep_config(TINY_GEMMA4_MOE_CONFIG["num_experts"]))

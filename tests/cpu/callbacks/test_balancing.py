@@ -217,8 +217,8 @@ def test_bias_update_on_moe_without_any_supporting_layer_raises() -> None:
         apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
 
 
-def test_bias_update_on_moe_without_ep_wrappers_raises() -> None:
-    """Explicit bias_update on a MoE with no EP wrappers at all (dense-loaded MoE) — same silent
+def test_bias_update_on_moe_without_ep_layers_raises() -> None:
+    """Explicit bias_update on a MoE with no EP layers at all (dense-loaded MoE) — same silent
     no-op, must raise."""
     model = _Model(_Cfg())
     with pytest.raises(ValueError, match="bias_update"):

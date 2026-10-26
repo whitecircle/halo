@@ -179,7 +179,7 @@ def _load_undistributed_model(
 ) -> PreTrainedModel:
     """COLLECTIVE: load a whole model onto this rank for plain DDP/FSDP data parallelism.
 
-    ``wraps_experts`` adds the EP MoE wrappers anyway: at ``ep_group_size == 1`` they distribute nothing
+    ``wraps_experts`` adds the EP layers anyway: at ``ep_group_size == 1`` they distribute nothing
     and exist for the grouped-GEMM expert compute and the FSDP-managed ep1 expert shard.
     """
     # Creating the groups must precede the node-serialized rank-local checkpoint replay.
@@ -200,7 +200,7 @@ def _load_undistributed_model(
         )
     if wraps_experts:
         model = apply_ep_layers(model, ep_config)
-    mode = "Grouped GEMM wrappers (no EP distribution)" if wraps_experts else "standard DDP"
+    mode = "Grouped GEMM EP layers (no EP distribution)" if wraps_experts else "standard DDP"
     if is_global_main_process():
         logger.info(f"Model loaded with {mode}")
     return model
@@ -298,7 +298,7 @@ def _resolve_run_config(
     model_class,
     text_only_model: bool,
 ) -> tuple[ModelSource, AutoConfig, type, bool]:
-    """COLLECTIVE: the agreed source, the run's config, its model class and whether the MoE wrappers apply, with
+    """COLLECTIVE: the agreed source, the run's config, its model class and whether the EP layers apply, with
     every refusal config.json answers raised before the process groups and the meta shell: a second, not minutes."""
     apply_remote_code_compat_shims()
     # Every read below — config, tokenizer, weights — takes this source's revision, so a Hub source loads
@@ -308,7 +308,7 @@ def _resolve_run_config(
         model_name_or_path, trust_remote_code=trust_remote_code, revision=source.revision
     )
     apply_config_overrides(model_config, model_config_overrides)
-    wraps_experts = pc.needs_ep_wrappers and has_routed_experts(model_config)
+    wraps_experts = pc.needs_ep_layers and has_routed_experts(model_config)
     reject_unsupported_model(pc, model_config, sinks_policy=sinks_policy, wraps_experts=wraps_experts)
     reject_unsupported_load(
         pc,
@@ -404,7 +404,7 @@ def load_distributed_model(
         apply_liger_kernel(
             model_config,
             liger_kernel_config=liger_kernel_config,
-            needs_ep_wrappers=parallelism_config.needs_ep_wrappers,
+            needs_ep_layers=parallelism_config.needs_ep_layers,
             tp_size=parallelism_config.tp_size,
             cp_size=parallelism_config.cp_size,
             pp_size=parallelism_config.pp_size,

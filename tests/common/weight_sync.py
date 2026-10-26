@@ -73,7 +73,7 @@ def push(client: WeightSyncClientBase, named_params: Iterable[tuple[str, torch.T
 
 
 class StockModel(nn.Module):
-    """A model with a config but no EP wrapper — the use_grouped_gemm: false module tree."""
+    """A model with a config but no EP layer — the use_grouped_gemm: false module tree."""
 
     def __init__(self, model_type: str):
         super().__init__()

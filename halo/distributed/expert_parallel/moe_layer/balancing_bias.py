@@ -38,7 +38,7 @@ class EPBalancingBiasMixin:
     num_experts: int
     _resident_device: Callable[[], torch.device]
 
-    # True when the EP wrapper selects routing itself (bias before top-k); False = aux-loss balancing.
+    # True when the EP layer selects routing itself (bias before top-k); False = aux-loss balancing.
     SUPPORTS_BIAS_BALANCING: bool = False
 
     # False when selection happens entirely inside the hub gate (Bailing), where a transient
@@ -46,7 +46,7 @@ class EPBalancingBiasMixin:
     # back to a buffer the callback would sign-update while selection ignores it.
     _supports_transient_balancing_bias: bool = True
 
-    # True when the EP wrapper bypasses the HF router module, severing the aux-loss path;
+    # True when the EP layer bypasses the HF router module, severing the aux-loss path;
     # ``moe_balancing: auto`` then resolves the family to ``bias_update``.
     SEVERS_AUX_LOSS: bool = False
 

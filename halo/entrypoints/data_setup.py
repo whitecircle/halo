@@ -17,7 +17,7 @@ from halo.data.pipeline.preferences import prepare_generative_dataset, prepare_p
 from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.sources.loading import is_presharded_dataset_load, load_datasets
-from halo.data.vlm_routing import dataset_declares_images, is_vlm_run, reject_image_columns
+from halo.data.vlm_detection import dataset_declares_images, is_vlm_run, reject_image_columns
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import RUN_LOG_DIR_NAME
 from halo.model_loading.parallel.model_source import probe_checkpoint

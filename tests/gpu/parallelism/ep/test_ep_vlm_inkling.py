@@ -21,9 +21,10 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_spread
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_INKLING_CONFIG
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 SEED = 42
 BATCH, SEQ = 2, 48

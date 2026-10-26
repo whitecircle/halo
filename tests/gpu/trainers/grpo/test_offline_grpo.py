@@ -31,8 +31,9 @@ from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import log, training_run_checks
+from tests.common.training_checks import training_run_checks
 
 # Configuration
 

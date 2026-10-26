@@ -7,7 +7,7 @@ loss mask (``clamp(min=1)``), and — on the environmental side — expand per-t
 per-turn rows (``turns_per_traj`` + zero-filled dummy rows). These tests pin the exact numerics of
 that seam on fixed reward/mask tensors:
 
-* the ONLINE path drives the real ``DistributedGRPOTrainer._apply_degenerate_group_drop`` hook
+* the ONLINE path drives the real ``DistributedOnlineGRPOTrainer._apply_degenerate_group_drop`` hook
   (with ``_gathered_rewards`` / ``_local_slice`` bound, gather = identity);
 * the ENVIRONMENTAL path drives the real ``_step_advantages`` and ``_narrow_masks_and_normalizer`` on a
   fake self;
@@ -26,7 +26,7 @@ import torch
 from halo.trainers.grpo.environmental.step_batch import BatchRows, rollout_valid_mask
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.objective.loss_inputs import expand_traj_to_rows
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.world_metrics import attach_world_metrics, flushed_metrics
 
 # --- Online trainer: fake-self driving the real _apply_degenerate_group_drop hook ---
@@ -49,8 +49,8 @@ def _online_fake_self(rewards_per_func: torch.Tensor, num_generations: int, drop
         accelerator=types.SimpleNamespace(process_index=0, gather=lambda x: x),
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
     )
-    me._gathered_rewards = types.MethodType(DistributedGRPOTrainer._gathered_rewards, me)
-    me._local_slice = types.MethodType(DistributedGRPOTrainer._local_slice, me)
+    me._gathered_rewards = types.MethodType(DistributedOnlineGRPOTrainer._gathered_rewards, me)
+    me._local_slice = types.MethodType(DistributedOnlineGRPOTrainer._local_slice, me)
     return me
 
 
@@ -69,7 +69,7 @@ def test_online_drop_pins_masks_and_num_items():
         "completion_mask": _mask_of_lengths([4, 2, 3, 5, 1, 2], max_len=5),
         "num_items_in_batch": torch.tensor(17),  # stale value the hook must recompute
     }
-    DistributedGRPOTrainer._apply_degenerate_group_drop(me, result)
+    DistributedOnlineGRPOTrainer._apply_degenerate_group_drop(me, result)
 
     expected_mask = _mask_of_lengths([4, 2, 3, 0, 0, 0], max_len=5)
     assert torch.equal(result["completion_mask"], expected_mask)
@@ -89,7 +89,7 @@ def test_online_drop_with_tool_mask_narrows_both_and_normalizes_by_product():
         "tool_mask": tool_mask,
         "num_items_in_batch": torch.tensor(17),
     }
-    DistributedGRPOTrainer._apply_degenerate_group_drop(me, result)
+    DistributedOnlineGRPOTrainer._apply_degenerate_group_drop(me, result)
 
     expected_comp = _mask_of_lengths([4, 2, 3, 0, 0, 0], max_len=5)
     assert torch.equal(result["completion_mask"], expected_comp)
@@ -108,7 +108,7 @@ def test_online_drop_all_degenerate_clamps_num_items_to_one():
         "completion_mask": _mask_of_lengths([3, 3, 3, 3], max_len=4),
         "num_items_in_batch": torch.tensor(12),
     }
-    DistributedGRPOTrainer._apply_degenerate_group_drop(me, result)
+    DistributedOnlineGRPOTrainer._apply_degenerate_group_drop(me, result)
 
     assert result["completion_mask"].sum().item() == 0
     assert result["num_items_in_batch"].item() == 1  # clamp(min=1) guards the 0/0 loss
@@ -120,7 +120,7 @@ def test_online_drop_no_degenerate_groups_recomputes_but_keeps_masks():
     me = _online_fake_self(rewards_per_func, num_generations=2)
     before = _mask_of_lengths([2, 4, 1, 3], max_len=4)
     result = {"completion_mask": before.clone(), "num_items_in_batch": torch.tensor(99)}
-    DistributedGRPOTrainer._apply_degenerate_group_drop(me, result)
+    DistributedOnlineGRPOTrainer._apply_degenerate_group_drop(me, result)
 
     assert torch.equal(result["completion_mask"], before)
     # The normalizer recompute is unconditional (rank-uniform gate → collective-safe).
@@ -133,7 +133,7 @@ def test_online_drop_disabled_is_noop():
     me = _online_fake_self(rewards_per_func, num_generations=2, drop=False)
     before = _mask_of_lengths([2, 2], max_len=3)
     result = {"completion_mask": before.clone(), "num_items_in_batch": torch.tensor(4)}
-    DistributedGRPOTrainer._apply_degenerate_group_drop(me, result)
+    DistributedOnlineGRPOTrainer._apply_degenerate_group_drop(me, result)
     assert torch.equal(result["completion_mask"], before)
     assert result["num_items_in_batch"].item() == 4
 

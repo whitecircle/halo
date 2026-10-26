@@ -41,7 +41,7 @@ from tests.common.pp_trainers import (
     probe_step,
     reload_reproduces_probe_loss,
 )
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 EP_SIZE = 2

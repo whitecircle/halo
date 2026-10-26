@@ -35,10 +35,11 @@ from tests.common.models import (
     TINY_GLM5_CONFIG,
     TINY_STEP3P7_CONFIG,
 )
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import cos_sim, log
 
 SEED = 42
 BATCH, SEQ = 2, 64

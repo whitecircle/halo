@@ -30,7 +30,8 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 # Configuration
 

@@ -2,7 +2,7 @@
 """CLI over the toolkit's S3 transport: push, download, list and delete S3 folders, each through an
 :class:`~halo.data.sources.s3_client.S3Client` built for ``--bucket``.
 
-Usage: python scripts/before_training/s3_datasets.py <push|download|list|exists|delete> ...
+Usage: python scripts/before_training/s3.py <push|download|list|exists|delete> ...
 """
 
 import argparse
@@ -105,21 +105,21 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 Examples:
   # Upload a folder
-  python scripts/before_training/s3_datasets.py push ./my_folder my_folder
+  python scripts/before_training/s3.py push ./my_folder my_folder
 
   # Download a folder
-  python scripts/before_training/s3_datasets.py download my_folder ./local_folder
+  python scripts/before_training/s3.py download my_folder ./local_folder
 
   # List objects
-  python scripts/before_training/s3_datasets.py list
-  python scripts/before_training/s3_datasets.py list my_project/
+  python scripts/before_training/s3.py list
+  python scripts/before_training/s3.py list my_project/
 
   # Check if exists
-  python scripts/before_training/s3_datasets.py exists my_folder
+  python scripts/before_training/s3.py exists my_folder
 
   # Delete a single object, or a whole prefix with --recursive
-  python scripts/before_training/s3_datasets.py delete my_folder/data.json --yes
-  python scripts/before_training/s3_datasets.py delete my_folder --recursive --yes
+  python scripts/before_training/s3.py delete my_folder/data.json --yes
+  python scripts/before_training/s3.py delete my_folder --recursive --yes
         """,
     )
 

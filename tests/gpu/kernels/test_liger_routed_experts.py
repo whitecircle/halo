@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Routed experts Halo leaves unwrapped compute the family's own function, forward and backward.
 
-At ``ep_size: 1`` with ``use_grouped_gemm: false`` Halo installs no EP wrapper, so after Liger is
+At ``ep_size: 1`` with ``use_grouped_gemm: false`` Halo installs no EP layer, so after Liger is
 applied the routed experts run whatever the model builds for them. Liger must not be that:
 ``LigerExperts``, upstream liger-kernel's fused MoE kernel, computed the input gradient wrong on
 Blackwell until the fix that shipped in liger-kernel 0.8.3, while its forward and weight gradients
@@ -23,7 +23,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.dtype import configure_float32_matmul_precision
 from halo.model_loading.liger.dispatch import apply_liger_kernel
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 SEED = 0
 # Qwen3-30B-A3B's MoE geometry: 128 experts of width 768 over a 2048 hidden, top-8.
@@ -108,10 +108,10 @@ def run(ctx) -> dict:
     # Captured before Liger runs: an applier's class swap is process-global.
     stock = modeling_qwen3_moe.Qwen3MoeExperts
     parallelism = ParallelismConfig(use_grouped_gemm=False)
-    assert not parallelism.needs_ep_wrappers, "ep_size 1 without grouped GEMM must leave the experts unwrapped"
+    assert not parallelism.needs_ep_layers, "ep_size 1 without grouped GEMM must leave the experts unwrapped"
 
     config = _config()
-    applied = apply_liger_kernel(config, None, needs_ep_wrappers=parallelism.needs_ep_wrappers)
+    applied = apply_liger_kernel(config, None, needs_ep_layers=parallelism.needs_ep_layers)
     log(f"  Liger applied: {applied}")
     torch.manual_seed(SEED)
     model = AutoModelForCausalLM.from_config(config)

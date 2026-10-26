@@ -38,9 +38,10 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B_PATCHED
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 MODEL = env_str("HALO_TEST_EP_CP_RT_MODEL", GPT_OSS_20B_PATCHED)
 ATTN = env_str("HALO_TEST_EP_CP_RT_ATTN", "flash_attention_2")

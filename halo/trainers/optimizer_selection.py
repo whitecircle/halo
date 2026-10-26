@@ -11,7 +11,7 @@ from halo.optimizers.registry import (
     register_custom_optimizers,
 )
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.parallelism.trainer_rules import reject_conflicting_optimizer_choice
+from halo.trainers.trainer_rules import reject_conflicting_optimizer_choice
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,14 @@ def resolve_bf16_optimizer(explicit: bool | None, config, training_args, *, repl
 
 
 def build_optimizer(
-    model, args, decay_parameters, *, bf16_optimizer: bool, config, has_ep_layers: bool, optimizer_cls_and_kwargs
+    model,
+    args,
+    decay_parameters,
+    *,
+    bf16_optimizer: bool,
+    config,
+    has_ep_layers: bool,
+    get_optimizer_cls_and_kwargs,
 ):
     """The toolkit's optimizer for this run, or ``None`` where the base Trainer's stock build applies."""
     optim = optim_name(args.optim)
@@ -55,5 +62,5 @@ def build_optimizer(
         return NAMED_OPTIMIZER_BUILDERS[optim][0](model, args, decay_parameters)
     # Stock SGD's foreach cannot mix FSDP2 DTensors with plain EP tensors; kept narrow to spare other optims.
     if config.fp32_non_ep_params or (optim == "sgd" and has_ep_layers):
-        return build_tensor_type_grouped_optimizer(model, args, decay_parameters, optimizer_cls_and_kwargs)
+        return build_tensor_type_grouped_optimizer(model, args, decay_parameters, get_optimizer_cls_and_kwargs)
     return None

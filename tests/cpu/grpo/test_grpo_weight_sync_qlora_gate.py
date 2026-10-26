@@ -20,7 +20,7 @@ import torch.nn as nn
 
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 
@@ -54,7 +54,7 @@ def test_gate_passes_float_model(backend):
 def _install_host(model, vllm_generation):
     """Real trainer object (never ``__init__``-ed) carrying only what the install reads —
     a real one so ``type(self)._distributed_sync_weights`` resolves."""
-    me = object.__new__(DistributedGRPOTrainer)
+    me = object.__new__(DistributedOnlineGRPOTrainer)
     me.model = model
     me.vllm_generation = vllm_generation
     me.parallelism_config = types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, is_expert_tp_mode=False)
@@ -65,8 +65,8 @@ def test_online_install_weight_sync_replaces_trl_sync_on_float_model():
     """The install must actually bind the distributed-aware sync — TRL's own ``sync_weights``
     forwards DTensors verbatim and deadlocks against the trainer↔vLLM NCCL group."""
     me = _install_host(_FloatStub(), types.SimpleNamespace())
-    DistributedGRPOTrainer._install_weight_sync(me)
-    assert me.vllm_generation.sync_weights.__func__ is DistributedGRPOTrainer._distributed_sync_weights
+    DistributedOnlineGRPOTrainer._install_weight_sync(me)
+    assert me.vllm_generation.sync_weights.__func__ is DistributedOnlineGRPOTrainer._distributed_sync_weights
 
 
 def test_online_install_weight_sync_raises_without_vllm_generation():
@@ -76,7 +76,7 @@ def test_online_install_weight_sync_raises_without_vllm_generation():
     rollout would come from an engine that never receives the trained weights."""
     me = _install_host(_FloatStub(), None)
     with pytest.raises(RuntimeError, match="vllm_generation"):
-        DistributedGRPOTrainer._install_weight_sync(me)
+        DistributedOnlineGRPOTrainer._install_weight_sync(me)
 
 
 _SPINE_STEPS = (
@@ -126,12 +126,12 @@ def test_both_trainers_reach_the_gate_through_the_shared_init_spine():
         "_install_weight_sync",
         "_disable_dropout_for_onpolicy",
     ], f"the shared init spine no longer runs its gates in order: {ran}"
-    for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
+    for cls in (DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert "_finish_on_policy_init" in inspect.getsource(cls.__init__), (
             f"{cls.__name__}.__init__ no longer closes through the shared spine"
         )
         assert "_loss_logits_width" in vars(cls), f"{cls.__name__} never states its logits width"
-    assert DistributedGRPOTrainer._install_weight_sync is not OnPolicyGRPOInitMixin._install_weight_sync, (
+    assert DistributedOnlineGRPOTrainer._install_weight_sync is not OnPolicyGRPOInitMixin._install_weight_sync, (
         "the online trainer no longer installs its distributed-aware sync"
     )
 

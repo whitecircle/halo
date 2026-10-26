@@ -2,7 +2,7 @@
 """Numerical correctness of combined/complex parallelism shapes vs a single-GPU reference.
 
 ``tests/gpu/parallelism/test_moe_all_parallelism.py`` proves each shape *runs* (finite loss,
-rank-consistent reduced loss, EP wrappers land, checkpoint roundtrips). It does **not**
+rank-consistent reduced loss, EP layers land, checkpoint roundtrips). It does **not**
 prove the shape computes the *same math* as the undistributed model. This test closes
 that gap for the non-CP shapes on Mistral4 — EP, TP, pure ETP, **EP+TP** and **EP+ETP** —
 by comparing each shape's forward loss and first router gradient to a plain single-GPU
@@ -44,10 +44,12 @@ from tests.common.ep_reference import (
     random_token_batch,
 )
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_MISTRAL4_CONFIG
+from tests.common.numerics import fro_rel_err
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import build_tiny_mistral4_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, fro_rel_err, log, log_all
 
 # bf16 ulp near a loss of ~O(1-10) is ~1e-2. EP/TP/ETP each add extra all-reduce / grouped-mm
 # accumulation in a different float order than the dense reference. 3e-2 is tight enough to catch

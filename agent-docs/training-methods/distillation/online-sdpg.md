@@ -32,6 +32,8 @@ trainer = DistributedSDPGTrainer(
     train_dataset=train_dataset,           # needs an "answer" column
     processing_class=tokenizer,
     parallelism_config=parallelism_config,
+    sdpg_answer_field="answer",            # required, like opd_positive_advantage_only
+    opd_positive_advantage_only=True,
     sdpg_loss="reverse_kl",
     sdpg_beta_base=1.0,
 )

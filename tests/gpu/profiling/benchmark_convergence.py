@@ -43,9 +43,10 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.memory import cleanup_memory
 from tests.common.models import MODEL_CONFIGS
+from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import cleanup_memory, log
 
 _LAYER_CLS = {"gpt-oss-20b": "GptOssDecoderLayer", "qwen3-30b-a3b": "Qwen3MoeDecoderLayer"}
 

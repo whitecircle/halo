@@ -18,7 +18,7 @@ from halo.data.pipeline.conversation import chat_template_kwargs, reject_image_c
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.prompt_completion import render_prompt_completions
 from halo.data.pipeline.text_rows import prepare_generative_row
-from halo.data.vlm_routing import reject_image_columns
+from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_prompt_completion_window,

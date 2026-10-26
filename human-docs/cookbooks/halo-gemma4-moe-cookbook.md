@@ -84,7 +84,7 @@ file and `SGLANG_REASONING_PARSER=gemma4`.
   Packing builds a dense mask over the whole batch, and its memory grows with the square of
   `batch size × max_length`.
 - **Precision.** `fp32_experts: true` is the recipe default. `fp32_non_ep_params` is refused under EP,
-  and `fp32_router` does nothing, because the router sits outside the EP wrapper.
+  and `fp32_router` does nothing, because the router sits outside the EP layer.
 - **No router balancing.** Keep `moe_balancing: none`. Gemma 4 has no auxiliary loss, and an explicit
   bias mode raises.
 - **RL.** The environment GRPO recipes set `use_chunked_grpo_logprobs: true` for the 262k-token

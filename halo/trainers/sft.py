@@ -21,7 +21,7 @@ from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.parallelism.trainer_rules import reject_compressed_kv_collator, reject_cp_packed_collator
+from halo.trainers.trainer_rules import reject_compressed_kv_collator, reject_cp_packed_collator
 from halo.trainers.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)

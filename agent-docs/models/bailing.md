@@ -4,13 +4,13 @@
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP covers Ling 2.0 only ([CP wrapper](#cp-wrapper)).
 
-The shipped config trains `inclusionAI/Ling-mini-2.0` (`model_type: bailing_moe`). The sibling `inclusionAI/Ring-mini-linear-2.0` is a **different** architecture (`BailingMoeLinearV2ForCausalLM`, `model_type: bailing_moe_linear`) that swaps softmax attention for Lightning Attention-2. Both share the `BailingMoeV2SparseMoeBlock` the EP wrapper targets.
+The shipped config trains `inclusionAI/Ling-mini-2.0` (`model_type: bailing_moe`). The sibling `inclusionAI/Ring-mini-linear-2.0` is a **different** architecture (`BailingMoeLinearV2ForCausalLM`, `model_type: bailing_moe_linear`) that swaps softmax attention for Lightning Attention-2. Both share the `BailingMoeV2SparseMoeBlock` the EP layer targets.
 
 ## Ling 3.0
 
 `BailingMoeV3ForCausalLM` (`model_type: bailing_hybrid`) — `inclusionAI/Ling-3.0-tiny` (7.9B, 128 experts) and `inclusionAI/Ling-3.0-flash` (~122B, 512 experts).
 
-The MoE block matches V2's (same per-expert `gate_proj`/`up_proj`/`down_proj` modules, same gate arithmetic: sigmoid, `expert_bias` on selection only, group-limited top-k, renormalization, `routed_scaling_factor`), so `EPBailingMoELayer` claims `BailingMoeV3SparseMoeBlock` too and everything above applies. The V3 block returns `(hidden, router_logits)` where V2 returns a tensor; its decoder layer tests the return for a tuple, so the wrapper's bare tensor is accepted.
+The MoE block matches V2's (same per-expert `gate_proj`/`up_proj`/`down_proj` modules, same gate arithmetic: sigmoid, `expert_bias` on selection only, group-limited top-k, renormalization, `routed_scaling_factor`), so `EPBailingMoELayer` claims `BailingMoeV3SparseMoeBlock` too and everything above applies. The V3 block returns `(hidden, router_logits)` where V2 returns a tensor; its decoder layer tests the return for a tuple, so the EP layer's bare tensor is accepted.
 
 Attention is what differs: layers alternate in groups of `layer_group_size`, with most layers `BailingMoeV3KimiDeltaAttention` (KDA linear attention through `fla`) and the rest `BailingMoeV3MultiLatentAttention` (MLA).
 
@@ -21,7 +21,7 @@ Three consequences for a training config:
 - **Pin `attn_implementation: sdpa`.** The modeling file declares only the v4-era `_supports_flash_attn_2`, which transformers v5 ignores in favor of `_supports_flash_attn`, so an auto-selected flash label (FA4 on Blackwell, FA3 on Hopper) is refused at model build. The KDA layers run their own `fla` kernels either way.
 - **`fp32_non_ep_params: true` keeps the KDA state in fp32 (optional).** The modeling file declares `A_log` and `dt_bias` in fp32; without the flag the loaders cast them to the run dtype with every other parameter ([Load precision](README.md#load-precision)). With it they train, with the other non-expert parameters, as fp32 masters from their stored fp32 values (compute stays bf16).
 
-    At `expert_parallel_size: 1` pair it with **`fsdp_shard_ep1_experts: false`**: the upcast skips every EP-wrapper parameter, so FSDP-managed replicated experts would sit bf16 inside the same fp32 shard group and `ParallelismConfig` refuses the combination at config time. Above ep1 the knob has no effect; the experts are FSDP-ignored anyway.
+    At `expert_parallel_size: 1` pair it with **`fsdp_shard_ep1_experts: false`**: the upcast skips every EP-layer parameter, so FSDP-managed replicated experts would sit bf16 inside the same fp32 shard group and `ParallelismConfig` refuses the combination at config time. Above ep1 the knob has no effect; the experts are FSDP-ignored anyway.
 
 - **Override `rope_scaling`.** The config ships `rope_scaling: null`, which transformers v5 normalizes into a dict carrying no `"factor"`; the MLA layers then read `config.rope_scaling["factor"]` and raise `KeyError`. Pass the minimal replacement and nothing more:
 
@@ -34,7 +34,7 @@ Three consequences for a training config:
 
 `expert_swiglu_limit_list` / `share_expert_swiglu_limit_list` appear in the Ling-3.0-flash config but are read nowhere in the shipped modeling code, so no clamp is applied and the wrapper stays equivalent. Both repos need `model_revision` pinned — these workarounds depend on the remote code's exact internals.
 
-## EP wrapper
+## EP layer
 
 `EPBailingMoELayer` (`halo/distributed/expert_parallel/families/bailing.py`) replaces `BailingMoeV2SparseMoeBlock`.
 
@@ -98,13 +98,13 @@ Measured configs persist in the Triton disk cache, which `configure_training_run
 
 Bailing is aux-loss-free by design (`moe_router_enable_expert_bias: true`; Ling 3.0 also declares `topk_method: noaux_tc`): no modeling variant computes a load-balancing loss and the config carries no `router_aux_loss_coef`. The family's native mechanism is the gate's persistent `expert_bias` buffer, added to the sigmoid scores for **selection only** — combine weights stay unbiased.
 
-`EPBailingMoELayer` hands exactly that buffer to `BalancingBiasCallback`: under `moe_balancing: bias_update` (or `auto`, which resolves there whenever the wrapper is applied) the DeepSeek-V3 sign-updates land in `expert_bias` itself, upcast to fp32 at enable so the 1e-3 steps survive the add.
+`EPBailingMoELayer` hands exactly that buffer to `BalancingBiasCallback`: under `moe_balancing: bias_update` (or `auto`, which resolves there whenever the EP layer is applied) the DeepSeek-V3 sign-updates land in `expert_bias` itself, upcast to fp32 at enable so the 1e-3 steps survive the add.
 
-The wrapper exposes it as a live property, so callback updates and the `router_balancing_biases.pt` resume-restore always reach the buffer the gate reads. Because the buffer is part of the checkpoint, a gathered save exports the **final** bias and a served checkpoint routes exactly as training did.
+The EP layer exposes it as a live property, so callback updates and the `router_balancing_biases.pt` resume-restore always reach the buffer the gate reads. Because the buffer is part of the checkpoint, a gathered save exports the **final** bias and a served checkpoint routes exactly as training did.
 
-Most wrapper families adopt a native slot the same way; the per-family slots and the exceptions are in the [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) table. `moe/*` load metrics come with the callback.
+Most EP layers adopt a native slot the same way; the per-family slots and the exceptions are in the [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) table. `moe/*` load metrics come with the callback.
 
-An explicit `aux_loss` warns and stays off (there is no aux term to enable). Without the EP wrapper — `use_grouped_gemm: false` at `expert_parallel_size: 1` — nothing counts expert loads, so `bias_update` raises at setup; freezing the gate is the fallback mitigation there:
+An explicit `aux_loss` warns and stays off (there is no aux term to enable). Without the EP layer — `use_grouped_gemm: false` at `expert_parallel_size: 1` — nothing counts expert loads, so `bias_update` raises at setup; freezing the gate is the fallback mitigation there:
 
 ```yaml
 freeze_layers_patterns:

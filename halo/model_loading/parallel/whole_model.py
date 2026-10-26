@@ -35,7 +35,7 @@ def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep
 
     ``keep_fp32`` (``fp32_non_ep_params``) keeps stored fp32 values for the parameters the trainer's fp32
     upcast covers, which skips EP parameters: with ``ep_wrapped`` a parameter inside a block the EP
-    wrappers take trains at the run dtype.
+    layers take trains at the run dtype.
     """
     cast_parameters_to_run_dtype(model, dtype, keep_fp32=keep_fp32)
     if keep_fp32 and ep_wrapped:
@@ -67,7 +67,7 @@ def load_whole_model(
     """COLLECTIVE: ``from_pretrained`` a node's ranks at a time (``pc.max_concurrent_loading``), cast to the
     run dtype with the FP32 masters restored.
 
-    ``ep_config`` is the EP wrappers' config when they will take the MoE blocks, else None. Loads on CPU
+    ``ep_config`` is the EP layers' config when they will take the MoE blocks, else None. Loads on CPU
     unless ``from_pretrained_kwargs`` names a ``device_map``; with ``place_on_device`` the model then moves
     onto this rank's device after ``before_move`` (the EP patch). A failed restore raises on every rank
     only once all have left the node-serialized region, where a world collective would wait on queued

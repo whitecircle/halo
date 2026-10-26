@@ -77,7 +77,7 @@ def _reject_aux_loss_balancing(model: nn.Module, moe_balancing: str) -> None:
         f"{type(model).__name__} balances its experts through the HuggingFace router aux loss "
         f"(moe_balancing={moe_balancing!r} resolves to 'aux_loss', router_aux_loss_coef={coef}), "
         f"which pipeline parallelism drops: a stage never runs the *ForCausalLM.forward that adds it. "
-        f"Use moe_balancing=bias_update on a family whose EP wrappers support the aux-loss-free bias "
+        f"Use moe_balancing=bias_update on a family whose EP layers support the aux-loss-free bias "
         f"update, moe_balancing=none to accept unbalanced experts, or train this model without PP."
     )
 

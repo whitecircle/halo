@@ -40,7 +40,7 @@ import logging
 from trl import GRPOConfig
 
 from halo.config_validation import reject_unsupported_args
-from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
 from halo.data.pipeline.chat_render import render_generation_prompt
@@ -48,7 +48,7 @@ from halo.data.pipeline.conversation import as_conversation
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
 from halo.data.render_columns import missing_render_column_splits, reject_missing_render_column
-from halo.data.vlm_routing import reject_image_columns
+from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_tokenizer_window,
@@ -83,9 +83,6 @@ from halo.trainers.grpo.rollout.engine_preflight import (
 
 logger = logging.getLogger(__name__)
 
-# Fallback token allowance when the environment preamble cannot be rendered.
-FALLBACK_ENV_PROMPT_OVERHEAD = 2048
-
 
 def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -> int:
     """Token count of the environment's conversation preamble (its system prompt + tool schema).
@@ -95,10 +92,10 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
     into the context. The startup context-window check must include that overhead or it validates a
     prompt smaller than any the model will ever see. Rendered under ``template_kwargs`` — the
     rollout's chat-template variables and effort steer (:func:`rollout_template_kwargs`) — since the
-    template's preamble depends on them. Falls back to a conservative margin when the template cannot
-    render the preamble (logged with the assumption). An MCP environment learns its tools only when
-    its first reset connects to the server, and ``environment`` here is never reset, so its schema is
-    absent and the overhead under-counts by it, which is warned.
+    template's preamble depends on them. A template that cannot render the preamble raises: the rollouts
+    render the same preamble, so no margin assumed in its place would hold. An MCP environment learns its
+    tools only when its first reset connects to the server, and ``environment`` here is never reset, so its
+    schema is absent and the overhead under-counts by it, which is warned.
     """
     messages = ([{"role": "system", "content": environment.system_prompt}] if environment.system_prompt else []) + [
         {"role": "user", "content": ""}
@@ -109,28 +106,16 @@ def measure_env_prompt_overhead(environment, tokenizer, template_kwargs: dict) -
             "An MCP server's tools arrive when its first reset connects, so the context-window check omits "
             "their schema from the prompt overhead."
         )
-    try:
-        rendered = tokenizer.apply_chat_template(
-            messages,
-            tools=tools,
-            tokenize=False,
-            add_generation_prompt=True,
-            **template_kwargs,
-        )
-        overhead = len(tokenizer(rendered, add_special_tokens=False)["input_ids"])
-        if is_global_main_process():
-            logger.info(f"Environment prompt overhead (system prompt + tool schema): {overhead} tokens (measured)")
-        return overhead
-    except Exception as e:
-        if is_global_main_process():
-            logger.warning(
-                f"Could not render the environment prompt preamble ({e}); assuming "
-                f"{FALLBACK_ENV_PROMPT_OVERHEAD} tokens of overhead for the context-window check."
-            )
-        return FALLBACK_ENV_PROMPT_OVERHEAD
+    rendered = tokenizer.apply_chat_template(
+        messages, tools=tools, tokenize=False, add_generation_prompt=True, **template_kwargs
+    )
+    overhead = len(tokenizer(rendered, add_special_tokens=False)["input_ids"])
+    if is_global_main_process():
+        logger.info(f"Environment prompt overhead (system prompt + tool schema): {overhead} tokens")
+    return overhead
 
 
-def probe_template_kwargs(async_config: AsyncTrainingConfig, environment) -> dict:
+def probe_template_kwargs(async_config: AsyncRolloutConfig, environment) -> dict:
     """The chat-template kwargs a rollout request of this run carries, for the prompt-overhead probe:
     the run's template variables plus the level and thinking budget an episode binds through
     :func:`bind_episode_effort` under the run's own bounds (a ``'random'`` env setting draws one level, as an
@@ -148,7 +133,7 @@ def probe_template_kwargs(async_config: AsyncTrainingConfig, environment) -> dic
     )
 
 
-def worst_case_generation(async_config: AsyncTrainingConfig, max_turns: int) -> int:
+def worst_case_generation(async_config: AsyncRolloutConfig, max_turns: int) -> int:
     """The most an episode can generate, for the context-window check: ``max_turns`` turns of
     ``rollout_max_tokens``, or the episode output budget where it binds first."""
     generated = max_turns * async_config.rollout_max_tokens
@@ -157,7 +142,7 @@ def worst_case_generation(async_config: AsyncTrainingConfig, max_turns: int) -> 
     return generated
 
 
-def rollout_start_log(env_settings: dict, async_config: AsyncTrainingConfig) -> list[str]:
+def rollout_start_log(env_settings: dict, async_config: AsyncRolloutConfig) -> list[str]:
     """The run's environment settings and rollout setup, as lines of the start log — the one place they
     are logged, prefetch as the trainer resolves it against the server count."""
     if async_config.rollout_server_configs:
@@ -250,7 +235,7 @@ def main():
     args, env_config, async_config, grpo_config, model_config, dist_args = parse_script_args(
         EnvironmentalGRPOScriptArguments,
         EnvironmentConfig,
-        AsyncTrainingConfig,
+        AsyncRolloutConfig,
         GRPOConfig,
         ModelArguments,
         ParallelismArguments,

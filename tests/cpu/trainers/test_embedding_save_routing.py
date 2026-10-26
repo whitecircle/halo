@@ -34,9 +34,9 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.trainers.embedding import trainer as embedding_module
 from halo.trainers.embedding.injected_lora import has_injected_lora
 from halo.trainers.embedding.trainer import EmbeddingTrainer
+from tests.common.adapters import randomize_adapters
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks
-from tests.common.peft_helpers import randomize_adapters
 
 WORLD_SIZE = 2
 

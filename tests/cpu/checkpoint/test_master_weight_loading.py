@@ -83,7 +83,7 @@ def _dense_pc(*, keep=True):
     return SimpleNamespace(
         max_concurrent_loading=1,
         fp32_non_ep_params=keep,
-        needs_ep_wrappers=False,
+        needs_ep_layers=False,
         cp_size=2,
         cp_config=lambda: SimpleNamespace(cp_size=2, cp_rank=0, process_group=None),
     )

@@ -20,7 +20,7 @@ from halo.trainers.preference.dpo import DistributedDPOTrainer
 from tests.common.datasets import create_vlm_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = QWEN3_VL_2B
 NUM_TRAIN_SAMPLES = 16

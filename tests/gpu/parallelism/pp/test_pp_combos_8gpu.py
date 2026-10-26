@@ -42,7 +42,7 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODE = ""  # set from --mode before the harness runs
 

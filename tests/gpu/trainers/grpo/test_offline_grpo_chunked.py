@@ -37,10 +37,12 @@ from tests.common.checkpoint_io import (
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
 from tests.common.offline_grpo import load_liger_class_patched_model
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, resumed_loss_deltas, step_losses
+from tests.common.training_checks import resumed_loss_deltas, step_losses
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 4

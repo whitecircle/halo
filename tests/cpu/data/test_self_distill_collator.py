@@ -46,6 +46,9 @@ def _collator(tokenizer, **overrides):
         "max_length": 256,
         "conversation_field": "messages",
         "hint_template": "\n[Hint] answer is {answer}\n",
+        "answer_field": "answer",
+        "solution_field": "solution",
+        "confidence_power": 1.0,
         "response_prompt_template": MARKER,
         "train_on_completions_only": True,
     }
@@ -95,7 +98,16 @@ def test_only_the_slots_a_template_names_must_be_filled():
 
 def test_the_vlm_collator_hints_the_teacher_history_the_same_way():
     tokenizer = types.SimpleNamespace(eos_token_id=2, pad_token_id=0, get_vocab=dict)
-    collator = SelfDistillVLMDataCollator(None, tokenizer, hint_template="\n[Hint] {answer}\n")
+    collator = SelfDistillVLMDataCollator(
+        None,
+        tokenizer,
+        2048,
+        train_on_completions_only=False,
+        hint_template="\n[Hint] {answer}\n",
+        answer_field="answer",
+        solution_field="solution",
+        confidence_power=1.0,
+    )
     history = [
         {"role": "user", "content": "Q1"},
         {"role": "assistant", "content": "A1"},
@@ -272,7 +284,14 @@ class _QwenTemplateProcessor:
 
 
 def _vlm_collator(tokenizer, **overrides):
-    kwargs = {"response_prompt_template": MARKER, "train_on_completions_only": True, "hint_template": " hint {answer}"}
+    kwargs = {
+        "response_prompt_template": MARKER,
+        "train_on_completions_only": True,
+        "hint_template": " hint {answer}",
+        "answer_field": "answer",
+        "solution_field": "solution",
+        "confidence_power": 1.0,
+    }
     return SelfDistillVLMDataCollator(_QwenTemplateProcessor(tokenizer), tokenizer, 256, **{**kwargs, **overrides})
 
 

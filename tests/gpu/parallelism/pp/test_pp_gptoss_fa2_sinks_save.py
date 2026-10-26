@@ -40,7 +40,7 @@ from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
 from tests.common.pp_equivalence import build_gptoss_model
 from tests.common.pp_trainers import build_pp_args, build_sft_rows, probe_step, reload_reproduces_probe_loss
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 SEQ_LEN = 64

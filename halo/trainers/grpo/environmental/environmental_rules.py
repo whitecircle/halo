@@ -245,7 +245,7 @@ def reject_unread_grpo_knobs(args) -> None:
     if changed(("vllm_group_port",)):
         raise ValueError(
             "GRPOConfig 'vllm_group_port' is not read by environmental GRPO, whose weight-sync group port is "
-            "AsyncTrainingConfig's rollout_group_port on either backend. Set rollout_group_port instead."
+            "AsyncRolloutConfig's rollout_group_port on either backend. Set rollout_group_port instead."
         )
     if changed(("vllm_importance_sampling_clip_min",)):
         raise ValueError(

@@ -2,11 +2,11 @@
 
 Poolside's `LagunaForCausalLM` (`poolside/Laguna-S-2.1`, `poolside/Laguna-XS-2.1`) — a MoE with a sigmoid top-k router, fused 3D expert storage, and one shared expert on every token. Both released sizes route to 256 experts: **S** is 48 layers / hidden 3072 / top-10 at 1M positions, **XS** is 40 layers / hidden 2048 / top-8 at 256K.
 
-Transformers ships `transformers.models.laguna` natively, and the released checkpoints also load through `auto_map`, so both implementations are reachable: the shipped configs set `trust_remote_code: true` with a pinned `model_revision` (the revisions the EP path was validated against); with it off, the same checkpoints load into the in-library classes, which compute the same forward. The EP wrapper claims both by class name and by `model_type`, and Liger patches both ([Configs](#configs)).
+Transformers ships `transformers.models.laguna` natively, and the released checkpoints also load through `auto_map`, so both implementations are reachable: the shipped configs set `trust_remote_code: true` with a pinned `model_revision` (the revisions the EP path was validated against); with it off, the same checkpoints load into the in-library classes, which compute the same forward. The EP layer claims both by class name and by `model_type`, and Liger patches both ([Configs](#configs)).
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
-## EP wrapper
+## EP layer
 
 `EPLagunaMoELayer` (`halo/distributed/expert_parallel/families/laguna.py`) subclasses GLM-4 MoE Lite's `EPGlm4MoELayer` and claims `LagunaSparseMoeBlock` / `model_type: laguna`. The two families share the whole contract (sigmoid routing, fused `gate_up_proj`/`down_proj` 3D storage, a shared expert on every token, and the per-expert hub checkpoint layout), so the gather and the sharded merge are inherited unchanged.
 
@@ -24,14 +24,14 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
     `EPGroupLimitedMoELayerBase._adopt_routing` resolves each knob off the block, then the gate, then the config, accepting both the `n_group` and `num_group` spellings. An explicit declaration always wins over the family default, and with no group knob at all group-limited selection degenerates to a plain top-k. Both families list exactly the knobs they lack in `_OPTIONAL_ROUTING_KNOBS`; any other missing knob raises.
 
-- **A missing router bias** (inherited). A checkpoint without `e_score_correction_bias` would leave it on meta under lazy loading; the wrapper materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault. The released Laguna checkpoints carry it.
+- **A missing router bias** (inherited). A checkpoint without `e_score_correction_bias` would leave it on meta under lazy loading; the EP layer materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault. The released Laguna checkpoints carry it.
 - **Hub vs module key spelling.** Laguna is the only family whose spec declares `export_key_renames`: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.
 
     Transformers declares both as `WeightRenaming` entries, which `from_pretrained` and the lazy loader apply on read. `LAGUNA.export_key_renames` mirrors them for the three save-side paths that bypass transformers: the gather, the RL weight sync and `merge_ep_shards.py`. Without them the export writes keys vLLM silently skips.
 
     The pairs fire only when the live name actually differs, so a remote-code revision already spelling `shared_expert` is untouched. See [Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp).
 
-Routing is otherwise unchanged: sigmoid the logits, add the correction bias (and any `moe_balancing: bias_update` bias) for *selection* only, and gate with the unbiased scores. `LagunaTopKRouter.forward` returns `(logits, weights, indices)`; the wrapper keeps only the logits and recomputes weights and indices itself, since the cached pair predates routing replay and balancing.
+Routing is otherwise unchanged: sigmoid the logits, add the correction bias (and any `moe_balancing: bias_update` bias) for *selection* only, and gate with the unbiased scores. `LagunaTopKRouter.forward` returns `(logits, weights, indices)`; the EP layer keeps only the logits and recomputes weights and indices itself, since the cached pair predates routing replay and balancing.
 
 Gathered saves restore the hub layout `experts.{i}.{gate,up,down}_proj.weight` through the spec's `FUSED_SPLIT_PER_EXPERT` `ExpertLayout`.
 

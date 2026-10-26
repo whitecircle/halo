@@ -24,7 +24,7 @@ from halo.kernels.lowp.quantization import (
     quantize_mxfp8,
     quantize_nvfp4,
 )
-from tests.common.utils import fro_rel_err
+from tests.common.numerics import fro_rel_err
 
 # Each format's intrinsic round-trip tolerance (fp8 ~ 8-bit, fp4 ~ 4-bit).
 _TOL = {"mxfp8": 0.05, "mxfp4": 0.25, "nvfp4": 0.25}

@@ -33,13 +33,13 @@ _SCRIPTS = REPO_ROOT / "scripts" / "training"
 # either way — it is listed because "no positional arguments" is the same contract for every trainer.
 TRAINERS = {
     "DistributedSFTTrainer",
-    "SmoothMarginPOTrainer",
+    "SMPOTrainer",
     "DistributedDPOTrainer",
     "DistributedKTOTrainer",
     "DistributedRewardTrainer",
     "ClassificationTrainer",
     "OfflineGRPOTrainer",
-    "DistributedGRPOTrainer",
+    "DistributedOnlineGRPOTrainer",
     "DistributedAsyncEnvironmentalGRPOTrainer",
     "DistributedDistillationTrainer",
     "DistributedSelfDistillationTrainer",

@@ -40,8 +40,9 @@ from tests.common.checkpoint_io import OPTIMIZER_META_FILE, OPTIMIZER_SHARD_FILE
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir, world_all
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG, TINY_QWEN35_MOE_CONFIG
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["fsdp", "ep"], default="fsdp")

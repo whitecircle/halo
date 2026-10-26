@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Every EP wrapper must ADOPT its family's block, never restate it.
+"""Every EP layer must ADOPT its family's block, never restate it.
 
 ``EPMoELayerBase.__init__`` is one template: it resolves the router and the expert container off the
 family's own declarations, then hands each step to a hook the family may override
@@ -229,7 +229,7 @@ def _parity_failures(block: nn.Module, layer, wrapper) -> list[str]:
 def test_the_wrapper_adopts_the_block_it_replaces(family, wrapper, factory):
     block, layer = _build(factory, wrapper)
     failures = _parity_failures(block, layer, wrapper)
-    assert not failures, f"{family}: the EP wrapper diverges from {type(block).__name__}:\n  " + "\n  ".join(failures)
+    assert not failures, f"{family}: the EP layer diverges from {type(block).__name__}:\n  " + "\n  ".join(failures)
 
 
 @pytest.mark.parametrize(_FIELDS, FAMILIES, ids=_IDS)

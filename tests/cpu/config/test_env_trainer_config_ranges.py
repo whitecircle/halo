@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Parse-time range checks on the training configs, ``AsyncTrainingConfig`` and ``EnvironmentConfig`` in depth.
+"""Parse-time range checks on the training configs, ``AsyncRolloutConfig`` and ``EnvironmentConfig`` in depth.
 
 * Every numeric knob a training script parses refuses a bool and a non-finite value, and an int knob a
   fraction: a bare range check reads ``true`` as 1 (``rollout_min_p: true`` samples every rollout
@@ -29,7 +29,7 @@ from typing import Union, get_args, get_origin, get_type_hints
 import pytest
 from transformers import TrainingArguments
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from tests.common.repo import REPO_ROOT
 
 # Keeps a TrainingArguments subclass constructible on a GPU-less runner, so a raise can only come from
@@ -109,10 +109,10 @@ def _sweep() -> list:
     for bad_id, bad in _BAD_NUMBERS.items():
         params.append(
             pytest.param(
-                AsyncTrainingConfig,
+                AsyncRolloutConfig,
                 "early_stop_entropy_band",
                 {"early_stop_entropy_band": [0.1, bad]},
-                id=f"AsyncTrainingConfig.early_stop_entropy_band-{bad_id}",
+                id=f"AsyncRolloutConfig.early_stop_entropy_band-{bad_id}",
             )
         )
     return params
@@ -149,30 +149,30 @@ def test_a_numeric_knob_refuses_a_bool_or_a_non_finite_value(config, knob, kwarg
 def test_a_rescore_budget_is_read_only_beside_the_engine_reference():
     """Set with the engine re-score off it would change nothing, so it is refused at parse time."""
     with pytest.raises(ValueError, match="isr_engine_rescore_per_server set with isr_engine_reference off"):
-        AsyncTrainingConfig(isr_engine_rescore_per_server=64)
-    assert AsyncTrainingConfig(isr_engine_reference=True, isr_engine_rescore_per_server=64)
+        AsyncRolloutConfig(isr_engine_rescore_per_server=64)
+    assert AsyncRolloutConfig(isr_engine_reference=True, isr_engine_rescore_per_server=64)
 
 
 @pytest.mark.parametrize("bad", [-1, 65536])
 def test_a_weight_sync_group_port_outside_the_port_range_is_refused(bad):
     with pytest.raises(ValueError, match="rollout_group_port"):
-        AsyncTrainingConfig(rollout_group_port=bad)
+        AsyncRolloutConfig(rollout_group_port=bad)
 
 
 @pytest.mark.parametrize("ok", [0, 51216, 65535])
 def test_a_weight_sync_group_port_in_range_passes(ok):
-    assert AsyncTrainingConfig(rollout_group_port=ok).rollout_group_port == ok
+    assert AsyncRolloutConfig(rollout_group_port=ok).rollout_group_port == ok
 
 
 @pytest.mark.parametrize("bad", [0.0, -0.1, 1.5, math.nan])
 def test_skip_update_masked_frac_outside_the_unit_interval_is_refused_at_parse_time(bad):
     with pytest.raises(ValueError, match="skip_update_masked_frac must be"):
-        AsyncTrainingConfig(skip_update_masked_frac=bad)
+        AsyncRolloutConfig(skip_update_masked_frac=bad)
 
 
 @pytest.mark.parametrize("ok", [0.3, 1.0, None])
 def test_skip_update_masked_frac_in_range_passes(ok):
-    assert AsyncTrainingConfig(skip_update_masked_frac=ok).skip_update_masked_frac == ok
+    assert AsyncRolloutConfig(skip_update_masked_frac=ok).skip_update_masked_frac == ok
 
 
 @pytest.mark.parametrize("cap", [1, 999, 1000])
@@ -180,24 +180,23 @@ def test_a_row_cap_at_or_below_the_per_turn_budget_is_refused(cap):
     with pytest.raises(
         ValueError, match=r"max_train_row_tokens must be an integer > 1000 \(above rollout_max_tokens\)"
     ):
-        AsyncTrainingConfig(rollout_max_tokens=1000, max_train_row_tokens=cap)
+        AsyncRolloutConfig(rollout_max_tokens=1000, max_train_row_tokens=cap)
 
 
 def test_a_row_cap_above_the_per_turn_budget_passes():
-    assert AsyncTrainingConfig(rollout_max_tokens=1000, max_train_row_tokens=1001).max_train_row_tokens == 1001
-    assert AsyncTrainingConfig(rollout_max_tokens=1000).max_train_row_tokens is None
+    assert AsyncRolloutConfig(rollout_max_tokens=1000, max_train_row_tokens=1001).max_train_row_tokens == 1001
+    assert AsyncRolloutConfig(rollout_max_tokens=1000).max_train_row_tokens is None
 
 
 def test_an_episode_budget_holds_one_whole_turn_and_is_unbounded_when_null():
     with pytest.raises(
         ValueError, match=r"rollout_max_episode_tokens must be an integer >= 1000 \(at least rollout_max_tokens\)"
     ):
-        AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=999)
+        AsyncRolloutConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=999)
     assert (
-        AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=1000).rollout_max_episode_tokens
-        == 1000
+        AsyncRolloutConfig(rollout_max_tokens=1000, rollout_max_episode_tokens=1000).rollout_max_episode_tokens == 1000
     )
-    assert AsyncTrainingConfig(rollout_max_tokens=1000).rollout_max_episode_tokens is None
+    assert AsyncRolloutConfig(rollout_max_tokens=1000).rollout_max_episode_tokens is None
 
 
 @pytest.mark.parametrize("bad", [0, -1, 1000, 1001, True, 512.0, "512"])
@@ -205,12 +204,12 @@ def test_an_answer_bound_outside_one_to_the_turn_cap_or_not_a_count_is_refused(b
     with pytest.raises(
         ValueError, match=r"rollout_max_answer_tokens must be an integer in \[1, 1000\) \(below rollout_max_tokens\)"
     ):
-        AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_answer_tokens=bad)
+        AsyncRolloutConfig(rollout_max_tokens=1000, rollout_max_answer_tokens=bad)
 
 
 @pytest.mark.parametrize("ok", [1, 999, None])
 def test_an_answer_bound_inside_the_turn_cap_passes_and_reaches_the_rollout_config(ok):
-    cfg = AsyncTrainingConfig(rollout_max_tokens=1000, rollout_max_answer_tokens=ok)
+    cfg = AsyncRolloutConfig(rollout_max_tokens=1000, rollout_max_answer_tokens=ok)
     assert cfg.get_rollout_config(in_process_group=False).max_answer_tokens == ok
 
 

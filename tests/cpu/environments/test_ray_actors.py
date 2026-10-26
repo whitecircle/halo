@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import pytest
 import ray
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments import ray_actors
 from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
 from halo.environments.messages import Trajectory
@@ -218,7 +218,7 @@ async def test_the_pool_and_its_clock_prefer_this_node_and_spill_off_a_busy_one(
 def test_rollout_config_defaults():
     """Fields RolloutConfig must NOT carry, and picklability (the actors receive it pickled).
 
-    The default VALUES are pinned against their ``AsyncTrainingConfig`` counterparts in
+    The default VALUES are pinned against their ``AsyncRolloutConfig`` counterparts in
     ``tests/cpu/config/test_rollout_config_mirror.py``.
     """
     config = RolloutConfig()
@@ -1153,12 +1153,12 @@ def test_rollout_manager_max_concurrent_clamping():
     assert manager2.max_concurrent == 16  # 4 * 4
 
 
-# Test: AsyncTrainingConfig → RolloutConfig mapping
+# Test: AsyncRolloutConfig → RolloutConfig mapping
 
 
-def test_async_training_config_to_rollout_config():
-    """Test that AsyncTrainingConfig.get_rollout_config() maps all fields."""
-    config = AsyncTrainingConfig(
+def test_async_rollout_config_builds_the_rollout_config():
+    """Test that AsyncRolloutConfig.get_rollout_config() maps all fields."""
+    config = AsyncRolloutConfig(
         rollout_temperature=0.9,
         rollout_top_p=0.8,
         rollout_top_k=40,

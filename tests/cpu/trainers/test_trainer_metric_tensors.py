@@ -15,12 +15,12 @@ import pytest
 import torch
 
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.stored_metrics import StoredMetricsMixin
 from tests.common.smpo_trainer import smpo_trainer
 
 
-def _bare_smpo() -> SmoothMarginPOTrainer:
+def _bare_smpo() -> SMPOTrainer:
     """A construction-free SMPO instance with just the attributes get_batch_loss_metrics reads."""
     t = smpo_trainer(target_margin=0.5)
     t.concatenated_forward = lambda model, batch, real_pairs=None: {

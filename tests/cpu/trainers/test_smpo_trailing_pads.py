@@ -31,7 +31,7 @@ from transformers import Gemma4Config, Gemma4ForConditionalGeneration
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 
 from halo.data.collators.smpo import concatenate_pairs
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_MISTRAL4_CONFIG
 from tests.common.smpo_trainer import smpo_trainer
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
@@ -73,7 +73,7 @@ class _CPAttention(nn.Module):
         return self.model(input_ids=input_ids, position_ids=positions, **kwargs)
 
 
-def _host(cp_layout: bool) -> SmoothMarginPOTrainer:
+def _host(cp_layout: bool) -> SMPOTrainer:
     """A construction-free SMPO; ``cp_layout`` lays the batch out as CP does, on one process."""
     return smpo_trainer(parallelism_config=SimpleNamespace(cp_size=2 if cp_layout else 1), pad_token_id=PAD_TOKEN_ID)
 

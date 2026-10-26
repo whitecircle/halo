@@ -15,7 +15,7 @@ import torch
 
 from halo.kernels.head_logprobs import VOCAB_TILE, _logprobs_backward, _logprobs_forward, chunked_head_logprobs
 from tests.common.harness import gpu_test_main
-from tests.common.utils import fro_rel_err
+from tests.common.numerics import fro_rel_err
 
 ROWS, HIDDEN, VOCAB = 5000, 1024, 8 * VOCAB_TILE + 1000
 # Logit spread of a trained model's head: most mass on a few tokens, |logit| in the tens.

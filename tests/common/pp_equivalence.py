@@ -40,7 +40,8 @@ from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import world_spread
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
-from tests.common.utils import log, max_abs_rel_err, max_or_nan
+from tests.common.numerics import max_abs_rel_err, max_or_nan
+from tests.common.rank_log import log
 
 SEQ_LEN = 64
 LOSS_REL_TOL = 2e-2
@@ -69,7 +70,7 @@ class UnsplitReference:
     ``slice_losses[r]`` is DP replica ``r``'s expected loss ``S_r / (G / dp)``: the ragged label
     prefixes make the per-replica token counts unequal on purpose, and the PP trainer normalizes
     every replica by the DP-global count ``G/dp``. The expert fields are populated only when the model
-    carries EP wrappers: expert parameters have no sharding-independent name (ETP and grouped-GEMM
+    carries EP layers: expert parameters have no sharding-independent name (ETP and grouped-GEMM
     split the fused ``gate_up_proj``), so they compare through :func:`gather_expert_grads` instead.
     """
 
@@ -128,7 +129,7 @@ def build_moe_model(dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
 
 
 def build_patched_moe_model(config: ParallelismConfig, dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
-    """The MoE model carrying the config's EP wrappers + prepared (non-collective) EP buffers."""
+    """The MoE model carrying the config's EP layers + prepared (non-collective) EP buffers."""
     model = build_moe_model(dtype)
     apply_ep_layers(model, config.ep_config())
     return model
@@ -370,7 +371,7 @@ def fp32_reference(rows: torch.Tensor, labels: torch.Tensor, device, dp_size: in
 
 
 def apply_single_process_ep1(model, rank: int, *, use_grouped_gemm: bool = True):
-    """``model`` with the ep1 EP wrappers on a single-process EPConfig whose hooks and dispatch stay inert;
+    """``model`` with the ep1 EP layers on a single-process EPConfig whose hooks and dispatch stay inert;
     stage_world_size=1 with stage_base_rank=rank keeps its group creation collective-consistent (every rank
     creates every single-rank group in the same order)."""
     config = EPConfig(
@@ -394,7 +395,7 @@ def ep1_reference(
     dtype: torch.dtype = torch.bfloat16,
     use_grouped_gemm: bool = True,
 ) -> UnsplitReference:
-    """Unsplit reference carrying the same ep1 EP wrappers, single-process.
+    """Unsplit reference carrying the same ep1 EP layers, single-process.
 
     At ``dtype=torch.float32`` with ``use_grouped_gemm=False`` this is the exact-arithmetic
     reference an fp32 distributed run is gated against: the expert compute is the per-expert loop

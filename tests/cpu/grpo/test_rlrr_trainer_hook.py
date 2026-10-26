@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Test DistributedGRPOTrainer's RLRR advantage hook in single-process isolation.
+"""Test DistributedOnlineGRPOTrainer's RLRR advantage hook in single-process isolation.
 
 Exercises ``_apply_rlrr_advantages`` (the production online-GRPO integration)
 against a fake trainer ``self`` so the gather/slice/recompute logic is validated
@@ -18,7 +18,7 @@ import torch
 from halo.configs.grpo import RLRRConfig
 from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 
 def _fake_self(rlrr_config, rewards_per_func, num_generations):
@@ -40,9 +40,9 @@ def _fake_self(rlrr_config, rewards_per_func, num_generations):
         # (generation_batch_size) — a plain list would support operations production cannot.
         _logs={"advantages": deque([0.0] * rewards_per_func.shape[0], maxlen=rewards_per_func.shape[0])},
     )
-    me._gathered_rewards = types.MethodType(DistributedGRPOTrainer._gathered_rewards, me)
-    me._local_slice = types.MethodType(DistributedGRPOTrainer._local_slice, me)
-    me._install_advantages = types.MethodType(DistributedGRPOTrainer._install_advantages, me)
+    me._gathered_rewards = types.MethodType(DistributedOnlineGRPOTrainer._gathered_rewards, me)
+    me._local_slice = types.MethodType(DistributedOnlineGRPOTrainer._local_slice, me)
+    me._install_advantages = types.MethodType(DistributedOnlineGRPOTrainer._install_advantages, me)
     return me
 
 
@@ -59,7 +59,7 @@ def test_hook_noop_when_disabled():
     me = _fake_self(None, torch.tensor([[1.0], [0.0]]), 2)
     result = _result([0.0, 0.0], [3, 5])
     before = result["advantages"].clone()
-    DistributedGRPOTrainer._apply_rlrr_advantages(me, result)
+    DistributedOnlineGRPOTrainer._apply_rlrr_advantages(me, result)
     assert torch.equal(result["advantages"], before), "disabled RLRR must not touch advantages"
 
 
@@ -68,7 +68,7 @@ def test_hook_recomputes_advantages():
     rewards_per_func = torch.tensor([[1.0], [1.0], [0.0], [0.0]])
     me = _fake_self(RLRRConfig(mode="hrr"), rewards_per_func, 4)
     result = _result([0.0] * 4, completion_lengths=[5, 5, 5, 5])
-    DistributedGRPOTrainer._apply_rlrr_advantages(me, result)
+    DistributedOnlineGRPOTrainer._apply_rlrr_advantages(me, result)
     adv = result["advantages"]
     assert adv.shape == (4,), adv.shape
     # Correct responses must end up with higher advantage than incorrect ones.
@@ -80,7 +80,7 @@ def test_hook_all_correct_group_keeps_signal_via_length():
     rewards_per_func = torch.tensor([[1.0], [1.0], [1.0], [1.0]])
     me = _fake_self(RLRRConfig(mode="hrr", lam=4.0), rewards_per_func, 4)
     result = _result([0.0] * 4, completion_lengths=[2, 10, 20, 30])
-    DistributedGRPOTrainer._apply_rlrr_advantages(me, result)
+    DistributedOnlineGRPOTrainer._apply_rlrr_advantages(me, result)
     adv = result["advantages"]
     assert adv.std() > 0, f"all-correct group should retain signal, got {adv}"
     assert adv[0] > adv[-1], adv  # shortest correct ranked best
@@ -98,7 +98,7 @@ def test_unscorable_member_does_not_shift_its_siblings():
     me = _fake_self(config, rewards_per_func, 4)
     result = _result([0.0] * 4, completion_lengths=[5, 5, 5, 5])
 
-    DistributedGRPOTrainer._apply_rlrr_advantages(me, result)
+    DistributedOnlineGRPOTrainer._apply_rlrr_advantages(me, result)
     adv = result["advantages"]
 
     # The three real completions must get exactly what a group of three alone gets.
@@ -126,7 +126,7 @@ def test_hook_noop_in_eval_mode():
     me.model.training = False
     result = _result([0.0] * 4, completion_lengths=[5, 5, 5, 5])
     before = result["advantages"].clone()
-    DistributedGRPOTrainer._apply_rlrr_advantages(me, result)
+    DistributedOnlineGRPOTrainer._apply_rlrr_advantages(me, result)
     assert torch.equal(result["advantages"], before), "eval mode must not reshape advantages"
 
 
@@ -143,7 +143,7 @@ def test_rlrr_advantages_reach_the_completions_log():
     me._logs = {"advantages": trl_logged}
     result = _result([0.0] * 4, completion_lengths=[5, 5, 5, 5])
 
-    DistributedGRPOTrainer._apply_rlrr_advantages(me, result)
+    DistributedOnlineGRPOTrainer._apply_rlrr_advantages(me, result)
 
     assert list(trl_logged) != [-99.0] * 4, "RLRR advantages never reached _logs — the record is TRL's, not ours"
     # approx: the log keeps the float64 gathered values, the trained tensor is cast to the result dtype.

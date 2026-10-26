@@ -30,7 +30,7 @@ def test_the_derived_roster_covers_every_trainer():
     """Anti-vacuity: a roster that stopped finding trainers would make the check below assert nothing."""
     names = {cls.__name__ for cls in TRAINERS}
     assert len(names) >= 13, f"the roster collapsed to {sorted(names)}"
-    assert {"DistributedSFTTrainer", "SmoothMarginPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
+    assert {"DistributedSFTTrainer", "SMPOTrainer", "EmbeddingTrainer"} <= names, sorted(names)
 
 
 @pytest.mark.parametrize("trainer", TRAINERS, ids=lambda cls: cls.__name__)

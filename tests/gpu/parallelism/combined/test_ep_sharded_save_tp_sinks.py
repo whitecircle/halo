@@ -37,7 +37,7 @@ from halo.distributed.tensor_parallel.parallelize_attention import shard_sinks_p
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 NUM_LAYERS = 2
 NUM_HEADS = 4

@@ -32,8 +32,8 @@ from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model, full_batch_eval_loss
 from tests.common.pp_trainers import build_pp_args, build_pp_trainer, build_sft_rows, losses_identical_across_ranks
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import log
 
 PP_SIZE = 2
 SEQ_LEN = 64

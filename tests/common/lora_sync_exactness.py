@@ -74,11 +74,12 @@ from halo.trainers.grpo.rollout.weight_push import (
 )
 from halo.trainers.sft import DistributedSFTTrainer
 from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
+from tests.common.adapters import load_peft_model, mixed_targets, mixer_linear_leaves
 from tests.common.checkpoint_io import fixed_text_batch
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import load_peft_model, mixed_targets, mixer_linear_leaves
+from tests.common.rank_log import log, log_all
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
@@ -86,7 +87,6 @@ from tests.common.tiny_models import (
     shared_tiny_family_checkpoint,
     tiny_family_model,
 )
-from tests.common.utils import log, log_all
 from tests.common.weight_sync import (
     RecordingSender,
     as_pushed,

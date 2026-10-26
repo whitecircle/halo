@@ -28,10 +28,12 @@ from tests.common.ep_reference import (
     roll_expert_banks,
 )
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_peak_mem_gb
 from tests.common.models import GPT_OSS_20B, QWEN3_30B_A3B
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log, log_all
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, cos_sim, gpu_peak_mem_gb, log, log_all
 
 # EP reorders the bf16 expert sum, and from layer 1 on the next router scores that reordered output, flipping a few
 # near-tied picks with no bug present: the mechanism this bound is derived for. gpt-oss (top-4-of-32): reference 5.607,

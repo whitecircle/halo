@@ -49,7 +49,7 @@ from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import RecordingSender
 
 EP_SIZE = 2

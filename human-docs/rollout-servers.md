@@ -140,7 +140,7 @@ address the **trainer dials**, not a bind address. The weight-sync port,
 bound on the **trainer** host, is `rollout_group_port` for async GRPO (a server
 entry without its own `group_port` takes it plus the entry's index) and
 `vllm_group_port` for Online GRPO
-([fields and defaults](../agent-docs/reference/configuration-reference.md#asynctrainingconfig) ↗).
+([fields and defaults](../agent-docs/reference/configuration-reference.md#asyncrolloutconfig) ↗).
 
 - **Group ports are unique across servers**, even on different hosts, because
   all of them bind on the trainer.

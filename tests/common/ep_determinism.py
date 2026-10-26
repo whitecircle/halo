@@ -33,8 +33,8 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.distributed import world_all
 from tests.common.ep_reference import ep_layers, random_token_batch
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.utils import log, log_all
 
 WORLD_SIZE = 2
 SEED = 1234

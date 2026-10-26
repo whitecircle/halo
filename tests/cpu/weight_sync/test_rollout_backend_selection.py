@@ -14,7 +14,7 @@ from typing import get_args, get_type_hints
 import pytest
 
 import halo.environments.engine_wire as engine_wire
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.engine_wire import capture_generation_tokens, turn_from_chat_completion
 from halo.environments.ray_actors import EnvironmentActor
 from halo.environments.rollout_config import RolloutConfig
@@ -121,15 +121,15 @@ def test_sglang_declares_the_fused_a_proj_halves_as_one_request():
 def test_every_registered_backend_is_a_selectable_config_value():
     """The registry and the config's Literal must not drift apart — a client registered under a key
     the config rejects is unreachable, and a config value with no client raises only at train time."""
-    literal_values = set(AsyncTrainingConfig.__annotations__["rollout_backend"].__args__)
+    literal_values = set(AsyncRolloutConfig.__annotations__["rollout_backend"].__args__)
     assert set(rollout_backends()) == literal_values
 
 
 # --- Config gating — each knob SGLang cannot honor must raise, not warn ---
 
 
-def _sglang_config(**overrides) -> AsyncTrainingConfig:
-    return AsyncTrainingConfig(**{"rollout_backend": "sglang", **overrides})
+def _sglang_config(**overrides) -> AsyncRolloutConfig:
+    return AsyncRolloutConfig(**{"rollout_backend": "sglang", **overrides})
 
 
 def test_sglang_supports_train_on_sampled_tokens():
@@ -154,8 +154,8 @@ def test_chat_template_kwargs_refuse_the_effort_key():
     """The level is per episode and travels top-level; a run-wide nested copy would either duplicate
     it or, on a disagreement, override it on SGLang and lose to it on vLLM."""
     with pytest.raises(ValueError, match="reasoning_effort"):
-        AsyncTrainingConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
-    assert AsyncTrainingConfig(
+        AsyncRolloutConfig(rollout_chat_template_kwargs={"reasoning_effort": "low"})
+    assert AsyncRolloutConfig(
         rollout_chat_template_kwargs={"preserve_thinking": True}
     ).get_rollout_config().chat_template_kwargs == {"preserve_thinking": True}
 
@@ -170,14 +170,14 @@ def test_sglang_accepts_the_supported_shape():
 
 def test_vllm_still_accepts_everything_sglang_rejects():
     """The gate must be engine-specific: not a defect on vLLM, which supports the budget field."""
-    config = AsyncTrainingConfig(rollout_backend="vllm", rollout_max_thinking_tokens=4096)
+    config = AsyncRolloutConfig(rollout_backend="vllm", rollout_max_thinking_tokens=4096)
     assert config.rollout_backend == "vllm"
 
 
 def test_rollout_backend_defaults_to_vllm():
     """The default must stay vLLM — every existing config omits the field and relies on it."""
-    assert AsyncTrainingConfig().rollout_backend == "vllm"
-    assert AsyncTrainingConfig().get_rollout_config().backend == "vllm"
+    assert AsyncRolloutConfig().rollout_backend == "vllm"
+    assert AsyncRolloutConfig().get_rollout_config().backend == "vllm"
 
 
 # --- Payload gating — vLLM-only fields must not be sent to SGLang ---
@@ -396,10 +396,10 @@ def test_capture_flags_absent_when_capture_disabled():
 
 
 def test_rollout_config_backend_roster_matches_the_gate_and_the_readers():
-    """``RolloutConfig.backend`` mirrors ``AsyncTrainingConfig.rollout_backend`` (the validated gate), and the
+    """``RolloutConfig.backend`` mirrors ``AsyncRolloutConfig.rollout_backend`` (the validated gate), and the
     selectable backends and the token-capture readers are one set: a backend without a reader would fail on its
     first captured turn, a reader without a backend is dead."""
-    gate = set(get_args(get_type_hints(AsyncTrainingConfig)["rollout_backend"]))
+    gate = set(get_args(get_type_hints(AsyncRolloutConfig)["rollout_backend"]))
     mirror = set(get_args(get_type_hints(RolloutConfig)["backend"]))
     assert gate and gate == mirror
     assert set(engine_wire._TOKEN_CAPTURE) == gate

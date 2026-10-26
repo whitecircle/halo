@@ -32,11 +32,11 @@ from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sha
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.model_preparation import auto_load_model
-from tests.common.checkpoint_io import save_context
+from tests.common.checkpoint_io import safetensors_state_dict, save_context
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
-from tests.common.utils import log, safetensors_state_dict
 
 EP_SIZE = 2
 

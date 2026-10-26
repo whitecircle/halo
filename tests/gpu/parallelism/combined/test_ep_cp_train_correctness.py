@@ -51,9 +51,12 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, world_mean
 from tests.common.ep_reference import fixed_chat_batch
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
+from tests.common.numerics import max_or_nan
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all, max_or_nan, step_losses, training_run_checks
+from tests.common.rank_log import log, log_all
+from tests.common.training_checks import step_losses, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2

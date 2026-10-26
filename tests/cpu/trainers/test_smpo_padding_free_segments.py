@@ -20,11 +20,11 @@ import pytest
 import torch
 from transformers.models.deepseek_v4 import DeepseekV4Config, DeepseekV4ForCausalLM
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.models import segment_markers
 from halo.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
 from halo.trainers.preference.preference_rules import reject_padding_free_without_varlen
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.segment_isolation import (
     FAMILIES,
@@ -52,7 +52,7 @@ def _model(family: str):
     return tiny_model(family, "sdpa")
 
 
-def _trainer(markers: SegmentMarkers) -> SmoothMarginPOTrainer:
+def _trainer(markers: SegmentMarkers) -> SMPOTrainer:
     """A construction-free SMPO carrying only what the padding-free forward reads."""
     trainer = smpo_trainer(pad_token_id=PAD_ID, padding_free=True)
     trainer._segment_markers = markers
@@ -117,9 +117,9 @@ def test_gdn_padding_free_refused_without_segment_aware_kernels(monkeypatch, tmp
     patched = tuple((name, (lambda ok=(name != missing): ok)) for name, _ in GDN_SEGMENT_AWARE_BACKENDS)
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", patched)
     with pytest.raises(ValueError, match="padding_free") as excinfo:
-        SmoothMarginPOTrainer(
+        SMPOTrainer(
             model=tiny_model("qwen3_5", "flash_attention_2"),
-            args=SmoothMarginPOConfig(output_dir=str(tmp_path), padding_free=True, bf16=False, report_to="none"),
+            args=SMPOConfig(output_dir=str(tmp_path), padding_free=True, bf16=False, report_to="none"),
             processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),
             is_vlm=False,
         )
@@ -131,9 +131,9 @@ def test_padding_free_is_refused_on_compressed_kv_layers(tmp_path):
     cut by row index, so the trainer refuses it before its backend gate."""
     model = DeepseekV4ForCausalLM(DeepseekV4Config(**TINY_DSV4_CONFIG))
     with pytest.raises(ValueError, match="padding_free is refused .* layers pool KV over windows"):
-        SmoothMarginPOTrainer(
+        SMPOTrainer(
             model=model,
-            args=SmoothMarginPOConfig(output_dir=str(tmp_path), padding_free=True, bf16=False, report_to="none"),
+            args=SMPOConfig(output_dir=str(tmp_path), padding_free=True, bf16=False, report_to="none"),
             processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),
             is_vlm=False,
         )

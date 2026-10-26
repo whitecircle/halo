@@ -23,7 +23,7 @@ from halo.runtime.consensus import RankConsensus
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.logprob_scoring import LogitsWidth, LogprobScoringMixin, full_logits_verdict
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 _GIB = 1024**3
 _WIDTH = LogitsWidth(1024, "max_completion_length")
@@ -178,10 +178,10 @@ def test_the_environmental_width_names_the_setting_that_bounds_it(per_turn, row_
 
 
 def test_the_online_width_is_the_completion_budget_or_unchecked_without_one():
-    assert DistributedGRPOTrainer._loss_logits_width(types.SimpleNamespace(max_completion_length=256)) == (
+    assert DistributedOnlineGRPOTrainer._loss_logits_width(types.SimpleNamespace(max_completion_length=256)) == (
         LogitsWidth(257, "max_completion_length")
     )
-    assert DistributedGRPOTrainer._loss_logits_width(types.SimpleNamespace(max_completion_length=None)) is None
+    assert DistributedOnlineGRPOTrainer._loss_logits_width(types.SimpleNamespace(max_completion_length=None)) is None
 
 
 def _call_lines(fn, name: str) -> list[int]:

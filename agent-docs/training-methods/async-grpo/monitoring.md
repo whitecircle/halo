@@ -32,7 +32,7 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 |---|---|
 | `thinking_cap_turns` | Turns whose counted reasoning reached a vLLM cap ([Thinking-cap metric](reasoning.md#thinking-cap-metric)) |
 | `output_budget_exhausted` | Under `rollout_max_episode_tokens` only: episodes whose output budget no longer held a turn's answer room ([Trajectory length](episodes.md#trajectory-length)) |
-| `truncation_alarm` | 1 in a round whose `truncation_rate` exceeds [`truncation_alarm_rate`](../../reference/configuration-reference.md#asynctrainingconfig), which also warns each time the rate crosses it |
+| `truncation_alarm` | 1 in a round whose `truncation_rate` exceeds [`truncation_alarm_rate`](../../reference/configuration-reference.md#asyncrolloutconfig), which also warns each time the rate crosses it |
 
 ### Group and entropy diagnostics
 

@@ -6,9 +6,9 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
 Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAttention-4 backward NaN on Blackwell, so the loader falls back from FA4 to SDPA (`is_fa4_backward_nan_prone`), or to FA2 under Context Parallelism. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
-## EP wrapper
+## EP layer
 
-`EPGlm4MoELayer` (`halo/distributed/expert_parallel/families/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this wrapper — see [Laguna](laguna.md).
+`EPGlm4MoELayer` (`halo/distributed/expert_parallel/families/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this EP layer — see [Laguna](laguna.md).
 
 - Routing: sigmoid + group mask + top-k. `topk_group` selects eligible expert *groups*, then `top_k` (=4) experts are chosen across them. `route_tokens_to_experts()` runs this before DeepEP dispatch.
 - Routed experts: `Glm4MoeLiteExperts`, fused `gate_up_proj` and `down_proj` 3D tensors.
@@ -55,7 +55,7 @@ The routed experts use fused-GLU contiguous-halves storage, so at `expert_tp_siz
 
 ## Router balancing and precision
 
-GLM-4 MoE Lite's router is DeepSeek-V3 aux-loss-free (sigmoid + a static `e_score_correction_bias`) and the forward has no aux-loss term, so `aux_loss` adds no balancing. `Glm4MoeLiteForCausalLM.forward` declares no `output_router_logits` parameter, so `auto` resolves to `bias_update` wherever the EP wrappers are present (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun); the shipped EP configs set it explicitly.
+GLM-4 MoE Lite's router is DeepSeek-V3 aux-loss-free (sigmoid + a static `e_score_correction_bias`) and the forward has no aux-loss term, so `aux_loss` adds no balancing. `Glm4MoeLiteForCausalLM.forward` declares no `output_router_logits` parameter, so `auto` resolves to `bias_update` wherever the EP layers are present (`ep_size > 1` or `use_grouped_gemm`, the default under torchrun); the shipped EP configs set it explicitly.
 
 [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own `e_score_correction_bias` — the native slot the family's selection arithmetic already consults, adopted whole rather than stacked with a side buffer — so the final bias exports with every checkpoint and a served copy routes as training did. To freeze the router instead, use `freeze_layers_patterns: ["*.mlp.gate.weight"]`.
 

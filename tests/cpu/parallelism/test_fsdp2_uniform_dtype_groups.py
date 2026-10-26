@@ -6,7 +6,7 @@ FSDP2 asserts one original dtype per group at the first forward. ``fp32_router``
 ``apply_fsdp2_per_layer`` gives such a submodule a group of its own first. The split decision is
 checked on small module trees; the real wrap runs on a single-rank gloo mesh over a tiny Qwen3 MoE
 whose routers hold fp32 masters, with the router called as a module and read in place (as the LFM2,
-DeepSeek-V4 and Inkling EP wrappers read ``gate.weight``). There the router's gradient must equal a
+DeepSeek-V4 and Inkling EP layers read ``gate.weight``). There the router's gradient must equal a
 plain bf16 model's bit for bit, and each premise is shown: FSDP2 refuses the unsplit layer, and a
 router read in place meets its sharded DTensor unless the layer's forward unshards it.
 
@@ -45,7 +45,7 @@ def _linear(dtype: torch.dtype, *, trainable: bool = True) -> nn.Linear:
 
 
 class _Experts(nn.Module):
-    """An EP-wrapper stand-in: bare expert parameters on the module itself, the router as a child."""
+    """An EP-layer stand-in: bare expert parameters on the module itself, the router as a child."""
 
     def __init__(self, router: nn.Module | None = None, router_param: nn.Parameter | None = None):
         super().__init__()

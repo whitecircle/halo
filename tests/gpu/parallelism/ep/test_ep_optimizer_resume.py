@@ -22,7 +22,7 @@ the whole contract on a tiny random-init model through the real trainer save/res
      warning fires naming ``ep_size``, the optimizer starts empty, training proceeds.
 
 ``--mode ep1`` (tiny Qwen3 MoE, ep_size=1): phases 1-3 on the DEFAULT MoE shape at ep_size=1 — EP
-wrappers with no expert distribution, so ``fsdp_shard_ep1_experts`` leaves the experts to FSDP2 and
+layers with no expert distribution, so ``fsdp_shard_ep1_experts`` leaves the experts to FSDP2 and
 their moments are DTensor shards rather than the ``ep`` row's plain FSDP-ignored per-rank tensors.
 Different shard layout and a different save gather (``full_tensor()``, not an EP all-gather), same
 contract. No mismatch phase: save and resume run the same topology by construction.
@@ -63,19 +63,14 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
+from tests.common.numerics import max_or_nan, relative_l2
+from tests.common.optimizer_state import local_optimizer_state, optimizer_state_matches
+from tests.common.rank_log import log
 from tests.common.tiny_models import build_tied_qwen3_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    cleanup_memory,
-    local_optimizer_state,
-    log,
-    max_or_nan,
-    optimizer_state_matches,
-    relative_l2,
-    snapshot_trainable,
-    step_losses,
-)
+from tests.common.training_checks import snapshot_trainable, step_losses
 
 # Modes whose tiny model is MoE — the only ones with expert weights to gather on save.
 MOE_MODES = ("ep", "ep1", "ep_cp")

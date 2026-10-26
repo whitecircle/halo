@@ -38,7 +38,7 @@ lora_target_modules:
 - g_proj
 # Routed experts (288 x 42 layers, fused storage): peeled by split_expert_lora_targets to grouped
 # adapters inside the EP layers. The 3 dense leading layers, the shared experts (inside the EP
-# wrapper — no LoRA route) and the router gate stay frozen.
+# layer — no LoRA route) and the router gate stay frozen.
 - gate_up_proj
 - down_proj
 merge_expert_lora_on_save: true       # fold both halves into the base at every save -> servable HF

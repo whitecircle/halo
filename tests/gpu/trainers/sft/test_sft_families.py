@@ -62,8 +62,8 @@ from tests.common.models import (
     QWEN3_5_MOE_35B,
     QWEN3_30B_A3B,
 )
+from tests.common.rank_log import log
 from tests.common.sft_modes import SFTMode, SFTSuite, run_sft_suite, sft_metric_checks
-from tests.common.utils import log
 
 EP_SIZE_OVERRIDE = env_int("HALO_TEST_EP", None)
 OVERFIT_MIN_PEAK_TOKEN_ACCURACY = 0.99

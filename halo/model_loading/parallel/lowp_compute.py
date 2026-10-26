@@ -153,7 +153,7 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
         raise RuntimeError(
             f"lowp_precision={precision!r} converted zero modules — {cause} "
             f"(apply_dense_mlp={lowp.apply_dense_mlp}, apply_moe_experts={lowp.apply_moe_experts}). "
-            f"The run would silently train in bf16. For MoE experts, EP wrappers with the grouped-GEMM "
+            f"The run would silently train in bf16. For MoE experts, EP layers with the grouped-GEMM "
             f"path are required (use_grouped_gemm: true)."
         )
 

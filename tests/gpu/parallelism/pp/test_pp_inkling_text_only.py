@@ -39,9 +39,10 @@ from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.pp import _load_stage_lazy
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_INKLING_CONFIG
 from tests.common.pp_fakes import registered_pp_backbones
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 DTYPE = torch.bfloat16

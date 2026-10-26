@@ -2,7 +2,7 @@
 
 SMPO trains on pairwise preferences with no reference model: a scheduled-margin loss plus a built-in SFT anchor, so one model sits in memory instead of two. Its default `smooth_lower_bound` margin term is exactly zero once the mean-token log-prob gap clears the current margin — where [DPO](dpo.md)'s sigmoid keeps pushing, the source of its log-prob collapse — while the SFT anchors keep training both completions.
 
-Trainer `SmoothMarginPOTrainer`, config `SmoothMarginPOConfig` (`halo/configs/preference.py`), script `scripts/training/preference/smpo.py`. The objective — margin losses keyed by `loss_type`, the log-prob clip, the CP-global reductions and the metric folds — is `SMPOObjective` (`halo/trainers/preference/smpo_objective.py`); under PP, `SMPOPipelineLoss` (`smpo_pipeline_loss.py`) carries it over interleaved pairs. `ParallelismConfig` accepts EP, CP, TP, pure ETP, EP+CP, EP+TP and EP+ETP for it, and rejects everything else outside its allowlist.
+Trainer `SMPOTrainer`, config `SMPOConfig` (`halo/configs/preference.py`), script `scripts/training/preference/smpo.py`. The objective — margin losses keyed by `loss_type`, the log-prob clip, the CP-global reductions and the metric folds — is `SMPOObjective` (`halo/trainers/preference/smpo_objective.py`); under PP, `SMPOPipelineLoss` (`smpo_pipeline_loss.py`) carries it over interleaved pairs. `ParallelismConfig` accepts EP, CP, TP, pure ETP, EP+CP, EP+TP and EP+ETP for it, and rejects everything else outside its allowlist.
 
 ```text
 logits  = mean_token log p(chosen) − mean_token log p(rejected) − margin(step)
@@ -38,7 +38,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 ```
 
-`beta` scales the margin logit before the loss, and `target_margin` is the log-ratio gap a pair must reach, ramped linearly from `initial_margin` over the run under `use_margin_schedule`. `chosen_sft_ratio` splits the SFT anchor between chosen and rejected cross-entropy. The margin term alone clips the bottom `lower_clip_percentile` of rejected log-probs and the top `upper_clip_percentile` of chosen, then floors rejected tokens at `min_log_prob`. Types, defaults and bounds: [SmoothMarginPOConfig](../../reference/configuration-reference.md#smoothmarginpoconfig).
+`beta` scales the margin logit before the loss, and `target_margin` is the log-ratio gap a pair must reach, ramped linearly from `initial_margin` over the run under `use_margin_schedule`. `chosen_sft_ratio` splits the SFT anchor between chosen and rejected cross-entropy. The margin term alone clips the bottom `lower_clip_percentile` of rejected log-probs and the top `upper_clip_percentile` of chosen, then floors rejected tokens at `min_log_prob`. Types, defaults and bounds: [SMPOConfig](../../reference/configuration-reference.md#smpoconfig).
 
 | `loss_type` | `loss_fn(z)` | Behavior |
 |---|---|---|
@@ -61,7 +61,7 @@ torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \
     --expert_parallel_size=8
 ```
 
-`halo launch smpo <config> --nproc 8 --expert_parallel_size=8` builds the same line; anything after the config is forwarded to the script. From Python, pass a `SmoothMarginPOConfig` as `args`, the tokenizer or processor as `processing_class`, the `ParallelismConfig` the model was loaded with, and LoRA as `peft_config`. `is_vlm` picks the data path, defaulting to the `processing_class` modality.
+`halo launch smpo <config> --nproc 8 --expert_parallel_size=8` builds the same line; anything after the config is forwarded to the script. From Python, pass a `SMPOConfig` as `args`, the tokenizer or processor as `processing_class`, the `ParallelismConfig` the model was loaded with, and LoRA as `peft_config`. `is_vlm` picks the data path, defaulting to the `processing_class` modality.
 
 ## Vision-language
 

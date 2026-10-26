@@ -1,4 +1,4 @@
-"""The rollout argument bundles ``AsyncTrainingConfig`` mixes in: what every rollout request samples with, and the
+"""The rollout argument bundles ``AsyncRolloutConfig`` mixes in: what every rollout request samples with, and the
 token budgets of a turn, an episode and a training row."""
 
 from dataclasses import dataclass, field

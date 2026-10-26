@@ -27,6 +27,7 @@ from halo.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_c
 from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
+from tests.common.liger_appliers import liger_applier
 
 
 class _RecordingApplier:
@@ -55,7 +56,7 @@ class _SwigluOffApplier(_RecordingApplier):
 
 
 def _stub_qwen3_moe_applier(monkeypatch):
-    """Record instead of patching for Qwen3 MoE, the one upstream-GLU family with an EP wrapper.
+    """Record instead of patching for Qwen3 MoE, the one upstream-GLU family with an EP layer.
 
     Its norms are the toolkit's (a delegating spec), so both registries resolve it; stubbing only
     upstream's entry would still run the real delegating applier and rebind the HF module classes for
@@ -262,7 +263,7 @@ def test_both_sites_fold_the_overrides_with_the_same_semantics():
     survive model load and be silently reverted before TRL re-applies Liger.
     """
     qwen3_moe = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
-    axes = {"needs_ep_wrappers": True, "model_config": qwen3_moe, "tp_size": 2}
+    axes = {"needs_ep_layers": True, "model_config": qwen3_moe, "tp_size": 2}
 
     explicit = dispatch.sanitize_liger_config({"swiglu": True, "cross_entropy": True}, **axes)
     assert explicit["swiglu"] is True, "an explicitly requested swiglu must survive the EP override"
@@ -274,42 +275,42 @@ def test_both_sites_fold_the_overrides_with_the_same_semantics():
 
 
 def test_ep_swiglu_force_off_only_applies_to_moe_models(monkeypatch):
-    """The EP swiglu/geglu force-off must key on the model being MoE, not on ``needs_ep_wrappers``.
+    """The EP swiglu/geglu force-off must key on the model being MoE, not on ``needs_ep_layers``.
 
-    ``needs_ep_wrappers`` is ``ep_group_size > 1 or use_grouped_gemm``, and ``use_grouped_gemm``
+    ``needs_ep_layers`` is ``ep_group_size > 1 or use_grouped_gemm``, and ``use_grouped_gemm``
     defaults True — so it is set on essentially every run, dense ones included. The loader installs EP
-    wrappers only for MoE models, so gating Liger on the flag alone silently strips fused SwiGLU from
-    every dense model in the repo while logging that EP wrappers were the reason.
+    layers only for MoE models, so gating Liger on the flag alone silently strips fused SwiGLU from
+    every dense model in the repo while logging that EP layers were the reason.
     """
     _stub_qwen3_moe_applier(monkeypatch)
     moe_config = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
-    moe_applied = dispatch.apply_liger_kernel(moe_config, None, needs_ep_wrappers=True)
-    assert moe_applied["swiglu"] is False, "MoE + EP wrappers must still disable Liger's fused MLP"
+    moe_applied = dispatch.apply_liger_kernel(moe_config, None, needs_ep_layers=True)
+    assert moe_applied["swiglu"] is False, "MoE + EP layers must still disable Liger's fused MLP"
 
     dense_config = types.SimpleNamespace(model_type="qwen3_moe", text_config=None)  # no expert count → dense
-    dense_applied = dispatch.apply_liger_kernel(dense_config, None, needs_ep_wrappers=True)
+    dense_applied = dispatch.apply_liger_kernel(dense_config, None, needs_ep_layers=True)
     assert dense_applied["swiglu"] is True, "dense model lost Liger's fused SwiGLU to an EP-only filter"
 
 
-def test_ep_swiglu_force_off_requires_an_ep_wrapper_class_for_the_family(monkeypatch):
-    """``needs_ep_wrappers`` is the run's INTENT; only the registry says a wrapper exists for the family.
+def test_ep_swiglu_force_off_requires_an_ep_layer_class_for_the_family(monkeypatch):
+    """``needs_ep_layers`` is the run's INTENT; only the registry says a wrapper exists for the family.
 
     Mixtral declares no EP MoE layer, so patching wraps nothing and the soft EP gate must not fire on
     the intent alone. Its swiglu still goes off, but through the routed-experts rule, which an explicit
     request cannot override — where the wrapped family's inert swap yields to one.
     """
     mixtral = types.SimpleNamespace(model_type="mixtral", text_config=None, num_experts=64)
-    assert dispatch.liger_ep_disables_fused_glu(True, mixtral) is False, "no EP wrapper class exists for mixtral"
+    assert dispatch.liger_ep_disables_fused_glu(True, mixtral) is False, "no EP layer class exists for mixtral"
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "mixtral", _RecordingApplier())
-    applied = dispatch.apply_liger_kernel(mixtral, {"swiglu": True}, needs_ep_wrappers=True)
+    applied = dispatch.apply_liger_kernel(mixtral, {"swiglu": True}, needs_ep_layers=True)
     assert applied["swiglu"] is False, "unwrapped routed experts must never reach upstream's LigerExperts swap"
 
     qwen3_moe = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
     assert dispatch.liger_ep_disables_fused_glu(True, qwen3_moe) is True
     _stub_qwen3_moe_applier(monkeypatch)
-    applied = dispatch.apply_liger_kernel(qwen3_moe, None, needs_ep_wrappers=True)
+    applied = dispatch.apply_liger_kernel(qwen3_moe, None, needs_ep_layers=True)
     assert applied["swiglu"] is False, "EPQwen3MoELayer wraps this family — Liger's fused MLP is inert"
-    explicit = dispatch.apply_liger_kernel(qwen3_moe, {"swiglu": True}, needs_ep_wrappers=True)
+    explicit = dispatch.apply_liger_kernel(qwen3_moe, {"swiglu": True}, needs_ep_layers=True)
     assert explicit["swiglu"] is True, "an explicit request for the inert swap under the wrapper is honored"
 
 
@@ -318,24 +319,24 @@ def test_ep_does_not_strip_a_toolkit_appliers_dense_and_shared_expert_glu(monkey
 
     Upstream's MoE appliers set the ROUTED-experts class, which ``apply_ep_layers`` replaces —
     inert under EP, hence the force-off. A toolkit spec names the dense and shared-expert MLPs, and
-    every EP wrapper adopts the shared expert unchanged, so the same force-off would delete a fusion
+    every EP layer adopts the shared expert unchanged, so the same force-off would delete a fusion
     that still runs on every token of every layer — in exactly the EP configuration these families
     are trained in.
     """
     applier = _RecordingApplier()
     monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "laguna", applier)
     config = types.SimpleNamespace(model_type="laguna", text_config=None, num_experts=256)
-    applied = dispatch.apply_liger_kernel(config, None, needs_ep_wrappers=True)
+    applied = dispatch.apply_liger_kernel(config, None, needs_ep_layers=True)
     assert applied["swiglu"] is True, "EPLagunaMoELayer adopts LagunaMLP as its shared expert unchanged"
 
     # Anti-vacuity: the exemption belongs to the spec that names the surviving MLPs, not to a blanket
     # EP no-op — an applier whose only GLU patch is the routed-expert swap still loses it.
     _stub_qwen3_moe_applier(monkeypatch)
     upstream = types.SimpleNamespace(model_type="qwen3_moe", text_config=None, num_experts=64)
-    assert dispatch.apply_liger_kernel(upstream, None, needs_ep_wrappers=True)["swiglu"] is False
+    assert dispatch.apply_liger_kernel(upstream, None, needs_ep_layers=True)["swiglu"] is False
 
     # A DELEGATING spec that names its family's shared-expert MLP keeps the flag for the same reason
-    # Laguna does: the EP wrapper adopts that module unchanged.
+    # Laguna does: the EP layer adopts that module unchanged.
     delegating = types.SimpleNamespace(model_type="qwen3_5_moe", text_config=None, num_experts=64)
     assert dispatch.liger_ep_disables_fused_glu(True, delegating) is False
 
@@ -436,7 +437,7 @@ def test_every_toolkit_applier_is_registered_in_the_toolkit_registry():
     self_registered = sorted(t for t, fn in MODEL_TYPE_TO_APPLY_LIGER_FN.items() if isinstance(fn, LigerApplier))
     assert not self_registered, f"toolkit appliers registered into liger_kernel's registry: {self_registered}"
     toolkit = dispatch._TOOLKIT_LIGER_APPLIERS
-    shadowed = sorted(t for t in declared if dispatch.resolve_liger_applier(t) is not toolkit[t])
+    shadowed = sorted(t for t in declared if liger_applier(t) is not toolkit[t])
     assert not shadowed, f"toolkit families resolving to liger_kernel's own applier: {shadowed}"
 
 
@@ -467,7 +468,7 @@ def test_the_ep_swiglu_force_off_is_not_read_as_a_user_request(monkeypatch):
     even with no user dict. Reading THAT as an explicit request would turn every uncovered family
     into a hard failure the moment EP is enabled.
 
-    ``wraps_experts`` is forced True because an uncovered family has no EP wrapper class either,
+    ``wraps_experts`` is forced True because an uncovered family has no EP layer class either,
     so the real predicate answers False and the fold would never run — the test would then pass on a
     config nothing was folded into, which is exactly the vacuity it is written to avoid.
     """
@@ -476,12 +477,12 @@ def test_the_ep_swiglu_force_off_is_not_read_as_a_user_request(monkeypatch):
     config = types.SimpleNamespace(model_type="model_type_without_any_applier", text_config=None, num_experts=8)
 
     # Premise: the fold really does write swiglu/geglu False for this call.
-    assert dispatch.sanitize_liger_config({}, needs_ep_wrappers=True, model_config=config) == {
+    assert dispatch.sanitize_liger_config({}, needs_ep_layers=True, model_config=config) == {
         "swiglu": False,
         "geglu": False,
     }
 
-    assert dispatch.apply_liger_kernel(config, None, needs_ep_wrappers=True) is None
+    assert dispatch.apply_liger_kernel(config, None, needs_ep_layers=True) is None
 
     # A kernel the user explicitly turned OFF is not a request either.
     config = types.SimpleNamespace(model_type="model_type_without_any_applier", text_config=None)

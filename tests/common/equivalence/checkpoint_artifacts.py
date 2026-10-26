@@ -32,8 +32,9 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
 from halo.model_loading.dtype import cast_parameters_to_run_dtype
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
+from tests.common.adapters import randomize_adapters
 from tests.common.checkpoint_io import save_context, shard_store_context
-from tests.common.cp_wrapper import unpatched_cp_wrapper
+from tests.common.cp_model import unpatched_cp_wrapper
 from tests.common.equivalence.revisions import (
     RAISED,
     compare_outputs,
@@ -47,7 +48,6 @@ from tests.common.equivalence.revisions import (
     write_evidence,
 )
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
-from tests.common.peft_helpers import randomize_adapters
 from tests.common.repo import REPO_ROOT
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,

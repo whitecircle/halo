@@ -4,8 +4,8 @@ the sampling overrides and the outputs. Flags only; the readers they feed live i
 
 import argparse
 
-from halo.entrypoints.environment_eval import EVAL_REQUEST_TIMEOUT_SECONDS
 from halo.environments.rollout_config import RolloutConfig
+from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS
 from scripts.cli_arguments import add_openai_endpoint_args
 
 # The split an eval reads when --split is omitted, unless its dataset ships a single split of its own.
@@ -40,7 +40,7 @@ def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
         type=float,
         default=None,
         help=f"Per-generation HTTP timeout (s). Default: the training config's request_timeout under "
-        f"--training_config, else {EVAL_REQUEST_TIMEOUT_SECONDS:.0f}; raise it when running many concurrent "
+        f"--training_config, else {REQUEST_TIMEOUT_SECONDS:.0f}; raise it when running many concurrent "
         f"episodes so long reasoning turns are not cut off.",
     )
     parser.add_argument("--output_path", default=None, help="Optional JSON file to dump per-example results to.")

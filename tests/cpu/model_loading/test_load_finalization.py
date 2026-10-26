@@ -85,7 +85,7 @@ TOOL_DRIVER_ROOTS = ("scripts", "halo/checkpoint", "halo/entrypoints/reward_scor
 # on, with no other symptom, so each must call the seam directly.
 INFERENCE_TOOL_LOADERS = (
     ("halo/entrypoints/reward_scoring.py", "load_reward_model"),
-    ("scripts/inference/generation/dataset_deduplication.py", "compute_embeddings"),
+    ("scripts/inference/deduplicate_dataset.py", "compute_embeddings"),
     ("halo/checkpoint/bf16_conversion.py", "_load_verified"),
 )
 

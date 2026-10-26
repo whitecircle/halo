@@ -93,7 +93,7 @@ class EPRoutingMixin:
         if self._ROUTER_ATTR is None:
             logger.warning(
                 f"{type(self).__name__}: fp32_router has NO effect — this family's router is a "
-                f"sibling module outside the EP wrapper (FSDP-managed). Its dtype cannot be raised "
+                f"sibling module outside the EP layer (FSDP-managed). Its dtype cannot be raised "
                 f"under EP: fp32_non_ep_params would upcast it, and DeepEP's combine is bf16-only. "
                 f"The router stays bf16."
             )

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.preference.smpo_objective import SMPOStepConstants, metric_sums, metrics_from_sums
 from halo.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
 from tests.common.smpo_trainer import smpo_trainer
@@ -77,7 +77,7 @@ _PP_CONSTANTS = SMPOStepConstants(
 )
 
 
-def _trainer(margin_schedule: bool = False) -> SmoothMarginPOTrainer:
+def _trainer(margin_schedule: bool = False) -> SMPOTrainer:
     """A construction-free SMPO whose forward returns the fixed per-side outputs above."""
     trainer = smpo_trainer(
         use_margin_schedule=margin_schedule, target_margin=TARGET_MARGIN, beta=BETA, chosen_sft_ratio=0.8

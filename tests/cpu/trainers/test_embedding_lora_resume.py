@@ -99,13 +99,13 @@ from halo.trainers.embedding.embedding_rules import reject_modules_outside_backb
 from halo.trainers.embedding.injected_lora import folded_backbone_chunks, has_injected_lora
 from halo.trainers.embedding.trainer import EmbeddingTrainer
 from scripts.training.embedding import inject_lora
+from tests.common.adapters import injected_lora_fold
 from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import fake_process_group_mesh, reset_shared_filesystem_consensus
 from tests.common.embedding_lora_resume import backbone_prefix
 from tests.common.gloo import run_gloo_ranks
-from tests.common.peft_helpers import injected_lora_fold
 from tests.common.repo import load_script_module
-from tests.common.utils import snapshot_trainable, step_losses
+from tests.common.training_checks import snapshot_trainable, step_losses
 
 WORDS = ["[PAD]", "[UNK]", "[CLS]", "[SEP]", *(f"w{i}" for i in range(60))]
 TARGET_MODULES = ("query", "value")

@@ -29,7 +29,7 @@ from halo.configs.preference import KTOScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.render_columns import alias_images_column, reject_missing_render_column
-from halo.data.vlm_routing import dataset_declares_images
+from halo.data.vlm_detection import dataset_declares_images
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
 from halo.entrypoints.model_setup import load_preference_models
 from halo.entrypoints.script import (

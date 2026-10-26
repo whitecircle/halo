@@ -30,8 +30,8 @@ from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.models.param_roles import persistent_buffers
 from halo.trainers.grpo.rollout import weight_push
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
+from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
-from tests.common.utils import safetensors_state_dict
 
 _SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
 _NUM_EXPERTS = TINY_STEP3P7_CONFIG["n_routed_experts"]

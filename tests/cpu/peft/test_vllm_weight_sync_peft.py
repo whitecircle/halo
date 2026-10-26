@@ -31,8 +31,8 @@ from torch.distributed.tensor import DTensor, init_device_mesh
 
 from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights, sync_weights_to_client
 from halo.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, snapshot_to_sync_device
+from tests.common.adapters import randomize_adapters
 from tests.common.gloo import run_gloo_ranks
-from tests.common.peft_helpers import randomize_adapters
 from tests.common.weight_sync import (
     RecordingSender,
     as_pushed,

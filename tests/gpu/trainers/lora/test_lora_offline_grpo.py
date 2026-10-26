@@ -28,9 +28,7 @@ import math
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.runtime.collectives import barrier
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from tests.common.datasets import create_offline_grpo_dataset
-from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     assert_adapter_checkpoint,
     assert_adapters_moved,
     assert_only_adapters_trainable,
@@ -40,7 +38,9 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import log
+from tests.common.datasets import create_offline_grpo_dataset
+from tests.common.harness import gpu_test_main
+from tests.common.rank_log import log
 
 MAX_STEPS = 3
 NUM_TRAIN_SAMPLES = 32

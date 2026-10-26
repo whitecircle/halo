@@ -221,7 +221,7 @@ the expert layout. vLLM 0.32.0 raises on a SigLIP tower key that lacks its `visi
 
 **Un-fuse experts.** transformers keeps MoE experts fused in memory (`experts.gate_up_proj` /
 `experts.down_proj`). Most hub checkpoints are per-expert, and `from_pretrained` fuses them on load;
-Qwen3.5/3.6 and Zaya ship the fused pair. The wrapper-less writers and the base-Trainer save write the
+Qwen3.5/3.6 and Zaya ship the fused pair. Writers without an EP layer and the base-Trainer save write the
 layout the model was loaded from (a model with no record reverts through the family's mapping —
 per-expert for Qwen3.5/3.6); an EP-gathered save writes whatever the family's gather emits — the fused
 pair for Qwen3.5/3.6, DeepSeek-V4, Cohere2 MoE and GLM-5 Next. A reload into a built model maps any of
@@ -441,7 +441,7 @@ Resume is resolved once in `init_training_script` (`halo/entrypoints/script.py`)
 ([Checkpoint detection](#checkpoint-detection)), then `resolve_resume_weights_source()` decides the weights
 source. Modes that transform the model at construction (EP fuses experts into 3-D tensors, CP wraps attention)
 cannot load the gathered HF checkpoint back through the Trainer, so it repoints to the **checkpoint
-directory** (Path B, the trained weights load at construction) when `needs_ep_wrappers`, `is_cp_mode` or
+directory** (Path B, the trained weights load at construction) when `needs_ep_layers`, `is_cp_mode` or
 `is_tp_mode` holds — with the default `use_grouped_gemm: true` that is **every stock torchrun run**, dense
 included. Only a `use_grouped_gemm: false` run with no EP, CP or TP keeps `model_name_or_path` (Path A, a
 reload into the built model), and so does an adapter checkpoint (adapter-only, or merge-on-save through its

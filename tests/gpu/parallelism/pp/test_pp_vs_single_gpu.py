@@ -29,8 +29,8 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import log
 
 # Depth scales with the launch: 4 GPUs -> pp2 (first+last only), 8 GPUs -> pp4, whose two middle
 # stages (no embedding, no loss, pure hidden->hidden) and 3-hop chains nothing else exercises.

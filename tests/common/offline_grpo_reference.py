@@ -22,6 +22,7 @@ from halo.trainers.grpo.offline.reference_cache import ReferenceScoreCache
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import shared_output_dir
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
     build_offline_grpo_trainer,
     doubled_head_kl_verdict,
@@ -34,15 +35,10 @@ from tests.common.offline_grpo import (
     save_offline_moe_base,
     swept_reference_error,
 )
+from tests.common.optimizer_state import optimizer_state_matches
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    cleanup_memory,
-    finish_phase,
-    log,
-    optimizer_state_matches,
-    resumed_loss_deltas,
-    step_losses,
-)
+from tests.common.training_checks import resumed_loss_deltas, step_losses
 
 SETTINGS = {"max_prompt_length": 8, "max_completion_length": 6, "pad_token_id": 0}
 _SEED = 1337

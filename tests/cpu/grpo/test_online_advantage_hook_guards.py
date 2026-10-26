@@ -29,15 +29,15 @@ from halo.configs.grpo import RLRRConfig
 from halo.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask
 from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 SUM_THEN_NORMALIZE = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="group")
 NORMALIZE_THEN_SUM = types.SimpleNamespace(multi_objective_aggregation="normalize_then_sum", scale_rewards="group")
 
 
-def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedGRPOTrainer:
+def _resolve(kwargs: dict, grpo_args=SUM_THEN_NORMALIZE) -> DistributedOnlineGRPOTrainer:
     """Run only the pre-super hook adoption and refusals on a bare instance (TRL's ctor needs a live server)."""
-    trainer = object.__new__(DistributedGRPOTrainer)
+    trainer = object.__new__(DistributedOnlineGRPOTrainer)
     trainer._adopt_advantage_hooks(kwargs)
     reject_conflicting_advantage_hooks(
         grpo_args,
@@ -159,7 +159,7 @@ def _rank(process_index: int, num_processes: int, *, rlrr=None, drop=False, std_
         "_apply_degenerate_group_drop",
         "_apply_std_floor_advantages",
     ):
-        setattr(me, name, types.MethodType(getattr(DistributedGRPOTrainer, name), me))
+        setattr(me, name, types.MethodType(getattr(DistributedOnlineGRPOTrainer, name), me))
     start = process_index * n_local
     mask = torch.zeros(n_local, int(FULL_LENGTHS.max()), dtype=torch.long)
     for i, length in enumerate(FULL_LENGTHS[start : start + n_local].tolist()):
@@ -238,13 +238,13 @@ def test_the_generation_batch_consumes_the_stash(monkeypatch):
     """A stash left in place would be read by the next batch's hooks if that batch's scoring skipped
     ``_calculate_rewards``, applying one batch's rewards to another batch's rows."""
     monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {})
-    me = object.__new__(DistributedGRPOTrainer)
+    me = object.__new__(DistributedOnlineGRPOTrainer)
     me._rlrr_config, me._drop_degenerate_groups = None, False
     me._scale_rewards_std_floor, me._balance_token_mass = 0.0, False
     me.model = types.SimpleNamespace(training=False)
     me.parallelism_config = types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     me._last_rewards_per_func = FULL_REWARDS
-    DistributedGRPOTrainer._generate_and_score_completions(me, [])
+    DistributedOnlineGRPOTrainer._generate_and_score_completions(me, [])
     assert me._last_rewards_per_func is None
 
 
@@ -252,7 +252,7 @@ def test_the_balance_weighs_what_the_other_hooks_leave(monkeypatch):
     """RLRR and the std floor replace the batch's advantages and the drop narrows its loss mask; the balance
     must weigh the result, or it cancels the net push of advantages the loss never sees."""
     monkeypatch.setattr(GRPOTrainer, "_generate_and_score_completions", lambda self, inputs: {})
-    me = object.__new__(DistributedGRPOTrainer)
+    me = object.__new__(DistributedOnlineGRPOTrainer)
     me.model = types.SimpleNamespace(training=True)
     me.parallelism_config = types.SimpleNamespace(is_tp_mode=False, is_expert_tp_mode=False)
     calls = []
@@ -264,7 +264,7 @@ def test_the_balance_weighs_what_the_other_hooks_leave(monkeypatch):
     )
     for hook in hooks:
         setattr(me, hook, lambda result, hook=hook: calls.append(hook))
-    DistributedGRPOTrainer._generate_and_score_completions(me, [])
+    DistributedOnlineGRPOTrainer._generate_and_score_completions(me, [])
     assert sorted(calls) == sorted(hooks), calls
     assert calls[-1] == "_apply_token_mass_balance", calls
 

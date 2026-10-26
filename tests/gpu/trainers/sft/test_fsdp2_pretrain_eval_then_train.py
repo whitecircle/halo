@@ -27,7 +27,8 @@ from tests.common.distributed import world_all, world_min
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.pp_equivalence import build_dense_model
-from tests.common.utils import log, step_losses
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 STEPS = 8
 LEARNING_RATE = 5e-3

@@ -196,7 +196,7 @@ def _runtime_batch(processor, dataset: Dataset, images_field: str | None) -> dic
         features=vlm_map_features(),
         load_from_cache_file=False,
     )
-    collator = VLMDataCollator(processor, processor.tokenizer, MAX_LENGTH)
+    collator = VLMDataCollator(processor, processor.tokenizer, MAX_LENGTH, train_on_completions_only=False)
     return collator([mapped[0]])
 
 

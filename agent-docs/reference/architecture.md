@@ -65,9 +65,9 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `halo/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from |
 | `halo/data/preprocessed/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use |
 | `halo/data/vlm_render.py` | the VLM chat render, the processor call, the over-length refusal, image decoding and the placeholder token ids; one render for the batch and the offline bake, so both tokenize a row identically |
-| `halo/data/vlm_routing.py` | whether a run takes the VLM data path: the image-column spellings, a dataset's image evidence and the cross-rank verdicts and refusals off them |
+| `halo/data/vlm_detection.py` | whether a run takes the VLM data path: the image-column spellings, a dataset's image evidence and the cross-rank verdicts and refusals off them |
 | `halo/data/preprocessed/metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts, readable without importing the bake that wrote the rows |
-| `halo/environments/rollout_config.py` | `RolloutConfig`, the rollout defaults `AsyncTrainingConfig` reads, the reasoning-effort levels, and the stop-token and reasoning-end id resolvers; pickled to the Ray rollout actors, which keeps the Ray import out of `halo.configs` |
+| `halo/environments/rollout_config.py` | `RolloutConfig`, the rollout defaults `AsyncRolloutConfig` reads, the reasoning-effort levels, and the stop-token and reasoning-end id resolvers; pickled to the Ray rollout actors, which keeps the Ray import out of `halo.configs` |
 | `halo/config_validation.py` | the bounds guards, the validation base, the declared-default comparison and the argument refusals — standard library only |
 | `halo/subclass_registry.py` | the subclass-tree walk, the class-claim maps (a key claimed twice raises), the swap of claimed modules and the package import that registers every family — torch only, so a family registers by subclassing, with no list to edit |
 | `halo/rewards/terms.py` | the typed reward terms and their config parse — the endpoint defaults and the `halo/config_validation.py` guards are its only first-party imports, so `rewards:` parses at config time without the scorers' SDK client |
@@ -135,8 +135,8 @@ never re-derives them.
 What each mode shards and its backend: [Parallelism → Parallelism modes](../parallelism/README.md#parallelism-modes);
 its data-parallel size: [Supported combinations](../parallelism/README.md#supported-combinations).
 
-Four subpackages own the mechanics: `expert_parallel/` (DeepEP dispatch/combine, per-family MoE
-wrappers, grouped-GEMM expert compute, gradient-sync hooks, expert gather), `context_parallel/`
+Four subpackages own the mechanics: `expert_parallel/` (DeepEP dispatch/combine, per-family EP
+layers, grouped-GEMM expert compute, gradient-sync hooks, expert gather), `context_parallel/`
 (`UlyssesModel`, sequence splitting), `tensor_parallel/` (DTensor weight sharding), and
 `pipeline_parallel/` (layer split, stage module, stage-aware loading, P2P groups, the
 `torch.distributed.pipelining` seam). Inside `expert_parallel/`, `moe_layer/` composes `EPMoELayerBase` from
@@ -188,12 +188,12 @@ ParallelismConfig  ── validate mode, build process groups
    ▼
 load_distributed_model            halo/model_loading/parallel/loader.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
-   │  • apply_ep_layers → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
+   │  • apply_ep_layers → EP layers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesModel (when cp_size > 1)
    ▼
 DistributedTrainerMixin._configure_distributed_modes
    │  • FSDP2 fully_shard (EP modules in ignored_params, except at ep_group_size == 1)
-   │  • router/expert grad-sync hooks already attached at EP-wrapper construction (load);
+   │  • router/expert grad-sync hooks already attached at EP-layer construction (load);
    │    PEFT modules_to_save router copies re-hooked here
    ▼
 trainer.train()  ── HF training loop, DDP wrapping skipped
@@ -207,7 +207,7 @@ trainer.save_model  ── save_checkpoint (halo/checkpoint/parallel/) gathers s
 ```
 
 The backend choice and its per-model redirects are on [Flash Attention](../optimization/flash-attention.md);
-the EP wrappers and their FSDP2 treatment on [Expert Parallelism](../parallelism/expert-parallelism.md); the
+the EP layers and their FSDP2 treatment on [Expert Parallelism](../parallelism/expert-parallelism.md); the
 gathered save on [Checkpoints & Resume](checkpoints.md).
 
 ## RL: the rollout engine as a separate container

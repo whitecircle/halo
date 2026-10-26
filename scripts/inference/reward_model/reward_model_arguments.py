@@ -1,4 +1,4 @@
-"""The flag surface of the reward-model scorers (``rm_scoring`` / ``rm_rejection_sampling``): the endpoint,
+"""The flag surface of the reward-model scorers (``score`` / ``rejection_sample``): the endpoint,
 prompt-row, generation and reward-model blocks on one parser; the runs live in ``halo/entrypoints/``."""
 
 import argparse

@@ -6,7 +6,7 @@ Run: python tests/cpu/conventions/test_host_peak_rss.py
 
 import pytest
 
-from tests.common.utils import host_peak_rss_gib, reset_host_peak_rss
+from tests.common.memory import host_peak_rss_gib, reset_host_peak_rss
 
 BLOCK_GIB = 0.25
 

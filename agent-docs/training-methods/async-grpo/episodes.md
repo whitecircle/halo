@@ -2,7 +2,7 @@
 
 An episode is one multi-turn conversation: the engine samples an assistant turn, the environment answers it, and the
 loop runs until a final answer, `max_turns`, or a spent budget. Knobs are top-level
-[`AsyncTrainingConfig`](../../reference/configuration-reference.md#asynctrainingconfig) fields except
+[`AsyncRolloutConfig`](../../reference/configuration-reference.md#asyncrolloutconfig) fields except
 `carry_reasoning`, `max_length_cutoff_recoveries` and `length_cutoff_penalty` (`environment_kwargs`), `max_turns`
 (`EnvironmentConfig`), and `max_prompt_length`, `chat_template` and `force_chat_template` (script arguments).
 Reasoning budgets have [their own page](reasoning.md).
@@ -11,7 +11,7 @@ Reasoning budgets have [their own page](reasoning.md).
 
 `rollout_temperature`, `rollout_top_p`, `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` set the
 engine's sampling; their ranges, and the cuts refused under a sequence-level ratio
-([Trust region masks](objective.md#trust-region-masks)), are in [AsyncTrainingConfig](../../reference/configuration-reference.md#asynctrainingconfig).
+([Trust region masks](objective.md#trust-region-masks)), are in [AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
 Rollout and eval requests send all five, so the model's `generation_config.json` defaults never apply. TRL's own
 sampling fields reach no sampler and are refused when set ([Rollout backend](setup.md#rollout-backend)).
 
@@ -36,7 +36,9 @@ rendered prompt exceeds it, and `max_train_row_tokens` bounds a training row's m
 
 The trajectory is **never truncated**: a row over the model's context window raises on every rank together. The
 startup check warns when the worst-case episode overflows the served window
-([Rollout backend](setup.md#rollout-backend)); size `rollout_max_episode_tokens` so it fits.
+([Rollout backend](setup.md#rollout-backend)); size `rollout_max_episode_tokens` so it fits. The check counts the
+environment's system prompt and tool schema as the chat template renders them, and a template that cannot render
+that preamble fails the run at startup.
 
 `max_completion_length` is no knob here: the script pins it to `rollout_max_tokens` (TRL reads it only as the
 `dr_grpo` normalizer) and raises on another explicit value.

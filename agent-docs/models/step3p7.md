@@ -50,7 +50,7 @@ Two tokenizer facts to hold:
 - `tokenizer_config.json` pins `model_max_length` 131072 while the model accepts 262144; set `max_length` explicitly for runs past 128k.
 - The 128896-row embedding is deliberately wider than the 128815-entry tokenizer, so do not resize.
 
-## EP wrapper
+## EP layer
 
 `EPStep3p7MoELayer` (`halo/distributed/expert_parallel/families/step3p7.py`) replaces `Step3p7SparseMoeBlock`.
 
@@ -85,9 +85,9 @@ The sync forwards that namespace: the same save-side revert the gathered save ru
 
 ## Router balancing
 
-The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP wrappers `moe_balancing: auto` therefore resolves to `bias_update`: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own slot (selection only) and a served copy routes as trained.
+The router carries a native `e_score_correction_bias` buffer that exports with every checkpoint (hub key `moe.router_bias`), and the modeling has no aux-loss machinery at all (no `router_aux_loss_coef`, no `output_router_logits` parameter). Under the EP layers `moe_balancing: auto` therefore resolves to `bias_update`: [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback) sign-updates the gate's own slot (selection only) and a served copy routes as trained.
 
-On the wrapper-less tree (`ep_size=1` with `use_grouped_gemm: false`) nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning.
+On a tree with no EP layer (`ep_size=1` with `use_grouped_gemm: false`) nothing carries the bias and no aux term can reach the loss, so `auto` resolves to `none` with a warning.
 
 ## Attention
 

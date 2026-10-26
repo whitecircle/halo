@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU parity coverage for Laguna's EP wrapper, against the REAL in-library MoE block.
+"""CPU parity coverage for Laguna's EP layer, against the REAL in-library MoE block.
 
 The wrapper claims `transformers.models.laguna` by class name and by ``model_type``, so the block it
 is checked against must be the real one: a hand-written stand-in can declare attributes the library
@@ -133,7 +133,7 @@ class _RemoteRouter(nn.Module):
 
     def forward(self, hidden_states):
         logits = F.linear(hidden_states, self.weight).float()
-        # Deliberately incorrect cached choices: the EP wrapper must route from the logits itself.
+        # Deliberately incorrect cached choices: the EP layer must route from the logits itself.
         weights = torch.ones(*logits.shape[:-1], K, device=logits.device)
         indices = torch.zeros(*logits.shape[:-1], K, dtype=torch.long, device=logits.device)
         return logits, weights, indices

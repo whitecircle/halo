@@ -41,8 +41,10 @@ from halo.runtime.collectives import barrier
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 8

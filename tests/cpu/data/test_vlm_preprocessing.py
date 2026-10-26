@@ -29,8 +29,8 @@ from halo.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMD
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
 from halo.data.vlm_render import VLM_OUTPUT_FEATURES
-from halo.data.vlm_routing import VLM_IMAGE_COLUMNS
 from halo.model_loading.parallel import model_source
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.models.modality import is_vlm_model
@@ -261,7 +261,7 @@ def test_vlm_collator_raises_on_over_length_instead_of_truncating():
     """VLMDataCollator must refuse to truncate: cutting expanded image placeholder tokens while
     pixel_values/image_grid_thw keep every patch desyncs the two silently. It must raise."""
     tok = FakeVLMTokenizer()
-    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=4)
+    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=4, train_on_completions_only=False)
     ex = {"history": [{"role": "user", "content": "one two three four five six"}], "images": []}
     with pytest.raises(ValueError, match="cannot be truncated at collation"):
         collator([ex])
@@ -270,7 +270,7 @@ def test_vlm_collator_raises_on_over_length_instead_of_truncating():
 def test_vlm_collator_within_budget_pads_and_builds_labels():
     """Under the budget the collator pads and builds labels: right-padded batch + pad-masked labels."""
     tok = FakeVLMTokenizer()
-    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=16)
+    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=16, train_on_completions_only=False)
     examples = [
         {
             "history": [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello there"}],
@@ -294,9 +294,11 @@ def test_self_distill_vlm_teacher_overflow_raises():
         _FakeVLMProcessor(tok),
         tok,
         max_length=8,
+        train_on_completions_only=False,
         hint_template=" hint hint hint hint hint {answer}",
         answer_field="answer",
         solution_field=None,
+        confidence_power=1.0,
     )
     ex = {
         # Student renders to exactly 8 tokens (fits); the teacher adds the 6-token hint (overflows).
@@ -451,7 +453,7 @@ def test_image_token_ids_are_resolved_once_per_collator_not_per_batch():
     """``resolve_image_token_ids`` unions the tokenizer's WHOLE vocab dict. Resolved per batch it is a
     per-step cost of the vocabulary's size (~150k entries) for a verdict fixed at construction."""
     tok = _VocabCountingVLMTokenizer()
-    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=32)
+    collator = VLMDataCollator(_FakeVLMProcessor(tok), tok, max_length=32, train_on_completions_only=False)
     example = {"history": _IMAGELESS_TURNS, "images": []}
 
     for _ in range(3):

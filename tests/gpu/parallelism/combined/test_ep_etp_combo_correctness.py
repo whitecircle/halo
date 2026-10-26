@@ -34,7 +34,8 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.utils import log, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2

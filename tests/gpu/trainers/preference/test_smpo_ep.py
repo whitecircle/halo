@@ -2,7 +2,7 @@
 """
 Test script for SMPO trainer with Expert Parallelism (EP=2) on GptOss-20B MoE.
 
-Smoke test: runs SmoothMarginPOTrainer with expert parallelism enabled, using synthetic
+Smoke test: runs SMPOTrainer with expert parallelism enabled, using synthetic
 preference data (math Q&A with 30% multi-turn prompts).
 
 Test validates:
@@ -26,15 +26,17 @@ Requirements:
 import torch
 from transformers import AutoTokenizer
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import gpu_mem_gb, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -106,7 +108,7 @@ def run(ctx) -> dict:
     log(f"GPU memory after model load: {gpu_mem_gb():.1f}GB")
 
     log("\n--- Creating SMPO config ---")
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -128,8 +130,8 @@ def run(ctx) -> dict:
 
     log(f"Config: beta={config.beta}, target_margin={config.target_margin}, loss_type={config.loss_type}")
 
-    log("\n--- Creating SmoothMarginPOTrainer ---")
-    trainer = SmoothMarginPOTrainer(
+    log("\n--- Creating SMPOTrainer ---")
+    trainer = SMPOTrainer(
         model=model,
         args=config,
         train_dataset=train_dataset,

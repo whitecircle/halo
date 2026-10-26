@@ -26,7 +26,7 @@ One YAML, six dataclasses.
 | Knob family | Class |
 |---|---|
 | `environment_type`, `rewards`, `max_turns`, `environment_kwargs` | `EnvironmentConfig` ([fields](../../reference/configuration-reference.md#environmentconfig)) |
-| Ray, servers and their group port, sync cadence, prefetch, rollout sampling, trust region | `AsyncTrainingConfig` ([fields](../../reference/configuration-reference.md#asynctrainingconfig)) |
+| Ray, servers and their group port, sync cadence, prefetch, rollout sampling, trust region | `AsyncRolloutConfig` ([fields](../../reference/configuration-reference.md#asyncrolloutconfig)) |
 | Dataset columns, prompt filter, `save_completions`, `reset_sinks` | `EnvironmentalGRPOScriptArguments` |
 | Optimizer, batch, `beta`, `num_generations` | TRL `GRPOConfig` |
 | Model id, LoRA, `trust_remote_code` | `ModelArguments` |
@@ -83,7 +83,7 @@ trainer = DistributedAsyncEnvironmentalGRPOTrainer(
     train_dataset=train_dataset,
     processing_class=tokenizer,
     environment_config=EnvironmentConfig(environment_type="react_math"),
-    async_config=AsyncTrainingConfig(rollout_server_url="http://localhost:8000"),
+    async_config=AsyncRolloutConfig(rollout_server_url="http://localhost:8000"),
     parallelism_config=ParallelismConfig(),          # required; the default is plain data parallelism
     peft_config=lora_config,                         # optional
 )

@@ -30,8 +30,9 @@ import torch
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 PP_SIZE = 2
 EP_SIZE = 2

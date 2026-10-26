@@ -76,12 +76,12 @@ tool's help, not the launcher's.
 | `convert-to-bf16` / `quantize-to-lowp` / `unfuse-moe-experts` / `reset-sinks` / `reattach-vision-tower` | checkpoint post-processing: bf16 export, low-precision export, per-expert layout, GPT-OSS sink reset, the vision tower back on a text-only export |
 | `patch-vocab` | add tokens to a model's vocabulary before training |
 | `convert-glm5-bf16` / `convert-mistral4-bf16` / `convert-deepseek-v4-bf16` | convert that family's low-precision Hub release to bf16, required before training it |
-| `prepare-dataset` / `s3-datasets` | tokenize SFT or pretraining data offline, optionally packed and sharded; move datasets to and from S3 |
+| `prepare-dataset` / `s3` | tokenize SFT or pretraining data offline, optionally packed and sharded; move datasets to and from S3 |
 | `compact-code-tests` / `prepare-code-dataset` | build a code-contests pool: cap the test corpus, then build prompts, pack tests and checker, and publish rating bands |
-| `dataset-deduplication` | deduplicate generated or collected data |
+| `deduplicate-dataset` | deduplicate generated or collected data |
 | `openai-batched-generation` | batched generation against a vLLM or OpenAI-compatible endpoint |
-| `rm-scoring` | generate one response per prompt against an endpoint and score it with a reward model |
-| `rm-rejection-sampling` | generate N responses per prompt, score them, and keep the best and worst as preference pairs or offline GRPO data |
+| `inference/reward-model/score` | generate one response per prompt against an endpoint and score it with a reward model |
+| `inference/reward-model/rejection-sample` | generate N responses per prompt, score them, and keep the best and worst as preference pairs or offline GRPO data |
 | `run-env` / `run-code-contests` / `regrade-trajectories` | evaluate a model on an RL environment through an OpenAI-compatible endpoint; re-grade recorded code-contest trajectories |
 | `gradio-openai-chatbot` / `gradio-environment-playground` | chat with a served model, or play an environment against it, in the browser |
 | `nvlink-health` / `py-spy-diag` / `trace-report` | preflight and debugging; see [Troubleshooting](troubleshooting.md) |

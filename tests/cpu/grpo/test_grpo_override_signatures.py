@@ -18,9 +18,9 @@ from trl import GRPOTrainer
 
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
-TRAINERS = [DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer, DistributedSDPGTrainer]
+TRAINERS = [DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer, DistributedSDPGTrainer]
 
 
 def _trl_call(trl_method) -> tuple[list, dict] | None:

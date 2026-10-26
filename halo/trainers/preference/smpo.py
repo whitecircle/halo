@@ -34,7 +34,7 @@ from transformers.trainer_callback import TrainerCallback
 from transformers.trainer_utils import EvalLoopOutput
 
 from halo.callbacks.variable_scheduler import VariableSchedulerCallback
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.preferences import VLM_SMPO_FEATURES, tokenize_preference_row, tokenize_vlm_preference_row
@@ -57,7 +57,6 @@ from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.evaluation import split_rows_head, split_rows_mean
 from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
-from halo.trainers.parallelism.trainer_rules import reject_cp_packed_collator
 from halo.trainers.preference.preference_rules import (
     reject_padding_free_without_varlen,
     reject_smpo_options,
@@ -74,6 +73,7 @@ from halo.trainers.preference.smpo_objective import (
 )
 from halo.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
 from halo.trainers.stored_metrics import StoredMetricsMixin
+from halo.trainers.trainer_rules import reject_cp_packed_collator
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,7 @@ def resolve_vlm_mode(processing_class, is_vlm: bool | None) -> bool:
     return is_vlm
 
 
-def _margin_schedule_callback(args: SmoothMarginPOConfig, model) -> VariableSchedulerCallback:
+def _margin_schedule_callback(args: SMPOConfig, model) -> VariableSchedulerCallback:
     """Seed ``model.target_margin`` at ``initial_margin`` and schedule it up to ``target_margin``."""
     model.target_margin = args.initial_margin
     if is_global_main_process():
@@ -137,7 +137,7 @@ def _side_statistics(
     }
 
 
-class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
+class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
     """Reference-model-free preference optimization (:class:`SMPOObjective`). Supports EP/CP/TP/PP.
 
     ``is_vlm`` selects the VLM data path, raw message rows plus ``images`` processed at collation, with vision
@@ -157,7 +157,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
     def __init__(
         self,
         model: str | PreTrainedModel | nn.Module,
-        args: SmoothMarginPOConfig | None = None,
+        args: SMPOConfig | None = None,
         data_collator: DataCollator | None = None,
         train_dataset: Dataset | IterableDataset | None = None,
         eval_dataset: Dataset | IterableDataset | dict[str, Dataset] | None = None,
@@ -174,7 +174,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         **kwargs,
     ):
         if args is None:
-            args = SmoothMarginPOConfig("smpo-output")
+            args = SMPOConfig("smpo-output")
         if processing_class is None:
             raise ValueError("processing_class (tokenizer) must be provided")
 
@@ -391,7 +391,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
     def _load_policy(
         self,
         model: str | PreTrainedModel | nn.Module,
-        args: SmoothMarginPOConfig,
+        args: SMPOConfig,
         peft_config: Any | None,
         parallelism_config: ParallelismConfig | None,
         tokenizer: PreTrainedTokenizerBase,
@@ -420,7 +420,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         self,
         dataset: Dataset | IterableDataset | dict[str, Dataset] | None,
         processing_class: PreTrainedTokenizerBase,
-        args: SmoothMarginPOConfig,
+        args: SMPOConfig,
         dataset_name: str,
     ) -> Dataset | IterableDataset | dict[str, Dataset] | None:
         """Tokenize the preference rows unless already prepared; a dict prepares each named split.

@@ -66,7 +66,7 @@ class _PeftStyleWrapper(nn.Module):
 
 
 def test_unsupported_family_roster_is_pinned():
-    """Read off the EP wrapper registry, not a hand-maintained list: a new family that cannot sync,
+    """Read off the EP layer registry, not a hand-maintained list: a new family that cannot sync,
     or a flag cleared on an existing one, must be a deliberate edit here with the evidence in the
     declaring class."""
     unsupported = {cls.__name__ for cls in set(MOE_LAYER_MAP.values()) if cls.FAMILY.weight_sync_refusal is not None}
@@ -97,7 +97,7 @@ def test_gate_passes_supported_ep_family():
 
 
 def test_gate_ignores_non_ep_modules_declaring_the_flag():
-    """A plain module that happens to carry the attribute is not an EP wrapper and must not trip the
+    """A plain module that happens to carry the attribute is not an EP layer and must not trip the
     gate."""
     model = nn.Module()
     model.dense = nn.Linear(4, 4)

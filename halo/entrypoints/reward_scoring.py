@@ -428,7 +428,7 @@ def print_statistics(responses: list, rewards: list, model_name: str):
     console.print(table)
 
 
-async def run_rm_scoring(args) -> None:
+async def run_reward_scoring(args) -> None:
     """Generate one response per pending prompt, score it with the reward model, append it to the run's
     JSONL output and print summary statistics over every scored row, resumed ones included."""
 

@@ -89,7 +89,7 @@ def test_factory_refuses_dense_packing_for_gpt_oss(attn_impl):
     config = _tiny_config()
     config._attn_implementation = attn_impl
     with pytest.raises(ValueError, match="refused"):
-        select_data_collator(_mock_tokenizer(), packing=True, model_config=config)
+        select_data_collator(_mock_tokenizer(), train_on_completions_only=False, packing=True, model_config=config)
 
 
 def test_factory_refuses_the_composite_wrapper_too():
@@ -107,13 +107,17 @@ def test_factory_refuses_the_composite_wrapper_too():
             return self.text_config
 
     with pytest.raises(ValueError, match="refused"):
-        select_data_collator(_mock_tokenizer(), packing=True, model_config=_CompositeConfig())
+        select_data_collator(
+            _mock_tokenizer(), train_on_completions_only=False, packing=True, model_config=_CompositeConfig()
+        )
 
 
 def test_factory_allows_varlen_packing_for_gpt_oss():
     config = _tiny_config()
     config._attn_implementation = "flash_attention_2"
-    collator = select_data_collator(_mock_tokenizer(), packing=True, model_config=config)
+    collator = select_data_collator(
+        _mock_tokenizer(), train_on_completions_only=False, packing=True, model_config=config
+    )
     assert isinstance(collator, DataCollatorWithPacking)
 
 
@@ -123,7 +127,9 @@ def test_factory_only_warns_for_isolating_families_on_dense():
     config = Mistral4Config(num_hidden_layers=1)
     config._attn_implementation = "sdpa"
     assert not has_dense_packing_leak(config)
-    collator = select_data_collator(_mock_tokenizer(), packing=True, model_config=config)
+    collator = select_data_collator(
+        _mock_tokenizer(), train_on_completions_only=False, packing=True, model_config=config
+    )
     assert isinstance(collator, DataCollatorWithPacking)
 
 

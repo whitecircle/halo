@@ -37,8 +37,8 @@ _APPLIER_DEFAULT_OFF_FLAGS = ("rope", "swiglu", "geglu")
 # upstream branch and miss the rules this module derives from this registry.
 _TOOLKIT_LIGER_APPLIERS = build_liger_appliers(LIGER_FAMILY_SPECS)
 
-# Model types whose fused GLU survives an EP wrapper: a toolkit spec names the dense and shared-expert
-# MLPs, which every wrapper adopts unchanged; a spec naming none has at most upstream's routed-expert swap.
+# Model types whose fused GLU survives an EP layer: a toolkit spec names the dense and shared-expert
+# MLPs, which every EP layer adopts unchanged; a spec naming none has at most upstream's routed-expert swap.
 _TOOLKIT_GLU_SURVIVES_EP = frozenset(
     model_type for spec in LIGER_FAMILY_SPECS if spec.glu_mlp for model_type in spec.model_types
 )
@@ -88,11 +88,6 @@ def _resolve_applier(model_type: str | None, fallback_type: str | None) -> tuple
     return None, None
 
 
-def resolve_liger_applier(model_type: str):
-    """The Liger applier claiming ``model_type``, toolkit first, or ``None``."""
-    return _resolve_applier(model_type, None)[1]
-
-
 def _toolkit_applier(model_type: str | None, applier) -> LigerApplier | None:
     """``applier`` as the toolkit's :class:`LigerApplier`, or ``None`` where liger-kernel's own resolved.
 
@@ -109,26 +104,26 @@ def _toolkit_applier(model_type: str | None, applier) -> LigerApplier | None:
     return applier
 
 
-def liger_ep_disables_fused_glu(needs_ep_wrappers: bool, model_config) -> bool:
+def liger_ep_disables_fused_glu(needs_ep_layers: bool, model_config) -> bool:
     """The ``has_ep_wrapped_experts`` argument both Liger application sites pass.
 
-    True only when an EP wrapper replaces every module the resolved applier's GLU patch swaps: upstream's
-    MoE appliers swap the routed-experts class the wrapper replaces wholesale, while a toolkit spec names
-    the dense and shared-expert MLPs every wrapper adopts unchanged.
+    True only when an EP layer replaces every module the resolved applier's GLU patch swaps: upstream's
+    MoE appliers swap the routed-experts class the EP layer replaces wholesale, while a toolkit spec names
+    the dense and shared-expert MLPs every EP layer adopts unchanged.
     """
-    if not wraps_experts(model_config, wrappers_requested=needs_ep_wrappers):
+    if not wraps_experts(model_config, ep_layers_requested=needs_ep_layers):
         return False
     return not any(candidate in _TOOLKIT_GLU_SURVIVES_EP for candidate in _liger_model_types(model_config))
 
 
-def liger_routed_expert_overrides(needs_ep_wrappers: bool, model_config) -> dict[str, str]:
+def liger_routed_expert_overrides(needs_ep_layers: bool, model_config) -> dict[str, str]:
     """``{"swiglu": reason}`` where upstream Liger's ``swiglu`` could replace routed experts Halo does not wrap.
 
     Upstream's MoE appliers swap routed experts for ``LigerExperts`` under ``swiglu``, whose Blackwell
     input-gradient fix is not validated here. The rule keys on the config having experts, and the flag goes
     whole: any dense, shared-expert or vision SwiGLU upstream fuses under it runs eager too.
     """
-    if not has_routed_experts(model_config) or wraps_experts(model_config, wrappers_requested=needs_ep_wrappers):
+    if not has_routed_experts(model_config) or wraps_experts(model_config, ep_layers_requested=needs_ep_layers):
         return {}
     model_type, applier = _resolve_applier(*_liger_model_types(model_config))
     if applier is None:
@@ -163,8 +158,8 @@ def liger_parallelism_overrides(
     """Liger kernels a parallelism axis makes incorrect or inert, mapped to the reason."""
     overrides: dict[str, str] = {}
     if has_ep_wrapped_experts:
-        # EP wrappers replace `.experts` with a DeepEP-aware path; Liger swaps a single FFN module.
-        reason = "EP wrappers replace the expert FFN Liger would swap"
+        # EP layers replace `.experts` with a DeepEP-aware path; Liger swaps a single FFN module.
+        reason = "EP layers replace the expert FFN Liger would swap"
         overrides["swiglu"] = overrides["geglu"] = reason
     if tp_size > 1:
         # A ColwiseParallel-sharded lm_head makes the fused CE softmax a partial-vocab slice.
@@ -196,7 +191,7 @@ def _force_off(user_config: dict, forced_off: dict[str, str], *, yields_to_reque
 def sanitize_liger_config(
     user_config: dict,
     *,
-    needs_ep_wrappers: bool,
+    needs_ep_layers: bool,
     model_config,
     tp_size: int = 1,
     cp_size: int = 1,
@@ -210,7 +205,7 @@ def sanitize_liger_config(
     rule does not.
     """
     forced_off = liger_parallelism_overrides(
-        has_ep_wrapped_experts=liger_ep_disables_fused_glu(needs_ep_wrappers, model_config),
+        has_ep_wrapped_experts=liger_ep_disables_fused_glu(needs_ep_layers, model_config),
         tp_size=tp_size,
         cp_size=cp_size,
         pp_size=pp_size,
@@ -218,7 +213,7 @@ def sanitize_liger_config(
     config = _force_off(user_config, forced_off, yields_to_request=("swiglu", "geglu"))
     if forced_off and is_global_main_process():
         logger.info(f"Liger disabled by parallelism: {', '.join(sorted(forced_off))}")
-    routed_expert_overrides = liger_routed_expert_overrides(needs_ep_wrappers, model_config)
+    routed_expert_overrides = liger_routed_expert_overrides(needs_ep_layers, model_config)
     config = _force_off(config, routed_expert_overrides, yields_to_request=())
     if is_global_main_process():
         for key, reason in routed_expert_overrides.items():
@@ -389,7 +384,7 @@ def _apply_liger_for_standard_models(
 def apply_liger_kernel(
     model_config: AutoConfig,
     liger_kernel_config: dict | None = None,
-    needs_ep_wrappers: bool = False,
+    needs_ep_layers: bool = False,
     tp_size: int = 1,
     cp_size: int = 1,
     pp_size: int = 1,
@@ -404,7 +399,7 @@ def apply_liger_kernel(
 
     user_overrides = sanitize_liger_config(
         liger_kernel_config or {},
-        needs_ep_wrappers=needs_ep_wrappers,
+        needs_ep_layers=needs_ep_layers,
         model_config=model_config,
         tp_size=tp_size,
         cp_size=cp_size,

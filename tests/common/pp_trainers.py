@@ -16,9 +16,10 @@ from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.optimizer_state import local_optimizer_state
 from tests.common.pp_equivalence import causal_lm_loss, dp_slice_batch
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import local_optimizer_state, log
 
 PAD_ID = 0
 

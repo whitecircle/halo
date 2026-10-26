@@ -2,7 +2,7 @@
 
 The sweep builds its loader with ``accelerator.prepare`` and reassembles the results with
 ``accelerator.gather_for_metrics``, both keyed on the GLOBAL rank. It runs inside TRL's ``__init__``,
-when the model already carries its load-time TP attention shards and EP/ETP expert wrappers, so
+when the model already carries its load-time TP attention shards and EP/ETP layers, so
 siblings forwarding different rows hit shape-coupled collectives. These tests drive the mixin's sweep
 over a stub reference forward.
 """

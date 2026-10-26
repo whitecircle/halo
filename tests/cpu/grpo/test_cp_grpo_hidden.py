@@ -8,7 +8,7 @@ import torch
 from torch import nn
 
 import halo.distributed.context_parallel.ulysses_model as cp_wrapper
-from tests.common.cp_wrapper import unpatched_cp_wrapper
+from tests.common.cp_model import unpatched_cp_wrapper
 
 SEQ = 12
 HIDDEN = 5

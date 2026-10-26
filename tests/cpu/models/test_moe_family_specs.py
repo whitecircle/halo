@@ -60,8 +60,8 @@ def test_lookups_resolve_every_spelling_and_the_text_sub_config():
             return _Text()
 
     assert find_moe_family_spec_for_config(_Composite()) is QWEN3
-    assert wraps_experts(_Composite(), wrappers_requested=True)
-    assert not wraps_experts(_Composite(), wrappers_requested=False)
+    assert wraps_experts(_Composite(), ep_layers_requested=True)
+    assert not wraps_experts(_Composite(), ep_layers_requested=False)
 
 
 def test_to_hub_key_renames_only_declared_spellings():

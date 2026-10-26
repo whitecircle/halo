@@ -28,7 +28,7 @@ from halo.weight_sync.pool import WeightSyncPool
 from halo.weight_sync.transport.pynccl import PyNcclCommunicator
 from tests.common.harness import gpu_test_main
 from tests.common.on_policy_e2e import probe_top_logprobs, record_served_baseline, served_policy_moved
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
 from tests.common.weight_sync_reinit import (
     CONNECTION_TIMEOUT_S,

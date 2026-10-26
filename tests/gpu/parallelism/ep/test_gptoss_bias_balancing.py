@@ -46,7 +46,7 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.moe.balancing import iter_balancing_routers, resolve_balancing_mode
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 NUM_EXPERTS = 8
 TOP_K = 2

@@ -40,8 +40,10 @@ from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_0_6B
 MAX_STEPS = 20

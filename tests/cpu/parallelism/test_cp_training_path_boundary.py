@@ -15,7 +15,7 @@ from transformers.modeling_outputs import CausalLMOutputWithPast
 
 from halo.distributed.context_parallel.config import CPConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs
-from tests.common.cp_wrapper import unpatched_cp_wrapper
+from tests.common.cp_model import unpatched_cp_wrapper
 from tests.common.gloo import run_gloo_ranks
 from tests.common.smpo_trainer import smpo_trainer
 

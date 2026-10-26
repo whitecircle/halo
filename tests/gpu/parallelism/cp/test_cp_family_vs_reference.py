@@ -58,9 +58,11 @@ from tests.common.equivalence.cp_equivalence import (
     tiny_model,
 )
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, cos_sim, log, log_all
 
 # The aux components are differences of two eval forwards on one batch, so the CE term and the CP-vs-reference
 # normalization gap cancel, leaving coef * aux ~ 0.2 plus bf16 noise; a dropped or doubled cp_size factor moves

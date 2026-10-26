@@ -36,6 +36,7 @@ from halo.model_loading.liger import dispatch
 from halo.model_loading.liger.applier import LigerApplier
 from halo.model_loading.liger.cross_entropy import liger_cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS, LigerFamilySpec
+from tests.common.liger_appliers import liger_applier
 from tests.common.repo import probe_findings
 
 DELEGATING_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.delegates_to_upstream]
@@ -88,7 +89,7 @@ def test_the_delegating_families_resolve_on_the_toolkit_branch():
     assert delegating == EXPECTED_DELEGATING_TYPES
 
     for model_type in sorted(delegating):
-        applier = dispatch.resolve_liger_applier(model_type)
+        applier = liger_applier(model_type)
         assert applier is dispatch._TOOLKIT_LIGER_APPLIERS[model_type], (
             f"{model_type} no longer resolves on the toolkit branch, where the added role is applied"
         )
@@ -163,7 +164,7 @@ def test_the_moe_families_add_their_shared_expert_mlp():
     """Dropping the shared-expert role would leave it eager on every layer, under EP included.
 
     Upstream's ``swiglu`` never runs for these families (it would swap ``*Experts``); the shared
-    expert every EP wrapper adopts unchanged is fused only because the spec names its MLP class.
+    expert every EP layer adopts unchanged is fused only because the spec names its MLP class.
     """
     shared_expert_mlps = {
         model_type: spec.glu_mlp
@@ -324,10 +325,10 @@ from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.model_loading.liger.fused_modules import _fused_glu_forward
-from halo.model_loading.liger.dispatch import resolve_liger_applier
+from tests.common.liger_appliers import liger_applier
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
-applier = resolve_liger_applier("qwen3_5_moe_text")
+applier = liger_applier("qwen3_5_moe_text")
 flags = dict(rope=False, cross_entropy=False, fused_linear_cross_entropy=False, rms_norm=False, swiglu=True)
 applier(**flags)
 once = modeling.Qwen3_5MoeMLP
@@ -384,7 +385,7 @@ def test_the_upstream_applier_actually_runs():
     script = """
 import importlib, inspect
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from halo.model_loading.liger.dispatch import resolve_liger_applier
+from tests.common.liger_appliers import liger_applier
 
 failures = []
 for spec in [s for s in LIGER_FAMILY_SPECS if s.delegates_to_upstream]:
@@ -392,7 +393,7 @@ for spec in [s for s in LIGER_FAMILY_SPECS if s.delegates_to_upstream]:
     before = {name: obj for name, obj in vars(module).items() if isinstance(obj, type)}
     forwards_before = {name: getattr(obj, "forward", None) for name, obj in before.items()}
     rope_before = getattr(module, "apply_rotary_pos_emb", None)
-    applier = resolve_liger_applier(spec.model_types[0])
+    applier = liger_applier(spec.model_types[0])
     names = set(inspect.signature(applier).parameters) - {"model"}
     # The norm flag proves upstream ran unless the spec took that role over; then its fused-loss head,
     # which every delegating family leaves to upstream, does (Liger computes no rotary for some of them).

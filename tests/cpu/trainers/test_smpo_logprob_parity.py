@@ -23,7 +23,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.preference.smpo_pipeline_loss import SMPOPipelineLoss
 from tests.common.smpo_trainer import smpo_trainer
 
@@ -51,11 +51,11 @@ class _TokenTableLM(nn.Module):
         return SimpleNamespace(logits=self.table[input_ids].to(torch.bfloat16).to(self.logits_dtype))
 
 
-def _trainer() -> SmoothMarginPOTrainer:
+def _trainer() -> SMPOTrainer:
     return smpo_trainer(pad_token_id=PAD_TOKEN_ID, min_log_prob=-4.0, max_length=MAX_LENGTH)
 
 
-def _pipeline(trainer: SmoothMarginPOTrainer) -> SMPOPipelineLoss:
+def _pipeline(trainer: SMPOTrainer) -> SMPOPipelineLoss:
     """The pipeline loss the trainer's adapter hook builds."""
     trainer._pp_loss_adapter()
     return trainer._pp_loss
@@ -169,7 +169,7 @@ def test_a_pipeline_step_of_padding_alone_scores_zero():
     assert pipeline.token_loss(model(inputs["input_ids"]).logits, filler).item() == 0.0
 
 
-def _eval_trainer(real_pairs: int) -> SmoothMarginPOTrainer:
+def _eval_trainer(real_pairs: int) -> SMPOTrainer:
     """An eval-mode SMPO whose batch's first ``real_pairs`` pairs are the split's own."""
     trainer = _trainer()
     trainer.eval_split_rows = lambda num_rows: real_pairs

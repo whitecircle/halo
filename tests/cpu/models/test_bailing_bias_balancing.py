@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for Bailing bias-update balancing through the gate's native ``expert_bias``.
 
-Bailing's EP wrapper delegates routing to the hub gate, so instead of the base's side-buffer it
+Bailing's EP layer delegates routing to the hub gate, so instead of the base's side-buffer it
 adopts the gate's own persistent ``expert_bias`` (``topk_method: noaux_tc``) as the balancing buffer.
 The adoption contract shared with every other native-slot family — identity, the fp32 upcast, the
 export key, buffer-not-Parameter, idempotence — is pinned once for the whole roster in

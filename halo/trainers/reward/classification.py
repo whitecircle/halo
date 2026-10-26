@@ -335,7 +335,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
                 if np.isnan(auc_roc):
                     self._omit_auc_roc("undefined (a class has no samples)")
                 else:
-                    metrics["auc_roc"] = auc_roc
+                    metrics[_OMITTABLE_METRIC] = auc_roc
 
         if args.compute_per_class_metrics and not self.is_multi_label:
             per_class_f1 = f1_score(labels, preds, average=None, zero_division=0)

@@ -10,14 +10,15 @@ import argparse
 
 import torch
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MAX_STEPS = 10
 SEED = 42
@@ -43,7 +44,7 @@ def run(ctx):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=MAX_STEPS,
         per_device_train_batch_size=1,
@@ -61,7 +62,7 @@ def run(ctx):
         dataloader_drop_last=True,
         padding_free=PADDING_FREE,
     )
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=config,
         train_dataset=create_preference_dataset(128, tokenizer, seed=SEED),

@@ -30,7 +30,7 @@ from halo.data.pipeline.text_rows import build_chat_row_processor
 from halo.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 # Configuration
 

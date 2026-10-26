@@ -36,7 +36,8 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import log, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 MODE_CONFIGS = {"fsdp": {}, "tp": {"tp_size": 2}, "ep": {"ep_size": 2}}

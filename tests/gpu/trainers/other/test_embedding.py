@@ -30,15 +30,17 @@ from halo.checkpoint.writing import save_dtype_caster
 from halo.configs.embedding import EmbeddingConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.embedding.trainer import EmbeddingTrainer
-from tests.common.harness import gpu_test_main
-from tests.common.models import PARAPHRASE_MINILM
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     assert_adapters_moved,
     assert_only_adapters_trainable,
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
+from tests.common.models import PARAPHRASE_MINILM
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = PARAPHRASE_MINILM
 NUM_TRAIN_STEPS = 10

@@ -228,7 +228,7 @@ def test_balancing_registries_resolve_on_the_real_config():
 
 
 def test_balancing_auto_resolves_none_and_an_explicit_aux_loss_warns_and_stays_off():
-    """Plain HF tree: no native ``balancing_biases`` buffer, no EP wrappers, and a forward that never
+    """Plain HF tree: no native ``balancing_biases`` buffer, no EP layers, and a forward that never
     takes ``output_router_logits`` — so ``auto`` resolves to ``none``; like Gemma 4, plain-tree
     step3p7 has no balancing route. An EXPLICIT ``aux_loss`` still has to survive the family
     stripping ``router_aux_loss_coef`` from its config entirely: the no-usable-coefficient branch

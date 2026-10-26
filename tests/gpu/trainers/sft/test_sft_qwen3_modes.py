@@ -34,12 +34,14 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.runtime.collectives import barrier
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import adapter_save_checks
 from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import adapter_save_checks
-from tests.common.utils import LM_TRAINING_LOSS_BAND, cleanup_memory, gpu_mem_gb, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import LM_TRAINING_LOSS_BAND, training_run_checks
 
 # Configuration
 
@@ -403,6 +405,7 @@ def run(ctx) -> dict:
         )
 
         cp_collator = select_data_collator(
+            train_on_completions_only=False,
             tokenizer=tokenizer,
             use_context_parallel=True,
             pad_to_multiple_of=2,

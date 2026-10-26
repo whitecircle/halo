@@ -28,8 +28,10 @@ from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
-from tests.common.utils import cleanup_memory, log, log_all, max_or_nan
+from tests.common.numerics import max_or_nan
+from tests.common.rank_log import log, log_all
 
 SEED = 42
 BATCH, SEQ = 2, 64

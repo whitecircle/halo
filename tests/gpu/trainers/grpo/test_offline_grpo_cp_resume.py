@@ -37,6 +37,7 @@ from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
     build_offline_grpo_trainer,
     completion_logps,
@@ -50,9 +51,10 @@ from tests.common.offline_grpo import (
     token_logps,
 )
 from tests.common.offline_grpo_reference import restore_reference
+from tests.common.optimizer_state import optimizer_state_matches
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, finish_phase, log, optimizer_state_matches
 
 SEED = 721
 STEPS = 3

@@ -15,11 +15,11 @@ from types import SimpleNamespace
 import pytest
 from datasets import Dataset, IterableDataset
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 _ROWS = [{"prompt": "p"}] * 4
 
@@ -35,7 +35,7 @@ def begin(monkeypatch):
     monkeypatch.setattr(DistributedTrainerMixin, "_init_distributed_config", lambda self, kwargs, **_: kwargs)
 
     def run(ctor_args=(), *, config=None, chunked=False, custom_loader=False, **kwargs):
-        trainer = object.__new__(DistributedGRPOTrainer)
+        trainer = object.__new__(DistributedOnlineGRPOTrainer)
         trainer._use_chunked_grpo_logprobs = chunked
         trainer._needs_custom_dataloader = lambda: custom_loader
         if not ctor_args:
@@ -88,10 +88,10 @@ class _GateReached(Exception):
 @pytest.mark.parametrize(
     ("trainer_cls", "kwargs"),
     [
-        (DistributedGRPOTrainer, {"use_chunked_grpo_logprobs": True}),
+        (DistributedOnlineGRPOTrainer, {"use_chunked_grpo_logprobs": True}),
         (
             DistributedAsyncEnvironmentalGRPOTrainer,
-            {"async_config": AsyncTrainingConfig(use_chunked_grpo_logprobs=True)},
+            {"async_config": AsyncRolloutConfig(use_chunked_grpo_logprobs=True)},
         ),
     ],
     ids=lambda v: getattr(v, "__name__", ""),

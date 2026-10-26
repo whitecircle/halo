@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """A gathered Gemma-4 EP save must reload as the checkpoint a plain ``save_pretrained`` would write.
 
-Gemma-4 is the family where the gathered writer has the least margin. Its EP wrapper replaces
+Gemma-4 is the family where the gathered writer has the least margin. Its EP layer replaces
 ``Gemma4TextExperts`` itself rather than an enclosing MoE block, so the base gather's ``experts.``
 prefix would double into ``...experts.experts.gate_up_proj`` — keys that no loader claims, which
 ``from_pretrained`` reports as *missing* (silently randomly-initialized experts) plus *unexpected*

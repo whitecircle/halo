@@ -54,8 +54,11 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
-from tests.common.utils import cleanup_memory, log, max_or_nan, step_losses
+from tests.common.numerics import max_or_nan
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--mode", choices=["dp", "hsdp", "tp", "cp", "ep1", "ep1_fp32_router", "ep", "ep2"], default="dp")

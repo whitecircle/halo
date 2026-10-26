@@ -1,4 +1,4 @@
-"""EP wrapper for GLM-5 Next MoE (fused experts, clamped SwiGLU, sigmoid noaux-tc routing)."""
+"""EP layer for GLM-5 Next MoE (fused experts, clamped SwiGLU, sigmoid noaux-tc routing)."""
 
 from __future__ import annotations
 
@@ -11,10 +11,10 @@ from halo.models.moe.family_specs import GLM5_NEXT
 
 
 class EPGlm5NextMoELayer(EPGroupLimitedMoELayerBase):
-    """EP wrapper for GLM-5 Next MoE (``Glm5NextTextMoE``, GLM-5.3-Flash) using DeepEP.
+    """EP layer for GLM-5 Next MoE (``Glm5NextTextMoE``, GLM-5.3-Flash) using DeepEP.
 
     Fused routed experts with the family's clamped SwiGLU, DeepSeek-V3-style sigmoid routing whose
-    ``e_score_correction_bias`` perturbs selection only (the wrapper reuses the router's logits and re-derives the
+    ``e_score_correction_bias`` perturbs selection only (the EP layer reuses the router's logits and re-derives the
     rest), and one always-on shared expert carrying its own clamp.
     """
 

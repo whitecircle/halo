@@ -198,7 +198,7 @@ def _reject_pp_stage_shape(pc: ParallelismConfig) -> None:
 
 def _reject_pp_stage_sharding(pc: ParallelismConfig) -> None:
     """The FSDP and precision settings whose collectives, memory or block numbering a stage would break."""
-    if pc.needs_ep_wrappers and pc.ep_group_size == 1 and not pc.experts_fsdp_managed:
+    if pc.needs_ep_layers and pc.ep_group_size == 1 and not pc.experts_fsdp_managed:
         raise ValueError(
             f"PP with fsdp_shard_ep1_experts=False (pipeline_parallel_size={pc.pp_size}, "
             f"expert_parallel_size=1) is not supported: a MoE stage would then hold plain "

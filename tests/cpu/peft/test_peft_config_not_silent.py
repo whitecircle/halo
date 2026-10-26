@@ -140,8 +140,8 @@ def test_lora_target_parameters_raises_under_ep():
         configure_adapter_training(_args(), _model_with_ep_layer(), config)
 
 
-def test_lora_target_parameters_allowed_without_ep_wrappers():
-    """Without EP wrappers (ep_size<=1 + use_grouped_gemm: false, the accelerate route) the experts are
+def test_lora_target_parameters_allowed_without_ep_layers():
+    """Without EP layers (ep_size<=1 + use_grouped_gemm: false, the accelerate route) the experts are
     ordinary modules and this is stock PEFT working as designed — rejecting it would be a regression."""
     config = _model_config(lora_target_modules=["q_proj"], lora_target_parameters=["gate_up_proj"])
 

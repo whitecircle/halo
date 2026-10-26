@@ -8,15 +8,15 @@ Transformers ships `transformers.models.inkling` natively (the image pins 5.20.2
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP and TP are out for architectural reasons, not a missing registration ([why](#why-cp-and-tp-are-out)). Pipeline parallelism refuses Inkling (`INKLING_PP`): loader-only validation, with no schedule, end-to-end or save/resume row. LoRA is tiny-model verified only (`test_lora_merged_save_resume.py --family inkling_text`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume).
 
-## EP wrapper
+## EP layer
 
 `EPInklingMoELayer` (`halo/distributed/expert_parallel/families/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged.
 
-That includes ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family inkling_text --expert-tp-size 2` (registered as EP+ETP on 4 GPUs; launched by hand at `--nproc_per_node=2` it runs pure ETP; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone wrapper rather than a GLM-4 subclass:
+That includes ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family inkling_text --expert-tp-size 2` (registered as EP+ETP on 4 GPUs; launched by hand at `--nproc_per_node=2` it runs pure ETP; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone EP layer rather than a GLM-4 subclass:
 
 - **Joint routed+shared normalization.** `InklingTopkRouter` emits `n_routed_experts + n_shared_experts` logits from one projection and normalizes the routed top-k and the shared experts **jointly** (`logsumexp` over `top_k + n_shared` logits), so the shared experts compete for probability mass.
 
-    The shared FFN is scaled by its resulting share (`gammas`), an extra argument `EPSharedExpertsMoELayerBase`'s shared-expert call cannot pass, so the wrapper runs the shared leg itself.
+    The shared FFN is scaled by its resulting share (`gammas`), an extra argument `EPSharedExpertsMoELayerBase`'s shared-expert call cannot pass, so the EP layer runs the shared leg itself.
 
 - **Selection vs gating split.** Selection runs on `sigmoid(routed_logits) + e_score_correction_bias` (a learned routing bias the family ships); `moe_balancing: bias_update` adds its balancing bias on top for selection only, while the returned weights stay derived from the unbiased logits.
 

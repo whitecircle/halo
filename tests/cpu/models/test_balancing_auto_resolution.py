@@ -2,7 +2,7 @@
 """``moe_balancing: auto`` may only resolve to a mode the ENABLED tree can actually serve.
 
 The window: a MoE checkpoint whose forward never takes ``output_router_logits`` (the multimodal
-wrappers, and every family reading the flag out of ``**kwargs``) loaded with no EP MoE wrapper —
+wrappers, and every family reading the flag out of ``**kwargs``) loaded with no EP layer —
 ``use_grouped_gemm: false``, or a launcher that never patches the layers. Nothing there accepts a
 routing bias and the aux-loss term can never reach the loss, so the model has NO balancing route at
 all: ``auto`` resolving to ``aux_loss`` hands the balancing strategy a mode it refuses, and the run
@@ -42,7 +42,7 @@ class _MoEProbeConfig(PretrainedConfig):
 
 
 class _NoRouterLogitFlag(nn.Module):
-    """MoE weights, no EP wrapper, and a forward that never consults the router-logit flag."""
+    """MoE weights, no EP layer, and a forward that never consults the router-logit flag."""
 
     def __init__(self):
         super().__init__()

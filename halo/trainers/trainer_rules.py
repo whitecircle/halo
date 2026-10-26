@@ -76,15 +76,14 @@ def reject_stock_adamw_on_mixed_params(optim: str, config, model_config) -> None
 
     ``aten._fused_adamw_`` raises 'mixed torch.Tensor and DTensor' at the first step over that set. Read off
     the config so every PP stage agrees (a module walk would refuse on MoE stages while dense stages walked into
-    the collective); ep1 experts FSDP2 shards, and a MoE family with no EP wrapper class, are uniformly DTensor.
+    the collective); ep1 experts FSDP2 shards, and a MoE family with no EP layer class, are uniformly DTensor.
     """
     if optim not in STOCK_ADAMW_OPTIMIZERS:
         return  # named/per-parameter optimizers carry their own gates
     if not (
         config.ep_group_size > 1
         or (
-            wraps_experts(model_config, wrappers_requested=config.needs_ep_wrappers)
-            and not config.experts_fsdp_managed
+            wraps_experts(model_config, ep_layers_requested=config.needs_ep_layers) and not config.experts_fsdp_managed
         )
     ):
         return
@@ -111,12 +110,12 @@ def reject_trainer_router_aux_loss_coef(training_args) -> None:
         )
 
 
-def reject_ep_wrappers_under_accelerate(ep_layers) -> None:
-    """Refuse grouped-GEMM/EP expert wrappers on an ``accelerate launch``: they need the mixin-managed FSDP2 path."""
+def reject_ep_layers_under_accelerate(ep_layers) -> None:
+    """Refuse EP layers on an ``accelerate launch``: they need the mixin-managed FSDP2 path."""
     if ep_layers:
         raise ValueError(
-            "The model carries grouped-GEMM/EP expert wrappers but this is an "
-            "'accelerate launch' run: the wrappers require the mixin-managed FSDP2 path "
+            "The model carries EP layers but this is an "
+            "'accelerate launch' run: the EP layers require the mixin-managed FSDP2 path "
             "(torchrun). Launch with torchrun, or load the model with "
             "use_grouped_gemm=false to train it under accelerate."
         )
@@ -193,7 +192,7 @@ def reject_inert_aux_loss_balancing(trainer_name: str, moe_balancing: str) -> No
             f"moe_balancing='aux_loss' balances nothing on this trainer. "
             f"{INERT_AUX_LOSS_DETAIL.format(trainer=trainer_name)} Use "
             f"moe_balancing='bias_update' (aux-loss-free DeepSeek-V3 bias update, on families "
-            f"whose EP wrappers support it) or moe_balancing='none'."
+            f"whose EP layers support it) or moe_balancing='none'."
         )
 
 
@@ -211,7 +210,7 @@ def reject_unreloadable_best_model(training_args, config, model) -> None:
     if adapter_only and not config.merge_expert_lora_on_save:
         return
     is_moe = has_routed_experts(getattr(model, "config", None))
-    if config.cp_size > 1 or (is_moe and config.needs_ep_wrappers):
+    if config.cp_size > 1 or (is_moe and config.needs_ep_layers):
         raise ValueError(
             "load_best_model_at_end is unsupported for this shape as a full fine-tune: under "
             "EP/CP base weights only load at construction, so the end-of-run best-model reload "

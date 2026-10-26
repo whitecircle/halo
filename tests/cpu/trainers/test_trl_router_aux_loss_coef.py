@@ -24,7 +24,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.config_access import ROUTER_AUX_FIELDS, restore_config_fields, snapshot_config_fields
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.preference.kto import DistributedKTOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
@@ -57,7 +57,7 @@ def test_a_trainer_whose_trl_loss_adds_the_term_gets_the_mode_s_coefficient(trai
 
 
 @pytest.mark.parametrize(
-    "trainer_cls", [DistributedSFTTrainer, DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer]
+    "trainer_cls", [DistributedSFTTrainer, DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer]
 )
 def test_every_other_trl_trainer_gets_zero(trainer_cls):
     """SFT's model forward adds the term itself; a policy-gradient loss keeps it inert."""

@@ -106,7 +106,7 @@ def revert_conversions(model: torch.nn.Module, state_dict: dict, conversions: li
 def revert_to_load_layout(model: torch.nn.Module, state_dict: dict) -> dict:
     """Map a module-layout state dict back to the checkpoint layout the model was loaded from.
 
-    Without it a wrapper-less MoE save emits fused expert keys that per-expert engine loaders refuse or
+    Without it a MoE save with no EP layer emits fused expert keys that per-expert engine loaders refuse or
     drop. A failure warns instead of raising: the config may be on disk with the peers past their
     barrier, and the pre-revert dict is loadable after ``unfuse_moe_experts.py``.
     """

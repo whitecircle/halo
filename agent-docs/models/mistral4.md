@@ -6,11 +6,11 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). The Mi
 
 Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family mistral4` (one node per single-node mode under `pytest -m "gpu and mistral4"`; the single-node EP+CP coverage lives in the script's Cohere2 MoE rows); `tests/cpu/parallelism/test_mistral4_registries.py` pins the EP/CP/TP registry claims.
 
-## EP wrapper
+## EP layer
 
 `EPMistral4MoELayer` (`halo/distributed/expert_parallel/families/mistral4.py`) replaces `Mistral4MoE`.
 
-- Routing: the wrapper calls `Mistral4TopkRouter` and keeps only its logits (the router also returns weights and indices, which balancing and routing replay have to recompute); `route_tokens_to_experts` then does softmax + group-topk inline, mirroring the router's own arithmetic. No `e_score_correction_bias` (unlike GLM-4); `norm_topk_prob` and `routed_scaling_factor` are honored.
+- Routing: the EP layer calls `Mistral4TopkRouter` and keeps only its logits (the router also returns weights and indices, which balancing and routing replay have to recompute); `route_tokens_to_experts` then does softmax + group-topk inline, mirroring the router's own arithmetic. No `e_score_correction_bias` (unlike GLM-4); `norm_topk_prob` and `routed_scaling_factor` are honored.
 - Load balancing: Mistral4 has **no bias slot** (a plain softmax router, no correction-bias tensor), so `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the opt-in. `Mistral4ForCausalLM.forward` declares no `output_router_logits` parameter either, so `aux_loss` cannot work and `auto` resolves to `none` with a warning naming the transient opt-in.
 
     The transient bias steers training-time routing, resumes from `router_balancing_biases.pt`, and never reaches a checkpoint or a served copy (near-tied top-k picks flip between trainer and server). See [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).

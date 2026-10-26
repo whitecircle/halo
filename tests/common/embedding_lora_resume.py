@@ -74,10 +74,13 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.script import ScriptContext
 from halo.trainers.embedding.trainer import EmbeddingTrainer
 from scripts.training.embedding import build_sentence_transformer, inject_lora
+from tests.common.adapters import LORA_ALPHA, LORA_R, injected_lora_fold
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
+from tests.common.memory import finish_phase
 from tests.common.models import PARAPHRASE_MINILM
-from tests.common.peft_helpers import LORA_ALPHA, LORA_R, injected_lora_fold
+from tests.common.numerics import min_or_nan, relative_l2, tensors_equal_at_narrower_dtype
+from tests.common.rank_log import log
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
@@ -85,16 +88,7 @@ from tests.common.tiny_models import (
     shared_tiny_family_checkpoint,
 )
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    finish_phase,
-    log,
-    min_or_nan,
-    relative_l2,
-    resumed_loss_deltas,
-    snapshot_trainable,
-    step_losses,
-    tensors_equal_at_narrower_dtype,
-)
+from tests.common.training_checks import resumed_loss_deltas, snapshot_trainable, step_losses
 
 
 @dataclass(frozen=True)
@@ -181,7 +175,7 @@ def _model_config(family: Family, source: str, lora: str) -> ModelArguments:
 def _parallelism_config(mode: str, lora: str) -> ParallelismConfig:
     if mode in PARALLEL_MODES:
         return ParallelismConfig(**PARALLEL_MODES[mode])
-    # A full fine-tune without expert wrappers keeps the resolver on the base, so its resume reads the
+    # A full fine-tune without EP layers keeps the resolver on the base, so its resume reads the
     # checkpoint into a model that does not hold it.
     return ParallelismConfig(use_grouped_gemm=lora != "off")
 

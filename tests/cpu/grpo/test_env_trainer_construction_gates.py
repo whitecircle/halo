@@ -38,17 +38,20 @@ from datasets import Dataset
 from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
 from halo.environments.reasoning_effort import has_thinking_budget
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
 from halo.trainers.grpo.environmental import reasoning
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
+    reject_inert_is_stages,
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
+    reject_straddling_train_groups,
     reject_unneutralized_forced_closes,
     reject_unread_grpo_knobs,
+    reject_unsupported_routing_replay,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
 )
@@ -285,7 +288,7 @@ def test_a_non_grading_environment_accepts_an_answer_less_dataset():
 
 def _level_host(budgets: dict, effort: str | None = "random", **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.async_config = AsyncTrainingConfig(**config)
+    host.async_config = AsyncRolloutConfig(**config)
     host._rollout_env = types.SimpleNamespace(
         reasoning_effort=effort, thinking_budget_for_effort=budgets.get, thinking_budget_enforced=lambda level: True
     )
@@ -351,7 +354,7 @@ class _Tokenizer:
 
     def __init__(self, knows_close: bool):
         self._encodings = {
-            AsyncTrainingConfig.rollout_reasoning_end_token: [_CLOSE_ID] if knows_close else [60, 61, 62],
+            AsyncRolloutConfig.rollout_reasoning_end_token: [_CLOSE_ID] if knows_close else [60, 61, 62],
             _OPENER: _OPENER_IDS,
         }
         self.added_tokens_decoder = dict.fromkeys(({_CLOSE_ID} if knows_close else set()) | {70, 72, 74})
@@ -363,7 +366,7 @@ class _Tokenizer:
 
 def _close_host(budgets: dict, knows_close: bool = True, soft: tuple = (), model_config=None, **config):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.async_config = AsyncTrainingConfig(**config)
+    host.async_config = AsyncRolloutConfig(**config)
     host._rollout_env = types.SimpleNamespace(
         reasoning_effort="random",
         thinking_budget_for_effort=budgets.get,
@@ -437,7 +440,7 @@ def test_a_marker_the_tokenizer_does_not_write_warns_and_trains_on_the_forced_cl
         assert _forced_close_ids(host) is None
     warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
     assert any(
-        "stay in the policy loss" in w and AsyncTrainingConfig.rollout_reasoning_end_token in w for w in warnings
+        "stay in the policy loss" in w and AsyncRolloutConfig.rollout_reasoning_end_token in w for w in warnings
     ), warnings
 
 
@@ -469,6 +472,68 @@ def test_the_reasoning_count_reads_up_to_a_one_token_close_on_every_budgeted_vll
     assert _count_end_id({"high": 16384}, rollout_backend=SGLANG_BACKEND) is None
     assert _count_end_id({"high": 16384}, knows_close=False) is None
     assert _count_end_id({"high": 16384}, knows_close=False, rollout_reasoning_end_token=_OPENER) is None
+
+
+_VETO = ISMaskConfig(veto_min=0.1)
+_NO_STAGE = ISMaskConfig()
+
+
+def test_the_shape_is_and_replay_gates_pass_a_supported_run():
+    """Anti-vacuity for the refusals below: each passes the configuration it exists to allow."""
+    reject_straddling_train_groups(per_device_train_batch_size=2, steps_per_generation=2, num_generations=4)
+    reject_inert_is_stages(_VETO, is_correction=True, skip_update_masked_frac=0.5)
+    reject_inert_is_stages(_NO_STAGE, is_correction=False, skip_update_masked_frac=None)
+    reject_unsupported_routing_replay("rollout", train_on_sampled_tokens=True, runs_logprob_recompute=False)
+    reject_unsupported_routing_replay("recompute", train_on_sampled_tokens=False, runs_logprob_recompute=True)
+    reject_unsupported_routing_replay("none", train_on_sampled_tokens=False, runs_logprob_recompute=False)
+
+
+@pytest.mark.parametrize(
+    ("refusal", "match"),
+    [
+        (
+            lambda: reject_straddling_train_groups(
+                per_device_train_batch_size=3, steps_per_generation=1, num_generations=2
+            ),
+            r"\(3\) must be divisible by num_generations \(2\): .* a group cannot straddle ranks",
+        ),
+        (
+            lambda: reject_inert_is_stages(_VETO, is_correction=False, skip_update_masked_frac=None),
+            r"isr_geo_band/isr_veto/isr_opsm knobs require the importance-sampling correction",
+        ),
+        (
+            lambda: reject_inert_is_stages(_NO_STAGE, is_correction=True, skip_update_masked_frac=0.5),
+            r"skip_update_masked_frac requires .* the circuit breaker would silently never fire",
+        ),
+        (
+            lambda: reject_inert_is_stages(_NO_STAGE, is_correction=False, skip_update_masked_frac=0.5),
+            r"skip_update_masked_frac requires .* the circuit breaker would silently never fire",
+        ),
+        (
+            lambda: reject_unsupported_routing_replay(
+                "rollout", train_on_sampled_tokens=False, runs_logprob_recompute=True
+            ),
+            r"routing_replay='rollout' requires train_on_sampled_tokens",
+        ),
+        (
+            lambda: reject_unsupported_routing_replay(
+                "recompute", train_on_sampled_tokens=True, runs_logprob_recompute=False
+            ),
+            r"routing_replay='recompute' captures the mask in the no-grad logprob-recompute pass",
+        ),
+    ],
+    ids=[
+        "straddling-train-group",
+        "is-stage-without-correction",
+        "breaker-without-stage",
+        "breaker-without-correction",
+        "rollout-replay-on-a-rerender",
+        "recompute-replay-without-recompute",
+    ],
+)
+def test_each_shape_is_and_replay_refusal_names_its_mechanism(refusal, match):
+    with pytest.raises(ValueError, match=match):
+        refusal()
 
 
 if __name__ == "__main__":

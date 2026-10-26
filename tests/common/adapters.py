@@ -49,9 +49,10 @@ from halo.model_loading.parallel.peft_setup import configure_adapter_training, s
 from halo.models.unwrapping import plain_adapter_key, strip_peft_adapter_segment
 from halo.runtime.collectives import barrier
 from tests.common.ep_reference import ep_layers
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 DENSE_MODEL = QWEN3_0_6B
 MOE_MODEL = GPT_OSS_20B

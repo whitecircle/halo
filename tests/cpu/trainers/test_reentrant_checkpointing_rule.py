@@ -4,7 +4,7 @@
 Non-reentrant checkpointing re-runs the checkpointed forward lazily and checks every recomputed tensor's
 metadata against the forward's. A MoE routes in that recompute: the router runs on a hidden state most
 attention kernels recompute nondeterministically, a near-tie pick flips, and the routing tensors change
-shape — a rejected recompute, with or without EP wrappers. CP's all-to-alls and EP's DeepEP barriers
+shape — a rejected recompute, with or without EP layers. CP's all-to-alls and EP's DeepEP barriers
 have their own reasons. Pipeline parallelism is the one mode that needs the non-reentrant form.
 
 Run: pytest tests/cpu/trainers/test_reentrant_checkpointing_rule.py
@@ -33,7 +33,7 @@ def test_a_dense_data_parallel_run_keeps_the_configured_form():
 
 
 def test_a_moe_forces_reentrant_even_without_expert_parallelism():
-    """The stock-experts path (``use_grouped_gemm: false``, no EP wrappers) routes in its recompute too."""
+    """The stock-experts path (``use_grouped_gemm: false``, no EP layers) routes in its recompute too."""
     assert uses_reentrant_checkpointing(_config(), MOE) is True
 
 

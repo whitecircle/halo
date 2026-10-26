@@ -7,7 +7,7 @@ import torch
 from trl import GRPOTrainer
 from trl.extras.profiling import profiling_context
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.environment_base import EnvironmentBase
 from halo.environments.messages import task_prompt
 from halo.environments.reasoning_effort import has_thinking_budget, resolve_reasoning_effort, stable_reasoning_effort
@@ -91,7 +91,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     _replay_row_spans = False
 
     def __init__(self, *args, **kwargs):
-        self.async_config = kwargs.pop("async_config", None) or AsyncTrainingConfig()
+        self.async_config = kwargs.pop("async_config", None) or AsyncRolloutConfig()
         self._use_chunked_grpo_logprobs = self.async_config.use_chunked_grpo_logprobs
         _, kwargs = self._begin_on_policy_init(args, kwargs)
         self._environment_spec, self._env_config_dict = _resolve_environment_spec(
@@ -137,7 +137,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         reject_unread_grpo_knobs(self.args)
         self._init_async_state()
         self._finish_on_policy_init()
-        # After _configure_distributed_modes (needs the EP wrappers); eager, so an unsupported setup fails now.
+        # After _configure_distributed_modes (needs the EP layers); eager, so an unsupported setup fails now.
         self._routing_injector = self._build_routing_replay_injector(self.async_config.routing_replay)
 
     def _configure_rollout_state(self) -> None:

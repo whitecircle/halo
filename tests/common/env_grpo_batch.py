@@ -10,7 +10,7 @@ from collections import defaultdict
 
 import torch
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.environments.episode import RolloutResult
 from halo.environments.messages import Message, Trajectory
@@ -74,7 +74,7 @@ def batch_host(
         mask_truncated_completions=False,
     )
     host.accelerator = types.SimpleNamespace(gather=lambda x: x)
-    host.async_config = AsyncTrainingConfig(
+    host.async_config = AsyncRolloutConfig(
         train_on_sampled_tokens=False,
         skip_update_masked_frac=skip_update_masked_frac,
         balance_token_mass=balance_token_mass,

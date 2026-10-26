@@ -214,8 +214,8 @@ def test_gradient_accumulation_and_interleaved_no_grad_forwards(family):
 
 
 @pytest.mark.parametrize("family", ["qwen3_moe", "gpt_oss"])
-def test_ep_wrapper_checkpoint_replay(family):
-    """The EP wrapper owns the router at ``ep_size=1`` and replays its dispatch inside a checkpoint
+def test_ep_layer_checkpoint_replay(family):
+    """The EP layer owns the router at ``ep_size=1`` and replays its dispatch inside a checkpoint
     scope; the gradient must ride the wrapper's output back to the adopted router."""
     batches = _batches(_build(family, balanced=False))
     native = _step(_build(family, balanced=False, ep=True), batches)[0]

@@ -1,4 +1,4 @@
-"""EP wrapper for Qwen3 MoE (pre-fused experts)."""
+"""EP layer for Qwen3 MoE (pre-fused experts)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from halo.models.moe.family_specs import QWEN3
 
 
 class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
-    """EP wrapper for Qwen3 MoE with pre-fused expert tensors.
+    """EP layer for Qwen3 MoE with pre-fused expert tensors.
 
     ``Qwen3MoeExperts`` provides fused ``gate_up_proj``/``down_proj``; gate_up is split here and the
     halves stored in matmul convention.

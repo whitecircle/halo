@@ -22,7 +22,7 @@ def post_process_merged_weights(
 ) -> dict:
     """Convert merged EP weights from runtime format to HuggingFace checkpoint format.
 
-    EP wrappers store expert weights in matmul convention with architecture-specific parameter names.
+    EP layers store expert weights in matmul convention with architecture-specific parameter names.
     This groups expert weights by MoE layer and applies the ``ExpertLayout`` of the family spec the
     checkpoint's ``model_type`` resolves to. ``had_expert_shards`` says whether the caller
     actually merged ``.shard_N`` keys, which turns "nothing matched" from a pass-through into an

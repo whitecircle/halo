@@ -50,7 +50,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 EP_SIZE = 2
 BATCH = 2

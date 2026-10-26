@@ -29,7 +29,7 @@ from halo.data.pipeline.coordinated_map import (
 )
 from halo.data.pipeline.preferences import tokenize_preference_row
 from halo.trainers.grpo.offline.group_rows import tokenize_offline_grpo_rows
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 
 # >1 is what makes datasets pickle the mapped callable.
 _WORKERS = 2
@@ -104,7 +104,7 @@ def _run_smpo_prepare(me):
     original = smpo_module.coordinated_map
     smpo_module.coordinated_map = _fake_map
     try:
-        SmoothMarginPOTrainer._prepare_dataset(me, _FakeDataset(), None, me.args, "train")
+        SMPOTrainer._prepare_dataset(me, _FakeDataset(), None, me.args, "train")
     finally:
         smpo_module.coordinated_map = original
     return captured

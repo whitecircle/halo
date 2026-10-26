@@ -118,7 +118,7 @@ def reject_unsupported_model(
 ) -> None:
     """Refuse what this model's ``config.json`` cannot take under ``pc``, before the process groups.
 
-    ``wraps_experts`` is whether the load swaps in the EP MoE wrappers (``needs_ep_wrappers`` on a MoE).
+    ``wraps_experts`` is whether the load swaps in the EP layers (``needs_ep_layers`` on a MoE).
     """
     if pc.ep_size > 1:
         num_experts = resolve_expert_count(model_config)
@@ -166,7 +166,7 @@ def reject_unsupported_model(
     if wraps_experts and is_accelerate_launch() and not (pc.has_ep_group or pc.is_cp_mode or pc.is_tp_mode):
         raise ValueError(
             "Grouped GEMM for MoE experts (use_grouped_gemm=True, the default on "
-            "SM90+ hardware) swaps in custom expert-layer wrappers that require "
+            "SM90+ hardware) swaps in custom EP layers that require "
             "'torchrun', not 'accelerate launch'. Two ways forward:\n"
             "\n"
             "  1. Launch with torchrun (keeps the grouped-GEMM speedup, no EP needed):\n"

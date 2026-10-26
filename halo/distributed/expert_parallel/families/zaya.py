@@ -1,4 +1,4 @@
-"""EP wrapper for Zaya routed experts (the router is part of the wrapped ZayaSparseMoeBlock)."""
+"""EP layer for Zaya routed experts (the router is part of the wrapped ZayaSparseMoeBlock)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from halo.models.moe.family_specs import ZAYA
 
 
 class EPZayaMoELayer(EPMoELayerBase):
-    """EP wrapper for ``ZayaSparseMoeBlock`` (gate + experts) using DeepEP.
+    """EP layer for ``ZayaSparseMoeBlock`` (gate + experts) using DeepEP.
 
     The gate's forward runs unchanged: it holds the cross-layer EDA state threaded through
     ``prev_router_hidden_states``, and it is the balancing router in every mode, adding its checkpointed

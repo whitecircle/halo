@@ -4,7 +4,7 @@ Two sizes: 20B and 120B. MoE with **attention sinks** (per-head learnable scalar
 
 Every axis runs on both sizes ([Compatibility matrix](README.md#compatibility-matrix)). `GptOssConfig` ships a native HF `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo selective-TP path. Under pipeline parallelism balance with `bias_update` or `none` (`aux_loss` is severed by the split); two-node recipe: `examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
-## EP wrapper
+## EP layer
 
 `EPGptOssMoELayer` (`halo/distributed/expert_parallel/families/gpt_oss.py`) replaces `GptOssMLP`.
 
@@ -60,7 +60,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 ## Precision and kernels
 
-- `fp32_non_ep_params: true` is safe — the router lives inside the EP wrapper (unlike Gemma 4).
+- `fp32_non_ep_params: true` is safe — the router lives inside the EP layer (unlike Gemma 4).
 - **Blackwell** auto-selects FA4 under every sink policy. GPT-OSS is unaffected by the Qwen3.5/3.6 FA4→SDPA fallback.
 - **SFT alternatives.** With sinks reset, `flash_attention_2` (`sinks = None`) and `sdpa` (the `dtype.min` column contributes `exp(dtype.min)=0`) also run end to end, both JIT-free. RL cannot use them ([why](#attention-sinks)). Which kernel carries a sink, and how the resolver reads it: [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 - **Sink-free trainer, live engine.** `reject_unsyncable_model` refuses on-policy RL when the FA2 reset removed the sinks Parameter (`reset_sinks: true` + FA2): the sync sends named parameters only, so the engine would keep serving the pretrained sinks against a sink-free trainer — permanently off-policy with no error at sync time.
@@ -135,4 +135,4 @@ vLLM and SGLang load `router.bias` and route with it (top-k on bias-inclusive lo
 
 `router_aux_loss_coef` is forced to 0 for the run to avoid double-balancing (restored in the exported config). The bias lives in logit space, so the default γ is small for it; size `router_balancing_rate` per [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback).
 
-**Not for on-policy RL.** Online and env GRPO must use `moe_balancing: none` — adoption re-registers `router.bias` as a buffer and the weight sync ships parameters only, so a synced engine routes on the pretrained bias (`configure_moe_balancing` downgrades it automatically). Bias-update needs the EP wrappers (`ep_size > 1`, or the default `use_grouped_gemm`); without them it raises at setup.
+**Not for on-policy RL.** Online and env GRPO must use `moe_balancing: none` — adoption re-registers `router.bias` as a buffer and the weight sync ships parameters only, so a synced engine routes on the pretrained bias (`configure_moe_balancing` downgrades it automatically). Bias-update needs the EP layers (`ep_size > 1`, or the default `use_grouped_gemm`); without them it raises at setup.

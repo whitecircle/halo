@@ -12,7 +12,7 @@ Run: torchrun --nproc_per_node=1 tests/gpu/optimizers/test_lowp_master_feasibili
 import torch
 
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 DEV = "cuda"
 

@@ -155,7 +155,7 @@ Every TP rank must call `model.forward` with **identical** `input_ids` / `attent
 same hidden states. Mismatched inputs do not error early; they deadlock at the first `o_proj`
 all-reduce (visible in py-spy as ranks stuck at different sub-modules of one forward).
 
-This affects trainers pulling per-rank data from an external service. `DistributedGRPOTrainer`
+This affects trainers pulling per-rank data from an external service. `DistributedOnlineGRPOTrainer`
 overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the TP-group leader. For
 custom trainers, add an `assert_rank_uniform` call (`halo.runtime.consensus`; pass
 `tuple(t.shape)` to compare a shape, `strict=True` to raise instead of warn) at the suspect tensor —
@@ -272,7 +272,7 @@ reshape, after the whole checkpoint has been pulled and placed on every rank.
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
 | `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `reject_accelerate_launch` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
-| `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `reject_unreloadable_best_model` |
+| `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP layers | `reject_unreloadable_best_model` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `halo/model_loading/liger/dispatch.py` |
 | `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `configure_run_tokenizer` (`is_input_embedding_tp_sharded`) |
 | `gradient_checkpointing`, `packing`, `padding_free`, `lowp_precision`, `moe_balancing` | not gated under TP | — |

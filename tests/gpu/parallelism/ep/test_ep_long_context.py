@@ -33,8 +33,9 @@ from halo.hardware import supports_grouped_mm
 from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log, log_all
+from tests.common.rank_log import log, log_all
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 8

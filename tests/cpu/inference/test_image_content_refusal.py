@@ -4,7 +4,7 @@
 Reward-model scoring takes a conversation straight from the user's data. It has no vision path:
 the reward model is a text sequence classifier, so a chat template expands an image part into
 placeholder tokens with no pixels behind them and the returned "reward" is a number computed over
-holes — which `rm_rejection_sampling` then writes into a DPO/SMPO or offline-GRPO training file.
+holes — which `rejection_sample` then writes into a DPO/SMPO or offline-GRPO training file.
 
 Driven through the functions the scripts actually call, so the guard is proven to sit ON the path:
 the stub past each guard raises `_PastTheGuard`, which is what a clean text conversation must reach.
@@ -57,7 +57,7 @@ _RM_SCORERS = pytest.mark.parametrize(
 
 @_RM_SCORERS
 @pytest.mark.parametrize("correct_answer", [None, "4"])
-def test_rm_scoring_refuses_an_image_conversation(score, correct_answer):
+def test_score_refuses_an_image_conversation(score, correct_answer):
     """Every scored conversation feeds a preference / offline-GRPO training file; the answer-context
     branch must not bypass the guard."""
     with pytest.raises(ValueError, match="carries an image content part"):

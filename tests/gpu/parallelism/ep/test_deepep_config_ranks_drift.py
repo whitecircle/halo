@@ -29,7 +29,7 @@ Requirements:
 from halo.distributed.expert_parallel.deepep.backends import deep_ep
 from halo.distributed.expert_parallel.deepep.capacity import DEEPEP_V1_CONFIG_RANKS
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 # Widths to probe. Well past the largest tuned entry (160) and past any EP group this toolkit can
 # build, so an upstream addition lands inside the range rather than beyond it.

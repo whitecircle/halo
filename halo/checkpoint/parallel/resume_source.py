@@ -153,7 +153,7 @@ def classify_resume_weights(checkpoint: str) -> ResumeWeightsKind:
 def resolve_resume_weights_source(checkpoint: str | None, model_config, parallelism_config) -> str:
     """COLLECTIVE (rank 0's verdict). The ``model_name_or_path`` the policy loads weights from on resume.
 
-    The checkpoint itself under the EP wrappers, CP and TP, whose resumes read base weights only at
+    The checkpoint itself under the EP layers, CP and TP, whose resumes read base weights only at
     construction (under the default ``use_grouped_gemm``, every torchrun resume); the base for an adapter
     or merged-with-resume-adapter checkpoint, whose adapter the resume restores onto it (a merged
     checkpoint's own weights already hold the delta). A checkpoint neither loadable nor an adapter raises.
@@ -162,9 +162,9 @@ def resolve_resume_weights_source(checkpoint: str | None, model_config, parallel
     base = model_config.model_name_or_path
     if checkpoint is None:
         return base
-    # TP is listed on its own rather than riding on ``needs_ep_wrappers`` (true only via
+    # TP is listed on its own rather than riding on ``needs_ep_layers`` (true only via
     # ``use_grouped_gemm``), so turning that knob off still leaves TP resume working.
-    if not (parallelism_config.needs_ep_wrappers or parallelism_config.is_cp_mode or parallelism_config.is_tp_mode):
+    if not (parallelism_config.needs_ep_layers or parallelism_config.is_cp_mode or parallelism_config.is_tp_mode):
         return base
 
     decision = classify_resume_weights(checkpoint) if is_global_main_process() else None

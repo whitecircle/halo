@@ -135,7 +135,7 @@ Checkpoint, inference, data, and environment utilities use halo run:
 halo run merge-ep-shards --input_dir <ep-checkpoint-dir> --output_dir <merged-dir>
 halo run quantize-to-lowp --input_dir <bf16-model-dir> --output_dir <nvfp4-out-dir> --format nvfp4
 
-# all tools (merge-*, quantize-to-lowp, rm-scoring, run-env, …)
+# all tools (merge-*, quantize-to-lowp, inference/reward-model/score, run-env, …)
 halo run --list             
 ```
 

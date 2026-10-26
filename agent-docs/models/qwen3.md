@@ -37,14 +37,14 @@ The per-method canonical examples (DPO, SMPO, KTO, reward, classification, disti
 
 - Routing: the gate returns `(logits, weights, experts)`; softmax + top-k.
 - Activation: `act(gate(x)) * up(x)` → `down`, where `act` is read off `Qwen3MoeExperts.act_fn` (the resolved `hidden_act`, SiLU on every released checkpoint) rather than assumed.
-- Storage: pre-fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]`, split at wrapper construction into separate `gate_proj` / `up_proj` / `down_proj` for sharding.
+- Storage: pre-fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]`, split at EP layer construction into separate `gate_proj` / `up_proj` / `down_proj` for sharding.
 - Compute: Grouped GEMM on SM90+, falling back to a per-expert loop with `index_add_`.
 - RL weight sync: `gather_expert_state_dict` emits the per-expert hub layout, which both pinned
   engines read — vLLM 0.32.0's `RoutedExperts` and SGLang 0.5.22's `qwen3_moe` loader
   (`make_expert_params_mapping`) alike, so either `rollout_backend` takes the sync
   ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-**Router balancing** — the wrapper re-derives selection from the router's own logits, applying the DeepSeek-V3 bias to the selection scores while the gate weights stay on the unbiased softmax (honoring the family's `norm_topk_prob`).
+**Router balancing** — the EP layer re-derives selection from the router's own logits, applying the DeepSeek-V3 bias to the selection scores while the gate weights stay on the unbiased softmax (honoring the family's `norm_topk_prob`).
 
 The architecture has no bias slot (the gate is a bare weight), so the bias is trainer-only: `moe_balancing: bias_update` **raises** and the explicit `bias_update_transient` is the opt-in, with exported checkpoints serving without the trained bias. `auto` stays on `aux_loss`, since `Qwen3MoeForCausalLM.forward` declares `output_router_logits` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)).
 
@@ -62,6 +62,6 @@ The architecture has no bias slot (the gate is a bare weight), so the bias is tr
 
 `Qwen3VLTextAttention` reuses `Qwen3MoeUlyssesAttention` for CP.
 
-Under TP a dense Qwen3-VL goes through HF-native `tp_plan="auto"`, and the architecture ships no `base_model_tp_plan` — the plan is empty, nothing shards, and the load **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. Use plain FSDP2 for dense VLM runs; CP covers only text-only rows, since the CP wrapper refuses `pixel_values`. The MoE variants get no EP: no wrapper claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither the CP nor the selective-TP registry.
+Under TP a dense Qwen3-VL goes through HF-native `tp_plan="auto"`, and the architecture ships no `base_model_tp_plan` — the plan is empty, nothing shards, and the load **raises** rather than running `tp_size` full replicas at `1/tp_size` throughput. Use plain FSDP2 for dense VLM runs; CP covers only text-only rows, since the CP wrapper refuses `pixel_values`. The MoE variants get no EP: no EP layer claims `Qwen3VLMoeTextSparseMoeBlock`, and `Qwen3VLMoeTextAttention` is in neither the CP nor the selective-TP registry.
 
 No dedicated SFT configs ship; `tests/gpu/trainers/sft/test_sft_vlm.py` exercises the path on `Qwen/Qwen3-VL-2B-Instruct`. See [Vision-language models](../training-methods/sft.md#vision-language-models).

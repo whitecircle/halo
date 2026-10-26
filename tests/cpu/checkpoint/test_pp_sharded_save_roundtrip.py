@@ -15,7 +15,7 @@ stage, the smallest config-legal PP topology):
 3. **PP+EP and PP+ETP composition** — an EP layer's experts are exported by the family gather under
    ``experts.*`` and must then pass through the stage's global rename; the stage-local EP state_dict
    entries (rank-local expert ranges, expert-TP shards) must NOT reach the checkpoint.
-4. **Hub namespace** — names and values equal the EP-gathered save (without EP wrappers, the
+4. **Hub namespace** — names and values equal the EP-gathered save (without EP layers, the
    save-side revert of the whole model), and both PP reads map them back onto the stage.
 
 Plus the topology-independence claim on the read side: because the shards carry the unsplit model's
@@ -61,7 +61,7 @@ from halo.models.attention.gpt_oss_sinks import neutralized_sink_value
 from halo.models.param_roles import persistent_buffers
 from halo.runtime import dtensor
 from halo.trainers.parallelism.pipeline_trainer import stash_wrapper_state
-from tests.common.checkpoint_io import load_context, save_context
+from tests.common.checkpoint_io import load_context, safetensors_state_dict, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import new_groups, run_gloo_ranks
 from tests.common.models import (
@@ -74,7 +74,6 @@ from tests.common.models import (
 )
 from tests.common.pp_fakes import hand_built_stage, registered_pp_backbones
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
-from tests.common.utils import safetensors_state_dict
 
 _PC_MOD = "halo.distributed.parallelism_config"
 
@@ -114,7 +113,7 @@ PP_EXPORT_FAMILIES = (
     "qwen3_moe",
 )
 PP_RENAME_FREE = frozenset({"inkling_text", "qwen3_moe"})
-# The renaming families as a run without EP wrappers (``ep_size=1``, no grouped GEMM) holds them: each
+# The renaming families as a run without EP layers (``ep_size=1``, no grouped GEMM) holds them: each
 # decoder layer's own tensors carry its reverses, several at once for Inkling's shared experts.
 PP_UNWRAPPED_FAMILIES = ("deepseek_v4", "glm5_next", "step3p7", "mistral3", "inkling_mm_model")
 PP_FAMILY_OVERRIDES = {
@@ -853,8 +852,8 @@ def test_a_pp_save_resumes_through_both_reads(tmp_path, name):
 
 
 @pytest.mark.parametrize("name", PP_UNWRAPPED_FAMILIES)
-def test_pp_save_without_ep_wrappers_writes_the_whole_model_revert(tmp_path, name):
-    """Without EP wrappers the reverses read a decoder layer's own tensors, several at once for Inkling
+def test_pp_save_without_ep_layers_writes_the_whole_model_revert(tmp_path, name):
+    """Without EP layers the reverses read a decoder layer's own tensors, several at once for Inkling
     (its shared experts' gate and up projections form one ``shared_w13_weight``): the save converts
     each layer whole, writing what transformers' save-side revert of the unsplit model writes, and a
     best-model load reads it back."""

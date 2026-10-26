@@ -29,10 +29,10 @@ from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
 # Every ``model_type`` transformers actually registers for an FA4-NaN attention stack. Listed
-# literally, NOT splatted from the family specs' ``model_types``: those declare which MoE block a
-# wrapper handles for checkpoint merging, which is a different question from which attention stack
+# literally, NOT splatted from the family specs' ``model_types``: those declare which MoE block an
+# EP layer handles for checkpoint merging, which is a different question from which attention stack
 # NaNs, and the two sets are in no subset relation (qwen3_next and dense qwen3_5 NaN with no EP
-# wrapper; ten wrapped families must keep FA4). Qwen3.6 ships under the 3.5 types — Qwen/Qwen3.6-35B-A3B
+# layer; ten wrapped families must keep FA4). Qwen3.6 ships under the 3.5 types — Qwen/Qwen3.6-35B-A3B
 # declares ``qwen3_5_moe`` — so there is no separate 3.6 spelling to cover.
 FA4_NAN_PRONE_MODEL_TYPES = (
     "qwen3_5",

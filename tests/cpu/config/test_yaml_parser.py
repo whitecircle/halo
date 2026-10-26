@@ -19,11 +19,11 @@ from transformers import TrainingArguments
 from trl import DPOConfig, GRPOConfig, RewardConfig, SFTConfig
 
 from halo.configs.distillation import SelfDistillScriptArguments
-from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentalGRPOScriptArguments
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentalGRPOScriptArguments
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, expand_strftime_directives
-from halo.configs.preference import DPOScriptArguments, SmoothMarginPOConfig
+from halo.configs.preference import DPOScriptArguments, SMPOConfig
 from halo.configs.reward import RewardScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import SFTScriptArguments
@@ -902,7 +902,7 @@ def test_cli_override_rollout_server_configs_rejected():
     """Pin the real seam: --rollout_server_configs=... must raise, not ship a list[str] into Ray."""
     path = _write_yaml("{}\n")
     try:
-        parser = HaloArgumentParser((AsyncTrainingConfig,))
+        parser = HaloArgumentParser((AsyncRolloutConfig,))
         with pytest.raises(ValueError, match="rollout_server_configs"):
             parser.parse_dict(parser.load_values([path, "--rollout_server_configs=http://localhost:8000"]))
     finally:
@@ -1051,12 +1051,12 @@ def test_cli_override_rederives_the_grpo_generation_geometry(
 
 
 def test_cli_fp16_override_reaches_the_toolkit_bf16_derivation(tmp_path):
-    """``SmoothMarginPOConfig.__post_init__`` derives an unset ``bf16`` from ``fp16``. Derived from the
+    """``SMPOConfig.__post_init__`` derives an unset ``bf16`` from ``fp16``. Derived from the
     YAML alone it comes out true, and ``--fp16=true`` then forms the fp16+bf16 pair the run never asked
     for."""
     path = tmp_path / "smpo.yaml"
     path.write_text(f"output_dir: {tmp_path / 'out'}\nuse_cpu: true\n")
-    config = _parse_with_argv(HaloArgumentParser((SmoothMarginPOConfig,)), ["prog", str(path), "--fp16=true"])
+    config = _parse_with_argv(HaloArgumentParser((SMPOConfig,)), ["prog", str(path), "--fp16=true"])
     assert (config.fp16, config.bf16, config.mixed_precision) == (True, False, "fp16")
 
 

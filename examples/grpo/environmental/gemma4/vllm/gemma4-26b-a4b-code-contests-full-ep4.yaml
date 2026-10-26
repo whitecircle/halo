@@ -17,7 +17,7 @@ expert_parallel_size: 4            # ep_size == GPUs-in-the-job = one DeepEP gro
 fsdp_reshard_after_forward: false  # ZeRO-2 for the non-expert base params; ZeRO-3 is rejected under EP
 ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only; elastic's 32-bit wire-index guard
                                    # breaks at these tokens/rank
-# fp32_router is omitted: Gemma-4's router is a sibling module OUTSIDE the EP wrapper (FSDP-managed),
+# fp32_router is omitted: Gemma-4's router is a sibling module OUTSIDE the EP layer (FSDP-managed),
 # so the knob has no fp32 route to take and only logs a per-layer no-op warning.
 fp32_experts: true
 

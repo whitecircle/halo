@@ -1,4 +1,4 @@
-"""EP wrapper for Cohere2 MoE / Command A+ (fused experts, top-k-then-activate router)."""
+"""EP layer for Cohere2 MoE / Command A+ (fused experts, top-k-then-activate router)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from halo.models.moe.family_specs import COHERE2_MOE
 
 
 class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
-    """EP wrapper for Cohere2 MoE (Cohere2MoeSparseMoeBlock) using DeepEP.
+    """EP layer for Cohere2 MoE (Cohere2MoeSparseMoeBlock) using DeepEP.
 
     Fused gate_up_proj/down_proj routed experts (base fused-GLU helpers). ``Cohere2MoeTopKRouter``
     selects top-k on the raw logits and activates only the selected scores: softmax over the k

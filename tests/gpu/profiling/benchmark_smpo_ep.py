@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""SMPO throughput of ``SmoothMarginPOTrainer`` on an EP (or EP+CP) MoE run: MFU, S-MFU, tok/s and peak memory.
+"""SMPO throughput of ``SMPOTrainer`` on an EP (or EP+CP) MoE run: MFU, S-MFU, tok/s and peak memory.
 
 torchrun --nproc_per_node=8 tests/gpu/profiling/benchmark_smpo_ep.py --ep 8 --cp 2 --seq 4096 --steps 10
 """
@@ -16,12 +16,12 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 
 from halo.callbacks.efficiency import EfficiencyCallback
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import configure_training_logging
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime.collectives import barrier
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.benchmark_args import axis_tags, create_benchmark_parser
 from tests.common.distributed import (
     cleanup_dirs,
@@ -30,8 +30,8 @@ from tests.common.distributed import (
     setup_cache_dirs,
 )
 from tests.common.models import MODEL_CONFIGS
+from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import log
 
 
 def create_smpo_dataset(
@@ -159,7 +159,7 @@ def main() -> int:
     try:
         if rank == 0:
             print(f"\n{'=' * 60}")
-            print("SMPO EP BENCHMARK with SmoothMarginPOTrainer")
+            print("SMPO EP BENCHMARK with SMPOTrainer")
             print(f"Model: {args.model}, EP={args.ep}, CP={args.cp}, SeqLen={args.seq}")
             print(
                 f"Full params: {model_config['full_params'] / 1e9:.1f}B, "
@@ -207,7 +207,7 @@ def main() -> int:
         if rank == 0:
             print(f"Dataset created: {len(dataset)} samples")
 
-        smpo_config = SmoothMarginPOConfig(
+        smpo_config = SMPOConfig(
             output_dir=output_dir,
             per_device_train_batch_size=1,
             gradient_accumulation_steps=1,
@@ -240,7 +240,7 @@ def main() -> int:
             num_full_model_params=model_config["full_params"],
         )
 
-        trainer = SmoothMarginPOTrainer(
+        trainer = SMPOTrainer(
             model=model,
             args=smpo_config,
             train_dataset=dataset,

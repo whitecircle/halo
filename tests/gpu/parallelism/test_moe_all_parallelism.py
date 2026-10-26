@@ -27,11 +27,12 @@ from tests.common.checkpoint_io import save_context
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir, world_spread
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import COMMAND_A_PLUS, MISTRAL3_119B_MOE
+from tests.common.rank_log import log
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import TINY_MOE_FAMILIES, copy_release_tokenizer, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log
 
 SEED = 0
 # The gathered save reloads to the same eval logits: random-init cross-entropy sits at ln(vocab) whatever the experts
@@ -89,7 +90,7 @@ FAMILY_CHECKS = {"cohere2_moe": _cohere2_moe_checks}
 
 
 def _mode_checks(model, pc: ParallelismConfig, args, family: MatrixFamily) -> dict[str, bool]:
-    """The mode engaged: the EP wrappers exist in every mode (grouped GEMM installs them at ``ep_size`` 1), so the
+    """The mode engaged: the EP layers exist in every mode (grouped GEMM installs them at ``ep_size`` 1), so the
     shard widths, the Ulysses attention, the TP DTensors and the Liger norm are what prove it."""
     layers = ep_layers(model)
     attention = Counter(type(m).__name__ for m in model.modules() if "Attention" in type(m).__name__)

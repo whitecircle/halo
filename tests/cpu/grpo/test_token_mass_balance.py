@@ -26,7 +26,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     TOKEN_MASS_SCALE_KEY,
     record_token_mass,
 )
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 
 def _local(x):
@@ -274,8 +274,8 @@ def _online_host(balance: bool, training: bool = True):
         _logs={"advantages": [0.3, 0.8, -0.8]},
     )
     for name in ("_install_advantages", "_local_slice"):
-        setattr(host, name, getattr(DistributedGRPOTrainer, name).__get__(host))
-    return DistributedGRPOTrainer._apply_token_mass_balance.__get__(host), host
+        setattr(host, name, getattr(DistributedOnlineGRPOTrainer, name).__get__(host))
+    return DistributedOnlineGRPOTrainer._apply_token_mass_balance.__get__(host), host
 
 
 def _online_result():

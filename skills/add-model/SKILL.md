@@ -2,7 +2,7 @@
 name: add-model
 description: >-
   Add support for a new model family to Halo — the EP (expert-parallel)
-  wrapper, the Liger coverage spec, router-balancing choice, and vendoring (with
+  layer, the Liger coverage spec, router-balancing choice, and vendoring (with
   a removal-on-merge policy). USER-INVOKED ONLY. Use when the user asks to "add a
   new model", "support <model> for EP/MoE", "vendor a model not in transformers",
   "wire up Liger for <model>", or extend the model roster (the families listed in
@@ -20,28 +20,28 @@ allowed-tools:
 
 # Add a new model family
 
-Canonical guide: `agent-docs/models/adding-a-model.md` (read it) — it holds the file list, the wrapper
-hooks, every class attribute the machinery reads, and the layout→wrapper table. **`checklist.md`**
+Canonical guide: `agent-docs/models/adding-a-model.md` (read it) — it holds the file list, the EP layer
+hooks, every class attribute the machinery reads, and the layout→EP-layer table. **`checklist.md`**
 carries the templates and the commands to run.
 
 ## Checklist (overview)
 
 1. **Dense or MoE?** Dense `AutoModelForCausalLM` / multimodal `AutoModelForImageTextToText`
-   needs **no EP work** — plain FSDP works as is. Only MoE families need an EP wrapper.
-2. **MoE → add an EP wrapper.** Create `halo/distributed/expert_parallel/families/<name>.py`
+   needs **no EP work** — plain FSDP works as is. Only MoE families need an EP layer.
+2. **MoE → add an EP layer.** Create `halo/distributed/expert_parallel/families/<name>.py`
    subclassing `EPMoELayerBase` (`moe_layer/layer.py`) — or `EPSharedExpertsMoELayerBase` (the routed
    forward template), `EPGroupLimitedMoELayerBase` where the family fits one. The base
    owns `__init__` and calls one hook per construction step (`_detect_hidden_dim`, `_adopt_routing`,
-   `_adopt_shared_experts`, `_adopt_expert_compute`, `_adopt_expert_params`); the wrapper supplies
+   `_adopt_shared_experts`, `_adopt_expert_compute`, `_adopt_expert_params`); the EP layer supplies
    `forward` and overrides only the hooks that differ. The family's facts go into one frozen
    `MoEFamilySpec` constant in `halo/models/moe/family_specs.py` (listed in `MOE_FAMILY_SPECS`; its
    `model_types` are the checkpoint `model_type`(s) every offline resolver reads), the class points at
    it with `FAMILY = <SPEC>` and declares `HF_MODULE_NAMES` (the HF block class name(s)), and one import
    line in `families/roster.py` registers it (`MOE_LAYER_MAP` is built from the imported classes). The
    spec's `expert_layout` (`halo/models/moe/expert_layout.py`) is the family's one checkpoint layout:
-   the EP gather, the RL weight sync and `merge_ep_shards.py` all write it, so no wrapper overrides
+   the EP gather, the RL weight sync and `merge_ep_shards.py` all write it, so no EP layer overrides
    the export.
-   Reuse an existing wrapper if the expert-weight layout matches (layout→wrapper table in the guide).
+   Reuse an existing EP layer if the expert-weight layout matches (layout→EP-layer table in the guide).
 3. **Liger coverage.** Add one `LigerFamilySpec` to `LIGER_FAMILY_SPECS` in
    `halo/model_loading/liger/family_specs.py` — there is no per-family applier module; `halo/model_loading/liger/applier.py`
    turns each spec into the applier `halo/model_loading/liger/dispatch.py` resolves.
@@ -50,7 +50,7 @@ carries the templates and the commands to run.
 4. **Router balancing.** Leave `moe_balancing` at `auto` and make the family resolvable. What `auto`
    picks and what `bias_update` needs to export:
    [Callbacks → MoE balancing modes](../../agent-docs/training-methods/callbacks.md#moe-balancing-modes);
-   the wrapper hooks (`SUPPORTS_BIAS_BALANCING`, the selection helpers, `balancing_slot`): step 3 of
+   the EP layer hooks (`SUPPORTS_BIAS_BALANCING`, the selection helpers, `balancing_slot`): step 3 of
    [Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support).
 5. **Not in transformers yet → vendor.** Copy `configuration_*.py` + `modeling_*.py` into
    `halo/models/<name>/`, register the `Auto*` classes in a module of that package (never its

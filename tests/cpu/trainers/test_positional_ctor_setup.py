@@ -25,7 +25,7 @@ from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.preference.kto import DistributedKTOTrainer
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
@@ -38,7 +38,7 @@ TRAINERS = [
     (DistributedRewardTrainer, 1),
     (DistributedDPOTrainer, 2),
     (DistributedKTOTrainer, 2),
-    (DistributedGRPOTrainer, 2),
+    (DistributedOnlineGRPOTrainer, 2),
     (DistributedSDPGTrainer, 2),
     (DistributedAsyncEnvironmentalGRPOTrainer, 2),
 ]
@@ -52,6 +52,7 @@ REQUIRED_KWARGS = {
         "confidence_weight_opd": True,
         "opd_exclude_eos": True,
     },
+    DistributedSDPGTrainer: {"sdpg_answer_field": "answer", "opd_positive_advantage_only": True},
 }
 
 

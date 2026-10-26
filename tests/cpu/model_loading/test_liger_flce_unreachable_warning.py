@@ -19,7 +19,7 @@ from halo.model_loading.liger.dispatch import warn_if_flce_unreachable
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 _LOGGER_NAME = "halo.model_loading.liger.dispatch"
 
@@ -45,7 +45,7 @@ def test_silent_when_flce_not_applied(caplog, applied):
     # CE alone must NOT warn: it is the toolkit default and equally inert here — warning on every
     # GRPO run would train users to ignore the one that matters.
     with caplog.at_level(logging.WARNING, logger=_LOGGER_NAME):
-        warn_if_flce_unreachable(_config(applied), "DistributedGRPOTrainer")
+        warn_if_flce_unreachable(_config(applied), "DistributedOnlineGRPOTrainer")
     assert not caplog.records
 
 
@@ -53,7 +53,7 @@ def test_grpo_family_declares_the_flag():
     # The warning only reaches users through _configure_distributed_modes' gate on this flag; a trainer
     # silently dropping it re-opens the inert-FLCE trap.
     assert DistributedTrainerMixin.POLICY_GRADIENT_LOSS is False  # SFT-shaped trainers keep FLCE
-    for trainer in (OfflineGRPOTrainer, DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
+    for trainer in (OfflineGRPOTrainer, DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert trainer.POLICY_GRADIENT_LOSS is True, trainer.__name__
 
 

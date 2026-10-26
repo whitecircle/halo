@@ -14,12 +14,14 @@ Each case pins one verdict the suite depends on:
   to retry rather than as a real regression;
 * the timeout path reaches workers torchrun placed in their own sessions, and reports any it could
   not kill (they keep holding GPUs and poison later nodes);
-* zero visible GPUs is a usage error, never a green tier of skips.
+* zero visible GPUs is a usage error, never a green tier of skips;
+* a ``launcher="python"`` row runs its script as one process told how many ranks to start.
 """
 
 import contextlib
 import json
 import subprocess
+import sys
 import time
 from unittest import mock
 
@@ -27,7 +29,7 @@ import pytest
 
 from tests.common.reporting import RESULT_SENTINEL
 from tests.gpu import conftest as launcher
-from tests.gpu.manifest import TestSpec
+from tests.gpu.manifest import TestSpec, script_path
 
 pytestmark = [pytest.mark.gpu, pytest.mark.core]
 
@@ -96,6 +98,41 @@ def test_a_silent_exit_zero_is_still_a_pass(monkeypatch, tmp_path):
     """Anti-vacuity for the skip above: exit-code-only scripts have no other way to report success,
     so a clean exit with neither a result line nor a SKIP must stay a PASS."""
     assert _verdict(_case(monkeypatch, 0, "done\n"), tmp_path)[0] == "pass"
+
+
+def _launched(monkeypatch, tmp_path, spec: TestSpec) -> tuple[list[str], dict]:
+    """The argv and env one launch of ``spec`` would run, without running it."""
+    seen = {}
+
+    class _Done:
+        returncode = 0
+
+        def communicate(self, timeout):
+            return "", None
+
+    def popen(cmd, env, **kwargs):
+        seen.update(cmd=cmd, env=env)
+        return _Done()
+
+    monkeypatch.setattr(launcher.subprocess, "Popen", popen)
+    launcher.GPUCase("fake/test_x.py", spec, "--method sft")._launch_once(tmp_path)
+    return seen["cmd"], seen["env"]
+
+
+def test_a_python_row_runs_its_script_as_one_process_told_how_many_ranks_to_start(monkeypatch, tmp_path):
+    """A ``halo launch`` driver starts its own ranks: under torchrun it would itself be ``nproc`` ranks, each
+    launching ``nproc`` more onto the same GPUs."""
+    cmd, env = _launched(monkeypatch, tmp_path, TestSpec(nproc=2, markers=("gpu",), launcher="python"))
+    assert cmd == [sys.executable, str(script_path("fake/test_x.py")), "--method", "sft"]
+    assert env[launcher._NPROC_VAR] == "2"
+    assert env[launcher._LAUNCH_ID_VAR], "the driver's own launches inherit the id the timeout sweep keys on"
+
+
+def test_a_torchrun_row_still_launches_its_ranks_under_torchrun(monkeypatch, tmp_path):
+    cmd, env = _launched(monkeypatch, tmp_path, TestSpec(nproc=2, markers=("gpu",)))
+    assert cmd[:4] == [sys.executable, "-m", "torch.distributed.run", "--nproc_per_node=2"]
+    assert cmd[-3:] == [str(script_path("fake/test_x.py")), "--method", "sft"]
+    assert launcher._NPROC_VAR not in env
 
 
 def test_timeout_reports_workers_it_could_not_kill(monkeypatch, tmp_path):

@@ -27,7 +27,7 @@ from tests.common.weight_sync import StockModel
 
 
 def _wrapped(model: nn.Module, layer_cls: type[EPMoELayerBase]) -> nn.Module:
-    """``model`` with one live EP wrapper of ``layer_cls`` — the ``nn.Module`` half only, as the base
+    """``model`` with one live EP layer of ``layer_cls`` — the ``nn.Module`` half only, as the base
     ``__init__`` needs a process group; the gate reads the family off the instance's type."""
     layer = object.__new__(layer_cls)
     nn.Module.__init__(layer)
@@ -73,10 +73,10 @@ def test_servable_wrapped_sibling_and_dense_models_pass(backend):
 )
 def test_servable_moe_without_a_live_wrapper_is_refused_with_the_remedy(backend, model_type, layer_cls):
     """The stock tree forwards fused expert tensors under module names; the refusal names the knob that
-    installs the wrappers, and the same model with a wrapper passes (the refusal is about the
-    wrapper, not the family). Per-expert and fused-native hub layouts alike: the validated layout is
+    installs the EP layers, and the same model with one passes (the refusal is about the
+    EP layer, not the family). Per-expert and fused-native hub layouts alike: the validated layout is
     the gather's, whichever it is. GptOss is the sink-gate test's wrapped stub."""
-    with pytest.raises(ValueError, match="no live EP wrapper") as refused:
+    with pytest.raises(ValueError, match="no live EP layer") as refused:
         reject_unsyncable_model(StockModel(model_type), backend)
     assert "use_grouped_gemm: true" in str(refused.value)
     assert layer_cls.__name__ in str(refused.value)

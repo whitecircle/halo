@@ -26,7 +26,7 @@ import torch.nn as nn
 
 from halo.kernels.grouped_mm import grouped_mm
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 # Model dimensions from tiny-random-kimi-k2.5
 

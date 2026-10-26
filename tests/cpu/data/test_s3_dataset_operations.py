@@ -34,7 +34,7 @@ from halo.data.sources.dataset_cache import (
 from halo.data.sources.s3_client import S3Client, build_s3_uri
 from halo.data.sources.s3_client import logger as s3_module_logger
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
-from scripts.before_training.s3_datasets import main as s3_cli_main
+from scripts.before_training.s3 import main as s3_cli_main
 
 
 def test_get_storage_options_default():

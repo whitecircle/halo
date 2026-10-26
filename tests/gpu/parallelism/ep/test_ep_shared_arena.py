@@ -30,7 +30,8 @@ from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_30B_A3B
-from tests.common.utils import cos_sim, log
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log
 
 MODEL_NAME = QWEN3_30B_A3B
 EP_SIZE = 2

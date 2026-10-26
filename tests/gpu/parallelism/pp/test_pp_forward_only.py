@@ -34,7 +34,8 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_all
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import log, max_abs_rel_err, max_or_nan
+from tests.common.numerics import max_abs_rel_err, max_or_nan
+from tests.common.rank_log import log
 
 PP_SIZE = 2
 GLOBAL_BATCH = 8

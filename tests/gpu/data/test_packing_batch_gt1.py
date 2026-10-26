@@ -36,8 +36,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from halo.data.collators.packing import DataCollatorWithPacking
 from halo.hardware import is_blackwell_gpu
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 MODEL = QWEN3_0_6B
 # Rows of UNEQUAL length: collation pads row 0 and the flatten must drop that padding, so the seam

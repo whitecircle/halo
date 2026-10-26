@@ -46,14 +46,15 @@ from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_mode
 from halo.model_loading.parallel.pp import StageKeyFilter, _load_stage_lazy
 from halo.model_loading.parallel.whole_model import cast_loaded_parameters, resolve_trainer_model
 from halo.models.param_roles import fp32_pinned_names
+from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
+from tests.common.numerics import params_off_dtype
 from tests.common.pinned_params import pins_off_stored, stored_fp32_pins
 from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.source_sweep import builds_a_model, functions_calling
 from tests.common.tiny_models import PINNED_FP32_FAMILIES, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 from tests.common.tokenizers import load_cached_tokenizer
-from tests.common.utils import params_off_dtype, safetensors_state_dict
 
 # The run-dtype cast, directly or through its EP-aware wrapper.
 CASTS = frozenset({cast_parameters_to_run_dtype.__name__, cast_loaded_parameters.__name__})
@@ -300,7 +301,7 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
 @pytest.mark.parametrize("ep_wrapped", [True, False])
 def test_fp32_masters_keep_stored_values_where_the_upcast_reaches(pinned_checkpoints, ep_wrapped):
     """``fp32_non_ep_params`` upcasts non-EP parameters alone, so a parameter inside a block that gets EP
-    wrappers trains at the run dtype even when it loaded fp32; without wrappers it is upcast too, and
+    layers trains at the run dtype even when it loaded fp32; without them it is upcast too, and
     keeps its stored value like the pins."""
     model = TINY_MOE_FAMILIES["inkling_text"].load_class.from_pretrained(
         pinned_checkpoints["inkling_text"], dtype=torch.bfloat16

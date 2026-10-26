@@ -19,7 +19,7 @@ import pytest
 import torch
 
 from halo.trainers.grpo.objective.advantages import group_relative_advantages
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 G = 4
 # Rewards all within 2e-3 of each other: no real signal, std ~1e-3.
@@ -49,10 +49,10 @@ class _OnlineStub:
         # deque (generation_batch_size) — a plain list would support operations production cannot.
         self._logs = {"advantages": deque([0.0] * G, maxlen=G)}
 
-    _recomputes_from_gathered_rewards = DistributedGRPOTrainer._recomputes_from_gathered_rewards
-    _apply_std_floor_advantages = DistributedGRPOTrainer._apply_std_floor_advantages
-    _install_advantages = DistributedGRPOTrainer._install_advantages
-    _local_slice = DistributedGRPOTrainer._local_slice
+    _recomputes_from_gathered_rewards = DistributedOnlineGRPOTrainer._recomputes_from_gathered_rewards
+    _apply_std_floor_advantages = DistributedOnlineGRPOTrainer._apply_std_floor_advantages
+    _install_advantages = DistributedOnlineGRPOTrainer._install_advantages
+    _local_slice = DistributedOnlineGRPOTrainer._local_slice
 
     def _gathered_rewards(self):
         return DEGENERATE_REWARDS.clone(), torch.zeros(G, dtype=torch.bool)

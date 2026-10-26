@@ -37,8 +37,10 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import QWEN3_5_VLM_4B
-from tests.common.utils import gpu_mem_gb, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = QWEN3_5_VLM_4B
 NUM_TRAIN_SAMPLES = 32

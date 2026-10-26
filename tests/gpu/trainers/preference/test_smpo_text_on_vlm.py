@@ -22,13 +22,13 @@ import shutil
 import torch
 from transformers import AutoModelForImageTextToText, AutoProcessor
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = "Qwen/Qwen3-VL-2B-Instruct"
 NUM_TRAIN_SAMPLES = 32
@@ -54,7 +54,7 @@ def run(ctx) -> dict:
 
     model = AutoModelForImageTextToText.from_pretrained(MODEL_NAME, dtype=torch.bfloat16, attn_implementation="sdpa")
 
-    config = SmoothMarginPOConfig(
+    config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=2,
@@ -78,7 +78,7 @@ def run(ctx) -> dict:
     # The text branch consumes what the script's prepare_preference_datasets emits: rendered
     # STRING columns, tokenized by the row fn through the processor's inner tokenizer.
     train_dataset = create_preference_dataset(NUM_TRAIN_SAMPLES, tokenizer)
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model,
         args=config,
         train_dataset=train_dataset,

@@ -61,6 +61,8 @@ _OOM = ("OutOfMemoryError", "CUDA out of memory", "CUDA error: out of memory")
 # Stamped into every launch's env so surviving workers are identifiable from /proc without matching
 # on a script name a co-tenant might also be running.
 _LAUNCH_ID_VAR = "HALO_TEST_LAUNCH_ID"
+# The rank count a ``launcher="python"`` row's script starts on its own, from the row's ``nproc``.
+_NPROC_VAR = "HALO_TEST_NPROC"
 # Seconds to let torchrun reap its own workers after SIGTERM before escalating to SIGKILL.
 _SHUTDOWN_GRACE = 10
 # Orphan sweep: kill deadline, consecutive clean surveys required, /proc passes per survey.
@@ -225,27 +227,32 @@ class GPUCase:
         self.args = args
 
     def _launch_once(self, tmp_path: Path):
-        port = free_port()
         launch_id = uuid.uuid4().hex
         # TORCHELASTIC_ERROR_FILE is left unset: one shared path makes the last writer win, and the
         # agent's collateral SIGTERMs would overwrite the real cause.
         env = {
             **os.environ,
-            "MASTER_PORT": str(port),
             _LAUNCH_ID_VAR: launch_id,
             # Per-run isolated temp: a crash can't poison the next node and ranks never share a
             # tokenizer-cache dir (cross-model token-ID collisions).
             "TMPDIR": str(_socket_safe_tmpdir(tmp_path)),
         }
-        cmd = [
-            sys.executable,
-            "-m",
-            "torch.distributed.run",
-            f"--nproc_per_node={self.spec.nproc}",
-            f"--master_port={port}",
-            str(script_path(self.rel)),
-            *(self.args.split() if self.args else []),
-        ]
+        script = [str(script_path(self.rel)), *(self.args.split() if self.args else [])]
+        if self.spec.launcher == "python":
+            # The script's own launches inherit the launch id, so the timeout sweep reaches their ranks.
+            env[_NPROC_VAR] = str(self.spec.nproc)
+            cmd = [sys.executable, *script]
+        else:
+            port = free_port()
+            env["MASTER_PORT"] = str(port)
+            cmd = [
+                sys.executable,
+                "-m",
+                "torch.distributed.run",
+                f"--nproc_per_node={self.spec.nproc}",
+                f"--master_port={port}",
+                *script,
+            ]
         proc = subprocess.Popen(
             cmd,
             env=env,

@@ -26,12 +26,12 @@ from halo.configs.distillation import (
     TeacherDistillScriptArguments,
 )
 from halo.configs.embedding import EmbeddingConfig
-from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.parser import HaloArgumentParser, _literal_choices
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.entrypoints.script import init_training_script
 from halo.env import DEFAULT_NCCL_TIMEOUT_MINUTES
 from halo.subclass_registry import iter_subclasses
@@ -58,16 +58,16 @@ _RANGE_VIOLATIONS = [
     (ClassificationConfig, "focal_gamma", "-1"),
     (ClassificationConfig, "label_smoothing", "1.5"),
     (ClassificationConfig, "multi_label_threshold", "0"),
-    (SmoothMarginPOConfig, "target_margin", "-0.1"),
-    (SmoothMarginPOConfig, "chosen_sft_ratio", "1.5"),
-    (SmoothMarginPOConfig, "min_log_prob", "0.5"),
-    (SmoothMarginPOConfig, "lower_clip_percentile", "0.9"),
+    (SMPOConfig, "target_margin", "-0.1"),
+    (SMPOConfig, "chosen_sft_ratio", "1.5"),
+    (SMPOConfig, "min_log_prob", "0.5"),
+    (SMPOConfig, "lower_clip_percentile", "0.9"),
     (EmbeddingConfig, "loss_scale", "0"),
     (OfflineGRPOConfig, "best_completion_emphasis", "0.5"),
     (OfflineGRPOConfig, "best_completion_emphasis", "atuo"),
-    (AsyncTrainingConfig, "sync_weights_every_n_steps", "0"),
-    (AsyncTrainingConfig, "max_retries", "-1"),
-    (AsyncTrainingConfig, "scale_rewards_std_floor", "-0.05"),
+    (AsyncRolloutConfig, "sync_weights_every_n_steps", "0"),
+    (AsyncRolloutConfig, "max_retries", "-1"),
+    (AsyncRolloutConfig, "scale_rewards_std_floor", "-0.05"),
     (RLVROnlineGRPOScriptArguments, "scale_rewards_std_floor", "nan"),
     (RLVROnlineGRPOScriptArguments, "sdpg_temperature", "0"),
     (RLVROnlineGRPOScriptArguments, "sdpg_hint_template", "{solution}"),
@@ -101,11 +101,11 @@ def test_cli_override_violating_a_range_raises(config_cls, flag, value, tmp_path
     ("config_cls", "flag", "value"),
     [
         (ClassificationConfig, "focal_gamma", "3.0"),
-        (SmoothMarginPOConfig, "chosen_sft_ratio", "0.5"),
+        (SMPOConfig, "chosen_sft_ratio", "0.5"),
         (OfflineGRPOConfig, "best_completion_emphasis", "1.5"),
         (OfflineGRPOConfig, "best_completion_emphasis", "auto"),
-        (AsyncTrainingConfig, "max_retries", "0"),
-        (AsyncTrainingConfig, "sync_weights_every_n_steps", "4"),
+        (AsyncRolloutConfig, "max_retries", "0"),
+        (AsyncRolloutConfig, "sync_weights_every_n_steps", "4"),
     ],
     ids=lambda v: str(v),
 )
@@ -131,7 +131,7 @@ def test_cli_override_emptying_a_required_field_raises(config_cls, flag, yaml_bo
 def test_smpo_cross_field_margin_guard_survives_override(tmp_path):
     """initial_margin < target_margin is a CROSS-field guard: overriding either side must re-check."""
     with pytest.raises(ValueError, match="initial_margin"):
-        _parse(SmoothMarginPOConfig, tmp_path, ["--initial_margin=0.9"], "use_margin_schedule: true\n")
+        _parse(SMPOConfig, tmp_path, ["--initial_margin=0.9"], "use_margin_schedule: true\n")
 
 
 def test_classification_class_weight_exclusivity_survives_override(tmp_path):
@@ -208,8 +208,8 @@ def test_offline_grpo_max_completion_length_defaults_to_none():
 
 
 def test_async_episode_timeout_default_clears_the_watchdog_warning():
-    """The shipped default must not trip AsyncTrainingConfig's own >= 0.8 * NCCL-watchdog warning."""
-    assert AsyncTrainingConfig.episode_timeout < 0.8 * DEFAULT_NCCL_TIMEOUT_MINUTES * 60
+    """The shipped default must not trip AsyncRolloutConfig's own >= 0.8 * NCCL-watchdog warning."""
+    assert AsyncRolloutConfig.episode_timeout < 0.8 * DEFAULT_NCCL_TIMEOUT_MINUTES * 60
 
 
 # Each distillation arm admits its own slice of the one divergence registry.

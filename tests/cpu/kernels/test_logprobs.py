@@ -15,7 +15,7 @@ from trl.trainer.utils import selective_log_softmax
 
 import halo.kernels.logprobs as logprob_kernels
 from halo.kernels.logprobs import logit_chunk_rows, next_token_logprobs, selective_logprobs, token_logprobs
-from tests.common.utils import autograd_nodes
+from tests.common.numerics import autograd_nodes
 
 VOCAB = 37
 

@@ -34,8 +34,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks, is_sink_key
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from tests.common.ep_reference import ep_layers
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     LORA_ALPHA,
     LORA_R,
     adapter_param_items,
@@ -44,7 +43,11 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import log, max_or_nan, optimizer_state_matches, step_losses
+from tests.common.ep_reference import ep_layers
+from tests.common.numerics import max_or_nan
+from tests.common.optimizer_state import optimizer_state_matches
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 from tests.common.weight_sync import local_parameters, moved_parameters
 
 # Greedy, one token, top-k: the assertion is "these numbers moved", so the probe must be the least
@@ -354,7 +357,7 @@ def perturbation_round(
     _unshard_with_a_forward(model, ctx.device)
     _apply_perturbation(targets, adapter)
     # Guard on the number that can go missing: a full fine-tune of a MoE policy has to move expert
-    # tensors, and zero of them means no EP wrapper carried any, so the served-policy check would rest
+    # tensors, and zero of them means no EP layer carried any, so the served-policy check would rest
     # on the dense delta alone. On an adapter run the same holds of the adapters: nothing perturbed
     # means nothing the fold could carry.
     counted = stream_count if adapter is not None or expert_stream else len(targets)
@@ -404,7 +407,7 @@ def expert_round(ctx, model, *, server_url: str, model_name: str, push, checks: 
         return False
     reshard_fsdp2_modules(unwrap(model))
     experts = _expert_params(model)
-    # Guard: an EP wrapper that stopped exposing its expert params would otherwise skip the round silently.
+    # Guard: an EP layer that stopped exposing its expert params would otherwise skip the round silently.
     checks["expert_perturbation_engaged"] = bool(experts)
     if not experts:
         return False

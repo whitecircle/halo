@@ -31,8 +31,9 @@ from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.datasets import digit_image
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_5_2B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 MODEL_NAME = QWEN3_5_2B
 NUM_TRAIN_SAMPLES = 16

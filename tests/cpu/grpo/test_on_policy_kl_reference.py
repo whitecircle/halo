@@ -39,7 +39,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.trainers.grpo import online
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.frozen_loader import captured_load, stub_frozen_loader
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.offline_grpo import make_offline_tokenizer
@@ -220,7 +220,7 @@ def test_a_policy_passed_by_name_is_still_built_by_trl(tmp_path, base_dir):
     assert trainer.accelerator.unwrap_model(trainer.ref_model) is reference
 
 
-@pytest.mark.parametrize("trainer_cls", [DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
+@pytest.mark.parametrize("trainer_cls", [DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
 def test_the_replica_warning_names_the_on_policy_way_around_the_reference(trainer_cls, monkeypatch, caplog):
     """Under EP the reference is a dense replica per rank; the warning offers what these trainers honor,
     not DPO's precompute."""
@@ -251,7 +251,7 @@ def test_the_constructor_takes_ref_model_off_the_kwargs_trl_receives():
     assert host._supplied_ref_model is reference
 
 
-@pytest.mark.parametrize("trainer_cls", [DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
+@pytest.mark.parametrize("trainer_cls", [DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
 def test_both_trainers_run_trls_constructor_under_the_hand_off(trainer_cls):
     init = ast.parse(textwrap.dedent(inspect.getsource(trainer_cls.__init__))).body[0]
     wrapped = [
@@ -297,7 +297,7 @@ def test_the_online_trainer_hands_trl_the_reference_under_its_client_install(tmp
     monkeypatch.setattr(online, "TrlVLLMClient", _StubTrlVLLMClient)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     reference = _load_reference(base_dir)
-    trainer = DistributedGRPOTrainer(
+    trainer = DistributedOnlineGRPOTrainer(
         model=Qwen3ForCausalLM.from_pretrained(base_dir),
         ref_model=reference,
         parallelism_config=ParallelismConfig(),
@@ -313,7 +313,7 @@ def _trl_constructor_reached(*_, **__):
     raise AssertionError("TRL's constructor ran: on online GRPO it has opened the rollout client by now")
 
 
-@pytest.mark.parametrize("trainer_cls", [DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
+@pytest.mark.parametrize("trainer_cls", [DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer])
 @pytest.mark.parametrize("unread", ["beta-zero", "peft-config", "peft-model"])
 def test_a_reference_the_run_never_reads_is_refused_before_trls_constructor(
     tmp_path, base_dir, monkeypatch, trainer_cls, unread

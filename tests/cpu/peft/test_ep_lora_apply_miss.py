@@ -56,7 +56,7 @@ def _adapter_keys(layer_idx: int) -> dict[str, torch.Tensor]:
 
 def test_stock_peft_expert_keys_are_not_claimed_as_native():
     """Per-expert ``nn.ModuleList`` families (Bailing/Ling) let stock PEFT adapt the experts directly
-    when no EP wrapper is built. Those keys carry ``.experts.`` too, so a substring predicate would
+    when no EP layer is built. Those keys carry ``.experts.`` too, so a substring predicate would
     route them into the EP loader — which has nowhere to put them, and which strips them from the
     attention state so PEFT never sees them either."""
     peft_key = "base_model.model.model.layers.0.mlp.experts.3.gate_proj.lora_A.default.weight"

@@ -7,7 +7,7 @@ Each CP rank all-reduces its chunk's partial log-prob and NLL sums. An in-place 
 there reaches autograd only through PyTorch's c10d fallback (identity backward, a warning), and a
 loss multiplied by ``cp_size`` to make up the gradient logs ``cp_size`` times the true loss. Step 1's
 microbatches, as ``compute_loss`` saw them, are scored again by an EP-only (CP=1)
-SmoothMarginPOTrainer on the initial weights, and
+SMPOTrainer on the initial weights, and
 
   1. each microbatch loss and the logged step-1 loss equal the reference's;
   2. no backward reached the c10d autograd fallback;
@@ -35,16 +35,18 @@ Note:
 import torch
 from transformers import AutoTokenizer
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.first_step import FirstStep, first_step_checks, score_first_step, train_recording_first_step
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2
@@ -65,8 +67,8 @@ SEED = 42
 LOSS_RTOL = 0.4
 
 
-def _smpo_config(output_dir: str) -> SmoothMarginPOConfig:
-    return SmoothMarginPOConfig(
+def _smpo_config(output_dir: str) -> SMPOConfig:
+    return SMPOConfig(
         output_dir=output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -114,7 +116,7 @@ def _train_ep_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep
 
     config = _smpo_config(output_dir)
     log(f"Config: beta={config.beta}, target_margin={config.target_margin}, loss_type={config.loss_type}")
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=model,
         args=config,
         train_dataset=train_dataset,
@@ -137,7 +139,7 @@ def _train_ep_cp(output_dir: str, tokenizer) -> tuple[dict[str, bool], FirstStep
 def _score_reference(output_dir: str, tokenizer, first_step: FirstStep, attn_implementation: str) -> FirstStep:
     """Score the recorded first step with an EP-only (CP=1) trainer on the initial weights."""
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
-    trainer = SmoothMarginPOTrainer(
+    trainer = SMPOTrainer(
         model=_load_model(parallelism_config, attn_implementation),
         args=_smpo_config(output_dir),
         processing_class=tokenizer,

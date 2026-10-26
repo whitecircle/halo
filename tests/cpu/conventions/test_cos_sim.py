@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``tests.common.utils.cos_sim`` raises on an operand with no direction instead of scoring it.
+"""``tests.common.numerics.cos_sim`` raises on an operand with no direction instead of scoring it.
 
 The GPU correctness suites gate gradient and weight agreement on this helper, and they run only on the
 GPU tiers. A cosine that scores a zero-norm operand passes one side of every threshold: 1.0 matches a
@@ -16,7 +16,7 @@ import re
 import pytest
 import torch
 
-from tests.common.utils import cos_sim
+from tests.common.numerics import cos_sim
 
 SEED = 0
 LABEL = "model.layers.0.mlp.router.weight"

@@ -128,7 +128,7 @@ def test_gc_on_supporting_layer_passes():
 
 
 def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
-    """No EP/CP axis (ep_size=1 grouped-GEMM wrappers): the MoE verdict comes from the backbone's
+    """No EP/CP axis (ep_size=1 grouped-GEMM EP layers): the MoE verdict comes from the backbone's
     config alone, and a router re-run in non-reentrant recompute can flip a near-tie pick."""
     trainer = _Trainer(_EPStub(), gradient_checkpointing=True)
     trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)

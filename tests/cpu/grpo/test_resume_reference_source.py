@@ -25,7 +25,7 @@ from halo.entrypoints.model_setup import load_model_and_tokenizer
 from halo.entrypoints.run_setup import prepare_distributed_resume
 from halo.entrypoints.script import ScriptContext
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.offline_grpo import make_offline_tokenizer
 from tests.common.parallelism import make_parallelism_config
@@ -77,7 +77,7 @@ def _resumed_policy(tmp_path, monkeypatch):
     checkpoint, source = prepare_distributed_resume(
         training, model_config, parallelism_config, overwrite_output_dir=False
     )
-    runtime = ScriptContext(parallelism_config, 0, checkpoint, source, DistributedGRPOTrainer)
+    runtime = ScriptContext(parallelism_config, 0, checkpoint, source, DistributedOnlineGRPOTrainer)
     assert runtime.policy_from_checkpoint, "premise: an EP resume builds the policy from its checkpoint"
     monkeypatch.setattr(model_setup, "load_distributed_model", _from_pretrained_loader)
 

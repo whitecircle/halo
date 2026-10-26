@@ -1,4 +1,4 @@
-"""EP wrapper for LFM-2 MoE (fused experts with sigmoid routing + expert bias)."""
+"""EP layer for LFM-2 MoE (fused experts with sigmoid routing + expert bias)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from halo.models.moe.family_specs import LFM2
 
 
 class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
-    """EP wrapper for LFM2 MoE fused experts using DeepEP.
+    """EP layer for LFM2 MoE fused experts using DeepEP.
 
     Fused gate_up_proj/down_proj experts, SwiGLU, sigmoid routing with optional
     ``expert_bias`` correction. No shared experts (the block carries none, so the declared slot
@@ -61,7 +61,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     def _native_slot_absence_is_legal(self) -> bool:
         """``use_expert_bias: false`` registers no buffer, which is a configuration, not a rename.
 
-        Read off the wrapper's own flag, which routing and slot materialization both key on;
+        Read off the EP layer's own flag, which routing and slot materialization both key on;
         :meth:`_adopt_routing` rejects the one state that would make it inaccurate (a router asking
         for a bias its block does not carry).
         """
@@ -82,7 +82,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     def _router_logits(self, flat: torch.Tensor) -> torch.Tensor:
         """Bare linear over the router's weight. ``Lfm2MoeTopKRouter.forward`` cannot be called here:
         it requires the block's ``expert_bias`` and runs its own top-k, while selection must stay
-        with the wrapper (balancing bias and routing replay recompute it)."""
+        with the EP layer (balancing bias and routing replay recompute it)."""
         return self._linear_router_logits(flat)
 
     def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:

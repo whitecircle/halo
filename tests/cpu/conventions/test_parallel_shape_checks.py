@@ -31,7 +31,7 @@ HIDDEN = 8
 
 
 class _StubEPLayer(EPMoELayerBase):
-    """The attributes and expert weights an EP wrapper carries, for ``expert_count`` local experts.
+    """The attributes and expert weights an EP layer carries, for ``expert_count`` local experts.
     The base ``__init__`` needs a live process group, so only the ``nn.Module`` half is initialized."""
 
     def __init__(self, ep_size: int, *, expert_count: int | None = None, expert_tp_size: int = 1):
@@ -95,7 +95,7 @@ def test_an_etp_run_reads_the_sharding_off_every_layer(expert_tp_size, ok):
     assert "expert_bank_split_ep_way" not in checks, "ep_size=1 splits no bank"
 
 
-def test_a_dense_model_owes_no_ep_wrapper():
+def test_a_dense_model_owes_no_ep_layer():
     model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
     assert parallel_shape_checks(model, _config()) == {}, "grouped GEMM wraps experts, and a dense model has none"
 

@@ -9,9 +9,6 @@ from typing import Any
 # (messages, add_generation_prompt, include_thinking) -> token ids
 RenderFn = Callable[[Sequence[Any], bool, bool], list[int]]
 
-# Probe the reasoning-carrying render first; ``False`` is what a template hiding prior-turn CoT emits.
-_ANCHOR_THINKING_ORDER = (True, False)
-
 
 class TemplateSpanError(ValueError):
     """An assistant turn's span could not be located in the authoritative render."""
@@ -42,7 +39,8 @@ class _SpanLocator:
             raise TemplateSpanError(f"the chat template cannot render this trajectory: {type(e).__name__}: {e}") from e
         # index -> (block start, the include_thinking flag whose render pinned it), or None.
         self._anchors: dict[int, tuple[int, bool] | None] = {}
-        self._anchor_flag_order = _ANCHOR_THINKING_ORDER
+        # Probe the reasoning-carrying render first; ``False`` is what a template hiding prior-turn CoT emits.
+        self._anchor_flag_order = (True, False)
         # The end of the last message's block is the end of the render — the one free boundary.
         self._block_starts: dict[int, int] = {len(self._messages): len(self._full)}
 

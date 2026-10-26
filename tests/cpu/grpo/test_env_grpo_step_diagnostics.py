@@ -18,7 +18,7 @@ import pytest
 import torch
 
 import halo.trainers.grpo.environmental.rollout_metrics as rm
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import SOLVE_RATE_KEY
 from halo.environments.messages import Trajectory
@@ -237,7 +237,7 @@ def test_the_truncation_warning_states_what_the_loss_does_with_a_truncated_episo
 @pytest.mark.parametrize("rate", [1.0, -0.1])
 def test_a_truncation_alarm_rate_that_could_never_or_always_fire_is_refused(rate):
     with pytest.raises(ValueError, match="truncation_alarm_rate"):
-        AsyncTrainingConfig(truncation_alarm_rate=rate)
+        AsyncRolloutConfig(truncation_alarm_rate=rate)
 
 
 def test_the_truncation_alarm_off_logs_nothing(caplog):

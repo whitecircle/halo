@@ -13,7 +13,7 @@ Run: pytest tests/cpu/grpo/test_env_grpo_eval_round_gate.py
 import pytest
 from trl import GRPOConfig
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.grpo.environmental.environmental_rules import validate_eval_round
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
@@ -40,20 +40,20 @@ def test_env_grpo_recipes_exist():
 def test_every_env_grpo_recipe_passes_the_eval_round_gate(config):
     parsed = parser_for(_ENV_GRPO_SCRIPT).parse_yaml_file(str(config))
     grpo_config = next(obj for obj in parsed if isinstance(obj, GRPOConfig))
-    async_config = next(obj for obj in parsed if isinstance(obj, AsyncTrainingConfig))
+    async_config = next(obj for obj in parsed if isinstance(obj, AsyncRolloutConfig))
     num_generations_eval = parsed_field(parsed, "num_generations_eval") or parsed_field(parsed, "num_generations")
     validate_eval_round(grpo_config, async_config, num_generations_eval)
 
 
 def test_a_run_that_never_evaluates_skips_the_gate(tmp_path):
     args = _grpo_config(tmp_path, eval_strategy="no", per_device_eval_batch_size=1, num_generations=8)
-    validate_eval_round(args, AsyncTrainingConfig(), num_generations_eval=8)
+    validate_eval_round(args, AsyncRolloutConfig(), num_generations_eval=8)
 
 
 def test_eval_on_start_still_checks_the_round(tmp_path):
     args = _grpo_config(tmp_path, eval_strategy="no", eval_on_start=True, per_device_eval_batch_size=1)
     with pytest.raises(ValueError, match=r"per_device_eval_batch_size \(1\) must be divisible"):
-        validate_eval_round(args, AsyncTrainingConfig(), num_generations_eval=8)
+        validate_eval_round(args, AsyncRolloutConfig(), num_generations_eval=8)
 
 
 if __name__ == "__main__":

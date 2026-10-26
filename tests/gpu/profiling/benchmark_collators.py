@@ -52,9 +52,10 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import MODEL_CONFIGS
+from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import gpu_mem_gb, log
 
 # Constants
 

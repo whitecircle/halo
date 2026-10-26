@@ -11,7 +11,7 @@ from typing import Any
 
 from transformers import AutoConfig, AutoTokenizer
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.script_arguments import ModelArguments
 from halo.environments.engine_wire import reject_unenforceable_thinking_budget
@@ -25,6 +25,7 @@ from halo.environments.rollout_config import (
     resolve_reasoning_end_token_id,
     resolve_rollout_stop_token_ids,
 )
+from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS
 from halo.models.config_access import config_model_types
 from halo.weight_sync.registry import resolve_weight_sync_client
 
@@ -33,13 +34,10 @@ logger = logging.getLogger(__name__)
 # The training script's config classes an eval reads its contract from: the environment's, the rollout's, and the
 # model's (its tokenizer resolves the stop tokens and the reasoning close). The YAML's other keys (training
 # arguments, dataset fields) belong to classes the eval never instantiates.
-TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncTrainingConfig, ModelArguments)
+TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncRolloutConfig, ModelArguments)
 
 # The sampling flags an explicit CLI value lays over the training config, by ``RolloutConfig`` field.
 _SAMPLING_FLAGS = ("temperature", "top_p", "max_tokens", "request_timeout")
-# Per-generation HTTP timeout (seconds) without --training_config. Generous: an eval runs many episodes
-# concurrently against one endpoint, and a long reasoning turn queued behind them takes minutes to return.
-EVAL_REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 @dataclass(frozen=True)
@@ -49,7 +47,7 @@ class TrainingContract:
 
     path: str
     env_config: EnvironmentConfig
-    async_config: AsyncTrainingConfig
+    async_config: AsyncRolloutConfig
     model_config: ModelArguments
 
     @classmethod
@@ -128,7 +126,7 @@ def rollout_config_from_args(
             temperature=default_temperature,
             top_p=RolloutConfig.top_p,
             max_tokens=default_max_tokens,
-            request_timeout=EVAL_REQUEST_TIMEOUT_SECONDS,
+            request_timeout=REQUEST_TIMEOUT_SECONDS,
         )
     explicit = {name: getattr(args, name) for name in _SAMPLING_FLAGS if getattr(args, name) is not None}
     return replace(base, model_name=args.model, **explicit)

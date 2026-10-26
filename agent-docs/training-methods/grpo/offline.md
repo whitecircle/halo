@@ -27,7 +27,7 @@ Three conversational columns. A group is one **row**: put every completion of a 
 - Strict templates (Qwen3.5) work: the script renders `prompt + completion` and strips the prompt.
 - A `tools_field` column is passed as `tools=`.
 
-`scripts/inference/reward_model/rm_rejection_sampling.py` emits this shape with `--output_format offline_grpo`.
+`scripts/inference/reward_model/rejection_sample.py` emits this shape with `--output_format offline_grpo`.
 
 ## Configuration
 

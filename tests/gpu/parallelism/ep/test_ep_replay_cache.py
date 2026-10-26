@@ -31,8 +31,9 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 EP_SIZE = 2
 SEQ_LEN = 128

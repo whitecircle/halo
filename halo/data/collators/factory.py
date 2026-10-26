@@ -20,9 +20,10 @@ logger = logging.getLogger(__name__)
 
 def select_data_collator(
     tokenizer,
+    *,
+    train_on_completions_only: bool,
     padding_free: bool = False,
     packing: bool = False,
-    train_on_completions_only: bool = False,
     assistant_message_template: str | None = None,
     pad_to_multiple_of: int | None = None,
     use_context_parallel: bool = False,

@@ -21,8 +21,8 @@ from datasets import Dataset
 from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.on_policy import GenerationRoundMixin
-from halo.trainers.grpo.online import DistributedGRPOTrainer
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.reward.classification import ClassificationTrainer
 
 
@@ -67,7 +67,7 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
     return t, calls
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_equalizes_when_presharded(trainer_cls):
     t, calls = _make_stub(trainer_cls, presharded=True, tp=False)
     with pytest.raises(_StopAfterEqualize):
@@ -75,7 +75,7 @@ def test_equalizes_when_presharded(trainer_cls):
     assert len(calls) == 1, f"{trainer_cls.__name__}: _equalize_presharded_length not called for presharded dataset"
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_no_equalize_when_not_presharded(trainer_cls):
     # Custom path entered via TP, but dataset not pre-sharded → must NOT truncate.
     t, calls = _make_stub(trainer_cls, presharded=False, tp=True)
@@ -84,7 +84,7 @@ def test_no_equalize_when_not_presharded(trainer_cls):
     assert len(calls) == 0, f"{trainer_cls.__name__}: equalized a non-presharded dataset"
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_eval_equalizes_when_presharded(trainer_cls):
     """Pre-sharded EVAL must be equalized too: unequal eval step counts hang on NCCL."""
     t, calls = _make_stub(trainer_cls, presharded=True, tp=False)
@@ -93,7 +93,7 @@ def test_eval_equalizes_when_presharded(trainer_cls):
     assert calls == ["eval"], f"{trainer_cls.__name__}: _equalize_presharded_length not called for presharded eval"
 
 
-@pytest.mark.parametrize("trainer_cls", [SmoothMarginPOTrainer, ClassificationTrainer])
+@pytest.mark.parametrize("trainer_cls", [SMPOTrainer, ClassificationTrainer])
 def test_eval_no_equalize_when_not_presharded(trainer_cls):
     t, calls = _make_stub(trainer_cls, presharded=False, tp=True)
     with pytest.raises(_StopAfterEqualize):
@@ -169,7 +169,7 @@ def test_grpo_trainers_inherit_mixin_eval_dataloader():
     DataParallelLoaderMixin.get_eval_dataloader through the MRO (ahead of TRL's GRPOTrainer),
     so the pre-sharded eval equalization applies to online + environmental GRPO too."""
     assert "get_eval_dataloader" not in vars(GenerationRoundMixin)
-    for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
+    for cls in (DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         assert cls.get_eval_dataloader is DataParallelLoaderMixin.get_eval_dataloader, (
             f"{cls.__name__}.get_eval_dataloader does not resolve to the DP mixin's eval path"
         )

@@ -31,7 +31,7 @@ from tests.common.pp_trainers import (
     expect_construction_error,
     losses_identical_across_ranks,
 )
-from tests.common.utils import step_losses
+from tests.common.training_checks import step_losses
 
 PP_SIZE = 2
 MICROBATCHES = 2

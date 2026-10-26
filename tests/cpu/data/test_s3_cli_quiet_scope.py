@@ -1,4 +1,4 @@
-"""``s3_datasets.py --quiet`` exists only on the commands that draw a transfer progress bar.
+"""``s3.py --quiet`` exists only on the commands that draw a transfer progress bar.
 
 ``push`` and ``download`` forward it as ``show_progress=False``; ``list`` / ``exists`` / ``delete`` draw
 no bar, so they refuse the flag instead of accepting it and doing nothing. The client is stubbed at its
@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.before_training.s3_datasets import main as s3_cli_main
+from scripts.before_training.s3 import main as s3_cli_main
 
 
 def _run(argv: list[str]) -> None:

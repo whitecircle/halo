@@ -50,8 +50,10 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import fixed_chat_batch, full_grad
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, cos_sim, log, log_all
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log, log_all
 
 MODEL_NAME = GPT_OSS_20B
 SEQ_LEN = 128
@@ -138,7 +140,7 @@ def run_mode(fsdp_shard_ep1_experts, tokenizer, local_rank, output_dir):
     name, expert_w, n_ep_layers = first_expert_weight(wrapped)
     assert expert_w is not None, (
         f"no EP expert weight found ({n_ep_layers} EP layers detected) — model was not EP-wrapped at ep1. "
-        "Confirm use_grouped_gemm enables EP wrappers for this MoE."
+        "Confirm use_grouped_gemm enables EP layers for this MoE."
     )
     is_dtensor = isinstance(expert_w, DTensor)
     log(f"  expert weight: {name}  DTensor={is_dtensor}  (FSDP-sharded={is_dtensor})")

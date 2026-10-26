@@ -16,7 +16,7 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_targets
 from halo.trainers.grpo.logprob_scoring import LogprobScoringMixin
 from halo.trainers.grpo.objective.offline_loss import offline_loss
 from tests.common.cp_grpo import full_row_loss
-from tests.common.cp_wrapper import unpatched_cp_wrapper
+from tests.common.cp_model import unpatched_cp_wrapper
 from tests.common.models import TINY_QWEN3_CONFIG
 
 SEQ = 12

@@ -44,7 +44,8 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
 from tests.common.preference_precompute import TRAINERS, column
-from tests.common.utils import log, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 EP_SIZE = 2
 N_ROWS = 16

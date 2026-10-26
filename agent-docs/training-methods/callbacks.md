@@ -70,7 +70,7 @@ It emits nothing in three cases:
 - Under pipeline parallelism, where it is not wired: the stage forwards return bare tensors without `router_logits`, so `bias_update` is the route to load metrics there.
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
-Two live paths bypass the hooks even when wired: a wrapper routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
+Two live paths bypass the hooks even when wired: an EP layer routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
 
 ### BalancingBiasCallback
 
@@ -97,7 +97,7 @@ The contract is checked on the **enabled tree**, not the class declaration: a re
 >
 > The side-buffer families add the bias to **softmax probabilities** of scale `1/num_experts`: the 1e-3 default is one sign step of ~50% of uniform at 512 experts, and the callback warns past 25%. GPT-OSS's adopted `router.bias` is in **logit space**, where 1e-3 is sub-ULP in bf16 — raise it toward 1e-2 and watch `moe/load_cv`.
 
-**Requires EP patching** — `ep_group_size > 1 or use_grouped_gemm`, so `expert_parallel_size=1` still qualifies with grouped GEMM on. Without those wrappers, and on a dense model, an explicit `bias_update` raises rather than balancing nothing, except on routers with a native buffer (Zaya). `bias_update_transient` is refused under pipeline parallelism.
+**Requires EP patching** — `ep_group_size > 1 or use_grouped_gemm`, so `expert_parallel_size=1` still qualifies with grouped GEMM on. Without those EP layers, and on a dense model, an explicit `bias_update` raises rather than balancing nothing, except on routers with a native buffer (Zaya). `bias_update_transient` is refused under pipeline parallelism.
 
 ### VariableSchedulerCallback
 
@@ -127,7 +127,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when a bias-update mode is a
 
 Both bias modes force `output_router_logits=False`, overriding `model_init_kwargs`: the EP bias path bypasses the HF router module the recorder hooks, so leaving it on returns an empty `router_logits` tuple and `load_balancing_loss_func` raises `IndexError`. These writes are **run-scoped** — every exported `config.json` carries the hub's coefficient and flag.
 
-`aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP wrappers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, so a forward that reads the flag from `kwargs` only never reaches the aux term. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.
+`aux_loss` sets `output_router_logits=True` only where `router_aux_loss_coef > 0`; without a usable coef, or where the EP layers sever the aux path (DeepSeek-V4), it leaves the flag off and warns rather than letting TRL read an `outputs.aux_loss` those models never populate. With a usable coef it **raises** where the `forward` declares no `output_router_logits` parameter — HF's config fallback lives on that parameter, so a forward that reads the flag from `kwargs` only never reaches the aux term. The probe reads the model under a PEFT or CP wrapper, both of which pass the flag through.
 
 Under pipeline parallelism no stage runs the `*ForCausalLM.forward` that adds the term, so a mode resolving to `aux_loss` (`auto` included) at a positive `router_aux_loss_coef` raises at the split; balance with `bias_update` where the family exports it, or `none` ([PP + EP](../parallelism/pipeline-parallelism.md#pp--ep-moe)).
 
@@ -149,19 +149,19 @@ Every case the hooks cannot route raises instead of dropping the gradient: a kep
 
 ### `auto` resolution per family
 
-`auto` wants `bias_update` on three signals: a native `balancing_biases` router (Zaya); EP wrappers that sever the aux-loss path (DeepSeek-V4, Bailing, Inkling); or a `forward` taking no `output_router_logits` while an EP wrapper accepts the bias.
+`auto` wants `bias_update` on three signals: a native `balancing_biases` router (Zaya); EP layers that sever the aux-loss path (DeepSeek-V4, Bailing, Inkling); or a `forward` taking no `output_router_logits` while an EP layer accepts the bias.
 
 It **commits** only where the bias would land in exported state. GLM-4 MoE Lite, LFM-2 and Step-3.7 qualify on the third signal — none of their modelings has aux-loss machinery. GLM-5 Next does not: its forward honors the flag, so `auto` gives `aux_loss` while the exported slot still serves an explicit `bias_update`, the Laguna shape.
 
 **Mistral4 and Cohere2 MoE** have no slot and resolve to `none`, warning that `bias_update_transient` is the deliberate opt-in.
 
-`aux_loss` follows for the families whose `forward` declares the parameter: GPT-OSS, Qwen3, Qwen3.5/3.6 (multimodal and text-only), Laguna, GLM-5 Next. Where it does not and no wrapper accepts a bias either, the model has **no balancing route at all**, `auto` resolves to `none` with the reason, and an explicit `aux_loss` raises.
+`aux_loss` follows for the families whose `forward` declares the parameter: GPT-OSS, Qwen3, Qwen3.5/3.6 (multimodal and text-only), Laguna, GLM-5 Next. Where it does not and no EP layer accepts a bias either, the model has **no balancing route at all**, `auto` resolves to `none` with the reason, and an explicit `aux_loss` raises.
 
-That is also what `use_grouped_gemm: false` at `ep_size = 1` does to GLM-4 MoE Lite, LFM-2 and Step-3.7: with no wrappers to carry the bias, the run trains unbalanced.
+That is also what `use_grouped_gemm: false` at `ep_size = 1` does to GLM-4 MoE Lite, LFM-2 and Step-3.7: with no EP layers to carry the bias, the run trains unbalanced.
 
 ### Gemma 4 has no balancing path
 
-`auto` resolves Gemma 4 to `none` with a warning: its EP wrapper accepts no bias, no router ships a `balancing_biases` buffer, and its `forward` declares no `output_router_logits` parameter. An explicit `bias_update` raises, because the router lives in the parent decoder layer rather than the EP module. An explicit `aux_loss` finds no `router_aux_loss_coef` either, so it stamps the flag forced-off and warns rather than raising.
+`auto` resolves Gemma 4 to `none` with a warning: its EP layer accepts no bias, no router ships a `balancing_biases` buffer, and its `forward` declares no `output_router_logits` parameter. An explicit `bias_update` raises, because the router lives in the parent decoder layer rather than the EP module. An explicit `aux_loss` finds no `router_aux_loss_coef` either, so it stamps the flag forced-off and warns rather than raising.
 
 Either way Gemma 4 gets no balancing **and** no `moe/*` metrics, and `output_router_logits: true` in `model_init_kwargs` cannot buy them back — no Gemma 4 config level declares the field, so the override is rejected at load. Every shipped Gemma 4 config sets `moe_balancing: none`.
 

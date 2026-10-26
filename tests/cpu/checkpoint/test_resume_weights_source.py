@@ -2,10 +2,10 @@
 """CPU tests for the distributed-resume weights-source resolution.
 
 ``resolve_resume_weights_source`` decides where the POLICY model loads weights from on resume, and is
-what keeps a resume off silent base weights: modes needing EP wrappers or CP skip the Trainer's
+what keeps a resume off silent base weights: modes needing EP layers or CP skip the Trainer's
 checkpoint weight reload (the EP-fused / CP-wrapped structure can't ingest HF-format keys), so for
 those modes the trained weights must be loaded at construction from the checkpoint. With the
-production default ``use_grouped_gemm: true``, ``needs_ep_wrappers`` is True even without EP — EVERY
+production default ``use_grouped_gemm: true``, ``needs_ep_layers`` is True even without EP — EVERY
 stock torchrun resume repoints; only ``use_grouped_gemm: false`` (and no EP/CP) keeps loading from
 base and lets the loader reload the checkpoint. These tests lock that decision table against REAL
 ``ParallelismConfig`` instances (returning base for a wrapper/CP mode resumes training from the
@@ -27,7 +27,7 @@ BASE = "org/base-model"
 def _mode(*, ep=False, cp=False, grouped_gemm=False):
     """A real ParallelismConfig on a single 8-GPU node.
 
-    The resolver gates on ``needs_ep_wrappers or is_cp_mode``, and ``needs_ep_wrappers`` is derived
+    The resolver gates on ``needs_ep_layers or is_cp_mode``, and ``needs_ep_layers`` is derived
     (``ep_group_size > 1 or use_grouped_gemm``). ``grouped_gemm`` defaults to False here — against
     the production default — so ``ep``/``cp`` are the only thing that opens the gate; leaving it on
     would make every EP and CP case below pass with both of those terms deleted from the resolver.
@@ -109,14 +109,14 @@ def test_ep_cp_full_checkpoint_repoints_to_checkpoint(tmp_path, mode):
 
 
 def test_default_config_full_checkpoint_repoints(tmp_path):
-    """The production default (use_grouped_gemm=True ⇒ needs_ep_wrappers=True even without EP): every
+    """The production default (use_grouped_gemm=True ⇒ needs_ep_layers=True even without EP): every
     stock torchrun resume loads policy weights FROM the checkpoint."""
     _touch(tmp_path / "model.safetensors")
     assert resolve_resume_weights_source(str(tmp_path), _model_config(), _mode(grouped_gemm=True)) == str(tmp_path)
 
 
 def test_no_wrappers_no_cp_full_checkpoint_stays_base(tmp_path):
-    """Without EP wrappers or CP (reachable only with use_grouped_gemm: false) the Trainer's loader
+    """Without EP layers or CP (reachable only with use_grouped_gemm: false) the Trainer's loader
     reloads the checkpoint itself, so the policy still loads from base."""
     _touch(tmp_path / "model.safetensors")
     assert resolve_resume_weights_source(str(tmp_path), _model_config(), _mode()) == BASE

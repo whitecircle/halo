@@ -30,10 +30,10 @@ from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLite
 from trl import SFTConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.model_loading.liger.dispatch import resolve_liger_applier
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.liger_appliers import liger_applier
+from tests.common.rank_log import log
 
 VOCAB_SIZE = 4096
 SEQ_LENGTH = 256
@@ -118,7 +118,7 @@ def run(ctx) -> dict:
     # The REAL registered applier, driven the way production resolves it — same FLCE path
     # GLM-4.7-Flash long-context runs take. Only the loss role is enabled: this suite is about the
     # eval-time skip_logits injection, not the family's norm/GLU swaps.
-    resolve_liger_applier("glm4_moe_lite")(
+    liger_applier("glm4_moe_lite")(
         cross_entropy=False,
         fused_linear_cross_entropy=True,
         rms_norm=False,

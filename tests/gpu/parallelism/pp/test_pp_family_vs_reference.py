@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """A pipeline-registered tiny ``TINY_MOE_FAMILIES`` model split into two stages through the real SFT trainer, its
-experts on the ep1 grouped-GEMM wrappers (``--ep-size 1``, pp2 × dp2) or distributed (``--ep-size 2``, pp2 × ep2),
+experts on the ep1 grouped-GEMM EP layers (``--ep-size 1``, pp2 × dp2) or distributed (``--ep-size 2``, pp2 × ep2),
 against the unsplit model carrying the same ep1 wrappers: every DP replica's loss, every non-expert gradient by its
 unsplit name, and every expert bank through the export's own gather. GPT-OSS has its own tighter gates
 (``test_pp_ep_vs_unsplit.py``, ``test_pp_ep1_gmm_vs_unsplit.py``).
@@ -27,9 +27,9 @@ from halo.runtime.dtensor import materialize_dtensor
 from tests.common import pp_equivalence as ppeq
 from tests.common.ep_reference import compare_ep_grad
 from tests.common.harness import gpu_test_main
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
-from tests.common.utils import log
 
 SEED = 1234
 PP_SIZE = 2

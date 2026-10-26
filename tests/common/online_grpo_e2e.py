@@ -20,10 +20,12 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
+from tests.common.adapters import assert_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import ep_layers
+from tests.common.memory import cleanup_memory
 from tests.common.on_policy_e2e import (
     RESUME_MAX_STEPS,
     RESUME_SAVE_STEP,
@@ -47,8 +49,7 @@ from tests.common.on_policy_e2e import (
     served_policy_moved,
     sink_round,
 )
-from tests.common.peft_helpers import assert_only_adapters_trainable, snapshot_adapters, unwrap
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 from tests.common.weight_sync import moved_parameters
 
 # Deliberately short: every step is a full engine round-trip, and the properties under test are that
@@ -67,7 +68,7 @@ PER_DEVICE_BATCH_SIZE = 2
 class _Mode:
     """One row's shape: the axes it engages and which adapter (if any) it trains.
 
-    ``adapter`` is the ``peft_helpers`` mode name: ``None`` (full fine-tune), ``"lora"`` (stock PEFT
+    ``adapter`` is the ``adapters`` mode name: ``None`` (full fine-tune), ``"lora"`` (stock PEFT
     handed to the trainer as ``peft_config``) or ``"expert_lora"`` (native grouped expert adapters
     built inside the EP layers). ``refuses_lora_under_tp`` marks the row that asserts a
     construction-time refusal instead of training; ``rejects_expert_lora`` marks the ETP row, which
@@ -206,10 +207,14 @@ def _build_trainer(
         )
     if trainer_kind == "sdpg":
         trainer = DistributedSDPGTrainer(
-            **kwargs, sdpg_answer_field="answer", sdpg_loss="reverse_kl", sdpg_beta_base=1.0
+            **kwargs,
+            sdpg_answer_field="answer",
+            opd_positive_advantage_only=True,
+            sdpg_loss="reverse_kl",
+            sdpg_beta_base=1.0,
         )
     else:
-        trainer = DistributedGRPOTrainer(**kwargs)
+        trainer = DistributedOnlineGRPOTrainer(**kwargs)
     return trainer, parallelism_config
 
 

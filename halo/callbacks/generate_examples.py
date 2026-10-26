@@ -108,7 +108,7 @@ class GenerateExamplesCallback(TrainerCallback):
         self,
         preprocessed_dataset: Dataset,
         tokenizer: PreTrainedTokenizer,
-        num_examples=5,
+        num_examples: int,
         max_new_tokens=256,
         logger_backend="wandb",
     ):

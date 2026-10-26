@@ -31,7 +31,7 @@ from transformers import (
 from trl import DPOConfig, KTOConfig, RewardConfig
 
 from halo.configs.classification import ClassificationConfig
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
@@ -39,19 +39,19 @@ from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from halo.runtime.collectives import barrier
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.preference.kto import DistributedKTOTrainer
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from halo.trainers.reward.classification import ClassificationTrainer
-from tests.common.harness import gpu_test_main
-from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     assert_adapter_checkpoint,
     assert_adapters_moved,
     assert_only_adapters_trainable,
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import log
+from tests.common.harness import gpu_test_main
+from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log
 
 MODEL = QWEN3_0_6B
 MAX_STEPS = 3
@@ -208,8 +208,8 @@ def _build_trainer(trainer, model, tokenizer, peft_config, output_dir, paralleli
             parallelism_config=parallelism_config,
         )
     if trainer == "smpo":
-        cfg = SmoothMarginPOConfig(beta=0.1, max_length=MAXLEN, max_prompt_length=64, **common)
-        return SmoothMarginPOTrainer(
+        cfg = SMPOConfig(beta=0.1, max_length=MAXLEN, max_prompt_length=64, **common)
+        return SMPOTrainer(
             model=model,
             args=cfg,
             train_dataset=_pref_rows_str(tokenizer, N),

@@ -11,7 +11,7 @@ dependency it needs:
 | `halo/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
 | `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool, the default-bucket helpers |
 | `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load, the mirrored control-file reads |
-| `scripts/before_training/s3_datasets.py` | the CLI |
+| `scripts/before_training/s3.py` | the CLI |
 
 ## Dataset path formats
 
@@ -143,11 +143,11 @@ duplicate downloads, memory-map the Arrow files.
 ## CLI
 
 ```bash
-python scripts/before_training/s3_datasets.py push ./data project/experiment/data
-python scripts/before_training/s3_datasets.py download project/experiment/data ./data
-python scripts/before_training/s3_datasets.py list my_project/ --recursive
-python scripts/before_training/s3_datasets.py delete my_folder/data.json --yes
-python scripts/before_training/s3_datasets.py delete my_folder --recursive --yes
+python scripts/before_training/s3.py push ./data project/experiment/data
+python scripts/before_training/s3.py download project/experiment/data ./data
+python scripts/before_training/s3.py list my_project/ --recursive
+python scripts/before_training/s3.py delete my_folder/data.json --yes
+python scripts/before_training/s3.py delete my_folder --recursive --yes
 ```
 
 Commands: `push`, `download`, `list`, `exists`, `delete`. Every command takes `--subfolder/-s`,

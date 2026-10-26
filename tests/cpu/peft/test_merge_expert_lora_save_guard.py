@@ -40,7 +40,7 @@ import halo.trainers.parallelism.mode_setup as mode_setup_mod
 from halo.checkpoint.reading import load_full_state_dict
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.parallelism.adapter_rules import reject_unmergeable_expert_lora_save
-from tests.common.peft_helpers import randomize_adapters
+from tests.common.adapters import randomize_adapters
 
 
 class _TinyLM(nn.Module):

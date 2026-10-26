@@ -22,7 +22,7 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict
 
-from halo.data.vlm_routing import VLM_IMAGE_COLUMNS
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
 from tests.common.repo import load_script_module
 
 _MODEL_ID = "stub/qwen3-4b"

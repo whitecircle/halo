@@ -70,7 +70,8 @@ from halo.trainers.parallelism.mode_setup import ModeSetupMixin, reject_unsynced
 from halo.trainers.parallelism.pipeline_rules import reject_pp_named_optimizer
 from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
-from halo.trainers.parallelism.trainer_rules import (
+from halo.trainers.token_metrics import TokenMetricsMixin
+from halo.trainers.trainer_rules import (
     INERT_AUX_LOSS_DETAIL,
     reject_inert_aux_loss_balancing,
     reject_reference_sinks_mismatch,
@@ -79,7 +80,6 @@ from halo.trainers.parallelism.trainer_rules import (
     reject_trainer_router_aux_loss_coef,
     reject_unreloadable_best_model,
 )
-from halo.trainers.token_metrics import TokenMetricsMixin
 from halo.trainers.training_args_overrides import (
     align_save_on_each_node,
     disable_trl_liger,
@@ -324,7 +324,7 @@ class DistributedTrainerMixin(
                 model_config,
                 sanitize_liger_config(
                     safe_config,
-                    needs_ep_wrappers=config.needs_ep_wrappers,
+                    needs_ep_layers=config.needs_ep_layers,
                     model_config=model_config,
                     tp_size=config.tp_size,
                     cp_size=config.cp_size,
@@ -332,7 +332,7 @@ class DistributedTrainerMixin(
                 ),
             )
         # Deferred past TRL.__init__ (which would re-apply Liger on EP-wrapped experts); restored before train().
-        self._deferred_liger_kernel = config.needs_ep_wrappers and disable_trl_liger(training_args)
+        self._deferred_liger_kernel = config.needs_ep_layers and disable_trl_liger(training_args)
         # Force use_reentrant before super().__init__ enables GC. Not under PP, which requires non-reentrant.
         if getattr(training_args, "gradient_checkpointing", False):
             gc_kwargs = getattr(training_args, "gradient_checkpointing_kwargs", None) or {}
@@ -376,7 +376,7 @@ class DistributedTrainerMixin(
 
         self._wrap_for_parallel_mode()
 
-        if config.needs_ep_wrappers:
+        if config.needs_ep_layers:
             reject_peft_lora_in_ep_layers(self._top_level_model())
             self._install_ep_layer_hooks()
         # Every run and never gated on the model: under PP a stage may hold no EP layer and the check is
@@ -442,7 +442,7 @@ class DistributedTrainerMixin(
             logger.warning(
                 f"output_router_logits is ON with router_aux_loss_coef={coef}, but that aux loss is "
                 f"INERT here. {INERT_AUX_LOSS_DETAIL.format(trainer=trainer)} {action} Set "
-                f"moe_balancing='bias_update' for real balancing on families whose EP wrappers support it."
+                f"moe_balancing='bias_update' for real balancing on families whose EP layers support it."
             )
 
     def _warn_on_zeroed_lora_dropout(self) -> None:
@@ -650,7 +650,7 @@ class DistributedTrainerMixin(
                 bf16_optimizer=self._bf16_optimizer,
                 config=self.parallelism_config,
                 has_ep_layers=bool(self._ep_layers()),
-                optimizer_cls_and_kwargs=self.get_optimizer_cls_and_kwargs,
+                get_optimizer_cls_and_kwargs=self.get_optimizer_cls_and_kwargs,
             )
             if self.optimizer is None:
                 reject_stock_adamw_on_mixed_params(

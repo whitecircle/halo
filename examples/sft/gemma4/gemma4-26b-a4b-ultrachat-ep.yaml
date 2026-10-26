@@ -14,7 +14,7 @@ test_size: 0.01
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8
-# fp32_router omitted: Gemma-4's router is a sibling module outside the EP wrapper (FSDP-managed),
+# fp32_router omitted: Gemma-4's router is a sibling module outside the EP layer (FSDP-managed),
 # so the knob has no fp32 route to take — setting it only logs a per-layer no-op warning.
 fp32_experts: true
 # fp32_non_ep_params omitted: refused at load under EP — Gemma-4's norms re-emit activations at

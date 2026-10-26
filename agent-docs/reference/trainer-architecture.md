@@ -24,7 +24,7 @@ its concern:
 | `parallelism/grad_clipping.py` | `GradientClippingMixin`: the EP / TP / QLoRA `clip_grad_norm_` replacements and the EP/DTensor-aware global norm they reduce; `pp_clip_grad_norm` and the clip primitives |
 | `parallelism/pipeline_trainer.py` | `PipelineTrainerMixin`: the PP split, setup, schedule-driven step and eval, inert unless `pp_size > 1` |
 | `parallelism/tp_leader.py` | `TPLeaderBroadcastMixin`: object and tensor broadcasts from the TP/ETP-group leader (the GRPO generation paths) |
-| `parallelism/trainer_rules.py`, `parallelism/pipeline_rules.py`, `parallelism/adapter_rules.py` | Every construction refusal as a pure `reject_*` over explicit inputs; `pipeline_rules.py` holds the PP ones, and the adapter rules cover LoRA, PEFT and native expert LoRA under the parallelism modes |
+| `trainer_rules.py`, `parallelism/pipeline_rules.py`, `parallelism/adapter_rules.py` | Every construction refusal as a pure `reject_*` over explicit inputs; `pipeline_rules.py` holds the PP ones, and the adapter rules cover LoRA, PEFT and native expert LoRA under the parallelism modes |
 
 Each mixin is a class because it reads live trainer state; the methods a test or a caller reaches as
 `DistributedTrainerMixin.<name>` resolve through the MRO unchanged. The HF overrides' zero-arg
@@ -96,14 +96,14 @@ them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 | Trainer | Base Class | CP | PP |
 |---------|-----------|:--:|:--:|
 | `DistributedSFTTrainer` | `SFTTrainer` | Yes | Yes |
-| `SmoothMarginPOTrainer` | `Trainer` | Yes | Yes (no VLM / `padding_free` / clip percentile / PEFT) |
+| `SMPOTrainer` | `Trainer` | Yes | Yes (no VLM / `padding_free` / clip percentile / PEFT) |
 | `OfflineGRPOTrainer` | `LogprobScoringMixin`, `Trainer` | Yes (full fine-tuning) | Yes (`kl_beta > 0` via a construction-time reference sweep) |
 | `DistributedDPOTrainer` | `DPOTrainer` | No | Yes (precompute-only; `sigmoid`/`hinge`/`ipo`) |
 | `DistributedKTOTrainer` | `KTOTrainer` | No | Yes (`apo_zero_unpaired`, precompute-only) |
 | `DistributedRewardTrainer` | `RewardTrainer` | No | Yes |
 | `ClassificationTrainer` | `Trainer` | No | Yes |
-| `DistributedGRPOTrainer` | `GRPOTrainer` | No | No |
-| `DistributedSDPGTrainer` | `DistributedGRPOTrainer` | No | No |
+| `DistributedOnlineGRPOTrainer` | `GRPOTrainer` | No | No |
+| `DistributedSDPGTrainer` | `DistributedOnlineGRPOTrainer` | No | No |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | `GRPOTrainer` | No | No |
 | `DistributedDistillationTrainer` | `Trainer` | No | No |
 | `DistributedSelfDistillationTrainer` | `DistributedSFTTrainer` | No | No |
@@ -264,7 +264,7 @@ has_ep_group + CP          -> adopt the CP wrapper, EP clip, EP FSDP2
 is_cp_mode                 -> adopt the CP wrapper, CP FSDP2
 is_tp_mode                 -> _apply_tp_fsdp2() + TP clip     # FSDP2 on the DP axis (TP applied at load)
 has_ep_group, or EP layers -> EP clip, EP FSDP2               # EP, pure ETP, EP+ETP, grouped-GEMM ep1
-accelerate-managed         -> accelerate FSDP / DDP           # refuses EP/grouped-GEMM wrappers
+accelerate-managed         -> accelerate FSDP / DDP           # refuses EP layers
 else                       -> plain DP FSDP2 (QLoRA: the DP sweep)
 ```
 
@@ -362,7 +362,7 @@ takes the model, args and decay parameters and returns an optimizer without touc
 
 `build_optimizer` (`halo/trainers/optimizer_selection.py`) returns `None` for that last row, and the
 stock build is gated, not a fallthrough: `reject_stock_adamw_on_mixed_params` raises on a
-stock fused/foreach AdamW whenever `ep_group_size > 1`, or the EP wrappers hold the experts and
+stock fused/foreach AdamW whenever `ep_group_size > 1`, or the EP layers hold the experts and
 FSDP2 does not (`experts_fsdp_managed` false). `aten._fused_adamw_` raises "mixed torch.Tensor and
 DTensor" over that parameter set at the first step; the message names AdamWBF16 and
 `fp32_non_ep_params` as the two supported shapes.
@@ -450,7 +450,7 @@ the eval loss and `compute_metrics` values it logs are then rank 0's shard, not 
 HuggingFace's `_inner_training_loop` calls `accelerator.prepare(model)`, which normally wraps in
 DDP. `AcceleratorMixin` replaces `prepare()` with `no_wrap_prepare` for model/optimizer/scheduler when
 `_fsdp_wrapped or _mixin_manages_gmm or is_tp_mode or is_expert_tp_mode or is_pp_mode`.
-`_mixin_manages_gmm` is `needs_ep_wrappers and not accelerate-managed`; `needs_ep_wrappers` alone
+`_mixin_manages_gmm` is `needs_ep_layers and not accelerate-managed`; `needs_ep_layers` alone
 defaults True even for dense models, so this guards against hijacking an accelerate-managed DDP/FSDP
 launch.
 
@@ -480,7 +480,7 @@ these declares `RECORDS_LOSS_METRICS = False` and skips the flush (self-distilla
 
 ## Trainer-specific notes
 
-- **SmoothMarginPOTrainer** — reference-free preference optimization; loss types `sigmoid`, `hinge`,
+- **SMPOTrainer** — reference-free preference optimization; loss types `sigmoid`, `hinge`,
   `ipo`, `smooth_lower_bound`; margin scheduling via `VariableSchedulerCallback`; CP via cross-rank
   all-reduce of log-prob sums and token counts. See [SMPO](../training-methods/preference/smpo.md).
 - **OfflineGRPOTrainer** — advantage methods `z_norm`, `minmax`, `quantile_norm`,
@@ -527,7 +527,7 @@ diagnostics).
 
 ### Online GRPO vLLM weight sync
 
-`DistributedGRPOTrainer._install_weight_sync` replaces TRL's
+`DistributedOnlineGRPOTrainer._install_weight_sync` replaces TRL's
 `VLLMGeneration.sync_weights` with `_distributed_sync_weights` at construction, and raises when TRL
 built no `vllm_generation` (server-mode vLLM is required). Before it, the init spine both on-policy
 trainers close through (`OnPolicyGRPOInitMixin._finish_on_policy_init`) runs
@@ -592,7 +592,7 @@ rounds. Each trainer lists the overriding mixin ahead of `DistributedTrainerMixi
 so the empty defaults do not shadow it.
 
 `load_best_model_at_end` is refused at construction for every shape whose end-of-run reload is
-guaranteed to be refused: `cp_size > 1`, a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1`
+guaranteed to be refused: `cp_size > 1`, a MoE carrying EP layers (`ep_size: 1`
 plain FSDP2 included, since `use_grouped_gemm` defaults on), and `tp_size > 1` with
 `data_parallel_size > 1`. The reload would otherwise fail after the whole run and export the LAST
 weights.

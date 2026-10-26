@@ -10,7 +10,7 @@ full reward vector — the trainer's degenerate-group handling owns that case).
 *One record shape per output format.* The sampler writes two trainer contracts — preference and
 offline-GRPO; the tests below fail the moment the records drift away from those contracts.
 
-Run: pytest tests/cpu/inference/test_rm_rejection_degenerate_pairs.py
+Run: pytest tests/cpu/inference/test_rejection_sampling_degenerate_pairs.py
 """
 
 import json
@@ -19,7 +19,7 @@ import types
 import numpy as np
 import pytest
 
-from halo.entrypoints import rejection_sampling as rm_rs
+from halo.entrypoints import rejection_sampling
 from halo.entrypoints.rejection_sampling import degenerate_hypotheses_reason
 
 
@@ -50,7 +50,7 @@ def test_numpy_and_list_scores_decide_the_same():
         assert degenerate_hypotheses_reason(distinct, "preference") is None
 
 
-# --- the offline-GRPO record rm_rejection_sampling writes -----------------------------------------
+# --- the offline-GRPO record rejection_sample writes -----------------------------------------
 
 
 _PROMPT = [{"role": "user", "content": "q"}]
@@ -61,7 +61,9 @@ _ARGS = types.SimpleNamespace(id_field="id")
 def _rm_record(row, correct_answer=None):
     """The sampler's record: it scores whole conversations and keeps the last turn."""
     conversations = [_PROMPT + [hypothesis] for hypothesis in _HYPOTHESES]
-    return rm_rs.build_offline_grpo_result(row, _PROMPT, conversations, np.array([0.2, 0.9]), _ARGS, correct_answer)
+    return rejection_sampling.build_offline_grpo_result(
+        row, _PROMPT, conversations, np.array([0.2, 0.9]), _ARGS, correct_answer
+    )
 
 
 @pytest.mark.parametrize(
@@ -102,7 +104,7 @@ def test_the_rewards_survive_json():
     assert json.loads(json.dumps(record)) == record
 
 
-# --- the preference record rm_rejection_sampling writes -------------------------------------------
+# --- the preference record rejection_sample writes -------------------------------------------
 
 
 _PREF_ARGS = types.SimpleNamespace(
@@ -124,7 +126,9 @@ _PREFERENCE_KEYS = {
 
 def _rm_pair(row, correct_answer=None):
     conversations = [_PROMPT + [hypothesis] for hypothesis in _HYPOTHESES]
-    return rm_rs.build_preference_result(row, _PROMPT, conversations, np.array([0.2, 0.9]), _PREF_ARGS, correct_answer)
+    return rejection_sampling.build_preference_result(
+        row, _PROMPT, conversations, np.array([0.2, 0.9]), _PREF_ARGS, correct_answer
+    )
 
 
 def test_the_preference_pair_selects_by_score_and_survives_json():

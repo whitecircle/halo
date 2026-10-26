@@ -35,7 +35,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig, ISMaskConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
 from halo.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.trainers.grpo.environmental import step_batch
@@ -203,7 +203,7 @@ def test_toolkit_optimizers_skip_none_gradients():
 def _armed(threshold: float | None) -> DistributedAsyncEnvironmentalGRPOTrainer:
     """A trainer shell after ``_arm_update_breaker``, the step ``__init__`` takes, recording its callbacks."""
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
-    host.async_config = AsyncTrainingConfig(skip_update_masked_frac=threshold)
+    host.async_config = AsyncRolloutConfig(skip_update_masked_frac=threshold)
     host.callbacks = []
     host.add_callback = host.callbacks.append
     host._arm_update_breaker()

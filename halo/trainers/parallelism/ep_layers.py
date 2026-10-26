@@ -13,7 +13,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, nam
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.ranks import is_global_main_process
-from halo.trainers.parallelism.trainer_rules import reject_ep_gradient_checkpointing
+from halo.trainers.trainer_rules import reject_ep_gradient_checkpointing
 
 logger = logging.getLogger(__name__)
 

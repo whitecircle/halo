@@ -28,8 +28,8 @@ import torch
 import torch.nn.functional as F
 
 from halo.kernels.lowp.deepgemm import deepgemm_available, deepgemm_grouped_gemm, use_deepgemm
+from tests.common.numerics import fro_rel_err
 from tests.common.tolerances import TOL
-from tests.common.utils import fro_rel_err
 
 DEV = "cuda"
 

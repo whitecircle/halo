@@ -269,13 +269,13 @@ and Cohere2 MoE carry a `weight_sync_refusal` on their family spec and are refus
 refusal is an engine fact on that engine's client
 ([Which families each engine serves](#which-families-each-engine-serves)).
 
-A bnb-quantized (QLoRA) base is refused on both engines. So is any MoE without a live EP wrapper
+A bnb-quantized (QLoRA) base is refused on both engines. So is any MoE without a live EP layer
 (`use_grouped_gemm: false` at `ep_size: 1`), for every MoE family: the experts ship in the layout the
-wrapper's gather emits, and without one the dense walk would forward the stock module tree's fused
+EP layer's gather emits, and without one the dense walk would forward the stock module tree's fused
 expert tensors under module names, which the engine's loader drops with no error.
 
-The gate reads the family's contract off the live wrapper, or off the `model_type` registry when a
-run has none; `use_grouped_gemm: true` (the torchrun default) installs the wrappers.
+The gate reads the family's contract off the live EP layer, or off the `model_type` registry when a
+run has none; `use_grouped_gemm: true` (the torchrun default) installs the EP layers.
 
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry. Where
 the live module tree and the hub checkpoint differ, the rewrite is derived, not tabulated: Laguna's
@@ -849,7 +849,7 @@ Support per trainer parallelism axis, async GRPO against a live server:
 | EP=2 (MoE) | supported | supported |
 | EP=2 + ETP=2, EP=2 + TP=2, EP=4, with or without LoRA / expert LoRA | supported | supported |
 | Expert LoRA (EP=2), resume included | supported | supported |
-| Undistributed MoE (`ep_group_size == 1`, EP wrappers present) with multi-server serving (2×TP=2, 4×TP=1), expert sync and R3 rollout replay | supported | supported |
+| Undistributed MoE (`ep_group_size == 1`, EP layers present) with multi-server serving (2×TP=2, 4×TP=1), expert sync and R3 rollout replay | supported | supported |
 | Trainer and server on different nodes over EFA ([Servers on other nodes](#servers-on-other-nodes-efa)) | supported, a trainer spanning two nodes (DTensor experts over the fabric) against a server on a third included | supported |
 
 An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`)

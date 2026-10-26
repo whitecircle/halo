@@ -44,8 +44,10 @@ from halo.runtime.collectives import barrier
 from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log, step_losses
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = GPT_OSS_20B
 NUM_TRAIN_SAMPLES = 32

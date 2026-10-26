@@ -40,6 +40,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import load_peft_model_from_config, peft_model_config, unwrap
 from tests.common.checkpoint_io import (
     RestorePointSnapshot,
     ResumeCapture,
@@ -51,11 +52,12 @@ from tests.common.checkpoint_io import (
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import load_peft_model_from_config, peft_model_config, unwrap
+from tests.common.memory import finish_phase
 from tests.common.pinned_params import RUN_DTYPE, SEED, load_row_model, tiny_family_checkpoint
+from tests.common.rank_log import log
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tolerances import TOL
-from tests.common.utils import finish_phase, log, resumed_loss_deltas, step_losses, training_run_checks
+from tests.common.training_checks import resumed_loss_deltas, step_losses, training_run_checks
 
 FAMILIES = ("qwen3_moe", "gpt_oss", "zaya", "lfm2_moe")
 TOTAL_STEPS = 4

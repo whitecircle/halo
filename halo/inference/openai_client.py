@@ -21,6 +21,9 @@ _UPSTREAM_BACKOFF_S = 2.0
 # The SDK's own transport retries (connection errors, 408/409/429, 5xx), enough for a long eval to
 # survive transient errors under load.
 _SDK_MAX_RETRIES = 4
+# Per-request timeout (seconds) where no config sets one. Generous: a run sends many requests to one endpoint at
+# once, and a long reasoning turn queued behind them takes minutes to return.
+REQUEST_TIMEOUT_SECONDS = 180.0
 
 
 class EmptyChoicesError(RuntimeError):
@@ -79,7 +82,7 @@ async def generate_openai_response(
     temperature: float | None = 0.0,
     max_tokens: int = 512,
     tools: list[dict] | None = None,
-    request_timeout: float = 180,
+    request_timeout: float = REQUEST_TIMEOUT_SECONDS,
     extra_body: dict[str, Any] | None = None,
     top_p: float | None = None,
 ) -> OpenAIResponse:

@@ -31,7 +31,7 @@ def load_cp_model(
 ) -> nn.Module:
     """COLLECTIVE: load a model for Ulysses CP with no expert distribution.
 
-    ``wraps_experts`` gives a MoE its grouped-GEMM expert wrappers before the CP wrap, on the inner HF
+    ``wraps_experts`` gives a MoE its grouped-GEMM EP layers before the CP wrap, on the inner HF
     model as under EP+CP; without them a MoE under pure CP pays the Liger swiglu/geglu force-off without
     the speedup it buys.
     """

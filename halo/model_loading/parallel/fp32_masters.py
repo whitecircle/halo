@@ -1,7 +1,7 @@
 """Configured FP32 parameter masters: which HF parameters train at fp32, and their checkpoint values kept
 or restored at fp32 before any parallel wrap.
 
-Selected off the EP layer registry, the accessors the wrappers adopt through, so every loader (eager, lazy
+Selected off the EP layer registry, the accessors the EP layers adopt through, so every loader (eager, lazy
 EP, PP stage) keeps one checkpoint-backed set. A native dense TP master is rebuilt as its 1-D TP DTensor.
 """
 

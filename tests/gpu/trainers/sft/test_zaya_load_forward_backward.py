@@ -39,7 +39,7 @@ from halo.env import env_str
 from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.harness import gpu_test_main
 from tests.common.models import ZAYA_8B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 # Truncation bound on the prompt, so the activation memory stays bounded.

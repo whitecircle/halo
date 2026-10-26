@@ -46,7 +46,7 @@ from halo.trainers.world_metrics import world_sums
 logger = logging.getLogger(__name__)
 
 
-class DistributedGRPOTrainer(
+class DistributedOnlineGRPOTrainer(
     OnPolicyGRPOInitMixin,
     GenerationRoundMixin,
     ProtectedTokenEntropyMixin,

@@ -90,6 +90,7 @@ python tests/cpu/conventions/test_test_conventions.py            # the CPU-test 
 python tests/cpu/parallelism/test_matrix_correctness_coverage.py # renaming a parallelism test breaks this
 # CPU:  python tests/cpu/<area>/<file>.py   (or: pytest -m cpu)
 # GPU:  torchrun --nproc_per_node=<N> tests/gpu/<path>/<file>.py
+#       (a launcher="python" row: HALO_TEST_NPROC=<N> python tests/gpu/<path>/<file>.py)
 ```
 
 ## Sources of truth

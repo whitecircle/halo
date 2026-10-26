@@ -25,7 +25,7 @@ from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.objective.logratio import KL_CLAMP_FRAC_KEY, KL_LOGRATIO_CLAMP, kl_clamp_counts
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, build, episode, row
 from tests.common.gloo import run_gloo_ranks
 from tests.common.routing import BareEPLayer
@@ -55,7 +55,7 @@ def test_online_kl_clamp_frac_reads_the_post_drop_loss_mask():
         "old_per_token_logps": torch.zeros(2, 3),
         "ref_per_token_logps": _OVER_THE_CAP.clone(),
     }
-    DistributedGRPOTrainer._clamp_kl_reference(host, result)
+    DistributedOnlineGRPOTrainer._clamp_kl_reference(host, result)
     assert host._metrics["train"][KL_CLAMP_FRAC_KEY] == [pytest.approx(_TRAINED_SHARE)]
     assert result["ref_per_token_logps"].max().item() == pytest.approx(KL_LOGRATIO_CLAMP), "the cap still applies"
 

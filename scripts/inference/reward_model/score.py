@@ -3,7 +3,7 @@
 Generates against an OpenAI-compatible API, scores with the reward model, prints summary statistics.
 
 Usage:
-    python scripts/inference/reward_model/rm_scoring.py \\
+    python scripts/inference/reward_model/score.py \\
         --model my-model \\
         --dataset data/prompts.jsonl \\
         --rm_model_id path/to/reward-model
@@ -16,7 +16,7 @@ Output JSONL format:
 """
 
 from halo.entrypoints.resumable_generation import run_async_cli
-from halo.entrypoints.reward_scoring import run_rm_scoring
+from halo.entrypoints.reward_scoring import run_reward_scoring
 from scripts.inference.reward_model.reward_model_arguments import build_generation_parser
 
 
@@ -26,7 +26,7 @@ def parse_args():
 
 
 async def main():
-    await run_rm_scoring(parse_args())
+    await run_reward_scoring(parse_args())
 
 
 if __name__ == "__main__":

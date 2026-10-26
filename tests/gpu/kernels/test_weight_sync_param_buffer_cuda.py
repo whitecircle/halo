@@ -24,7 +24,7 @@ Run with 1 GPU:
 import torch
 
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.cpu.weight_sync.test_param_buffer import _bare_client
 
 # 32 MiB fp32: a copy long enough that a reader with no ordering against it would see it in flight.

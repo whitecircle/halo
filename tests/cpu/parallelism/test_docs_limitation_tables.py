@@ -114,12 +114,12 @@ def _axis_set_from_mode(label: str) -> frozenset[str] | None:
 
 def _ep_model_rows() -> list[dict[str, str]]:
     """The EP supported-models table rows."""
-    return _table_with_headers(_EXPERT_PARALLELISM, "Model", "HF Class", "EP Wrapper")
+    return _table_with_headers(_EXPERT_PARALLELISM, "Model", "HF Class", "EP Layer")
 
 
-def _ep_wrapper_class_name(row: dict[str, str]) -> str:
+def _ep_layer_class_name(row: dict[str, str]) -> str:
     """The wrapper class a supported-models row names (first code span; ignores 'subclasses X')."""
-    spans = re.findall(r"`([^`]+)`", row["EP Wrapper"])
+    spans = re.findall(r"`([^`]+)`", row["EP Layer"])
     assert spans, f"EP supported-models row {row['Model']!r} names no wrapper class in backticks"
     return spans[0]
 
@@ -181,10 +181,10 @@ def test_ep_supported_models_table_lists_every_registered_wrapper():
     ``MOE_LAYER_MAP`` is derived from the ``EPMoELayerBase`` subclass tree, so a family added to
     ``layers/`` is live the moment it is imported — with no doc row telling anyone it exists.
     """
-    documented = {_ep_wrapper_class_name(row) for row in _ep_model_rows()}
+    documented = {_ep_layer_class_name(row) for row in _ep_model_rows()}
     registered = {cls.__name__ for cls in MOE_LAYER_MAP.values()}
     assert documented == registered, (
-        f"EP wrappers registered but undocumented: {sorted(registered - documented)}; "
+        f"EP layers registered but undocumented: {sorted(registered - documented)}; "
         f"documented but not registered: {sorted(documented - registered)}"
     )
 
@@ -195,7 +195,7 @@ def test_ep_restriction_table_matches_the_layer_capability_flags():
     Each capability is on by default, so a family turning one off is the whole limitation. A stale row
     promises a restriction that no longer exists; a missing row hides one that does (Zaya under gradient checkpointing, Inkling under weight sync).
     """
-    by_wrapper = {_ep_wrapper_class_name(row): _plain(row["Model"]) for row in _ep_model_rows()}
+    by_wrapper = {_ep_layer_class_name(row): _plain(row["Model"]) for row in _ep_model_rows()}
     documented = set()
     for row in _table_with_headers(_EXPERT_PARALLELISM, "Family", "Restricted capability", "Declaration"):
         family, attr = _plain(row["Family"]), _plain(row["Declaration"])

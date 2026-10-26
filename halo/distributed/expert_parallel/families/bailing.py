@@ -1,4 +1,4 @@
-"""EP wrapper for Bailing MoE (individual experts fused at init + shared experts)."""
+"""EP layer for Bailing MoE (individual experts fused at init + shared experts)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from halo.models.moe.family_specs import BAILING
 
 
 class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
-    """EP wrapper for Bailing MoE (BailingMoeV2/V3SparseMoeBlock) using DeepEP.
+    """EP layer for Bailing MoE (BailingMoeV2/V3SparseMoeBlock) using DeepEP.
 
     Per-expert ``nn.ModuleList`` experts, stacked into 3D here at init. The gate returns
     ``(topk_idx, topk_weight, logits)`` with all routing (sigmoid, group-limited top-k, expert bias,
@@ -25,7 +25,7 @@ class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
     # Selection happens inside the gate (the forward never consults ``_balancing_bias``), so the
     # base's transient fallback would register a buffer nothing reads.
     _supports_transient_balancing_bias = False
-    # The wrapper returns a bare tensor where the V3 block returns ``(hidden, router_logits)``, so
+    # The EP layer returns a bare tensor where the V3 block returns ``(hidden, router_logits)``, so
     # ``outputs.router_logits`` stays empty; no Bailing modeling computes an aux loss regardless.
     SEVERS_AUX_LOSS = True
 

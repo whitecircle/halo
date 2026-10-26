@@ -26,8 +26,7 @@ from halo.configs.distillation import DistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.collectives import barrier
 from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
-from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     assert_adapter_checkpoint,
     assert_adapters_moved,
     assert_only_adapters_trainable,
@@ -37,7 +36,8 @@ from tests.common.peft_helpers import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.utils import log
+from tests.common.harness import gpu_test_main
+from tests.common.rank_log import log
 
 MAX_STEPS = 3
 NUM_TRAIN_SAMPLES = 32

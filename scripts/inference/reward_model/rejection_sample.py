@@ -6,13 +6,13 @@ picks the shape: ``preference`` (default; DPO/SMPO chosen/rejected pairs) or ``o
 
 Usage:
     # Preference format (DPO/SMPO)
-    python scripts/inference/reward_model/rm_rejection_sampling.py \\
+    python scripts/inference/reward_model/rejection_sample.py \\
         --model my-model \\
         --dataset data/prompts.jsonl \\
         --rm_model_id path/to/reward-model
 
     # Offline GRPO format
-    python scripts/inference/reward_model/rm_rejection_sampling.py \\
+    python scripts/inference/reward_model/rejection_sample.py \\
         --model my-model \\
         --dataset data/prompts.jsonl \\
         --rm_model_id path/to/reward-model \\

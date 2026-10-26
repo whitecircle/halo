@@ -65,13 +65,13 @@ def require_vllm_server_mode(grpo_args):
     rank-divergent under FSDP2/EP) and colocate (no vLLM in the training image) are refused."""
     if grpo_args is None:
         raise ValueError(
-            "DistributedGRPOTrainer requires a GRPOConfig: pass it as the `args` keyword or in "
+            "DistributedOnlineGRPOTrainer requires a GRPOConfig: pass it as the `args` keyword or in "
             "the conventional positional slot. Without it the vLLM server-mode requirement, the "
             "parallelism config and the Liger overrides all silently go unapplied."
         )
     if not grpo_args.use_vllm:
         raise ValueError(
-            "DistributedGRPOTrainer requires vLLM server-mode generation: set use_vllm=True "
+            "DistributedOnlineGRPOTrainer requires vLLM server-mode generation: set use_vllm=True "
             "and vllm_mode='server'. In-process HF generation (use_vllm=False) is not "
             "supported — it is slow and desyncs ranks under FSDP2/EP. Run a separate vLLM "
             "container (docker-compose.vllm.yml) and point vllm_server_host/vllm_server_port "
@@ -79,7 +79,7 @@ def require_vllm_server_mode(grpo_args):
         )
     if grpo_args.vllm_mode != "server":
         raise ValueError(
-            f"DistributedGRPOTrainer supports only vllm_mode='server', got "
+            f"DistributedOnlineGRPOTrainer supports only vllm_mode='server', got "
             f"'{grpo_args.vllm_mode}'. Colocate mode would launch an in-process vLLM on the "
             f"training GPUs, but the training image has no vLLM (ABI-incompatible "
             f"with the training PyTorch/Transformers). Run a separate vLLM "
@@ -100,7 +100,7 @@ def reject_tool_calling_loop(ctor_args: tuple, kwargs: dict) -> None:
     ]
     if given:
         raise ValueError(
-            f"DistributedGRPOTrainer does not run TRL's tool-calling loop ({', '.join(given)}): it loops as "
+            f"DistributedOnlineGRPOTrainer does not run TRL's tool-calling loop ({', '.join(given)}): it loops as "
             "long as some completion on this rank calls a tool, each round a collective vLLM generate, so ranks "
             "fall out of step. Train tool use with Async GRPO with Environments "
             "(scripts/training/grpo/environmental.py), whose episodes run in the rollout actors."

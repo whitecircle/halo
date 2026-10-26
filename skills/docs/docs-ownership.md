@@ -22,7 +22,7 @@ changes.
 | `halo/trainers/checkpointing.py`, `halo/trainers/dataloaders.py`, `halo/trainers/evaluation.py` | `agent-docs/reference/trainer-architecture.md`; `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-loading.md` |
 | `halo/trainers/parallelism/{grad_sync,grad_clipping,ep_layers}.py` | `agent-docs/reference/trainer-architecture.md`; `agent-docs/parallelism/expert-parallelism.md`; `agent-docs/parallelism/tensor-parallelism.md`; `agent-docs/parallelism/data-parallelism.md`; `agent-docs/optimization/bf16-optimizer.md` |
 | `halo/trainers/parallelism/{pipeline_trainer,pipeline_rules}.py`, `halo/trainers/parallelism/pipeline_loss_adapter.py` | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/trainer-architecture.md` |
-| `halo/trainers/parallelism/trainer_rules.py` | `agent-docs/parallelism/context-parallelism.md`; `agent-docs/reference/trainer-architecture.md` |
+| `halo/trainers/trainer_rules.py` | `agent-docs/parallelism/context-parallelism.md`; `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/trl_dataset_prep.py` | `agent-docs/data/filesystem-handling.md`; `agent-docs/reference/trainer-architecture.md` |
 | `halo/trainers/token_metrics.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `halo/trainers/world_metrics.py` | `agent-docs/reference/trainer-architecture.md`, `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/grpo/online.md` |
@@ -131,7 +131,7 @@ changes.
 | `halo/data/tree_layout.py`, `halo/data/pipeline/tree_rows.py`, `halo/data/collators/tree_packing.py`, `halo/models/attention/{tree_plan,tree}.py` | `agent-docs/optimization/tree-packing.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/data/turn_markers.py`, `halo/data/completion_spans.py` | `agent-docs/data/collators.md`, `agent-docs/data/dataset-preparation.md` |
 | `halo/data/` | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
-| `halo/data/sources/s3_client.py`, `halo/data/sources/s3_dataset_store.py`, `halo/data/sources/dataset_cache.py`, `halo/data/sources/paths.py`, `scripts/before_training/s3_datasets.py` | `agent-docs/data/s3-utilities.md` |
+| `halo/data/sources/s3_client.py`, `halo/data/sources/s3_dataset_store.py`, `halo/data/sources/dataset_cache.py`, `halo/data/sources/paths.py`, `scripts/before_training/s3.py` | `agent-docs/data/s3-utilities.md` |
 | `halo/data/preprocessed/`, `scripts/before_training/prepare_dataset.py` | `agent-docs/data/dataset-preparation.md`, `agent-docs/parallelism/data-loading.md` |
 | `halo/data/pipeline/chat_render.py`, `halo/model_loading/tokenizer_backend.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/data/dataset-preparation.md` |
 | `halo/data/pipeline/vlm_rows.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |

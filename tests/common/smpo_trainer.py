@@ -1,12 +1,12 @@
-"""A construction-free ``SmoothMarginPOTrainer`` for the CPU tests that drive its forward and loss paths."""
+"""A construction-free ``SMPOTrainer`` for the CPU tests that drive its forward and loss paths."""
 
 from types import SimpleNamespace
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.preference.smpo_objective import SMPOObjective
 
-# The SmoothMarginPOConfig fields those paths read, at values a test overrides per case.
+# The SMPOConfig fields those paths read, at values a test overrides per case.
 _ARGS = {
     "beta": 2.0,
     "loss_type": "sigmoid",
@@ -23,9 +23,9 @@ _ARGS = {
 }
 
 
-def smpo_trainer(*, parallelism_config=None, cp_config=None, pad_token_id: int = 0, **args) -> SmoothMarginPOTrainer:
+def smpo_trainer(*, parallelism_config=None, cp_config=None, pad_token_id: int = 0, **args) -> SMPOTrainer:
     """The trainer as ``__init__`` leaves what those paths read, its config fields overridden by ``args``."""
-    trainer = object.__new__(SmoothMarginPOTrainer)
+    trainer = object.__new__(SMPOTrainer)
     trainer.args = SimpleNamespace(**{**_ARGS, **args})
     trainer.objective = SMPOObjective.from_args(trainer.args)
     trainer.parallelism_config = ParallelismConfig() if parallelism_config is None else parallelism_config

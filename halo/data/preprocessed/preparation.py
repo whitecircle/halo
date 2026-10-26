@@ -13,7 +13,7 @@ from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, Preproc
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo, write_stamped_sidecar
 from halo.data.preprocessed.tokenization import resolve_label_eos_token_ids, tokenize_dataset, tokenize_vlm_dataset
 from halo.data.sources.paths import METADATA_FILE, eval_split_name
-from halo.data.vlm_routing import carried_image_columns
+from halo.data.vlm_detection import carried_image_columns
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.runtime.ranks import is_local_main_process
 

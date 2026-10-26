@@ -1,0 +1,12 @@
+# Tiny offline GRPO recipe for the entry-script runs (tests/common/entry_scripts.py), which add the
+# model, dataset and output_dir and the step counts.
+attn_implementation: sdpa
+max_prompt_length: 64
+max_completion_length: 32
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 1
+learning_rate: 1.0e-3
+lr_scheduler_type: constant
+logging_steps: 1
+report_to: none
+seed: 42

@@ -1,4 +1,4 @@
-"""EP wrapper for Inkling (Thinking Machines): fused experts, joint routed+shared normalisation."""
+"""EP layer for Inkling (Thinking Machines): fused experts, joint routed+shared normalisation."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from halo.models.moe.family_specs import INKLING
 
 
 class EPInklingMoELayer(EPMoELayerBase):
-    """EP wrapper for Inkling (``InklingMoE``) using DeepEP.
+    """EP layer for Inkling (``InklingMoE``) using DeepEP.
 
     Fused routed experts (GLM4 layout). One router projection emits ``n_routed_experts + n_shared_experts``
     logits, and the routed top-k and the shared experts are normalised jointly, so the shared FFN is scaled by its

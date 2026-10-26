@@ -57,10 +57,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.unwrapping import find_peft_model
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from tests.common.datasets import create_offline_grpo_dataset
-from tests.common.distributed import ensure_model_downloaded, pin_deterministic_ep_dispatch, shared_scratch_dir
-from tests.common.harness import gpu_test_main
-from tests.common.peft_helpers import (
+from tests.common.adapters import (
     is_expert_lora_active,
     is_lora_b_key,
     load_peft_model,
@@ -68,15 +65,15 @@ from tests.common.peft_helpers import (
     parallelism_config_for,
     snapshot_adapters,
 )
+from tests.common.datasets import create_offline_grpo_dataset
+from tests.common.distributed import ensure_model_downloaded, pin_deterministic_ep_dispatch, shared_scratch_dir
+from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
+from tests.common.numerics import max_or_nan
+from tests.common.optimizer_state import local_optimizer_state, optimizer_state_matches
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import (
-    cleanup_memory,
-    local_optimizer_state,
-    log,
-    max_or_nan,
-    optimizer_state_matches,
-    step_losses,
-)
+from tests.common.training_checks import step_losses
 
 MODES = ("lora", "lora_ep", "expert_lora", "lora_etp")
 

@@ -19,7 +19,6 @@ from transformers import CONFIG_MAPPING
 import halo.entrypoints.environment_eval as training_contract
 import halo.environments.rollout_config as rollout_config
 from halo.entrypoints.environment_eval import (
-    EVAL_REQUEST_TIMEOUT_SECONDS,
     TrainingContract,
     load_training_contract,
     rollout_config_from_args,
@@ -29,6 +28,7 @@ from halo.env import nccl_timeout
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import DEFAULT_REASONING_EFFORT
+from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS
 from scripts.environments.inference.run_code_contests import CODING_ENV_TYPES, resolve_env_config
 from tests.common.code_contests import StubSandbox
 from tests.common.repo import REPO_ROOT
@@ -137,7 +137,7 @@ def test_without_the_flag_the_script_defaults_stand():
         0.2,
         RolloutConfig.top_p,
         99,
-        EVAL_REQUEST_TIMEOUT_SECONDS,
+        REQUEST_TIMEOUT_SECONDS,
     )
     assert rollout.stop_token_ids is None and rollout.chat_template_kwargs == {}
 

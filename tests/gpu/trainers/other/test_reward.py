@@ -50,8 +50,9 @@ from tests.common.distributed import (
 )
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import log, step_losses
+from tests.common.training_checks import step_losses
 
 MODEL_NAME = QWEN3_0_6B
 NUM_TRAIN_SAMPLES = 64

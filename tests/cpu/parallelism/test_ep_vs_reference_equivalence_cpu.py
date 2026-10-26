@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""At ``ep_size=1`` every EP wrapper must compute exactly what the upstream block computes.
+"""At ``ep_size=1`` every EP layer must compute exactly what the upstream block computes.
 
 ``ep_size=1`` leaves the DeepEP dispatcher inert, so the wrapper's forward is its own re-derivation
 of the family's MoE: it re-reads the gate, re-applies the family's normalization / routed scaling /
@@ -325,7 +325,7 @@ _UNCOMPARABLE = {
 
 
 def _build(factory, wrapper, dtype: torch.dtype) -> tuple[nn.Module, nn.Module]:
-    """Return ``(untouched reference, EP wrapper around an identical copy)``.
+    """Return ``(untouched reference, EP layer around an identical copy)``.
 
     The reference is deep-copied BEFORE wrapping: the wrapper copies the expert weights into its own
     layout and adopts the gate by reference, so a shared module would make the comparison partly
@@ -389,7 +389,7 @@ def test_ep1_forward_matches_the_upstream_module(family, wrapper, factory, input
     assert actual.shape == expected.shape
     difference = (actual - expected).abs().max().item()
     assert difference <= _band(expected), (
-        f"{family} at {dtype}: EP wrapper diverges from {type(reference).__name__} by {difference:.3e} "
+        f"{family} at {dtype}: EP layer diverges from {type(reference).__name__} by {difference:.3e} "
         f"(band {_band(expected):.3e}) — the wrapper's re-derived routing/scaling/activation no "
         f"longer reproduces the upstream block"
     )

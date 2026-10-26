@@ -1,4 +1,4 @@
-"""``EPMoELayerBase``, the EP MoE layer every family wrapper subclasses.
+"""``EPMoELayerBase``, the base class of every family's EP layer.
 
 The base owns construction, the dispatch -> expert compute -> combine forward and the expert-parameter
 views; compute, routing, grad sync, expert LoRA, the checkpoint gather and the balancing bias are mixins.
@@ -74,7 +74,7 @@ class EPMoELayerBase(
     # The family's facts; every concrete family layer declares its own.
     FAMILY: ClassVar[MoEFamilySpec]
 
-    # HF class name(s) of the MoE block this wrapper replaces; ``roster.MOE_LAYER_MAP`` claims them.
+    # HF class name(s) of the MoE block this EP layer replaces; ``roster.MOE_LAYER_MAP`` claims them.
     HF_MODULE_NAMES: tuple[str, ...] = ()
 
     # Per-family dotted paths on the original HF MoE module, probed by :meth:`detect_num_experts` first.
@@ -93,9 +93,9 @@ class EPMoELayerBase(
     _DEFAULT_ACTIVATION: str = "silu"
 
     # Attribute the router hangs off, on the wrapped HF block (:meth:`_find_gate_or_router` reads it
-    # there) and on this wrapper, which re-registers it under the same name. Declared once per family so
+    # there) and on this EP layer, which re-registers it under the same name. Declared once per family so
     # the probe, the fp32 upcast and the grad-sync hook cannot point at different modules. ``None`` = the
-    # router is external to the wrapper (Gemma4's sibling module): nothing is adopted here, no routing
+    # router is external to the EP layer (Gemma4's sibling module): nothing is adopted here, no routing
     # knob is read, and only expert grad-sync hooks register.
     _ROUTER_ATTR: str | None = "gate"
 
@@ -175,7 +175,7 @@ class EPMoELayerBase(
         return cls._require_fused_experts(experts).gate_up_proj.shape[2]
 
     def _init_ep_state(self, ep_config: EPConfig, hidden_dim: int):
-        """Build the EP state every wrapper shares; callable without an HF block, as construction probes
+        """Build the EP state every EP layer shares; callable without an HF block, as construction probes
         do."""
         super().__init__()
         self.ep_config = ep_config

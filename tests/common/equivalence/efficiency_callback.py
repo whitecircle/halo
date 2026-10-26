@@ -298,7 +298,7 @@ def _model(case: EfficiencyCase, scenario: Scenario, parallelism) -> torch.nn.Mo
     model.to(torch.bfloat16 if scenario.bf16 else torch.float32)
     if parallelism.tp_size > 1:
         _apply_tensor_parallelism(model, case.family, parallelism)
-    if case.family in MOE_FAMILIES and parallelism.needs_ep_wrappers:
+    if case.family in MOE_FAMILIES and parallelism.needs_ep_layers:
         apply_ep_layers(model, parallelism.ep_config())
     if parallelism.pp_size > 1:
         # The FLOPs accounting is family-agnostic; Qwen3-MoE is not registered for pipeline parallelism.

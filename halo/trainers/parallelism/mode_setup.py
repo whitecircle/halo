@@ -20,9 +20,9 @@ from halo.models.unwrapping import find_peft_model
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.parallelism.ep_layers import require_ep_config
-from halo.trainers.parallelism.trainer_rules import (
+from halo.trainers.trainer_rules import (
     reject_cp_trainer_args,
-    reject_ep_wrappers_under_accelerate,
+    reject_ep_layers_under_accelerate,
     reject_fsdp_knobs_under_qlora,
 )
 
@@ -105,7 +105,7 @@ def reject_unsynced_trainable_params(
             )
         else:
             remedy = (
-                "The EP family wrapper must declare every trainable weight it owns: expert shards in "
+                "The family's EP layer must declare every trainable weight it owns: expert shards in "
                 "expert_named_params() (via FAMILY.expert_weight_roots) and replicated submodules in "
                 "replicated_named_params(), so the layer's grad-sync hooks cover it."
             )
@@ -122,7 +122,7 @@ class ModeSetupMixin:
     def _wrap_for_parallel_mode(self) -> None:
         """Wrap the model for its mode: PP, EP+TP, EP+CP, CP, TP, EP, an accelerate-managed launch, or plain DP.
 
-        TP and CP precede the EP branch, which ``needs_ep_wrappers`` (on by default) would otherwise take for a
+        TP and CP precede the EP branch, which ``needs_ep_layers`` (on by default) would otherwise take for a
         dense TP-only model; an accelerate launch keeps its own wrap.
         """
         config = self.parallelism_config
@@ -148,13 +148,13 @@ class ModeSetupMixin:
             self._install_tp_clip()
             mode = "TP"
         elif config.has_ep_group or (
-            not self._accelerate_manages_wrap and config.needs_ep_wrappers and self._ep_layers()
+            not self._accelerate_manages_wrap and config.needs_ep_layers and self._ep_layers()
         ):
             self._install_ep_clip()
             self._apply_ep_fsdp2()
             mode = "EP"
         elif self._accelerate_manages_wrap:
-            reject_ep_wrappers_under_accelerate(self._ep_layers())
+            reject_ep_layers_under_accelerate(self._ep_layers())
             self._log_accelerate_managed_wrap()
         elif config.stage_world_size > 1:
             # QLoRA skips FSDP2: fully_shard cannot wrap bnb's non-float Params4bit.
@@ -327,7 +327,7 @@ class ModeSetupMixin:
         fallback_dp_group: dist.ProcessGroup | None = None,
         dp_replicate_size: int = 1,
     ) -> None:
-        """FSDP2 wrap for a model carrying EP wrappers, shared by the EP mode and the PP stage wrap.
+        """FSDP2 wrap for a model carrying EP layers, shared by the EP mode and the PP stage wrap.
 
         Deferred-DP topologies (``is_deferred_dp``) shard the non-expert params over the EP group, whose
         membership the reduce-scatter must share with the DeepEP combine, and defer the cross-replica average

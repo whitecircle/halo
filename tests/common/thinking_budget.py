@@ -19,7 +19,7 @@ import requests
 from halo.inference.response import get_reasoning_text
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.on_policy_e2e import PROBE_TIMEOUT_S
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 # Long enough that an unbudgeted answer reasons past the budget under test — the A/B is only a
 # measurement of enforcement while the model would otherwise have overrun it.

@@ -31,7 +31,7 @@ import torch.nn as nn
 from halo.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
 from halo.distributed.context_parallel.ulysses_model import _reject_left_padding
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.first_step import AUTOGRAD_FALLBACK_WARNING
 from tests.common.gloo import run_gloo_ranks
 from tests.common.smpo_trainer import smpo_trainer
@@ -62,7 +62,7 @@ class _TokenTableLM(nn.Module):
         return SimpleNamespace(logits=self.table[input_ids])
 
 
-def _trainer(parallelism_config: ParallelismConfig, cp_config) -> SmoothMarginPOTrainer:
+def _trainer(parallelism_config: ParallelismConfig, cp_config) -> SMPOTrainer:
     # Clipping on, so the CP quantile's all-gather runs inside the backward-carrying forward.
     return smpo_trainer(
         parallelism_config=parallelism_config,
@@ -96,7 +96,7 @@ def _batch(ragged_prompts: bool) -> dict[str, torch.Tensor]:
     }
 
 
-def _loss_and_grad(trainer: SmoothMarginPOTrainer, model: _TokenTableLM, batch: dict) -> tuple:
+def _loss_and_grad(trainer: SMPOTrainer, model: _TokenTableLM, batch: dict) -> tuple:
     """Per-sequence outputs, the loss, the table gradient, the logged metrics and the warnings the
     backward raised."""
     outputs = trainer.concatenated_forward(model, batch)

@@ -17,8 +17,8 @@ from halo.data.pipeline.prompt_completion import (
 )
 from halo.data.pipeline.text_rows import prepare_generative_row
 from halo.data.pipeline.vlm_rows import normalize_vlm_conversation
+from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
 from halo.data.vlm_render import extract_conversation_images, render_vlm_text
-from halo.data.vlm_routing import VLM_RAW_IMAGE_COLUMNS
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 
 # The columns :func:`render_vlm_preference_row` writes and the VLM preference collator consumes.

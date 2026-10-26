@@ -27,8 +27,9 @@ from tests.common.distributed import (
     init_distributed,
     teardown_distributed,
 )
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 MODEL_NAME = GPT_OSS_20B
 EP_SIZE = 2

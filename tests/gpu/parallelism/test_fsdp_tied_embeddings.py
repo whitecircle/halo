@@ -23,7 +23,7 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from halo.distributed.fsdp import apply_fsdp2_for_dp
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 SEED = 42
 SEQ_LEN = 16

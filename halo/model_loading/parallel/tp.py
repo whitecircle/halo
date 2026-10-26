@@ -144,7 +144,7 @@ def load_tp_moe_model(
     wraps_experts: bool,
 ) -> PreTrainedModel:
     """COLLECTIVE: load a MoE with TP on attention only, the experts replicated (HF's ``tp_plan="auto"``
-    mis-shards MoE expert biases); ``wraps_experts`` adds the grouped-GEMM expert wrappers."""
+    mis-shards MoE expert biases); ``wraps_experts`` adds the grouped-GEMM EP layers."""
     rank = get_global_rank()
     tp_size, dp_size = pc.tp_size, pc.data_parallel_size
     if is_global_main_process():
@@ -166,7 +166,7 @@ def load_tp_moe_model(
     if wraps_experts:
         model = apply_ep_layers(model, ep_config)
         if is_global_main_process():
-            logger.info("Applied grouped GEMM wrappers to MoE layers")
+            logger.info("Swapped the grouped-GEMM EP layers into the MoE blocks")
 
     if is_global_main_process():
         logger.info(f"Model loaded with TP on MoE (tp={tp_size}, dp={dp_size})")

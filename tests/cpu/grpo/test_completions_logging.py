@@ -40,7 +40,7 @@ from halo.runtime import consensus, filesystem, ranks
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
 from tests.common.distributed import reset_shared_filesystem_consensus
@@ -561,7 +561,7 @@ def test_the_log_mixin_keeps_trls_block_off_and_emits_the_decoupled_artifacts(tm
 
 
 def test_both_on_policy_trainers_log_through_the_mixin_ahead_of_the_parallelism_logs():
-    for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
+    for cls in (DistributedOnlineGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
         mro = cls.__mro__
         assert mro.index(cl.DecoupledCompletionsLogMixin) < mro.index(DistributedTrainerMixin), cls.__name__
 

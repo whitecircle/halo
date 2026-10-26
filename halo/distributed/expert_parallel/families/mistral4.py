@@ -1,4 +1,4 @@
-"""EP wrapper for Mistral4 MoE: GLM-4 MoE Lite's group-limited routing with a softmax score and no
+"""EP layer for Mistral4 MoE: GLM-4 MoE Lite's group-limited routing with a softmax score and no
 correction bias, over fused experts and a shared expert."""
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from halo.models.moe.family_specs import MISTRAL4
 
 
 class EPMistral4MoELayer(EPGroupLimitedMoELayerBase):
-    """EP wrapper for Mistral4 MoE (``Mistral4MoE``) using DeepEP."""
+    """EP layer for Mistral4 MoE (``Mistral4MoE``) using DeepEP."""
 
     HF_MODULE_NAMES = ("Mistral4MoE",)
     FAMILY = MISTRAL4

@@ -13,7 +13,7 @@ Lite, LFM-2, Qwen3.5/3.6, Gemma-4 and Zaya), runs two configurations and
 compares forward losses:
 
 1. **Reference** — rank 0 loads the model with plain ``from_pretrained``
-   (no Halo loader, no EP wrapper), so the math runs through the standard
+   (no Halo loader, no EP layer), so the math runs through the standard
    ``Mistral4MoE`` block on full weights.
 2. **ETP** — both ranks load the model with ``ep_size=1,
    expert_tp_size=2``, so the fused-GLU experts go through the shared
@@ -42,10 +42,11 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.ep_reference import ep_layers, random_token_batch
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import TINY_MISTRAL4_CONFIG
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import build_tiny_mistral4_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, log_all
 
 # bf16 ulp at ~1.0 is ~7.8e-3; ETP adds one all-reduce per layer (4 layers in the tiny config) and
 # bf16 grouped-mm reorders accumulation. 1e-2 sits above that noise and far below the shift of the

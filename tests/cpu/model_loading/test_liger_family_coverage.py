@@ -35,12 +35,12 @@ from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.model_loading.liger.cross_entropy import build_lce_forward
-from halo.model_loading.liger.dispatch import resolve_liger_applier
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.model_loading.liger.fused_modules import _bridge_gated_norm
 from halo.models.head_transform import resolve_head_transform_spec
 from halo.models.moe.family_specs import moe_model_types
 from halo.models.moe.router_logits import honors_router_logits_flag
+from tests.common.liger_appliers import liger_applier
 from tests.common.repo import probe_findings
 
 NATIVE_SPECS = [spec for spec in LIGER_FAMILY_SPECS if spec.modeling_module]
@@ -141,11 +141,11 @@ def test_every_roster_family_resolves_an_applier(model_type):
     """A supported family with no applier trains fully unfused — the regression this pins."""
     if model_type in RESOLVED_THROUGH_TEXT_CONFIG:
         text_type = RESOLVED_THROUGH_TEXT_CONFIG[model_type]
-        assert resolve_liger_applier(text_type) is not None, (
+        assert liger_applier(text_type) is not None, (
             f"{model_type} resolves Liger through its text sub-config {text_type}, which now has no applier"
         )
         return
-    assert resolve_liger_applier(model_type) is not None, (
+    assert liger_applier(model_type) is not None, (
         f"no Liger applier covers {model_type}; add a LigerFamilySpec to LIGER_FAMILY_SPECS"
     )
 
@@ -501,7 +501,7 @@ import inspect, sys, torch
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from halo.model_loading.liger.dispatch import resolve_liger_applier
+from tests.common.liger_appliers import liger_applier
 from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG
 
 failures = []
@@ -515,7 +515,7 @@ for model_type, tiny in (("cohere2_moe", TINY_COHERE2_MOE_CONFIG), ("glm4_moe_li
     reference_out.loss.backward()
     reference_grads = {n: p.grad.clone() for n, p in reference.named_parameters() if p.grad is not None}
 
-    applier = resolve_liger_applier(model_type)
+    applier = liger_applier(model_type)
     names = set(inspect.signature(applier).parameters) - {"model"}
     applier(**{name: name == "fused_linear_cross_entropy" for name in names})
 
@@ -569,7 +569,7 @@ def test_the_applier_offers_only_the_roles_the_spec_fills(spec):
     A delegating spec offers UPSTREAM's roles instead — dropping one would silently refuse a kernel
     the family had before the spec existed, and adding one would offer a knob nothing reads.
     """
-    parameters = set(inspect.signature(resolve_liger_applier(spec.model_types[0])).parameters)
+    parameters = set(inspect.signature(liger_applier(spec.model_types[0])).parameters)
     if spec.delegates_to_upstream:
         upstream = set(inspect.signature(MODEL_TYPE_TO_APPLY_LIGER_FN[spec.model_types[0]]).parameters)
         assert parameters == upstream, f"{spec.model_types[0]} no longer offers upstream's kernel set"

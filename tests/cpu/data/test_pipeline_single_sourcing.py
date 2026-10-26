@@ -172,6 +172,9 @@ def test_both_text_renderers_go_through_the_shared_render(monkeypatch):
         max_length=256,
         conversation_field="messages",
         hint_template="hint {answer}",
+        answer_field="answer",
+        solution_field="solution",
+        confidence_power=1.0,
         train_on_completions_only=False,
     )
     with pytest.raises(_SharedRenderReached):
@@ -187,6 +190,9 @@ def test_the_shared_render_applies_the_system_fold_to_both_renderers():
         max_length=256,
         conversation_field="messages",
         hint_template="hint {answer}",
+        answer_field="answer",
+        solution_field="solution",
+        confidence_power=1.0,
         train_on_completions_only=False,
         system_prompt="be terse",
         model_supports_system_role=False,
@@ -206,7 +212,7 @@ def test_the_shared_render_keeps_a_template_emitted_bos():
     tokenizer = _RenderTokenizer()
     text = render_conversation(tokenizer, list(_PROMPT), {}, conversation_field="messages")
     assert text.startswith("<bos>"), text
-    assert render_row_conversation({"messages": _PROMPT}, tokenizer).startswith("<bos>")
+    assert render_row_conversation({"messages": _PROMPT}, tokenizer, conversation_field="messages").startswith("<bos>")
 
 
 # --- one declaration per schema ------------------------------------------------------------------
@@ -219,7 +225,7 @@ def test_the_vlm_map_output_is_one_declaration():
     more or the map would strip it before collation.
     """
     row = {"messages": [{"role": "user", "content": "hi"}]}
-    emitted = set(build_vlm_row_processor()(row))
+    emitted = set(build_vlm_row_processor(conversation_field="messages")(row))
     assert emitted == set(vlm_map_features()), "the row processor and the pinned schema disagree"
     assert emitted <= set(_VLM_SIGNATURE_COLUMNS), "the map writes a column the signature list strips"
     assert "text" not in emitted, "the dead 'text' payload is back"
@@ -364,6 +370,9 @@ def test_the_row_map_factories_expose_no_dead_injection_knobs():
                 max_length=256,
                 conversation_field="messages",
                 hint_template="h {answer}",
+                answer_field="answer",
+                solution_field="solution",
+                confidence_power=1.0,
                 train_on_completions_only=True,
             ),
             id="self-distill-collator",

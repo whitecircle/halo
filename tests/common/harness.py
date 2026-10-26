@@ -57,8 +57,9 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.memory import cleanup_memory
+from tests.common.rank_log import log, log_all
 from tests.common.reporting import emit_result, format_table, snapshot_efficiency
-from tests.common.utils import cleanup_memory, log, log_all
 
 # Exit codes the launcher keys on.
 _EXIT_PASS = 0
@@ -202,6 +203,7 @@ def gpu_test_main(
     exact_world_size: int | None = None,
     prefix: str = "halo_test",
     partial_state: bool = True,
+    process_group: bool = True,
 ):
     """Wrap a ``run(ctx) -> dict`` body with the full GPU-test lifecycle.
 
@@ -212,6 +214,8 @@ def gpu_test_main(
         prefix: temp-dir prefix for this test's isolated output/cache dirs.
         partial_state: construct ``accelerate.PartialState()`` (needed by the
             Trainer-based tests; off for pure-kernel tests).
+        process_group: join the torchrun process group; off for a ``launcher="python"`` driver, one
+            process at rank 0 of a world of one that starts its own ranks.
     """
 
     def decorator(run: Callable[["Ctx"], dict]) -> Callable[[], int]:
@@ -220,7 +224,7 @@ def gpu_test_main(
             configure_training_logging()
             for name, value in _DETERMINISTIC_KERNEL_ENV.items():
                 os.environ.setdefault(name, value)
-            rank, world_size, local_rank = init_distributed()
+            rank, world_size, local_rank = init_distributed() if process_group else (0, 1, 0)
 
             if partial_state:
                 PartialState()

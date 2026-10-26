@@ -30,7 +30,8 @@ from halo.trainers.distillation.self_distillation import DistributedSelfDistilla
 from tests.common.datasets import digit_image
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_VL_2B
-from tests.common.utils import log, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 MODEL_NAME = QWEN3_VL_2B
 NUM_TRAIN_SAMPLES = 16
@@ -96,6 +97,7 @@ def run(ctx) -> dict:
         hint_template="\n[Hint] The correct answer is: {answer}.\n",
         answer_field="answer",
         solution_field=None,
+        confidence_power=1.0,
     )
 
     config = SFTConfig(

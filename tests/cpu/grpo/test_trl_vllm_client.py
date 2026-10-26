@@ -16,7 +16,7 @@ import types
 import pytest
 import trl.generation.vllm_generation as trl_vllm_generation
 
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from tests.common.weight_sync import offline_client
 
@@ -324,11 +324,11 @@ def test_the_client_takes_trl_s_constructor_keywords():
 
 def test_online_grpo_replaces_each_trl_method_the_surface_walk_skips():
     """The walk may skip a TRL method's client calls only while the trainer installs its own version."""
-    host = object.__new__(DistributedGRPOTrainer)
+    host = object.__new__(DistributedOnlineGRPOTrainer)
     host.vllm_generation = types.SimpleNamespace()
     host.parallelism_config = types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, is_expert_tp_mode=False)
 
-    DistributedGRPOTrainer._install_weight_sync(host)
+    DistributedOnlineGRPOTrainer._install_weight_sync(host)
 
     assert vars(trl_vllm_generation.VLLMGeneration).keys() >= _REPLACED_BY_ONLINE_GRPO
     assert vars(host.vllm_generation).keys() >= _REPLACED_BY_ONLINE_GRPO

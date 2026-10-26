@@ -93,8 +93,8 @@ collator = select_data_collator(
 )
 ```
 
-Flags: `padding_free=False`, `packing=False`, `train_on_completions_only=False`,
-`assistant_message_template=None`, `pad_to_multiple_of=None`, `use_context_parallel=False`,
+Flags, keyword-only: `train_on_completions_only` (required: the run's own setting), `padding_free=False`,
+`packing=False`, `assistant_message_template=None`, `pad_to_multiple_of=None`, `use_context_parallel=False`,
 `train_on_last_assistant_only=False`, `model_config=None`, `per_device_train_batch_size=1`,
 `keeps_packed_rows=False`. With `packing` above batch 1 the collator merges the mini-batch's packed
 rows into one row (document isolation and throughput unchanged), and the factory warns: raise

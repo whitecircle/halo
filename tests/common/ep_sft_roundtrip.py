@@ -23,14 +23,16 @@ from halo.entrypoints.script import ScriptContext, configure_balancing_and_build
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.module_tree import backbone_with_layers
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.checkpoint_io import fixed_batch_loss
+from tests.common.checkpoint_io import fixed_batch_loss, safetensors_state_dict
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import random_token_batch
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, safetensors_state_dict, training_run_checks
+from tests.common.training_checks import training_run_checks
 
 SEED = 42
 NUM_TRAIN_STEPS = 3
@@ -56,7 +58,7 @@ class EPSftRoundTrip:
     """One family's round trip: a subclass names the family and overrides what differs.
 
     ``family`` keys :data:`TINY_MOE_FAMILIES`, whose ``load_class`` reloads the save. ``ep_layer_cls``
-    is the family's EP wrapper and ``num_ep_layers`` how many of them the load must patch.
+    is the family's EP layer and ``num_ep_layers`` how many of them the load must patch.
     ``load_liger_kernel`` is the loader's Liger patch and ``train_liger_kernel`` the trainer flag.
     ``composite_token_ids`` pins a composite config's top-level special-token ids to ids of the
     tokenizer, where the family defaults index a release vocab. ``hub_conversion`` checks the lazy

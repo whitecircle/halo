@@ -1,6 +1,6 @@
 # Online GRPO (RLVR)
 
-RLVR (Reinforcement Learning with Verifiable Rewards) is on-policy GRPO scored by the config's [reward terms](rewards/README.md), `\boxed{}` exact match by default. Trainer `DistributedGRPOTrainer`, script `scripts/training/grpo/online.py`. A separate vLLM server generates and receives weights over NCCL; the trainer scores rewards.
+RLVR (Reinforcement Learning with Verifiable Rewards) is on-policy GRPO scored by the config's [reward terms](rewards/README.md), `\boxed{}` exact match by default. Trainer `DistributedOnlineGRPOTrainer`, script `scripts/training/grpo/online.py`. A separate vLLM server generates and receives weights over NCCL; the trainer scores rewards.
 
 Parallelism: EP, TP, EP+TP, EP+ETP and pure ETP (`ep_size=1`). CP and PP are rejected at config time.
 
@@ -58,7 +58,7 @@ learning_rate: 1.0e-06
 ```
 
 - `max_completion_length` must be a positive int; `null` raises, and leaving it out takes TRL's default, so set it. With both length knobs bounded, their sum becomes `model_max_length`.
-- The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedgrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
+- The recipes (`examples/grpo/online/`) run `loss_type: grpo`, `beta: 0`, `epsilon` `0.15`–`0.2`, `num_generations` 4 or 8 and `max_completion_length` 128–4096; a field a config leaves out takes TRL's default ([GRPOConfig](../../reference/configuration-reference.md#grpoconfig--distributedonlinegrpotrainer-distributedasyncenvironmentalgrpotrainer-trl-docs)).
 - `reasoning_effort` (default unset; `low` / `medium` / `high` / `random`) is applied at dataset-map time and needs a template that reads it.
 - Learning rate: `1e-6` to `5e-6` in the recipes, roughly 10× that for LoRA ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 
@@ -139,7 +139,7 @@ The trainer's tokenizer renders each prompt and TRL sends vLLM the **token ids**
 
 ## Server mode only
 
-`DistributedGRPOTrainer` rejects two generation paths:
+`DistributedOnlineGRPOTrainer` rejects two generation paths:
 
 - **In-process generation** (`use_vllm: false`, `vllm_mode: colocate`), at init: two NCCL worlds on the same GPUs deadlock ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)).
 - **TRL's tool-calling loop** (`tools`, `environment_factory`), which desynchronizes ranks. Tool use trains on [Async GRPO with Environments](../async-grpo/README.md).
@@ -164,7 +164,7 @@ Set `VLLM_GROUP_HOST` to the trainer IP a **remote** server should dial when it 
 > [!NOTE]
 > **Multi-server sync belongs to Async GRPO with Environments**
 >
-> The list-of-dicts `server_configs` API (per-server `url`/`group_port`/`group_host` via `WeightSyncPool`) belongs to [Async GRPO with Environments](../async-grpo/setup.md#multiple-servers-and-prefetch) (`AsyncTrainingConfig.rollout_server_configs`), not this single-server RLVR trainer.
+> The list-of-dicts `server_configs` API (per-server `url`/`group_port`/`group_host` via `WeightSyncPool`) belongs to [Async GRPO with Environments](../async-grpo/setup.md#multiple-servers-and-prefetch) (`AsyncRolloutConfig.rollout_server_configs`), not this single-server RLVR trainer.
 
 ## Launch
 

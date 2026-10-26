@@ -32,7 +32,7 @@ from halo.models.attention.sdpa_flex_sliding import (
 )
 from halo.models.attention.selection import has_head_dim_beyond_flash
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import fro_rel_err
+from tests.common.numerics import fro_rel_err
 
 WINDOW = 32
 PACKINGS = ([100, 7, 45], [150])

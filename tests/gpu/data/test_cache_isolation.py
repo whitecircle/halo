@@ -26,7 +26,7 @@ from halo.data.pipeline.coordinated_map import coordinated_map, ensure_cache_dir
 from halo.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 # Configuration
 

@@ -21,7 +21,7 @@ import torch
 
 from halo.kernels.moe_permute import MoEExpertBiasGather
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import max_abs_rel_err
+from tests.common.numerics import max_abs_rel_err
 
 E, DIM, N = 32, 256, 512
 

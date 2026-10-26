@@ -50,7 +50,7 @@ from halo.kernels import logprobs as logprob_kernels
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
-from tests.common.utils import log_all
+from tests.common.rank_log import log_all
 
 # A large vocabulary over a tiny backbone is the whole point: the logits plane must dominate the
 # model so the memory difference is unambiguous, and the head GEMM must be wide enough that slicing

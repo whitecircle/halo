@@ -4,7 +4,7 @@ The facts behind these commands live on their owner pages; read them, not a copy
 
 - server images, build gates, compose knobs, weight sync, transport, per-family serving:
   `agent-docs/infrastructure/rollout-servers.md`;
-- every `AsyncTrainingConfig` / `EnvironmentConfig` / `GRPOConfig` field with its default:
+- every `AsyncRolloutConfig` / `EnvironmentConfig` / `GRPOConfig` field with its default:
   `agent-docs/reference/configuration-reference.md`;
 - the environment registry and per-environment knobs:
   `agent-docs/training-methods/async-grpo/environments/README.md#registry`;
@@ -50,7 +50,7 @@ each with `vllm/` and — ep1 only — `sglang/`); in a filename `-lora-`/`-full
 `qwen3_5/vllm/qwen3.6-35b-a3b-react-math-full-ep4.yaml` (template:
 `environmental-grpo-template.yaml`), `qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-lora-ep1.yaml` for
 a graded tool-heavy one, or `gptoss/sglang/gptoss-20b-code-contests-full-ep1.yaml` on SGLang. Each
-reads `EnvironmentConfig` + `AsyncTrainingConfig` from YAML.
+reads `EnvironmentConfig` + `AsyncRolloutConfig` from YAML.
 
 Each recipe's header carries its server flags and GPU split. React-math (EP=4) serves on GPUs 4-7
 with `--reasoning-parser qwen3` and no tool-call parser — react_math reads its Action from the
@@ -82,7 +82,7 @@ rewards:
 max_turns: 10
 # environment_kwargs: { search_backend: duckduckgo }
 
-# Rollout server + Ray (AsyncTrainingConfig)
+# Rollout server + Ray (AsyncRolloutConfig)
 rollout_server_url: "http://localhost:8000"
 rollout_group_port: 51216       # NCCL weight-sync group port, bound on the trainer host
 rollout_connection_timeout: 120.0

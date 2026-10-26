@@ -5,7 +5,7 @@ description: >-
   Halo: bring up the separate rollout container — vLLM 0.32.0 (cu13), or
   SGLang 0.5.22 for async GRPO with environments (rollout_backend: sglang, the families
   its loaders can take an update for)
-  — point the trainer at it via AsyncTrainingConfig rollout URLs, establish
+  — point the trainer at it via AsyncRolloutConfig rollout URLs, establish
   NCCL weight sync through the engine client in halo/weight_sync/
   (parallelism-aware gather — EP/TP/ETP and multi-rank FSDP2 all participate),
   select the RL environment by registry name, and set the key GRPO
@@ -38,7 +38,7 @@ synced (its build gates). Concrete commands: [`wiring.md`](wiring.md).
    weights and corrupt synced updates). Use the toolkit images, not upstream: both pin the training
    image's NCCL. Server flags, parsers per family, R3: `rollout-servers.md#vllm` / `#sglang`.
 
-2. **Point the trainer at it.** Env GRPO reads `AsyncTrainingConfig` from YAML: `rollout_backend`
+2. **Point the trainer at it.** Env GRPO reads `AsyncRolloutConfig` from YAML: `rollout_backend`
    (`vllm` default; `sglang` for the families its loaders take an update for — the trainer refuses the
    rest at construction, naming the loader reason), then `rollout_server_url` (single server) or
    `rollout_server_configs` (multi-server), `rollout_connection_timeout` and the NCCL group port

@@ -255,14 +255,14 @@ def test_apply_chat_template_forwards_tools_when_present():
         "messages": [{"role": "user", "content": "hi"}],
         "tools": tools,
     }
-    render_row_conversation(row, tokenizer, tools_field="tools")
+    render_row_conversation(row, tokenizer, conversation_field="messages", tools_field="tools")
     assert tokenizer.calls and tokenizer.calls[-1].get("tools") == tools
 
 
 def test_apply_chat_template_omits_tools_when_field_missing():
     tokenizer = _RecordingTokenizer()
     row = {"messages": [{"role": "user", "content": "hi"}]}
-    render_row_conversation(row, tokenizer, tools_field="tools")
+    render_row_conversation(row, tokenizer, conversation_field="messages", tools_field="tools")
     assert tokenizer.calls and "tools" not in tokenizer.calls[-1]
 
 
@@ -273,7 +273,7 @@ def test_apply_chat_template_parses_json_tools():
         "messages": [{"role": "user", "content": "hi"}],
         "tools": json.dumps(tools),
     }
-    render_row_conversation(row, tokenizer, tools_field="tools")
+    render_row_conversation(row, tokenizer, conversation_field="messages", tools_field="tools")
     assert tokenizer.calls[-1].get("tools") == tools
 
 
@@ -283,7 +283,7 @@ def test_apply_chat_template_parses_json_messages():
     row = {
         "messages": json.dumps([{"role": "user", "content": "hi"}]),
     }
-    render_row_conversation(row, tokenizer)
+    render_row_conversation(row, tokenizer, conversation_field="messages")
     assert tokenizer.calls[-1]["messages"] == [{"role": "user", "content": "hi"}]
 
 
@@ -294,6 +294,7 @@ def test_build_chat_row_processor_threads_tools():
     processor = build_chat_row_processor(
         tokenizer=tokenizer,
         max_length=128,
+        conversation_field="messages",
         tools_field="tools",
     )
     row = {
@@ -381,7 +382,7 @@ def _passthrough_vlm_conversation(monkeypatch):
 def test_vlm_processor_emits_tools_json_when_field_set(_passthrough_vlm_conversation):
     """tools list at row[tools_field] should land as a JSON string on the example."""
     tools = [{"type": "function", "function": {"name": "calc"}}]
-    processor = build_vlm_row_processor(tools_field="tools")
+    processor = build_vlm_row_processor(conversation_field="messages", tools_field="tools")
     row = {
         "messages": [{"role": "user", "content": "hi"}],
         "tools": tools,
@@ -394,7 +395,7 @@ def test_vlm_processor_emits_tools_json_when_field_set(_passthrough_vlm_conversa
 def test_vlm_processor_passes_through_json_string_tools(_passthrough_vlm_conversation):
     """Pre-serialized JSON tool strings should be stored as-is, not double-encoded."""
     tools_str = json.dumps([{"type": "function", "function": {"name": "calc"}}])
-    processor = build_vlm_row_processor(tools_field="tools")
+    processor = build_vlm_row_processor(conversation_field="messages", tools_field="tools")
     row = {
         "messages": [{"role": "user", "content": "hi"}],
         "tools": tools_str,
@@ -407,7 +408,7 @@ def test_vlm_processor_passes_through_json_string_tools(_passthrough_vlm_convers
 
 def test_vlm_processor_omits_tools_json_when_field_unset(_passthrough_vlm_conversation):
     """tools_json must always be present (schema stable) and None when no tools."""
-    processor = build_vlm_row_processor()
+    processor = build_vlm_row_processor(conversation_field="messages")
     row = {"messages": [{"role": "user", "content": "hi"}]}
     example = processor(row)
     assert "tools_json" in example
@@ -416,7 +417,7 @@ def test_vlm_processor_omits_tools_json_when_field_unset(_passthrough_vlm_conver
 
 def test_vlm_processor_handles_missing_tools_column(_passthrough_vlm_conversation):
     """Setting tools_field on rows that lack the column should not raise."""
-    processor = build_vlm_row_processor(tools_field="tools")
+    processor = build_vlm_row_processor(conversation_field="messages", tools_field="tools")
     row = {"messages": [{"role": "user", "content": "hi"}]}
     example = processor(row)
     assert example["tools_json"] is None

@@ -37,7 +37,7 @@ import torch
 
 import halo.trainers.checkpointing as checkpointing_mod
 import halo.trainers.grpo.environmental.async_rollouts as async_mod
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.checkpointing import CheckpointingMixin
 from halo.trainers.grpo.environmental.async_rollouts import AsyncRolloutMixin
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
@@ -492,7 +492,7 @@ def test_a_run_without_prefetch_writes_and_takes_no_pending_rounds(tmp_path):
 def _async_state(server_configs):
     """Run the REAL ``_init_async_state`` over a config carrying ``server_configs``."""
     host = types.SimpleNamespace(
-        async_config=AsyncTrainingConfig(rollout_server_configs=server_configs, enable_prefetch=True)
+        async_config=AsyncRolloutConfig(rollout_server_configs=server_configs, enable_prefetch=True)
     )
     _T._init_async_state(host)
     return host

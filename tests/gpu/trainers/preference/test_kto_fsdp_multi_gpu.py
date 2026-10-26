@@ -47,7 +47,9 @@ from halo.trainers.preference.kto import DistributedKTOTrainer
 from tests.common.distributed import snapshot_full_weights, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
-from tests.common.utils import fro_rel_err, log, step_losses
+from tests.common.numerics import fro_rel_err
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses
 
 N_ROWS = 32
 N_STEPS = 6

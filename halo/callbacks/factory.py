@@ -62,7 +62,7 @@ def build_run_callbacks(
             )
         )
 
-    # MoEMetricsCallback needs outputs.router_logits, which neither the bias modes' EP wrappers nor a
+    # MoEMetricsCallback needs outputs.router_logits, which neither the bias modes' EP layers nor a
     # PP stage's bare-tensor forward populate; BalancingBiasCallback emits moe/* there instead.
     if args.enable_moe_metrics and routing.routes_between_experts and balancing_mode not in BIAS_UPDATE_MODES:
         if parallelism_config.pp_size > 1:

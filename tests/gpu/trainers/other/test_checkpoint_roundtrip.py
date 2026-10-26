@@ -20,9 +20,11 @@ from tests.common.checkpoint_io import model_save_checks
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir, teardown_distributed
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B, QWEN3_8B
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.utils import cleanup_memory, log, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import training_run_checks
 
 MAX_STEPS = 3
 # Per-element bound on the re-save round trip, which must be lossless.

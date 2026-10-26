@@ -135,7 +135,9 @@ def test_seq_idx_isolates_the_conv(sparse_ffn, token_shift):
 
 def test_factory_emits_seq_idx_for_lfm2_only():
     lfm2_config = _tiny_model().config
-    collator = select_data_collator(_mock_tokenizer(), packing=True, model_config=lfm2_config)
+    collator = select_data_collator(
+        _mock_tokenizer(), train_on_completions_only=False, packing=True, model_config=lfm2_config
+    )
     rows = [{"input_ids": [5, 6, 7, 8], "attention_mask": [1, 1, 1, 1], "seq_lengths": [2, 2]}]
     batch = collator.torch_call(rows)
     assert batch["seq_idx"].tolist() == [[0, 0, 1, 1]]
@@ -145,7 +147,9 @@ def test_factory_emits_seq_idx_for_lfm2_only():
     # gate itself, or widening segment_markers_for's seq_idx to every family would pass unnoticed.
     qwen3_config = Qwen3Config(num_hidden_layers=1)
     qwen3_config._attn_implementation = "flash_attention_2"
-    other = select_data_collator(_mock_tokenizer(), packing=True, model_config=qwen3_config)
+    other = select_data_collator(
+        _mock_tokenizer(), train_on_completions_only=False, packing=True, model_config=qwen3_config
+    )
     assert "seq_idx" not in other.torch_call(rows)
 
 

@@ -2,7 +2,7 @@
 """
 SMPO with Tensor Parallelism (TP=2): smoke test.
 
-Runs SmoothMarginPOTrainer for 10 steps with tp_size=2 (TP shards attention/embedding/lm_head
+Runs SMPOTrainer for 10 steps with tp_size=2 (TP shards attention/embedding/lm_head
 weights as DTensors, FSDP2 syncs gradients when DP > 1). It checks only that ``trainer.parallelism_config.is_tp_mode``
 is set, that every configured step ran and that the final training loss is finite.
 It does not compare the SMPO objective or gradients against a reference, so a wrong-but-finite
@@ -22,14 +22,14 @@ import math
 import torch
 from transformers import AutoTokenizer
 
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.datasets import create_preference_dataset
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 # Configuration
 
@@ -103,7 +103,7 @@ def run(ctx) -> dict:
 
     # ---- Training Config ----
     log("Creating SMPO training config...")
-    training_config = SmoothMarginPOConfig(
+    training_config = SMPOConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -122,8 +122,8 @@ def run(ctx) -> dict:
     )
 
     # ---- Create Trainer ----
-    log("Creating SmoothMarginPOTrainer with TP...")
-    trainer = SmoothMarginPOTrainer(
+    log("Creating SMPOTrainer with TP...")
+    trainer = SMPOTrainer(
         model=model,
         args=training_config,
         train_dataset=train_dataset,

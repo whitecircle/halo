@@ -26,7 +26,7 @@ import halo.distributed.expert_parallel.moe_layer.compute as compute_mod
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.kernels.lowp.quantization import fake_quant
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 DEV = "cuda"
 E, K, N, R, T_PER = 2, 64, 48, 16, 16  # r=16: NOT divisible by mxfp8's 32-element block

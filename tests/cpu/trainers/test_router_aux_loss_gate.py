@@ -24,7 +24,7 @@ from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.preference.kto import DistributedKTOTrainer
-from halo.trainers.preference.smpo import SmoothMarginPOTrainer
+from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from halo.trainers.sft import DistributedSFTTrainer
 from halo.trainers.training_args_overrides import resolve_active_router_aux_loss_coef
@@ -83,7 +83,7 @@ def test_only_labels_forwarding_trainers_declare_consumption():
     assert DistributedKTOTrainer.ROUTER_AUX_LOSS_ADDED_BY == "trl_loss"
     assert DistributedDPOTrainer.ROUTER_AUX_LOSS_ADDED_BY == "trl_loss"
     for trainer_cls in (
-        SmoothMarginPOTrainer,
+        SMPOTrainer,
         DistributedRewardTrainer,
         OfflineGRPOTrainer,
         DistributedDistillationTrainer,

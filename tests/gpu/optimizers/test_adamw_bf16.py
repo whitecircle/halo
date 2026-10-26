@@ -23,7 +23,7 @@ from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.optimizers.flash_adamw import build_flash_adamw_optimizer
 from halo.optimizers.muon import build_muon_optimizer
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import assert_optimizer_state_bit_exact
+from tests.common.optimizer_state import assert_optimizer_state_bit_exact
 
 # ─── Model ───────────────────────────────────────────────────────────────────
 

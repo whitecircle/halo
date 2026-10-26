@@ -63,9 +63,9 @@ rejected by default. Tabulated in the
 |---|---|
 | **SFT** | Supervised fine-tuning on `{"prompt": [...]}` conversations (`DistributedSFTTrainer`). See [SFT](../training-methods/sft.md). |
 | **DPO** | Direct Preference Optimization on `{prompt, chosen, rejected}` triples with a reference model (`DistributedDPOTrainer`). See [DPO](../training-methods/preference/dpo.md). |
-| **SMPO** | Smooth Margin PO — reference-free preference optimization with a target margin (`SmoothMarginPOTrainer`). See [SMPO](../training-methods/preference/smpo.md). |
+| **SMPO** | Smooth Margin PO — reference-free preference optimization with a target margin (`SMPOTrainer`). See [SMPO](../training-methods/preference/smpo.md). |
 | **Offline GRPO** | Group-relative PO with pre-computed completions and rewards (`{prompt, completions, rewards}`); no online sampling (`OfflineGRPOTrainer`). See [Offline GRPO](../training-methods/grpo/offline.md). |
-| **Online GRPO** | GRPO with live vLLM generation and NCCL weight sync (`DistributedGRPOTrainer`). See [Online GRPO](../training-methods/grpo/online.md). |
+| **Online GRPO** | GRPO with live vLLM generation and NCCL weight sync (`DistributedOnlineGRPOTrainer`). See [Online GRPO](../training-methods/grpo/online.md). |
 | **Async GRPO with Environments** | Multi-turn environment RL — async Ray-actor rollouts, rollout-server HTTP generation, NCCL weight sync (`DistributedAsyncEnvironmentalGRPOTrainer`). See [Async GRPO](../training-methods/async-grpo/README.md). |
 | **Rollout** | One sampled episode: the policy generates against an environment (single- or multi-turn) and the trajectory comes back with its reward. Collected by Ray actors in async GRPO, by direct server calls in online GRPO. |
 | **Masked row** | An episode the rollout infrastructure errored on, or one the environment marked `episode_invalid` (its reward carries no signal: a grading or sandbox outage, an inconclusive code grade, a failed scorer, a null `answer`). It still runs the forward so every rank's collectives match, but it is dropped from the group baseline and its tokens are masked out of the loss. |

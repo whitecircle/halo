@@ -1,4 +1,4 @@
-"""EP wrapper for Qwen3.5 / Qwen3.6 MoE (fused experts + sigmoid-gated shared expert)."""
+"""EP layer for Qwen3.5 / Qwen3.6 MoE (fused experts + sigmoid-gated shared expert)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from halo.models.moe.family_specs import QWEN3_5
 
 
 class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
-    """EP wrapper for Qwen3.5 MoE (Qwen3_5MoeSparseMoeBlock) using DeepEP.
+    """EP layer for Qwen3.5 MoE (Qwen3_5MoeSparseMoeBlock) using DeepEP.
 
     Fused gate_up_proj/down_proj routed experts (GLM4 layout, base fused-GLU helpers).
     ``Qwen3_5MoeTopKRouter`` returns ``(router_logits, router_scores, router_indices)``. The shared
@@ -20,7 +20,7 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("Qwen3_5MoeSparseMoeBlock",)
     FAMILY = QWEN3_5
 
-    # The only balancing under PP, which rejects ``aux_loss``. ``SEVERS_AUX_LOSS`` stays False: the wrapper
+    # The only balancing under PP, which rejects ``aux_loss``. ``SEVERS_AUX_LOSS`` stays False: the EP layer
     # calls the real ``Qwen3_5MoeTopKRouter``, so the recorder still fires for the text-only sibling.
     SUPPORTS_BIAS_BALANCING = True
 

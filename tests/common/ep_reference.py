@@ -12,11 +12,13 @@ from transformers import AutoModelForCausalLM
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from tests.common.datasets import CHAT_TEMPLATE_NOW
+from tests.common.memory import cleanup_memory
+from tests.common.numerics import cos_sim
+from tests.common.rank_log import log_all
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, cos_sim, log_all
 
 # Router parameter suffixes across the MoE roster: GptOss/DeepSeek-V4 name it ``router``,
-# Qwen3/GLM4/Mistral4 name it ``gate``. The EP wrapper adopts the HF layer's own module
+# Qwen3/GLM4/Mistral4 name it ``gate``. The EP layer adopts the HF layer's own module
 # (``EPMoELayerBase._find_gate_or_router``), so the parameter path is identical in the sharded and
 # the dense model, which makes the two directly comparable.
 _ROUTER_SUFFIXES = ("router.weight", "gate.weight")

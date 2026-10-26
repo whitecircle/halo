@@ -24,11 +24,14 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime.collectives import barrier
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import load_peft_model
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
+from tests.common.memory import cleanup_memory, gpu_mem_gb
+from tests.common.numerics import max_or_nan
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.peft_helpers import load_peft_model
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log, max_or_nan, step_losses, training_run_checks
+from tests.common.rank_log import log
+from tests.common.training_checks import step_losses, training_run_checks
 
 SEED = 42
 # The eval split's seed offset, so it never repeats the training samples.
@@ -65,7 +68,7 @@ class SFTMode:
     # ``(train, eval)`` sample counts; ``None`` keeps the suite's.
     num_samples: tuple[int, int] | None = None
     extra_checks: TrainerChecks | None = None
-    # :func:`~tests.common.peft_helpers.load_peft_model` kwargs (``mode``, ``lora_target_modules``): the model
+    # :func:`~tests.common.adapters.load_peft_model` kwargs (``mode``, ``lora_target_modules``): the model
     # loads through the production adapter path and the trainer wraps it.
     adapters: Mapping[str, Any] | None = None
     # Run on the built trainer before training; returns the checks to run on it after.
@@ -138,7 +141,10 @@ def run_sft_mode(ctx, suite: SFTSuite, key: str, mode: SFTMode, tokenizer) -> di
     # script builds the same collator through this factory.
     data_collator = (
         select_data_collator(
-            tokenizer=tokenizer, pad_to_multiple_of=parallelism_config.cp_size, use_context_parallel=True
+            train_on_completions_only=False,
+            tokenizer=tokenizer,
+            pad_to_multiple_of=parallelism_config.cp_size,
+            use_context_parallel=True,
         )
         if parallelism_config.is_cp_mode
         else None

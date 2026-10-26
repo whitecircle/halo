@@ -37,6 +37,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 from transformers.models.qwen3 import Qwen3Config
+from transformers.models.qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_vl import Qwen3VLConfig
 
 from halo.configs.script_arguments import ModelLoadArguments
@@ -62,6 +63,7 @@ from halo.models.attention.selection import resolve_attn_implementation
 from halo.models.moe.family_specs import GEMMA4, MoEFamilySpec
 from halo.trainers.accelerator import accelerate_manages_ddp
 from tests.common.distributed import fake_process_group_mesh
+from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
 _CP_LOADING = "halo.model_loading.parallel.cp"
@@ -110,6 +112,32 @@ def test_trainer_gate_rejects_ep_under_any_accelerate_launch(launch_env):
 def test_trainer_gate_passes_under_torchrun():
     with patch.dict(os.environ, _env({}), clear=True):
         reject_accelerate_launch(_pc(ep_size=2))
+
+
+@pytest.mark.parametrize("launch_env", [_MULTI_GPU_ENV, _FSDP_ENV])
+def test_the_grouped_gemm_wrappers_are_refused_under_any_accelerate_launch(launch_env):
+    """Plain data parallelism under accelerate would hand the wrapped experts to accelerate's own DDP or FSDP
+    management, which they are not built for; the refusal names both ways forward."""
+    with patch.dict(os.environ, _env(launch_env), clear=True):
+        with pytest.raises(ValueError, match=r"Grouped GEMM for MoE experts .* require 'torchrun'") as refusal:
+            reject_unsupported_model(
+                _pc(),
+                Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG),
+                sinks_policy=SinksPolicy.NEUTRALIZED,
+                wraps_experts=True,
+            )
+    assert "use_grouped_gemm: false" in str(refusal.value)
+
+
+def test_the_grouped_gemm_wrappers_pass_under_torchrun_and_unwrapped_experts_under_accelerate():
+    with patch.dict(os.environ, _env({}), clear=True):
+        reject_unsupported_model(
+            _pc(), Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True
+        )
+    with patch.dict(os.environ, _env(_MULTI_GPU_ENV), clear=True):
+        reject_unsupported_model(
+            _pc(), Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False
+        )
 
 
 def test_pure_etp_is_not_swept_up_by_the_fp32_refusal():
@@ -530,7 +558,7 @@ def test_every_load_refusal_fires_before_attention_the_tokenizer_and_the_weight_
 
 
 def test_qlora_passes_plain_data_parallelism_and_is_refused_under_the_expert_wrappers():
-    """The MoE conjunct: a dense QLoRA run on plain DP keeps its Params4bit, the grouped-GEMM wrappers do not."""
+    """The MoE conjunct: a dense QLoRA run on plain DP keeps its Params4bit, the grouped-GEMM EP layers do not."""
     load_rules.reject_unsupported_load(
         _pc(), torch.bfloat16, quantization_config=_QUANTIZED, init_from_scratch=False, wraps_experts=False
     )

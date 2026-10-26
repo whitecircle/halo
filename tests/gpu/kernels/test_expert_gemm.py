@@ -16,7 +16,8 @@ import torch
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.lowp.deepgemm import deepgemm_available
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import fro_rel_err, log
+from tests.common.numerics import fro_rel_err
+from tests.common.rank_log import log
 
 DEV = "cuda"
 

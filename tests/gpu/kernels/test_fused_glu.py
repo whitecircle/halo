@@ -27,7 +27,8 @@ from halo.kernels.fused_glu import (
     silu_then_clamp_mul_eager,
 )
 from tests.common.harness import gpu_test_main, record_check
-from tests.common.utils import log, max_abs_rel_err
+from tests.common.numerics import max_abs_rel_err
+from tests.common.rank_log import log
 
 DIM, ALPHA, LIMIT = 2880, 1.702, 7.0
 # Device memory the int64-offset case needs to hold its >2**31-element tensors.

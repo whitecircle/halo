@@ -36,7 +36,7 @@ from halo.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.collectives import barrier
 from tests.common.harness import gpu_test_main
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 HIDDEN = 1024
 NUM_TOPK = 4

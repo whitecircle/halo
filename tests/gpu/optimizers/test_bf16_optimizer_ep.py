@@ -42,8 +42,9 @@ from halo.runtime.ranks import get_global_world_size, get_local_world_size
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 

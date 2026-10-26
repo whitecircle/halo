@@ -5,7 +5,7 @@ import shlex
 import pytest
 
 from tests.common.offline_grpo import EP_LOADINGS, ep_loading_parser
-from tests.common.utils import imports_name
+from tests.common.source_sweep import imports_name
 from tests.gpu.manifest import MANIFEST, script_path
 
 EP_SUITES = ("trainers/grpo/test_offline_grpo_ep_cp.py", "trainers/grpo/test_offline_grpo_reference.py")

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The ``s3_datasets.py delete`` CLI exits non-zero whenever the data it was asked to delete is still there.
+"""The ``s3.py delete`` CLI exits non-zero whenever the data it was asked to delete is still there.
 
 ``S3Client.delete`` logs the ``ClientError`` and returns ``False`` for a single-object delete, and the
 two ``--recursive`` mismatches (a prefix without it, a single object with it) refuse before deleting
@@ -15,7 +15,7 @@ from unittest.mock import patch
 
 import pytest
 
-from scripts.before_training.s3_datasets import main as s3_cli_main
+from scripts.before_training.s3 import main as s3_cli_main
 
 _URI = "s3://test-bucket/my_folder/a.json"
 

@@ -74,7 +74,7 @@ MISTRAL4_SCALE_PERIOD = 32
 @dataclass(frozen=True)
 class CPFamily:
     """A tiny model one Ulysses wrapper class runs on: its builder, the text-config fields that make every layer
-    one the wrapper takes, and whether its MoE blocks take the EP wrappers."""
+    one the wrapper takes, and whether its MoE blocks take the EP layers."""
 
     tiny: TinyFamily
     overrides: dict = field(default_factory=dict)

@@ -6,9 +6,9 @@ A run evaluates in two ways: eval rounds inside training, and offline CLIs that 
 
 Eval metrics carry the `eval_` prefix. Eval rounds run without prefetch, and a round waits for its slowest episode.
 
-`num_generations_eval` sets the eval group size (`1` gives a fast pass@1 eval) and `eval_rollout_batch_size` the rows, not prompts, per rank in one eval round; types and defaults are in [GRPOConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [AsyncTrainingConfig](../../reference/configuration-reference.md#asynctrainingconfig).
+`num_generations_eval` sets the eval group size (`1` gives a fast pass@1 eval) and `eval_rollout_batch_size` the rows, not prompts, per rank in one eval round; types and defaults are in [GRPOConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
 
-- `eval_rollout_batch_size` must be a multiple of `num_generations_eval`, at most `max_concurrent_rollouts`, and needs `dataloader_drop_last: false`; each raises at startup ([`eval_rollout_batch_size`](../../reference/configuration-reference.md#asynctrainingconfig)). Unset, `per_device_eval_batch_size` must hold whole groups instead; the loss forward chunks by it either way.
+- `eval_rollout_batch_size` must be a multiple of `num_generations_eval`, at most `max_concurrent_rollouts`, and needs `dataloader_drop_last: false`; each raises at startup ([`eval_rollout_batch_size`](../../reference/configuration-reference.md#asyncrolloutconfig)). Unset, `per_device_eval_batch_size` must hold whole groups instead; the loss forward chunks by it either way.
 - Under `reasoning_effort: random` ([Effort levels](reasoning.md#effort-levels)) each problem's level is drawn from its text, here and under the offline `--training_config`, so checkpoints compare level for level.
 - With `num_generations_eval` above 1 and a solve verdict, `eval_outcome/success@<k>` is the share of prompts any of their `k` valid samples solved; `eval_outcome/solve_rate` stays the per-sample mean.
 

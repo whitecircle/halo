@@ -2,7 +2,7 @@
 """MoEMetricsCallback must respect the balancing strategy's router-logits off decision.
 
 ``apply_balancing_mode`` deliberately keeps ``output_router_logits`` OFF in several modes
-(bias_update's EP bypass, aux-severed EP wrappers, coef-0 crash avoidance, GRPO inert-aux) and
+(bias_update's EP bypass, aux-severed EP layers, coef-0 crash avoidance, GRPO inert-aux) and
 stamps that decision on the config via ``mark_router_logits_forced_off``. An ``on_train_begin`` that
 unconditionally flips ``output_router_logits = True`` undoes the decision (and re-arms the very crash
 the strategy avoided). The callback must check the stamp and skip.
@@ -116,7 +116,7 @@ def test_explicit_bias_mode_on_a_dense_model_raises():
 
 
 def test_severed_ep_aux_loss_stays_off_through_callback():
-    """DeepSeek-V4-under-EP shape: aux_loss requested but the EP wrappers sever the path — the
+    """DeepSeek-V4-under-EP shape: aux_loss requested but the EP layers sever the path — the
     strategy leaves logits off and the callback must not re-enable them (that would crash the HF
     aux-loss reduction on the empty router_logits tuple)."""
     cfg = _Cfg(output_router_logits=False, router_aux_loss_coef=0.01)

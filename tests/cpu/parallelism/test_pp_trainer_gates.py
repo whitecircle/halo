@@ -40,7 +40,7 @@ _TRAINERS = distributed_trainer_classes()
 # construction-time reference sweep).
 _PP_ENABLED: set[str] = {
     "DistributedSFTTrainer",
-    "SmoothMarginPOTrainer",
+    "SMPOTrainer",
     "DistributedRewardTrainer",
     "ClassificationTrainer",
     "OfflineGRPOTrainer",

@@ -9,7 +9,7 @@ from dataclasses import fields
 
 import pytest
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.environments.ray_actors import _await_with_deadline
 from halo.environments.rollout_config import RolloutConfig
 
@@ -46,10 +46,10 @@ def test_deadline_is_enforced_promptly():
 
 
 def test_episode_timeout_is_configurable_and_defaults_sanely():
-    """AsyncTrainingConfig reads RolloutConfig's default, which it validates against the NCCL watchdog.
+    """AsyncRolloutConfig reads RolloutConfig's default, which it validates against the NCCL watchdog.
     Identity, not equality: a side that re-declares its own literal compares equal today and drifts the
     moment the other moves, letting a straggler outlive the watchdog."""
-    async_default = next(f for f in fields(AsyncTrainingConfig) if f.name == "episode_timeout").default
+    async_default = next(f for f in fields(AsyncRolloutConfig) if f.name == "episode_timeout").default
     assert async_default is RolloutConfig.episode_timeout
     assert RolloutConfig().episode_timeout == 1200.0
     assert RolloutConfig(episode_timeout=42.0).episode_timeout == 42.0

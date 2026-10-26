@@ -17,7 +17,7 @@ from halo.env import env_str
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from tests.common.models import QWEN3_0_6B
 from tests.common.on_policy_e2e import probe_top_logprobs, record_served_baseline
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import push, weight_transfer_port
 
 # The checkpoint the vLLM tier's dense endpoint serves, which the re-init and pool-reconnect suites push.

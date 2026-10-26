@@ -14,14 +14,16 @@ from transformers import AutoTokenizer
 from trl import GRPOConfig
 
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
-from halo.configs.grpo_environmental import AsyncTrainingConfig, EnvironmentConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_int, env_str
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
+from tests.common.adapters import assert_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.harness import record_check
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_30B_A3B
 from tests.common.on_policy_e2e import (
     RESUME_MAX_STEPS,
@@ -46,14 +48,13 @@ from tests.common.on_policy_e2e import (
     served_policy_moved,
     sink_round,
 )
-from tests.common.peft_helpers import assert_only_adapters_trainable, snapshot_adapters, unwrap
+from tests.common.rank_log import log
 from tests.common.thinking_budget import (
     ReasoningTurnRecorder,
     record_budget_acceptance,
     record_budget_enforcement,
     record_thinking_budget_checks,
 )
-from tests.common.utils import cleanup_memory, log
 
 # Default for the vLLM legs; the SGLang and 4-GPU wrappers own their own knob (their servers and
 # default families differ).
@@ -128,8 +129,8 @@ def _async_config(
     model_name: str,
     thinking_budget: int | None,
     routing_replay: str,
-) -> AsyncTrainingConfig:
-    return AsyncTrainingConfig(
+) -> AsyncRolloutConfig:
+    return AsyncRolloutConfig(
         rollout_backend=backend,
         rollout_server_url=server_url,
         # Each pool server's group port is the base rollout_group_port plus its index.

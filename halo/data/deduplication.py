@@ -1,5 +1,5 @@
 """Semantic deduplication of a corpus: mean-pooled sentence embeddings + FAISS similarity search, the driver
-behind ``scripts/inference/generation/dataset_deduplication.py``."""
+behind ``scripts/inference/deduplicate_dataset.py``."""
 
 from concurrent.futures import ThreadPoolExecutor
 from multiprocessing import cpu_count

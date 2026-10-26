@@ -3,8 +3,10 @@ SDK-free, since the argument dataclasses read their defaults from it."""
 
 from halo.env import env_str
 
-# Omitting the URL flag must never send conversations to the public OpenAI API.
-DEFAULT_LOCAL_BASE_URL = "http://localhost:8000/v1"
+# A rollout server on this machine at the engines' default port: its root (weight sync, health) and its OpenAI
+# API. Omitting the URL flag must never send conversations to the public OpenAI API.
+DEFAULT_LOCAL_SERVER_URL = "http://localhost:8000"
+DEFAULT_LOCAL_BASE_URL = f"{DEFAULT_LOCAL_SERVER_URL}/v1"
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 # Read in order for a hosted (non-local) endpoint's key.
 EXTERNAL_API_KEY_CHAIN = ("OPENROUTER_API_KEY", "OPENAI_API_KEY")

@@ -7,7 +7,7 @@ The properties pinned here:
     (VLM) config — which carries ``max_position_embeddings`` on its nested ``text_config`` only —
     resolves instead of falling through to the tokenizer's unset sentinel and raising, and it is the
     single resolver (env-GRPO's ``_context_limit`` delegates to it rather than keeping a copy);
-  * ``SmoothMarginPOConfig.resolve_length_budget`` derives the prompt/completion shares from
+  * ``SMPOConfig.resolve_length_budget`` derives the prompt/completion shares from
     ``max_length`` so they scale with a context-resolved budget, and rejects a split that overflows
     it (prompt and completion truncate independently, so an over-budget split silently exceeds
     ``max_length``);
@@ -29,7 +29,7 @@ from transformers import PretrainedConfig
 
 from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.parser import HaloArgumentParser
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 from halo.entrypoints.model_setup import apply_max_length, apply_prompt_completion_window, apply_tokenizer_window
 from halo.models.context_window import get_model_context_window, resolve_length_to_context
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -274,36 +274,36 @@ def test_env_grpo_context_limit_uses_the_shared_resolver():
 
 def test_smpo_budget_defaults_split_max_length_in_half():
     """The null-share derivation splits the shipped default in half (1024 → 512 / 512)."""
-    assert SmoothMarginPOConfig(**_CPU_OK).resolve_length_budget() == (1024, 512, 512)
+    assert SMPOConfig(**_CPU_OK).resolve_length_budget() == (1024, 512, 512)
 
 
 def test_smpo_budget_prompt_share_scales_with_max_length():
     """A fixed 512 prompt default would silently truncate prompts to 512 on a run whose max_length
     resolves to a long context window."""
-    cfg = SmoothMarginPOConfig(max_length=131072, **_CPU_OK)
+    cfg = SMPOConfig(max_length=131072, **_CPU_OK)
     assert cfg.resolve_length_budget() == (131072, 65536, 65536)
 
 
 def test_smpo_budget_explicit_shares_are_honoured():
-    cfg = SmoothMarginPOConfig(max_length=4096, max_prompt_length=1024, max_completion_length=512, **_CPU_OK)
+    cfg = SMPOConfig(max_length=4096, max_prompt_length=1024, max_completion_length=512, **_CPU_OK)
     assert cfg.resolve_length_budget() == (4096, 1024, 512)
 
 
 def test_smpo_budget_completion_takes_the_remainder():
-    cfg = SmoothMarginPOConfig(max_length=4096, max_prompt_length=3072, **_CPU_OK)
+    cfg = SMPOConfig(max_length=4096, max_prompt_length=3072, **_CPU_OK)
     assert cfg.resolve_length_budget() == (4096, 3072, 1024)
 
 
 def test_smpo_budget_rejects_overflowing_split():
     """Prompt and completion truncate independently, so shares summing past max_length would build
     sequences longer than the stated budget without either cut firing."""
-    cfg = SmoothMarginPOConfig(max_length=4096, max_prompt_length=2048, max_completion_length=4096, **_CPU_OK)
+    cfg = SMPOConfig(max_length=4096, max_prompt_length=2048, max_completion_length=4096, **_CPU_OK)
     with pytest.raises(ValueError, match="overflows max_length"):
         cfg.resolve_length_budget()
 
 
 def test_smpo_budget_rejects_prompt_share_exceeding_max_length():
-    cfg = SmoothMarginPOConfig(max_length=1024, max_prompt_length=1024, **_CPU_OK)
+    cfg = SMPOConfig(max_length=1024, max_prompt_length=1024, **_CPU_OK)
     with pytest.raises(ValueError, match="no room"):
         cfg.resolve_length_budget()
 
@@ -312,7 +312,7 @@ def test_smpo_budget_rejects_prompt_share_exceeding_max_length():
 def test_smpo_budget_requires_a_resolved_max_length(unresolved):
     """A null max_length must be resolved to the context window by the script BEFORE the trainer;
     reaching resolve_length_budget() unresolved is a construction error, not a silent default."""
-    cfg = SmoothMarginPOConfig(max_length=unresolved, **_CPU_OK)
+    cfg = SMPOConfig(max_length=unresolved, **_CPU_OK)
     with pytest.raises(ValueError, match="must be a positive int"):
         cfg.resolve_length_budget()
 

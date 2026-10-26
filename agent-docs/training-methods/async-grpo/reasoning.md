@@ -43,7 +43,7 @@ The budget is per turn; `rollout_max_tokens` bounds the whole turn, reasoning an
 
 `rollout_max_thinking_tokens` is the run-wide per-turn reasoning cap (vLLM `thinking_token_budget`), and
 `rollout_max_answer_tokens` the most a turn may generate past its reasoning cap ([Answer room](#answer-room)); types
-and defaults are in [AsyncTrainingConfig](../../reference/configuration-reference.md#asynctrainingconfig).
+and defaults are in [AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
 
 Any reasoning cap on vLLM needs a reasoning parser on the server, which enforces it on the image's
 Model Runner V2 ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)). A vLLM cap on Mistral 4 is
@@ -116,7 +116,7 @@ Two trainer-side terms add to the task reward before advantages.
 it charges per 1,000 reasoning tokens, at most `reasoning_price_cap` per episode. `reasoning_price_past_budget`
 prices only reasoning past each turn's soft budget, and `reasoning_terms_in_failed_groups` charges both terms in a
 [failed group](#failed-groups) too. Both terms are off by default; types and defaults are in
-[AsyncTrainingConfig](../../reference/configuration-reference.md#asynctrainingconfig).
+[AsyncRolloutConfig](../../reference/configuration-reference.md#asyncrolloutconfig).
 
 - While `drop_degenerate_groups` is on (the default), both reach the gradient only through groups the environment's
   reward separates: it judges a group without them ([Advantages](objective.md#advantages)).

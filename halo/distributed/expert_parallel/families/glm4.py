@@ -1,4 +1,4 @@
-"""EP wrapper for GLM-4 MoE Lite's fused sigmoid-routed MoE (Laguna subclasses it)."""
+"""EP layer for GLM-4 MoE Lite's fused sigmoid-routed MoE (Laguna subclasses it)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from halo.models.moe.family_specs import GLM4
 
 
 class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
-    """EP wrapper for GLM-4 MoE Lite's fused sigmoid-routed MoE using DeepEP.
+    """EP layer for GLM-4 MoE Lite's fused sigmoid-routed MoE using DeepEP.
 
     Fused gate_up_proj/down_proj routed experts, group-based sigmoid routing, plus a shared expert on
     every token (not distributed). Laguna subclasses it.
@@ -21,7 +21,7 @@ class EPGlm4MoELayer(EPGroupLimitedMoELayerBase):
 
     SUPPORTS_BIAS_BALANCING = True
 
-    # The remote-code revisions this wrapper also serves declare no group limiting, so those two fall
+    # The remote-code revisions this EP layer also serves declare no group limiting, so those two fall
     # through to the neutral 1. ``norm_topk_prob`` and ``routed_scaling_factor`` (1.8 in-library) stay
     # required: defaulting either rescales every routed weight.
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group")

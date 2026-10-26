@@ -47,7 +47,7 @@ from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B, QWEN3_30B_A3B
 from tests.common.online_grpo_e2e import MODES, modes_for, run_online_grpo_e2e
 from tests.common.ports import free_port
-from tests.common.utils import log
+from tests.common.rank_log import log
 from tests.common.weight_sync import VLLM_DENSE_SERVER_URL, weight_transfer_port
 
 MOE_MODEL = env_str("HALO_TEST_ONLINE_GRPO_MOE_MODEL", QWEN3_30B_A3B)

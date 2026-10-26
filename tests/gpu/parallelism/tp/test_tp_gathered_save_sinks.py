@@ -45,7 +45,7 @@ from tests.common.checkpoint_io import save_context, weight_files
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 TP_SIZE = 2
 NUM_LAYERS = TINY_GPTOSS_CONFIG["num_hidden_layers"]

@@ -1,4 +1,4 @@
-"""EP wrapper for GptOss MoE (interleaved fused experts with bias)."""
+"""EP layer for GptOss MoE (interleaved fused experts with bias)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from halo.models.moe.family_specs import GPT_OSS
 
 
 class EPGptOssMoELayer(EPMoELayerBase):
-    """EP wrapper for GptOss fused experts using DeepEP."""
+    """EP layer for GptOss fused experts using DeepEP."""
 
     HF_MODULE_NAMES = ("GptOssMLP",)
     FAMILY = GPT_OSS

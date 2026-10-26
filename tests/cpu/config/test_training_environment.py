@@ -5,12 +5,15 @@ Run: python -m pytest tests/cpu/config/test_training_environment.py
 """
 
 import json
+import logging
 from types import SimpleNamespace
 
 import pytest
+from transformers import TrainerState
 
 from halo.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME
 from halo.entrypoints.run_setup import _validate_output_dir, resume_checkpoint_from_config
+from halo.entrypoints.script import run_trainer
 from halo.log import RUN_LOG_DIR_NAME
 
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
@@ -211,6 +214,29 @@ def test_auto_resume_nothing_found_overwrite_flag_skips_validation(tmp_path):
 def test_no_resume_returns_none(tmp_path):
     assert resume_checkpoint_from_config(_config(tmp_path / "out"), overwrite_output_dir=False) is None
     assert resume_checkpoint_from_config(_config(tmp_path / "out", resume=False), overwrite_output_dir=False) is None
+
+
+def test_a_resumed_run_logs_its_checkpoint_once(tmp_path, caplog):
+    """The resolution names the checkpoint it picked; the runner that trains from it adds no second line."""
+    out = tmp_path / "out"
+    ckpt = _write_checkpoint(out, step=5)
+    trainer = SimpleNamespace(
+        callback_handler=SimpleNamespace(callbacks=[]),
+        state=TrainerState(max_steps=5),
+        train=lambda resume_from_checkpoint=None: None,
+        cleanup_ep=lambda: None,
+    )
+    with caplog.at_level(logging.INFO):
+        context = SimpleNamespace(
+            parallelism_config=SimpleNamespace(
+                has_ep_group=False, is_cp_mode=False, is_tp_mode=False, is_expert_tp_mode=False, data_parallel_size=1
+            ),
+            mode_suffix="ddp",
+            resume_checkpoint=resume_checkpoint_from_config(_config(out, resume=True), overwrite_output_dir=False),
+        )
+        run_trainer(trainer, context, method_name="SFT")
+    lines = [record.getMessage() for record in caplog.records if "Resuming from checkpoint" in record.getMessage()]
+    assert lines == [f"Resuming from checkpoint: {ckpt}"]
 
 
 if __name__ == "__main__":

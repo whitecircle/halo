@@ -1,6 +1,6 @@
 """Generation and retry configuration for rollout collection, shared by the trainer config and the Ray rollout
 actors, and the tokenizer reads of its stop and reasoning-end ids. Free of Ray and rollout-engine imports:
-``AsyncTrainingConfig`` builds one and the actors receive it pickled."""
+``AsyncRolloutConfig`` builds one and the actors receive it pickled."""
 
 import logging
 from dataclasses import dataclass, field
@@ -43,7 +43,7 @@ REASONING_END_TOKEN_EXAMPLES = (
 class RolloutConfig:
     """Generation and retry configuration for rollout collection.
 
-    Its defaults are the ones ``AsyncTrainingConfig``, the validated YAML surface, reads for the fields it
+    Its defaults are the ones ``AsyncRolloutConfig``, the validated YAML surface, reads for the fields it
     mirrors; the fields that config derives rather than mirrors default to their off state.
     """
 

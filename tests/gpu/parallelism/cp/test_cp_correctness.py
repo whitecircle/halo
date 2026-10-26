@@ -35,9 +35,10 @@ from halo.distributed.context_parallel.model_rules import reject_unsupported_uly
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from tests.common.distributed import world_mean, world_spread
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
+from tests.common.rank_log import log, log_all
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, log, log_all
 
 # Configuration
 

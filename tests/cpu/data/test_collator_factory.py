@@ -37,7 +37,7 @@ def _mock_model_config(model_type: str = "qwen3") -> MagicMock:
 
 
 def _select(**kwargs):
-    return select_data_collator(tokenizer=_make_tokenizer(), **kwargs)
+    return select_data_collator(tokenizer=_make_tokenizer(), **{"train_on_completions_only": False, **kwargs})
 
 
 def test_packing_and_padding_free_conflict():
@@ -336,7 +336,7 @@ def test_varlen_gate_covers_every_declared_flash_impl():
 def _warnings_for(**kwargs) -> str:
     """The main-process warnings select_data_collator emits, as one lowercased blob."""
     with patch("halo.data.collators.collator_rules.logger") as mock_logger:
-        select_data_collator(tokenizer=_make_tokenizer(), **kwargs)
+        select_data_collator(tokenizer=_make_tokenizer(), **{"train_on_completions_only": False, **kwargs})
         rendered = []
         for call in mock_logger.warning.call_args_list:
             msg, *fmt_args = call.args

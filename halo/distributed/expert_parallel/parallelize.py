@@ -29,7 +29,7 @@ def apply_ep_layers(model: nn.Module, ep_config: EPConfig, weights_already_shard
     expert_tp_info = f", expert_tp_size={ep_config.expert_tp_size}" if ep_config.expert_tp_size > 1 else ""
     logger.info(f"Patching model for EP with DeepEP (ep_size={ep_config.ep_size}{expert_tp_info})")
 
-    def build(path: str, block: nn.Module, wrapper_cls: type[EPMoELayerBase]) -> nn.Module:
+    def build(path: str, block: nn.Module, layer_cls: type[EPMoELayerBase]) -> nn.Module:
         # recurse=True: only Gemma4 registers the expert tensors on the mapped class itself. Every
         # other family maps the MoE block, whose experts hang off a child module, so a shallow scan
         # would see nothing and pass on the quantized checkpoints this check exists to reject
@@ -46,10 +46,10 @@ def apply_ep_layers(model: nn.Module, ep_config: EPConfig, weights_already_shard
         # ``num_experts`` or raises, so a set count means already finalized — the spelling both lazy
         # loaders use.
         if ep_config.num_experts is None:
-            ep_config.finalize_expert_assignment(wrapper_cls.detect_num_experts(block))
+            ep_config.finalize_expert_assignment(layer_cls.detect_num_experts(block))
         if is_global_main_process():
-            logger.info(f"Patched {path} ({type(block).__name__}) -> {wrapper_cls.__name__}")
-        return wrapper_cls(block, ep_config, weights_already_sharded=weights_already_sharded)
+            logger.info(f"Patched {path} ({type(block).__name__}) -> {layer_cls.__name__}")
+        return layer_cls(block, ep_config, weights_already_sharded=weights_already_sharded)
 
     # No descent into a wrapped block: Gemma4 registers the expert tensors on the mapped class
     # itself, so walking a match's subtree would re-match what was just wrapped.
@@ -62,8 +62,8 @@ def apply_ep_layers(model: nn.Module, ep_config: EPConfig, weights_already_shard
             raise ValueError(
                 f"Expert Parallelism requested (expert_parallel_size={ep_config.ep_size}, "
                 f"expert_tensor_parallel_size={ep_config.expert_tp_size}) but NO MoE layer was "
-                f"patched — none of the model's modules match a registered EP wrapper. "
-                f"Supported HF MoE classes: {sorted(MOE_LAYER_MAP)}. Add an EP wrapper for "
+                f"patched — none of the model's modules match a registered EP layer. "
+                f"Supported HF MoE classes: {sorted(MOE_LAYER_MAP)}. Add an EP layer for "
                 f"this family (see agent-docs/models/adding-a-model.md) or run without expert "
                 f"parallelism."
             )

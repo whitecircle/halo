@@ -10,7 +10,7 @@ from accelerate.utils import DataLoaderConfiguration
 from halo.config_validation import differs_from_default
 from halo.env import is_accelerate_fsdp_launch, is_accelerate_launch
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
-from halo.trainers.parallelism.trainer_rules import FSDP_SHAPING_KNOBS
+from halo.trainers.trainer_rules import FSDP_SHAPING_KNOBS
 
 logger = logging.getLogger(__name__)
 
@@ -72,9 +72,9 @@ class AcceleratorMixin:
 
     @property
     def _mixin_manages_gmm(self) -> bool:
-        """Whether the grouped-GEMM wrappers run on the mixin-managed path: ``needs_ep_wrappers`` holds by
+        """Whether the grouped-GEMM EP layers run on the mixin-managed path: ``needs_ep_layers`` holds by
         default even for dense models, and an accelerate launch keeps its own DDP/FSDP choice."""
-        return self.parallelism_config.needs_ep_wrappers and not self._accelerate_manages_wrap
+        return self.parallelism_config.needs_ep_layers and not self._accelerate_manages_wrap
 
     def create_accelerator_and_postprocess(self):
         """A plain Accelerator under custom parallelism (FSDP2 syncs the gradients), else the base Trainer's."""
@@ -144,7 +144,7 @@ class AcceleratorMixin:
     def _inner_training_loop(
         self, batch_size=None, args=None, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None
     ):
-        """Skip DDP wrapping where FSDP2, the EP wrappers, TP, ETP or PP sync the gradients."""
+        """Skip DDP wrapping where FSDP2, the EP layers, TP, ETP or PP sync the gradients."""
         config = self.parallelism_config
         if not (
             self._fsdp_wrapped

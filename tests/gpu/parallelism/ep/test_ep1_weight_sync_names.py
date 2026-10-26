@@ -3,7 +3,7 @@
 ep_size==1 vLLM weight-sync correctness: the EP expert gather must run even though
 ``has_ep_group`` is False.
 
-At ep_size==1 the MoE is still EP-wrapped (``needs_ep_wrappers`` is True for the grouped-GEMM
+At ep_size==1 the MoE is still EP-wrapped (``needs_ep_layers`` is True for the grouped-GEMM
 path) but ``has_ep_group`` is False (``ep_group_size == 1``). ``gather_and_send_weights`` must not gate
 the EP expert reshape on ``has_ep_group``: gating it there drops the ep1 experts onto the DENSE path,
 which forwards them to vLLM in the EP-internal layout — transposed ``gate_up_proj [E,H,2M]`` or, on the
@@ -45,8 +45,9 @@ from halo.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import cleanup_memory, log
+from tests.common.rank_log import log
 from tests.common.weight_sync import RecordingSender
 
 MODEL_NAME = GPT_OSS_20B
@@ -71,7 +72,7 @@ def run(ctx):
     num_experts = model.config.num_local_experts
     n_ep_layers = len(ep_layers(model))
     log(f"  EP layers (ep_size=1): {n_ep_layers}, num_local_experts={num_experts}")
-    assert n_ep_layers > 0, "model was not EP-wrapped at ep_size=1 — grouped-GEMM wrappers missing"
+    assert n_ep_layers > 0, "model was not EP-wrapped at ep_size=1 — grouped-GEMM EP layers missing"
 
     # All ranks run the gather (collective at ep>1; a pure copy here). Only rank 0 records.
     recorder = RecordingSender() if ctx.rank == 0 else None

@@ -148,7 +148,7 @@ def module_with_weight_keys(paths: list[str]) -> torch.nn.Module:
 def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
     """Fill every DeepSeek-V4 hash layer's ``tid2eid`` with DISTINCT experts per token id.
 
-    Random init leaves the table all-zero, and DeepEP dispatch and the EP wrapper's init guard both
+    Random init leaves the table all-zero, and DeepEP dispatch and the EP layer's init guard both
     require distinct top-k experts per token.
     """
     gen = torch.Generator().manual_seed(seed)
@@ -430,7 +430,7 @@ def build_tiny_family_checkpoint(
     the production loaders read. Rank 0 only.
 
     Sharded, so the checkpoint carries the index a family's attention projection names are read from
-    (:func:`tests.common.peft_helpers.attention_target_modules`). Without ``tokenizer`` the tiny config's
+    (:func:`tests.common.adapters.attention_target_modules`). Without ``tokenizer`` the tiny config's
     own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
     at full fp32 precision, as a release does, rather than rounded through bf16. ``edit`` changes the
     random-init model before it is saved (a test pinning its routing, say); ``overrides`` sets text-config

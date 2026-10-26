@@ -1,4 +1,4 @@
-"""Async environmental GRPO: the script arguments, ``EnvironmentConfig`` and ``AsyncTrainingConfig``."""
+"""Async environmental GRPO: the script arguments, ``EnvironmentConfig`` and ``AsyncRolloutConfig``."""
 
 import logging
 from collections.abc import Mapping
@@ -23,6 +23,7 @@ from halo.environments.rollout_config import (
     RolloutBackend,
     RolloutConfig,
 )
+from halo.inference.endpoints import DEFAULT_LOCAL_SERVER_URL
 from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_reward_terms, read_context_files
 from halo.runtime.ranks import is_global_main_process
 
@@ -237,7 +238,7 @@ class ReasoningCostArguments(ValidatedConfig):
 
 
 @dataclass
-class AsyncTrainingConfig(
+class AsyncRolloutConfig(
     RolloutSamplingArguments,
     RolloutBudgetArguments,
     ISCorrectionArguments,
@@ -264,7 +265,7 @@ class AsyncTrainingConfig(
             "help": "Per-rank cap on rollouts in flight, the generation-throughput throttle; size it to one "
             "generation cycle's per-rank demand with about 2× prefetch headroom. Unset = 4 × this rank's share of "
             "the rollout workers, and an explicit value below that share is raised to it. "
-            "See agent-docs/reference/configuration-reference.md#asynctrainingconfig."
+            "See agent-docs/reference/configuration-reference.md#asyncrolloutconfig."
         },
     )
     eval_rollout_batch_size: int | None = field(
@@ -289,7 +290,7 @@ class AsyncTrainingConfig(
         },
     )
     rollout_server_url: str = field(
-        default="http://localhost:8000",
+        default=DEFAULT_LOCAL_SERVER_URL,
         metadata={"help": "Primary rollout-server URL (vLLM or SGLang) for weight sync and generation."},
     )
     rollout_connection_timeout: float = field(
@@ -656,7 +657,7 @@ class EnvironmentConfig(ValidatedConfig):
 
 @dataclass
 class EnvironmentalGRPOScriptArguments(PromptDatasetArguments, CommonScriptArguments):
-    """Dataset-specific args for Environmental GRPO. Async infra is in AsyncTrainingConfig,
+    """Dataset-specific args for Environmental GRPO. Async infra is in AsyncRolloutConfig,
     env selection in EnvironmentConfig (both parsed separately)."""
 
     PROJECT_NAME: ClassVar[str] = "environmental-grpo"

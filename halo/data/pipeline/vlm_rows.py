@@ -97,7 +97,7 @@ def build_vlm_history(
 
 
 def build_vlm_row_processor(
-    conversation_field: str = "messages",
+    conversation_field: str,
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
     tools_field: str | None = None,

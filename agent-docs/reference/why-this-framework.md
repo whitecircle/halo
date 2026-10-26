@@ -66,7 +66,7 @@ Any HuggingFace `AutoModelForCausalLM` works with standard FSDP, and any model c
 gets TP. Advanced parallelism (EP, CP, ETP) requires per-family wrappers, not a model
 reimplementation or a checkpoint conversion.
 
-For EP, that is a frozen `MoEFamilySpec` holding the family's facts plus a wrapper under
+For EP, that is a frozen `MoEFamilySpec` holding the family's facts plus an EP layer under
 `halo/distributed/expert_parallel/families/` (most under 140 lines) subclassing `EPMoELayerBase`, declaring
 its `HF_MODULE_NAMES` and pointing `FAMILY` at the spec, with `MOE_LAYER_MAP` built from the roster's
 imports. Fifteen MoE families ship one; the per-family × per-mode matrix is

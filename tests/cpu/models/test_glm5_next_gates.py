@@ -213,7 +213,7 @@ def test_packing_collator_round_trips_without_gdn_kwargs():
     emit the markers nor trip the GDN wheel refusal, and the packed batch must build cleanly."""
     config = Glm5NextConfig(text_config=dict(TINY_GLM5_NEXT_TEXT_CONFIG))
     config._attn_implementation = "sdpa"
-    collator = select_data_collator(_tokenizer(), packing=True, model_config=config)
+    collator = select_data_collator(_tokenizer(), train_on_completions_only=False, packing=True, model_config=config)
     batch = collator.torch_call([{"input_ids": [5, 6, 7], "attention_mask": [1, 1, 1], "seq_lengths": [2, 1]}])
     assert "seq_idx" not in batch and "cu_seq_lens_q" not in batch
     assert batch["input_ids"].tolist() == [[5, 6, 7]]

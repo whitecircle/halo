@@ -1,4 +1,4 @@
-"""EP wrapper for DeepSeek-V4 MoE (fused experts, clamped SwiGLU, hash + top-k routing, shared expert)."""
+"""EP layer for DeepSeek-V4 MoE (fused experts, clamped SwiGLU, hash + top-k routing, shared expert)."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from halo.models.moe.family_specs import DEEPSEEK_V4
 
 
 class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
-    """EP wrapper for DeepSeek-V4 fused experts (``DeepseekV4SparseMoeBlock``) using DeepEP.
+    """EP layer for DeepSeek-V4 fused experts (``DeepseekV4SparseMoeBlock``) using DeepEP.
 
     Fused routed experts with the clamped-SwiGLU combine, a replicated shared expert, and two router variants
     adopted whole as ``gate`` (so ``e_score_correction_bias`` / ``tid2eid`` stay checkpointable): top-k layers

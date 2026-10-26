@@ -15,7 +15,7 @@ from unittest import mock
 import pytest
 from trl import GRPOTrainer
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.grpo.environmental.environmental_rules import validate_eval_round
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -48,7 +48,7 @@ def _trainer(
 ):
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     host.args = _Args(per_device=per_device, drop_last=drop_last)
-    host.async_config = AsyncTrainingConfig(eval_rollout_batch_size=rows)
+    host.async_config = AsyncRolloutConfig(eval_rollout_batch_size=rows)
     host.num_generations_eval = num_generations_eval
     host._needs_custom_dataloader = lambda: custom_path
     return host
@@ -139,7 +139,7 @@ def test_round_may_not_exceed_the_in_flight_cap():
 
 def test_config_refuses_a_non_positive_round():
     with pytest.raises(ValueError, match="eval_rollout_batch_size must be an integer >= 1"):
-        AsyncTrainingConfig(eval_rollout_batch_size=0)
+        AsyncRolloutConfig(eval_rollout_batch_size=0)
 
 
 if __name__ == "__main__":

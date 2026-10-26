@@ -35,7 +35,7 @@ from tests.common.pinned_params import (
     tiny_family_checkpoint,
     train_row,
 )
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 CASES = ("router_only", "glm5_next_mixed_uncast")
 

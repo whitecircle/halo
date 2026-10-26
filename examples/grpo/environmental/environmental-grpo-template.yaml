@@ -31,13 +31,13 @@ rewards:
 #   reasoning_effort: null       # every environment: low / medium / high, or random (drawn once per generation group)
 # Shared kwargs: agent-docs/training-methods/async-grpo/environments/README.md; native-tool shaping: .../environments/protocols/native-tool-use.md
 
-# --- Ray Workers (AsyncTrainingConfig fields) ---
+# --- Ray Workers (AsyncRolloutConfig fields) ---
 num_rollout_workers: 16
 # max_concurrent_rollouts: null  # 4 × this rank's share of the rollout workers
 # eval_rollout_batch_size: null  # rows per rank in one evaluation rollout round; null = the eval batch
 # ray_address: null  # null = local, or "head-node:6379"
 
-# --- Rollout Server - Single Server (AsyncTrainingConfig fields) ---
+# --- Rollout Server - Single Server (AsyncRolloutConfig fields) ---
 # rollout_backend: vllm  # vllm or sglang
 # rollout_server_url: "http://localhost:8000"
 # rollout_group_port: 51216  # NCCL group port for weight sync; the base port with several servers
@@ -56,7 +56,7 @@ num_rollout_workers: 16
 #   - url: "http://localhost:8001"
 #     group_port: 51217
 
-# --- Rollout Generation (AsyncTrainingConfig fields) ---
+# --- Rollout Generation (AsyncRolloutConfig fields) ---
 rollout_temperature: 0.7
 # rollout_top_p: 0.95
 # rollout_top_k: -1                   # -1 = off; sent on every request, as are the two below
@@ -77,7 +77,7 @@ rollout_max_tokens: 8192
 # reasoning_floor: 0.0               # weight of the under-use floor: an episode reasoning under 0.75x its level's per-turn budget pays up to it (0 = off)
 # reasoning_terms_in_failed_groups: false # also charge both terms in a training group no episode of which earned the objective
 
-# --- Prefetch (AsyncTrainingConfig fields) ---
+# --- Prefetch (AsyncRolloutConfig fields) ---
 enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the
                           # trainer auto-disables it (that server stops serving during weight sync)
 

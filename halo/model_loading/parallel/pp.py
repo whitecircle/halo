@@ -314,7 +314,7 @@ def _load_stage_lazy(
     )
 
     if ep_config is not None:
-        # The wrappers run over this stage's layers alone, so any failure is stage-local and reaches the peers
+        # The EP layers run over this stage's layers alone, so any failure is stage-local and reaches the peers
         # through the join. ``weights_already_sharded`` is derived, never asserted, as in load_ep_model_lazy.
         reason = None
         try:

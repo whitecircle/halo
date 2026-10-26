@@ -12,7 +12,7 @@ memory are measured identically and are directly comparable against
 Differences vs the Halo path (the things this baseline deliberately does NOT have):
   - no Expert Parallelism (experts replicated, sharded only by FSDP — every rank computes all experts)
   - stock optimizer (adamw_torch_fused, fp32 moments) instead of AdamWBF16/SR
-  - transformers-native FSDP instead of Halo's FSDP2 + EP wrapper
+  - transformers-native FSDP instead of Halo's FSDP2 + EP layer
 
 Expert compute is transformers' OWN grouped GEMM (`torch.nn.functional.grouped_mm`, the default
 `experts_implementation` for gpt-oss) — the same grouped-GEMM CLASS as Halo, NOT an
@@ -49,9 +49,10 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import MODEL_CONFIGS
+from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
-from tests.common.utils import cleanup_memory, gpu_mem_gb, log
 
 # Decoder-layer class to wrap per architecture for FSDP auto-wrap.
 _LAYER_CLS = {

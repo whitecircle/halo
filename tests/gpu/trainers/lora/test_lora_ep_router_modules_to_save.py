@@ -47,8 +47,9 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
 ATTN_IMPL = env_str("HALO_TEST_ATTN", "flex_attention")

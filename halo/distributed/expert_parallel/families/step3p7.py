@@ -1,4 +1,4 @@
-"""EP wrapper for Step-3.7 MoE (fused experts, per-layer post-activation clamp, sigmoid routing)."""
+"""EP layer for Step-3.7 MoE (fused experts, per-layer post-activation clamp, sigmoid routing)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from halo.models.moe.family_specs import STEP3P7
 
 
 class EPStep3p7MoELayer(EPGroupLimitedMoELayerBase):
-    """EP wrapper for Step-3.7 MoE (``Step3p7SparseMoeBlock``, Step-3.7-Flash) using DeepEP.
+    """EP layer for Step-3.7 MoE (``Step3p7SparseMoeBlock``, Step-3.7-Flash) using DeepEP.
 
     Fused routed experts with a per-layer post-activation SwiGLU clamp (most layers carry none), sigmoid
     selection-only ``e_score_correction_bias`` routing as plain top-k, always-renormalized gate weights with the

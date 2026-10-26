@@ -42,11 +42,11 @@ That verdict does not decide the data path: a text-only dataset on these checkpo
 
 The resolver keys on `model_type` alone, not `architectures`. A `*-patched` checkpoint whose `config.json` carries the text-only `model_type` `qwen3_5_moe_text` is absent from the mapping, falls back to `AutoModelForCausalLM`, and drops the vision tower — regenerate it through the resolver.
 
-## EP wrapper
+## EP layer
 
 `EPQwen3_5MoELayer` (`halo/distributed/expert_parallel/families/qwen3_5.py`) replaces `Qwen3_5MoeSparseMoeBlock`. Softmax top-k routing via `Qwen3_5MoeTopKRouter`. The shared expert (`Qwen3_5MoeMLP`, sigmoid-gated output) stays local on every rank and is combined with routed-expert output after DeepEP combine. Routed experts use the fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]` layout, sharded along the expert dimension, SwiGLU, grouped GEMM on SM90+.
 
-The wrapper re-derives selection from the router's own logits — top-k on the bias-adjusted probabilities, gate weights from the unbiased renormalized softmax, which makes a zero bias a no-op.
+The EP layer re-derives selection from the router's own logits — top-k on the bias-adjusted probabilities, gate weights from the unbiased renormalized softmax, which makes a zero bias a no-op.
 
 The architecture has **no bias slot** (the gate is a bare weight), so the trained bias can only be trainer-side: `moe_balancing: bias_update` **raises**, and the explicit `bias_update_transient` is the opt-in. Balancing works during training and resumes exactly, while every exported checkpoint serves without the bias (near-tied top-k picks flip vs training).
 

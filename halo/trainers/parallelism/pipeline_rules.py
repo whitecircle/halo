@@ -5,7 +5,7 @@ final collator after it."""
 from __future__ import annotations
 
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
-from halo.data.vlm_routing import VLM_IMAGE_COLUMNS, dataset_image_evidence
+from halo.data.vlm_detection import VLM_IMAGE_COLUMNS, dataset_image_evidence
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.stage import reject_reentrant_checkpointing
 from halo.model_loading.tokenizer_setup import resolve_tokenizer

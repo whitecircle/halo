@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """PP × ep1 grouped-GEMM MoE vs the unsplit model (pp2 × dp2, fsdp_shard_ep1_experts=True).
 
-At ep_size==1 the grouped-GEMM EP wrappers stay on every MoE model and fsdp_shard_ep1_experts
+At ep_size==1 the grouped-GEMM EP layers stay on every MoE model and fsdp_shard_ep1_experts
 folds the replicated experts into the stage FSDP mesh: no EP hooks, no deferred sweep — FSDP's
 reduce-scatter is the sole grad sync and every parameter (experts included) is a stage-mesh
 DTensor, so the plain ``pp_clip_grad_norm`` covers the whole stage. The reference is the same

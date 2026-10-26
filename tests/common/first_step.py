@@ -24,8 +24,10 @@ from torch.distributed.tensor import DTensor
 from transformers import TrainerCallback
 
 from tests.common.distributed import world_mean
+from tests.common.numerics import max_or_nan
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import log, max_or_nan, step_losses
+from tests.common.training_checks import step_losses
 
 # What PyTorch warns when a backward passes through a collective with no autograd kernel (an in-place
 # ``dist.all_reduce`` on a grad-carrying tensor): the gradient goes through as the identity.

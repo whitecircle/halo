@@ -24,7 +24,7 @@ therefore measures routing divergence, not the gradient sync under test. Running
 removes the flips (measured worst errors drop to the 1e-6 range) and lets one tolerance cover loss,
 every non-expert parameter, every expert shard and the clip norm.
 
-The reference is an unsplit single-process model carrying the same ep1 EP wrappers with grouped-GEMM
+The reference is an unsplit single-process model carrying the same ep1 EP layers with grouped-GEMM
 off, so its expert compute is the per-expert loop over plain torch ops — no kernel is asked to run
 outside a dtype it supports, and its parameter names match the distributed run's for everything
 except the experts, which are compared through ``pp_equivalence.gather_expert_grads``.

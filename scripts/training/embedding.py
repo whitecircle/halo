@@ -19,7 +19,7 @@ from halo.config_validation import reject_non_default_args, reject_unsupported_a
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.vlm_routing import reject_image_columns
+from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets
 from halo.entrypoints.model_setup import load_model_and_tokenizer
 from halo.entrypoints.script import (

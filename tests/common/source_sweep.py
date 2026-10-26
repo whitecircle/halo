@@ -1,4 +1,4 @@
-"""AST sweeps over the repository's own source: which functions make which calls.
+"""AST sweeps over the repository's own source: which names a module imports and which functions make which calls.
 
 The load-coverage tests pin that every function building a model also runs the repairs a run needs (the
 run-dtype cast, ``finalize_loaded_model``). They walk the tree rather than a hand list, so a new function
@@ -8,6 +8,7 @@ comment is not a call.
 
 import ast
 from collections.abc import Callable, Iterable, Iterator
+from pathlib import Path
 
 from halo.checkpoint.offline_export import load_task_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
@@ -23,6 +24,21 @@ MODEL_FACTORIES = frozenset({"from_pretrained", "from_config", "_from_config"})
 NON_MODEL_CLASSES = frozenset({"AutoTokenizer", "AutoProcessor", "AutoConfig", "GenerationConfig", "PeftConfig"})
 
 Function = ast.FunctionDef | ast.AsyncFunctionDef
+
+
+def imports_name(path: Path, name: str) -> bool:
+    """Whether the module at ``path`` imports ``name``.
+
+    The binding is the check rather than a text match: CLAUDE.md bans function-local imports, so a
+    module-level import is the only way a call site reaches a symbol, while a mention in a docstring
+    or a comment is not a use. ``asname`` counts, since an aliased import binds the name too.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    return any(
+        isinstance(node, ast.ImportFrom | ast.Import)
+        and any(alias.name == name or alias.asname == name for alias in node.names)
+        for node in ast.walk(tree)
+    )
 
 
 def call_name(call: ast.Call) -> str | None:

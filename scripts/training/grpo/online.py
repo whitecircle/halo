@@ -4,7 +4,7 @@
 Online GRPO against a vLLM server, scored by the ``rewards`` terms of the config: the strict
 ``\\boxed{}`` accuracy grader, the regex format grader, a generative judge, a served reward model.
 
-Supported Parallelism Modes: EP, TP, ETP (CP is not supported by ``DistributedGRPOTrainer``; the
+Supported Parallelism Modes: EP, TP, ETP (CP is not supported by ``DistributedOnlineGRPOTrainer``; the
 rollout server takes its own GPUs, so size the launch to the remaining ones).
 
 Usage:
@@ -24,7 +24,7 @@ from halo.data.pipeline.conversation import as_conversation, chat_template_kwarg
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
 from halo.data.render_columns import reject_missing_render_column
-from halo.data.vlm_routing import reject_image_columns
+from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
 from halo.entrypoints.model_setup import (
     apply_prompt_completion_window,
@@ -49,7 +49,7 @@ from halo.rewards.graders.verifiable import RLVR_GRADERS
 from halo.rewards.trl_reward_functions import ScorerRewardFunction, build_trl_reward_functions
 from halo.runtime.collectives import barrier
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rollout.engine_preflight import verify_context_window, verify_sampler_logprob_reference
 
 
@@ -113,7 +113,7 @@ def main():
     # --use_sdpg swaps in the SDPG trainer (GRPO loss plus privileged-teacher reverse-KL OPD on
     # positive-advantage rollouts). It reuses the same rollout and verifier machinery, so only the
     # class and the OPD kwargs differ.
-    trainer_cls = DistributedSDPGTrainer if args.use_sdpg else DistributedGRPOTrainer
+    trainer_cls = DistributedSDPGTrainer if args.use_sdpg else DistributedOnlineGRPOTrainer
     context = init_training_script(
         args,
         grpo_config,
@@ -215,7 +215,7 @@ def main():
         top_k=grpo_config.top_k,
         min_p=0.0 if grpo_config.min_p is None else grpo_config.min_p,
         repetition_penalty=grpo_config.repetition_penalty,
-        sequence_ratio_active=DistributedGRPOTrainer.sums_sequence_logratio(grpo_config),
+        sequence_ratio_active=DistributedOnlineGRPOTrainer.sums_sequence_logratio(grpo_config),
         backend=VLLM_BACKEND,
     )
     # The KL reference TRL would otherwise build itself; None where the run holds none. Loaded after the

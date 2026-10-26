@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``tests.common.peft_helpers.assert_adapters_moved`` fails the adapter states that should fail it.
+"""``tests.common.adapters.assert_adapters_moved`` fails the adapter states that should fail it.
 
 The default passes once any adapter moved, a zero-init ``lora_B`` among them; ``require_all`` also fails a run
 that left one adapter where it started, the partially wired adapter the default lets through.
@@ -8,7 +8,7 @@ that left one adapter where it started, the partially wired adapter the default 
 import pytest
 import torch
 
-from tests.common.peft_helpers import assert_adapters_moved
+from tests.common.adapters import assert_adapters_moved
 
 _BEFORE = {
     "q_proj.lora_A.default.weight": torch.ones(2, 4),

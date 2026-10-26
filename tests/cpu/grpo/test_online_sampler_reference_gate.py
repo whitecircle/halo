@@ -21,8 +21,8 @@ import pytest
 import torch
 from trl import GRPOTrainer
 
-from halo.configs.grpo_environmental import AsyncTrainingConfig
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.configs.grpo_environmental import AsyncRolloutConfig
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rollout import engine_preflight
 from halo.trainers.grpo.rollout.engine_preflight import (
     _verify_sampler_logprob_reference_on_rank0,
@@ -75,7 +75,7 @@ def test_the_sequence_sum_follows_the_mode_the_loss_and_the_correction_switch(co
     grpo_args = types.SimpleNamespace(
         vllm_importance_sampling_correction=correction, vllm_importance_sampling_mode=mode, loss_type=loss_type
     )
-    assert DistributedGRPOTrainer.sums_sequence_logratio(grpo_args) is expected
+    assert DistributedOnlineGRPOTrainer.sums_sequence_logratio(grpo_args) is expected
 
 
 def test_vespo_folds_every_tokens_engine_ratio_into_one_sequence_weight():
@@ -165,7 +165,7 @@ def test_a_preflight_failure_reaches_every_rank_with_its_type(monkeypatch, error
 def test_the_rlvr_script_feeds_the_gate_from_the_is_mode():
     """The script must derive the flag from the config, not pin it: a pinned False leaves TRL's
     default ``sequence_mask`` running against a renormalized reference unchecked."""
-    assert _preflight_argument(RLVR_SCRIPT) == "DistributedGRPOTrainer.sums_sequence_logratio(grpo_config)"
+    assert _preflight_argument(RLVR_SCRIPT) == "DistributedOnlineGRPOTrainer.sums_sequence_logratio(grpo_config)"
 
 
 @pytest.mark.parametrize(
@@ -183,7 +183,7 @@ def test_the_env_script_arms_the_gate_for_every_sequence_summing_consumer(knobs,
     (``apply_opsm`` thresholds ``|mean log-ratio|``), so a nucleus-renormalized reference biases it the
     same way. The env script's flag is evaluated from its own source: an expression naming only the
     geometric band leaves an OPSM-only run's reference unchecked."""
-    async_config = AsyncTrainingConfig(**knobs)
+    async_config = AsyncRolloutConfig(**knobs)
     assert eval(_preflight_argument(ENV_SCRIPT), {"async_config": async_config}) is expected  # noqa: S307
 
 
@@ -230,7 +230,7 @@ def test_the_isr_bounds_are_refused_at_parse(knobs, match):
     """A bad bound fails before the model loads, and a lone upper band bound never reaches the sampler
     preflight reading as no sequence consumer."""
     with pytest.raises(ValueError, match=match):
-        AsyncTrainingConfig(**knobs)
+        AsyncRolloutConfig(**knobs)
 
 
 if __name__ == "__main__":

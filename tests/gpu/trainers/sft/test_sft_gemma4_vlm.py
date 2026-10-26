@@ -31,8 +31,9 @@ from halo.env import env_int, env_str
 from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main, skip_unless_local_checkpoint
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GEMMA4_26B_A4B_PATCHED
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
 MODEL_NAME = env_str("HALO_TEST_GEMMA4_MODEL", GEMMA4_26B_A4B_PATCHED)
 EP_SIZE_OVERRIDE = env_int("HALO_TEST_EP", None)

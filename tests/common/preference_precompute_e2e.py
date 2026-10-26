@@ -40,13 +40,14 @@ from halo.checkpoint.format import REFERENCE_LOGPS_FILE
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
+from tests.common.adapters import load_peft_model
 from tests.common.distributed import shared_scratch_dir
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.models import QWEN3_0_6B
-from tests.common.peft_helpers import load_peft_model
 from tests.common.preference_precompute import TRAINERS, column
+from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, finish_phase, log
 
 # The layouts: plain FSDP2 DP (dp2, the dense model's), plain per-rank experts (ep2), FSDP-sharded
 # DTensor experts over DP=2 (ep1), attention and MLP sharded over the TP mesh (tp2), the expert FFN

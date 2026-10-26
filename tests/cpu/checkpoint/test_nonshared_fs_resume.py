@@ -49,8 +49,8 @@ from tests.common.checkpoint_io import (
 )
 from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
+from tests.common.optimizer_state import assert_optimizer_state_bit_exact
 from tests.common.parallelism import make_parallelism_config
-from tests.common.utils import assert_optimizer_state_bit_exact
 
 WORLD_SIZE = 2  # two 1-rank "nodes"
 TORN_NODE = 1

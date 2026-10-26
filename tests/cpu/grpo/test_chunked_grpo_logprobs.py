@@ -30,7 +30,7 @@ from halo.trainers.grpo.logprob_scoring import (
     rows_forward_densely,
 )
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 # Vocab spans multiple chunk tiles so the online-softmax accumulation across chunks is exercised.
 VOCAB = VOCAB_TILE * 2 + 137
@@ -464,7 +464,12 @@ class _RealBackboneHarness(ChunkedGRPOLogprobsMixin):
 
 @pytest.mark.parametrize(
     "trainer_cls",
-    [DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer, DistributedSDPGTrainer, OfflineGRPOTrainer],
+    [
+        DistributedOnlineGRPOTrainer,
+        DistributedAsyncEnvironmentalGRPOTrainer,
+        DistributedSDPGTrainer,
+        OfflineGRPOTrainer,
+    ],
     ids=lambda cls: cls.__name__,
 )
 def test_every_chunked_trainer_forwards_the_backbone_through_the_core(trainer_cls):

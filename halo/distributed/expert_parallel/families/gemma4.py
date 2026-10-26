@@ -1,4 +1,4 @@
-"""EP wrapper for Gemma-4 routed experts (the router is in the parent decoder layer)."""
+"""EP layer for Gemma-4 routed experts (the router is in the parent decoder layer)."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from halo.models.moe.family_specs import GEMMA4
 
 
 class EPGemma4MoELayer(EPMoELayerBase):
-    """EP wrapper for Gemma4 routed experts (``Gemma4TextExperts``) using DeepEP.
+    """EP layer for Gemma4 routed experts (``Gemma4TextExperts``) using DeepEP.
 
     Gemma4 inlines MoE compute in its decoder layer with no ``*MoeBlock``, so only the experts are replaced; the
     sibling ``Gemma4TextRouter`` stays FSDP-managed and bf16 (``fp32_router`` has no effect, and upcasting it

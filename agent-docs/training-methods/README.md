@@ -9,9 +9,9 @@ Every method is YAML-driven, runs through the same distributed parallelism syste
 | [SFT](sft.md) | `DistributedSFTTrainer` | `prompt` (message list) | Instruction tuning, text or vision-language; also [pre-training](pretraining.md), same trainer and script |
 | [DPO](preference/dpo.md) | `DistributedDPOTrainer` | `prompt`, `chosen`, `rejected` | Paired preference data, against a reference model; 15 TRL `loss_type` values, combinable |
 | [KTO](preference/kto.md) | `DistributedKTOTrainer` | `prompt`, `completion`, `label` | Unpaired binary feedback — one completion, thumbs up or down |
-| [SMPO](preference/smpo.md) | `SmoothMarginPOTrainer` | `prompt`, `chosen`, `rejected` | Preference tuning with no reference model to hold in memory |
+| [SMPO](preference/smpo.md) | `SMPOTrainer` | `prompt`, `chosen`, `rejected` | Preference tuning with no reference model to hold in memory |
 | [Offline GRPO](grpo/offline.md) | `OfflineGRPOTrainer` | `prompt`, `completions`, `rewards` | Completions already generated and scored |
-| [Online GRPO (RLVR)](grpo/online.md) | `DistributedGRPOTrainer` | `prompt`, `answer` | Single-turn verifiable rewards (math, format) against a live vLLM server |
+| [Online GRPO (RLVR)](grpo/online.md) | `DistributedOnlineGRPOTrainer` | `prompt`, `answer` | Single-turn verifiable rewards (math, format) against a live vLLM server |
 | [Async GRPO with Environments](async-grpo/README.md) | `DistributedAsyncEnvironmentalGRPOTrainer` | `prompt` (+ `answer` where the environment grades against one) | Multi-turn RL with tools, sandboxes or a judge, on vLLM or SGLang |
 | [Reward modeling](preference/reward-modeling.md) | `DistributedRewardTrainer` | `chosen`, `rejected` | A Bradley-Terry scorer to rank completions |
 | [Classification](classification.md) | `ClassificationTrainer` | `prompt` or `text_field`, `label` | Single- and multi-label sequence classification |

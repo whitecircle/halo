@@ -15,7 +15,7 @@ from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.trainers.distillation.divergences import global_token_mean, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from halo.trainers.evaluation import split_rows_head
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.stored_metrics import StoredMetricsMixin
 from halo.trainers.token_metrics import effective_loss_mask
 
@@ -36,7 +36,7 @@ def positive_advantage_gate(
     return loss_mask * (adv > 0).to(loss_mask.dtype)
 
 
-class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTrainer):
+class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnlineGRPOTrainer):
     """On-policy SDPG: online GRPO + privileged-teacher reverse-KL OPD on positive-advantage rollouts."""
 
     _tag_names = ["trl", "grpo", "sdpg"]
@@ -53,8 +53,8 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedGRPOTr
     def __init__(
         self,
         *args,
-        sdpg_answer_field: str = "answer",
-        opd_positive_advantage_only: bool = True,
+        sdpg_answer_field: str,
+        opd_positive_advantage_only: bool,
         **kwargs,
     ):
         self._adopt_sdpg_arguments(kwargs)

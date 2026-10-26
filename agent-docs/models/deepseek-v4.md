@@ -26,12 +26,12 @@ Consequences:
 
 - The per-rope-type rotary buffers (`{main,compress}_inv_freq`, on the model-level rotary and inside every compressor/indexer) are recomputed in fp32 by the rotary fixer chain `finalize_loaded_model` walks on every load path.
 
-## EP wrapper
+## EP layer
 
 `EPDeepseekV4MoELayer` (`halo/distributed/expert_parallel/families/deepseek_v4.py`) replaces `DeepseekV4SparseMoeBlock`. It subclasses `EPMoELayerBase` directly (not the shared-experts forward base): the routers return tuples and hash layers need `input_ids`, which the decoder layer forwards into the MoE block.
 
 - **Top-k layers**: fp32 scores via `sqrtsoftplus(logits)`, selection on `scores + e_score_correction_bias` (+ the balancing bias when enabled), weights gathered from the unbiased scores, normalized (`+1e-20`), scaled by `routed_scaling_factor` (1.5).
-- **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the wrapper validates at init and raises).
+- **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the EP layer validates at init and raises).
 - **Clamped SwiGLU**: the experts compute `silu(gate.clamp(max=limit)) * up.clamp(±limit)` by latching that combine into `_fused_glu_mul`, the GLU-combine seam: one Triton kernel, `GluCombine.clamped_silu(limit)` (`glu_combine=clamped_silu`), with the bound as a runtime argument. Every base GLU path (fused, grouped-GEMM, ETP separate) routes through it.
 
     The fused form hardcodes SiLU, so it is armed by the same behavioral `is_silu_activation` gate as GLM-4 ([Fused SwiGLU](glm4.md#fused-swiglu)); any other `hidden_act` falls back to the generic clamp.
@@ -41,7 +41,7 @@ Consequences:
 
 ## Router balancing
 
-Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`SEVERS_AUX_LOSS`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)); an explicit `aux_loss` warns and stays off.
+The EP layer re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`SEVERS_AUX_LOSS`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)); an explicit `aux_loss` warns and stays off.
 
 The update lands in the gate's own exported `e_score_correction_bias`, so the trained bias ships with every checkpoint. Hash layers refuse the balancing bias (their selection is frozen); only top-k layers receive it.
 

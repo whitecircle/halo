@@ -33,7 +33,7 @@ from halo.trainers.grpo.grpo_rules import (
     reject_unshared_rollout_func,
     require_vllm_server_mode,
 )
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 _ROWS = [{"prompt": "p", "unused": i} for i in range(6)]
 
@@ -52,7 +52,7 @@ def _train_loader(dataset, *, remove_unused_columns: bool):
     Only the HF/accelerate seams are stubbed (column pruning, sampler, accelerate prepare); the
     dataset/collator decision under test is the production one.
     """
-    trainer = object.__new__(DistributedGRPOTrainer)
+    trainer = object.__new__(DistributedOnlineGRPOTrainer)
     trainer.parallelism_config = SimpleNamespace(
         is_tp_mode=True,
         is_cp_mode=False,
@@ -93,7 +93,7 @@ def _train_loader(dataset, *, remove_unused_columns: bool):
     trainer._get_train_sampler = lambda: SequentialSampler(dataset)
     trainer._prepare_dataloader = lambda loader: loader
 
-    return DistributedGRPOTrainer.get_train_dataloader(trainer), calls
+    return DistributedOnlineGRPOTrainer.get_train_dataloader(trainer), calls
 
 
 def test_non_datasets_train_dataset_prunes_through_the_collator():
@@ -178,11 +178,13 @@ def test_the_ctor_refuses_tools_before_trl_builds_anything():
     """Wired into ``__init__`` ahead of TRL's ctor, which would open the NCCL group to the server."""
     config = SimpleNamespace(use_vllm=True, vllm_mode="server")
     with (
-        mock.patch.object(DistributedGRPOTrainer, "_begin_on_policy_init", lambda self, a, k: (config, k)),
-        mock.patch.object(DistributedGRPOTrainer, "_adopt_advantage_hooks", side_effect=AssertionError("too late")),
+        mock.patch.object(DistributedOnlineGRPOTrainer, "_begin_on_policy_init", lambda self, a, k: (config, k)),
+        mock.patch.object(
+            DistributedOnlineGRPOTrainer, "_adopt_advantage_hooks", side_effect=AssertionError("too late")
+        ),
         pytest.raises(ValueError, match="tool-calling loop"),
     ):
-        DistributedGRPOTrainer(model=None, args=config, tools=[_calculator])
+        DistributedOnlineGRPOTrainer(model=None, args=config, tools=[_calculator])
 
 
 def _rollout(prompts, trainer):
@@ -218,11 +220,13 @@ def test_the_ctor_refuses_rollout_func_under_tp_before_trl_builds_anything():
         return config, kwargs
 
     with (
-        mock.patch.object(DistributedGRPOTrainer, "_begin_on_policy_init", begin),
-        mock.patch.object(DistributedGRPOTrainer, "_adopt_advantage_hooks", side_effect=AssertionError("too late")),
+        mock.patch.object(DistributedOnlineGRPOTrainer, "_begin_on_policy_init", begin),
+        mock.patch.object(
+            DistributedOnlineGRPOTrainer, "_adopt_advantage_hooks", side_effect=AssertionError("too late")
+        ),
         pytest.raises(ValueError, match="rollout_func is not supported"),
     ):
-        DistributedGRPOTrainer(model=None, args=config, rollout_func=_rollout)
+        DistributedOnlineGRPOTrainer(model=None, args=config, rollout_func=_rollout)
 
 
 if __name__ == "__main__":

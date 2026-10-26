@@ -188,7 +188,7 @@ def iter_balancing_routers(model: torch.nn.Module):
     """Yield every router with both a ``balancing_biases`` buffer and an ``expert_load_counter`` slot
     (set or unset).
 
-    Both are required so the yield stays unique when a wrapper adopts an inner gate's native buffer:
+    Both are required so the yield stays unique when an EP layer adopts an inner gate's native buffer:
     only the module that also records loads is the balancing router."""
     for module in model.modules():
         if hasattr(module, BALANCING_BIASES_ATTR) and hasattr(module, "expert_load_counter"):
@@ -286,7 +286,7 @@ def resolve_balancing_mode(requested: str, model, is_moe: bool) -> BalancingMode
         type(model).__name__,
         f"moe_balancing=auto resolves to none on {type(model).__name__}: its forward does not take "
         f"output_router_logits, so the aux-loss term never reaches the loss, and nothing on this tree "
-        f"carries a routing bias (no EP MoE wrapper, no native balancing_biases router) — THIS RUN "
+        f"carries a routing bias (no EP layer, no native balancing_biases router) — THIS RUN "
         f"TRAINS UNBALANCED, a real cost at this expert count. {remedy}Launch under torchrun with "
         f"use_grouped_gemm: true or expert parallelism, where auto resolves to the bias update for "
         f"families whose bias exports, or load the text-only sibling class whose forward honours the "

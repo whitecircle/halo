@@ -34,13 +34,13 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import freeze_base_keep_expert_adapters
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded, shared_scratch_dir
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import freeze_base_keep_expert_adapters
-from tests.common.utils import log
+from tests.common.rank_log import log
 
 MODEL_NAME = GPT_OSS_20B
 SAVE_AT_STEP = 2

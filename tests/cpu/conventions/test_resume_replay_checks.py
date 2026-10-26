@@ -16,7 +16,8 @@ import pytest
 import torch
 
 from tests.common.checkpoint_io import LOADING_INFO_KINDS, RestorePointSnapshot, loading_problems
-from tests.common.utils import relative_l2, resumed_loss_deltas, snapshot_trainable
+from tests.common.numerics import relative_l2
+from tests.common.training_checks import resumed_loss_deltas, snapshot_trainable
 
 SAVE_STEP = 2
 TOTAL_STEPS = 4

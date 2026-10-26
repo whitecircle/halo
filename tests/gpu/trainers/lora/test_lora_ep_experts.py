@@ -45,13 +45,14 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.runtime.collectives import barrier
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import freeze_base_keep_expert_adapters
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import gpu_mem_gb
 from tests.common.models import GPT_OSS_20B
-from tests.common.peft_helpers import freeze_base_keep_expert_adapters
-from tests.common.utils import gpu_mem_gb, log
+from tests.common.rank_log import log
 
 # Model is GptOss-20B by default; the cross-architecture sweep overrides via env (HALO_TEST_MODEL /
 # HALO_TEST_ATTN) to exercise the other storage layouts (fused-GLU, separate-GLU) without new files.

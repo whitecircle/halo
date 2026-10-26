@@ -120,11 +120,11 @@ def test_collator_factory_refuses_multi_document_rows():
         eos_token_id = 1
 
     with pytest.raises(ValueError, match="varlen"):
-        select_data_collator(tokenizer=_Tok(), padding_free=True, model_config=config)
+        select_data_collator(train_on_completions_only=False, tokenizer=_Tok(), padding_free=True, model_config=config)
     with pytest.raises(ValueError, match=COMPRESSED_KV_REFUSAL):
-        select_data_collator(tokenizer=_Tok(), packing=True, model_config=config)
+        select_data_collator(train_on_completions_only=False, tokenizer=_Tok(), packing=True, model_config=config)
     # Padded batches stay allowed (default TRL collator).
-    assert select_data_collator(tokenizer=_Tok(), model_config=config) is None
+    assert select_data_collator(train_on_completions_only=False, tokenizer=_Tok(), model_config=config) is None
 
 
 def _legacy_compress_ratios_config() -> DeepseekV4Config:

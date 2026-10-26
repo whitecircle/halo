@@ -33,7 +33,7 @@ from halo.model_loading.parallel.frozen_models import (
 )
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.grpo.online import DistributedGRPOTrainer
+from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import load_script_module
@@ -237,9 +237,9 @@ def test_the_on_policy_grpo_loader_and_trainer_gate_report_one_reference_once(ca
             model=None,
             ref_model=result,
             parallelism_config=config,
-            REFERENCE_ALTERNATIVES=DistributedGRPOTrainer.REFERENCE_ALTERNATIVES,
+            REFERENCE_ALTERNATIVES=DistributedOnlineGRPOTrainer.REFERENCE_ALTERNATIVES,
         )
-        DistributedGRPOTrainer._validate_held_reference_model(host)
+        DistributedOnlineGRPOTrainer._validate_held_reference_model(host)
     assert result is loaded
     (message,) = _warnings(caplog)
     assert message.startswith(PREFIX) and message.endswith(ON_POLICY_GRPO_REFERENCE_ALTERNATIVES.under(config))

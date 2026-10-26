@@ -12,7 +12,7 @@ all-reduce with only an info line about FSDP2 being skipped.
 import pytest
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.trainers.parallelism.trainer_rules import reject_fsdp_knobs_under_qlora
+from halo.trainers.trainer_rules import reject_fsdp_knobs_under_qlora
 
 
 def _config(**knobs):

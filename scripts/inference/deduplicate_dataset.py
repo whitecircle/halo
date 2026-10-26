@@ -5,7 +5,7 @@ Embeds ``--text_field``, then drops every row whose cosine similarity to an earl
 ``--similarity_threshold``.
 
 Usage:
-    python scripts/inference/generation/dataset_deduplication.py \\
+    python scripts/inference/deduplicate_dataset.py \\
         --dataset dataset.jsonl \\
         --output_path deduplicated_dataset.jsonl \\
         --text_field "text" \\

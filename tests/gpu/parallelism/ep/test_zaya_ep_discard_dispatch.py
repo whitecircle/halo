@@ -34,8 +34,8 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
-from tests.common.utils import log, log_all
 
 EP_SIZE = 2
 BATCH, SEQ = 4, 64

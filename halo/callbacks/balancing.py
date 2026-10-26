@@ -99,10 +99,10 @@ def _nothing_balanced_detail(hook_layers: list[str], is_moe: bool) -> str:
         return (
             f"its EP MoE layers {hook_layers} do not support bias-update balancing "
             "(SUPPORTS_BIAS_BALANCING=False — routing happens inside the HF gate or outside the "
-            "EP wrapper)"
+            "EP layer)"
         )
     if is_moe:
-        return "it has no EP MoE wrappers or native balancing_biases routers"
+        return "it has no EP layers or native balancing_biases routers"
     return "it is a dense model — there are no experts to balance"
 
 
@@ -185,7 +185,7 @@ def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
 
 def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
     """Turn router logits on for the run and route the aux-loss router gradient through reentrant
-    checkpointing, unless the aux term is inert (policy-gradient loss), severed by EP wrappers or
+    checkpointing, unless the aux term is inert (policy-gradient loss), severed by EP layers or
     unusable; each leave-off stamps the config so ``MoEMetricsCallback`` does not re-enable it."""
     if policy_gradient_loss:
         mark_router_logits_forced_off(cfg)
@@ -202,7 +202,7 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
         # Enabling output_router_logits would index the never-populated tuple: a crash, not balancing.
         mark_router_logits_forced_off(cfg)
         logger.warning(
-            "moe_balancing=aux_loss has NO EFFECT for this model under EP: its EP MoE wrappers "
+            "moe_balancing=aux_loss has NO EFFECT for this model under EP: its EP layers "
             "re-derive routing internally and never record router logits, so the HF aux-loss "
             "path is severed (enabling output_router_logits would crash on the empty "
             "router_logits tuple). Leaving output_router_logits off. Use "
@@ -233,8 +233,8 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
         else:
             remedy = (
                 "moe_balancing=bias_update is no way out on this model AS LOADED — nothing here "
-                "carries the bias (no EP MoE wrapper, no native balancing_biases router), so it "
-                "raises in turn. The wrappers are what balancing needs first: launch under "
+                "carries the bias (no EP layer, no native balancing_biases router), so it "
+                "raises in turn. The EP layers are what balancing needs first: launch under "
                 "torchrun with use_grouped_gemm: true, or with expert parallelism "
                 "(--expert_parallel_size>1); moe_balancing=auto then resolves to bias_update by "
                 "itself. Otherwise set moe_balancing=none to train unbalanced deliberately — a "

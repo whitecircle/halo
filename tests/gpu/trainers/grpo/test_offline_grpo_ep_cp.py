@@ -35,6 +35,7 @@ from tests.common.cp_grpo import (
 )
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.harness import gpu_test_main
+from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.offline_grpo import (
     OFFLINE_VOCAB,
     build_offline_grpo_trainer,
@@ -47,8 +48,8 @@ from tests.common.offline_grpo import (
     swept_reference_error,
     token_logps,
 )
+from tests.common.rank_log import log
 from tests.common.tolerances import TOL
-from tests.common.utils import cleanup_memory, finish_phase, log
 
 SEED = 1337
 BETA = 0.2

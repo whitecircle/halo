@@ -114,7 +114,7 @@ def _moe(**fields) -> _Config:
 
 MODELS: dict[str, Callable[[], _Model]] = {
     "dense": lambda: _Model(_Config()),
-    "moe without wrappers": lambda: _Model(_moe()),
+    "moe without EP layers": lambda: _Model(_moe()),
     "moe native slot": lambda: _Model(_moe(), [_NativeAdoptingLayer()]),
     "moe transient": lambda: _Model(_moe(), [_TransientLayer()]),
     "moe native router": lambda: _Model(_moe(router_aux_loss_coef=0.0), [_NativeRouter()]),

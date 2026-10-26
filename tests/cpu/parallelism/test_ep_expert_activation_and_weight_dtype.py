@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Silent-failure invariants of the EP MoE wrappers, checked against the real HF blocks.
+"""Silent-failure invariants of the EP layers, checked against the real HF blocks.
 
 * **The expert activation comes from the wrapped module.** Every family's expert container resolves
   ``ACT2FN[config.hidden_act]``; a wrapper that restates ``F.silu`` instead trains a checkpoint with

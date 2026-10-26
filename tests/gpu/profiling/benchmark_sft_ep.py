@@ -76,9 +76,10 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.memory import cleanup_memory, gpu_mem_gb, host_peak_rss_gib, reset_host_peak_rss
 from tests.common.models import MODEL_CONFIGS
+from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, emit_save_benchmark, format_benchmark_report
-from tests.common.utils import cleanup_memory, gpu_mem_gb, host_peak_rss_gib, log, reset_host_peak_rss
 
 # The bench band's negative control: every EP layer holds the GPU idle this long before each forward.
 EP_FORWARD_DELAY_MS = env_float("HALO_TEST_EP_FORWARD_DELAY_MS", 0.0)

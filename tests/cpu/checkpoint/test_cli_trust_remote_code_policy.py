@@ -74,9 +74,9 @@ _TOOLS = (
     ("scripts/before_training/convert_deepseek_v4_bf16.py", False),
     ("scripts/before_training/patch_vocab.py", False),
     ("scripts/before_training/prepare_dataset.py", False),
-    ("scripts/inference/reward_model/rm_scoring.py", False),
-    ("scripts/inference/reward_model/rm_rejection_sampling.py", False),
-    ("scripts/inference/generation/dataset_deduplication.py", False),
+    ("scripts/inference/reward_model/score.py", False),
+    ("scripts/inference/reward_model/rejection_sample.py", False),
+    ("scripts/inference/deduplicate_dataset.py", False),
 )
 
 # Hub-source tools that thread no revision, so they must not advertise the pin. The helper's own

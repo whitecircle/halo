@@ -1,4 +1,4 @@
-"""DPO, KTO and SMPO script arguments and ``SmoothMarginPOConfig``."""
+"""DPO, KTO and SMPO script arguments and ``SMPOConfig``."""
 
 from dataclasses import dataclass, field
 from typing import ClassVar, Literal
@@ -80,8 +80,8 @@ class SMPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
 
 
 @dataclass
-class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, ValidatedConfig, TrainingArguments):
-    """Config for SmoothMarginPOTrainer (SMPO): a reference-model-free, margin-based preference
+class SMPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, ValidatedConfig, TrainingArguments):
+    """Config for SMPOTrainer (SMPO): a reference-model-free, margin-based preference
     method with optional SFT loss. Per-field docs are in each field's ``help`` metadata."""
 
     learning_rate: float = field(default=1e-6, metadata={"help": "Initial learning rate for AdamW optimizer."})
@@ -173,7 +173,7 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Va
         max_length = self.max_length
         if max_length is None or max_length <= 0:
             raise ValueError(
-                "SmoothMarginPOConfig.max_length must be a positive int by the time the trainer is "
+                "SMPOConfig.max_length must be a positive int by the time the trainer is "
                 "constructed (it is the total prompt + completion budget). Set it in the config, or "
                 "resolve it to the model context window first (resolve_length_to_context, as "
                 "scripts/training/preference/smpo.py does)."

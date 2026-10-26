@@ -35,12 +35,12 @@ The family's fp32 pins are transformers' `_keep_in_fp32_modules_strict` (`e_scor
 
 The checkpoint is a composite VLM with **no text-only CausalLM sibling** in transformers, so `text_only_model` is refused for this family. The composite class loads through the shared VLM path; a text-only dataset still takes the text data path ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
-## EP wrapper
+## EP layer
 
 `EPGlm5NextMoELayer` (`halo/distributed/expert_parallel/families/glm5_next.py`) replaces `Glm5NextTextMoE`.
 
 - Routing: sigmoid scores plus the fp32 `gate.e_score_correction_bias` on **selection only** (the routed weight comes from the unbiased scores), top-8, `norm_topk_prob`, then `routed_scaling_factor` — fp32 top-k weights, expert load recorded for balancing.
-- Experts: fused `Glm5NextTextExperts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. The hub spells them per-expert (`experts.{i}.gate_proj/up_proj/down_proj`); transformers' weight converter restores the fused layout on load and, on a wrapper-less `save_pretrained`, the per-expert spelling on save.
+- Experts: fused `Glm5NextTextExperts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. The hub spells them per-expert (`experts.{i}.gate_proj/up_proj/down_proj`); transformers' weight converter restores the fused layout on load and, on a `save_pretrained` with no EP layer, the per-expert spelling on save.
 
     An EP-gathered save writes the hub's vendor namespace (`hc_attn_*`, the KDA `f_a_proj`/`A_log` family, the split `q/k/v_conv1d`) and keeps the experts as the fused pair; `unfuse_moe_experts.py` turns it into the hub checkpoint. The lazy loaders and `from_pretrained` read either layout.
 

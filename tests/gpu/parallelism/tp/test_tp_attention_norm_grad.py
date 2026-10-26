@@ -39,7 +39,9 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.harness import gpu_test_main
-from tests.common.utils import cleanup_memory, log, log_all, max_or_nan
+from tests.common.memory import cleanup_memory
+from tests.common.numerics import max_or_nan
+from tests.common.rank_log import log, log_all
 
 # num_attention_heads must stay divisible by tp_size (2 and 4 both run here).
 TINY_CONFIG_KWARGS = {

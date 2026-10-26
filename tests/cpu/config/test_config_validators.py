@@ -20,7 +20,7 @@ from halo.configs.distillation import DistillationConfig, TeacherDistillScriptAr
 from halo.configs.embedding import EmbeddingConfig
 from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
 from halo.configs.parser import HaloArgumentParser
-from halo.configs.preference import SmoothMarginPOConfig
+from halo.configs.preference import SMPOConfig
 
 OUTPUT_DIR = "/tmp/test_config_validators"
 # Clears the bf16/GPU tail check for configs expected to construct successfully.
@@ -222,9 +222,9 @@ def test_rlvr_rlrr_out_of_range_raises(kwargs, match):
         (ClassificationConfig, "focal_gamma"),
         (DistillationConfig, "distill_temperature"),
         (EmbeddingConfig, "loss_scale"),
-        (SmoothMarginPOConfig, "target_margin"),
-        (SmoothMarginPOConfig, "initial_margin"),
-        (SmoothMarginPOConfig, "min_log_prob"),
+        (SMPOConfig, "target_margin"),
+        (SMPOConfig, "initial_margin"),
+        (SMPOConfig, "min_log_prob"),
     ],
 )
 def test_a_nan_float_is_refused(config_cls, field_name):

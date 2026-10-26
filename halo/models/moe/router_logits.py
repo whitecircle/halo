@@ -15,7 +15,7 @@ from halo.models.config_access import get_config_field, set_config_field_run_sco
 from halo.models.unwrapping import base_transformers_model
 
 ROUTER_LOGITS_KEY = "router_logits"
-# Stamped where router logits must stay off (EP wrappers that never populate them, aux-loss paths that would crash).
+# Stamped where router logits must stay off (EP layers that never populate them, aux-loss paths that would crash).
 # Run-scoped, so ``config_export_ready`` restores it away before any config serialization.
 ROUTER_LOGITS_FORCED_OFF_ATTR = "_toolkit_router_logits_forced_off"
 
