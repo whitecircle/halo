@@ -80,21 +80,19 @@ server; SGLang's c10d reads raw bytes, but the same trust assumption holds. **Th
 reachable only by trusted hosts.**
 
 On both engines the store listens on the advertised address alone: `group_host` /
-`VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` when set, else loopback for a server on the same host and
-the default-route NIC for one on another node. A name is resolved once to its IPv4 address, and the
-engine is sent that address. The client binds the listening socket and hands it to torch's
+`VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` when set, else loopback when this host binds the server's
+address itself (no firewalled hairpin traffic), else the default-route NIC. A name is resolved once to
+its IPv4 address, and the engine is sent that address. The client binds the listening socket and hands it to torch's
 `TCPStore` (`master_listen_fd`); a store master that opens its own listens on every interface
 whatever address it is given. An address this host cannot bind alone (a NAT or port-mapped address,
 the `0.0.0.0` wildcard, a name resolving to loopback for a remote server) raises before the engine
 is asked to join, and so does one with no IPv4 address: IPv6 is unsupported.
 
-The listener is bound and listening before the engine is asked to join: on `group_port`, or on a port
-the kernel assigns when it is 0, and the engine is sent the port the listener holds. The client then
-sends the join request and hands the listener to the store; group formation blocks until every worker
-has joined, so the engine is told before the store exists. A configured port another socket holds (a
-live client, or an outbound connection given it as its source port) fails with
-`Could not bind the weight-transfer group port` before the join request is sent, so no server is
-left waiting on a group that cannot form.
+The listener is bound before the engine is asked to join (on `group_port`, or a kernel-assigned port
+when it is 0, which is the port the engine is sent), then handed to the store. A configured port another
+socket holds (a live client, or an outbound connection given it as its source port) fails with
+`Could not bind the weight-transfer group port` before the join request, so no server is left waiting on
+a group that cannot form.
 
 `HALO_WEIGHT_SYNC_BIND_ALL=1` puts the store on every interface instead and advertises the
 configured address unresolved, for a trainer the server reaches through NAT or a port mapping. The
@@ -128,11 +126,8 @@ have it. The threads share the forwarding rank's GPU, NICs and process, so the f
 rather than the max: two servers each push at 27 GB/s over EFA, half of one server's rate.
 
 A chunk cannot be replayed. A server that fails **after** its first chunk is reported rather than
-reconnected; the trainer does not hold what already landed. One that fails before any chunk went out
-(an engine restarted between syncs, the common case) is recovered by the reconnect + re-flush
-(`tests/gpu/trainers/grpo/test_weight_sync_pool_reconnect.py`). Each
-client owns its own NCCL connection to its server on a `group_port` bound on the *trainer* host
-([group ports](../training-methods/async-grpo/setup.md#weight-synchronization)).
+reconnected; one that fails before any chunk went out (an engine restarted between syncs, the common
+case) is recovered by the reconnect + re-flush (`tests/gpu/trainers/grpo/test_weight_sync_pool_reconnect.py`).
 
 **The quiesce spans the streaming, not just the final broadcast.** The update opens with the first
 full chunk (~1 GB into the gather) and closes when the last one lands, so a server stops serving for
@@ -165,16 +160,11 @@ that engine **paused** instead of resuming it, refuses every later sync on that 
 `RESTART the … server`. Restart the container: the trainer kept no copy of what landed and cannot
 repair it.
 
-Both clients send from CUDA streams of their own (a stream pair per vLLM client for the
-double-buffered packs, one send stream per SGLang client), and PyTorch's caching allocator reuses a
-freed block only for the stream that allocated it, so a buffer carved from a client's stream stays
-reserved once the client closes, one per reconnect. The vLLM client therefore lands its tensors and
-allocates its pack buffers on the caller's stream, recorded for the pack stream that sends them. The
-SGLang client allocates its staging arena on the caller's stream, not its own send stream, and drops
-it at the end of every sync, so between syncs the block is back in the pool the training step and a
-reconnected client draw from. Both also record each snapshot for the stream that reads it: SGLang
-replies to a chunk before its sends retire, and the caller drops the chunk's snapshots on that reply,
-so an unrecorded block could be reallocated and overwritten before the queued read ran.
+Both clients send from CUDA streams of their own, and PyTorch's caching allocator reuses a freed block
+only for the stream that allocated it. So both allocate their buffers (the vLLM pack buffers, the SGLang
+staging arena, dropped after every sync) on the caller's stream, recorded for the send stream, or each
+reconnect would strand one; and both record each snapshot for the stream that reads it, since SGLang
+replies to a chunk before its sends retire.
 
 `HALO_WEIGHT_SYNC_MEM_LOG=1` (off by default) brackets each collective sync with a per-rank
 `[mem rankNN] weight-sync pre/post` line ([Debugging](../reference/debugging.md#3-gpu-memory-profiling));
@@ -210,7 +200,8 @@ weights while `/update_weights` returns `200 OK`.
 The patch excludes the affected classes from the reload lifecycle (`SKIP_LAYER_NAMES`:
 `RoutedExperts` / `FusedMoE`, `OAIAttention`, and `Gemma4Router`, whose partial load would
 materialize an uninitialized buffer into live memory). The class set is version-dependent and
-asserted against the installed vLLM at build, so an upstream refactor fails the image build.
+asserted against the installed vLLM at build (through the MRO), so an upstream refactor fails the image
+build.
 
 Missing, it shows as `RoutedExperts: Failed to load weights` per expert layer per sync in the server
 log, with the trainer's `sampling/logratio_mean` drifting monotonically negative
@@ -224,10 +215,9 @@ before `/init_weight_transfer_engine` builds the next one, so one server outlive
 trainer connections; engine shutdown destroys it upstream.
 
 Stock vLLM 0.32.0 drops the previous communicator on re-init without destroying it, and
-`PyNcclCommunicator` has no `__del__`, so each connection strands a live communicator (~633 MiB of
-device memory per connection on every engine-core worker, measured on 0.26.0) until
-`ncclCommInitRank` fails while `/health` still answers `200`. The trainer
-half is symmetric: `close_communicator()` aborts its own communicator instead of dropping it. Both
+`PyNcclCommunicator` has no `__del__`, so each connection strands a live communicator, holding device
+memory on every engine-core worker, until `ncclCommInitRank` fails while `/health` still answers `200`.
+The trainer half is symmetric: `close_communicator()` aborts its own communicator instead of dropping it. Both
 halves are asserted by `tests/gpu/trainers/grpo/test_vllm_weight_transfer_reinit.py`. On SGLang the
 client releases the engine's half itself: `close_communicator()` asks the engine to destroy the group
 by name (`/destroy_weights_update_group`) while it destroys its own, and every join clears a stale
@@ -244,15 +234,21 @@ logit-space no-mask check to the split top-p pipeline vLLM runs for the top-k-of
 most 64: without it, a budget cut (the forced token's logit is 1e9) at `rollout_top_p < 1` masks the
 whole row, the engine samples token 0 and reports a NaN log-prob.
 
-**Prompt log-probs under speculative decoding.** The V1 model runner runs the drafter before it reads
-the target's hidden states for prompt log-probs. When the prefill ran as a CUDA graph (by default up
-to 512 tokens on H100/H200, 1024 on B200/B300 and for gpt-oss), the drafter's graph overwrites those
-hidden states first: every prompt position comes back garbage (NLL 12–22, measured on 0.26.0) while
-sampling stays correct ([vllm#53488](https://github.com/vllm-project/vllm/issues/53488)). Model
-Runner V2, the image's runner, computes prompt log-probs before the drafter runs; that order is read
-from source, not verified under load. The `isr_engine_reference` startup probe refuses a server whose
-prompt log-probs do not follow from its tokens, whatever the cause
-([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
+**Prompt log-probs under speculative decoding.** Model Runner V2, the image's runner, computes prompt
+log-probs before the drafter runs. The V1 runner runs the drafter first, and when the prefill ran as a
+CUDA graph the drafter's graph overwrites the target's hidden states, so every prompt position comes back
+garbage while sampling stays correct ([vllm#53488](https://github.com/vllm-project/vllm/issues/53488)).
+The `isr_engine_reference` startup probe refuses a server whose prompt log-probs do not follow from its
+tokens, whatever the cause ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
+
+**Build gates.** Besides the patch targets, the build asserts that the weight-transfer wire (init and
+update request fields, the packed chunk boundary, the routes) matches the client's; that `/pause` still
+accepts `mode=keep` and resets the prefix cache under it; that the split top-p guard keeps a budget-cut
+row whole while masking an ordinary row as upstream does; that `verify_gptoss_plugins.py` drives the
+gpt-oss parser plugins and Model Runner V2's budget, which no test suite can reach; that `EngineArgs`
+still carries `weight_transfer_config` / `enable_return_routed_experts` and `KernelConfig.moe_backend`;
+and the per-family [config-schema parity](#config-schema-parity). A green build is what proves the server
+can be synced.
 
 Checkpoint layout and expert un-fuse rules live in
 [Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang).
@@ -366,11 +362,13 @@ DeepEP's.
 
 ## vLLM
 
-`Dockerfile.vllm` builds `vllm-server:0.32.0` with the native NCCL weight-transfer engine, the
-layerwise-reload patch, R3 routed-experts capture (base64-npy `routed_experts` per completion
-choice), and `nvidia-nccl-cu13` installed at `uv.lock`'s exact pin, the same NCCL the training
-images run. `VLLM_NCCL_SO_PATH` is baked to that wheel so the base image's older system copy can
-never win the soname race.
+`Dockerfile.vllm` builds `vllm-server:0.32.0` from upstream `vllm/vllm-openai:v0.32.0` (the CUDA 13
+build) with the native NCCL weight-transfer engine (`VLLM_SERVER_DEV_MODE=1`), the patches above, R3
+routed-experts capture (base64-npy `routed_experts` per completion choice), and `nvidia-nccl-cu13`
+installed at `uv.lock`'s exact pin, the same NCCL the training images run. The build asserts the
+installed version against the lock, the resolved `libnccl.so.2` and the `ncclUniqueId` ABI identity
+between the two stacks, and `VLLM_NCCL_SO_PATH` is baked to that wheel so the base image's older system
+copy can never win the soname race.
 
 A skew fails `ncclCommInitRank` at `/init_weight_transfer_engine` or hangs it with no error;
 rebuild the image after any lock bump of the pin.
@@ -400,7 +398,7 @@ parse and vLLM 0.32.0's Gemma 4 code reads that, so the flat form is lossless he
 `step3p7` class, but vLLM's config parsing raises `AmbiguousGlobalPerLayerAttributeError` on it, so
 the server reads the family only through the release's `auto_map` modules, which load its
 vendor-keyed config cleanly. Its exports therefore carry the source repo's own config schema and
-those modules ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
+those modules ([Exported `config.json`](../reference/checkpoints.md#exported-configjson)).
 
 `docker/vllm/parity/check.py` runs at image build: vLLM's own `ModelConfig` must resolve what the
 toolkit exports, to a per-layer attention geometry, for every family whose EP layer admits weight sync
@@ -421,7 +419,9 @@ trainer port, neither of which a bridge network publishes, so group formation ti
 "1/2 clients joined".
 
 Prebuilt: `docker pull public.ecr.aws/whitecircle/halo:vllm-0.32.0` (anonymous, no AWS account), then
-`docker tag public.ecr.aws/whitecircle/halo:vllm-0.32.0 vllm-server:0.32.0` — compose names that tag.
+`docker tag public.ecr.aws/whitecircle/halo:vllm-0.32.0 vllm-server:0.32.0` — compose names that tag. The
+healthcheck calls `python3` (the base ships no bare `python`; an exit-127 healthcheck would wedge the
+training service's `service_healthy` gate).
 
 ```bash
 make build-vllm                        # or the pull + tag above
@@ -429,7 +429,23 @@ VLLM_MODEL=Qwen/Qwen3-30B-A3B VLLM_CUDA_DEVICES=6,7 VLLM_TP=2 TRAINER_CUDA_DEVIC
   docker compose -f docker-compose.vllm.yml up vllm-server
 ```
 
-`TRAINER_CUDA_DEVICES` defaults to `0,1,2,3,4,5,6`, so a two-GPU server on 6,7 needs it narrowed.
+`TRAINER_CUDA_DEVICES` defaults to `0,1,2,3,4,5,6`, so a two-GPU server on 6,7 needs it narrowed. The
+flag-valued variables (`VLLM_ATTENTION_BACKEND`, `VLLM_ENABLE_R3`, `VLLM_SPECULATIVE_CONFIG`, the
+tool-parser-plugin, reasoning-parser and chat-template ones) are `${VAR:+--flag ${VAR}}` slots, so leaving
+one unset omits its flag. They are compose interpolations vLLM never reads as env vars;
+`VLLM_ENFORCE_STRICT_TOOL_CALLING` and `VLLM_TUNED_CONFIG_FOLDER` are env vars the server reads.
+
+Without compose, the ENTRYPOINT is `vllm serve` and any args replace the compose `CMD` wholesale, so
+restate every load-bearing flag, or the server silently loses NCCL weight transfer and falls back to the
+expert-corrupting auto MoE backend:
+
+```bash
+docker run --gpus all --network=host --ipc=host \
+  vllm-server:0.32.0 Qwen/Qwen3-4B-Instruct-2507 --port 8000 \
+  --weight-transfer-config '{"backend": "nccl"}' --moe-backend triton \
+  --return-tokens-as-token-ids --logprobs-mode processed_logprobs \
+  --enable-auto-tool-choice --tool-call-parser hermes
+```
 
 | Variable | Default | Purpose |
 |---|---|---|
@@ -489,19 +505,15 @@ engine refuses to start the capture on the V1 runner and with prefix caching off
 `VLLM_ENABLE_R3` for MoE models only: the engine exits at start on a dense model, which under the
 compose `restart` policy shows up as a server that restarts forever and never turns healthy.
 
-`VLLM_USE_V2_MODEL_RUNNER` is an env var, not a serve flag. The image pins it to `1` and the compose
-file passes it through bare, so leaving it unset keeps the pin. Model Runner V2 is the only runner
-R3 capture starts on and the one the gpt-oss thinking-budget patches target; pinned, it fails at
-startup on a feature it lacks instead of falling back to V1. `0` selects the V1 runner, where R3
-refuses to start, the gpt-oss budget cut loses its patches, and prompt log-probs under speculative
-decoding come back garbage ([vLLM server patches](#vllm-server-patches)).
+`VLLM_USE_V2_MODEL_RUNNER` is an env var, not a serve flag: the image pins it to `1` and the compose
+file passes it through bare, so leaving it unset keeps the pin. Model Runner V2 is the only runner R3
+capture starts on and the one the gpt-oss thinking-budget patches target; pinned, it fails at startup on
+a feature it lacks instead of falling back to V1 (`0`), where R3 refuses to start and prompt log-probs
+under speculative decoding come back garbage. Spell it `0` or `1`: vLLM reads it with `int()`, so `false`
+or an empty value (an empty key in the repo-root `.env` counts) kills the server with a bare `ValueError`.
 
-A thinking budget also needs a reasoning parser (`VLLM_REASONING_PARSER`): without one vLLM answers
-every request carrying `thinking_token_budget` with a 400, so each rollout errors instead of
-generating (zero tokens, `episode/error_rate` 1).
-
-Spell it `0` or `1` and nothing else: vLLM reads it with `int()`, so `false` or an empty value (an
-empty key in the repo-root `.env` counts) kills the server at startup with a bare `ValueError`.
+A thinking budget also needs a reasoning parser (`VLLM_REASONING_PARSER`): without one vLLM answers every
+request carrying `thinking_token_budget` with a 400 (zero tokens, `episode/error_rate` 1).
 
 Tool parsers are per family. For **native-tool** envs (`code_contests`, `swe`, `mcp`, `qa_search`,
 open-book `exam_qa`) the absence of the right one is silent and fatal to RL: calls stay text, no
@@ -528,18 +540,16 @@ Native-tool parsers per family:
 and `NCCL_NET=Socket` on each, `NCCL_P2P_LEVEL=NVL` on the server). On a host without a fabric the
 cross-container group then takes NVLink + sockets on both ends by declaration rather than by each
 side's own fallback; two containers that land on different nets form the group and hang at the first
-collective ([Troubleshooting](#troubleshooting)).
+collective ([Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix)).
 
 On an EFA host layer `docker-compose.vllm.efa.yml` over it
 ([Servers on other nodes](#servers-on-other-nodes-efa)). `NCCL_NET` is process-global, so a trainer
 left at `Socket` there sends every collective over TCP and breaks DeepEP.
 
 `VLLM_GROUP_HOST` (or an entry's `group_host`, for that one server) names the trainer address the
-server dials back to and the rendezvous store binds ([Group rendezvous](#group-rendezvous)), and
-touches nothing else; a same-host compose stack needs no value, and the
-resolution order is on
-[Online GRPO — Multi-homed nodes](../training-methods/grpo/online.md#multi-homed-nodes-vllm_group_host).
-`NCCL_SOCKET_IFNAME` is not a transfer-group knob ([NCCL transport](#nccl-transport-sglang)).
+server dials back to and the rendezvous store binds, and touches nothing else; a same-host compose stack
+needs no value ([Group rendezvous](#group-rendezvous)). `NCCL_SOCKET_IFNAME` is not a transfer-group knob
+([NCCL transport](#nccl-transport-sglang)).
 
 ## SGLang
 
@@ -728,28 +738,17 @@ python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8
 ```
 
 Run it from the trainer container, launched as the trainer would be (same image, devices and NCCL
-env), on a GPU the server does not own.
+env), on a GPU the server does not own. It pushes one real parameter of the served checkpoint, unchanged,
+through the trainer's own sync path (`--model-id` when the served id is a server-side path or an alias),
+and reports the transport NCCL formed on (`NET/Libfabric/…/GDRDMA` is EFA with GPUDirect; `NET/IB`,
+`NET/Socket`, `P2P/CUMEM` for same-host CUDA IPC, or `SHM`), the `aws-ofi-nccl` build, the libfabric
+provider and GB/s; it exits 1 when the group fails to form or the served model changed, and `--expect`
+adds the transport to that gate ([flags](../reference/scripts-reference.md#profiling--benchmarks)).
 
-It forms the group against the live server (either backend) and pushes one real parameter of the
-served checkpoint (the input embedding by default, value unchanged, so the served model is unchanged)
-through the trainer's own sync path: staged on the sync GPU, then streamed. The checkpoint read on
-the trainer side must be the one the server loaded (`--model-id` when the served id is a server-side
-path or an alias).
-
-It reports the transport NCCL formed on (`NET/Libfabric/…/GDRDMA` is EFA with GPUDirect; `NET/IB`,
-`NET/Socket`, `P2P/CUMEM` for same-host CUDA IPC, or `SHM`), the `aws-ofi-nccl` build string, the
-libfabric provider, and GB/s. It exits 1 when the group fails to form or the push changed the served
-model; `--expect efa|ib|socket|p2p|shm` adds the transport to that gate. Flags:
-[Scripts](../reference/scripts-reference.md#profiling--benchmarks).
-
-Measured on 8× B300 nodes, trainer node → server node, one worker, the trainer's own streamed path, full
-model per sync (NIC line rate ~100 GB/s per GPU; a raw NCCL broadcast reaches 93 GB/s): EFA with the
-vLLM client 53 GB/s, EFA with the SGLang client 80 GB/s, sockets over the ENA 9.7 GB/s. At those
-rates gpt-oss-120b (234 GB) syncs in 4.4 s, 2.9 s and 24 s.
-
-The vLLM client's rate is set by its one HTTP round trip per chunk and rises with
-`HALO_WEIGHT_SYNC_CHUNK_MB` (1 GiB, the default, → 53 GB/s; 8 GiB → 73 GB/s at this payload); the SGLang client's
-by the fabric.
+On 8× B300 nodes, trainer node → server node, the trainer's streamed path syncs at 53 GB/s through the
+vLLM client over EFA, 80 GB/s through the SGLang client, and 9.7 GB/s over sockets (NIC line rate ~100
+GB/s per GPU). The vLLM client's rate is set by its one HTTP round trip per chunk and rises with
+`HALO_WEIGHT_SYNC_CHUNK_MB` (73 GB/s at 8 GiB); the SGLang client's by the fabric.
 
 ## Checking a server
 
@@ -769,116 +768,65 @@ outside `TRAINER_CUDA_DEVICES`.
 
 ## Throughput
 
-**Servers × TP.** Run one engine per GPU, grouped into the fewest servers that hold the model.
+**The decode step is CPU-bound at RL concurrency.** The engine core is one Python thread and sits at 100%
+of a core from ~48 concurrent sequences (Qwen3.6-35B-A3B on a B300: ~15 ms per step); step latency grows
+with running sequences, so per-sequence speed falls as concurrency rises while aggregate throughput rises
+sub-linearly. Fewer steps per token help; kernel-level gains (tuned MoE tiles, another attention backend)
+do not show. A trainer sharing the host slows every step, so pin each server container to its own cores
+(`docker run --cpuset-cpus`, compose `cpuset:`) and the trainer to the rest. Turning this into batch sizes
+and timeouts: [Sizing a run](../training-methods/async-grpo/performance.md#sizing-a-run).
 
-Two half-memory engines on one B300 deliver less at 96 sequences (5.4k tok/s) than a single engine
-at the same load (6.25k), because the second engine only time-slices the GPU, and two engines
-starting on one GPU at the same moment fail their memory profiling. Two servers instead of four also
-halve the weight-sync fan-out.
+**Servers × TP.** Run one engine per GPU, grouped into the fewest servers that hold the model: a second
+engine on one GPU only time-slices it (and two engines starting on one GPU at once fail their memory
+profiling), and fewer servers shrink the weight-sync fan-out. Where rollout collection dominates (a
+tool-heavy env such as `code_contests`), 2×(TP=2) and 4×(TP=1) measure the same step time; on short
+single-turn envs re-measure before consolidating. Per-server request load is
+`max_concurrent_rollouts × world_size / num_servers`: every rank builds its own actor pool, under TP too
+([Ray — Pool sizing](ray.md#pool-sizing)), and dispatch is round-robin regardless of load.
 
-The condition: where rollout collection dominates serving (a tool-heavy env such as `code_contests`
-at gpt-oss-20b scale on 4 B300s), 2×(TP=2) and 4×(TP=1) measure the same step time, so consolidate.
-On short single-turn envs serving is a larger share of the step; re-measure before consolidating.
-
-Per-server request load is `max_concurrent_rollouts × world_size / num_servers`: every rank builds
-its own actor pool and collects a full batch, under TP too, so the load scales with `world_size`
-rather than `data_parallel_size` ([Ray — Pool sizing](ray.md#pool-sizing)). Dispatch is round-robin
-and ignores whether a server is busy.
-
-**Prefix caching.** The compose passes `--enable-prefix-caching`, which vLLM 0.32.0 also defaults to
-for hybrid families (Qwen3.5/3.6's linear-attention layers, in the "Mamba cache mode 'align'" it
-logs). A multi-turn episode re-sends its whole context every turn, and without the cache each
-turn's prefill takes scheduler steps away from every other request's decode.
-
-The pause that brackets every weight update (`/pause?mode=keep`) demotes in-flight requests to
-waiting and wipes the cache, so no cached prefix serves stale weights.
-
-Speculative decoding was measured to poison the align-mode prefix cache on 0.26.0; 0.32.0 has no
-guard for the pair and it is not re-measured, so turn the cache off with MTP
-(`VLLM_PREFIX_CACHING_FLAG=--no-enable-prefix-caching`; R3 capture then refuses to start). Measured
-on Qwen3.6-35B-A3B on a B300 at TP=1, uncached prefill runs near 22k tok/s, so re-prefilling each turn costs far less than MTP
-returns at RL concurrency.
-
-**The decode step is CPU-bound at RL concurrency.** The V1 engine core is one Python thread and sits
-at 100% of a core from ~48 concurrent sequences (Qwen3.6-35B-A3B on a B300: ~15 ms per step).
-
-A trainer sharing the host (its ranks and the environments' judge sandboxes) slows every step: 22–25
-tok/s per sequence against 63–66 for the same server alone. Pin each server container to
-its own cores (`docker run --cpuset-cpus`, compose `cpuset:`) and the trainer to the rest.
-
-Step latency grows with running sequences (about 14 ms + 0.22 ms per sequence here under MTP), so
-per-sequence speed falls as concurrency rises, 101 tok/s at 48 running and 71 at 96, while aggregate
-throughput rises sub-linearly (+41% for that doubling).
-
-Kernel-level gains (tuned MoE tiles, another attention backend) do not show at this concurrency;
-fewer steps per token do. Turning these numbers into batch sizes and timeouts:
-[Sizing a run](../training-methods/async-grpo/performance.md#sizing-a-run).
+**Prefix caching** stays on (the compose passes `--enable-prefix-caching`, vLLM's default for hybrid
+families): a multi-turn episode re-sends its whole context every turn. The pause that brackets every
+weight update (`/pause?mode=keep`) wipes the cache, so no cached prefix serves stale weights. Turn it off
+with speculative decoding / MTP (`VLLM_PREFIX_CACHING_FLAG=--no-enable-prefix-caching`; R3 capture then
+refuses to start): speculative decoding can poison the align-mode prefix cache and the engine has no guard
+for the pair; re-prefilling each turn costs far less than MTP returns at RL concurrency.
 
 **Speculative decoding (MTP).** A checkpoint that ships a multi-token-prediction head (Qwen3.5/3.6,
-`mtp.*` tensors) drafts with it through
-`--speculative-config '{"method":"mtp","num_speculative_tokens":2}'` (compose slot
-`VLLM_SPECULATIVE_CONFIG`); the drafter loads from the same checkpoint.
+`mtp.*` tensors) drafts with it through `VLLM_SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":2}'`.
+On Qwen3.6-35B-A3B on a B300 at 48 concurrent sequences it takes 59–67 to 108–112 tok/s per sequence
+(2.4 tokens accepted per step), output statistics unchanged. It is sound for RL: rejection sampling keeps
+the target distribution, `processed_logprobs` come from the target logits, the thinking budget is enforced
+on the target, and the drafter's embeddings and `lm_head` are the target's modules, so weight sync updates
+them (its MTP layer keeps launch weights, which only moves acceptance). Under speculation a request with
+`min_p > 0` or a `logit_bias` raises; never use `ngram` on linear-attention families (an unguarded
+output-corruption bug); `suffix` fails at startup on Model Runner V2.
 
-Measured on Qwen3.6-35B-A3B on a B300 at 48 concurrent sequences, temperature 1.0, measured apart from the sweep above: 59–67 → 108–112
-tok/s per sequence, 2.4 tokens accepted per step, output statistics unchanged.
+**Strict tool calling off** (`VLLM_ENFORCE_STRICT_TOOL_CALLING=0`, the compose default): the
+structural-tag grammar would mask tokens the trainer's log-probabilities never see masked and add CPU work
+per step. A malformed call becomes text the environment scores.
 
-Sound for RL: rejection sampling applies temperature and top-p to the target logits and keeps the
-target distribution, `processed_logprobs` come from those same logits, and the thinking budget is
-enforced on the target under speculation. The drafter's embeddings and `lm_head` are the target's
-modules, so weight sync updates them; its MTP layer keeps launch weights, which only moves
-acceptance. Prompt log-probs (the `isr_engine_reference` re-score) are computed before the drafter
-runs on Model Runner V2 and probed at startup ([vLLM server patches](#vllm-server-patches)).
-
-Refused under speculation: a request with `min_p > 0` or a `logit_bias` raises. Never `ngram` on
-linear-attention families (an output-corruption bug 0.32.0 does not guard; it also turns async
-scheduling off); `suffix` fails at startup on Model Runner V2.
-`scripts/profiling/weight_sync_transport.py` passes against an MTP server.
-
-**Strict tool calling off** (`VLLM_ENFORCE_STRICT_TOOL_CALLING=0`, the compose default). vLLM
-otherwise constrains every tool-bearing request with a structural-tag grammar, masking tokens the
-trainer's log-probabilities never see masked and adding per-step grammar work on the CPU-bound engine
-core. The tool parser still parses the calls; a malformed call becomes text the environment scores.
-
-**Triton MoE tile configs.** The mandatory `--moe-backend triton` reads a per-shape tuned config
-(`E=<experts>,N=<intermediate>,device_name=<GPU>.json`) from `VLLM_TUNED_CONFIG_FOLDER`, then from
-vLLM's `fused_moe/configs`, and logs `Using default MoE config. Performance might be sub-optimal!`
-when neither matches; the image ships none for B300 in bf16. At RL concurrency the step is CPU-bound
-(above) and the tuned tiles change nothing measurable; they matter for prefill-heavy phases.
-
-`benchmarks/kernels/benchmark_moe.py --tune` in the vLLM image writes one (needs `pip install ray`;
-one batch size per visible GPU in parallel, 1920 tile configs each, 8–27 minutes, JSON written only
-at the end; a single config's Triton compile failure aborts the run unless its `OutOfResources`
-handler also catches `RuntimeError`). Pass `--tp-size 1` (the default of 2 halves `N`) and
-`--batch-size` with the decode batch (concurrent sequences × (1 + speculative tokens)) and the
-prefill chunk. The file is read once per process, so a new one needs a server restart.
+**Triton MoE tile configs.** `--moe-backend triton` reads a per-shape tuned config
+(`E=<experts>,N=<intermediate>,device_name=<GPU>.json`) from `VLLM_TUNED_CONFIG_FOLDER`, then vLLM's
+`fused_moe/configs`, and logs `Using default MoE config` when neither matches (the image ships none for
+B300 in bf16). They matter for prefill-heavy phases, not CPU-bound decode. `benchmarks/kernels/benchmark_moe.py
+--tune` in the vLLM image writes one (needs `pip install ray`; pass `--tp-size 1` and `--batch-size` with
+the decode batch and the prefill chunk); the file is read once per process.
 
 **Generation volume is the step-time lever** once prefetch overlaps collection into training
-(`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens` caps a
-turn; on vLLM the turn's reasoning cap (`rollout_max_thinking_tokens`, a level's enforced budget, or a soft level's
-ceiling) caps CoT engine-side; below it a soft budget, and on SGLang every budget, is held only by the reasoning terms,
-which a training group with no success is not charged.
+(`async/prefetch_hit_rate` > 0.8): step time tracks mean episode tokens. `rollout_max_tokens` caps a turn;
+on vLLM the turn's reasoning cap caps CoT engine-side, while a soft budget, and every budget on SGLang, is
+held only by the reasoning terms, which a training group with no success is not charged.
 
-**Memory.** Raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 (0.80 with
-`isr_engine_reference`, below) when the server GPUs are dedicated; more KV cache means more
-concurrent rollouts per server. Do not pass `--enforce-eager`: the in-place weight sync keeps captured
-CUDA graphs valid, and CUDA-graph decode is several-fold faster on long generations.
-
-On B200 pin the backend through the compose slot `VLLM_ATTENTION_BACKEND=FLASH_ATTN` (FlashInfer can
-JIT-fail on SM 10.0). On head-dim-256 families `FLASH_ATTN` resolves to FA2 (FA4 refuses the head
-size) and measured 30% slower than FlashInfer on a B300; keep auto unless FlashInfer fails.
-
-**`isr_engine_reference` headroom.** The trainer's engine re-score sends `prompt_logprobs` requests.
-The V1 runner materializes an fp32 log-softmax over the vocabulary for every prefill chunk of one
-(`max_num_batched_tokens × vocab × 4 B`, 8 GB at 8192 × 248k) outside its memory profile, and at 0.90
-the engine died of CUDA OOM under load. Model Runner V2 scores them in 1024-row chunks of logits in
-the model dtype (~0.5 GB at a 248k vocabulary in bf16) and builds no full log-softmax; the bound is
-not re-measured there. Serve at `--gpu-memory-utilization` ≤ 0.80 or a smaller
-`--max-num-batched-tokens` when that knob is on.
+**Memory.** Raise `--gpu-memory-utilization` / `--mem-fraction-static` to 0.9 when the server GPUs are
+dedicated (more KV cache, more concurrent rollouts), but serve at ≤ 0.80, or a smaller
+`--max-num-batched-tokens`, under `isr_engine_reference`, whose `prompt_logprobs` re-scores allocate
+outside the engine's memory profile. Do not pass `--enforce-eager`: the in-place sync keeps captured CUDA
+graphs valid, and CUDA-graph decode is several-fold faster on long generations. On B200 pin
+`VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on SM 10.0; on head-dim-256 families it
+resolves to FA2, which is slower than FlashInfer.
 
 **Sync cadence.** `sync_weights_every_n_steps: 2–4` for slow environments
 ([Async GRPO with Environments](../training-methods/async-grpo/setup.md#weight-synchronization)).
-
-**Weight-quantized serving is excluded** by the in-place sync ([Weight sync](#weight-sync)).
 
 ## Coverage
 
@@ -897,10 +845,13 @@ Support per trainer parallelism axis, async GRPO against a live server:
 An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`)
 takes the sync for Qwen3 MoE: the loader keeps its local experts and drops the rest. gpt-oss cannot
 be served that way: its bf16 fused expert loader narrows only the TP dimension and copies the global
-expert count into local-expert storage (`_load_w2`), which crash-looped at start under `--ep-size`
-on 0.5.17, before any sync; the 0.5.22 loader keeps that shape.
+expert count into local-expert storage (`_load_w2`), so the server fails at start under `--ep-size`,
+before any sync.
 
 ## Troubleshooting
+
+Server-side symptoms; the trainer-side weight-sync errors (group address, port bind, transport mismatch,
+SGLang cuMem) are rows of [Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix).
 
 | Symptom | Cause → fix |
 |---|---|
@@ -912,5 +863,3 @@ on 0.5.17, before any sync; the 0.5.22 loader keeps that shape.
 | Log-ratio drifts on SGLang while the server log stays clean | No server-side signal exists: the MoE loaders skip unmapped expert names before their `not found in params_dict` warning → do not read a clean log as proof of a landed sync; the construction gates are the guard |
 | `RoutedExperts: Failed` (vLLM log) | Layerwise-reload patch missing → expert syncs silently reverted; rebuild `vllm-server` |
 | `/init_weight_transfer_engine` answers 500 (`NCCL error: unhandled cuda error`) while `/health` is 200 | Re-init patch missing → the engine strands a communicator per trainer connection until the GPU runs out; rebuild `vllm-server` and recreate the server container |
-| First sync hangs at the first collective after the group formed, both ends idle | The two containers drive different transports (`NCCL_NET` / `NCCL_NET_PLUGIN` differ) or different `aws-ofi-nccl` + libfabric builds (an upstream server image, a host-installed plugin) — the pair forms the group and then hangs → both ends from the Halo images with the same recipe (compose EFA overlay + `make ... EFA=1`, or both on the no-fabric defaults); `scripts/profiling/weight_sync_transport.py` reports the transport and build each side formed on |
-| `ncclP2pImportShareableBuffer ... invalid argument` on the first update, `The full weights of the ModelRunner are partially updated` (SGLang) | cuMem off on the server only — SGLang sets `NCCL_CUMEM_ENABLE=0` unless it is pre-set → `NCCL_CUMEM_ENABLE=1` in the server container (the compose default); restart the server, it holds a half-written model |

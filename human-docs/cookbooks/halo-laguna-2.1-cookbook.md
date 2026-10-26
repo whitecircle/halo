@@ -7,12 +7,8 @@ through a sigmoid router with a correction bias. S has 48 layers and picks ten e
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | No | partial | No | No | Yes | vLLM |
-
-`partial`: pure ETP and EP+ETP train, save and resume on a tiny Laguna in the GPU tests. The released
-checkpoints have not run under ETP.
+Modes: the Laguna S / XS 2.1 row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoints:** `poolside/Laguna-S-2.1` and `poolside/Laguna-XS-2.1`. The recipes load them through
   the hub's remote code at a pinned revision.

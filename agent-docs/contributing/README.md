@@ -25,12 +25,9 @@ same targets. The Docker incantation lives once in the `Makefile`; `make help` l
 
 ## The gate (read first)
 
-Halo is a public, gated project. Every change starts as an **accepted issue** (use a
-`.github/ISSUE_TEMPLATE`), and a maintainer must comment `/approve @you` on it — which adds you to
-`.github/APPROVED_CONTRIBUTORS` (kept on the `allowlist` branch) — **before** you open a PR. A PR from anyone not on that list and
-without write access is auto-commented and closed by `.github/workflows/pr-gate.yml`. A reaction, a
-comment, a branch, or a draft reserves nothing. `CONTRIBUTING.md` is the short version; the workflow
-mechanics are in [Continuous Integration](../infrastructure/ci.md#contribution-gate).
+Every change starts as an accepted issue and a maintainer's `/approve @you` on it, **before** any PR; an
+unapproved PR is closed automatically. The rules are in [`CONTRIBUTING.md`](../../CONTRIBUTING.md), the
+workflow mechanics in [Continuous Integration](../infrastructure/ci.md#contribution-gate).
 
 ## Dev setup
 
@@ -89,10 +86,14 @@ Without `EFA=1` it forces the no-fabric recipe both compose bases default to
 `EFA=1` passes `/dev/infiniband` and the fabric variables instead, matching a server started with
 its compose EFA overlay ([Servers on other nodes](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)).
 
-Each server slice takes **two passes**, because the tests broadcast the trainer's own weights into the
-served model and assert the served policy moved — server and trainer must hold the same checkpoint, and
-no one server covers both halves. `SERVER_TIER` defaults to `not moe` (serve a dense model); restart the
-server on a MoE checkpoint and rerun with `SERVER_TIER=moe`.
+Each server slice runs **one pass per served model**, because the tests broadcast the trainer's own
+weights into the served model and assert the served policy moved, so server and trainer must hold the same
+checkpoint. `SERVER_TIER` defaults to `not moe` (serve `Qwen/Qwen3-0.6B`); the MoE passes restart the
+server on `Qwen/Qwen3-30B-A3B-Instruct-2507` for `SERVER_TIER='moe and not gptoss'` and on
+`unsloth/gpt-oss-20b-BF16` for `SERVER_TIER='moe and gptoss'`; SGLang's MoE tests are gpt-oss only
+(`SERVER_TIER=moe`). The vLLM
+server needs `VLLM_REASONING_PARSER=qwen3`: the benchmarks send a per-effort CoT budget, which draws a 400
+without a reasoning parser (the target's health guard prints the compose line).
 
 `make test-gpu-sglang` is the `sglang_server` slice with the same server requirement and the same
 `EFA=1` switch; the server needs only cuMem parity on top — `NCCL_CUMEM_ENABLE=1`, the compose default
@@ -133,16 +134,9 @@ make train METHOD=preference/smpo CONFIG=<config>    # METHOD defaults to sft
 
 ## AI-assisted contributions
 
-Halo is built with AI assistance, and AI-assisted contributions are welcome. `CLAUDE.md` and
-`AGENTS.md` are the rulebook for agents and humans alike. Three conditions:
-
-- **Disclose** the scaffold and models in the PR (the template has a checkbox).
-- **Own it** — you are accountable for every line, at the same bar as hand-written code.
-- **House rules apply** — `CLAUDE.md`, the ruff gate, the test conventions, and the docs charter
-  bind AI-generated code exactly as they bind yours.
-
-Unreviewed AI output — code nobody read, tests nobody ran, docs in marketing register — is closed.
-A diff over **~2,000 lines** drops off the fast path; split it.
+AI-assisted contributions are welcome on the terms in [`CONTRIBUTING.md`](../../CONTRIBUTING.md#the-one-rule)
+(understand and own every line, disclose the scaffold and models, keep a diff under ~2,000 lines);
+`CLAUDE.md` and `AGENTS.md` bind agents and humans alike.
 
 ## Tests
 
@@ -253,12 +247,9 @@ manifest.
     instead of re-rolling one per file.
 
 - **GPU tests register in the manifest.** Drop the script under `tests/gpu/`, add one `TestSpec`
-  line to `tests/gpu/manifest.py` (`nproc`, `markers`, `args_matrix`, `timeout`, `flaky`). A script
-  missing from the manifest fails collection, so coverage cannot silently rot.
-
-    A `bench*.py` that is in neither the manifest nor `_UNMANIFESTED_BENCHMARKS` fails the same way.
-    World-size strictness is not a manifest field; the script declares it itself via
-    `gpu_test_main(exact_world_size=N)`.
+  line to `tests/gpu/manifest.py` ([fields](../../skills/write-tests/harness.md#register-in-the-manifest-testsgpumanifestpy)).
+  A script missing from the manifest fails collection, so coverage cannot silently rot, and a `bench*.py`
+  in neither the manifest nor `_UNMANIFESTED_BENCHMARKS` fails the same way.
 
 - **Run GPU tests through pytest**, not by hand: `make test-gpu-core`, or a narrower marker
   expression over the directory (`pytest -m "gpu and ep" tests/gpu`). The launcher entry points
@@ -285,36 +276,13 @@ manifest.
     A literal `/mnt/...` in a test escapes basetemp, is never reclaimed, and assumes a volume layout
     this host may not have; checkpoint locations belong in `tests/common/models.py`.
 
-- **Use the `gpu_test_main` harness** (`tests/common/harness.py`). It owns the lifecycle
-  (`init_distributed` → setup → body → teardown → `sys.exit`); the body is *load → train → assert*
-  and returns `{"checks": {name: bool}, "metrics": {...}}`, exiting `0` pass / `1` fail / `2` bad
-  launch.
-
-    Every manifest script runs under it, except a script whose lifecycle the harness cannot express,
-    listed in `_OWN_LIFECYCLE` (`tests/cpu/conventions/test_gpu_harness_conventions.py`) with the
-    reason, and an entry whose script moves onto the harness fails the suite until it is dropped.
-
-    The harness sets `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value: causal_conv1d's
-    default backward sums the conv weight gradient with atomics, so the gated-DeltaNet families miss
-    an exact resume replay now and then. An EP body that replays a run exactly without
-    `full_determinism` calls `pin_deterministic_ep_dispatch` (`tests/common/distributed.py`) itself:
-    DeepEP's default dispatch claims receive slots with atomics, so the order an expert's tokens arrive
-    in, and with it the rounding of every expert weight gradient, changes from run to run (under
-    `full_determinism` the dispatcher builds the deterministic buffer on its own). A forward-only
-    comparison on the grouped-GEMM path needs no pin: each expert row is computed independently of that
-    order and the combine sums a token's partials in top-k slot order, so it holds the bound a non-EP
-    run does, as the per-expert loop does ([EP → Determinism](../parallelism/expert-parallelism.md#determinism)).
-- **Build checks from the shared helpers** rather than re-deriving them per file:
-  `training_run_checks` (`tests/common/utils.py`, the finished-run verdicts), `parallel_shape_checks`
-  (`parallel_shape.py`, each enabled axis read off the model, not the config echo), `run_sft_suite`
-  (`sft_modes.py`, the SFT smoke body with one `--mode` per manifest row), `run_gloo_ranks` (`gloo.py`,
-  spawned gloo ranks for a CPU test that needs a real process group) and the synthetic-checkpoint
-  builders in `tiny_models.py`. A worst-difference bound goes through `max_or_nan` (`utils.py`): the
-  builtin `max` drops a NaN anywhere but first, so the bound would pass on it. The full table is in
-  `skills/write-tests/harness.md`.
-- **Emit perf and memory.** Return `ctx.metrics(trainer)` so the result line carries tokens/s/GPU
-  and peak memory; a `benchmark_*` script's `emit_benchmark(key, callback)` writes the line the
-  committed throughput baselines are compared against.
+- **Use the `gpu_test_main` harness** (`tests/common/harness.py`) and **build checks from the shared
+  helpers** rather than re-deriving them per file; return `ctx.metrics(trainer)` so the result line
+  carries tokens/s/GPU and peak memory. The harness API, its lifecycle and determinism pins, and the
+  helper table are in [`skills/write-tests/harness.md`](../../skills/write-tests/harness.md). Every
+  manifest script runs under it, except a script whose lifecycle the harness cannot express, listed in
+  `_OWN_LIFECYCLE` (`tests/cpu/conventions/test_gpu_harness_conventions.py`) with the reason; an entry
+  whose script moves onto the harness fails the suite until it is dropped.
 - **Cover the matrix and the rejections.** Markers select the tier (`core` or `full`), the world size
   every entry declares (`1gpu 2gpu 4gpu 8gpu`) and capabilities (`ep cp tp etp pp hsdp vlm lora moe` +
   model family).
@@ -355,7 +323,7 @@ entry and the script name them, and the non-obvious ones are:
 
 | Var | Meaning |
 |---|---|
-| `HALO_TEST_<SUITE>_MODEL` | Swap the checkpoint a family or phase suite loads without editing it; the per-suite spelling keeps a global export from pointing a family test at a checkpoint of another family. Per family (`HALO_TEST_ZAYA_MODEL`, `HALO_TEST_GLM4_MODEL`, `HALO_TEST_GEMMA4_MODEL`, `HALO_TEST_QWEN3_5_MODEL`, …) and per phase: `HALO_TEST_EP_RT_MODEL` (EP round-trip, default a local Gemma4-26B-A4B checkpoint, built as shown below the table), `HALO_TEST_EP_CP_RT_MODEL` (EP+CP round-trip, the same for gpt-oss-20b), `HALO_TEST_EP1_KNOB_MODEL` (ep1 weight-sync, default gpt-oss), `HALO_TEST_RESUME_MODEL` / `HALO_TEST_RESUME_EP_MODEL` (SFT resume: dense default Qwen3-0.6B, and the MoE the `ep` mode needs), `HALO_TEST_LORA_CP_MODEL` / `HALO_TEST_LORA_SAVE_LOAD_MODEL` (both default Qwen3-0.6B; point them at a 4B for a scale check), `HALO_TEST_STEP3P7_MODEL` (the Step-3.7 vLLM sync suite serves its own `--write-checkpoint` tree, so it has no default and skips without one). A suite whose local default checkpoint is absent skips rather than failing. |
+| `HALO_TEST_<SUITE>_MODEL` | Swap the checkpoint a family or phase suite loads without editing it; the per-suite spelling keeps a global export from pointing a family test at a checkpoint of another family. Per family (`HALO_TEST_ZAYA_MODEL`, `HALO_TEST_GLM4_MODEL`, `HALO_TEST_GEMMA4_MODEL`, `HALO_TEST_QWEN3_5_MODEL`, …) and per phase: `HALO_TEST_EP_RT_MODEL` (EP round-trip, default a local Gemma4-26B-A4B checkpoint, built as shown below the table), `HALO_TEST_EP_CP_RT_MODEL` (EP+CP round-trip, the same for gpt-oss-20b), `HALO_TEST_EP1_KNOB_MODEL` (ep1 weight-sync, default gpt-oss), `HALO_TEST_RESUME_MODEL` / `HALO_TEST_RESUME_EP_MODEL` (SFT resume: dense default Qwen3-0.6B, and the MoE the `ep` mode needs), `HALO_TEST_STEP3P7_MODEL` (the Step-3.7 vLLM sync suite serves its own `--write-checkpoint` tree, so it has no default and skips without one). A suite whose local default checkpoint is absent skips rather than failing. |
 | `HALO_TEST_ZAYA_EP_STEPS` / `HALO_TEST_ZAYA_EP_SEQ` | Training steps (default `4`) and `max_length` (default `512`) of the ZAYA1-8B EP smoke suite (`tests/gpu/parallelism/ep/test_zaya_ep.py`); the step count is asserted, so a longer sweep stays self-checking. |
 | `HALO_TEST_ZAYA_FSDP_STEPS` | Training steps (default `4`) of the ZAYA1-8B FSDP2 suite (`tests/gpu/trainers/sft/test_zaya_fsdp.py`); its sequence length is fixed. |
 | `HALO_TEST_ZAYA_GC` / `HALO_TEST_ZAYA_GC_REENTRANT` | Gradient checkpointing (default **off**) and its `use_reentrant` kwarg (default on) for both Zaya suites. Zaya's load patch refuses GC, so `=1` asserts that refusal rather than training with it. |
@@ -370,7 +338,7 @@ entry and the script name them, and the non-obvious ones are:
 | `HALO_TEST_ENV_GRPO_SGLANG_MODEL` | Checkpoint of the SGLang Environmental-GRPO e2e wrappers (`trainers/grpo/test_env_grpo_sglang_e2e.py` and its four-rank sibling `test_env_grpo_sglang_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`); a per-family pass points it at the family and serves the same checkpoint. Its own knob because its server and default family differ from the vLLM leg's. |
 | `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` | Per-family overrides for the Environmental-GRPO e2e body: the policy's `attn_implementation` (unset = the loader's auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset = the attention projections read off the checkpoint's index, which MLA families resolve to their own names; needed where the projections do not end in `_proj`, such as Ling's `query_key_value,dense`). |
 | `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoint of the 4-rank Environmental-GRPO e2e (`trainers/grpo/test_env_grpo_vllm_4gpu_e2e.py`, default `unsloth/gpt-oss-20b-BF16`), whose rows hold two parallelism axes at once (EP+ETP, EP+TP, ep4). Its own knob because it shares the 2-GPU file's server but not its default family. |
-| `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_vllm_weight_transfer_reinit.py`; the pool-reconnect suite (`trainers/grpo/test_weight_sync_pool_reconnect.py`) drives the same server and reads the same checkpoint knob. An unreleased communicator costs ~633 MiB per cycle on each end, so twelve cycles of a leak overshoot the suite's 1 GiB growth budget several times over. |
+| `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` | Checkpoint (default `Qwen/Qwen3-0.6B`, the dense endpoint's) and connect/sync/disconnect cycle count (default `12`) of `trainers/grpo/test_vllm_weight_transfer_reinit.py`; the pool-reconnect suite (`trainers/grpo/test_weight_sync_pool_reconnect.py`) drives the same server and reads the same checkpoint knob. An unreleased communicator strands device memory on every cycle on each end, so twelve cycles of a leak overshoot the suite's 1 GiB growth budget. |
 | `HALO_TEST_VLLM_SERVER_GPU` | The vLLM server's GPU as `nvidia-smi` indexes it, for the same suite's device-memory read. Unset means "every GPU the trainer does not own", which is exactly the server's on the tier's own topology (`TRAINER_CUDA_DEVICES` covers the rest); set it when another job holds a third GPU. |
 | `HALO_TEST_SGLANG_REINIT_MODEL` / `HALO_TEST_SGLANG_REINIT_CYCLES` / `HALO_TEST_SGLANG_SERVER_GPU` | The same three knobs for the SGLang re-init suite (`trainers/grpo/test_sglang_weight_transfer_reinit.py`), against `SGLANG_SERVER_URL`: checkpoint (default `Qwen/Qwen3-0.6B`, the dense SGLang pass's), cycle count (default `12`) and the server's GPU for the device-memory read. |
 
@@ -415,10 +383,11 @@ run to tens of hours. This page owns tier composition; the manifest is the only 
 
 Where a big-checkpoint entry stays `core`, it is because it is a *correctness gate* — a comparison
 against an independent reference that catches a silently wrong result, like
-`parallelism/ep/test_ep_correctness.py` (gpt-oss ep2 vs the dense reference). Smoke runs on the same
-checkpoint are `full`: `trainers/sft/test_sft_gptoss_modes.py`, `trainers/sft/test_sft_oss20b_default.py`
-and `trainers/lora/test_lora_mixed_merged_save.py` all assert only that training completed on the
-requested shape and stayed finite, which the gate already covers.
+`parallelism/ep/test_ep_modes_vs_reference.py` (gpt-oss and Qwen3-MoE parallel modes vs the dense reference).
+Smoke runs on the same checkpoint are `full`: `trainers/sft/test_sft_gptoss_modes.py` and
+`trainers/lora/test_lora_mixed_merged_save.py` are smokes that check the run completed on the requested shape
+(and, for the gpt-oss suite, its sink shape and a save), with no comparison against a reference, which the gate
+already provides.
 
 Run `make test-gpu-core` deliberately, not as a quick check, and mark a new heavy or many-GPU test
 `full`. The tier measures about 4 h 15 m on 8×B300, and `gpu-tests.yml` budgets 6 h for the whole
@@ -457,44 +426,34 @@ grouped-GEMM defaults:
 | gpt-oss-20b under EP1, EP2, EP8, EP8 × TP2, EP4 × ETP2 | `benchmark_sft_ep.py` | `sft_ep_gpt-oss-20b_{ep1,ep2,ep8,ep8_tp2,ep4_etp2}_s4096` |
 | the EP8 row's gathered save (`--measure_save`) | `benchmark_sft_ep.py` | `sft_ep_gpt-oss-20b_ep8_gathered_save` |
 
-Every rank prints one `__HALO_BENCH__` line per key (`tests/common/reporting.py`) with its rank, the world
-size, the command and the metrics. The key names the golden `tests/baselines/bench/<key>.json`: the commit,
-image, date, world size and command it was measured with, and the metrics of each of its repeats, at least
-five. `make bench BAND=1` holds the run to them (`tests/common/equivalence/bench_band.py`, evidence in
-`evidence/bench_band-<revision>.json`); `make bench-band` re-checks the logs `make bench` left at HEAD
-without GPUs. Each gated metric has a band around the mean of its baseline repeats, give or take the larger
-of a margin and twice their spread. `tokens_per_second` (mean over ranks, 2% margin) and `save_seconds` (6%)
-must stay within theirs, on either side: a faster run fails too, since a band a speedup left behind would pass
-the regression that undoes it, so a change that is meant to speed a row up re-records its baseline.
-`peak_allocated_gb` (0.5%) and `save_peak_rss_gib` (1%; the save's peak resident host memory), each the
-highest over ranks, must not rise above their band's upper edge. That edge is never below the highest repeat,
-and it is not the highest repeat itself because a peak that varies between runs would fail one run in six
-against the highest of five. Every row trains on one corpus, `create_benchmark_dataset` in
-`tests/common/datasets.py`: seeded uniform token ids over the regular vocabulary, every position real. No
-model can fit it, so an MoE row's routing, and with it the hottest EP rank's step time and peak, stays put
-within and between runs: EP8, EP8 × TP2 and EP4 × ETP2 repeat within 1% in throughput and 0.02 GB in peak.
-On a corpus the model fits, the routing drifts as it fits, differently each run under the default
-non-deterministic dispatch (EP8 moved 4% in throughput and 1.2 GB in peak between runs). A row that shares
-the host with another job's CPU and network load (a model download) runs 4–17% slow, so recording refuses
-that repeat and a band run that meets one fails: keep the node to the bench while it runs. The save is
-host I/O into the page cache: its time moves by up to 6% between runs and its peak resident memory in steps
-of about 1%, hence their own margins. Five repeats measure the spread well enough for a later run of the same
-commit to pass its band. MFU, S-MFU and TFLOPS stay under `metrics.diagnostics`, never gated.
-Each training line also carries its rank's mean and median step time in milliseconds (`mean_step_time_ms`,
-`median_step_time_ms`); the band reads rank 0's. A repeat whose mean is more than 2% off its median is flagged
-(`FLAG` lines, `flags` in the evidence), never failed: a few stalled steps move the mean the gate reads while
-the median holds, so re-run a flagged row before reading its throughput as a regression.
-A key compares only with a baseline measured by the same command on as many ranks of the same GPU model, so
-editing a row means re-recording it; a measured key with no baseline, and a baseline the run did not
-measure, fail too.
+Every rank prints one `__HALO_BENCH__` line per key (`tests/common/reporting.py`). The key names the
+golden `tests/baselines/bench/<key>.json`: the commit, image, date, world size and command it was measured
+with, and the metrics of at least five repeats. `make bench BAND=1` holds the run to them
+(`tests/common/equivalence/bench_band.py`, evidence in `evidence/bench_band-<revision>.json`);
+`make bench-band` re-checks the logs `make bench` left at HEAD without GPUs.
+
+- **The band.** Each gated metric's band is the mean of its baseline repeats, give or take the larger of
+  a margin and twice their spread. `tokens_per_second` (mean over ranks, 2%) and `save_seconds` (6%)
+  must stay inside it on either side: a faster run fails too, so a change meant to speed a row up
+  re-records its baseline. `peak_allocated_gb` (0.5%) and `save_peak_rss_gib` (1%, the save's peak
+  resident host memory), each the highest over ranks, must not rise above its upper edge, which is never
+  below the highest repeat. MFU, S-MFU and TFLOPS stay under `metrics.diagnostics`, never gated.
+- **The corpus.** Every row trains on `create_benchmark_dataset` (`tests/common/datasets.py`): seeded
+  uniform token ids no model can fit, so an MoE row's routing — and the hottest EP rank's step time and
+  peak — stays put: EP8, EP8 × TP2 and EP4 × ETP2 repeat within 1% in throughput and 0.02 GB in peak. On
+  a corpus the model fits, the routing drifts differently each run (EP8 moved 4% and 1.2 GB).
+- **A quiet host.** A row sharing the host with another job's CPU or network load runs 4–17% slow;
+  recording refuses that repeat and a band run that meets one fails.
+- **Flags.** Each training line carries its rank's mean and median step time (`mean_step_time_ms`,
+  `median_step_time_ms`; the band reads rank 0's). A repeat whose mean is more than 2% off its median is
+  flagged, never failed: re-run it before reading its throughput as a regression.
+- **Same command.** A key compares only with a baseline measured by the same command on as many ranks of
+  the same GPU model; a measured key with no baseline, and a baseline the run did not measure, fail.
 
 `make bench RECORD=1` runs the rows five times on a clean tree and writes the baselines only when no repeat
-is outlying, removing any baseline the run no longer measures; it touches nothing else under
-`tests/baselines/`. A rate or a duration is outlying outside the band of the other repeats widened to four
-times their spread, a disturbed repeat rather than one at the edge of the spread four repeats measure; a
-peak is outlying only above that band's upper edge, since a lower peak widens the spread its ceiling is
-drawn from. Commit the files it writes. The gate's negative control holds the GPU
-idle before every EP layer's forward:
+is outlying (a rate or duration outside the other repeats' band widened to four times their spread, a peak
+only above its upper edge), removing any baseline the run no longer measures; commit the files it writes.
+The gate's negative control holds the GPU idle before every EP layer's forward:
 `make bench BAND=1 EXTRA_DOCKER_ENV="-e HALO_TEST_EP_FORWARD_DELAY_MS=2"` must fail every EP row's
 `tokens_per_second` and pass the dense rows and the save.
 
@@ -803,24 +762,14 @@ first-class content — report it with the reason.
 
 ## Submitting a PR
 
-1. **Get approved first** — an accepted issue plus a maintainer's `/approve @your-handle` on it. An un-approved PR is closed by
-   `pr-gate.yml`; once approved, reopen it, or ask on the issue and a maintainer will — the gate re-runs on
-   reopen. Merging a PR adds you to the allowlist, so the gate applies once. `/approve` assigns you to the
-   issue, which keeps it open while you work; an unassigned idle issue goes stale after 30 days and closes
-   7 days later.
-2. **Branch** off `main` — in your fork, unless you have write access. Every PR is squash-merged, and
-   every commit in it must carry a verified signature (SSH or GPG), forks included: GitHub does not
-   merge a PR while any of its commits lacks one. Re-sign earlier commits with
-   `git rebase --exec 'git commit --amend --no-edit -S' <base>` (the `main` commit the branch starts
-   from) and force-push; the one-time signing setup is in `CONTRIBUTING.md`.
-3. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
+1. **Get approved first and work from a signed fork branch** — the gate, the fork workflow and the
+   signed-commit setup are in [`CONTRIBUTING.md`](../../CONTRIBUTING.md).
+2. **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
    `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (plus
-   `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs `ruff`,
-   `actionlint`, the convention tests and the docs checks; the test tiers run locally, so report their
-   result in the PR. A PR that changes a path listed in `.github/sensitive-paths` also needs the
-   `sensitive` label, which a maintainer adds once the change is approved.
-4. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
-5. **No secrets.** Never add `keys/`, `.env`, `*.pem`, or any credential.
+   `make test-gpu-core` for GPU-affecting changes), `make docs`. The test tiers run locally, so report
+   their result in the PR.
+3. **Fill the PR template** — what and why, type of change, Proof-of-Value evidence, checklist.
+4. **No secrets.** Never add `keys/`, `.env`, `*.pem`, or any credential.
 
 Report vulnerabilities **privately** — see `SECURITY.md`, never a public issue.
 

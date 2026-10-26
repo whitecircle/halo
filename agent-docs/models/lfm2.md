@@ -2,11 +2,7 @@
 
 Liquid AI's `Lfm2MoeForCausalLM` — a hybrid MoE (interleaved short-convolution and full-attention layers) with sigmoid routing and an optional non-trainable `expert_bias` buffer for top-k selection correction. EP, ETP, and selective TP are supported; CP is blocked by the sequence-axis short-conv layers.
 
-| | EP | CP | TP | ETP | PP | EP+TP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| LFM-2 MoE | Yes | **No** | Yes | Yes | **No** | Yes |
-
-Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). The checkpoints also tie their head (`tie_word_embeddings` is the config-class default) and ship no `lm_head` tensor, so the tie gate refuses them first.
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism refuses the checkpoints at the tie gate, before the registry check: they tie their head (`tie_word_embeddings` is the config-class default) and ship no `lm_head` tensor.
 
 ## EP wrapper
 

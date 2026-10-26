@@ -146,9 +146,9 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 **6. Buffers.** `finalize_loaded_model()` (`src/model_loading/buffer_repair.py`) is the post-load repair every load path runs: it walks two fixer chains — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — and re-ties shared weights. transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
 
-**7. Tests.** The DeepSeek-V4 trio is the template: an EP-vs-FSDP equivalence test (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`, a thin subclass of `EPSftRoundTrip` in `tests/common/ep_sft_roundtrip.py` — copy it and override only the family hooks), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`). The family's tiny model also goes into `TINY_MOE_FAMILIES` (`tests/common/tiny_models.py`), keyed by its `model_type`, and its name into `_TINY_MOE_FAMILIES` in the manifest: the merge-on-save and precompute-resume sweeps run every entry, and `tests/cpu/conventions/test_tiny_family_roster.py` fails on a registered EP family missing from either. `tests/cpu/parallelism/test_ep_family_instantiation.py` builds every registered family's EP layer on its tiny model, and `tests/cpu/parallelism/test_ep_gc_replay.py` replays its dispatch under gradient checkpointing for every family whose layer supports it.
+**7. Tests.** The DeepSeek-V4 trio is the template: an EP=2-vs-stock row (`tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family deepseek_v4`, generated from `TINY_MOE_FAMILIES`; family-specific checks go in its `FAMILY_CHECKS`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`, a thin subclass of `EPSftRoundTrip` in `tests/common/ep_sft_roundtrip.py` — copy it and override only the family hooks), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`). The family's tiny model also goes into `TINY_MOE_FAMILIES` (`tests/common/tiny_models.py`), keyed by its `model_type`, and its name into `_TINY_MOE_FAMILIES` in the manifest: the merge-on-save and precompute-resume sweeps run every entry, and `tests/cpu/conventions/test_tiny_family_roster.py` fails on a registered EP family missing from either. `tests/cpu/parallelism/test_ep_family_instantiation.py` builds every registered family's EP layer on its tiny model, and `tests/cpu/parallelism/test_ep_gc_replay.py` replays its dispatch under gradient checkpointing for every family whose layer supports it.
 
-**8. Wire the docs.** A supported family gets `agent-docs/models/<name>.md`, an `examples/sft/<family>/` config, and a row in every family roster: the compatibility matrix and per-family list in [Supported Models](README.md), the supported-models tables in [Expert Parallelism](../parallelism/expert-parallelism.md) and [Grouped GEMM](../optimization/grouped-gemm.md), the wrapped-families list in [Parallelism](../parallelism/README.md), the human guide's [Supported Models](../../human-docs/models.md) and [Supported Matrix](../../human-docs/supported-matrix.md#model-families) tables, and the `CLAUDE.md` family list and Models index.
+**8. Wire the docs.** A supported family gets `agent-docs/models/<name>.md`, an `examples/sft/<family>/` config, and a row in every family roster: the compatibility matrix and per-family list in [Supported Models](README.md), the supported-models tables in [Expert Parallelism](../parallelism/expert-parallelism.md) and [Grouped GEMM](../optimization/grouped-gemm.md), the human guide's [Supported Models](../../human-docs/models.md) and [Supported Matrix](../../human-docs/supported-matrix.md#model-families) tables, and the `CLAUDE.md` family list and Models index.
 
 ## Add CP support
 
@@ -181,7 +181,12 @@ The wrapper must split Q/K/V into the local-rank slice before all-to-all, apply 
 
 If a model isn't in transformers yet, or its `trust_remote_code` conflicts with the v5 pin, vendor it — and remove the vendoring at step 5 once upstream ships the family.
 
-1. **Copy `configuration_*.py` and `modeling_*.py`** into `src/models/<name>/`.
+1. **Copy `configuration_*.py` and `modeling_*.py`** into `src/models/<name>/`. Seed
+   `HARDCODED_CONFIG_FOR_MODELS["<name>"]` (`transformers.utils.auto_docstring`) before importing the
+   modeling module, or `@auto_docstring` raises "Config not found". A hub checkpoint that stores experts
+   per expert while the module fuses them gets no entry in transformers' conversion mapping, so declare
+   the layout on the spec (`expert_layout` with its `per_expert_keys`), which the gather and the lazy
+   loader read.
 2. **Register in a module**, not in the package `__init__.py` — every package init under `src/` but the `src/__init__.py` bootstrap carries a docstring only (`tests/cpu/conventions/test_package_inits.py`). Put the calls in `src/models/<name>/registration.py`:
 
     ```python
@@ -194,7 +199,7 @@ If a model isn't in transformers yet, or its `trust_remote_code` conflicts with 
     `apply_remote_code_compat_shims()` restores removed transformers APIs (`is_torch_fx_available`, `ROPE_INIT_FUNCTIONS['default']`), binds names remote files call without importing (`DynamicLayer`), and patches every loaded remote module for dispatchless eager attention and legacy list-form tied-weight keys, which convert to the v5 dict form; `reject_untieable_list_ties` refuses a tied config that carried one, since `{}` ties nothing.
 
 4. **Add a CPU test** — `tests/cpu/models/test_<name>_registration.py` verifying `AutoModelForCausalLM.from_pretrained` resolves to your class.
-5. **Remove the vendoring** once upstream lands — the directory, its registration import, and the registration test all go, and the EP wrapper, Liger spec and any patches re-key to the upstream module.
+5. **Remove the vendoring** once upstream lands — the directory, its registration import, and the registration test all go, and the EP wrapper, Liger spec and any patches re-key to the upstream module. Name the removal trigger (the upstream PR) in the docstring of `src/models/<name>/__init__.py`.
 
 HF models that only need `trust_remote_code=True` (Bailing/Ling, Laguna) take the shims path with no vendoring.
 

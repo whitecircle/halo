@@ -28,7 +28,8 @@ change. The last column is the name you pass to `halo launch`
   frozen reference model, a second copy in memory unless you train LoRA or
   precompute the reference log-probs. SMPO needs no reference: its bounded loss
   stops pushing a pair once it is well separated, and an SFT term protects
-  generation quality. KTO takes unpaired thumbs-up / thumbs-down labels.
+  generation quality. KTO takes unpaired thumbs-up / thumbs-down labels and
+  keeps a reference under DPO's rules.
 - **Preference training or reward modeling.** Same pairs, different output.
   DPO, SMPO and KTO change the policy. `rewards` trains a scorer you use later,
   for rejection sampling or as a GRPO reward.
@@ -36,10 +37,15 @@ change. The last column is the name you pass to `halo launch`
   completions and generates nothing. Online GRPO (RLVR) generates single-turn
   completions and scores them with verifiable rewards. Async GRPO with
   environments adds multi-turn tool use and overlaps rollouts with training.
+  Each scores against a reference only while its KL term is on (`kl_beta`
+  offline, `beta` online and async).
 - **Teacher or self-distillation.** `teacher-distill` learns from a separate,
   larger model. Self-distillation uses the same model, given the answer as a
   hint, as its own teacher: offline (`self-distill`) or on-policy
   (`rlvr --use_sdpg=true`).
+
+Which trainer takes which parallelism mode is in the
+[Supported matrix](supported-matrix.md#training-methods).
 
 ## Pretraining
 

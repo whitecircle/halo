@@ -62,7 +62,9 @@ image's torch, so `export_profiler_artifacts` drops the empty file rather than l
 For a collapsed-stack flame graph use py-spy (§1c).
 
 Keep the window small — stacks and shapes add real overhead, and the capture is one-shot so the
-rest of training runs at full speed. Profile an arbitrary region the same way:
+rest of training runs at full speed. On a large multi-GPU MoE, CPU per-op tracing starves the GPUs
+(the first step crawls): build `TorchProfilerCallback(cpu_activity=False)` for a CUDA-kernel-only trace,
+at the cost of host-side op attribution and the TraceLens report (§1b). Profile an arbitrary region the same way:
 
 ```python
 from src.diagnostics.profiling import torch_profiler_session
@@ -231,6 +233,7 @@ python scripts/profiling/py_spy_diag.py dump   # → $TMPDIR/halo_diag_stacks/<t
 
 It attaches to every training process on the node, so it needs ptrace access to each ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).
 The rank *not* in a collective (still in the dataloader, or a different `if` branch) is the culprit.
+In-script, `dump_distributed_stacks` (`src/diagnostics/py_spy.py`) takes the same snapshot.
 
 ### Catch divergence before it deadlocks
 
@@ -240,8 +243,10 @@ a shape, the usual first sign of a TP/EP collective deadlock. Add the call at th
 nothing in the toolkit calls it for you:
 
 ```bash
-export HALO_TP_CONSISTENCY_CHECK=1   # make assert_rank_uniform raise instead of warn
+export HALO_TP_CONSISTENCY_CHECK=1   # make assert_rank_uniform raise instead of warn (1/true/yes/on)
 ```
+
+`strict=True`/`False` overrides the variable per call, and `group=None` or a one-rank group is a no-op.
 
 ```python
 from src.runtime.consensus import assert_rank_uniform

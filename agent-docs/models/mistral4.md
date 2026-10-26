@@ -2,19 +2,9 @@
 
 `Mistral4ForCausalLM` is the text side of `Mistral3ForConditionalGeneration` — the LM in `mistralai/Mistral-Small-4-*` and any `mistral3` VLM. It is a DeepSeek-V3 clone: softmax + group-topk routing with an always-on shared expert, MLA (multi-head latent attention) with llama-4 logarithmic position scaling, and YARN RoPE.
 
-| | EP | CP | TP | ETP | PP | EP+CP | EP+TP | EP+ETP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Mistral4 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | **No** ² | partial ¹ | Yes | Experimental |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). The Mistral4 suite runs EP+ETP as `ep_size=2, expert_tp_size=4`; the legal sibling `ep4+etp2` is not in it. EP+CP is a valid shape whose only GPU test on this model is a tiny-model LoRA row: `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py --family mistral4 --cp-size 2` (ep2+cp2).
 
-² Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
-
-EP+ETP (`ep_size>1` and `expert_tp_size>1`) is experimental; its expert-TP groups stay NVLink-local, and it cannot combine with attention TP (`tp_size>1`). The Mistral4 suite runs `ep_size=2, expert_tp_size=4`; the sibling `ep_size=4, expert_tp_size=2` is a legal shape that this model's matrix does not cover.
-
-`ep4+etp2` passes the racy-EP gate (`is_racy_single_domain_multigroup_ep`) because ETP raises `ep_group_size` to the domain, even though DeepEP still forms the two 4-rank dispatch groups the gate rejects for bare `ep4`; bare `ep4` on 8 stays rejected. See [Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md).
-
-¹ A valid shape whose only GPU test on this model is a tiny-model LoRA row: `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py --family mistral4 --cp-size 2` (ep2+cp2). Node-local EP+CP requires `ep_group_size == nvlink_domain_size`, so on 8-GPU nodes `ep_size=8` exactly; `cp_size` then only has to divide the domain.
-
-Coverage: `tests/gpu/parallelism/test_mistral4_all_parallelism.py` (one node per single-node mode under `pytest -m "gpu and mistral4"`; the single-node EP+CP coverage lives in the Cohere2 MoE matrix); `tests/cpu/parallelism/test_mistral4_registries.py` pins the EP/CP/TP registry claims.
+Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family mistral4` (one node per single-node mode under `pytest -m "gpu and mistral4"`; the single-node EP+CP coverage lives in the script's Cohere2 MoE rows); `tests/cpu/parallelism/test_mistral4_registries.py` pins the EP/CP/TP registry claims.
 
 ## EP wrapper
 

@@ -155,19 +155,11 @@ Before the trainer is built, every rank raises if `max_prompt_length + max_compl
 
 ### Weight sync
 
-Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). `reject_unsyncable_model` refuses at construction:
-
-- QLoRA (`load_in_4bit` / `load_in_8bit`).
-- A PEFT layer the sync cannot fold, or an adapter on a tensor the dense push does not send, such as EP expert weights ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
-- GptOss sinks removed by the `flash_attention_2` `reset_sinks` reset, and `train_sinks: true`.
-- Model types in the client's `UNSERVABLE_MODEL_TYPES`, families whose spec carries a `weight_sync_refusal`, and an MoE with no live EP wrapper (`expert_parallel_size: 1` with `use_grouped_gemm: false`) ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)).
-- Live `bias_update` balancing state.
+Weights are pushed before the **next** generation, not at the optimizer step; a resumed run pushes before its first rollout ([mechanics](../../infrastructure/rollout-servers.md#weight-sync)). `reject_unsyncable_model` refuses at construction what the sync cannot carry ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)), including a PEFT layer the sync cannot fold or an adapter on a tensor the dense push does not send ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)
 
-Rank 0 advertises an address for the vLLM workers to dial back and binds the weight-sync TCPStore on it alone ([group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)). Resolution order: an explicit `group_host` argument, `VLLM_GROUP_HOST`, **loopback when this host binds the server address itself** (avoiding firewalled hairpin traffic), then the default-route NIC.
-
-Set `VLLM_GROUP_HOST` to the trainer IP a **remote** server should dial when the default route is not on its subnet. It is the control-plane address, not `NCCL_SOCKET_IFNAME`.
+Set `VLLM_GROUP_HOST` to the trainer IP a **remote** server should dial when the default route is not on its subnet; this trainer has no per-server `group_host` (TRL builds its client without one). Resolution order and the rendezvous: [Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous).
 
 > [!NOTE]
 > **Multi-server sync belongs to Async GRPO with Environments**
@@ -214,7 +206,7 @@ Each row becomes a group of `num_generations` completions. Under TP and ETP ever
 
 ## vLLM on Blackwell (B200)
 
-- **Server:** pin `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on SM 10.0. On head-dim-256 families it resolves to FA2 and measures slower ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
+- **Server:** `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on SM 10.0 ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
 - **Trainer:** all three GRPO scripts default `attn_implementation` to **SDPA** for their right-padded batches, except under `reset_sinks: false` and offline GRPO under CP ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). A pinned value wins.
 
 ## Testing a setup

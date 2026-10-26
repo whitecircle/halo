@@ -427,6 +427,7 @@ def build_tiny_family_checkpoint(
     *,
     fp32_pins: bool = False,
     edit: Callable[[PreTrainedModel], None] | None = None,
+    overrides: dict | None = None,
 ) -> None:
     """Save ``family``'s seeded tiny model at ``tokenizer``'s vocab, with that tokenizer, as a checkpoint
     the production loaders read. Rank 0 only.
@@ -435,10 +436,11 @@ def build_tiny_family_checkpoint(
     (:func:`tests.common.peft_helpers.attention_target_modules`). Without ``tokenizer`` the tiny config's
     own vocab is kept and no tokenizer is saved. ``fp32_pins`` stores the family's fp32-pinned parameters
     at full fp32 precision, as a release does, rather than rounded through bf16. ``edit`` changes the
-    random-init model before it is saved (a test pinning its routing, say).
+    random-init model before it is saved (a test pinning its routing, say); ``overrides`` sets text-config
+    fields, as :func:`tiny_family_model` takes them.
     """
     torch.manual_seed(seed)
-    model = tiny_family_model(family, tokenizer)
+    model = tiny_family_model(family, tokenizer, overrides=overrides)
     if edit is not None:
         edit(model)
     pinned = fp32_pinned_names(model) if fp32_pins else frozenset()
@@ -461,6 +463,7 @@ def shared_tiny_family_checkpoint(
     *,
     fp32_pins: bool = False,
     edit: Callable[[PreTrainedModel], None] | None = None,
+    overrides: dict | None = None,
 ) -> str:
     """:func:`build_tiny_family_checkpoint` into the rank-shared scratch dir ``name``, returned: rank 0
     builds it (removing it at teardown) and every rank waits for it. Collective."""
@@ -468,6 +471,8 @@ def shared_tiny_family_checkpoint(
     if ctx.rank == 0:
         shutil.rmtree(path, ignore_errors=True)
         ctx.on_teardown(lambda: shutil.rmtree(path, ignore_errors=True))
-        build_tiny_family_checkpoint(family, path, tokenizer, seed, fp32_pins=fp32_pins, edit=edit)
+        build_tiny_family_checkpoint(
+            family, path, tokenizer, seed, fp32_pins=fp32_pins, edit=edit, overrides=overrides
+        )
     ctx.barrier()
     return path

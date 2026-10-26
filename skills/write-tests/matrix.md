@@ -3,50 +3,21 @@
 Tick these off when a change touches a trainer, parallelism mode, or model family. A
 support-matrix addition is not done until its **rejection counterpart** exists.
 
-## Trainer × parallelism support matrix
+## Trainer × parallelism and mode coverage
 
-From the trainer table in `CLAUDE.md`. For each cell marked **Yes**, there should be a
-correctness test (loss finite + decreasing over ≥2 steps + cross-rank invariants). For each
-**No / NOT SUPPORTED**, there should be a rejection test (must raise).
+Every supported cell needs a correctness test (loss finite + decreasing over ≥2 steps + cross-rank
+invariants); every refused one a rejection test (must raise). The cells live once:
 
-| Trainer | EP | CP | TP | ETP | PP |
-|---|:--:|:--:|:--:|:--:|:--:|
-| `DistributedSFTTrainer` | Yes | Yes | Yes | Yes | Yes |
-| `SmoothMarginPOTrainer` (SMPO) | Yes | Yes | Yes | Yes | Yes |
-| `OfflineGRPOTrainer` | Yes | Yes (full fine-tuning; adapters rejected) | Yes | Yes | Yes (any `kl_beta`) |
-| `DistributedGRPOTrainer` (online) | Yes | **No** | Yes | Yes | **No** |
-| `DistributedDPOTrainer` | Yes | **No** | Yes | Yes | Yes (precompute-only) |
-| `DistributedKTOTrainer` | Yes | **No** | Yes | Yes | Yes (`apo_zero_unpaired`, precompute-only) |
-| `DistributedRewardTrainer` | Yes | **No** | Yes | Yes | Yes |
-| `ClassificationTrainer` | Yes | **No** | Yes | Yes | Yes |
-| `DistributedDistillationTrainer` | Yes | **No** | Yes | Yes | **No** |
-| `DistributedSelfDistillationTrainer` | Yes | **No** | Yes | Yes | **No** |
-| `DistributedSDPGTrainer` | Yes | **No** | Yes | Yes | **No** |
-| `EmbeddingTrainer` | Yes | **No** | Yes | Yes | **No** |
-| `DistributedAsyncEnvironmentalGRPOTrainer` | Yes | **No** | Yes | Yes | **No** |
+- trainer × CP/PP: [Trainer Compatibility](../../agent-docs/reference/trainer-architecture.md#trainer-compatibility),
+  read off `SUPPORTS_CP` / `PP_REFUSAL` by `reject_undeclared_axes` (EP, ETP and TP run under every
+  trainer). A PP-supporting trainer still needs the construction-refusal tests of
+  [Rejected combinations](../../agent-docs/parallelism/pipeline-parallelism.md#rejected-combinations);
+  each PP suite lives under `tests/gpu/parallelism/pp/`;
+- supported axis sets and topology rules:
+  [Supported combinations](../../agent-docs/parallelism/README.md#supported-combinations);
+- family × axis: [Compatibility matrix](../../agent-docs/models/README.md#compatibility-matrix).
 
-`SUPPORTS_CP` (default `False`) and `PP_REFUSAL` (default a refusal; `None` admits PP), both on
-`DistributedTrainerMixin` (`src/trainers/distributed_trainer.py`), are the class declarations its `reject_undeclared_axes` reads. CP is
-incompatible with any trainer using `logits_to_keep`, global log-prob sums, full-sequence pooling, dual models, or a separate-length teacher or rollout
-sequence; PP additionally rejects PEFT/LoRA, a live `ref_model`, `activation_offloading` and
-reentrant GC at trainer construction, so a PP-supporting trainer still needs those rejection tests.
-Each PP **Yes** cell's suite lives under `tests/gpu/parallelism/pp/`.
-
-## Parallelism-mode matrix (from `CLAUDE.md`)
-
-The allowlist is `SUPPORTED_AXIS_SETS` (`src/distributed/parallelism_rules.py`) — anything not in
-it is rejected before any rank math. Supported (need a correctness test): plain DP, EP-only,
-TP-only, CP-only, PP-only, pure ETP (`ep_size=1`), EP+CP (node-local EP), EP+TP (node-local TP),
-EP+ETP (experimental, node-local ETP only), PP+EP, PP+ETP (`ep_size=1`).
-
-Pure-EP topology caveat — `ep_size=2` (2-rank groups) or `ep_size = nvlink_domain_size` (a single
-group filling the domain) is supported. Multiple >2-rank dispatch groups in one domain
-(`num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size`, e.g. ep4 on an
-8-GPU domain) are rejected — mechanism and evidence in the `parallelism` skill (`matrix.md`, row
-*Multi-group >2-rank EP on one NVLink domain*). The enforcement point a test can target:
-`parallelism_rules._reject_single_domain_multigroup_ep` raises at
-config time (predicate `is_racy_single_domain_multigroup_ep`), hand-built configs included. Write it
-as a **rejection** test (CPU config test is enough), not a correctness test.
+`tests/cpu/parallelism/test_docs_limitation_tables.py` pins those tables against the code.
 
 ## REQUIRED rejection tests (combos that MUST raise)
 
@@ -60,7 +31,7 @@ as a **rejection** test (CPU config test is enough), not a correctness test.
 | PP + EP + TP, PP + EP + CP, PP + EP + ETP (all three `>1`) | raises — outside the allowlist; FSDP mesh conflict (TP), CP-scaled expert gradients (CP), the expert-TP reduce cannot be deferred past the combine (ETP) |
 | QLoRA + EP | raises |
 | LoRA/PEFT + TP (`tp_size>1`), native EP expert LoRA included | raises at trainer construction — `reject_lora_under_tp` |
-| Multi-group >2-rank EP on one NVLink domain (`ep_size>2` with `nvlink_domain_size > ep_group_size`) | fails fast (DeepEP combine race) |
+| Multi-group >2-rank EP on one NVLink domain (`ep_size>2` with `nvlink_domain_size > ep_group_size`) | raises at config time (`_reject_single_domain_multigroup_ep`) — a CPU config test is enough |
 | `SUPPORTS_CP = False` trainer with `cp_size>1`, a `PP_REFUSAL` trainer with `pp_size>1` | rejects in `parallelism_config_from_args`, and at trainer `__init__` for a hand-built config |
 
 A rejection test asserts the *reason*, not just that something raised:
@@ -76,19 +47,15 @@ a CPU test (see `tests/cpu/parallelism/test_cp_support_declared.py` for the exis
 attribute-inspection pattern, and `tests/cpu/parallelism/test_parallelism_config.py` for
 config-level rejections).
 
-## EP-family `ep_vs_fsdp` baselines (per MoE family)
+## EP-family EP-vs-stock rows (per MoE family)
 
-Every supported MoE family needs an `ep_vs_fsdp` correctness test: run the same seeded data
-under FSDP (`ep_size=1`) and under EP, and assert step-0 loss matches within
-`TOL.parallel_vs_baseline_loss_abs` and the trend within
-`TOL.parallel_vs_baseline_train_loss_abs`. Existing exemplars to copy:
-
-All live in `tests/gpu/parallelism/ep/`, under two spellings — `test_ep_vs_fsdp_*`
-(cohere2_moe, deepseek_v4, glm4_moe, glm5_next, step3p7) and `test_ep_vs_reference_*`
-(bailing_v3, inkling, qwen3_moe) — plus `test_ep_vs_no_ep.py` for gptoss.
-
-Every MoE family on the roster (`agent-docs/models/README.md`) needs one. New family → add the
-`ep_vs_fsdp` test + register it in the manifest with the family marker.
+Every MoE family runs EP=2 against the stock model it was copied from, on its tiny model:
+`tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family <name>`, one manifest row per
+`TINY_MOE_FAMILIES` entry. It asserts the loss within `TOL.parallel_vs_baseline_loss_abs` and every
+MoE-block gradient in direction and scale, the experts through the export's own gather. A new family
+gets its row by joining `TINY_MOE_FAMILIES`; checks of its own go in the script's `FAMILY_CHECKS`. The
+real checkpoints (gpt-oss, Qwen3-MoE) run EP, EP+TP and ETP against the undistributed forward in
+`test_ep_modes_vs_reference.py`, and gpt-oss also against its no-EP load in `test_ep_vs_no_ep.py`.
 
 ## Tier / marker checklist for a new GPU test
 

@@ -2,13 +2,7 @@
 
 Two sizes: 20B and 120B. MoE with **attention sinks** (per-head learnable scalars) and an interleaved expert layout de-interleaved at load on the grouped-GEMM and ETP paths, then re-interleaved on save.
 
-| | EP | CP | TP | ETP | PP | EP+TP | EP+CP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| GPT-OSS 20B / 120B | Yes | Yes | Yes | Yes | Yes ¹ | Yes | Yes |
-
-`GptOssConfig` ships a native HF `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo selective-TP path.
-
-¹ Registered for pipeline parallelism, alone or with EP or pure ETP; balance with `bias_update` or `none` (`aux_loss` is severed by the split). Two-node recipe: `examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Every axis runs on both sizes ([Compatibility matrix](README.md#compatibility-matrix)). `GptOssConfig` ships a native HF `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo selective-TP path. Under pipeline parallelism balance with `bias_update` or `none` (`aux_loss` is severed by the split); two-node recipe: `examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## EP wrapper
 

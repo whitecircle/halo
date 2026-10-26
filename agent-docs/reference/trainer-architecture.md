@@ -553,12 +553,10 @@ accelerate-managed FSDP v1 does not create dynamic subclasses and is unaffected.
 
 ## Checkpoint save and load
 
-Weight saves and loads live in `src/checkpoint/parallel/`.
-`save_model()` builds a `CheckpointContext` from explicit trainer fields (`_checkpoint_context`, the
-one place a saver's trainer state is read) and hands it to `save_checkpoint()`, which writes the tokenizer and runs
-the `CheckpointSaver` its `select_checkpoint_saver()` ladder picks — PEFT and expert-LoRA adapters
-included (`None` = fall through to `Trainer.save_model`). The ladder reads rank-uniform state only,
-so every rank picks the identical saver.
+The save flow, the saver ladder, the on-disk formats and every resume path are on
+[Checkpoints & Resume](checkpoints.md). On the trainer side, `_checkpoint_context` is the one place a
+saver's trainer state is read, and the ladder reads rank-uniform state only, so every rank picks the
+identical saver (`None` = fall through to `Trainer.save_model`).
 
 Weight resume goes through `load_resume_weights()` over `_weights_load_context()`, and the per-rank
 optimizer shards through `OptimizerShardStore` (`src/checkpoint/parallel/`) over
@@ -586,8 +584,7 @@ plain FSDP2 included, since `use_grouped_gemm` defaults on), and `tp_size > 1` w
 weights.
 
 Adapter-only runs reload in place and are exempt — unless `merge_expert_lora_on_save` folds the
-adapter into a full base checkpoint, which the loader refuses like any other. For the formats,
-multi-node filesystem handling, and resume, see [Checkpoints & Resume](checkpoints.md).
+adapter into a full base checkpoint, which the loader refuses like any other.
 
 ## Related pages
 

@@ -3,30 +3,11 @@
 This is the short version. The full policy is in the root
 [`CONTRIBUTING.md`](../CONTRIBUTING.md).
 
-Bug reports, proposals and focused pull requests are welcome. Code changes need
-an accepted issue and a maintainer's approval first, because AI makes plausible
-but wrong contributions cheap to produce.
-
-## Start in the right place
-
-| You have | Where it goes |
-| --- | --- |
-| Reproducible bug | Issue, **Bug report** template |
-| Feature idea or proposal | Issue, **Feature request / proposal** template |
-| Usage or design question | Issue, **Question / support** template |
-| Docs error or gap | Issue, **Documentation** template |
-| Security issue | Private report, see [`SECURITY.md`](../SECURITY.md) |
-| Code change | An accepted issue, then a maintainer's `/approve @your-handle` on it |
-
-Don't open a PR until a maintainer approves you on an accepted issue. PRs from
-unapproved contributors are closed automatically.
-
-- Once approved, reopen a PR the gate closed, or ask on the issue and a
-  maintainer will. The gate runs again on reopen.
-- After your first merged PR you're on the approved list and skip the gate.
-
-Work from a fork: fork the repo, clone your fork, branch off `main`, push to your
-fork, and open the PR against `whitecircle/halo`.
+Bug reports, proposals and focused pull requests are welcome. A code change
+needs an accepted issue and a maintainer's `/approve @your-handle` on it before
+any PR, and PRs from unapproved contributors are closed automatically. The
+issue templates, the gate and working from a fork are in the full policy; report
+security issues privately ([`SECURITY.md`](../SECURITY.md)).
 
 ## The one rule
 

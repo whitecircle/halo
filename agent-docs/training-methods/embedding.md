@@ -34,19 +34,13 @@ matryoshka_dimensions: [256, 128, 64, 32]
 
 ## Configuration
 
-| Parameter | Default | Description |
-|---|---|---|
-| `loss_type` | `mnrl` | Loss function |
-| `loss_scale` | `20.0` | Scale / inverse temperature |
-| `cached_mnrl_mini_batch_size` | `32` | Rows per gradient-cached sub-forward (`cached_mnrl`) |
-| `matryoshka_dimensions` | `None` | Matryoshka truncation dims |
-| `matryoshka_weights` | `None` | Per-dimension weights; same length as the dimensions |
-| `pooling_mode` | `mean` | `mean`, `cls`, `max`, `lasttoken`, `weightedmean`, `mean_sqrt_len_tokens` |
-| `normalize_embeddings` | `true` | L2-normalize output embeddings |
-| `max_length` | `512` | Truncation length, installed as the pipeline's `max_seq_length` and passed by sentence-transformers' collator as every text column's; `null` or non-positive → the backbone's context window, resolved by the entry script (a hand-built `EmbeddingTrainer` refuses a non-positive one) |
-| `disable_dropout` | `false` | Disable dropout while training |
-| `batch_sampler` | `batch_sampler` | `no_duplicates` / `no_duplicates_hashed` (MNRL — avoids in-batch false negatives), `group_by_label` (batch-triplet losses). Refused under TP, ETP or a pre-sharded dataset: those runs batch through the toolkit's DP-sharded loader, which builds plain batches |
-| `dataloader_drop_last` | `false` (`true` on any multi-process launch) | sentence-transformers sets it to `true`, with a warning, on any multi-process launch, a YAML `false` included. A CLI `--dataloader_drop_last=false` survives that and is refused on a multi-process plain DP or pure EP run over a map-style dataset that is not pre-sharded, right after the datasets load: the sentence-transformers loader shards its batch sampler with `even_batches` off, so a kept remainder gives some ranks one step more and the run hangs in it. The eval loader then drops its last incomplete round too. On a multi-process plain DP or pure EP run, an iterable dataset that is not pre-sharded runs only with `accelerator_config.dispatch_batches: false` and either `split_batches: true` or at most one file shard per process, else it is refused: accelerate's default dispatches an iterable by concatenating collated batches, which the collator's string modality fields cannot take, and more shards than processes are split by shard, unevenly whatever `drop_last` says |
+Types and defaults: [EmbeddingConfig](../reference/configuration-reference.md#embeddingconfig).
+
+`max_length` is installed as the pipeline's `max_seq_length` and passed by sentence-transformers' collator as every text column's; `null` or non-positive resolves to the backbone's context window in the entry script (a hand-built `EmbeddingTrainer` refuses a non-positive one).
+
+`batch_sampler: no_duplicates` or `no_duplicates_hashed` avoids in-batch false negatives under MNRL, and `group_by_label` serves the batch-triplet losses. All three are refused under TP, ETP or a pre-sharded dataset: those runs batch through the toolkit's DP-sharded loader, which builds plain batches.
+
+sentence-transformers sets `dataloader_drop_last` to `true`, with a warning, on any multi-process launch, a YAML `false` included. A CLI `--dataloader_drop_last=false` survives that and is refused on a multi-process plain DP or pure EP run over a map-style dataset that is not pre-sharded, right after the datasets load: the sentence-transformers loader shards its batch sampler with `even_batches` off, so a kept remainder gives some ranks one step more and the run hangs in it. The eval loader then drops its last incomplete round too. On a multi-process plain DP or pure EP run, an iterable dataset that is not pre-sharded runs only with `accelerator_config.dispatch_batches: false` and either `split_batches: true` or at most one file shard per process, else it is refused: accelerate's default dispatches an iterable by concatenating collated batches, which the collator's string modality fields cannot take, and more shards than processes are split by shard, unevenly whatever `drop_last` says.
 
 `pooling_mode`, `normalize_embeddings` and `max_length` describe the pipeline both loading paths train: the EP/TP path builds the `SentenceTransformer` modules from them, the standard path aligns the checkpoint's `modules.json` to them.
 

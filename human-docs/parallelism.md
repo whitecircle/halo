@@ -40,38 +40,19 @@ message that names the rule. Most checks run at config time, before the model
 loads; a few (LoRA with TP, CP head counts) fail at model load or trainer
 construction.
 
-- **Allowed combinations.** EP pairs with at most one of TP, CP or ETP. TP+CP,
-  TP+ETP, ETP+CP, PP+TP, PP+CP and any three axes are rejected.
-- **Within one NVLink domain, EP fills the domain or uses `ep_size=2`.** Sizes
-  in between, such as EP=4 on 8 GPUs, are rejected: the MoE routing collectives
-  race FSDP2's and the run faults or deadlocks. For a 4-way expert split on 8
-  GPUs, use `ep4 + etp2`. The check compares `ep_size × expert_tp_size` with the
-  domain size, so `ep4 + tp2` is rejected like plain `ep4`.
-- **TP, ETP and node-local EP stay inside one NVLink domain.** On a typical
-  8-GPU host that is the node; on NVL72, set `NVLINK_DOMAIN_SIZE=72` to make it
-  the rack. `tp_size` and `expert_tp_size` must divide the domain size. EP spans
-  domains with `--ep_scope=global` on an RDMA fabric ([Clusters](clusters.md)).
-  EP+TP across domains needs one EP group that spans the whole job (`ep_size` =
-  world size).
-- **EP+CP needs node-local EP that fills the domain.** `ep_size` must equal the
-  NVLink domain size, for example `ep8` on an 8-GPU node. Global-scope EP with
-  CP is rejected.
-- **HSDP is for pure DP or CP.** `--use_hsdp=true` shards within an NVLink
-  domain and replicates across domains ([Clusters](clusters.md)). It is
-  rejected with EP, TP and ETP, and does nothing on a single-domain job.
-- **Replicated experts are FSDP-sharded by default.** With `ep_size` and
-  `expert_tensor_parallel_size` both 1, `fsdp_shard_ep1_experts: true` shards
-  them, which saves memory that otherwise grows with the DP size. Setting it to
-  `false` is rejected under TP or CP.
-- **LoRA does not combine with TP** (or EP+TP).
-- **QLoRA runs on plain data parallelism and CP only.** Its 4-bit base is
-  replicated, not FSDP-sharded, so FSDP knobs such as `use_hsdp` are refused
-  under torchrun. EP, ETP and TP reject it, and a MoE model also needs
-  `use_grouped_gemm: false`. Offline GRPO rejects it under CP, and both online
-  RL methods reject it in every mode, because weight sync would ship packed
-  4-bit tensors to the server.
-- **CP covers SFT, SMPO and offline GRPO.** Offline GRPO under CP is full
-  fine-tuning only. Online GRPO and async GRPO do not support CP.
+- **Allowed combinations** are in the
+  [Supported matrix](supported-matrix.md#parallelism-modes).
+- **Within one NVLink domain, EP fills the domain or uses `ep_size=2`.** EP=4 on
+  8 GPUs is rejected, and so is `ep4 + tp2`; for a 4-way expert split on 8 GPUs,
+  use `ep4 + etp2`
+  ([why](../agent-docs/parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs) ↗).
+- **Every other layout rule** (what stays inside one NVLink domain, which is
+  the node, or the rack on NVL72 with `NVLINK_DOMAIN_SIZE=72`; EP+CP; HSDP; the
+  FSDP knobs) is in
+  [Topology rules](../agent-docs/parallelism/README.md#topology-rules) ↗.
+- **LoRA, QLoRA and the trainers each mode covers** are in the
+  [Supported matrix](supported-matrix.md#peft-quantization-and-data) and its
+  [Training methods](supported-matrix.md#training-methods) table.
 
 ## Context parallelism
 
@@ -86,12 +67,9 @@ sequence length to fit.
 
 `pipeline_parallel_size` splits the decoder layers into stages, each a whole
 number of NVLink domains, so only point-to-point activations cross nodes and a
-run needs at least two nodes. It composes with EP or pure ETP and covers SFT,
-SMPO, DPO and KTO (precompute-only), offline GRPO, reward and classification.
-
-Only registered families split: Qwen3 dense (untied, 8B and up), Qwen3.5/3.6,
-GPT-OSS, DeepSeek-V4, and the Step-3.7 and GLM-5 Next text towers. Any other
-model is refused by name before a weight loads. Every batch pads to
+run needs at least two nodes. It composes with EP or pure ETP. Which methods
+and families it covers is in the [Supported matrix](supported-matrix.md); any
+other model is refused by name before a weight loads. Every batch pads to
 `max_length`, so use `packing` (except on Qwen3.5/3.6, whose packing PP
 refuses). On per-node storage, merge the nodes' checkpoint directories with
 `halo run merge-pp-stages` before loading the result

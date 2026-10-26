@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Numerical correctness of combined/complex parallelism shapes vs a single-GPU reference.
 
-``tests/gpu/parallelism/test_mistral4_all_parallelism.py`` proves each shape *runs* (finite loss,
+``tests/gpu/parallelism/test_moe_all_parallelism.py`` proves each shape *runs* (finite loss,
 rank-consistent reduced loss, EP wrappers land, checkpoint roundtrips). It does **not**
 prove the shape computes the *same math* as the undistributed model. This test closes
 that gap for the non-CP shapes on Mistral4 — EP, TP, pure ETP, **EP+TP** and **EP+ETP** —

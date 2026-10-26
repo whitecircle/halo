@@ -4,9 +4,7 @@
 
 Around that sit Manifold-Constrained Hyper-Connections (`hc_mult` parallel residual streams) and three attention layer types (sliding window / CSA + Lightning Indexer / HCA) over shared-KV MQA with `head_dim=512` and learnable sinks. V4-Flash: 43 layers, 256 routed experts, top-k=6.
 
-| | EP | CP | TP | ETP | EP+TP | EP+CP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| DeepSeek-V4 | Yes | No | No | Yes | No | No |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Why each axis runs or not:
 
 - **CP** — the CSA/HCA compressors pool non-overlapping token windows along the sequence axis; a CP shard would compress incomplete windows at every chunk boundary. Rejected by class name in `src/distributed/context_parallel/model_rules.py`.
 - **TP** — `DeepseekV4Attention` (shared-KV MQA broadcast to all heads + the compressor branch) is not shardable; `apply_tp_to_attention_only` raises when a model ends up with zero shardable attention layers under `tp_size > 1`.

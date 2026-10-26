@@ -1,17 +1,7 @@
 #!/usr/bin/env python
-"""Base-class contracts of native bias-update adoption (the spec's ``balancing_slot``).
-
-Families whose selection math already consults a checkpoint-persistent tensor adopt that tensor as
-the balancing state, so the trained bias exports with every gathered save instead of dying with the
-run. The machinery lives on ``EPMoELayerBase``; these tests pin its edges for every declaring
-family: adoption identity (updates land in the tensor the family's routing actually reads), the
-single-application guarantee (``_balancing_bias`` returns None in native mode — the family's own
-route already adds the adopted tensor), Parameter→buffer re-registration under the same state-dict
-key (FSDP2 shards Parameters, which would break the callback's in-place updates), the fp32 upcast,
-the meta fail-loud, slot materialization on config-gated families (LFM-2), the adoption of GPT-OSS's
-trainable logit bias, and the side-buffer fallback when an instance lacks a non-materializable slot.
-
-    python tests/cpu/parallelism/test_native_bias_balancing_adoption.py
+"""Native bias-update adoption (the spec's ``balancing_slot``) per declaring family: the adopted tensor is the one the
+family's routing reads and exports, applied once, an fp32 buffer under its key, materialized where config-gated
+(LFM-2), refused on meta; and a balancing bias that moves each family's selection.
 """
 
 import pytest
@@ -31,7 +21,13 @@ from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.families.roster import ep_layer_classes
 from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from src.distributed.expert_parallel.moe_layer.balancing_bias import EPBalancingBiasMixin
+from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.models.moe.balancing import is_transient_balancing_router, iter_balancing_routers
+from tests.common.ep_reference import ep_layers
+from tests.common.parallelism import single_process_ep_config
+from tests.common.rosters import ep_layer_class_by_model_type
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 NUM_EXPERTS = 8
 # Hub slots are bf16 everywhere; the adoption's fp32 upcast is load-bearing (1e-3 steps round away).
@@ -325,6 +321,30 @@ def test_exactly_one_family_materializes_its_native_balancing_slot():
     assert lfm2._can_materialize_native_balancing_slot() is True
     glm4 = _bare_layer(EPGlm4MoELayer, _Gate("e_score_correction_bias"))
     assert glm4._can_materialize_native_balancing_slot() is False
+
+
+@pytest.mark.parametrize(
+    "family",
+    [
+        family
+        for family, cls in ep_layer_class_by_model_type().items()
+        if family in TINY_MOE_FAMILIES and issubclass(cls, EPSharedExpertsMoELayerBase)
+    ],
+)
+def test_a_large_balancing_bias_pulls_its_expert_into_every_selection(family):
+    """A bias that never reaches selection leaves every adoption pin above green while balancing does nothing. Here
+    the route the forward takes must pick an expert no token picked unbiased, once that expert carries a huge bias;
+    DeepSeek-V4's hash layers refuse the bias, so its first top-k layer is the one probed."""
+    torch.manual_seed(0)
+    model = apply_ep_layers(tiny_family_model(TINY_MOE_FAMILIES[family]), single_process_ep_config())
+    layer = next(layer for layer in ep_layers(model) if layer.enable_bias_balancing())
+    flat = torch.randn(4, layer.hidden_dim)
+    with torch.no_grad():
+        natural, _ = layer._route_hidden_states(flat)
+        target = next(expert for expert in range(layer.num_experts) if not (natural == expert).any())
+        layer.balancing_biases[target] = 1e3
+        forced, _ = layer._route_hidden_states(flat)
+    assert (forced == target).any(-1).all(), f"{family}: the biased expert {target} missed tokens: {forced.tolist()}"
 
 
 if __name__ == "__main__":

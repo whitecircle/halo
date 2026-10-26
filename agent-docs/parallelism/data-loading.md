@@ -172,6 +172,14 @@ The map/filter runs on one rank per filesystem scope and the rest read its cache
 the store joins and the never-nest rule are on
 [Filesystem Handling](../data/filesystem-handling.md#coordination-primitives).
 
+Whether a source is sharded at all is agreed across ranks (`is_sharded_dataset_across_ranks`, an all-reduce MAX): a
+per-rank S3 probe errs only toward "not sharded" on a credentials flake, and a split verdict would load
+different sizes on different ranks and hang the first collective.
+
+A rank past the last shard is handed an empty split carrying the artifact's **schema** (read off the
+split's first shard), never a column-less one: every downstream `column_names` test gates a
+coordinated operation, so a rank whose split had no columns would skip a barrier its peers make.
+
 ## Common pitfalls
 
 - **Double-sharding:** a sampler that already shards DP (e.g. `MultiGroupSampler`) must pass

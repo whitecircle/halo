@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """``score_ep_grad_pairs`` fails each way an EP gradient can disagree with its reference.
 
-The EP gradient GPU suites (the EP-vs-FSDP family tests, Inkling, Bailing V3) gate their gradient
+The EP gradient GPU suites (the per-family EP-vs-stock rows and the EP+ETP Inkling wrapper) gate their gradient
 checks on this helper, and they run only on the GPU tiers. Each failure mode it exists for is pinned here: a
 missing or misshapen EP gradient, a doubled or halved cross-rank divide, and a reoriented gradient.
 

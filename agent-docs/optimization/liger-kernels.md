@@ -165,13 +165,9 @@ the EP wrapper the toolkit's class swap runs them on Halo's own SwiGLU kernel (`
 wrapper runs.
 
 Upstream's MoE appliers (Qwen3 MoE, Mixtral, Qwen3-VL MoE, GLM-4V MoE, HunYuan MoE, Qwen3.5 MoE, Qwen3-Next)
-swap the routed-experts class for `LigerExperts` under `swiglu`. On Blackwell, `LigerExperts` computed the input
-gradient wrong until the fix that shipped in liger-kernel 0.8.3
-([Liger-Kernel#1413](https://github.com/linkedin/Liger-Kernel/pull/1413)): against fp32 eager experts on a B300
-at Qwen3-30B-A3B's shape (128 experts, top-8, 8192 tokens), `dx` was off by 0.61 relative while the forward and
-weight gradients stayed under 0.5%. The routed-experts GPU test has not re-measured the fixed kernel.
-
-Two rules keep it off:
+swap the routed-experts class for `LigerExperts` under `swiglu`, and two rules keep it off, since no GPU test here
+validates its Blackwell input gradient against fp32 eager experts (the gradient
+[Liger-Kernel#1413](https://github.com/linkedin/Liger-Kernel/pull/1413) corrected):
 
 - The Qwen3.5-MoE and Qwen3-Next specs withhold `swiglu` from upstream and serve it on their own MLPs.
 - Where Halo does not wrap a MoE's experts and the resolved applier would hand `swiglu` to upstream, the

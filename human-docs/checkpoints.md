@@ -35,64 +35,26 @@ These are checked at startup.
 
 ## Resume
 
-Set `resume_from_checkpoint` to a checkpoint directory, or to `true` to pick the
+Set `resume_from_checkpoint` to a checkpoint directory, or to `true` for the
 newest complete one in `output_dir`, and launch the same training script again.
+The training script restores the weights, so resume through it, not through a
+hand-built model.
 
-A torchrun run with sharded parameters (FSDP2, EP, TP, CP) saves per-rank
-optimizer shards, the LR schedule and the step. Single-GPU, QLoRA and
-`accelerate` runs keep HF's own `optimizer.pt`.
+| Situation | What happens |
+| --- | --- |
+| Same topology fingerprint: world size, every parallel size, the layout knobs, the optimizer class | exact resume: weights, optimizer state, LR schedule and step |
+| A different fingerprint, or a save with `save_only_model: true` | warm restart: weights and LR schedule, fresh optimizer moments |
+| The optimizer restore fails (a truncated shard, a CUDA OOM, the optimizer half of an interrupted save) | every rank stops, naming the cause; `allow_optimizer_warm_restart: true` accepts fresh moments |
+| `resume_from_checkpoint: true` and a step directory lacks `trainer_state.json` (written last) | that save never completed: it moves to `output_dir/_incomplete_checkpoints/` and the newest complete one resumes |
+| An explicit path to an incomplete directory, or an `output_dir` whose step directories are all incomplete | raises |
 
-- **Exact resume** restores the optimizer state too. It needs the same topology
-  fingerprint: world size, every parallel size, the layout knobs and the
-  optimizer class
-  ([full list](../agent-docs/reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun) ↗).
-- **Warm restart** happens when any of those differ, or the run saved with
-  `save_only_model: true`. Weights and the LR schedule are restored; optimizer
-  moments start fresh.
-- **A failed optimizer restore** (a truncated shard, a CUDA OOM, the optimizer
-  half of an interrupted save) stops every rank with an error naming the cause.
-  Fix it, or set `allow_optimizer_warm_restart: true` to accept fresh optimizer
-  moments.
-
-The weights come back one of three ways:
-
-- **Built from the checkpoint.** At the default `use_grouped_gemm: true` (dense
-  models included), and always under EP, CP or TP, the training script builds
-  the model directly from the checkpoint directory. This is why the resume must
-  go through the training script, not a hand-built model.
-- **Loaded into a built model.** With `use_grouped_gemm: false` and no EP, CP or
-  TP (plain FSDP2, single process, DDP), the checkpoint loads into a model built
-  from the base. Its keys convert the way `from_pretrained` converts them, so a
-  checkpoint in the hub's per-expert layout lands in the fused experts. A
-  best-model reload under FSDP2 or TP takes the same path. `accelerate` FSDP
-  uses the base Trainer's loader.
-- **Adapters onto the base.** LoRA runs build the base model and restore the
-  adapters onto it. `merge_expert_lora_on_save` and embedding LoRA checkpoints
-  keep the unmerged adapters (`resume_adapter/`) for this.
-
-MoE router-balancing state is saved and restored automatically.
-
-### Interrupted saves
-
-A save is safe to interrupt. `trainer_state.json` is written last, so a step
-directory without it never completed.
-
-- `resume_from_checkpoint: true` skips an incomplete directory and moves it into
-  `output_dir/_incomplete_checkpoints/`.
-- Naming an incomplete directory explicitly raises, and so does an `output_dir`
-  whose step directories are all incomplete.
-- An `output_dir` with no step directory starts fresh, with a warning.
-- `save_total_limit` never deletes the previous checkpoint before its successor
-  is complete.
-
-### Best model at end
-
+A save is safe to interrupt: `save_total_limit` never deletes a checkpoint
+before its successor is complete. LoRA runs restore the adapters onto the base,
+and MoE router-balancing state is saved and restored automatically.
 `load_best_model_at_end` is refused at startup where the end-of-run reload
-cannot work: a full fine-tune under CP, a MoE model wrapped for expert compute
-(including plain FSDP2 at the default `use_grouped_gemm: true`), and TP with
-more than one data-parallel replica. Export the best checkpoint yourself
-instead. Dense pure TP is allowed, and adapter-only runs are exempt unless
-`merge_expert_lora_on_save` merges them into a full checkpoint.
+cannot work: a full fine-tune under CP, an MoE wrapped for expert compute, and
+TP with more than one data-parallel replica
+([full mechanics](../agent-docs/reference/checkpoints.md#resuming-training) ↗).
 
 ## Per-node PP saves
 
@@ -123,18 +85,10 @@ flags.
 | `reset-sinks` | disable the attention sinks in a GPT-OSS checkpoint |
 | `reattach-vision-tower` | restore the vision tower to a `text_only_model` Qwen3.5/3.6 export, the layout vLLM loads |
 
-- **Write to a new directory.** The tools refuse to run in place, since writing
-  over the source deletes shards they do not overwrite. Only `reset-sinks` takes
-  an explicit `--in_place` (there is no undo).
-- **Merge sharded EP saves first.** Every other tool rejects the per-rank layout.
-- **Resume state.** Conversions of a run's own weights (`convert-to-bf16`,
-  `unfuse-moe-experts`, …) keep its resume files except the optimizer shards;
-  strip those before uploading. Exports that make a new base (`merge-peft-adapters`,
-  `merge-models`, `patch-vocab`) drop them, `trainer_state.json` included.
-- **Text-only merges.** Merging an adapter trained with `text_only_model: true`
-  writes a text-only model with the run's tokenizer and none of the base's
-  processor files. For Qwen3.5/3.6, vLLM loads it only after
-  `reattach-vision-tower`; SGLang loads it as-is.
+The tools write to a new directory (only `reset-sinks` takes `--in_place`),
+reject a sharded EP save until `merge-ep-shards` has run, and keep a converted
+run's resume files except the optimizer shards. Flags and input guards:
+[Scripts reference](../agent-docs/reference/scripts-reference.md#post-training-scripts) ↗.
 
 ## Serving the result
 

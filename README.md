@@ -110,8 +110,9 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 halo launch --list
 ```
 
-`halo` selects `python`, `torchrun`, or `accelerate launch` based on the arguments. Options after the
-config that are not the launcher's own are passed to the trainer and override the YAML config:
+`halo` selects `python`, `torchrun`, or `accelerate launch` based on the arguments, and `--dry-run`
+prints the command instead of running it. Options after the config that are not the launcher's own are
+passed to the trainer and override the YAML config:
 
 ```bash
 halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml \
@@ -119,13 +120,6 @@ halo launch sft examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml \
     --expert_parallel_size=8 \
     --learning_rate=1e-5 \
     --max_length=32000
-```
-
-Use `--dry-run` to print the command without running it, and `--list` to see the available methods:
-
-```bash
-halo launch --list
-halo launch sft config.yaml --dry-run
 ```
 
 ### Other tools

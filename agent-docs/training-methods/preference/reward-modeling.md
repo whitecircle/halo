@@ -29,12 +29,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/rm-qwen3.5-9b-skywork-pref80k
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `max_length` | `1024` | A **filter**: TRL drops pairs whose chosen or rejected side exceeds it |
-| `center_rewards_coefficient` | `None` | Penalizes `(chosen + rejected)²`, pulling scores toward zero mean |
-| `tools_field` | `None` | Column of per-row tool schemas; aliased onto `tools` and rendered on conversational rows only |
-| `images_field` | `None` | Image column, see [Vision-language](#vision-language) |
+`max_length` is a **filter**: TRL drops pairs whose chosen or rejected side exceeds it. `center_rewards_coefficient` penalizes `(chosen + rejected)²`, pulling scores toward zero mean. `tools_field` names a column of per-row tool schemas, aliased onto `tools` and rendered on conversational rows only; `images_field` is under [Vision-language](#vision-language). Types and defaults: [RewardConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [RewardScriptArguments](../../reference/configuration-reference.md#other-script-arguments).
 
 `max_length: null` resolves to the model's context window. `learning_rate` defaults to TRL's `1e-4`, high for a full fine-tune. A `chat_template_kwargs` column is splatted into the template too.
 

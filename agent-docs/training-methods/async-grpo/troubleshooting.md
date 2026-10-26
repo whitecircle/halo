@@ -1,6 +1,6 @@
 # Troubleshooting
 
-Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NCCL hangs, OOM) are on the toolkit's [Troubleshooting](../../reference/troubleshooting.md) page.
+Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NCCL hangs, OOM) and the weight-sync errors both GRPO arms share (group address, port bind, transport mismatch, SGLang cuMem) are on the toolkit's [Troubleshooting](../../reference/troubleshooting.md) page.
 
 ## Training dynamics
 
@@ -13,7 +13,6 @@ Symptom → cause → fix for Async GRPO runs. Distributed-training failures (NC
 | Symptom | Cause | Fix |
 |---|---|---|
 | `server unreachable at …`, or a stall in `init_communicator()` | The server is down, or never joins the NCCL group (an unroutable advertised master, or trainer and server on one GPU) | Verify `/health`; set `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST` to a routable NIC; give them different `CUDA_VISIBLE_DEVICES` ([Rollout Servers](../../infrastructure/rollout-servers.md#troubleshooting)) |
-| `Could not bind the weight-transfer group port` | A live client, or an outbound connection using it as an ephemeral source port, holds the port (not `TIME_WAIT`). The server keeps serving | Give each server and trainer its own `group_port` / `vllm_group_port`, outside `net.ipv4.ip_local_port_range` or reserved; remove the stale container |
 | `GENERATION is wedged (no response … to a 1-token probe)` | The scheduler is stuck after a trainer was killed while attached to the weight-transfer group | Restart the server container after every hard trainer crash |
 | `vLLM server … is PAUSED for a weight update` | A trainer died without lifting its `/pause` | `POST /resume`, or restart the server if that sync had streamed part of the model |
 | `Prefetch auto-disabled: 1 rollout server configured.` | Expected: a sync pauses the only server | Configure more servers ([Multiple servers and prefetch](setup.md#multiple-servers-and-prefetch)) |

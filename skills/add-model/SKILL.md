@@ -20,9 +20,9 @@ allowed-tools:
 
 # Add a new model family
 
-Canonical guide: `agent-docs/models/adding-a-model.md` (read it) — it holds the wrapper hooks, every
-class attribute the machinery reads, and the layout→wrapper table. **`checklist.md`** carries the
-file-touch list, the traps and the commands; read it before editing.
+Canonical guide: `agent-docs/models/adding-a-model.md` (read it) — it holds the file list, the wrapper
+hooks, every class attribute the machinery reads, and the layout→wrapper table. **`checklist.md`**
+carries the templates and the commands to run.
 
 ## Checklist (overview)
 
@@ -47,8 +47,11 @@ file-touch list, the traps and the commands; read it before editing.
    turns each spec into the applier `src/model_loading/liger/dispatch.py` resolves.
    Name a role only where the kernel reproduces the family's forward exactly. A family upstream
    Liger already covers sets `delegates_to_upstream=True` and names only the roles it adds.
-4. **Router balancing.** Leave `moe_balancing` at `auto` and make the family resolvable — the
-   wrapper hooks and the export contract are in `checklist.md` → *Router balancing*.
+4. **Router balancing.** Leave `moe_balancing` at `auto` and make the family resolvable. What `auto`
+   picks and what `bias_update` needs to export:
+   [Callbacks → MoE balancing modes](../../agent-docs/training-methods/callbacks.md#moe-balancing-modes);
+   the wrapper hooks (`SUPPORTS_BIAS_BALANCING`, the selection helpers, `balancing_slot`): step 3 of
+   [Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support).
 5. **Not in transformers yet → vendor.** Copy `configuration_*.py` + `modeling_*.py` into
    `src/models/<name>/`, register the `Auto*` classes in a module of that package (never its
    `__init__.py` — package inits carry a docstring only), and trigger that module's import as a
@@ -57,9 +60,10 @@ file-touch list, the traps and the commands; read it before editing.
    the directory goes when upstream ships the family. A `trust_remote_code` model needs no
    vendoring: `apply_remote_code_compat_shims()` (`src/model_loading/remote_code.py`)
    restores the transformers-v5 APIs those files call.
-6. **Configs + tests.** Add `examples/sft/<family>/` YAMLs and the required tests: an EP-vs-FSDP
-   equivalence test, a save-and-reload trainer test, a CPU support test, and the Liger numerics
-   case. Exact files and commands in `checklist.md`.
+6. **Configs + tests.** Add `examples/sft/<family>/` YAMLs and the required tests: an EP=2-vs-stock
+   equivalence row, a save-and-reload trainer test, a CPU support test, and the Liger numerics
+   case — step 7 of [Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support); the
+   commands are in `checklist.md`.
 
 All execution (tests, loading) runs **inside the Docker image** — tools are on `PATH` (uv-built, no
 prefix); see `CLAUDE.md`.

@@ -128,12 +128,14 @@ Inside **one NVLink domain** (not one OS node; on NVL72 the domain is the rack),
 8 GPUs (two 4-rank groups) makes the groups' DeepEP combine barriers
 **race FSDP2's DP-wide NCCL collectives**.
 
-Both backends fail, with different symptoms. The `legacy` buffer (DeepEP V1) deadlocks
-deterministically on ~step 2 (`DeepEP timeout check failed` → `cudaErrorLaunchFailure`); the
-`elastic` default (V2) faults with `CUDA error: Invalid access of peer GPU memory over nvlink`.
-Gradient checkpointing on or off does not change this, and `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked
-into the images) does not cover it.
+Both backends fail, with different symptoms, measured on 8×B300 against a clean `ep8` control. The
+`legacy` buffer (DeepEP V1) deadlocks deterministically on ~step 2 (`DeepEP timeout check failed` →
+`cudaErrorLaunchFailure`); the `elastic` default (V2) faults with `CUDA error: Invalid access of peer
+GPU memory over nvlink`. Gradient checkpointing on or off does not change this, and
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the images) does not cover it.
 
+The predicate is `ParallelismConfig.is_racy_single_domain_multigroup_ep`: one NVLink domain,
+`ep_size > 2` and `ep_group_size < nvlink_domain_size`. It keys on `ep_group_size`, not `ep_size`.
 `parallelism_rules._reject_single_domain_multigroup_ep` **rejects the shape at config
 construction**, before the model loads, hand-built configs included. Deferring the cross-replica
 average does not help here: on one domain FSDP2 still shards the non-expert params over every rank
@@ -148,7 +150,8 @@ Safe single-node pure-EP shapes — one group, or 2-rank groups:
 - **`ep_size == 2`** → many 2-rank groups, clean.
 
 The only 4-way expert split left on 8 GPUs is EP+**ETP** (`ep4 + etp2`), which the gate accepts
-because `ep_group_size` then fills the domain; the GPU test matrix runs `ep2 + etp4` instead
+because `ep_group_size` then fills the domain, although its DeepEP dispatch groups stay 4 ranks wide;
+the GPU test matrix runs `ep2 + etp4` instead
 ([ETP validation rules](expert-tensor-parallelism.md#validation-rules)). Attention **TP does not
 help** at all: it leaves `ep_group_size` untouched, so `ep4 + tp2` is rejected exactly like bare
 `ep4`.
@@ -182,20 +185,11 @@ EP patching and gradient sync are automatic. Programmatically, pass
 
 ## Configuration
 
-EP flags live on `ParallelismArguments` (`src/configs/parallelism_arguments.py`):
-
-```python
-expert_parallel_size: int = 1     # >1 enables EP
-ep_scope: str = "auto"            # "auto" | "node" | "global"
-nvlink_domain_size: int = 0       # NVLink locality unit (0 = auto)
-use_grouped_gemm: bool = True     # grouped-GEMM expert compute (SM90+)
-ep_buffer_backend: str = "auto"   # "auto"/"elastic" | "legacy"
-save_sharded_ep: bool = False     # per-rank save (needs merge script)
-fp32_router: bool = False
-fp32_experts: bool = False
-fp32_non_ep_params: bool = False
-fp32_grad_reduce: bool = False    # fp32 cross-rank grad reduction, bf16 storage
-```
+The EP flags (`expert_parallel_size`, `ep_scope`, `nvlink_domain_size`, `use_grouped_gemm`,
+`ep_buffer_backend`, the `fp32_*` masters, `fp32_grad_reduce`) and their defaults:
+[Configuration reference → ParallelismConfig](../reference/configuration-reference.md#parallelismconfig);
+`save_sharded_ep`:
+[checkpoint flags](../reference/configuration-reference.md#model-checkpoint-and-from-scratch-flags).
 
 Training args: `bf16=True`, `gradient_checkpointing=True` (recommended).
 `ddp_find_unused_parameters=True` is required for EP and set automatically by the entry scripts —
@@ -565,11 +559,8 @@ each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix
 restrictions. A `ep_group_size > 1` run that patches **zero** MoE layers raises — that is how a
 dense model under EP or pure ETP is rejected.
 
-**Axis combinations.** EP composes with TP, CP and ETP; EP+TP+ETP, EP+TP+CP and EP+CP+ETP are
-refused by the [allowlist](README.md#supported-combinations). EP-specific topology rejections sit on
-top: single-domain multi-group EP with `ep_size > 2`
-([above](#single-domain-multi-group-ep-races-and-hangs)), multi-domain multi-group EP+TP / EP+ETP,
-and EP+CP on anything but a node-local EP group filling the NVLink domain.
+**Axis combinations.** EP composes with one of TP, CP or ETP; the allowlist and the topology rules
+on top of it: [Supported combinations](README.md#supported-combinations).
 
 **Knobs.** Everything below raises unless the verdict says otherwise.
 
@@ -606,12 +597,12 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | OOM | Enable GC; raise EP size (each doubling roughly halves per-GPU expert memory) |
 
 gpt-oss-20b peak memory per EP degree on 8× B300: [EP-only table](../optimization/throughput-benchmarks.md#ep-only-batch-scaling)
-(it grows with sequence length and batch). `ep4` is not a legal shape on 8 GPUs
-([above](#single-domain-multi-group-ep-races-and-hangs)).
+(it grows with sequence length and batch).
 
 ## Adding a new model
 
 Procedure: [Adding a Model → Add EP support](../models/adding-a-model.md#add-ep-support). The per-PR
 EP correctness gate (gpt-oss-20b, EP=2 against the undistributed forward) is
-`torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_correctness.py`; a new family adds its
-own EP-vs-FSDP equivalence test.
+`torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_modes_vs_reference.py --model gpt_oss_20b --mode ep`;
+a new family's EP=2-vs-stock row in `tests/gpu/parallelism/ep/test_ep_family_vs_reference.py` comes from its
+`TINY_MOE_FAMILIES` entry.

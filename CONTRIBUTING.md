@@ -42,31 +42,19 @@ Coding agents working in this repo must respect this gate — see [`AGENTS.md`](
 
 ## If you're approved — the engineering bar
 
-Once your PR path is approved, the normal bar applies (full detail in
-[`agent-docs/contributing/README.md`](agent-docs/contributing/README.md)):
+Once your PR path is approved, the normal bar applies; the dev guide
+[`agent-docs/contributing/README.md`](agent-docs/contributing/README.md) owns each part:
 
-- **Everything runs in the Docker image.** The host has no usable Python. Pull the prebuilt image
-  (`docker pull public.ecr.aws/whitecircle/halo:blackwell`, then tag it `halo:blackwell` — or `hopper`)
-  or build it (`make build-blackwell`), then use the `make` targets (`make test-cpu`, ...); only
-  `make lint` / `make format` / `make precommit` (`uvx ruff`) and `make docs` (links, anchors and code
-  references) run on the host. `make test-cpu` needs Docker, not a GPU.
-- **Pass the gates.** `make lint`, `make format`, `make seed-hf-cache` (again when
-  `tests/common/models.py` or `examples/` gain a repo), then `make test-cpu` (and
-  `make test-gpu-core` for GPU-affecting changes), `make docs`. Hosted CI runs only `ruff`,
-  `actionlint`, the convention tests and the docs checks on a PR; the test tiers run on your machine,
-  so state their result in the PR. A PR that changes a path listed in `.github/sensitive-paths` also
-  needs the `sensitive` label, which a maintainer adds once the change is approved.
-- **Tests ship with behavior — and must not be slop.** A test must *fail when the behavior breaks*; no
-  tautologies, smoke-only "didn't raise" checks, vacuous `assert x is not None`, or mock-the-thing-under-test.
-  See the anti-slop test guide in [`agent-docs/contributing/README.md`](agent-docs/contributing/README.md).
-- **Follow the test conventions.** A CPU test ends in `raise SystemExit(pytest.main([__file__, "-v"]))`
-  and a GPU test runs under `gpu_test_main` (`tests/common/harness.py`); a CPU test never re-declares
-  its `cpu` marker in `pytestmark` (the marker comes from its path), neither edits `sys.path`, and a
-  CPU test never imports a GPU script (put a shared fixture in `tests/common/`).
-  `tests/cpu/conventions/` fails the suite on a violation. Never hardcode
-  `--master_port`; the launcher picks a free one.
-- **Proof of value.** No-op/refactor → bitwise-identical loss (fixed seed); behavior change → an e2e
-  test; perf → before/after tokens/s/GPU + peak memory. The PR template has a checkbox per case.
+- **Everything runs in the Docker image** (the host has no usable Python), and the
+  [gates](agent-docs/contributing/README.md#submitting-a-pr) pass before you open the PR. Hosted CI runs
+  only `ruff`, `actionlint`, the convention tests and the docs checks; state the test tiers' result in the
+  PR. A PR that changes a path listed in `.github/sensitive-paths` also needs the `sensitive` label, which
+  a maintainer adds once the change is approved.
+- **Tests ship with behavior and must not be slop** — a test fails when the behavior breaks, and follows
+  the [test conventions](agent-docs/contributing/README.md#tests), which `tests/cpu/conventions/`
+  enforces.
+- **[Proof of value](agent-docs/contributing/README.md#proof-of-value)** for every change; the PR
+  template has a checkbox per case.
 - **Keep it focused.** A diff over **~2,000 lines** is hard to review and will be deferred — split it.
 - **Work from a fork.** Outside contributors have no push access here: fork the repo, clone your
   fork, branch off `main`, push to your fork, and open the PR against `whitecircle/halo`'s `main`.

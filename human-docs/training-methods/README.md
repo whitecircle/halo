@@ -8,7 +8,7 @@ have to the trainer that reads it.
 | Method | Trains on | `halo launch` | Page |
 | --- | --- | --- | --- |
 | SFT | conversations, text or image | `sft` | [Supervised fine-tuning](sft.md) |
-| Pre-training | raw text, or a random-init model | `sft` | [Supervised fine-tuning](sft.md#pre-training-and-from-scratch) |
+| Pre-training | raw text, or a random-init model | `sft` | [Supervised fine-tuning](sft.md#run) |
 | SMPO | `prompt` / `chosen` / `rejected`, no reference model | `smpo` | [Preference](preference.md) |
 | DPO | `prompt` / `chosen` / `rejected`, against a reference | `dpo` | [Preference](preference.md) |
 | KTO | `prompt` / `completion` / boolean `label` | `kto` | [Preference](preference.md) |
@@ -24,16 +24,13 @@ have to the trainer that reads it.
 
 ## What every method shares
 
-- **One config format.** A config is a flat YAML file of trainer fields, and any field can be
-  overridden on the command line after the config path. Every method gets the same toolkit defaults
-  (`bf16: true`, `use_liger_kernel: true`, `logging_nan_inf_filter: false`), and an unknown key
-  raises ([Configuration](../configuration.md)).
+- **One config format.** A config is a flat YAML file of trainer fields, any of which can be
+  overridden on the command line after the config path ([Writing a config](../configuration.md)).
 - **One data stack.** Datasets come from the Hub, a local path or `s3://` through the same `dataset:`
   field, and a list mixes them ([Datasets](../data.md)). The columns each method reads differ.
-- **One parallelism stack.** Expert, tensor and expert-tensor parallelism work on every trainer.
-  Context parallelism covers SFT, SMPO and offline GRPO (full fine-tuning only for offline GRPO).
-  Pipeline parallelism covers SFT, SMPO, DPO and KTO (precompute-only), offline GRPO, reward and
-  classification, on the registered families ([Parallelism](../parallelism.md)).
+- **One parallelism stack.** Expert, tensor and expert-tensor parallelism work on every trainer;
+  which ones also take context or pipeline parallelism is in the
+  [Supported matrix](../supported-matrix.md#training-methods).
 - **HuggingFace in, HuggingFace out.** Checkpoints load with `from_pretrained` and upload to the Hub
   as written. Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
   writes an adapter you merge with one command; expert LoRA under EP folds into the weights at save

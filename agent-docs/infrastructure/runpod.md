@@ -86,12 +86,9 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('uns
   Simplest to debug.
 - **Cross-node EP**: one EP group spans all 16 GPUs; the expert all-to-all uses the NCCL Gin backend over IB
   RDMA. Each GPU holds fewer experts → more memory for activations.
-- **EP+TP**: TP groups are contiguous rank blocks, so `tp_size` must **divide** the NVLink domain. Cross-node EP+TP must be a single
-  global EP group (`ep_size == world`) — a multi-domain multi-group EP+TP shape is rejected at config time.
+- **EP+TP**: a single global EP group across nodes; the rules: [Topology rules](../parallelism/README.md#topology-rules).
 
-CLI arguments come from `ParallelismArguments`: `--expert_parallel_size` (default `1`), `--ep_scope`
-(`auto` | `node` | `global`, default `auto`), `--context_parallel_size`, `--tensor_parallel_size`,
-`--save_sharded_ep`, `--fp32_router`.
+The flags and their defaults: [Configuration reference → ParallelismConfig](../reference/configuration-reference.md#parallelismconfig).
 
 ## Launch
 
@@ -164,37 +161,10 @@ look for `NCCL INFO NET/IB` (connection up) and `NCCL WARN` (fallbacks/timeouts)
 
 ## Troubleshooting
 
-**NCCL timeout / pods can't connect.** Use the IB-routable `MASTER_ADDR`. Test the control port from Node 1:
-`python -c "import socket; s=socket.socket(); s.settimeout(5); s.connect(('$MASTER_ADDR', 29500)); print('OK')"`.
-Confirm both pods are on the same IB fabric; raise `DIST_NCCL_TIMEOUT_MINUTES=60` for large collectives.
-
-**`No module named 'deep_ep'`.** The image includes it — a missing module means an outdated image; re-pull the
-current tag, or rebuild and push your own. An in-container rebuild needs the full CUDA-13 build env ([DeepEP](deepep.md)).
-
-**InfiniBand not active** (`ibstat` shows `State: Down`). Verify the pod was provisioned with IB; install
-`infiniband-diags`; contact RunPod support. Without IB, fall back to node-local EP (`--ep_scope=node`) — only
-gradient sync crosses the network.
-
-**Host OOM during gathered save.** Every gathered save streams: the EP path one MoE layer at a
-time, the dense/CP/TP paths one decoder layer at a time
-([Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)). Each pod's save rank peaks
-at the replicated non-expert params plus one pending shard (`save_max_shard_size`, default `5GB`),
-not a model's worth.
-
-Lower `save_max_shard_size` if that peak is still too high. `--save_sharded_ep`
-does not help; it is MoE-only and holds more host memory per node, not less.
-
-**`ProcessGroup not initialized` / mismatch.** Ensure both pods use identical parallelism args and start
-within the torchrun rendezvous timeout (10 min default). Kill stale processes:
-`pkill -f torchrun; pkill -f sft.py`.
-
-**Cross-node EP slow.** Check RDMA bandwidth (`ib_write_bw -d mlx5_0 <REMOTE_IP>`). Cross-node dispatch is
-per-operation latency-bound, not bandwidth-bound ([DeepEP](deepep.md#expert-parallelism-over-aws-efa)):
-switch to node-local EP so only gradient sync crosses the network, or raise batch size / gradient
-accumulation to amortize comm.
-
-**Resume "no checkpoint found".** Confirm `checkpoint-*` and its `trainer_state.json` exist on **both** pods
-at the same path.
+Pods that never rendezvous, InfiniBand down, a resume that finds no checkpoint on one pod, and the
+rest: [Troubleshooting](../reference/troubleshooting.md). Cross-node dispatch is per-operation
+latency-bound, so a slow cross-node EP run is a case for node-local EP or a larger batch
+([DeepEP](deepep.md#expert-parallelism-over-aws-efa)).
 
 ## Related pages
 

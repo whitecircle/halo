@@ -30,3 +30,17 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 - **[Liger kernels](liger-kernels.md)** — Triton kernels for fused cross-entropy, RMS normalization, and SwiGLU (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 run their norms on torch's fused `F.rms_norm`). On by default — set `use_liger_kernel: false` to disable.
 - **[torch.compile](torch-compile.md)** — Inductor compilation of the spans between MoE/attention graph breaks (`torch_compile: true`) — at most 1% on EP MoE, and slower in `reduce-overhead` mode.
 - **[Muon optimizer](muon-optimizer.md)** — Newton-Schulz orthogonalization for matrix params, fused Triton (~5× over upstream's Python-loop step). Set `optim: muon`.
+
+---
+
+## Levers that do not help at these shapes
+
+At fine-grained MoE shapes (EP8, a few hundred tokens per expert, expert width ≤ 4096) each of these was
+measured and loses; its page holds the result.
+
+- **Low-precision fp8/fp4 compute** — the per-expert GEMM sits at the bf16 roofline, and the simulated path runs several times a bf16 step: [Why bf16 wins](low-precision-moe-kernels.md#why-bf16-wins). The fp8/fp4 win is inference memory ([QAT → low-precision inference](low-precision-moe-kernels.md#qat--low-precision-inference)).
+- **Native DeepGEMM** — net-slower than bf16 at every training shape: [DeepGEMM](low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path).
+- **torch.compile on EP MoE** — at most 1%, and `reduce-overhead` is slower: [Benchmark results](torch-compile.md#benchmark-results).
+- **Sub-bf16 master weights** — parameters, checkpoints and optimizer state never go below bf16; bf16 with stochastic rounding is the floor: [BF16 optimizer](bf16-optimizer.md).
+- **FA2 on Blackwell** — the slow outlier against FA4 and SDPA: [FA4 vs FA2 vs SDPA](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell).
+- **MoE throughput measured at batch 1** — communication-bound and run-to-run noisy; measure at batch ≥ 4 ([Liger benchmarks](liger-kernels.md#benchmarks)).

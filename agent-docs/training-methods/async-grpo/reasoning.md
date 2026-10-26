@@ -41,10 +41,9 @@ sets it. The trainer's own renders carry the same variables, but not the derived
 
 The budget is per turn; `rollout_max_tokens` bounds the whole turn, reasoning and answer together.
 
-| Knob | Default | Effect |
-|---|---|---|
-| `rollout_max_thinking_tokens` | `null` | run-wide per-turn reasoning cap (vLLM `thinking_token_budget`) |
-| `rollout_max_answer_tokens` | `null` | the most a turn may generate past its reasoning cap ([Answer room](#answer-room)) |
+`rollout_max_thinking_tokens` is the run-wide per-turn reasoning cap (vLLM `thinking_token_budget`), and
+`rollout_max_answer_tokens` the most a turn may generate past its reasoning cap ([Answer room](#answer-room)); types
+and defaults are in [AsyncTrainingConfig](../../reference/configuration-reference.md#asynctrainingconfig).
 
 Any reasoning cap on vLLM needs a reasoning parser on the server, which enforces it on the image's
 Model Runner V2 ([Rollout Servers](../../infrastructure/rollout-servers.md#vllm)). A vLLM cap on Mistral 4 is
@@ -112,13 +111,11 @@ encodes to one added token. gpt-oss's six-token move into the final channel logs
 
 Two trainer-side terms add to the task reward before advantages.
 
-| Knob | Default | Effect |
-|---|---|---|
-| `reasoning_floor` | `0` (off) | weight of the [shortfall penalty](#floor) |
-| `reasoning_price` | `null` (off) | per-level map: reward units per 1,000 reasoning tokens |
-| `reasoning_price_cap` | `0.1` | the most the price charges one episode; refused at another value while the price is off |
-| `reasoning_price_past_budget` | `false` | price only reasoning past each turn's soft budget; needs `reasoning_price` |
-| `reasoning_terms_in_failed_groups` | `false` | charge both terms in a [failed group](#failed-groups) too |
+`reasoning_floor` weighs the [shortfall penalty](#floor), and `reasoning_price` maps each level to the reward units
+it charges per 1,000 reasoning tokens, at most `reasoning_price_cap` per episode. `reasoning_price_past_budget`
+prices only reasoning past each turn's soft budget, and `reasoning_terms_in_failed_groups` charges both terms in a
+[failed group](#failed-groups) too. Both terms are off by default; types and defaults are in
+[AsyncTrainingConfig](../../reference/configuration-reference.md#asynctrainingconfig).
 
 - While `drop_degenerate_groups` is on (the default), both reach the gradient only through groups the environment's
   reward separates: it judges a group without them ([Advantages](objective.md#advantages)).

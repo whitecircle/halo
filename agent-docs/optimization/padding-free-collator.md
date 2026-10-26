@@ -13,7 +13,7 @@ Implementations live in `src/data/collators/packing.py`:
 
 ## Configuration
 
-`padding_free`, `packing`, `packing_strategy`, and `eval_packing` come from TRL's `SFTConfig`; the completion-masking fields (`train_on_completions_only`, `assistant_message_template`) come from `ConversationRenderArguments` in `src/configs/sft.py`:
+`padding_free`, `packing`, `packing_strategy` and `eval_packing` come from TRL's [`SFTConfig`](../reference/configuration-reference.md#trl-trainer-configs); the completion-masking fields (`train_on_completions_only`, `assistant_message_template`) from [`SFTScriptArguments`](../reference/configuration-reference.md#sftscriptarguments):
 
 ```yaml
 padding_free: true
@@ -22,13 +22,6 @@ packing: false                              # mutually exclusive with padding_fr
 train_on_completions_only: true
 assistant_message_template: "<|im_start|>assistant\n"
 ```
-
-| Option | Default | Description |
-|--------|---------|-------------|
-| `padding_free` | `false` | Enable padding-free varlen-FA training |
-| `packing` | `false` | Enable traditional sequence packing |
-| `packing_strategy` | `"bfd"` | `"bfd"` (best-fit-decreasing, drops overflow), `"bfd_split"` (carries overflow into later examples) or `"wrapped"` (concatenate-and-chunk) |
-| `eval_packing` | `null` | Packing for eval (defaults to `packing`) |
 
 `select_data_collator` gates on the model's **resolved** `_attn_implementation`, not on a family list.
 `padding_free` is **rejected** outside `flash_attention_2` / `_3` / `_4`: the `cu_seq_lens` it exists to emit

@@ -1,19 +1,27 @@
 # Writing a config
 
 A run is one flat YAML file: the HuggingFace `TrainingArguments` fields you
-already know, plus Halo's own.
+already know, plus Halo's own. Every field's type and default is in the
+[Configuration Reference](../agent-docs/reference/configuration-reference.md) ↗;
+this page covers how the file works.
 
 ## Start from the nearest example
 
 Don't write a config from scratch. `examples/` is organized by method, then by
-model family (`examples/sft/qwen3/`, `examples/preference/qwen3_5/`). The closest
-file is usually two edits from what you want:
+model family (`examples/sft/qwen3/`, `examples/preference/qwen3_5/`). The
+closest file is usually two edits from what you want:
 
 ```bash
 ls examples/sft/                          # families with an SFT recipe
 cp examples/sft/qwen3/qwen3-4b-ultrachat.yaml my-run.yaml
 halo launch sft my-run.yaml -n 8
 ```
+
+- The async GRPO recipes add a rollout-backend level below the family
+  (`examples/grpo/environmental/<family>/{vllm,sglang}/`).
+- The annotated GRPO templates sit at the top of their method folder.
+- `qwen3_5/` also holds the Qwen3.6 configs, which ship under the Qwen3.5 model
+  types.
 
 Keep the comments when you copy. They record the family's constraints: why
 `sdpa` and not Flash Attention, why `packing` and not `padding_free`, which
@@ -45,11 +53,16 @@ Notes on the ones that cause trouble:
   [Supported matrix](supported-matrix.md#attention-backends).
 - **`model_revision`** pins a Hub commit.
 - **`max_concurrent_loading`** caps how many ranks per node load weights at once.
-  Unset, it is half the node's GPUs, at most 4. Set `1` on a host short on CPU
-  RAM.
+  Set `1` on a host short on CPU RAM.
 - **`vllm_*` fields** parse on both online RL trainers, which share TRL's GRPO
   config. The async rollout block belongs to async GRPO only:
   `rollout_server_url` in an online GRPO config fails to parse.
+- **Sequence length.** `max_length` is the one sequence-length setting; `null`
+  means the model's context window. `max_prompt_length` and
+  `max_completion_length` mean different things per trainer
+  ([Sequence length](../agent-docs/reference/configuration-reference.md#sequence-length-caps-vs-generation-budgets) ↗).
+  Online and async GRPO have no `max_length` field, so the key fails to parse
+  there.
 
 ## Overriding on the command line
 
@@ -97,71 +110,7 @@ These fail at startup, not deep into training:
 - An invalid parallelism shape. `ParallelismConfig` rejects it after parsing and
   before any weights load ([Parallelism](parallelism.md)).
 
-## Sequence length per method
-
-`max_length` is the one sequence-length setting; `null` means the model's context
-window. `max_prompt_length` and `max_completion_length` mean different things
-per trainer:
-
-| Method | What the length settings do |
-| --- | --- |
-| SFT, DPO, KTO, distillation | `max_length` only. DPO's `generation_max_prompt_length` (default 512) bounds eval-time samples, not training |
-| SMPO | prompt and completion budgets come out of `max_length`; an unset prompt budget takes half |
-| Offline GRPO | independent truncation caps; set both, and their sum becomes the tokenizer's `model_max_length` |
-| Online GRPO | `max_prompt_length` filters the dataset (over-long rows are dropped, not truncated); `max_completion_length` is the generation budget |
-| Async GRPO with environments | `max_prompt_length` is the same filter. The per-turn generation budget is `rollout_max_tokens`; a `max_completion_length` other than TRL's default must equal it. `rollout_max_episode_tokens` (default `null`) caps a whole episode and must be at least `rollout_max_tokens` |
-
-Online GRPO and async GRPO have no `max_length` field, so the key fails to parse
-there. Offline GRPO parses it, then refuses it when the trainer is built.
-
-## A complete config
-
-`examples/sft/qwen3/qwen3-4b-ultrachat.yaml` is a full fine-tune of a 4B dense
-model on UltraChat that runs on 1 to 8 GPUs:
-
-```yaml
-model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
-attn_implementation: flash_attention_2
-
-dataset:
-- HuggingFaceH4/ultrachat_200k@train_sft
-conversation_field: messages
-assistant_message_template: "<|im_start|>assistant\n"
-test_size: 0.01
-
-per_device_train_batch_size: 2
-per_device_eval_batch_size: 2
-num_train_epochs: 1.0
-gradient_accumulation_steps: 8
-gradient_checkpointing: true
-gradient_checkpointing_kwargs:
-  use_reentrant: false
-optim: adamw_torch_fused
-learning_rate: 2.0e-05
-max_grad_norm: 1.0
-lr_scheduler_type: cosine
-warmup_steps: 32
-seed: 42
-
-max_length: 4096
-packing: true
-
-output_dir: checkpoints/sft-qwen3-4b-ultrachat
-save_strategy: steps
-save_steps: 500
-eval_strategy: steps
-eval_steps: 500
-save_total_limit: 3
-save_only_model: true
-
-logging_steps: 1
-logging_first_step: true
-report_to: wandb
-
-dataloader_num_workers: 4
-remove_unused_columns: true
-use_peft: false
-```
+## Batch size and memory
 
 Batch size is per device. The global batch is
 `per_device_train_batch_size × gradient_accumulation_steps × data_parallel_size`,
@@ -171,6 +120,5 @@ so the same file trains a different global batch on 1 GPU and on 8.
 activation memory. It is usually the first thing to turn on when a run doesn't
 fit.
 
-Each [training method](training-methods/README.md) page lists its own keys. Every
-field, default and `HALO_*` knob is in the
-[Configuration Reference](../agent-docs/reference/configuration-reference.md) ↗.
+Each [training method](training-methods/README.md) page lists its own keys, and
+[Environment variables](environment-variables.md) covers what the YAML does not.

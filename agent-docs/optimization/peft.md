@@ -503,10 +503,10 @@ and with `save_sharded_ep: true`.
 ## Tests and benchmarks
 
 ```bash
-# LoRA + CP (trains) and LoRA + TP (asserts rejection)
-torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_cp_tp.py
-# LoRA + EP with MoE
-torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_ep.py
+# LoRA SFT under one shape (ep / ep_cp / etp / cp / fsdp, --qlora for a 4-bit base), the save
+# reloaded on a fresh base; LoRA under TP is refused at construction (tests/cpu/trainers/test_expert_lora_tp_gate.py)
+torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --model gpt_oss_20b --mode ep --save-reload
+torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_sft_modes.py --model qwen3_0_6b --mode cp --save-reload --resume
 # merge_expert_lora_on_save checkpoint: servable, and resumed exactly against an uninterrupted run
 torchrun --nproc_per_node=2 tests/gpu/trainers/lora/test_lora_merged_save_resume.py \
     --family gpt_oss --adapters mixed

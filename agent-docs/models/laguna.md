@@ -4,13 +4,7 @@ Poolside's `LagunaForCausalLM` (`poolside/Laguna-S-2.1`, `poolside/Laguna-XS-2.1
 
 Transformers ships `transformers.models.laguna` natively, and the released checkpoints also load through `auto_map`, so both implementations are reachable: the shipped configs set `trust_remote_code: true` with a pinned `model_revision` (the revisions the EP path was validated against); with it off, the same checkpoints load into the in-library classes, which compute the same forward. The EP wrapper claims both by class name and by `model_type`, and Liger patches both ([Configs](#configs)).
 
-| | EP | CP | TP | ETP | PP | EP+CP | EP+TP | LoRA |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Laguna S / XS 2.1 | Yes | **No** | **No** | Yes ² | **No** ¹ | **No** | **No** | Yes |
-
-¹ Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
-
-² Tiny-model verified: pure ETP and EP+ETP train, save and resume (`tests/gpu/trainers/preference/test_preference_precompute_resume_families.py --mode etp2`, `test_preference_precompute_resume_ep_etp.py`); the released checkpoints are not run under ETP.
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
 ## EP wrapper
 
@@ -60,7 +54,7 @@ Both are registry-gated, and Laguna is in neither registry:
 - **CP** needs a Ulysses attention wrapper. `LagunaAttention` is absent from `ULYSSES_ATTENTION_MAP` — the registered wrappers in `src/distributed/context_parallel/families.py` — so CP, and therefore EP+CP, is rejected.
 - **TP** on a MoE model takes the selective attention-only path (HF's `tp_plan="auto"` mis-shards expert weights), gated on `TP_SHARDABLE_ATTENTION_CLASSES` (`src/distributed/tensor_parallel/parallelize_attention.py`). `LagunaAttention` is not listed, so there is nothing for the DTensor path to shard.
 
-ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`); its only GPU coverage is the tiny-model LoRA row in footnote ².
+ETP is mechanically reachable (the experts use the shared fused-GLU storage, so `_init_fused_glu_params` handles `expert_tp_size > 1`) and tiny-model verified only: pure ETP and EP+ETP train, save and resume (`tests/gpu/trainers/preference/test_preference_precompute_resume_families.py --mode etp2`, `test_preference_precompute_resume_ep_etp.py`); the released checkpoints are not run under ETP.
 
 ## Configs
 

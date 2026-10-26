@@ -1,16 +1,7 @@
-"""Single-GPU dense reference and expert-identity negative control for EP/ETP/TP tests.
-
-A parallel MoE forward that dispatches every token to the wrong expert still produces a finite loss
-and finite gradients, so finiteness checks cannot detect it. The same math on the same weights with
-no distribution can. This module builds that reference (loss plus the first router gradient from a
-plain ``from_pretrained`` forward/backward) and the control showing the comparison is sensitive to
-expert identity: :func:`roll_expert_banks` rotates each rank's local expert bank by one expert, the
-corruption a dispatch or ownership bug produces, and that must move the loss well outside the
-tolerance the match is asserted at.
-
-Reference and parallel model must be built with the same ``attn_implementation``. For a sinks model
-(GptOss) that matters twice over: a sink-dropping backend shifts the loss by ~3 nats on live sinks,
-which would swamp the signal this module measures.
+"""The undistributed reference EP, ETP and TP tests compare against, and the negative control that proves the
+comparison is sensitive to expert identity: a parallel MoE forward that sends tokens to the wrong expert still yields
+a finite loss and finite gradients. Reference and parallel model share one ``attn_implementation``, since a
+sink-dropping backend moves a GptOss loss by nats.
 """
 
 from __future__ import annotations
@@ -79,12 +70,17 @@ def ep_layers(model) -> list:
     return [layer for _name, layer in named_ep_layers(model)]
 
 
+def named_router_weights(model) -> list[tuple[str, torch.nn.Parameter]]:
+    """Every MoE router weight in module order, by parameter name."""
+    return [(name, param) for name, param in model.named_parameters() if name.endswith(_ROUTER_SUFFIXES)]
+
+
 def find_router_weight(model) -> tuple[str, torch.nn.Parameter]:
-    """First MoE router weight in module order, by parameter name."""
-    for name, param in model.named_parameters():
-        if name.endswith(_ROUTER_SUFFIXES):
-            return name, param
-    raise AssertionError(f"no router/gate weight found in {type(model).__name__} — nothing to compare")
+    """First MoE router weight in module order."""
+    routers = named_router_weights(model)
+    if not routers:
+        raise AssertionError(f"no router/gate weight found in {type(model).__name__} — nothing to compare")
+    return routers[0]
 
 
 def full_grad(param: torch.nn.Parameter) -> torch.Tensor:
@@ -227,19 +223,10 @@ def dense_reference(
     return loss, grad
 
 
-def broadcast_reference(
-    loss: float, grad: torch.Tensor | None, device: str, rank: int, *, with_grad: bool = True
-) -> tuple[float, torch.Tensor | None]:
-    """Share a rank-0-only reference with every rank (they all compare their own result against it).
-
-    ``with_grad=False`` shares the loss alone, for a caller whose gradient checks are not anchored
-    here; every rank must pass the same value, since it decides whether the grad collective runs.
-    """
+def broadcast_reference(loss: float, grad: torch.Tensor | None, device: str, rank: int) -> tuple[float, torch.Tensor]:
+    """Share a rank-0-only reference with every rank (they all compare their own result against it)."""
     loss_t = torch.tensor([loss], device=device, dtype=torch.float32)
     dist.broadcast(loss_t, src=0)
-    if not with_grad:
-        return float(loss_t.item()), None
-
     shape = torch.zeros(2, dtype=torch.long, device=device)
     if rank == 0:
         shape[0], shape[1] = grad.shape

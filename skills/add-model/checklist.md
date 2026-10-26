@@ -1,116 +1,21 @@
-# Add-a-model — concrete checklist
+# Add-a-model — what to run
 
-`agent-docs/models/adding-a-model.md` is the contract: the wrapper hooks, every class attribute the
-machinery reads, the layout→wrapper table, and the CP / TP / vendoring / Liger tracks. Read it
-first. This page carries what that guide does not — the file-touch list, the traps, and what to
-run. Paths are relative to the repo root; anything that executes runs **inside the Docker image**
-(`halo:blackwell` / `:hopper`), where tools are on `PATH` (uv-built, no prefix).
-
----
-
-## Files you touch
-
-| Concern | File(s) |
-|---|---|
-| EP family | a `MoEFamilySpec` constant in `src/models/moe/family_specs.py` (+ `MOE_FAMILY_SPECS`), the wrapper `src/distributed/expert_parallel/families/<name>.py` with `FAMILY = <SPEC>`, and its import in `families/roster.py` |
-| EP base / hooks | `src/distributed/expert_parallel/moe_layer/layer.py` (gather in `moe_layer/gather.py`, balancing in `moe_layer/balancing_bias.py`) |
-| Expert-LoRA coverage | `src/models/moe/expert_lora_spec.py` (`LORA_PROJECTION_COVERAGE`) |
-| Non-persistent buffers | `src/model_loading/buffer_repair.py` — add a fixer to the `_NON_PERSISTENT_FIXERS` / `_ROTARY_FIXERS` chains; `finalize_loaded_model` is the seam every load path calls, and a buffer no fixer covers stays on meta and is rejected at device placement |
-| Liger coverage | `src/model_loading/liger/family_specs.py` (`LIGER_FAMILY_SPECS`) |
-| CP wrapper | `src/distributed/context_parallel/families.py` |
-| Selective TP | `src/distributed/tensor_parallel/parallelize_attention.py` (`TP_SHARDABLE_ATTENTION_CLASSES`) |
-| Head transform (forward scales, caps or cuts logits around `lm_head`) | `src/models/head_transform.py` (`HeadTransformSpec`) + the family's tiny model in `tests/cpu/models/test_head_transform.py` |
-| Attention backend (auto-detection falls short) | the family's patch in `src/models/attention/selection.py`, gated on `model_type_matches` (`src/models/config_access.py`) in `resolve_attn_implementation` or `apply_family_patches` (`src/model_loading/model_preparation.py`) |
-| PP registration | `src/distributed/pipeline_parallel/families.py` — add the backbone class to a `validated=True` `PPFamilySpec` (`STOCK_FORWARD_PP` when the upstream forward splits as-is) once its PP GPU rows pass; an unregistered backbone is refused by name |
-| Vendoring | `src/models/<name>/` + a side-effect import in `src/model_loading/model_preparation.py` |
-| Configs | `examples/sft/<family>/` |
-| Tests | `tests/gpu/parallelism/ep/`, `tests/gpu/trainers/sft/`, `tests/cpu/models/`, `tests/gpu/manifest.py` |
-| Docs | the per-family page and every family roster listed in step 8 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` — agent-docs, human-docs and `CLAUDE.md` |
-
-`MOE_LAYER_MAP` (`families/roster.py`) is built from the roster's imported classes, and the CP map by
-walking its subclass tree — a duplicate HF class name raises at import; a `model_type` two specs claim
-raises at import of `family_specs`. Templates worth cribbing: `families/qwen3.py` (separate-GLU),
-`families/gpt_oss.py` (in-layer routing, interleaved weights), `families/deepseek_v4.py` (most class
-attributes in one place).
-
----
-
-## Router balancing (`moe_balancing`)
-
-The field is `Literal["auto", "none", "aux_loss", "bias_update", "bias_update_transient"]`, default
-`auto` (`src/configs/script_arguments.py`); `resolve_balancing_mode`
-(`src/models/moe/balancing.py`) resolves it against the live model and
-`apply_balancing_mode` (`src/callbacks/balancing.py`) applies it.
-Leave the YAML at `auto` and make the family resolvable:
-
-- **Selection inside the HF gate** and the loaded class's forward declares
-  `output_router_logits` → `aux_loss`. Declare nothing.
-- **The wrapper selects** → `SUPPORTS_BIAS_BALANCING = True` and select through the shared
-  helpers, not a hand-added `self._balancing_bias(...)` (it is `None` when balancing is off and in
-  native-adoption mode): top-k over `self._selection_scores(scores)` for score-routed layers
-  (group-limited base, DeepSeek-V4, Inkling, LFM-2), `self._biased_topk(logits)` or
-  `_deepseek_biased_route` (also returns the unbiased gate) for logit-routed ones (Qwen3, Cohere2
-  MoE, GPT-OSS). Gate weights come from the *unbiased* scores; call
-  `self._record_expert_load(indices)` on the selected indices yourself, or the bias never moves. A
-  layer can refuse per-instance by overriding `enable_bias_balancing`.
-- **`bias_update` ships only if the bias exports** — declare the spec's `balancing_slot` (live path
-  first, plus its `config_flag` and the `_materialize_native_balancing_slot` hook for a config-gated
-  slot). Without one, `_enforce_bias_export_contract` refuses `bias_update` and the
-  user must opt into `bias_update_transient`, which no export or weight-sync carries.
-
-Which mode `auto` picks per family is published in `agent-docs/training-methods/callbacks.md` — read the
-verdict there rather than keeping a second copy.
-
-**Traps.**
-
-- Both bias modes downgrade to `none` on the weight-sync RL scripts (online / async GRPO):
-  the sync ships parameters and the bias is a buffer (`src/callbacks/balancing.py`), so those
-  runs train unbalanced. `aux_loss` is inert under a policy-gradient loss.
-- A construction hook may issue **no collective** and allocate nothing sized by `world_size` —
-  some load paths patch layers before every rank reaches group setup, and 8-GPU-invisible state is
-  an OOM at 512. Both are pinned per family by
-  `tests/cpu/parallelism/test_ep_prologue_parity.py`.
-- A stored expert-weight root with no `LORA_PROJECTION_COVERAGE` entry leaves `expert_lora`
-  silently not adapting it (`tests/cpu/peft/test_expert_lora_projection_coverage.py`).
-
----
-
-## Vendoring — removal is part of the change
-
-Vendoring is for a family transformers has not shipped, and it is temporary: the directory, its
-registration import, the registration test, and any compat shim go the moment upstream lands, with
-the EP wrapper and Liger spec re-keyed to the upstream module. Put the removal trigger in the
-header docstring of `src/models/<name>/__init__.py`, naming the upstream PR. Procedure:
-`agent-docs/models/adding-a-model.md` → *Vendoring a model*.
-
-One detail that bites and is not in the guide: seed
-`HARDCODED_CONFIG_FOR_MODELS["<name>"]` (`transformers.utils.auto_docstring`) **before** importing
-the modeling module, or `@auto_docstring` raises "Config not found". A vendored family whose hub
-checkpoint stores experts per-expert while the module fuses them gets no entry in transformers'
-own conversion mapping, so the layout must be declared on the spec (`expert_layout` with its
-`per_expert_keys`) instead — the gather and the lazy loader read that, not `from_pretrained`'s
-converter.
-
----
+Templates worth cribbing: `families/qwen3.py` (separate-GLU), `families/gpt_oss.py` (in-layer routing,
+interleaved weights), `families/deepseek_v4.py` (most class attributes in one place).
 
 ## Verify
 
-Lint on the host; everything else inside the image. Never pin `--master_port` — the harness
-allocates one per run.
+Lint on the host; everything else inside the Docker image (`halo:blackwell` / `:hopper`), where the
+tools are on `PATH`. Never pin `--master_port` — the harness allocates one per run.
 
 ```bash
 make lint
 python tests/cpu/models/test_<name>_support.py            # registration, gather/merge, balancing
 python tests/cpu/model_loading/test_liger_family_coverage.py    # every spec class exists and is exact
 python tests/cpu/checkpoint/test_merge_ep_shards.py       # merged-from-shards == gathered for the family
-torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_vs_fsdp_<name>.py
+torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family <name>
 ```
 
-Required before the family counts as supported: an EP-vs-FSDP equivalence test (template
-`tests/gpu/parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`), a trainer test that saves through the
-gathered EP path and reloads the checkpoint as a plain HF model
-(`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`, a thin subclass of `EPSftRoundTrip` in
-`tests/common/ep_sft_roundtrip.py` — copy it and override only the family hooks), both registered in
-`tests/gpu/manifest.py`, a CPU support test (`tests/cpu/models/test_deepseek_v4_support.py`), and —
-where you wired `bias_update` — `tests/gpu/parallelism/ep/test_gptoss_bias_balancing.py`. Add the
-Liger numerics case to `tests/gpu/kernels/test_liger_family_kernels.py`.
+The family counts as supported once the tests of step 7 of
+[Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support) pass and its docs rows exist
+(step 8); where you wired `bias_update`, also `tests/gpu/parallelism/ep/test_gptoss_bias_balancing.py`.

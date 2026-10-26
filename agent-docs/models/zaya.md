@@ -2,9 +2,7 @@
 
 `ZayaForCausalLM` — Zyphra's 8.84B-parameter MoE (16 routed experts, top-1; ~760M active) with CCA (Compressed Convolutional Attention), cross-layer EDA (Evolving Decision Adapter) router state, and a discard-bucket routing slot. Transformers ships `transformers.models.zaya` natively, so the family loads with no remote code and no revision pin. The most constrained model in Halo.
 
-| | EP | EP + GC | FSDP2 (no GC) | FSDP2 + GC | CP | TP | ETP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Zaya (Zyphra/ZAYA1) | Yes | **No** | Yes | **No** | **No** | **No** | Yes |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Every mode runs without gradient checkpointing ([Limitations](#limitations)).
 
 40 `ZayaDecoderLayer`, each one CCA attention plus a `ZayaSparseMoeBlock` — every layer is MoE. `layer_types` picks `hybrid` or `hybrid_sliding` per layer, which selects the mask, the per-layer `sliding_window` kernel argument, and the RoPE parameters. `rope_parameters` is a per-layer-type dict; a flat spelling is stored as-is and dies at model build with a bare `KeyError`.
 

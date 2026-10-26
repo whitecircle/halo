@@ -2,11 +2,7 @@
 
 `Glm5NextForConditionalGeneration` (`zai-org/GLM-5.3-Flash`) — 321B total / 18B active composite VLM, native in transformers 5.16 (`model_type` `glm5_next`, text tower `glm5_next_text`; no remote code). 45 text layers mix KDA linear attention with DeepSeek sparse attention, hyper-connections widen the cross-layer residual 4×, and a 288-expert sigmoid-routed MoE carries most of the parameters.
 
-| | EP | CP | TP | ETP | PP | FSDP2 |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|
-| GLM-5 Next | Yes | **No** | **No** | Yes | Yes ¹ | Yes |
-
-¹ Text tower only (`GLM5_NEXT_PP`): a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and no stage may begin on a `shared` DSA indexer layer ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism takes the text tower only (`GLM5_NEXT_PP`): a text-only run of the composite is admitted and re-emits the vision tower in every checkpoint, image data is refused, and no stage may begin on a `shared` DSA indexer layer ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 

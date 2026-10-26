@@ -21,11 +21,7 @@ use_peft: false                    # true makes the adapter-free base the refere
 output_dir: checkpoints/dpo-qwen3.5-9b
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `beta` | `0.1` | Scales the implicit-reward gap inside the loss; `0` flattens the objective |
-| `max_length` | `1024` | Truncates prompt + completion, keeping the start |
-| `generation_max_prompt_length` | `512` | Prompt cap for the eval generation split only |
+`beta` scales the implicit-reward gap inside the loss (`0` flattens the objective), `max_length` truncates prompt + completion keeping the start, and `generation_max_prompt_length` caps prompts of the eval generation split only. Types and defaults: [DPOConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [DPOScriptArguments](../../reference/configuration-reference.md#other-script-arguments).
 
 `loss_type` takes 15 TRL values — `sigmoid`, `hinge`, `ipo`, `sft`, `exo_pair`, `nca_pair`, `robust`, `bco_pair`, `sppo_hard`, `aot`, `aot_unpaired`, `discopop`, `apo_zero`, `apo_down`, `sigmoid_norm` — and a list combines several under `loss_weights` (unset: `1.0` each), so `[sigmoid, sft]` adds an SFT anchor to the preference term.
 

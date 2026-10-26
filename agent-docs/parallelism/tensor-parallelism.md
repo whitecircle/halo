@@ -45,20 +45,11 @@ Every MoE under **pure** TP routes to `load_tp_moe_model` rather than `tp_plan="
 HF's auto plan wrongly shards MoE expert biases. Supported attention classes:
 `TP_SHARDABLE_ATTENTION_CLASSES` in `src/distributed/tensor_parallel/parallelize_attention.py`.
 
-**Not supported:** every family absent from the table above, and Qwen3-VL: a dense checkpoint loads
-through HF-native `tp_plan="auto"` and the architecture ships no `base_model_tp_plan`, so the load
-raises, while the MoE variant's `Qwen3VLMoeTextAttention` is in no registry
-([qwen3.md](../models/qwen3.md#qwen3-vl)). For the others no attention class is in the registry, so a `tp_size > 1` run shards zero layers and raises rather than silently leaving
-every weight replicated. Zaya trips the earlier head-divisibility gate at `tp_size > 2`
-(`num_key_value_heads` is 2). Use EP for their experts.
-
-Behind the missing entries:
-
-- Gemma 4's KV-shared layers plus `attention_k_eq_v`.
-- Zaya's CCA/Conv1d front-end, which has no DTensor sharding primitive.
-- Step-3.7 Flash's per-layer head counts, which fit no uniform q/k/v plan.
-- GLM-5 Next's DSA indexer plus KDA projections, which have no sound sharding
-  ([glm5-next.md](../models/glm5-next.md#limitations)).
+**Not supported:** every family absent from the table above. Their attention class is in no
+registry, so a `tp_size > 1` run shards zero layers and raises rather than leaving every weight
+replicated; a dense checkpoint shipping no `base_model_tp_plan` (Qwen3-VL) raises at the HF-native
+load. Per family, with the reason on its page:
+[Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Load paths
 
@@ -224,8 +215,9 @@ unsharded single-GPU grad norm.
 
 EP+TP shards attention with TP and distributes MoE experts with EP on the same GPU groups
 (`load_ep_tp_model`). Router, `embed_tokens`/`lm_head`, and norms stay replicated. `ep_size` must be
-a multiple of `tp_size`, TP stays NVLink-local, and DP = `world_size / tp_size`. Locality rules, the
-EP/TP/DP example shapes, and the gradient-sync groups: [multi-node.md](multi-node.md#eptp-mode).
+a multiple of `tp_size`, TP stays NVLink-local, and DP = `world_size / tp_size`. Its topology rules:
+[Topology rules](README.md#topology-rules); example shapes and the gradient-sync groups:
+[multi-node.md](multi-node.md#eptp-mode).
 
 For MoE where only expert memory is the bottleneck, shard the expert FFN with
 [ETP](expert-tensor-parallelism.md) instead. Attention TP and expert TP are mutually exclusive.
@@ -262,10 +254,8 @@ on every load path, off `config.json` before any weight is read.
 Transformers validates no head count of its own, so without it the run dies on the first forward's
 reshape, after the whole checkpoint has been pulled and placed on every rank.
 
-**Axis combinations.** TP composes with EP only. TP+CP, TP+ETP and EP+TP+ETP are refused by the
-[allowlist](README.md#supported-combinations). EP+TP also meets two topology rejections:
-single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domain multi-group EP
-([Multi-Node → EP+TP](multi-node.md#eptp-mode)).
+**Axis combinations.** TP composes with EP only; the allowlist and the EP+TP topology rules:
+[Supported combinations](README.md#supported-combinations).
 
 **Knobs.** Everything below raises unless the verdict says otherwise.
 

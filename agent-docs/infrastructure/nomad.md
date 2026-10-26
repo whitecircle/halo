@@ -171,7 +171,7 @@ So a missing variable, or one holding only some of the keys, renders empty for t
 
 ## Mapping onto `docker run`
 
-The specs carry the same container flags every other Halo surface passes (`CLAUDE.md`, the Makefile, the SkyPilot tasks):
+The specs carry the [standard container flags](docker.md#standard-training-launch), mapped onto the docker driver:
 
 | `docker run` | Nomad docker driver |
 |---|---|

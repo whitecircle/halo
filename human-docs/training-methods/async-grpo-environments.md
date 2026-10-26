@@ -17,18 +17,14 @@ advantage, and the loss drives the optimizer step](../../agent-docs/assets/diagr
 
 ## The environments
 
-`environment_type` picks one. Where the last column says yes, a dataset without an `answer` column is
-refused at startup.
-
-| `environment_type` | The task | Needs `answer` |
-| --- | --- | --- |
-| `react_math`, `react_search` | ReAct: the model writes `Thought:` / `Action:` as plain text; calculator and Python, or web search | yes |
-| `native_math`, `native_coding`, `native_combined` | the same tools as native function calls; grades the row's `answer` when there is one, otherwise finishing the episode | no |
-| `qa_search` | factual question answering with a web-search tool | yes |
-| `exam_qa` | multiple-choice and open exams, closed-book unless `open_book: true` | yes |
-| `swe` | edit-run-test loop over a workspace that survives across turns | yes (unless judge-only) |
-| `code_contests`, `codeforces` | write a program, try it in a scratchpad, submit it; scores 1 only when every hidden test passes | yes |
-| `mcp` | whatever tools an MCP server advertises | no |
+`environment_type` picks one: `react_math` and `react_search` (plain-text actions), `native_math`,
+`native_coding` and `native_combined` (native tool calls), `qa_search`, `exam_qa`, `swe` (an
+edit-run-test loop over a workspace), `code_contests`, `codeforces`, or `mcp` (whatever tools an MCP
+server advertises). The
+[registry](../../agent-docs/training-methods/async-grpo/environments/README.md#registry) ↗ lists each
+one's tools and turn budget. An environment that grades against `answer` refuses a dataset without that
+column at startup
+([`requires_answer`](../../agent-docs/training-methods/async-grpo/environments/README.md#common-knobs) ↗).
 
 The hosts that run the Ray actors need what their environment needs: a sandbox and a large `TMPDIR` for
 the code environments, outbound network (and usually a search API key) for the search ones, and the MCP
@@ -122,9 +118,9 @@ learning_rate: 1.0e-06
 Qwen3.5/3.6 and Gemma 4 ship recipes under `examples/grpo/environmental/<family>/{vllm,sglang}/`; the
 SGLang ones are `ep1` only.
 
-- **Sampling** goes through the `rollout_*` fields: `rollout_temperature` (`0.7`), `rollout_top_p`
-  (`0.95`), and `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` (off by default). Every
-  request sends all five, so the model's `generation_config.json` never fills them in. TRL's `top_p`,
+- **Sampling** goes through the `rollout_*` fields (`rollout_temperature`, `rollout_top_p`,
+  `rollout_top_k`, `rollout_min_p`, `rollout_repetition_penalty`). Every request sends all five, so the
+  model's `generation_config.json` never fills them in. TRL's `top_p`,
   `top_k`, `min_p`, `repetition_penalty` and `generation_kwargs` reach no sampler here, and setting one
   raises at startup.
 - **`beta`** above 0 on a full fine-tune or native expert-only LoRA loads a frozen reference the way the

@@ -36,20 +36,9 @@ gradient_checkpointing: true
 output_dir: checkpoints/self-distill-qwen3.5-9b
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `sdpg_hint_template` | `\n[Hint] The correct answer is: {answer}. ...\n` | Appended to the last user turn, teacher forward only. Fills `{answer}` and `{solution}`; any other placeholder is refused at parse time |
-| `sdpg_answer_field` / `privileged_solution_field` | `answer` / `solution` | Columns filling `{answer}` and `{solution}`; a slot the template names needs its column while `sdpg_beta_base > 0`, and a row with a blank named slot gets no hint (counted in a prep-time warning) |
-| `sdpg_loss` | `reverse_kl` | OPD loss; or `forward_kl`, `unnormalized_kl` |
-| `sdpg_temperature` | `1.0` | OPD softmax temperature, finite and `> 0`; all three losses scale by `T²` |
-| `sdpg_beta_base` | `1.0` | Base OPD coefficient, finite and `>= 0`; `0` builds no teacher branch and skips the teacher forward |
-| `sdpg_beta_warmup_steps` / `sdpg_beta_decay_steps` | `0` / `0` | `beta(k) = base · min(1, k/T_warm) · min(1, (T−k)/T_decay)`; each `>= 0` |
-| `opd_exclude_eos` | `True` | Drops EOS/stop tokens from OPD but not from SFT |
-| `reference_kl_coef` | `0.0` | Alpha on a frozen-reference KL anchor, finite and `>= 0`; `0` loads no reference. Under EP, ETP or TP the reference is a whole dense replica on every rank, experts included (a warning says so): its log-probs match the policy's up to kernel numerics, but budget for its memory |
-| `reference_kl_loss` | `unnormalized_kl` | The anchor's divergence; or `reverse_kl`, `forward_kl`; evaluated at `sdpg_temperature` |
-| `reference_model_name_or_path` | `None` | The anchor model; defaults to the student's init weights. Loaded like a preference reference, the run's added special tokens included. A separate repo takes its own main, not the policy's `model_revision`, and its tokenizer must map every token to the policy repo's id, refused before its weights load |
-| `confidence_field` / `confidence_power` | `None` / `4.0` | Per-sample weight `conf**p` (`p` finite and `> 0`), divided by its mean over the train split, so it weights rows at any batch size. Every confidence must lie in `[0, 1]` |
-| `confidence_weight_opd` | `True` | Applies that weight to OPD as well as SFT |
+The hint (`sdpg_hint_template`) is appended to the last user turn for the teacher forward only, its `{answer}` and `{solution}` slots filled from the `sdpg_answer_field` and `privileged_solution_field` columns; a row with a blank named slot gets no hint (counted in a prep-time warning). The OPD coefficient follows `beta(k) = base · min(1, k/T_warm) · min(1, (T−k)/T_decay)`, all three losses scale by `T²` at `sdpg_temperature`, and `sdpg_beta_base: 0` builds no teacher branch and skips the teacher forward. `opd_exclude_eos` keeps EOS/stop tokens out of OPD but not out of SFT.
+
+`reference_kl_coef` adds a KL anchor to `reference_model_name_or_path` (the student's init weights when unset), loaded like a preference reference, the run's added special tokens included. A separate repo takes its own main, not the policy's `model_revision`, and its tokenizer must map every token to the policy repo's id, refused before its weights load. Under EP, ETP or TP the reference is a whole dense replica on every rank, experts included (a warning says so): its log-probs match the policy's up to kernel numerics, but budget for its memory. `confidence_field` weights each row by `conf**confidence_power`, divided by its mean over the train split so it weights rows at any batch size; `confidence_weight_opd` applies it to OPD as well as SFT. Types, defaults and bounds: [SelfDistillScriptArguments](../../reference/configuration-reference.md#selfdistillscriptarguments).
 
 With `reference_kl_coef <= 0`, a non-default `reference_model_name_or_path` or `reference_kl_loss` raises rather than being ignored; so do `confidence_power` and `confidence_weight_opd` without a `confidence_field`, and a `confidence_field` over a presharded dataset (each rank would divide by its own shard's mean).
 

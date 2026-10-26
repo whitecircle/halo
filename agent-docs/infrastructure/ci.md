@@ -56,7 +56,7 @@ A per-family pass of either server tier serves the family's checkpoint and point
 
 ## Contribution gate
 
-Three workflows implement the issue-first gate described in `CONTRIBUTING.md`:
+Three workflows implement the issue-first gate [`CONTRIBUTING.md`](../../CONTRIBUTING.md#the-gate-read-first) states:
 
 - `.github/workflows/pr-gate.yml` (`pull_request_target`, opened/reopened): a PR whose author is neither a bot, nor a write-access maintainer, nor listed in `.github/APPROVED_CONTRIBUTORS` gets an explanatory comment and is closed. It reads the allowlist via the API from the `allowlist` branch and checks out nothing, so PR code never executes.
 - `.github/workflows/approve-contributor.yml`: a maintainer commenting `/approve @username` appends that user to `.github/APPROVED_CONTRIBUTORS` and assigns them to the issue (`stale.yml` exempts assigned issues; a user GitHub refuses to assign — one who never commented on the issue — is reported with a `keep-open` hint). Several `/approve @handle` lines in one comment approve each named user. The gate is the commenter's write access, verified first — the `issue_comment` trigger fires on PR comments too, and a permission check that errors is reported on the issue and fails the run rather than approving nobody in silence. Bot comments are skipped.

@@ -70,43 +70,21 @@ run. Do it once, offline:
 halo run prepare-dataset -- --help
 ```
 
-The tool tokenizes, optionally packs, and shards the corpus, and can push the
-result to the Hub or S3. These flags decide whether the output is usable:
+The tool tokenizes, optionally packs (`--pack_sequences`), and shards the
+corpus, and can push the result to the Hub or S3. Three rules decide whether the
+output trains:
 
-- **`--mode`.** `chat` (the default) renders the conversation field through the
-  chat template. `text` tokenizes `--text_field` as raw text, for pretraining.
-- **`--num_shards`.** The default `1` writes one unsharded dataset that trains at
-  any data-parallel size. Above 1, the shard count must be at least your
-  data-parallel size.
-- **`--pack_sequences`.** Turns packing on. Without it each row holds one
-  document.
-- **`--packing_strategy`.** How packing fills rows:
-  - `bfd` (default): best-fit-decreasing; a document longer than
-    `--max_length` loses its overflow.
-  - `bfd_split`: the same packing, with the overflow carried into later
-    examples. Use it for lossless pretraining.
-  - `wrapped`: concatenates and chunks across documents. It keeps every token
-    but loses the document boundaries the collator uses to reset attention.
+- `--max_length` is stored with the data and must equal the training config's
+  `max_length`, or the load raises, since rows are never re-truncated.
+- `--num_shards` above 1 must be at least your data-parallel size. The default
+  `1` trains at any size.
+- `--mode text` tokenizes raw text for pre-training; the default `chat` renders
+  the conversation through the chat template.
 
-  In chat mode a conversation longer than `--max_length` is dropped before
-  packing, whatever the strategy.
-- **`--max_length`.** Stored in the dataset metadata. It must equal the training
-  config's `max_length`, or the load raises, since rows are never re-truncated.
-- **`--test_size`.** Without it, a single-split input is written train-only. The
-  run then warns and uses the first 100 train rows as a placeholder test split,
-  and `--num_shards` above 1 is refused. The output keeps only `train` and
-  `test`: with no `test` split, the input's `validation` split becomes `test`,
-  and any other split is dropped with a warning.
-
-`--tokenizer_backend gigatoken` replaces the HF tokenizer with a Rust bulk
-encoder, about 6× faster on UltraChat 200K with the Qwen3-0.6B tokenizer. It
-checks its IDs against the HF tokenizer at startup and raises on any mismatch.
-It ships in the training image; elsewhere, install it from a checkout with
-`uv pip install -e '.[gigatoken]'`.
-
-Training configs take the same choice as `tokenizer_backend` (`hf` by default,
-`gigatoken` to opt in). Embedding training accepts only `hf`, because
-SentenceTransformers does its own tokenization.
+`--tokenizer_backend gigatoken` swaps in a faster Rust encoder whose IDs are
+checked against the HF tokenizer at startup; training configs take the same
+choice through `tokenizer_backend`. Every flag and the packing strategies:
+[Pre-Processing](../agent-docs/data/dataset-preparation.md#parameters) ↗.
 
 ## Data for the RL environments
 
@@ -123,5 +101,4 @@ Pool format, build flags and bands:
 
 Full schema (multimodal content included), collators and the S3 utilities:
 [Dataset Formats](../agent-docs/data/dataset-formats.md) ↗ ·
-[Pre-Processing](../agent-docs/data/dataset-preparation.md) ↗ ·
 [S3 Utilities](../agent-docs/data/s3-utilities.md) ↗.

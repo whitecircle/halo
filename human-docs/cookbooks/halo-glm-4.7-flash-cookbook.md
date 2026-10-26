@@ -6,9 +6,8 @@ queries and keys through low-rank projections (MLA).
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | vLLM, SGLang |
+Modes: the GLM-4 MoE Lite row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoint:** `zai-org/GLM-4.7-Flash`.
 - **GPUs:** eight at EP8, eight experts per GPU, at 30,720 tokens.

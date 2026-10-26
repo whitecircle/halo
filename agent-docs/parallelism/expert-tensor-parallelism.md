@@ -14,10 +14,8 @@ Use ETP when expert weights don't fit per rank after EP distribution and attenti
 Per-rank expert memory drops ~`expert_tp_size`×; ranks in the same ETP group share a batch, reducing
 DP.
 
-`expert_tp_size` is mutually exclusive with attention TP (`tp_size`), which would shard the same
-ranks along a second axis, and with CP (`cp_size`): ETP partners hold shards of one expert and must
-see the **same** tokens, since `ReduceFromExpertTP` sums their outputs element-wise in token space,
-while CP hands each rank a different sequence chunk.
+`expert_tp_size` excludes attention TP and CP
+([why](README.md#supported-combinations)).
 
 | Term | Meaning |
 |------|---------|
@@ -80,7 +78,7 @@ torchrun --nproc_per_node=8 scripts/training/sft.py \
 
 # 2-GPU correctness test (expert_tp_size=2, ep_size=1)
 torchrun --nproc_per_node=2 \
-    tests/gpu/parallelism/combined/test_ep_etp_correctness.py
+    tests/gpu/parallelism/ep/test_ep_modes_vs_reference.py --model gpt_oss_20b --mode etp
 ```
 
 ## Validation rules
@@ -92,8 +90,6 @@ Enforced in `src/distributed/parallelism_rules.py` before model loading:
 - `ep_group_size` must divide the NVLink domain (`ep_scope=node`). Under `ep_scope=global` it must
   tile the world as equal contiguous per-domain blocks — divisibility
   alone is not sufficient ([Multi-Node](multi-node.md#node-local-vs-cross-node-ep)).
-- `tp_size > 1` with `expert_tp_size > 1` is rejected. Use EP+TP for attention memory or EP+ETP for
-  expert memory, never both.
 - Cross-node EP (`ep_scope=global`) + ETP is supported as **one ETP group per NVLink domain** only:
   `expert_tp_size == EP members per domain` and `ep_size == domains spanned`. A finer split that
   would straddle a domain boundary is rejected — the ETP all-reduce must stay on NVLink.
@@ -104,20 +100,11 @@ Enforced in `src/distributed/parallelism_rules.py` before model loading:
     This rule, not the one above, is what refuses `ep2+etp4` and `ep4+etp2` on 2×8 (both leave
     `ep_group_size=8` under a 16-rank world), at either scope; `ep2+etp8` is the working shape.
 
-- The racy-EP gate (`is_racy_single_domain_multigroup_ep`) fires on a **single** NVLink domain with
-  `ep_size > 2` **and** `ep_group_size < nvlink_domain_size`, so an ETP shape that leaves
-  `ep_group_size` short of the domain is rejected like bare `ep4` — `ep4+etp2` on a 16-GPU NVL
-  domain, for instance.
-
-> [!NOTE]
-> **`ep4+etp2` on 8 GPUs passes the gate**
->
-> It is the only 4-way expert split on a single 8-GPU node, and it clears the racy-EP gate that
-> refuses bare `ep4` because ETP raises `ep_group_size` to the full domain —
-> [Expert Parallelism](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs). The GPU
-> test matrix does not run it. For a 4-way *expert-FFN* split without that topology, `ep2+etp4`
-> reaches the same 8-way total split through 2-rank dispatch groups, at DP 2 instead of DP 4; it is
-> what the 8-GPU Mistral4 and Cohere2 MoE matrices (`tests/gpu/manifest.py`) run.
+- On a single NVLink domain the EP rule keys on `ep_group_size`: `ep4+etp2` on 8 GPUs fills the
+  domain and passes, while an ETP shape leaving `ep_group_size` short of the domain is refused like
+  bare `ep4` ([single-domain rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
+  The GPU test matrix runs `ep2+etp4` instead (the 8-GPU Mistral4 and Cohere2 MoE matrices,
+  `tests/gpu/manifest.py`): the same 8-way split through 2-rank dispatch groups, at DP 2 instead of 4.
 
 ETP reduces data parallelism — within a stage it counts toward the max of TP, CP and ETP
 ([Stacking the dimensions](README.md#stacking-the-dimensions)). On 8 GPUs
@@ -209,8 +196,7 @@ would be dropped silently. `reject_unsupported_model` checks it off
 That helper is the one home for "what does ETP actually shard", so the config-time gate and the
 layer that does the split cannot disagree on which config spelling carries the per-expert width.
 
-**Axis combinations.** ETP composes with EP. Pure ETP and EP+ETP are supported shapes; TP+ETP,
-ETP+CP and EP+TP+ETP are refused by the [allowlist](README.md#supported-combinations).
+**Axis combinations.** Pure ETP and EP+ETP only ([allowlist](README.md#supported-combinations)).
 
 **Knobs.** ETP inherits every [EP knob rule](expert-parallelism.md#limitations) (`has_ep_group` is
 `ep_group_size > 1`, which pure ETP satisfies). On top of those:

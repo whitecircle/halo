@@ -23,24 +23,12 @@ more GPUs or a shorter `max_length` there.
 
 ## Start the training container
 
-Every training, inference and conversion command runs inside this container. Point `HALO_SCRATCH` at a
-large volume first. `/mnt` is not always large, so check with `df -h`.
-
-```bash
-git clone https://github.com/whitecircle/halo
-cd halo
-cp .env.example .env    # fill in HF_TOKEN, WANDB_API_KEY, and OPENROUTER_API_KEY for code-contests GRPO
-export HALO_IMAGE=public.ecr.aws/whitecircle/halo:blackwell   # :hopper on H100 / H200
-export HALO_SCRATCH=/path/to/large/volume
-docker pull "$HALO_IMAGE"
-mkdir -p "$HALO_SCRATCH/hf" "$HALO_SCRATCH/checkpoints" "$HALO_SCRATCH/tmp"
-docker run --rm -it --gpus all --network host --ipc=host --shm-size=128g \
-  --ulimit memlock=-1 --ulimit stack=67108864 --env-file .env \
-  -e HF_HOME=/data/hf -e HF_DATASETS_CACHE=/data/hf/datasets \
-  -e TMPDIR=/data/tmp -e HALO_DATA_ROOT=/data \
-  -v "$(pwd)":/workspace -v "$HALO_SCRATCH":/data -w /workspace \
-  "$HALO_IMAGE" bash
-```
+Every training, inference and conversion command runs inside the training container: start it as in
+[Installation → Start a container](../installation.md#5-start-a-container), with two changes. Mount your
+large volume at `/data` (`-v "$HALO_SCRATCH":/data`, with `HF_HOME=/data/hf`,
+`HF_DATASETS_CACHE=/data/hf/datasets`, `TMPDIR=/data/tmp` and `HALO_DATA_ROOT=/data`), and add
+`--network host` so the trainer reaches the rollout servers. `/mnt` is not always large, so check with
+`df -h` first. Load-bearing flags: [Docker](../../agent-docs/infrastructure/docker.md#standard-training-launch) ↗.
 
 Inside the container, `/data` is `$HALO_SCRATCH`. A run that writes `/data/checkpoints/<run>` leaves its
 output in `$HALO_SCRATCH/checkpoints/<run>` on the host.
@@ -52,8 +40,7 @@ copy the YAML and edit them there. Edit the existing line rather than adding a s
 repeated key fails to parse.
 
 Every layout in these cookbooks passes Halo's startup checks at the GPU count shown. The rule people hit
-most often: on one eight-GPU node, pure EP must be 8, 2 or 1, and a 4-way expert split is `ep4 + etp2`.
-The full rules are in [Parallelism](../parallelism.md).
+most often, EP on one eight-GPU node, is in [Parallelism](../parallelism.md#rules-that-save-you-a-wasted-run).
 
 ## Smoke-test a checkpoint
 

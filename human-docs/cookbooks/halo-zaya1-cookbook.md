@@ -6,9 +6,8 @@ loads with no revision pin and no remote code. It is the most constrained family
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | No | Yes | No | No | Yes | No |
+Modes: the Zaya (ZAYA1) row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 Every mode runs without gradient checkpointing.
 

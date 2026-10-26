@@ -7,12 +7,8 @@ its language-model weights in FP8, so convert it to BF16 once before training.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | partial | Yes | Yes | No |
-
-`partial`: EP+CP is a valid shape, but its only GPU test on this family is a tiny-model LoRA run. Try a
-short run before a long one.
+Modes: the Mistral4 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoint:** `mistralai/Mistral-Small-4-119B-2603`, converted to BF16.
 - **GPUs:** eight at EP8, 16 experts per GPU, at 32,000 tokens. Plan for about 500 GB of disk for the FP8

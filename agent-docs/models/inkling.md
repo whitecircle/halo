@@ -6,13 +6,7 @@ Attention is hybrid sliding (5 sliding : 1 full, period 6) with **no RoPE** — 
 
 Transformers ships `transformers.models.inkling` natively (the image pins 5.20.2), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
 
-| | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Inkling-Small | Yes | **No** ¹ | **No** ¹ | Yes | **No** ¹ | **No** ¹ | Yes ² |
-
-¹ Architectural, not a missing registration — see [Why CP and TP are out](#why-cp-and-tp-are-out). Pipeline parallelism refuses Inkling (`INKLING_PP`): loader-only validation, with no schedule, end-to-end or save/resume row ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
-
-² Tiny-model LoRA verified (`test_lora_merged_save_resume_families.py`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume); no full-scale LoRA run.
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP and TP are out for architectural reasons, not a missing registration ([why](#why-cp-and-tp-are-out)). Pipeline parallelism refuses Inkling (`INKLING_PP`): loader-only validation, with no schedule, end-to-end or save/resume row. LoRA is tiny-model verified only (`test_lora_merged_save_resume_families.py`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume).
 
 ## EP wrapper
 
@@ -86,4 +80,4 @@ Inkling loads as a `ConditionalGeneration` class, but the data path follows the 
 
 The shipped config sets `packing: false`: full rows attend 8192 tokens/rank/step against the ~2.3k the measurement above ran at, on a peak of 246 of 288 GB, and the depthwise convs cross packed documents either way.
 
-CPU coverage: `tests/cpu/models/test_inkling_support.py` (registration and router parity, joint normalization included). GPU gates: `tests/gpu/parallelism/ep/test_ep_vs_reference_inkling.py`, `tests/gpu/parallelism/combined/test_ep_etp_inkling.py`, `tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` (`--family inkling_text`).
+CPU coverage: `tests/cpu/models/test_inkling_support.py` (registration and router parity, joint normalization included). GPU gates: `tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family inkling_text`, `tests/gpu/parallelism/combined/test_ep_etp_inkling.py`, `tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` (`--family inkling_text`).

@@ -33,18 +33,9 @@ gradient_checkpointing: true
 output_dir: checkpoints/clf-qwen3.5-9b-mage
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `max_length` | `1024` | Truncation length; `null` or non-positive → the context window |
-| `loss_type` | `cross_entropy` | Also `focal` (`focal_gamma` `2.0`; `focal_alpha` on multi-label heads only) and `label_smoothing_ce` (single-label only) |
-| `class_weights` | `None` | Per-class weights by label id; `pos_weight` on the multi-label BCE |
-| `derive_class_weights` | `false` | Balanced weights from world-reduced label counts; single-label only |
-| `multi_label_threshold` | `0.5` | Sigmoid decision threshold |
-| `compute_mcc` / `compute_auc_roc` / `compute_per_class_metrics` | `true` / `false` / `false` | Extra eval metrics; MCC and per-class are single-label only |
+`loss_type` picks `cross_entropy`, `focal` or `label_smoothing_ce`; every field's type and default, and which apply to single- or multi-label heads, is in [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
 
-Full field list: [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
-
-The two weighting knobs are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own `ClassificationLoss` (`src/trainers/reward/classification_loss.py`), evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
+`class_weights` and `derive_class_weights` are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own `ClassificationLoss` (`src/trainers/reward/classification_loss.py`), evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
 
 The script defaults `attn_implementation` to `sdpa` when the YAML pins none, because batches are right-padded and the auto-selected FA4 would take its slow varlen path. Under `reset_sinks: false` it requests nothing and lets the resolver auto-select, which there accepts only a sink-carrying backend.
 

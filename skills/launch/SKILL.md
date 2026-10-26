@@ -30,142 +30,43 @@ system interpreter — no venv, no Poetry), so `python`/`torchrun`/`accelerate`/
 
 ## 1. ALWAYS prefer a `make` target first
 
-The Docker incantation lives **once** in the repo `Makefile` — contributors,
-CI, and this skill all call these targets instead of re-typing `docker run`.
-Read the Makefile (`make help` or open the repo-root `Makefile`)
-and use a target if one fits. The relevant targets:
+The Docker incantation lives **once** in the repo `Makefile` — contributors, CI, and this skill all call
+its targets instead of re-typing `docker run`. Run `make help` and use a target if one fits:
 
 ```bash
-# Training — CONFIG is required; METHOD defaults to sft; NPROC defaults to 8;
-# IMAGE defaults to halo:blackwell; EXTRA passes through extra CLI flags.
-# The recipe routes through `python -m src.cli launch METHOD CONFIG` (the halo CLI
-# picks python/torchrun/accelerate), so METHOD selects any scripts/training method.
+# Training — CONFIG is required; METHOD defaults to sft (any `halo launch --list` entry, e.g.
+# offline-grpo, environmental-grpo, preference/smpo); NPROC defaults to 8; IMAGE to halo:blackwell;
+# EXTRA passes through extra CLI flags.
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml
 make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
            NPROC=8 EXTRA="--expert_parallel_size=8"
-make train METHOD=offline-grpo CONFIG=examples/grpo/offline/gptoss/... \
-           NPROC=8            # non-SFT method via METHOD=
-make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
-           IMAGE=halo:hopper        # run on Hopper instead
 
-# Tests
-make seed-hf-cache                           # Hub configs + tokenizers the CPU tier reads (no weights)
-make test-cpu                                # pytest CPU tier (no GPU, runs in image)
-make test-gpu-core                           # core GPU tier (pre-merge, GPU changes; CI runs it on dispatch)
-make test-gpu-full                           # full GPU tier (heavy, many-GPU; run by hand)
-
-# Benchmarks
+# Tests, benchmarks, images, host-only gates
+make seed-hf-cache && make test-cpu          # CPU tier (no GPU, in the image)
+make test-gpu-core                           # core GPU tier; test-gpu-full for the heavy one
 make bench BAND=1                            # throughput + peak memory held to tests/baselines/bench (8 GPUs)
-
-# Image builds (credential-free — every dep is public)
-make build-blackwell
-make build-hopper
-make build-vllm                              # vllm-server:0.32.0
-make build-sglang                            # sglang-server:0.5.22 (NCCL matched to the training images)
-make build-all                               # all four
-
-# Rollout-server GPU tiers (the server must already serve on a GPU outside TRAINER_CUDA_DEVICES;
-# both check /health first and, without EFA=1, force the no-fabric NCCL_IB_DISABLE=1 NCCL_NET=Socket
-# both compose bases default to. EFA=1 passes --device=/dev/infiniband plus NCCL_NET=Libfabric
-# NCCL_NET_PLUGIN=ofi NCCL_IB_DISABLE=0 (and its own NCCL_SOCKET_IFNAME exclude list) to every
-# DOCKER_RUN instead — start the server with its
-# compose EFA overlay (-f docker-compose.{vllm,sglang}.efa.yml) then. The SGLang server needs
-# NCCL_CUMEM_ENABLE=1 on top, the compose default.)
-# Server and trainer must hold the same checkpoint, so each tier runs one pass per served model:
-# SERVER_TIER defaults to 'not moe' (dense Qwen/Qwen3-0.6B); the vLLM MoE half is
-# SERVER_TIER='moe and not gptoss' against Qwen/Qwen3-30B-A3B-Instruct-2507, then
-# SERVER_TIER='moe and gptoss' against unsloth/gpt-oss-20b-BF16; SGLang's (SERVER_TIER=moe) is gpt-oss only.
-# The vLLM server needs VLLM_REASONING_PARSER=qwen3: the benchmarks send a per-effort CoT budget,
-# which draws a 400 without a reasoning parser. The health guard prints the exact compose line when
-# it is missing.
-make test-gpu-vllm
-make test-gpu-sglang
-
-# Publish to Amazon ECR Public (anonymous pull; a moving tag plus an immutable -VERSION pin)
-make ecr-public-login
-make push-public-all                         # or push-public-{blackwell,hopper,vllm,sglang}
-
-# Host-only gates (pinned uvx ruff, no image; `make docs` checks links, anchors and code references)
-make lint
-make format
-make precommit
-make docs
-
-# In-image
-make install                                 # check the lock installs into the image (throwaway container)
-make diagrams                                # regenerate agent-docs/assets from scripts/diagrams (CI byte-compares)
-
-make clean                                   # prune wandb/, the ruff and pytest caches, $(HALO_SCRATCH) test scratch (leaves checkpoints/)
+make build-blackwell                         # build-hopper / build-vllm / build-sglang / build-all
+make lint && make docs                       # host-only (pinned uvx ruff; links, anchors, code references)
 ```
 
-Notes that come straight from the Makefile recipes:
+The rollout-server GPU tiers (`make test-gpu-vllm` / `make test-gpu-sglang`) need the server already
+serving the same checkpoint on a GPU outside `TRAINER_CUDA_DEVICES`, one pass per served model
+(`SERVER_TIER`): [Contributing → Dev loop](../../agent-docs/contributing/README.md#dev-loop).
 
-- `make train` selects the method via `METHOD=` (default `sft`) and dispatches
-  through the `halo` CLI (`python -m src.cli launch METHOD CONFIG --nproc NPROC -- EXTRA`), which resolves
-  the right `scripts/training/` script and launcher. Method names come from
-  `halo launch --list` (e.g. `sft`, `offline-grpo`, `classification`, `embedding`,
-  `environmental-grpo`, and nested names like `preference/smpo`). For a raw one-off
-  or an unusual flag layout the target doesn't fit, use the template in §2.
-- Every GPU target already bakes in `--gpus all --network host --ipc=host --ulimit
-  memlock=-1 --ulimit stack=67108864 --shm-size=128g`, the `-e HF_HOME /
-  HF_DATASETS_CACHE / TMPDIR / HALO_DATA_ROOT / PYTHONPATH /
-  CUDA_DEVICE_MAX_CONNECTIONS=1` env, and the `$(CURDIR):/workspace`, `$(HALO_SCRATCH):$(HALO_SCRATCH)`,
-  `$(AWS_DIR):/root/.aws` (`AWS_DIR ?= ~/.aws`) mounts. `--env-file .env` and the AWS mount are
-  conditional on `ENV_FILE`/`AWS_DIR` (CI drops both to run creds-free). Don't
-  re-specify those by hand when a target works. `DOCKER_RUN` does **not** add
-  `--cap-add=SYS_PTRACE`, so py-spy attaches to a `make`-launched job only on a host whose
-  `kernel.yama.ptrace_scope` is 0 — use §2 when you may need hang triage.
-- **`HALO_SCRATCH` (default `/mnt`) is the one override for this host's large volume** — the
-  bind mount, the in-container `HF_HOME`/`HF_DATASETS_CACHE`/`TMPDIR`/`HALO_DATA_ROOT`,
-  and `make clean`'s prune all derive from it. `/mnt` is **not** guaranteed large (on
-  some hosts it shares the small root device), so verify with `findmnt`/`df -h` and pass
-  `HALO_SCRATCH=/path/to/big/volume` when it isn't. `docker-compose.vllm.yml` and the devcontainer
-  read the same variable.
-- `make` targets run in the **foreground** (`docker run --rm`, no `-d`). For a
-  long detached job that survives the turn and logs to the scratch volume, use §2.
+What a `make` run differs in from a hand-rolled launch (foreground, `--network host`, no
+`--cap-add=SYS_PTRACE`, conditional `.env`/`~/.aws`) and the one `HALO_SCRATCH` override for the large
+volume: [Docker → Standard training launch](../../agent-docs/infrastructure/docker.md#standard-training-launch).
+`/mnt` is **not** guaranteed large — verify with `findmnt`/`df -h` and pass `HALO_SCRATCH=` when it isn't.
 
-## 2. Raw detached `docker run` template (when `make` doesn't fit)
+## 2. Raw detached `docker run` (when `make` doesn't fit)
 
-This is the incantation from `CLAUDE.md`, parameterized. Use it for custom flags,
-disjoint-GPU runs, or long detached jobs. Fill in `<job>`
-(container + log name), `<nproc>`, `<script>`, `<config>`, and any extra flags.
-`$D` is the scratch volume, **resolved dynamically — never hardcode a path**: a
-directory's name does not prove its capacity.
+Use the detached recipe in
+[Docker → Standard training launch](../../agent-docs/infrastructure/docker.md#standard-training-launch)
+for custom flags, disjoint-GPU runs, or long detached jobs: fill in `<job>` (container + log name), the
+`torchrun` line and any extra flags, and keep every flag it calls load-bearing. `$D` is the scratch volume,
+**resolved dynamically — never hardcode a path**: a directory's name does not prove its capacity.
 
-```bash
-# Resolve the scratch volume dynamically (see Preflight in CLAUDE.md).
-D=$(findmnt -rbno TARGET,AVAIL,FSTYPE | awk '$3!~/tmpfs|overlay|squashfs|nfs|fuse|autofs/ && $2+0>20e9{print $2,$1}' | sort -rn | head -1 | awk '{print $2}')
-docker run -d --rm --name <job> --gpus all \
-  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 --shm-size=128g \
-  --cap-add=SYS_PTRACE --env-file .env \
-  -e HF_HOME="$D/hf" -e HF_DATASETS_CACHE="$D/hf/datasets" \
-  -e TMPDIR="$D/tmp" -e HALO_DATA_ROOT="$D" \
-  -v $(pwd):/workspace -v "$D:$D" -v ~/.aws:/root/.aws -w /workspace \
-  halo:blackwell \
-  bash -lc "torchrun --nproc_per_node=<nproc> <script> <config> > \"$D/<job>.log\" 2>&1"
-```
-
-Mandatory pieces (do NOT drop them):
-
-- **`--env-file .env`** — the repo-root `.env` supplies `WANDB_API_KEY`,
-  `HF_TOKEN`, `AWS_DEFAULT_REGION`. The code does **not** auto-load it.
-- **No prefix** inside the container — call `python`/`torchrun`/`accelerate`/
-  `pytest` directly (they are on `PATH`; the image is uv-built, no Poetry, no venv).
-- **`-v $(pwd):/workspace -w /workspace`** — the code mounts live; edits on the
-  host take effect immediately.
-- **`-v "$D:$D"`** — outputs, logs, HF cache all go here. Verify `$D` is a large
-  volume before any multi-GB write (`findmnt` / `df -h` / `readlink -f`); the root FS
-  is small and on some hosts shares a device with `/mnt`.
-- **`--cap-add=SYS_PTRACE`** — lets py-spy attach for hang triage (`agent-docs/reference/debugging.md`).
-- **`-e HALO_DATA_ROOT="$D"`** — toolkit scratch root: S3 dataset cache →
-  `$D/s3_datasets`, profiler artifacts → `$D/profiling` (one knob; defaults to
-  `~/.cache/halo` when unset).
-- **`-v ~/.aws:/root/.aws`** — S3 dataset/checkpoint access. Pre-cached S3
-  datasets live under `$HALO_DATA_ROOT/s3_datasets` (keyed by `md5("<bucket>/<key>")`)
-  and load without live AWS.
-
-Single-GPU / accelerate / pytest variants just swap the `bash -lc "..."` body,
-e.g.:
+Single-GPU / accelerate / pytest variants just swap the `bash -lc "..."` body, e.g.:
 
 ```bash
 # Single GPU, plain python
@@ -179,35 +80,15 @@ bash -lc "accelerate launch --config_file launcher-configs/accelerate/fsdp2_grad
 bash -lc "pytest -m gpu tests/gpu/test_suite.py -k <pattern> > \"$D/<job>.log\" 2>&1"
 ```
 
-A **CPU-only** job (CPU tests, lint-in-image, one-off Python with no GPU) drops
-`--gpus all` and the GPU ulimits/shm, matching the Makefile's `DOCKER_RUN_CPU`:
-
-```bash
-docker run -d --rm --name <job> \
-  -e PYTHONPATH=/workspace -e HF_HOME="$D/hf" \
-  -v $(pwd):/workspace -v "$D:$D" -w /workspace \
-  halo:blackwell \
-  bash -lc "pytest -m cpu tests/cpu > \"$D/<job>.log\" 2>&1"
-```
-
-Both mounts are load-bearing: without `-v "$D:$D"` the log is written into the
-container's ephemeral filesystem and destroyed by `--rm`, and without the HF cache the CPU
-tests that call `from_pretrained` directly **hard-fail** (not skip) the moment the Hub is unreachable.
+A **CPU-only** job (CPU tests, lint-in-image, one-off Python with no GPU) uses the CPU-only variant on
+that Docker page.
 
 ## 3. Image selection — by GPU architecture
 
-| GPU | Arch | Image |
-|-----|------|-------|
-| B200 / B300 (x86_64 hosts; no arm64 image for GB200/GB300) | SM100 / SM103 (Blackwell) | `halo:blackwell` — FA4 (default) + FA2 + DeepEP, no FA3 |
-| H100 / H200 | SM90 (Hopper) | `halo:hopper` — FA2 + FA3 + DeepEP, no FA4 |
-
-Default to **blackwell** (the Makefile `IMAGE` default); confirm the host arch with `nvidia-smi`.
-Confirm with `docker run --gpus all --rm halo:blackwell nvidia-smi`
-(or `nvidia-smi` if available) when unsure of the host arch. If the local tag is
-missing, pull it from ECR — see `agent-docs/infrastructure/docker.md`.
-
-For `make`, override with `IMAGE=halo:hopper`. For the raw template,
-swap the image line.
+`halo:blackwell` on B200/B300 (the Makefile `IMAGE` default), `halo:hopper` on H100/H200; confirm the host
+arch with `nvidia-smi`. What each image carries, and pulling a missing tag from ECR:
+[Docker](../../agent-docs/infrastructure/docker.md#image-matrix). For `make`, override with
+`IMAGE=halo:hopper`; for the raw template, swap the image line.
 
 ## 4. GPU count and disjoint / concurrent runs
 
@@ -269,10 +150,6 @@ Training configs should set `output_dir` (and checkpoints) under `$D` too.
       `HALO_DATA_ROOT=$D` (S3 cache + profiler scratch) — all on a verified large volume?
 - [ ] Concurrent jobs → unique `--master_port`, `--name`, log, disjoint GPUs?
 - [ ] Detached (`-d`) for anything long-running, so it survives the turn?
-
-References: the repo-root `Makefile` (canonical recipes),
-`CLAUDE.md` (work principles), `agent-docs/infrastructure/docker.md` (image registry,
-ECR pull, troubleshooting).
 
 ## Sources of truth
 

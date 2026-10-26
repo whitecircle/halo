@@ -38,15 +38,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `beta` | `1.2` | Scales the margin logit before the loss |
-| `target_margin` | `0.35` | Log-ratio gap a pair must reach; must be `>= 0` |
-| `use_margin_schedule` / `initial_margin` | `True` / `0.01` | Margin ramps linearly to `target_margin` over the run; `initial_margin` must be smaller |
-| `chosen_sft_ratio` | `0.8` | Split of the SFT anchor between chosen and rejected cross-entropy |
-| `lower_clip_percentile` / `upper_clip_percentile` | `0.02` / `None` | Clip the bottom percentile of rejected log-probs, the top percentile of chosen — the margin term only |
-| `min_log_prob` | `-2.3` | Absolute floor for rejected tokens, applied after the percentile clip |
-| `padding_free` | `False` | Flattens the batch into one varlen sequence |
+`beta` scales the margin logit before the loss, and `target_margin` is the log-ratio gap a pair must reach, ramped linearly from `initial_margin` over the run under `use_margin_schedule`. `chosen_sft_ratio` splits the SFT anchor between chosen and rejected cross-entropy. The margin term alone clips the bottom `lower_clip_percentile` of rejected log-probs and the top `upper_clip_percentile` of chosen, then floors rejected tokens at `min_log_prob`. Types, defaults and bounds: [SmoothMarginPOConfig](../../reference/configuration-reference.md#smoothmarginpoconfig).
 
 | `loss_type` | `loss_fn(z)` | Behavior |
 |---|---|---|

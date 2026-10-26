@@ -7,9 +7,8 @@ on the 8B and 64 on the 24B.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | Yes | Yes | No | Yes | Yes | vLLM, SGLang |
+Modes: the LFM-2 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoints:** `LiquidAI/LFM2.5-8B-A1B` and `LiquidAI/LFM2-24B-A2B`.
 - **GPUs:** the 8B runs at EP2 on two GPUs, 16 experts per GPU. The 24B runs at EP4 on four GPUs or EP8 on

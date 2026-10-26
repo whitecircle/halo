@@ -7,9 +7,8 @@ supports.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | No | No | Yes | No | No | Yes | vLLM, SGLang |
+Modes: the Gemma 4 MoE row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 - **Checkpoint:** `google/gemma-4-26B-A4B-it`.
 - **GPUs:** eight at EP8, 16 experts per GPU, at 32,768 tokens.

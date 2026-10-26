@@ -141,7 +141,7 @@ address differs per server.
 - `num_rollout_workers` actors are created per training rank, soft-pinned to its node; on a shared cluster the budget
   divides by world size ([pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - The trainer's NCCL address must be routable from the serving nodes: set `VLLM_GROUP_HOST` or `SGLANG_GROUP_HOST`
-  when the default-route NIC is wrong ([multi-homed nodes](../grpo/online.md#multi-homed-nodes-vllm_group_host)).
+  when the default-route NIC is wrong ([Group rendezvous](../../infrastructure/rollout-servers.md#group-rendezvous)).
 - The sync runs over EFA when both sides use their EFA overlays
   ([Servers on other nodes](../../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)), over sockets
   otherwise.

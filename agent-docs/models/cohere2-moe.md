@@ -14,19 +14,11 @@ sigmoid selection + top-k renorm, 4 shared experts combined by `average` (`(rout
 tied embeddings, and a `logit_scale` multiplier on the lm_head output (the config default is
 `0.0625`).
 
-| | EP | CP | TP | ETP | PP | EP+CP | EP+TP | EP+ETP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| Cohere2 MoE | Yes | Yes | Yes (selective) | Yes (pure, `ep_size=1`) | **No** | Yes ¹ | Yes | Experimental |
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism refuses the shipped checkpoints at the tie gate, before the registry check: they tie `lm_head` to `embed_tokens`.
 
-Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). The shipped checkpoints also tie `lm_head` to `embed_tokens`, which the tie gate refuses first.
-
-¹ Node-local EP+CP requires `ep_group_size == nvlink_domain_size`; on an 8-GPU node that pins
-`ep_size` to 8, with `cp_size` dividing the domain (EP is orthogonal to DP — ep8+cp2 is a valid
-single-node shape).
-
-Coverage: `tests/gpu/parallelism/test_cohere2_moe_all_parallelism.py` (ep8 / cp8 / tp8 / ep8+cp2 /
-ep8+tp2 / etp8 / ep2+etp4 on a tiny synthetic checkpoint), plus EP=2 equivalence, SFT and CPU
-contract suites (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_cohere2_moe.py`,
+Coverage: `tests/gpu/parallelism/test_moe_all_parallelism.py --family cohere2_moe` (ep8 / cp8 / tp8 /
+ep8+cp2 / ep8+tp2 / etp8 / ep2+etp4 on a tiny synthetic checkpoint), plus EP=2 equivalence, SFT and CPU
+contract suites (`tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family cohere2_moe`,
 `tests/gpu/trainers/sft/test_sft_cohere2_moe.py`, `tests/cpu/models/test_cohere2_moe_support.py`).
 LoRA is tiny-model verified by `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py`
 (expert and mixed adapters at ep2 / ep1 / ep2+cp2, merged save and exact resume); no full-scale LoRA

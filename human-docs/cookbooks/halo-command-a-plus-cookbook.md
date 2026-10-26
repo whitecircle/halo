@@ -7,9 +7,8 @@ trains on text.
 
 ## Support
 
-| FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | LoRA | Online RL |
-|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No |
+Modes: the Command A+ (Cohere2 MoE) row of the [Supported Matrix](../supported-matrix.md#model-families); online RL:
+[Rollout engines](../supported-matrix.md#rollout-engines).
 
 Only EP8 has run on the full checkpoint. CP, TP, ETP, EP+CP, EP+TP and LoRA pass the GPU tests on a
 tiny model, so try a short run before a long one.

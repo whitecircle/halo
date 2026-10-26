@@ -7,11 +7,15 @@ sweep skips EP expert params **by identity**. EP's native grouped expert adapter
 gate: not PEFT-wrapped, no tuner layer, excluded from the TP grad sweep — an expert-only LoRA run
 would then train and export on a path with no equivalence gate, no save/merge test and no doc
 claiming it works. It is refused at construction, on the allowlist discipline the parallelism axes
-use. Adapters injected in place count by their tuner layers, not by a ``lora_`` name: a backbone's
-own ``lora_*`` parameter is a base weight a TP full fine-tune may train.
+use, and the trainer's construction spine runs the refusal before any wrap. Adapters injected in place
+count by their tuner layers, not by a ``lora_`` name: a backbone's own ``lora_*`` parameter is a base
+weight a TP full fine-tune may train.
 
     python tests/cpu/trainers/test_expert_lora_tp_gate.py
 """
+
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
@@ -20,7 +24,9 @@ from peft import IA3Config, LoraConfig, PeftModel, get_peft_model, inject_adapte
 
 import src.trainers.parallelism.adapter_rules as validation_mod
 from src.models.peft_adapters import tuner_adapter_param_ids
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.adapter_rules import reject_lora_under_tp
+from tests.common.parallelism import make_parallelism_config
 
 
 class _TinyLM(nn.Module):
@@ -89,6 +95,44 @@ def test_adapters_injected_in_place_are_refused_under_tp(monkeypatch, config):
 
     with pytest.raises(ValueError, match="LoRA/PEFT adapters are not supported with Tensor Parallelism"):
         reject_lora_under_tp(model)
+
+
+class _PastTpGuard(Exception):
+    """Carries control out of the construction spine at the step after the TP adapter refusal."""
+
+
+class _ConstructionHost(DistributedTrainerMixin):
+    """The mixin's real post-``__init__`` construction spine over a bare model, stopped one step past the refusal."""
+
+    def __init__(self, model, **parallelism):
+        self.model = model
+        self.args = SimpleNamespace(optim="adamw_torch")
+        self._bf16_optimizer = False
+        with patch("src.distributed.parallelism_config.validate_nvlink_domain_against_fabric"):
+            self.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2, **parallelism)
+
+    def _restore_trl_overrides(self):
+        """No TRL constructor ran, so there is nothing to take back."""
+
+    def _disable_inert_router_logits(self):
+        raise _PastTpGuard
+
+
+@pytest.mark.parametrize(
+    ("parallelism", "error", "fragment"),
+    [
+        ({"tp_size": 2}, ValueError, "LoRA/PEFT adapters are not supported with Tensor Parallelism"),
+        ({}, _PastTpGuard, None),
+    ],
+    ids=["tp", "dp"],
+)
+def test_trainer_construction_refuses_lora_under_tp_only(parallelism, error, fragment):
+    """The pins above hold only while the trainer calls the refusal: a LoRA model under TP is refused before
+    any wrap, and the same model on plain data parallelism passes it."""
+    host = _ConstructionHost(get_peft_model(_TinyLM(), LoraConfig(r=4, target_modules=["q_proj"])), **parallelism)
+
+    with patch("src.trainers.distributed_trainer.agree_rank_uniform_env"), pytest.raises(error, match=fragment):
+        DistributedTrainerMixin._configure_distributed_modes(host)
 
 
 if __name__ == "__main__":

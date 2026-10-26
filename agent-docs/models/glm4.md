@@ -2,11 +2,7 @@
 
 `Glm4MoeLiteForCausalLM` — MoE with sigmoid routing (group-limited top-k), shared experts, and LoRA-style attention compression (`q_a_proj` / `q_b_proj` + `kv_a_proj_with_mqa` / `kv_b_proj`).
 
-| | EP | CP | TP | ETP | PP | EP+TP | EP+CP |
-|---|:--:|:--:|:--:|:--:|:--:|:--:|:--:|
-| GLM-4 MoE Lite | Yes | Yes (MLA path) | Yes (selective) | Yes | **No** ¹ | Yes | Yes |
-
-¹ Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
 Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAttention-4 backward NaN on Blackwell, so the loader falls back from FA4 to SDPA (`is_fa4_backward_nan_prone`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 

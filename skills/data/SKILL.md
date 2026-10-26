@@ -18,55 +18,42 @@ allowed-tools:
 # data — dataset formats, prep, loading & collators
 
 Pick the format for the method, decide whether to pre-process offline, and let the right collator get
-selected. Per-method schema detail, the `prepare_dataset.py` flags, and the footguns are in
-**`reference.md`** — read it before acting. Authoritative docs: `agent-docs/data/dataset-formats.md`,
-`agent-docs/data/dataset-preparation.md`, `agent-docs/data/collators.md`, `agent-docs/data/s3-utilities.md`,
-`agent-docs/data/filesystem-handling.md`.
+selected. Every schema, flag and rule below lives on its owner page; read it there before acting, and
+use placeholder URIs (`s3://<bucket>/<key>`) — never hardcode an internal bucket or dataset key.
 
-## Format per method (messages are ChatML `{"role","content"}`)
+## 1. Shape the dataset for the method
 
-Required columns and types per method: `agent-docs/data/dataset-formats.md#required-columns-by-method`
-(its intro routes Async GRPO with Environments and distillation to their method pages); embedding
-reads its columns positionally (`agent-docs/training-methods/embedding.md#dataset-formats`).
+Required columns per method: [Dataset Formats](../../agent-docs/data/dataset-formats.md#required-columns-by-method)
+(it routes Async GRPO with Environments and distillation to their method pages). Embedding reads its
+columns positionally ([Embedding](../../agent-docs/training-methods/embedding.md#dataset-formats)).
+The column-name fields (`conversation_field`, `prompt_field`, `answer_field`, `text_field`) default
+differently per method: check the method's row in the
+[configuration reference](../../agent-docs/reference/configuration-reference.md), never assume one.
 
-The default `conversation_field` is **method-dependent** — `"prompt"` (sft.py, self-distillation and
-`prepare_dataset.py --conversation_field`), `"messages"` (teacher distillation). Don't assume one value;
-check the script/config. Every config declares `max_length`
-natively; the YAML parser migrates no spelling, so TRL's retired `max_seq_length` raises the
-unknown-key error.
+## 2. Decide on offline pre-processing (SFT only)
 
-## Offline pre-processing (`scripts/before_training/prepare_dataset.py`) — SFT only
+`scripts/before_training/prepare_dataset.py` tokenizes, optionally packs and optionally shards once,
+so large SFT corpora skip that work at every launch and multi-node ranks load disjoint shards. Pay
+it when the corpus is large or the run is multi-node; otherwise train from the raw dataset. Flags,
+output layout and the preprocessed-vs-presharded distinction:
+[Dataset Pre-Processing](../../agent-docs/data/dataset-preparation.md); the tool's CLI row:
+[Scripts Reference](../../agent-docs/reference/scripts-reference.md#preparation-scripts); the shard-count rule
+(`--num_shards` at least the data-parallel size) and how ranks split shards:
+[Data Loading](../../agent-docs/parallelism/data-loading.md#pre-processed-sharded-datasets).
 
-Tokenize → optional pack → optional shard, written to `s3://` / `hf://org/name` / local. Worth it for
-large SFT corpora (pay tokenization+packing once; multi-node ranks load disjoint shards). The output
-carries `metadata.json` (`preprocessed: true`); a training config sets `dataset:` to that S3 or local
-path — **no flag needed**, `load_datasets_auto()` auto-detects and skips tokenization. A Hub-published
-output is refused as `dataset:`; download it and point at the directory. Sharded output also
-carries `shard_index.json`; the trainer computes `dataset_presharded` so the DataLoader does **not**
-re-shard. Key flags (the `PreprocessingConfig` fields; see `reference.md` for the rest): `--mode {chat,text}`, `--pack_sequences`
-`--packing_strategy {bfd,bfd_split,wrapped}` (text SFT only, not VLM), `--num_shards N` (above 1:
-**must be ≥ data_parallel_size**, and needs a `test` split — `--test_size`),
-`--is_vlm`. Non-SFT methods are not supported by this script. Full flag list + the two distinct mechanisms
-(preprocessed vs presharded) in `reference.md`.
+## 3. Load it and let the collator follow
 
-## Loading & collators (selected for you)
-
-- Sources (`src/data/sources/loading.py`): `s3://bucket/key`, `org/name` (HF Hub, `:config` and
-  `@split` suffixes), or a local `save_to_disk` directory or single data file. Bare strings are
-  local/HF — **not** auto-prefixed to any bucket.
-- Multi-node: `ShardedDatasetLoader` gives each DP rank its shards; `fs_aware_main_first(tag)` /
-  `DIST_INPUT_SHARED_FILESYSTEM` (falling back to the `DIST_SHARED_FILESYSTEM` umbrella, default
-  `"1"`) coordinate shared-NFS vs per-node-local downloads.
-- Collator routing (`src/data/collators/factory.py`, `select_data_collator`): picks
-  completions-only / packing / padding-free (`cu_seq_lens`) from your YAML flags. Mutually-exclusive
-  guards raise: packing+padding_free, CP+padding_free, CP+packing, padding_free off a varlen
-  attention kernel; `train_on_completions_only` needs `assistant_message_template`. Selection matrix in `reference.md`.
+- Sources (`s3://`, Hub `org/name[:config][@split]`, local) and S3 caching:
+  [S3 Utilities](../../agent-docs/data/s3-utilities.md); shared vs per-node filesystems:
+  [Filesystem Handling](../../agent-docs/data/filesystem-handling.md).
+- The collator is picked from the YAML flags (`packing`, `padding_free`, `train_on_completions_only`,
+  CP); the selection table and the combinations that raise are in
+  [Collators](../../agent-docs/data/collators.md).
+- A data-loading error (wrong schema, embedding OOB at step 0, a re-shard, `num_shards` below DP):
+  [Troubleshooting](../../agent-docs/reference/troubleshooting.md).
 
 ## Sources of truth
 
-The `agent-docs/data/` pages document the intended behavior — check them first. The code is the **ultimate**
-authority: when a doc, this skill, `reference.md`, or memory disagrees — or you are unsure — read the
-actual file (`src/data/sources/loading.py`, `src/data/pipeline/coordinated_map.py`, `src/data/pipeline/map_cache_key.py`,
-`src/data/sources/sharded_dataset.py`, `src/data/collators/factory.py`, `src/data/collators/`,
-`scripts/before_training/prepare_dataset.py`) before you assert or act. (`CLAUDE.md`: docs-first, but the
-code wins.)
+The pages above document the intended behavior; the code wins when they disagree. Find the module
+behind a behavior in the [module map](../../agent-docs/reference/architecture.md) and read it before
+you assert or act.

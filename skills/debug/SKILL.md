@@ -22,9 +22,10 @@ Diagnose a hang / OOM / NaN-loss / DeepEP fault / NCCL timeout. Every helper and
 env var below matches its owner **exactly** — `src/runtime/consensus.py` (`assert_rank_uniform` consistency
 check), `src/diagnostics/py_spy.py` (py-spy capture), `src/diagnostics/profiling.py`
 (`cuda_memory_history`, `log_cuda_memory`), `src/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`),
-`src/models/attention/selection.py` (`is_fa4_backward_nan_prone`) — do not invent flags. The full
-symptom→cause→fix table and helper-enable recipes are in **[playbook.md](playbook.md)**; read it
-before giving a verdict on anything non-trivial. User-facing guide: `agent-docs/reference/debugging.md`.
+`src/models/attention/selection.py` (`is_fa4_backward_nan_prone`) — do not invent flags. Before a
+verdict on anything non-trivial, find the symptom's row in
+[Troubleshooting](../../agent-docs/reference/troubleshooting.md#symptom--cause--fix) and the helper's
+enable recipe in [Debugging](../../agent-docs/reference/debugging.md).
 
 **First, classify the symptom**, then follow the matching branch.
 
@@ -42,9 +43,9 @@ the others never reach.
    host's `kernel.yama.ptrace_scope` is 0, else py-spy fails with `Permission denied`.
 2. Suspect a shape/value divergence upstream of the stuck collective →
    `HALO_TP_CONSISTENCY_CHECK=1` + `assert_rank_uniform(tuple(t.shape), group=..., label=...)`.
-3. An EP job that stops at startup with `ValueError: parallelism config failed on … First (rank 0):
-   expert_parallel_size=N on a single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups` is a
-   rejected topology, not a hang — see the **DeepEP fault** branch.
+3. An EP job that stops at startup naming `concurrent >2-rank DeepEP dispatch groups` is a rejected
+   topology, not a hang — see the **DeepEP fault** branch.
+4. Recipes: [Debugging §4](../../agent-docs/reference/debugging.md#4-diagnosing-multi-node-hangs).
 
 ### OOM (CUDA out of memory)
 
@@ -54,7 +55,8 @@ the others never reach.
 2. Reduce levers, cheapest first: **gradient checkpointing** on; lower
    `per_device_train_batch_size`; lower `max_length` / seq len; switch to a
    parallelism that lowers DP (CP/TP). GC is refused for Zaya in every mode (cuDNN CCA fault)
-   and forced reentrant under EP/CP/any MoE — see playbook before enabling.
+   and forced reentrant under EP/CP/any MoE (the `CheckpointError` row of Troubleshooting).
+   Recipes: [Debugging §3](../../agent-docs/reference/debugging.md#3-gpu-memory-profiling).
 3. Quick textual check: `log_cuda_memory("after forward")` / `EfficiencyCallback` peak mem.
 
 ### NaN / Inf loss
@@ -72,16 +74,13 @@ the others never reach.
 
 ### DeepEP fault (EP crash, combine-barrier deadlock)
 
-- **Multiple >2-rank dispatch groups in one NVLink domain are rejected at config time**
-  (`ep_size > 2` with `nvlink_domain_size > ep_group_size`, e.g. ep4 on an 8-GPU domain): startup
-  raises `ValueError: parallelism config failed on … First (rank 0): expert_parallel_size=N on a
-  single M-GPU NVLink domain forms K concurrent >2-rank DeepEP dispatch groups …` before any model load
-  (`_reject_single_domain_multigroup_ep`, `parallelism_rules.py`), hand-built configs included. Run anyway,
-  their combine barriers race FSDP2's DP-wide NCCL (`elastic` faults, `legacy` deadlocks). **Fix: use
-  ep_size=2 or ep_size = nvlink_domain_size** (one group per domain). For finer sharding
-  combine EP with **ETP** (`ep4+etp2`) — TP leaves `ep_group_size` untouched.
-  Per-symptom row: [playbook.md](playbook.md) §1. Mechanism and measured evidence live once,
-  in the `parallelism` skill (`matrix.md`, row *Multi-group >2-rank EP on one NVLink domain*).
+- **Multiple >2-rank dispatch groups in one NVLink domain are rejected at config time** (`ep_size > 2`
+  with `ep_group_size` below the NVLink domain, e.g. ep4 on 8 GPUs). **Fix: `ep_size=2` or
+  `ep_size = nvlink_domain_size`**, or EP with **ETP** (`ep4+etp2`) for finer sharding — attention TP
+  leaves `ep_group_size` untouched. Mechanism and evidence:
+  [Expert Parallelism](../../agent-docs/parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs).
+- Import, GIN, OOM-masquerading-as-launch-failure and EFA payload faults:
+  [Troubleshooting → DeepEP](../../agent-docs/reference/troubleshooting.md#deepep-build--runtime-faults).
 
 ### NCCL timeout (watchdog fires after a stall)
 
@@ -109,14 +108,14 @@ the others never reach.
   `trace_report.py` turns the trace into TraceLens workbooks (gpu_timeline compute/comm/idle split,
   op tables, roofline).
 
-See **[playbook.md](playbook.md)** for the per-failure-mode table (DeepEP ep4
-rejection, qwen3.5 FA4 NaN, gemma4 attn, Zaya GC refusal, tokenizer-cache
-embedding-OOB, fused EP export an engine rejects), the exact env-var enable recipe for each
-opt-in helper, and how to read `TorchProfilerCallback` artifacts.
+The per-failure-mode rows (DeepEP ep4 rejection, Qwen3.5 FA4 NaN, Gemma 4 attention, Zaya GC refusal,
+the MoE `CheckpointError`, tokenizer-cache embedding OOB, a fused EP export an engine rejects) are in
+[Troubleshooting](../../agent-docs/reference/troubleshooting.md#symptom--cause--fix); reading
+`TorchProfilerCallback` artifacts is [Debugging §1a](../../agent-docs/reference/debugging.md#1a-torchprofiler--gpuoperator-trace).
 
 ## Sources of truth
 
-`agent-docs/reference/debugging.md` + `playbook.md` capture the known failure modes. The code is the
+`agent-docs/reference/troubleshooting.md` + `debugging.md` capture the known failure modes. The code is the
 **ultimate** authority: `src/diagnostics/` (the opt-in helpers) and the failing
 `src/` path itself are what actually behave — when a doc, this skill, or memory disagrees, or you are
 unsure, read the real file before concluding. (`CLAUDE.md`: docs-first, the code wins.) Related skill:

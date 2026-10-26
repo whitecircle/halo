@@ -1,4 +1,4 @@
-"""A markdown page as GitHub renders it: the heading anchors it generates, the links and the code.
+"""A markdown page as GitHub renders it: the heading anchors it generates, the links, the code and the tables.
 
 Headings are ATX (``#``) or raw ``<h1>``–``<h6>``; an underlined (setext) heading has no anchor here.
 An explicit ``<a id>`` / ``<a name>`` is an anchor too. A ``{#id}`` heading attribute is collected
@@ -8,6 +8,7 @@ apart: GitHub renders the braces as heading text, so the id never exists.
 from __future__ import annotations
 
 import html
+import itertools
 import re
 import unicodedata
 from functools import cache
@@ -44,6 +45,12 @@ class Document(NamedTuple):
     heading_attributes: tuple[tuple[int, str], ...]
     links: tuple[tuple[int, str], ...]
     code: tuple[tuple[int, str], ...]
+
+
+class Table(NamedTuple):
+    line: int
+    headers: list[str]
+    rows: list[list[str]]
 
 
 def github_slug(text: str) -> str:
@@ -159,6 +166,20 @@ def parse_markdown(text: str) -> Document:
             paragraph = []
     code.extend(code_spans(paragraph))
     return Document(frozenset(unique_slugs(headings)) | explicit, tuple(attributes), tuple(links), tuple(code))
+
+
+def parse_tables(text: str) -> list[Table]:
+    """Every pipe table in ``text``: its 1-based header line, header cells and body rows of raw cell text."""
+    tables = []
+    numbered = enumerate(text.splitlines(), start=1)
+    for is_table, block in itertools.groupby(numbered, key=lambda item: item[1].lstrip().startswith("|")):
+        if not is_table:
+            continue
+        (line, headers), *body = [
+            (lineno, [cell.strip() for cell in row.strip().strip("|").split("|")]) for lineno, row in block
+        ]
+        tables.append(Table(line, headers, [cells for _, cells in body if not set("".join(cells)) <= set("-: ")]))
+    return tables
 
 
 @cache

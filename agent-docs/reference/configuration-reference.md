@@ -1,6 +1,6 @@
 # Configuration Reference
 
-Every training script takes a YAML config file as its first positional argument. Config classes extend HuggingFace `TrainingArguments`, so all its parameters (learning rate, batch size, scheduler, …) are valid everywhere. Any field can be overridden on the command line; CLI wins, and every config is built from the merged values ([CLI overrides](../getting-started/configuration.md#cli-overrides)). Every numeric knob the toolkit declares refuses a bool and a NaN or infinity at parse time, and an integer knob a fraction (`ParallelismArguments` checks only the type; `ParallelismConfig` owns the ranges):
+Every training script takes a YAML config file as its first positional argument. Config classes extend HuggingFace `TrainingArguments`, so all its parameters (learning rate, batch size, scheduler, …) are valid everywhere. Any field can be overridden on the command line; CLI wins, and every config is built from the merged values ([CLI overrides](#cli-overrides)). Every numeric knob the toolkit declares refuses a bool and a NaN or infinity at parse time, and an integer knob a fraction (`ParallelismArguments` checks only the type; `ParallelismConfig` owns the ranges):
 
 ```bash
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
@@ -63,7 +63,7 @@ The pin is **run-scoped and never exported**. `save_pretrained` writes the live 
 
 Embedding training pins nothing: its length is installed as SentenceTransformers' `max_seq_length`. The inference scripts (`scripts/inference/`) take a raw CLI number and resolve nothing.
 
-The YAML parser migrates no spelling: `max_seq_length` is a field of no config, so it hits the unknown-key raise (see the [Configuration Guide](../getting-started/configuration.md)).
+The YAML parser migrates no spelling: `max_seq_length` is a field of no config, so it hits the unknown-key raise ([Parsing](#parsing)).
 
 ## Performance & balancing flags
 
@@ -193,8 +193,8 @@ Each trainer combines a **trainer config** (hyperparameters) with **script argum
 | `DistributedRewardTrainer` | [RewardConfig](#trl-trainer-configs) (TRL) | [RewardScriptArguments](#other-script-arguments) | `preference/rewards.py` |
 | `ClassificationTrainer` | [ClassificationConfig](#classificationconfig) | [ClassificationScriptArguments](#other-script-arguments) | `classification.py` |
 | `DistributedDistillationTrainer` | [DistillationConfig](#distillationconfig) | [TeacherDistillScriptArguments](#teacherdistillscriptarguments) | `distillation/teacher_distill.py` |
-| `DistributedSelfDistillationTrainer` (offline SDPG) | [SFTConfig](#trl-trainer-configs) (TRL) | [SelfDistillScriptArguments](#other-script-arguments) | `distillation/self_distill.py` |
-| `EmbeddingTrainer` | [EmbeddingConfig](../training-methods/embedding.md) (extends `SentenceTransformerTrainingArguments`) | [EmbeddingScriptArguments](#other-script-arguments) | `embedding.py` |
+| `DistributedSelfDistillationTrainer` (offline SDPG) | [SFTConfig](#trl-trainer-configs) (TRL) | [SelfDistillScriptArguments](#selfdistillscriptarguments) | `distillation/self_distill.py` |
+| `EmbeddingTrainer` | [EmbeddingConfig](#embeddingconfig) (extends `SentenceTransformerTrainingArguments`) | [EmbeddingScriptArguments](#other-script-arguments) | `embedding.py` |
 
 All distributed trainers also accept the [ParallelismConfig](#parallelismconfig) parameters, in the YAML or on the CLI.
 
@@ -210,6 +210,7 @@ These configs come from [TRL](https://huggingface.co/docs/trl) and are used dire
 |-----------|------|---------|-------------|
 | `max_length` | `int \| None` | `1024` | Total sequence budget. Over-length conversations are dropped by the chat processor; under `packing` it is the fixed pack size and must be explicit. `null` → model context window. |
 | `packing` | `bool` | `False` | Pack multiple sequences into one example. |
+| `packing_strategy` | `str` | `"bfd"` | `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk, which emits no document boundaries). |
 | `eval_packing` | `bool \| None` | `None` | Packing for eval. Defaults to `packing`; it can only turn packing off for the eval split (`true` without `packing` raises), and a pre-processed dataset refuses it. |
 | `padding_free` | `bool` | `False` | Flatten the batch into one varlen sequence instead of padding it. Needs a varlen Flash kernel (FA2/FA3/FA4) and **raises** on any other resolved `attn_implementation` — the `cu_seqlens` it exists to emit go unread there. See [Padding-Free](../optimization/padding-free-collator.md). |
 | `dataset_text_field` | `str` | `"text"` | TRL's pre-formatted text column. Halo SFT renders `conversation_field` through the chat template and never reads it, so a non-default value raises. |
@@ -231,13 +232,21 @@ These configs come from [TRL](https://huggingface.co/docs/trl) and are used dire
 
 ### KTOConfig — `DistributedKTOTrainer`
 
-Unpaired `{prompt, completion, label}` preference optimization. `max_length` (`int | None`, default `1024`) truncates the assembled sequence **keeping the start**; `loss_type` is `kto` (default) or `apo_zero_unpaired`. `beta` defaults to `0.1`.
+Unpaired `{prompt, completion, label}` preference optimization.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `beta` | `float` | `0.1` | Deviation allowed from the reference. |
+| `desirable_weight` / `undesirable_weight` | `float` | `1.0` / `1.0` | Re-weight the two classes when the label counts are skewed. |
+| `loss_type` | `str` | `"kto"` | `kto`, or `apo_zero_unpaired`, which carries no KL term. |
+| `max_length` | `int \| None` | `1024` | Truncates the assembled prompt + completion, **keeping the start**. `null` → model context window. |
 
 ### GRPOConfig — `DistributedGRPOTrainer`, `DistributedAsyncEnvironmentalGRPOTrainer` ([TRL docs](https://huggingface.co/docs/trl/grpo_trainer#trl.GRPOConfig))
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `num_generations` | `int \| None` | `8` | Completions per prompt. |
+| `num_generations_eval` | `int \| None` | `None` | Eval group size; `None` = `num_generations`. |
 | `max_completion_length` | `int \| None` | `512` | Generation budget (online / vanilla GRPO; TRL `max_new_tokens`). Set it explicitly. **Async GRPO does not use it**: it generates with `rollout_max_tokens` and is bounded by the model context (see [Sequence length](#sequence-length-caps-vs-generation-budgets)). |
 | `beta` | `float` | `0.0` | KL penalty coefficient (`0.0` = no reference model). Non-zero on a policy no PEFT adapter wraps (a full fine-tune, or expert-only LoRA), the online and async GRPO scripts load a frozen reference from `model_name_or_path`, never a resume checkpoint, as the policy loads (run dtype, `model_revision`, its attention and `reset_sinks`), and the trainer hands it to TRL in place of the fp32 copy TRL would build. A trainer constructed without one raises, as does one given a `ref_model` the run never reads. |
 | `use_bias_correction_kl` | `bool` | `True` | Multiplies the KL term by the importance-sampling ratio, the unbiased reverse-KL gradient. It changes the KL gradient of every online and async GRPO run at `beta != 0`, on-policy included (the ratio is differentiable even where it equals 1); `false` keeps the plain k3 term. |
@@ -267,7 +276,7 @@ Both on-policy trainers force `use_liger_kernel` off at construction: TRL's Lige
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `max_length` | `int \| None` | `1024` | Total sequence budget, applied as a **filter**: TRL drops pairs whose chosen *or* rejected exceeds it, never truncates. `null` → model context window. |
-| `center_rewards_coefficient` | `float \| None` | `None` | Reward-centering loss coefficient. Helps prevent reward hacking. |
+| `center_rewards_coefficient` | `float \| None` | `None` | Reward-centering loss coefficient: penalizes `(chosen + rejected)²`, pulling scores toward zero mean. Helps prevent reward hacking. |
 | `disable_dropout` | `bool` | `True` | Disable dropout. |
 
 ---
@@ -336,18 +345,6 @@ A trainer whose config declares no `max_length` field stamps neither and leaves 
 
 Five knobs are implemented inside the mixin's own FSDP2 wrap and are therefore **ignored under `accelerate launch`** (accelerate owns the wrap): `use_hsdp`, `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward`, `fsdp_defer_grad_sync`, `fp32_grad_reduce`. Setting any of them on an accelerate launch logs one warning — use `torchrun`. Accelerate's own `no_sync` already skips the gradient reduce on a window's non-final microsteps, so `fsdp_defer_grad_sync` has nothing to add there.
 
-### Data parallel size
-
-EP is always orthogonal to data parallelism; PP, TP, CP, and ETP reduce it ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)).
-
-> **Pre-sharded datasets:** a per-DP-rank pre-split dataset must have `num_shards >= data_parallel_size`, else a DP rank holds zero examples and training raises `ValueError`. Re-preprocess with a larger `--num_shards`, or use a non-sharded dataset.
-
-```bash
-torchrun --nproc_per_node=8 scripts/training/sft.py \
-    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-    --expert_parallel_size=8 --context_parallel_size=8 --ep_scope=node --packing=false
-```
-
 ---
 
 ## OfflineGRPOConfig
@@ -384,14 +381,14 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `beta` | `float` | `1.2` | Temperature controlling loss sensitivity. Higher = stronger preference signal. |
-| `target_margin` | `float` | `0.35` | Target margin for the chosen/rejected log-prob ratio. |
+| `target_margin` | `float` | `0.35` | Target margin for the chosen/rejected log-prob ratio; `>= 0`. |
 | `loss_type` | `"sigmoid" \| "hinge" \| "ipo" \| "smooth_lower_bound"` | `"smooth_lower_bound"` | `sigmoid` (margin violation), `hinge` (hard margin), `ipo` (squared), `smooth_lower_bound` (squared hinge, smooth near boundary; recommended). |
 | `chosen_sft_ratio` | `float` | `0.8` | Weight of chosen in the SFT loss component. `1.0` = chosen only, `0.0` = rejected only. |
 | `use_margin_schedule` | `bool` | `True` | Linearly raise `target_margin` from `initial_margin`. |
-| `initial_margin` | `float` | `0.01` | Starting margin when scheduling. |
-| `lower_clip_percentile` | `float \| None` | `0.02` | Clip low token log probs in rejected (recommended 0.01–0.05). |
-| `upper_clip_percentile` | `float \| None` | `None` | Clip high token log probs in chosen. |
-| `min_log_prob` | `float \| None` | `-2.3` | Absolute min log-prob threshold for rejected tokens. |
+| `initial_margin` | `float` | `0.01` | Starting margin when scheduling; must be below `target_margin`. |
+| `lower_clip_percentile` | `float \| None` | `0.02` | Clip low token log probs in rejected, in the margin term only (recommended 0.01–0.05); in `(0, 0.5]`. |
+| `upper_clip_percentile` | `float \| None` | `None` | Clip high token log probs in chosen, in the margin term only; in `[0.5, 1)`. |
+| `min_log_prob` | `float \| None` | `-2.3` | Absolute min log-prob threshold for rejected tokens, applied after the percentile clip; `< 0`. |
 | `padding_free` | `bool` | `False` | Flatten the batch into one varlen sequence instead of padding it. Needs a varlen Flash kernel (FA2/FA3/FA4) and raises on any other — including the `sdpa` the script defaults to under `reset_sinks: true`, which is what makes it need an explicit `attn_implementation` ([SMPO](../training-methods/preference/smpo.md)). **Incompatible with CP and VLM mode.** |
 | `max_length` | `int \| None` | `1024` | Total budget (prompt + completion), split into the two shares below by `resolve_length_budget()`. `null` → model context window. |
 | `max_prompt_length` | `int \| None` | `None` | Prompt share; longer prompts truncate per `truncation_mode`. `null` (default) = **half of `max_length`**, so the split scales with a context-resolved budget. VLM prompts are never truncated — one that expands past this raises at collation. |
@@ -457,6 +454,26 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ---
 
+## EmbeddingConfig
+
+`EmbeddingTrainer`; extends sentence-transformers' `SentenceTransformerTrainingArguments`. **Source:** `src/configs/embedding.py`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `loss_type` | `"mnrl" \| "cached_mnrl" \| "cosent" \| "angle" \| "cosine_similarity" \| "triplet" \| "contrastive" \| "online_contrastive" \| "batch_all_triplet" \| "batch_hard_triplet"` | `"mnrl"` | Sentence-transformers loss ([Loss functions](../training-methods/embedding.md#loss-functions)). |
+| `loss_scale` | `float` | `20.0` | Scale / inverse temperature of the losses that take one. |
+| `cached_mnrl_mini_batch_size` | `int` | `32` | Rows per gradient-cached sub-forward (`cached_mnrl`). |
+| `matryoshka_dimensions` | `list[int] \| None` | `None` | Matryoshka truncation dims. |
+| `matryoshka_weights` | `list[float] \| None` | `None` | Per-dimension weights, same length as the dimensions; refused without them. |
+| `pooling_mode` | `"mean" \| "cls" \| "max" \| "lasttoken" \| "weightedmean" \| "mean_sqrt_len_tokens"` | `"mean"` | Pooling over the token embeddings. |
+| `normalize_embeddings` | `bool` | `True` | L2-normalize output embeddings. |
+| `max_length` | `int \| None` | `512` | Truncation length; `null` or non-positive → the backbone's context window. |
+| `disable_dropout` | `bool` | `False` | Disable dropout while training. |
+| `batch_sampler` | `str` | `"batch_sampler"` | `batch_sampler`, `no_duplicates`, `no_duplicates_hashed` or `group_by_label` ([Embedding](../training-methods/embedding.md#configuration)). |
+| `dataloader_drop_last` | `bool` | `False` | Forced `True` by sentence-transformers on any multi-process launch ([Embedding](../training-methods/embedding.md#configuration)). |
+
+---
+
 ## EnvironmentConfig
 
 Environment selection, reward terms and turn budget for Async GRPO with Environments. **Source:** `src/configs/grpo_environmental.py`
@@ -468,25 +485,7 @@ Environment selection, reward terms and turn budget for Async GRPO with Environm
 | `max_turns` | `int \| null` | `null` | Max environment turns per episode, an int `>= 1`. `null` keeps the environment class's own default ([per-environment defaults](../training-methods/async-grpo/environments/README.md#registry)). |
 | `environment_kwargs` | `dict` | `{}` | Env-specific kwargs passed to the registry factory. Merged with core settings in `to_env_config()`. A key the target environment's constructor chain does not bind raises `TypeError`; `max_turns` and `reward_terms` are refused at parse (set the top-level `max_turns` / `rewards`, which validate them). |
 
-Common `environment_kwargs` keys:
-
-- `search_backend` (`qa_search`, `react_search`, `native_combined`, open-book `exam_qa`): `duckduckgo`, `serper`, `brave`, `tavily`; `mock` only with `HALO_ALLOW_MOCK_SEARCH=1`. Setting it with `open_book: false` is refused at construction.
-- `open_book` (`exam_qa`, default `false`).
-- `timeout_per_test` (`code_contests`, seconds per test, default `15`; a non-finite or non-positive value raises at construction, as does such a `max_time_limit`).
-- `compiled_time_limit_scale` (`code_contests`, multiplier on a compiled language's per-test limit, default `1`; the interpreted floor and the `max_time_limit` clamp are unchanged; see [Code Contests → Grading rules](../training-methods/async-grpo/environments/tasks/code-contests/grading.md#grading-rules)).
-- `max_grading_seconds` (`code_contests`, wall-clock budget per submission grade, default `None` = unbounded; see [Code Contests → Grading rules](../training-methods/async-grpo/environments/tasks/code-contests/grading.md#grading-rules)).
-- `verdict_detail` (`code_contests`, `outcome` default / `full`): what a failed test's verdict shows ([Code Contests → Grading rules](../training-methods/async-grpo/environments/tasks/code-contests/grading.md#grading-rules)).
-- `eval_protocol` (`code_contests`, `harness` default / `leaderboard`): `leaderboard` pins one submission and no scratchpad runs ([Code Contests → Evaluation protocols](../training-methods/async-grpo/environments/tasks/code-contests/evaluation.md#evaluation-protocols)).
-- `submission_reward`, `resubmission_penalty`, `unrun_submission_penalty` (`code_contests`, the shaping components, default `0`; the objective is 1 when the submitted solution passes every hidden test, else 0, priced by the `environment` term in `rewards`; see [Code Contests → Reward ladder](../training-methods/async-grpo/environments/tasks/code-contests/reward.md#reward-ladder)).
-- `language` (`code_contests`: `python` default, `cpp`, `c`, or a list the model chooses from per call).
-- `reasoning_effort_profiles` (every environment): effort → profile merged over the class defaults. The base admits `thinking_tokens` and `enforce_thinking_cap` (default `true`; `false` makes the budget soft: stated where the template reads it, priced, never enforced, and refused at or past its ceiling, [Reasoning budget](../training-methods/async-grpo/reasoning.md#reasoning-budget)); `code_contests` adds `max_submissions`, `max_test_calls` ([Code Contests → Reasoning effort](../training-methods/async-grpo/environments/tasks/code-contests/README.md#reasoning-effort)).
-- `max_length_cutoff_recoveries` (every environment, `>= 0`; `null` = every one within `max_turns`): cap on the unproductive turns one episode may recover from — engine-cut, or ended with neither a tool call nor visible content; the turn past the cap, or on the episode's last turn, ends the episode truncated, priced like a `max_turns` overflow.
-- `carry_reasoning` (every environment, default `false`): sends the previous assistant turn's reasoning back to the engine; earlier turns stay as visible text. vLLM backend only: the trainer refuses it on `rollout_backend: sglang`. Where it renders is the chat template's call ([Chat template](../training-methods/async-grpo/episodes.md#chat-template)).
-- `tool_reward_cap` (every environment): per-episode cap on the summed `tool_success_reward`, default `tool_success_reward × max_turns` ([Native Tool-Use → Reward](../training-methods/async-grpo/environments/protocols/native-tool-use.md#reward)).
-- `tool_budgets` (native tool-use and ReAct environments, `{tool_name: cap}` per episode, `0` disables a tool; see [Native Tool-Use → Configuration](../training-methods/async-grpo/environments/protocols/native-tool-use.md#configuration)).
-- `requires_answer` (every environment): whether the reward grades against the dataset's `answer` column, so a dataset without one is refused at trainer construction. Defaults to the class's own declaration — `true` for code contests, `exam_qa`, `qa_search` and the ReAct presets (an `answer_validator` clears it), `true` for `swe` without a `test_function`, unless judge-only ([SWE → Reward](../training-methods/async-grpo/environments/tasks/swe.md#reward)), `false` elsewhere.
-- `mcp_server` (`mcp`, e.g. `filesystem`).
-- `include_python_tools` (`qa_search`, default `false`).
+`environment_kwargs` keys are per environment. The ones every environment takes (turn shaping, tool caps, `requires_answer`, `carry_reasoning`, `max_length_cutoff_recoveries`) are in [Common knobs](../training-methods/async-grpo/environments/README.md#common-knobs), `reasoning_effort` and `reasoning_effort_profiles` in [Effort levels](../training-methods/async-grpo/reasoning.md#effort-levels), `tool_budgets` in [Native Tool-Use](../training-methods/async-grpo/environments/protocols/native-tool-use.md#configuration), and each environment's own on its page ([Code Contests](../training-methods/async-grpo/environments/tasks/code-contests/README.md), [QA Benchmarks](../training-methods/async-grpo/environments/tasks/qa-benchmarks.md), [MCP](../training-methods/async-grpo/environments/protocols/mcp.md), [SWE](../training-methods/async-grpo/environments/tasks/swe.md)).
 
 ```yaml
 environment_type: qa_search
@@ -618,11 +617,52 @@ RLVR Online GRPO. **Source:** `src/configs/grpo_online.py`
 | `use_sdpg` | `bool` | `False` | Swap in `DistributedSDPGTrainer`: the GRPO loss plus a privileged-teacher reverse-KL OPD term. Text-only. See [SDPG](../training-methods/distillation/online-sdpg.md). |
 | `opd_positive_advantage_only` | `bool` | `True` | Charge the OPD term on positive-advantage tokens only. `false` with `use_sdpg: false` is refused. |
 
-The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `src/configs/grpo.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; both sets are additionally range-validated whether or not their toggle is on (the SDPG bounds and hint placeholders: [Online SDPG](../training-methods/distillation/online-sdpg.md#configuration)). Per-knob list: [RLVR Online GRPO](../training-methods/grpo/online.md#configuration).
+The tuning fields behind the two toggles — `rlrr_*` (`RLRRArguments`, `src/configs/grpo.py`) and the SDPG set (`SDPGArguments` plus `opd_positive_advantage_only`) — are **refused** at a non-default value when their toggle is off rather than ignored; both sets are additionally range-validated whether or not their toggle is on (their bounds: [RLRRArguments](#rlrrarguments), [SDPGArguments](#sdpgarguments)).
 
 It also inherits `AdvantageShapingArguments` (`src/configs/grpo.py`): `scale_rewards_std_floor`, `drop_degenerate_groups` and `balance_token_mass`, with the same semantics as the [AsyncTrainingConfig](#asynctrainingconfig) rows, except that `drop_degenerate_groups` defaults **`false`** here (it is `true` in async GRPO, whose sparse verifiable reward makes dead groups dominate the batch) and judges a group on the total weighted reward, since this arm's terms carry no shaping.
 
 It inherits `GRPOEarlyStopArguments` as well: `early_stop_entropy_band`, `early_stop_logratio_gap` and `early_stop_patience`, as in the AsyncTrainingConfig rows, with the gap read from TRL's `sampling/sampling_logp_difference/mean` (refused without `vllm_importance_sampling_correction`). The skipped-update condition is async-only: this trainer has no trust-region breaker.
+
+### RLRRArguments
+
+The `rlrr_*` tunables of RLRR relative-reward shaping ([arXiv:2601.23058](https://arxiv.org/abs/2601.23058)), read under `use_rlrr: true`. **Source:** `src/configs/grpo.py`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `rlrr_mode` | `"hrr" \| "prr"` | `"hrr"` | Hybrid rank correction (Eq. 3) or pure relative (Eq. 4). |
+| `rlrr_tau` | `float` | `0.1` | HRR rank-correction magnitude; finite, `> 0`. Too high dilutes the rule reward. |
+| `rlrr_lambda` | `float` | `2048.0` | Length-bin granularity for re-ranking: correct responses bucket by `floor(len / λ)`; finite, `> 0`. |
+| `rlrr_xi_pos` / `rlrr_xi_neg` | `float` | `1.0e-3` / `-1.0e-3` | Advantage cap for incorrect responses and floor for correct ones (Eq. 5 clip); `xi_neg > xi_pos` is refused. |
+| `rlrr_std_normalize` | `bool` | `False` | Divide the centered advantage by the group std; `false` keeps the Dr. GRPO normalizer. |
+| `rlrr_length_rerank` | `bool` | `True` | The length-bin tie-break in hierarchical re-ranking (Eq. 6). |
+| `rlrr_correctness_clip` | `bool` | `True` | Correctness-aware advantage clipping (Eq. 5); disable for pure PRR with no gold labels. |
+| `rlrr_correctness_threshold` | `float` | `0.5` | A response is correct iff its raw reward is at least this, the only correctness signal. |
+
+### SDPGArguments
+
+The privileged-teacher OPD term, shared by [online SDPG](../training-methods/distillation/online-sdpg.md) (on `RLVROnlineGRPOScriptArguments`, read only under `use_sdpg: true`) and [self-distillation](../training-methods/distillation/self-distillation.md). **Source:** `src/configs/distillation.py`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `sdpg_hint_template` | `str` | `"\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"` | `str.format` template the teacher forward sees after its prompt. `{answer}` fills on both arms, `{solution}` on self-distillation only; any other placeholder is refused at parse time. |
+| `sdpg_loss` | `"reverse_kl" \| "forward_kl" \| "unnormalized_kl"` | `"reverse_kl"` | OPD loss. |
+| `sdpg_temperature` | `float` | `1.0` | OPD softmax temperature; finite, `> 0`. |
+| `sdpg_beta_base` | `float` | `1.0` | Base OPD coefficient; finite, `>= 0`. `0` drops the term. |
+| `sdpg_beta_warmup_steps` / `sdpg_beta_decay_steps` | `int` | `0` / `0` | Steps over which beta ramps from 0 to `sdpg_beta_base`, and the final steps over which it decays back to 0; `>= 0`. |
+
+### SelfDistillScriptArguments
+
+`SFTScriptArguments` plus [SDPGArguments](#sdpgarguments) and the fields below. **Source:** `src/configs/distillation.py`
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `sdpg_answer_field` / `privileged_solution_field` | `str \| None` | `"answer"` / `"solution"` | Columns filling the hint's `{answer}` and `{solution}`; a slot the template names needs its column while `sdpg_beta_base > 0`. |
+| `opd_exclude_eos` | `bool` | `True` | Drop EOS/stop tokens from OPD but not from SFT. |
+| `reference_kl_coef` | `float` | `0.0` | Alpha on a frozen-reference KL anchor; finite, `>= 0`. `0` loads no reference. |
+| `reference_kl_loss` | `"unnormalized_kl" \| "reverse_kl" \| "forward_kl"` | `"unnormalized_kl"` | The anchor's divergence, evaluated at `sdpg_temperature`. |
+| `reference_model_name_or_path` | `str \| None` | `None` | The anchor model; `None` = the student's init weights. |
+| `confidence_field` / `confidence_power` | `str \| None` / `float` | `None` / `4.0` | Per-sample weight `conf**p` from this column, each confidence in `[0, 1]`; `p` finite, `> 0`. |
+| `confidence_weight_opd` | `bool` | `True` | Apply that weight to OPD as well as SFT. |
 
 ### EnvironmentalGRPOScriptArguments
 
@@ -650,7 +690,6 @@ These extend `CommonScriptArguments` with minimal additions:
 | `RewardScriptArguments` | `src/configs/reward.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/preference/reward-modeling.md#vision-language)) |
 | `ClassificationScriptArguments` | `src/configs/classification.py` | `text_field` (`None`) — raw-text column wrapped as one user turn when the dataset has no `prompt` conversation (e.g. text/label sets like imdb) |
 | `EmbeddingScriptArguments` | `src/configs/embedding.py` | *None (inherits only)* |
-| `SelfDistillScriptArguments` | `src/configs/distillation.py` | Extends `SFTScriptArguments` with privileged-context + OPD-loss fields — see [Self-Distillation](../training-methods/distillation/self-distillation.md) |
 
 ---
 
@@ -676,3 +715,26 @@ output_dir: "checkpoints/sft-run"
 
 Working configs for every method and model family live under `examples/<method>/<family>/`; each
 method page links its own.
+
+### Parsing
+
+`HaloArgumentParser` (`src/configs/parser.py`) reads the YAML (`argv[0]` when it ends in `.yaml`/`.yml`) or a flags-only command line, casts the `--key=value` overrides, applies the toolkit defaults above, then builds each config dataclass once from the merged values. Every `__post_init__` (transformers', TRL's, the toolkit's) therefore derives its state from, and validates, the final configuration: `--gradient_accumulation_steps=1` over a YAML's `8` also re-derives GRPO's `steps_per_generation` and `generation_batch_size`.
+
+- A toolkit default applies only where neither the YAML nor the CLI wrote the field, and reaches every config declaring it before that config is built, so `TrainingArguments` derives `mixed_precision` from `bf16`. The `bf16` default yields to an explicitly-enabled `fp16`.
+- Every key no config declares raises and names the field. Nothing is migrated or stripped, ecosystem spellings included.
+- A `Literal[...]` field rejects an out-of-set value (`advantage_method`), in YAML and on the CLI alike. Mixed unions (`float | Literal["auto"]`) are not validated.
+- A string on a bool field is rejected: YAML 1.2 reads the 1.1 spellings `yes`/`no`/`on`/`off` as truthy strings, which would silently invert `packing: no`.
+
+Every training script parses through `parse_script_args` (`src/entrypoints/script.py`), which adds three effects around the pure parser:
+
+- `init_distributed()` runs before any dataclass is built. Constructing `TrainingArguments` touches `self.device`, which would let accelerate create the default process group without `device_id`; that binding lost costs a `new_group` per mesh dimension instead of one `ncclCommSplit`.
+- `output_dir` expands strftime directives (`checkpoints/sft-%Y-%m-%dT%H-%M-%S`) from one timestamp, broadcast from rank 0 so every node agrees. `%%` collapses to `%`; any other `%` (`sft-100%-data`) survives byte-identical. No other field expands them.
+- The `run.log` tee into that `output_dir` starts ([Launch Recipes](../parallelism/launch-recipes.md#torchrun)).
+
+### CLI overrides
+
+`--param=value` overrides any field, dashed spellings normalized to the underscore name. The `=` is required: `--key value` raises "CLI overrides must be in --key=value form". A repeated override (`--learning_rate=1e-5 --learning_rate=2e-5`) raises instead of keeping the last. An override matching no field of the script's config dataclasses raises, as an unknown YAML key does.
+
+- `--field=None`, `--field=null` and `--field=none` clear an Optional field, container unions included. Three carve-outs: a `Literal` whose choices include `"none"` gets the string (`--moe_balancing=none`); a field whose default spells "no value" as a string of its own gets that string (`--report_to=none` reaches transformers as `"none"`, the way to silence logging on a smoke run, where `None` would become `[None]`, which the Trainer refuses); an optional bool refuses the spelling (`--bf16=none` raises).
+- A field with no confident string cast stays in the YAML: dict-typed fields, lists of containers (`rollout_server_configs: list[dict]`), and unions with a container member (`dataset: str | list[str]`, `--report_to=wandb`).
+- Without a YAML the whole config is argparse flags: `--key value` works, an unknown flag is a usage error, each flag reaches every config dataclass that declares it (`pad_token` sits on the script args and on TRL's config), and an unset field keeps each dataclass's own default.

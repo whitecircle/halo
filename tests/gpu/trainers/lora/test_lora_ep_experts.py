@@ -2,7 +2,7 @@
 """
 Test: NATIVE grouped-LoRA on EP-distributed MoE EXPERTS (EP=2, GptOss-20B).
 
-Unlike test_lora_ep.py (attention-only PEFT LoRA under EP), this validates LoRA adapters on the
+Unlike test_lora_sft_modes.py (PEFT LoRA outside the experts), this validates LoRA adapters on the
 expert FFNs themselves — grouped A/B tensors built inside the EP layers, applied in the grouped-GEMM
 compute, and gradient-synced/checkpointed via the existing EP machinery. Checks, each of which FAILS
 when a piece of the wiring breaks:

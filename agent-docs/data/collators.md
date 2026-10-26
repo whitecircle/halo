@@ -132,6 +132,8 @@ The SFT script defaults `train_on_completions_only: true`; `assistant_message_te
 
 For a pre-processed dataset the SFT script derives the flags from the data, not the config: `packing` follows `metadata.packed` (offline-packed chunks still need the packing collator's per-document position IDs), and completion masking is disabled at runtime because the baked `labels` are authoritative — see [SFT Dataset Pre-Processing](dataset-preparation.md).
 
+After building its collator a script calls `disable_trl_dataset_prep` (`src/entrypoints/data_setup.py`): it sets `dataset_kwargs: {skip_prepare_dataset: true}` and clears `packing` and `padding_free` on the TRL config, since TRL reads both again at collator selection and would swap its own collator in over rows it never tokenized. A custom script must call it too; a user `dataset_kwargs` or `dataset_text_field` is refused at startup (`reject_trl_dataset_prep_args`).
+
 ## Document isolation under packing
 
 Packing only pays off if document B's logits do not move when document A's content changes. That

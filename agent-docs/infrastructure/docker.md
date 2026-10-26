@@ -52,6 +52,8 @@ Load-bearing flags:
   auto-load `.env`; start from the repo-root template (`cp .env.example .env`), which the `make`
   targets and the dev container both expect to exist.
 - `-e HF_HOME`/`HF_DATASETS_CACHE`/`TMPDIR` — redirect HuggingFace caches and temp off the small root FS.
+  Keep `TMPDIR` a short top-level path: a multiprocessing socket under it caps at 108 bytes
+  ([Troubleshooting](../reference/troubleshooting.md#symptom--cause--fix)).
 - `-e HALO_DATA_ROOT` — toolkit scratch root: the S3 dataset cache resolves to `$HALO_DATA_ROOT/s3_datasets`
   and profiler artifacts to `$HALO_DATA_ROOT/profiling`. Defaults to `~/.cache/halo` when unset.
 - `-v ~/.aws:/root/.aws` — host AWS config for S3.
@@ -69,6 +71,19 @@ device. Confirm with `findmnt` / `df -h` before any multi-GB write.
 
 On a host whose docker default runtime rejects `--gpus` (sysbox-runc, for one), set
 `DOCKER_RUNTIME=nvidia` on any `make` target; empty — the default — leaves the host default in place.
+
+A CPU-only job (CPU tests, a one-off script) drops `--gpus all` and the GPU ulimits and shm, matching the
+Makefile's `DOCKER_RUN_CPU`. Both mounts stay load-bearing: without `-v "$D:$D"` the log dies with the
+`--rm` container, and without the HF cache the CPU tests that call `from_pretrained` directly hard-fail
+once the Hub is unreachable.
+
+```bash
+docker run -d --rm --name <job> \
+    -e PYTHONPATH=/workspace -e HF_HOME="$D/hf" \
+    -v $(pwd):/workspace -v "$D:$D" -w /workspace \
+    halo:blackwell \
+    bash -lc "pytest -m cpu tests/cpu > \"$D/<job>.log\" 2>&1"
+```
 
 ## Image matrix
 
@@ -245,46 +260,9 @@ rollout server on another node selects EFA through its compose overlay and the t
 
 ## vLLM inference server
 
-vLLM runs as a separate container built from upstream `vllm/vllm-openai:v0.32.0` plus toolkit patches
-(`Dockerfile.vllm`; the unsuffixed upstream tag is the CUDA 13 build). It pins its own torch/transformers
-stack, so the training environment uses its own NCCL weight-sync client (`src/weight_sync/`) instead
-of importing vLLM.
-
-The image reads `nvidia-nccl-cu13` out of `uv.lock` and installs that **exact** version, so the weight-sync
-communicator sees an identical NCCL runtime on both ends. Build asserts check the installed version against
-the lock, the resolved `libnccl.so.2`, and the `ncclUniqueId` ABI identity between the two stacks.
-
-The image bakes the RL serving contract: native weight transfer (`VLLM_SERVER_DEV_MODE=1`; the
-trainer's client drives the phased update protocol the server exposes), R3 routed-experts capture,
-Model Runner V2 (`VLLM_USE_V2_MODEL_RUNNER=1`, the runner thinking budgets and R3 capture run on), and
-five `sitecustomize`-applied patches: layerwise reload, weight-transfer re-init, the two gpt-oss
-thinking-budget patches and the split top-p guard. The patch targets are asserted against the live
-vLLM at build, so an upstream refactor fails the image build.
-
-What the patches do, the `--moe-backend triton` rule, serving flags, networking, GPU assignment, and
-troubleshooting: [Rollout Servers](rollout-servers.md).
-
-Which families this image can serve for RL, and why a family is refused, is stated once in
-[Rollout Servers → Weight sync](rollout-servers.md#weight-sync).
-
-```bash
-make build-vllm            # docker build -f Dockerfile.vllm -t vllm-server:0.32.0 . (plus the label build args)
-```
-
-Standalone `docker run` gotcha: the ENTRYPOINT is `vllm serve`, so any args REPLACE the compose
-`CMD` wholesale — restate every default flag or the server silently loses NCCL weight transfer and
-falls back to the expert-corrupting auto MoE backend. `VLLM_TOOL_PARSER` and friends are
-compose-only interpolations; vLLM itself reads no such env.
-
-The healthcheck calls `python3`, not `python` — the `vllm-openai` base ships no bare `python`, and an
-exit-127 healthcheck marks the service permanently unhealthy, wedging the training service's
-`service_healthy` gate.
-
-**GPT-OSS.** The image applies `docker/vllm/patches/patch_vllm_disable_gptoss.sh` at build time,
-disabling harmony mode; with harmony off the model emits plain-text tool calls only the two baked
-plugins parse (`/opt/gpt_oss_text_tool_parser.py`; `/opt/gpt_oss_reasoning_parser.py` restores
-`thinking_token_budget`). Serve flags: [Rollout Servers](rollout-servers.md#vllm); model page:
-[GPT-OSS](../models/gpt-oss.md).
+`vllm-server:0.32.0` (`make build-vllm`) is upstream `vllm/vllm-openai:v0.32.0` plus the toolkit's
+weight-sync patches; it pins its own torch/transformers stack, so the trainer never imports vLLM. Build
+gates, patches, serving flags, networking and troubleshooting: [Rollout Servers](rollout-servers.md#vllm).
 
 ## Registry
 

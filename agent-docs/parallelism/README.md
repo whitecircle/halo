@@ -16,7 +16,7 @@ Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GP
 - **Context parallelism (CP)** — splits long sequences across GPUs via Ulysses-style attention with all-to-all. For long-context training (32K+ tokens); see [Context Parallelism Guide](context-parallelism.md).
 - **Pipeline parallelism (PP)** — splits decoder layers into stages, one contiguous rank block each, and is the only axis meant to cross NVLink domains. Off by default ([why](#when-pipeline-parallelism-is-worth-it)). See [Pipeline Parallelism](pipeline-parallelism.md).
 
-Wrapped MoE families: [Qwen3 MoE](../models/qwen3.md#qwen3-moe), [Qwen3.5/3.6 MoE](../models/qwen3_5.md), [GPT-OSS](../models/gpt-oss.md), [GLM-4 MoE Lite](../models/glm4.md), [Laguna](../models/laguna.md), [Inkling](../models/inkling.md), [Gemma 4](../models/gemma4.md), [Bailing / Ling](../models/bailing.md), [LFM-2](../models/lfm2.md), [Mistral4](../models/mistral4.md), [DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md), [Cohere2 MoE](../models/cohere2-moe.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md). Full list and per-family quirks: [Supported Models](../models/README.md).
+Which MoE families each axis wraps: [Supported Models → Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Supported combinations
 
@@ -28,25 +28,57 @@ All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignore
 | EP only | `world_size` | EP orthogonal to DP; full DP preserved |
 | TP only | `world_size / tp_size` | DTensor mesh reduces effective DP |
 | CP only | `world_size / cp_size` | Ulysses attention reduces effective DP |
-| EP+CP | `world_size / cp_size` | Only CP reduces DP. Node-local EP requires `ep_group_size == nvlink_domain_size` (= `gpus_per_node` on a standard node; = the rack on NVL72) |
-| EP+TP | `world_size / tp_size` | Attention sharded (node-local TP), experts distributed; TP leaves `ep_group_size` at `ep_size`, so it adds no expert sharding. `ep_size` must be a multiple of `tp_size`. Within one domain the single-domain EP rule still applies (`ep2+tp2` and `ep8+tp2` on 8 pass, `ep4+tp2` is rejected); across domains the EP group must be a **single global** one (`ep_size == world_size`, `ep_scope=global`). Rules: [Multi-Node → EP+TP](multi-node.md#eptp-mode) |
+| EP+CP | `world_size / cp_size` | Only CP reduces DP |
+| EP+TP | `world_size / tp_size` | Attention sharded (node-local TP), experts distributed; TP adds no expert sharding |
 | ETP (pure, `ep_size=1`) | `world_size / expert_tp_size` | Expert FFN sharded `expert_tp_size`-way; experts replicated. MoE only — a dense model raises. See [ETP guide](expert-tensor-parallelism.md) |
-| EP+ETP | `world_size / expert_tp_size` | Experts distributed `ep_size`-way **and** each expert's FFN sharded `expert_tp_size`-way (`ep_group_size = ep_size × expert_tp_size`). Experimental. The expert-TP reduce stays node-local (token space, outside the DeepEP dispatch→combine span) while EP may be node-local **or cross-node** (one ETP group per NVLink domain) |
+| EP+ETP | `world_size / expert_tp_size` | Experts distributed `ep_size`-way **and** each expert's FFN sharded `expert_tp_size`-way (`ep_group_size = ep_size × expert_tp_size`). Experimental. The expert-TP reduce runs in token space, outside the DeepEP dispatch→combine span |
 | PP | `world_size / pp_size` | Stages are contiguous rank blocks of whole NVLink domains; every other axis runs unchanged inside one stage. See [Pipeline Parallelism](pipeline-parallelism.md) |
 | PP+EP | `world_size / pp_size` | EP inside each stage; the cross-replica expert average is deferred to a post-backward sweep |
-| PP+ETP | `world_size / (pp_size × expert_tp_size)` | Pure ETP (`ep_size=1`) inside each stage: experts replicated, each expert's FFN sharded `expert_tp_size`-way. The deferred sweep divides the expert leg by `stage_world_size / expert_tp_size` — ETP partners share a batch and are not DP replicas |
+| PP+ETP | `world_size / (pp_size × expert_tp_size)` | Pure ETP (`ep_size=1`) inside each stage. The deferred sweep divides the expert leg by `stage_world_size / expert_tp_size` — ETP partners share a batch and are not DP replicas |
 | **Anything else** | **Not supported** | Rejected at config time with the mechanism named — see below |
 
 The supported set is an **allowlist** (`SUPPORTED_AXIS_SETS` in
-`src/distributed/parallelism_rules.py`), checked before any rank math, so a combination nobody
-considered is refused rather than run unvalidated. Adding one means adding the equivalence gate that
-proves its gradients against an unsplit reference. Rejections quote the flags you typed and the
-mechanism that would break, for example:
+`src/distributed/parallelism_rules.py`), checked first by `reject_unsupported_axes`, before any rank
+math, so a combination nobody considered is refused rather than run unvalidated. Adding one means
+adding the equivalence gate that proves its gradients against an unsplit reference. Rejections quote
+the flags you typed and the mechanism from `AXIS_SET_MECHANISMS` that would break, for example:
 
 - **TP+CP** — TP shards attention over a DTensor `(dp, tp)` mesh while CP's Ulysses groups partition the same ranks a second, incompatible way.
 - **TP+ETP**, with or without EP — attention TP and expert TP would shard the same ranks along two different axes. Use EP+TP or pure ETP.
 - **ETP+CP** — expert-TP partners hold shards of one expert and must see the **same** tokens (`ReduceFromExpertTP` sums their outputs element-wise in token space), but CP hands each rank a different sequence chunk, so that sum would add unrelated tokens.
-- **PP+TP / PP+CP / PP+EP+ETP** — PP composes with the expert axes only (EP, or pure ETP, not both); see [Pipeline Parallelism](pipeline-parallelism.md).
+- **PP with anything but EP or pure ETP** — the full PP refusal list: [Pipeline Parallelism → Rejected combinations](pipeline-parallelism.md#rejected-combinations).
+
+### Topology rules
+
+Inside an allowed set, `reject_invalid_composition` checks the layout against the NVLink domain
+(`nvlink_domain_size`: the OS node, or the rack on NVL72), also before the model loads:
+
+- **Locality.** `tp_size`, `cp_size` and `expert_tp_size` divide the domain (`_reject_tp`,
+  `_reject_cp_locality`, `_reject_expert_tp`). A node-scope `ep_group_size` divides the domain; a
+  global one must tile the stage's ranks as equal contiguous per-domain blocks (`_reject_ep_group`,
+  [Multi-Node](multi-node.md#node-local-vs-cross-node-ep)). `world_size` is a multiple of both
+  `gpus_per_node` and the domain (`ParallelismConfig._resolve_topology`).
+- **One domain, one dispatch group.** Within a single domain pure EP runs at `ep_size == 2` or with
+  `ep_group_size` filling the domain; `ep4` on 8 GPUs is refused (`_reject_single_domain_multigroup_ep`,
+  [mechanism and evidence](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
+- **EP+TP.** `ep_size` is a multiple of `tp_size`. TP leaves `ep_group_size` at `ep_size`, so the
+  single-domain rule applies unchanged: `ep2+tp2` and `ep8+tp2` on 8 pass, `ep4+tp2` is refused.
+  Across domains the EP group must be a **single global** one (`ep_size == world_size`,
+  `ep_scope: global`): multi-group EP there defers its replica average by sharding over the EP group,
+  while EP+TP shards over the `(dp, tp)` mesh (`_reject_tp`).
+- **EP+CP.** Node-local EP with `ep_group_size == nvlink_domain_size`; global-scope EP is refused
+  (`_reject_ep_cp`). `cp_size` only has to divide the domain, so `ep8+cp2`, `ep8+cp4` and `ep8+cp8` all
+  run on one 8-GPU node.
+- **EP+ETP.** The ETP groups stay inside one domain. EP may cross domains as a single EP group with
+  exactly one ETP group per domain; multi-group EP+ETP across domains is refused, since expert TP keeps
+  the deferred replica average off (`_reject_expert_tp`,
+  [ETP validation rules](expert-tensor-parallelism.md#validation-rules)).
+- **HSDP** composes with pure DP and CP only (`_reject_hsdp`); the FSDP shaping knobs carry per-axis
+  rules (`_reject_fsdp_settings`, [Data Parallelism → Limitations](data-parallelism.md#limitations)).
+- **Model shape.** `reject_unsupported_model` reads `config.json` before any weight: `num_experts`
+  divisible by `ep_size`, `expert_tp_size` dividing the expert FFN width, head counts divisible by
+  `tp_size`, and the declared per-rank token budget under DeepEP's dispatch ceilings
+  ([DeepEP backend](expert-parallelism.md#deepep-backend)).
 
 ## Communication and data flow
 
@@ -122,10 +154,8 @@ across NVLink domains, where the cross-replica average is deferred to the post-b
 HSDP is not a separate layer on top of FSDP2; it is how the plain-DP or CP shard group is meshed.
 The default is 1D full-shard. Under `--use_hsdp` it is a 2D `(dp_replicate, dp_shard)` mesh that
 shards within one NVLink domain (`dp_shard_size = nvlink_domain_size`) and replicates across domains
-(`dp_replicate_size = num_nvlink_domains`).
-
-HSDP composes only with pure DP and CP; TP, EP and ETP each reject it for their own reason. On a
-single domain it is a no-op ([HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
+(`dp_replicate_size = num_nvlink_domains`), so on a single domain it is a no-op
+([HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
 
 Node-local EP+CP reaches cross-domain depth without HSDP: EP dispatch/combine and CP Ulysses
 all-to-all stay node-local on NVLink, FSDP shards the non-expert params within the EP group, and the
@@ -139,57 +169,27 @@ On EP MoE (Qwen3-30B-A3B, EP=2, seq 16384) `torch.compile` gains at most 1% and 
 
 ## Per-axis limitation surface
 
-Each axis page states its own supported trainers, supported models and knob rejections, every one
-traced to the code that raises. This table is the index into them, not a second copy.
-
-| Axis | Trainers | Models | Signature knob rejections |
-|---|---|---|---|
-| [EP](expert-parallelism.md#limitations) | all | the wrapped MoE families; a dense model raises | QLoRA, PEFT inside expert layers, `fsdp_reshard_after_forward`, `use_hsdp`, stock AdamW with `bf16_optimizer: false`, `accelerate launch` |
-| [ETP](expert-tensor-parallelism.md#limitations) | all | every EP-capable MoE family | expert LoRA, `save_sharded_ep` — plus every EP rule |
-| [TP](tensor-parallelism.md#limitations) | all | the attention classes in `TP_SHARDABLE_ATTENTION_CLASSES`; zero sharded layers raises | LoRA/PEFT, QLoRA, `fsdp_reshard_after_forward` at DP > 1, `use_hsdp` |
-| [CP](context-parallelism.md#limitations) | SFT, SMPO, offline GRPO (full fine-tuning) | the Ulysses attention wrappers | packing, padding-free, left padding, non-Flash attention, `label_smoothing_factor`, `loss_type: dft`, eval metrics, multimodal; offline GRPO adapters |
-| [PP](pipeline-parallelism.md) | SFT, SMPO, reward, classification, DPO/KTO (precompute-only), offline GRPO | the families registered in `PP_FAMILY_SPECS` (Qwen3 dense, Qwen3.5/3.6, GPT-OSS, DeepSeek-V4, the Step-3.7 and GLM-5 Next text towers), untied and without live MTP layers; any other backbone and image-bearing runs are rejected | PEFT, `torch_compile`, `lowp_precision`, `use_hsdp`, `fsdp_reshard_after_forward`, reentrant GC, `save_sharded_ep`, padding-free, `compute_metrics` on DPO/KTO/offline GRPO |
-| [DP](data-parallelism.md#limitations) | all | all | MoE grouped GEMM under `accelerate launch`, multi-device `device_map` |
-
-EP, ETP and TP run under every trainer. CP and PP support is declared per class (`SUPPORTS_CP` /
-`PP_REFUSAL`) and enforced by `DistributedTrainerMixin.reject_undeclared_axes`. Full matrix:
-[Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). CP's `False`
-rows are per-trainer declarations — `logits_to_keep`, global log-probability sums, full-sequence
-pooling and dual models are the reasons behind them, not properties CP itself detects.
+Each axis page states its own knob rejections, every one traced to the code that raises:
+[EP](expert-parallelism.md#limitations) · [ETP](expert-tensor-parallelism.md#limitations) ·
+[TP](tensor-parallelism.md#limitations) · [CP](context-parallelism.md#limitations) ·
+[PP](pipeline-parallelism.md#rejected-combinations) · [DP](data-parallelism.md#limitations). EP, ETP and
+TP run under every trainer; CP and PP are declared per class (`SUPPORTS_CP` / `PP_REFUSAL`):
+[Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). Which family
+runs which axis: [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Recommendations
 
-| Model Family | Short Seq (<32K) | Long Seq (>32K) | Max Memory Efficiency | CP-Compatible |
-|---|:--:|:--:|:--:|:--:|
-| **Dense** (Llama, Mistral, Qwen3 dense) | Standard or TP | CP on Qwen3 dense; TP otherwise | TP | Qwen3 dense only |
-| **MoE — full-coverage** ([Qwen3 MoE](../models/qwen3.md#qwen3-moe), [GPT-OSS](../models/gpt-oss.md), [GLM-4 MoE Lite](../models/glm4.md), [Mistral4](../models/mistral4.md) ⁵, [Cohere2 MoE](../models/cohere2-moe.md)) | EP or EP+TP | EP+CP | EP+TP or pure ETP | Yes |
-| **MoE — EP/TP/ETP, no CP** ([Qwen3.5/3.6 MoE](../models/qwen3_5.md) ¹, [LFM-2](../models/lfm2.md) ⁶) | EP or EP+TP | EP at max single-GPU seq | EP+TP or pure ETP | **No** |
-| **MoE — EP/ETP/CP** ([Bailing / Ling 2.0](../models/bailing.md)) | EP | EP+CP ² | pure ETP | Yes ² |
-| **MoE — EP/ETP only** ([Inkling](../models/inkling.md) ⁸, Ring-mini-linear-2.0, Ling 3.0) | EP | EP at max single-GPU seq | pure ETP | **No** ² |
-| **MoE — EP / pure ETP** ([Gemma 4](../models/gemma4.md), [Laguna](../models/laguna.md) ⁷) | EP | EP at max single-GPU seq | pure ETP ⁷ | **No** ³ |
-| **MoE w/ CCA** ([Zaya](../models/zaya.md)) | EP (no GC) ⁴ or pure ETP (no GC) | — | Plain FSDP2 (no GC) | **No** ⁴ |
-| **MoE — EP/ETP, no CP/TP** ([DeepSeek-V4](../models/deepseek-v4.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md)) | EP | EP at max single-GPU seq | pure ETP | **No** |
-| **VLM** ([Qwen3-VL](../models/qwen3.md#qwen3-vl)) | Standard | Standard at max single-GPU seq ⁹ | ZeRO-3 FSDP2 ⁹ | Text-only runs ⁹ |
+| Model | Short Seq (<32K) | Long Seq (>32K) | Max Memory Efficiency |
+|---|:--:|:--:|:--:|
+| Dense | Standard or TP | CP where the family has a wrapper, else TP | TP |
+| MoE with CP and TP | EP or EP+TP | EP+CP | EP+TP or pure ETP |
+| MoE with TP, no CP | EP or EP+TP | EP at max single-GPU seq | EP+TP or pure ETP |
+| MoE with CP, no TP | EP | EP+CP | pure ETP |
+| MoE with neither | EP | EP at max single-GPU seq | pure ETP |
+| VLM without a TP plan (Qwen3-VL) | Standard | Standard, CP on text-only batches | ZeRO-3 FSDP2 (`fsdp_reshard_after_forward: true`) |
 
-¹ Qwen3.5/3.6 — CP blocked by interleaved linear-attention layers; see [qwen3_5.md](../models/qwen3_5.md).
-
-² CP covers Ling 2.0 only. `Ring-mini-linear-2.0` is rejected by name (its file reuses Ling 2.0's full-attention class names over a Lightning-Attention-2 stack) and Ling 3.0 pairs a KDA linear recurrence with unwrapped MLA. EP+CP's only GPU test on this family is a tiny-model LoRA row (`test_lora_merged_save_resume_families.py`, ep2+cp2). See [bailing.md](../models/bailing.md#cp-wrapper).
-
-³ Gemma 4 — TP and CP blocked by KV-shared layers + `attention_k_eq_v`; see [gemma4.md](../models/gemma4.md).
-
-⁴ Zaya — CCA rules out CP/TP, GC unsupported; see [Zaya — Limitations](../models/zaya.md#limitations).
-
-⁵ Mistral4 — the CP wrapper handles the MLA mismatched head dims, shared rope head, and llama-4 position scale (all-gathers `position_ids` across the CP group). EP+CP is a valid shape whose only GPU test on this model is a tiny-model LoRA row (`test_lora_merged_save_resume_families.py`, ep2+cp2). See [mistral4.md](../models/mistral4.md).
-
-⁶ LFM-2 — CP blocked by the sequence-axis short-conv layers in the hybrid stack (no Ulysses wrapper); see [lfm2.md](../models/lfm2.md).
-
-⁷ Laguna — `LagunaAttention` is in neither the Ulysses nor the TP registry, so CP and TP both raise; pure ETP and EP+ETP train, save and resume on the tiny model (the precompute-resume suites). See [laguna.md](../models/laguna.md).
-
-⁸ Inkling — CP blocked by the sequence-axis short convolutions, TP by the RoPE-free relative-logits attention. See [inkling.md](../models/inkling.md).
-
-⁹ Qwen3-VL — the CP wrapper raises at the first forward carrying `pixel_values`, so CP covers text-only runs on the dense checkpoint; the check is per batch, so a dataset that mixes in images fails mid-run. A dense checkpoint ships no `base_model_tp_plan`, so `tp_plan="auto"` shards nothing and the loader raises. That leaves ZeRO-3 (`fsdp_reshard_after_forward: true`) as the memory lever. See [Supported Models](../models/README.md) and [SFT — VLMs](../training-methods/sft.md#vision-language-models).
-
-Per-family configs and EP wrapper internals: [Supported Models](../models/README.md).
+A family's CP and TP verdicts, and its qualifiers (Zaya trains without gradient checkpointing in every
+mode): [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## Additional guides
 
@@ -205,4 +205,4 @@ Per-family configs and EP wrapper internals: [Supported Models](../models/README
 
 Inside one NVLink domain PP earns nothing: FSDP2 + EP/TP/ETP/CP already run every collective on the fabric, and PP only adds bubbles. Across domains the trade is which traffic crosses RDMA: global-scope EP puts **four** latency-bound all-to-alls there per MoE layer per microbatch (dispatch and combine each repeat in backward), while PP keeps EP node-local and sends `2 × (pp_size − 1)` point-to-point activations per microbatch. On an NVL72 rack the whole EP group rides NVLink and global EP wins outright.
 
-PP is not a drop-in: it composes with the expert axes only, runs only the registered families, rejects tied-embedding checkpoints, and is unavailable to online and async GRPO. Layouts without it: [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).
+PP is not a drop-in: [what it refuses](pipeline-parallelism.md#rejected-combinations). Layouts without it: [Large-Scale Scenarios](large-scale-scenarios.md) and [Capabilities & Limitations at Scale](../reference/scale-and-limitations.md).

@@ -55,9 +55,8 @@ Per-family details:
 
 ## Training methods
 
-Every trainer supports EP, TP, ETP and EP+TP. CP is enabled per trainer, only for
-SFT, SMPO and offline GRPO; on any other loss it would silently mis-pool across
-sequence shards.
+Every trainer supports EP, TP and ETP. CP and PP are enabled per trainer; CP on
+any other loss would silently mis-pool across sequence shards.
 
 | Method | Script | CP | PP | Notes |
 | --- | --- | :---: | :---: | --- |
@@ -115,41 +114,32 @@ Any HuggingFace `AutoModelForCausalLM` runs under FSDP2; this table covers
 advanced parallelism. What each family is for:
 [Supported Models](models.md).
 
-| Model family | FSDP | EP | CP | TP | ETP | EP+CP | EP+TP | PP | LoRA | Notes |
-| --- | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | --- |
-| Qwen3 (dense) | Yes | — | Yes | Yes | — | — | — | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
-| Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes | broadest coverage |
-| Qwen3-VL (text) | Yes | — | Yes | No | — | — | — | No | Yes | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
-| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | No | Yes | Yes | Yes | linear attention blocks CP; VL checkpoints train (MoE-VL with EP, dense 9B-VL on plain FSDP with `sdpa`) |
-| GPT-OSS | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
-| GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes | |
-| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | Yes | Yes | Yes | No | Yes | only EP validated on the 200B+ checkpoint; the other modes and LoRA pass tiny-model GPU tests |
-| Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | No | No | No | Yes | native in transformers; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
-| Gemma 4 MoE | Yes | Yes | No | No | Yes | No | No | No | Yes | KV-shared layers block CP/TP; no router balancing; LoRA adapts the language model only |
-| Bailing/Ling | Yes | Yes | Yes | No | Yes | partial | No | No | Yes | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only |
-| LFM-2 MoE | Yes | Yes | No | Yes | Yes | No | Yes | No | Yes | short-conv layers block CP |
-| Mistral4 MoE | Yes | Yes | Yes | Yes | Yes | partial | Yes | No | Yes | |
-| DeepSeek-V4 | Yes | Yes | No | No | Yes | No | No | Yes | Yes | eager only; `packing` and `padding_free` refused; LoRA skips the grouped `o_a_proj` |
-| Zaya | Yes | Yes | No | No | Yes | No | No | No | Yes | always without gradient checkpointing |
-| Inkling | Yes | Yes | No | No | Yes | No | No | No | Yes | multimodal MoE; LoRA passes tiny-model GPU tests only |
-| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | Yes | composite VLM, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first |
-| Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | Yes | composite VLM, SDPA only; sharded EP saves refused |
-| Any other HF causal LM | Yes | — | No | if the model has a `tp_plan` | — | — | — | No | Yes | a dense model without a TP plan raises under TP |
+| Model family | EP | ETP | CP | TP | PP | Notes |
+| --- | :---: | :---: | :---: | :---: | :---: | --- |
+| Qwen3 (dense) | — | — | Yes | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
+| Qwen3 MoE | Yes | Yes | Yes | Yes | No | broadest coverage |
+| Qwen3-VL (text) | — | — | Yes | No | No | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
+| Qwen3.5 / Qwen3.6 (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
+| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower |
+| GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
+| GLM-4 MoE Lite | Yes | Yes | Yes | Yes | No | |
+| Laguna S / XS 2.1 | Yes | Yes | No | No | No | ETP passes tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
+| Inkling-Small | Yes | Yes | No | No | No | multimodal MoE; LoRA passes tiny-model GPU tests only |
+| Gemma 4 MoE | Yes | Yes | No | No | No | no router balancing; LoRA adapts the language model only |
+| Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP passes a tiny-model LoRA test only |
+| LFM-2 MoE | Yes | Yes | No | Yes | No | |
+| Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP passes a tiny-model LoRA test only |
+| DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP passes tiny-model GPU tests only; LoRA skips the grouped `o_a_proj` |
+| Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |
+| Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP validated on the 200B+ checkpoint; the other modes and LoRA pass tiny-model GPU tests |
+| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first |
+| Step-3.7 Flash | Yes | Yes | No | No | Yes | composite VLM, SDPA only; sharded EP saves refused |
+| Any other HF causal LM | — | — | No | if the model has a `tp_plan` | No | a dense model without a TP plan raises under TP |
 
-`partial` marks a shape that only a tiny-model LoRA GPU test runs; validate a
-short run before you rely on it. Online RL support per family is in
-[Rollout engines](#rollout-engines). Why each family drops a mode:
-[Supported Models](models.md) and the
+EP+CP runs where EP and CP both do, EP+TP where EP and TP both do. GPT-OSS
+turns grouped GEMM off under ETP. Online RL per family:
+[Rollout engines](#rollout-engines). Why a family drops a mode: the
 [model pages](../agent-docs/models/README.md) ↗.
-
-Rules that cut across the table:
-
-- **EP+CP** always needs node-local EP with `ep_size` equal to the NVLink
-  domain size.
-- **ETP** needs no per-family opt-in. GPT-OSS turns grouped GEMM off under ETP.
-- **LoRA** `Yes` covers FSDP/DP, EP, CP and pure ETP. TP and EP+TP reject
-  adapters. With `expert_tp_size > 1`, adapters on expert projections are also
-  rejected, so keep `lora_target_modules` on attention there.
 
 ## PEFT, quantization and data
 

@@ -2,12 +2,7 @@
 
 `BailingMoeV2ForCausalLM` — Ant Group's MoE with standard softmax GQA attention (16 heads / 4 KV / head_dim 128), sigmoid routing (256 experts in 8 groups; the top-4 groups are chosen, then the top-8 experts within them), and 1 shared expert. Loaded from the `inclusionAI/*` repos under `trust_remote_code=True`.
 
-| | EP | CP | TP | ETP | PP |
-|---|:--:|:--:|:--:|:--:|:--:|
-| Bailing MoE / Ling 2.0 | Yes | Yes | **No** | Yes | **No** ¹ |
-| Ring-mini-linear-2.0, Ling 3.0 | Yes | **No** | **No** | Yes | **No** ¹ |
-
-¹ Pipeline parallelism refuses the backbone by name: it is not registered in `PP_FAMILY_SPECS` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP covers Ling 2.0 only ([CP wrapper](#cp-wrapper)).
 
 The shipped config trains `inclusionAI/Ling-mini-2.0` (`model_type: bailing_moe`). The sibling `inclusionAI/Ring-mini-linear-2.0` is a **different** architecture (`BailingMoeLinearV2ForCausalLM`, `model_type: bailing_moe_linear`) that swaps softmax attention for Lightning Attention-2. Both share the `BailingMoeV2SparseMoeBlock` the EP wrapper targets.
 

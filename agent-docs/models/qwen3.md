@@ -2,11 +2,7 @@
 
 Three variants: dense (`Qwen3ForCausalLM`), MoE (`Qwen3MoeForCausalLM`), and the text branch of the VL model.
 
-| Variant | HF classes | EP | CP | TP | ETP |
-|---|---|:--:|:--:|:--:|:--:|
-| Qwen3 dense | `Qwen3ForCausalLM` / `Qwen3Attention` | — | Yes | Yes | — |
-| Qwen3 MoE | `Qwen3MoeForCausalLM` / `Qwen3MoeSparseMoeBlock` / `Qwen3MoeAttention` | Yes | Yes | Yes | Yes |
-| Qwen3-VL (text) | `Qwen3VLTextAttention` | — | Yes | **No** (dense: no `base_model_tp_plan`) | — |
+Per-axis support: the Qwen3 rows of the [compatibility matrix](README.md#compatibility-matrix).
 
 Qwen3.5 / Qwen3.6 share the name prefix but use a different `Qwen3_5*` class hierarchy — see the [separate page](qwen3_5.md).
 
@@ -17,7 +13,7 @@ Standard transformer with GQA, RoPE, SwiGLU MLP. Stock `Qwen3ForCausalLM`, no pa
 - **FSDP2** — default under torchrun; under `accelerate launch` the `--config_file` decides.
 - **TP** — native HF `tp_plan="auto"` shards attention and MLP.
 - **CP** — `Qwen3Attention` uses the same `Qwen3MoeUlyssesAttention` wrapper as Qwen3 MoE and Qwen3-VL.
-- **PP** — registered for the dense family; the tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate, 8B and up split. Two-node recipe: `examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml`. Qwen3 MoE is not registered ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+- **PP** — registered for the dense family; the tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate, 8B and up split. Two-node recipe: `examples/sft/qwen3/qwen3-8b-multinode-pp2.yaml` ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 - **LoRA** — under FSDP/DP and CP; rejected at construction under TP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ### Configs

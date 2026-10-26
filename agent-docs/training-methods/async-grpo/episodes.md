@@ -9,26 +9,18 @@ Reasoning budgets have [their own page](reasoning.md).
 
 ## Sampling
 
-| Knob | Default | Effect |
-|---|---|---|
-| `rollout_temperature` | `0.7` | sampling temperature |
-| `rollout_top_p` | `0.95` | in `(0, 1]` |
-| `rollout_top_k` | `-1` (off) | `-1` or ≥ 1; `0` is refused, since SGLang rejects it |
-| `rollout_min_p` | `0` (off) | in `[0, 1]`; vLLM rejects every request with `min_p > 0` on a server running speculative decoding (MTP) |
-| `rollout_repetition_penalty` | `1` (off) | in `(0, 2]`; another value is refused at startup under a sequence-level ratio (`isr_geo_band_*`, `isr_opsm_delta`; [Trust region masks](objective.md#trust-region-masks)), since the trainer's recomputed log-probs omit it |
-
+`rollout_temperature`, `rollout_top_p`, `rollout_top_k`, `rollout_min_p` and `rollout_repetition_penalty` set the
+engine's sampling; their ranges, and the cuts refused under a sequence-level ratio
+([Trust region masks](objective.md#trust-region-masks)), are in [AsyncTrainingConfig](../../reference/configuration-reference.md#asynctrainingconfig).
 Rollout and eval requests send all five, so the model's `generation_config.json` defaults never apply. TRL's own
 sampling fields reach no sampler and are refused when set ([Rollout backend](setup.md#rollout-backend)).
 
 ## Trajectory length
 
-| Knob | Default | Effect |
-|---|---|---|
-| `rollout_max_tokens` | `32768` | caps **one turn**, reasoning and answer together |
-| `max_turns` | `null`: the environment class's own ([per environment](environments/README.md#registry)) | an episode that burns them ends truncated |
-| `rollout_max_episode_tokens` | `null`: `max_turns × rollout_max_tokens` | caps what an **episode's** assistant turns sample together, recovery turns included; at least `rollout_max_tokens` |
-| `max_prompt_length` | `null` | drops dataset rows whose rendered prompt exceeds it |
-| `max_train_row_tokens` | `null`: no cap beyond the context check | memory bound on a training row; must exceed `rollout_max_tokens` |
+`rollout_max_tokens` caps **one turn**, reasoning and answer together, and `rollout_max_episode_tokens` what an
+**episode's** assistant turns sample together, recovery turns included; an episode that burns its `max_turns`
+([per environment](environments/README.md#registry)) ends truncated. `max_prompt_length` drops dataset rows whose
+rendered prompt exceeds it, and `max_train_row_tokens` bounds a training row's memory.
 
 ### Episode output budget
 

@@ -20,39 +20,24 @@ allowed-tools:
 
 # Parallelism configuration gate
 
-Recommend a **valid** `ParallelismConfig` (`src/distributed/parallelism_config.py`)
-and **reject** unsupported combos before the user burns GPU hours. Be exact — the
-full reference matrix with per-row source citations is in **[matrix.md](matrix.md)**.
-Read it before giving a verdict on any non-trivial combo.
+Recommend a **valid** `ParallelismConfig` (`src/distributed/parallelism_config.py`) and **reject**
+unsupported combos before the user burns GPU hours. Every rule lives once in the docs; read the owner
+section before a verdict on any non-trivial combo:
 
-## Source of truth
+- allowed axis sets, their DP size and each rejection's mechanism —
+  [Supported combinations](../../agent-docs/parallelism/README.md#supported-combinations);
+- locality, EP+TP / EP+CP / EP+ETP and model-shape rules —
+  [Topology rules](../../agent-docs/parallelism/README.md#topology-rules);
+- `data_parallel_size` — [Stacking the dimensions](../../agent-docs/parallelism/README.md#stacking-the-dimensions);
+- trainer × CP/PP — [Trainer Compatibility](../../agent-docs/reference/trainer-architecture.md#trainer-compatibility);
+- family × axis — [Compatibility matrix](../../agent-docs/models/README.md#compatibility-matrix);
+- per-axis knob refusals — each axis page's *Limitations*.
 
-- `src/distributed/parallelism_config.py` — the dataclass + `__post_init__` →
-  `_resolve_and_validate`, which applies the refusals in `src/distributed/parallelism_rules.py`
-  (`reject_unsupported_axes`, then `reject_invalid_composition`). Every config-time `raise` lives there or in
-  `parallelism_config_from_args` (`src/configs/parallelism_arguments.py`): `lowp_*` knobs or
-  `init_from_scratch` outside SFT, a trainer's `SUPPORTS_CP` / `PP_REFUSAL`.
-- `CLAUDE.md` "## Parallelism" table + DeepEP / trainer-support notes.
-- User docs to cross-link: `agent-docs/parallelism/{expert,context,tensor,expert-tensor}-parallelism.md`,
-  `agent-docs/parallelism/{data-parallelism,multi-node,data-loading}.md`.
-
-## Key facts (from the code)
-
-- **The allowlist decides.** `SUPPORTED_AXIS_SETS` is checked first, before any rank
-  math: plain DP, each axis alone (**EP, ETP, TP, CP, PP**), and **EP+TP, EP+CP,
-  EP+ETP, PP+EP, PP+ETP**. Anything else is rejected with the mechanism from
-  `AXIS_SET_MECHANISMS`, or a generic "no validated composition" when unlisted.
-- `ep_group_size = ep_size * expert_tp_size` (the full EP process group).
-- **EP alone never reduces DP** (EP is orthogonal to DP); PP, TP, CP and ETP do.
-  [Stacking the dimensions](../../agent-docs/parallelism/README.md#stacking-the-dimensions)
-  derives `data_parallel_size`; [matrix.md](matrix.md) gives it per mode.
-- Locality unit is `nvlink_domain_size` (auto = `NVLINK_DOMAIN_SIZE`, else `gpus_per_node`; set
-  it only on NVL72/MNNVL). "Node-local" below means "within one NVLink domain".
-- `ep_scope` defaults to `"auto"` in both the dataclass and on the CLI/YAML
-  (`src/configs/parallelism_arguments.py`). `"auto"` resolves to `node` if
-  `ep_group_size <= nvlink_domain_size`, else `global`.
-- PP flags: `--pipeline_parallel_size`, `--pipeline_microbatches`,
-  `--pipeline_schedule` (`1f1b` | `gpipe`), `--pipeline_split`.
+The code is the **ultimate** authority: `src/distributed/parallelism_rules.py` (`reject_unsupported_axes`,
+then `reject_invalid_composition` and its `_reject_*`), and `parallelism_config_from_args`
+(`src/configs/parallelism_arguments.py`: `lowp_*` or `init_from_scratch` outside SFT, a trainer's
+`SUPPORTS_CP` / `PP_REFUSAL`). When a doc, this skill or memory disagrees, read those files before
+advising.
 
 ## How to pick a mode
 
@@ -66,108 +51,54 @@ Read it before giving a verdict on any non-trivial combo.
 4. **Weights/attention too big for one GPU?** **TP** (node-local DTensor). TP
    reduces DP by `tp_size`.
 5. **Model too deep for one rank, across nodes?** **PP** — the outermost axis, the
-   only one meant to cross NVLink domains. Stage-aware loading streams only this
-   stage's layers, so the load ceiling falls with `pp_size`. Composes with the expert
-   axes only — **EP, or pure ETP (`ep_size=1`)** — never both, never TP/CP.
-   Needs at least two NVLink domains: every stage must be a whole number of them.
-   Only the families registered in `PP_FAMILY_SPECS` split — Qwen3 dense (untied),
-   Qwen3.5/3.6, GPT-OSS, DeepSeek-V4, the Step-3.7 and GLM-5 Next text towers; any
-   other backbone is refused by name at load (`reject_unsupported_pp_structure`), so
-   do not recommend PP for Qwen3 MoE, GLM-4, Ling, Mistral4, Laguna, LFM-2, Cohere2 MoE,
-   Gemma 4, Zaya or Inkling. A per-node (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) save
-   exports through `scripts/after_training/merge_pp_stages.py`.
-6. Compute `dp_size` with the formula above and sanity-check it's >= 1 and the
-   global batch is what you intend.
+   only one meant to cross NVLink domains, composing with **EP or pure ETP** only. Every
+   stage is a whole number of NVLink domains, so it needs at least two; only the families
+   with a PP verdict in the compatibility matrix split. A per-node
+   (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) save exports through `scripts/after_training/merge_pp_stages.py`.
+6. Compute `dp_size` and sanity-check it's >= 1 and the global batch is what you intend.
 
-## Hard node-local / divisibility constraints
+## Worked dp_size examples (8 GPUs, 1 node, domain=8)
 
-- TP, CP, ETP must be **NVLink-local**: each must divide `nvlink_domain_size` and
-  be `<= nvlink_domain_size`.
-- `ep_group_size` must divide its scope and not exceed it: `nvlink_domain_size` for
-  `node`; for `global`, `stage_world_size` (`world_size // pp_size`), which it must
-  also tile as equal contiguous per-domain blocks.
-- EP+TP: `ep_size` must be a multiple of `tp_size`, so each EP group spans whole TP groups. On one
-  NVLink domain that means `ep_size=2` (`ep2+tp2` on 8 = four 2-rank EP groups) or an EP group that
-  fills the domain (`ep8+tp2` on 8); `ep4+tp2` on 8 is the racy topology and is rejected. Above one
-  domain multi-group EP+TP is rejected — use one global EP group (`ep_size == world_size`,
-  `ep_scope: global`).
-- `world_size % gpus_per_node == 0` and `world_size % nvlink_domain_size == 0`.
+| Config | ep_group_size | dp_divisor | dp_size | Valid? |
+|--------|:--:|:--:|:--:|--------|
+| DDP | 1 | 1 | 8 | yes |
+| ep_size=8 | 8 | 1 | 8 | yes (single intra-node group) |
+| ep_size=2 | 2 | 1 | 8 | yes (2-rank groups) |
+| ep_size=4 | 4 | 1 | 8 | **NO** — multi-group >2-rank pure EP, rejected at config time (use 2 or 8) |
+| tp_size=8 | 1 | 8 | 1 | yes |
+| cp_size=2 | 1 | 2 | 4 | yes |
+| expert_tp_size=2 (ep_size=1) | 2 | 2 | 4 | yes (pure ETP) |
+| ep_size=8 + cp_size=8 | 8 | 8 | 1 | yes — canonical EP+CP (`cp_size == ep_group_size == domain`) |
+| ep_size=8 + cp_size=2 | 8 | 2 | 4 | yes — `cp_size` only has to divide the domain |
+| ep_size=4 + cp_size=2 | 4 | 2 | 4 | **NO** — node-local EP+CP requires `ep_group_size == domain` |
+| ep_size=8 + tp_size=8 | 8 | 8 | 1 | yes (ep_size multiple of tp_size, node-local) |
+| ep_size=2 + expert_tp_size=2 | 4 | 2 | 4 | yes (EP+ETP, node-local) |
+| ep_size=4 + expert_tp_size=2 | 8 | 2 | 4 | yes — the 4-way expert split on 8 GPUs |
+| tp_size=4 + cp_size=2 | — | — | — | **NO** — TP+CP rejected |
+| tp_size=2 + expert_tp_size=2 | — | — | — | **NO** — TP+ETP rejected (`ep_size=1`, so the axis set is `{tp, etp}`) |
+| expert_tp_size=2 + cp_size=2 | 2 | 2 | — | **NO** — ETP+CP rejected |
 
-## REJECT THESE (verdict = do not run)
+## Reject these
 
-- **TP + CP** (`tp_size>1 and cp_size>1`) — both partition the same contiguous rank blocks, and
-  Ulysses redistributes heads TP has already split.
-- **TP + ETP**, with or without EP (`tp_size>1 and expert_tp_size>1`) — attention-TP and
-  expert-TP are mutually exclusive; use EP+TP **or** pure/EP+ETP.
-- **ETP + CP** (`expert_tp_size>1 and cp_size>1`) — expert-TP partners sum their outputs
-  element-wise in token space, while CP hands each rank a different sequence chunk.
-- **Multi-group >2-rank EP on one NVLink domain** — the predicate is
-  `num_nvlink_domains == 1 and ep_size > 2 and nvlink_domain_size > ep_group_size`
-  (`is_racy_single_domain_multigroup_ep`): DeepEP combine barriers race FSDP2's DP-wide NCCL.
-  **Rejected at config time** (`_reject_single_domain_multigroup_ep`), hand-built configs
-  included. Use `ep_size=2`, `ep_size = nvlink_domain_size` (the **domain**, not the
-  node — they differ on NVL72), or `ep4 + etp2` — the supported 4-way expert split across 8 GPUs,
-  since `ep_group_size = ep_size * expert_tp_size` fills the domain. `ep4 + tp2` lands on the same
-  rejection: attention TP leaves `ep_group_size` untouched. The measured evidence and the two
-  buffer failure modes live once, in **[matrix.md](matrix.md)** → row *Multi-group >2-rank EP on
-  one NVLink domain*; every other skill links there instead of restating them.
-- **EP+CP with `ep_scope="global"`** (cross-NVLink-domain EP) — incompatible with CP.
-- **Node-local EP+CP where `ep_group_size != nvlink_domain_size`** — EP must be
-  NVLink-orthogonal to CP.
-- **Any node-local size exceeding / not dividing the NVLink domain** (TP, CP, ETP,
-  or `ep_group_size`) — "must divide" / "cannot exceed domain" raises.
-- **TP with indivisible attention heads** (`num_attention_heads % tp_size != 0`, or
-  non-MLA GQA `num_key_value_heads % tp_size != 0`) — a split inside a head corrupts
-  attention; `reject_unsupported_model` raises from `config.json` before any weight is read.
-  The same gate rejects `num_experts % ep_size != 0`, an `expert_tp_size` not dividing the expert
-  FFN width, and a declared per-rank token budget past DeepEP's dispatch ceiling (matrix.md).
-- **HSDP with TP / ETP / EP** — `_reject_hsdp` rejects all three; **PP+HSDP** is
-  refused by `_reject_pipeline_parallel`. HSDP wraps the standard DP path only:
-  **pure DP or CP**. (EP already shards over the EP group; PP cannot restrict a 2-D mesh
-  to a stage's rank block.)
-- **Every PP pairing outside the expert axes** — `PP+TP`, `PP+CP`, `PP+EP+TP`, `PP+EP+CP`, `PP+EP+ETP`
-  (`PP+EP` and pure `PP+ETP` are supported, both together are not). Plus
-  these PP-specific config-time raises: `pp_split` length mismatch or an entry < 1 (the
-  sum-vs-layer-count check runs later, at model split); a stage that is
-  not a whole NVLink domain; a 1-rank stage; `fsdp_shard_ep1_experts=False`; `use_hsdp=True`;
-  `fsdp_reshard_after_forward=True`; `fsdp_reshard_after_backward=False`; `fsdp_defer_grad_sync=True`;
-  `lowp_precision != "bf16"`; expert LoRA; and a PP-only knob (`pp_split`/`pp_microbatches`/`pp_schedule`) set at `pp_size=1`.
-  At trainer construction PP also rejects `save_sharded_ep`, PEFT/LoRA, a live
-  `ref_model`, `activation_offloading`, reentrant gradient checkpointing, `torch_compile`, a
-  missing `max_length`, an image-bearing VLM run, and `per_device_eval_batch_size !=
-  per_device_train_batch_size`. Full list: `matrix.md`.
-- **`fsdp_shard_ep1_experts=False` with TP or CP**, and **`fsdp_reshard_after_forward=True`
-  wherever an expert-distribution group exists** — the gate is `has_ep_group`
-  (`ep_group_size > 1`), so pure ETP (`ep_size=1`, `expert_tp_size>1`) is rejected alongside EP —
-  **or with TP at `dp_size>1`**; **`fsdp_defer_grad_sync=True` under PP, with TP at `dp_size==1`**
-  (no FSDP2 wrap to defer) **or with `fsdp_reshard_after_forward=True`** (the held unsharded gradient
-  is the state ZeRO-3 shards — defer under ZeRO-2). `_reject_fsdp_settings` raises; QLoRA refuses
-  every FSDP shaping knob at trainer construction.
-- **Expert LoRA with ETP** (`expert_tp_size > 1` + `expert_lora`) — `_reject_expert_tp` raises:
-  the replicated adapter half would take a partial, never-synced gradient.
-- **LoRA/PEFT with TP** (`tp_size > 1`) — adapters are plain tensors outside the TP graph, so the
-  replicated matrix diverges per rank and the sharded one is corrupted by the TP grad sync.
-  `reject_lora_under_tp` (`src/trainers/parallelism/adapter_rules.py`) raises at trainer
-  construction, **native EP expert LoRA included** (its own message: the expert adapters live on
-  the EP-distributed weights, which every TP gate skips by param identity). CP and pure ETP leave
-  attention unsharded, so LoRA is fine there.
-- **Offline GRPO + CP + adapters** — offline CP is full fine-tuning only; PEFT and
-  native expert LoRA are rejected. SFT and SMPO keep their CP adapter support.
-- **CP with a trainer that doesn't support it** (DPO, KTO, GRPO online/env/SDPG,
-  reward, classification, distillation, embedding) — see matrix.md trainer table.
-- **PP with a trainer that doesn't support it** (online/env GRPO, SDPG, both distillation
-  trainers, embedding) — a non-`None` `PP_REFUSAL`, refused at config time with
-  `<Trainer> does not support Pipeline Parallelism (PP)`.
+- TP+CP, TP+ETP (with or without EP), ETP+CP —
+  [Supported combinations](../../agent-docs/parallelism/README.md#supported-combinations).
+- `ep_size > 2` with `ep_group_size` short of a single NVLink domain (`ep4` or `ep4+tp2` on 8) —
+  [Single-domain multi-group EP](../../agent-docs/parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs).
+- A size not dividing the domain, EP+CP that is not node-local filling the domain, multi-group EP+TP
+  or EP+ETP across domains, indivisible heads or experts —
+  [Topology rules](../../agent-docs/parallelism/README.md#topology-rules).
+- Every PP pairing outside EP or pure ETP, and every PP config, model and trainer refusal —
+  [Pipeline → Rejected combinations](../../agent-docs/parallelism/pipeline-parallelism.md#rejected-combinations).
+- CP or PP with a trainer that does not declare it —
+  [Trainer Compatibility](../../agent-docs/reference/trainer-architecture.md#trainer-compatibility).
+- HSDP or an FSDP shaping knob outside its modes —
+  [Data Parallelism → Limitations](../../agent-docs/parallelism/data-parallelism.md#limitations).
+- LoRA with TP, expert LoRA with ETP, offline GRPO adapters under CP —
+  [TP](../../agent-docs/parallelism/tensor-parallelism.md#limitations),
+  [ETP](../../agent-docs/parallelism/expert-tensor-parallelism.md#limitations),
+  [CP](../../agent-docs/parallelism/context-parallelism.md#limitations) limitations.
 
 When rejecting, cite the exact reason and offer the nearest valid alternative
 (e.g. "ep_size=4 on 8 GPUs is rejected at config time → use ep_size=2, ep_size=8 (the whole domain), or
-ep4+etp2; EP+TP does not help — attention TP leaves `ep_group_size` at 4").
-
-## Sources of truth
-
-`matrix.md` + `agent-docs/parallelism/` document the supported/rejected combos. The code is the **ultimate**
-authority: `src/distributed/parallelism_rules.py` (the refusals), `src/distributed/parallelism_config.py` and
-`src/trainers/parallelism/ep_layers.py` (the runtime EP-GC setup guard) decide what actually raises or
-deadlocks — when a doc, this skill, or memory disagrees, or you are unsure, read those files before
-advising. (`CLAUDE.md`: docs-first, the code wins.) Related skill: `data` (sharded dataset ↔
-`data_parallel_size`).
+ep4+etp2; EP+TP does not help — attention TP leaves `ep_group_size` at 4"). Related skill: `data`
+(sharded dataset ↔ `data_parallel_size`).

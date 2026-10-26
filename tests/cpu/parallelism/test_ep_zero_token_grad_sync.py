@@ -19,8 +19,8 @@ reducing hook at all, so a regression fails loudly instead of hanging.
 
 The end-to-end proof is a GPU test: an 8-GPU ``ep_size=2`` run (4 EP groups, one NVLink domain — the
 shape an ``is_deferred_dp``-only rule leaves on the hook) with a batch small enough for a rank to be
-served no tokens, e.g. ``tests/gpu/parallelism/ep/test_ep_correctness.py`` at
-``--nproc_per_node=8`` with ``ep_size=2``. Not run here.
+served no tokens, e.g. the ``--mode ep`` body of ``tests/gpu/parallelism/ep/test_ep_modes_vs_reference.py``
+at ``--nproc_per_node=8``. Not run here.
 
 Run: python tests/cpu/parallelism/test_ep_zero_token_grad_sync.py
 """

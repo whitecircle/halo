@@ -18,13 +18,10 @@ tree_share_markers:
 tree_share_requires: "\nDocument:\n"
 ```
 
-| Option | Default | Description |
-|---|---|---|
-| `tree_packing` | `false` | Pack rows that share a prefix as trees. |
-| `tree_share_markers` | `[]` | Rows whose message before the final turn is identical up to and including one of these strings are examined together. Required. |
-| `tree_share_requires` | `null` | A row is shared only if this text occurs before its marker. Leaves rows that put the long part *after* the marker alone, instead of sharing a short header. |
-| `tree_min_shared_tokens` | `16` | A shared span shorter than this is repeated per row, not split off. |
-| `tree_full_attention` | `split` | How full-attention layers see the prefix: `split` (FA4 only) or `gather`. See [Attention](#attention). |
+`tree_share_markers` is required: rows whose message before the final turn is identical up to and including
+one of its strings are examined together. `tree_share_requires` shares a row only if its text occurs before
+the marker, which leaves rows that put the long part *after* the marker alone instead of sharing a short
+header. Types and defaults of every `tree_*` option: [SFTScriptArguments](../reference/configuration-reference.md#sftscriptarguments).
 
 ## What is shared
 
@@ -41,6 +38,7 @@ token less; nothing is assumed from the text.
 - A group longer than `max_length` splits into several trees that each repeat the prefix. A row
   longer than `max_length` on its own is dropped, as on the flat path.
 - A row with no marker, or with the marker more than once, shares only with an exact duplicate.
+- A shared span shorter than `tree_min_shared_tokens` is repeated per row, not split off.
 
 The digest order replaces the dataset's row order, in both splits. The trainer still shuffles packed
 rows every epoch.
@@ -48,8 +46,9 @@ rows every epoch.
 The gain is the share of tokens that sit in shared prefixes: a dataset where half the rows share a long
 prefix with others packs into about 1.4× fewer rows. A tree row costs about what a flat row costs where
 sliding-window layers dominate (GPT-OSS). Qwen3-30B-A3B, where every layer is a full layer in the
-`split` form, pays 10% per step, and Qwen3.5-35B-A3B on FA2 about 7%. Building the trees adds dataset
-maps on top of tokenization.
+`split` form, pays 10% per step, and Qwen3.5-35B-A3B on FA2 (`gather`) about 7%. That cost grows with the
+shared-prefix length and fan-out: on a corpus sharing 6k-token prefixes about 1.8× deep it is 1.41× per step,
+still about 1.3× more examples per second. Building the trees adds dataset maps on top of tokenization.
 
 ## Attention
 

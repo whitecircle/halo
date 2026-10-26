@@ -27,10 +27,10 @@ the wall.
 
 ## Launching
 
-Set `pipeline_parallel_size` on a script whose trainer declares `PP_REFUSAL = None`: SFT, SMPO, DPO,
-KTO, offline GRPO, Bradley-Terry reward and classification ([Trainer support](#trainer-support)).
-Any other script refuses it at config time with `<Trainer> does not support Pipeline Parallelism
-(PP)`, before a model loads. The model's backbone must be registered
+Set `pipeline_parallel_size` on a script whose trainer declares `PP_REFUSAL = None`
+([Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility)). Any other script
+refuses it at config time with `<Trainer> does not support Pipeline Parallelism (PP)`, before a model
+loads. The model's backbone must be registered
 ([Model support](#model-support)); any other is refused by name on the meta shell, on every rank,
 before a weight is read.
 
@@ -69,16 +69,12 @@ rejected too (the stage FSDP wrap assumes DP ≥ 2).
 
 ## Configuration
 
-| Field | Default | Meaning |
-|---|---|---|
-| `pipeline_parallel_size` | `1` | Number of stages. Must divide `world_size`; each stage owns whole NVLink domains. |
-| `pipeline_microbatches` | `0` (auto = `gradient_accumulation_steps`) | Microbatches per optimizer step. The microbatches **are** the gradient accumulation, so setting both this and `gradient_accumulation_steps > 1` is rejected, and the count must divide `per_device_train_batch_size`. |
-| `pipeline_schedule` | `1f1b` | `1f1b` (lower activation memory; fewer than `pp_size` microbatches are raised to `pp_size` with a warning) or `gpipe`. |
-| `pipeline_split` | `null` | Manual per-stage decoder-layer counts, e.g. `[20, 16]`. Must sum to the layer count, boundaries on the `layer_types` period. |
-
+The four knobs (`pipeline_parallel_size`, `pipeline_microbatches`, `pipeline_schedule`,
+`pipeline_split`), their defaults and constraints:
+[Configuration reference → ParallelismConfig](../reference/configuration-reference.md#parallelismconfig).
+The microbatches **are** the gradient accumulation (auto = `gradient_accumulation_steps`), and a
+`pipeline_split` sums to the layer count with boundaries on the `layer_types` period.
 `data_parallel_size` is divided by `pipeline_parallel_size`: a whole chain consumes one batch.
-Setting any of `pipeline_split`, `pipeline_microbatches` or `pipeline_schedule` at
-`pipeline_parallel_size=1` is rejected: nothing reads them there.
 
 `max_length` must be set. The pipeline freezes its P2P shapes on the first step and pads every batch
 to it, so an unset value is rejected at construction. Offline GRPO fills an unset `max_length` from
@@ -132,7 +128,7 @@ verdict, so a tied or MTP-carrying checkpoint names that reason first.
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
 | Inkling (`InklingTextModel`) | refused | loader-only validation: no schedule, end-to-end or save/resume row. Its embedding module carries `embed_norm`, so the norm leaves later stages with it |
-| Qwen3 MoE, GLM-4 MoE Lite, Bailing/Ling, Mistral4, Laguna, LFM-2, Cohere2 MoE, any other | not registered | refused by name. LFM-2 and the shipped Cohere2 MoE checkpoints also tie their head (tie gate) |
+| Any other backbone | not registered | refused by name |
 
 Models with **live** MTP tail layers are refused: MTP re-embeds `input_ids` mid-backbone, a second
 cross-stage stream. Live means built — the decoder list is longer than `num_hidden_layers`. All three
@@ -257,6 +253,14 @@ before any rank math; the rest by their own gate.
 | PP + `activation_offloading` | TRL implements it by wrapping `training_step`, which the PP schedule never calls. |
 | PP + image-bearing VLM training | The vision tower and projector sit in no stage. Refused on image evidence (a dataset image column, embedded image parts, or a collator declaring image columns); a text-only run of a composite checkpoint is admitted and re-emits the tower unchanged, and `text_only_model: true` drops it from the build. |
 | PP + layer-indexed `freeze_layers_patterns` / `unfreeze_layers_patterns` | Each stage's layers are re-based to index 0, so a global index selects the wrong layer ([Configuration](../reference/configuration-reference.md#commonscriptarguments)). |
+| PP + a stage that is not a whole number of NVLink domains, or a one-rank stage | Every intra-stage group must stay inside one stage, and the stage FSDP wrap assumes DP ≥ 2 ([Rank layout](#rank-layout)). |
+| PP + `fsdp_defer_grad_sync` or `fsdp_shard_ep1_experts: false` | The schedule already reduces once per step; with ep1 experts unsharded, a MoE stage and a dense stage run different collective programs and deadlock at the gradient norm ([PP + EP](#pp--ep-moe)). |
+| PP-only knobs at `pipeline_parallel_size: 1`; `pipeline_microbatches` with `gradient_accumulation_steps > 1`; an unset `max_length` | Nothing reads the knobs there; the microbatches are the accumulation; the P2P shapes freeze at `max_length` ([Configuration](#configuration)). |
+| PP + live MTP tail layers, or a head transform the last stage cannot reproduce | MTP re-embeds `input_ids` mid-backbone ([Model support](#model-support)); the last stage applies the family's head path itself ([Fused head](#fused-head-and-loss-on-the-last-stage)). |
+| PP + `aux_loss` with a live `router_aux_loss_coef`, or a stage with no MoE layer at `ep_group_size > 1` | The split severs the aux-loss path; a dense stage runs a different collective program than its MoE peers and deadlocks ([PP + EP](#pp--ep-moe)). |
+| PP + `compute_metrics` on DPO, KTO or offline GRPO, or an eval batch size other than the train one | No pipeline reproduces their prediction convention; the P2P shapes are frozen ([Evaluation](#evaluation)). |
+| PP + DPO/KTO with positional `model`/`args`, a live `ref_model`, or reference log-probs not precomputed | The PP reference contract is precompute-only ([Trainer support](#trainer-support)). |
+| PP + `packing` on the GatedDeltaNet families, or more than one packed row per microbatch | The kept rows carry no per-row `cu_seq_lens`, and FlashAttention isolates documents only at batch size 1 ([Packing](#packing)). |
 
 ## Fused head and loss on the last stage
 
@@ -487,19 +491,23 @@ SMPO and offline GRPO call `reject_pp_peft` and `reject_pp_compute_metrics` on t
 parameters themselves. `reject_pp_vlm` and `reject_uncovered_pp_ep_layers` are collective: their
 evidence is rank-local, so the verdict is joined across ranks.
 
-| Trainer | Enabled | Contract notes |
-|---|---|---|
-| SFT | ✅ | canonical causal-LM |
-| SMPO | ✅ | interleaved pairs; percentile clips stay rejected (batch-global quantiles are not microbatch-decomposable) |
-| Reward (BT) | ✅ | interleaved pairs over scores pooled in the loss; needs `num_labels: 1`, and a `margin` column in the train dataset or in no batch |
-| Classification | ✅ | every loss variant; single-label needs `num_labels >= 2`; `predictions_fn` broadcasts pooled `[B, num_labels]` |
-| DPO | ✅ precompute-only | reference log-probs as dataset columns; limits: [DPO](../training-methods/preference/dpo.md) |
-| KTO | ✅ `apo_zero_unpaired` only | KL-free, per-row decomposable, precompute-only; the default `kto` loss needs a world-global KL baseline |
-| Offline GRPO | ✅ | all three loss types and both PG formulations; `max_prompt_length` + `max_completion_length` required. `kl_beta > 0` scores the reference once at construction by a forward-only sweep through the pipeline and ships it per completion token as a dataset column (sized, indexable, unsharded datasets); the scores ride every checkpoint (`reference_logps.pt`) |
-| Embedding | ❌ | the in-batch similarity matrix *is* the loss |
-| SDPG | ❌ | online GRPO's blockers plus a second, differently-shaped same-model forward |
-| Online / async GRPO | ❌ | the weight sync sends the full `named_parameters()` from one rank set, which no PP rank holds |
-| Teacher / self distillation | ❌ | a second forward per microbatch through a distinct frozen teacher |
+Which trainers enable PP: [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+The enabled trainers' pipeline-loss contracts:
+
+| Trainer | Contract notes |
+|---|---|
+| SFT | canonical causal-LM |
+| SMPO | interleaved pairs; percentile clips stay rejected (batch-global quantiles are not microbatch-decomposable) |
+| Reward (BT) | interleaved pairs over scores pooled in the loss; needs `num_labels: 1`, and a `margin` column in the train dataset or in no batch |
+| Classification | every loss variant; single-label needs `num_labels >= 2`; `predictions_fn` broadcasts pooled `[B, num_labels]` |
+| DPO | precompute-only: reference log-probs as dataset columns; limits: [DPO](../training-methods/preference/dpo.md) |
+| KTO | `apo_zero_unpaired` only: KL-free, per-row decomposable, precompute-only; the default `kto` loss needs a world-global KL baseline |
+| Offline GRPO | all three loss types and both PG formulations; `max_prompt_length` + `max_completion_length` required. `kl_beta > 0` scores the reference once at construction by a forward-only sweep through the pipeline and ships it per completion token as a dataset column (sized, indexable, unsharded datasets); the scores ride every checkpoint (`reference_logps.pt`) |
+
+A refusing trainer's error names its `PP_REFUSAL`: embedding (the in-batch similarity matrix *is* the
+loss), SDPG (a second, differently-shaped same-model forward), online and async GRPO (the weight sync
+sends the full `named_parameters()` from one rank set, which no PP rank holds), teacher and self
+distillation (a second forward per microbatch through a distinct frozen teacher).
 
 ## Code map
 

@@ -28,12 +28,15 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
         "parallelism/tp/test_tp_dp_correctness.py",
     ),
     frozenset({"ep"}): (
-        "parallelism/ep/test_ep_correctness.py",
+        "parallelism/ep/test_ep_modes_vs_reference.py",
         "parallelism/ep/test_ep_vs_no_ep.py",
-        "parallelism/ep/test_ep_vs_reference_qwen3_moe.py",
+        "parallelism/ep/test_ep_family_vs_reference.py",
         "parallelism/combined/test_combined_ref_correctness.py",
     ),
-    frozenset({"etp"}): ("parallelism/combined/test_combined_ref_correctness.py",),
+    frozenset({"etp"}): (
+        "parallelism/ep/test_ep_modes_vs_reference.py",
+        "parallelism/combined/test_combined_ref_correctness.py",
+    ),
     frozenset({"tp"}): (
         "parallelism/tp/test_tp_correctness.py",
         # The toolkit's attention-only TP path (MoE): its per-head norm reduction is invisible to the dense test above.
@@ -47,7 +50,7 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
     ),
     frozenset({"pp"}): ("parallelism/pp/test_pp_vs_single_gpu.py",),
     frozenset({"ep", "tp"}): (
-        "parallelism/combined/test_ep_tp_correctness.py",
+        "parallelism/ep/test_ep_modes_vs_reference.py",
         "parallelism/combined/test_combined_ref_correctness.py",
     ),
     frozenset({"ep", "cp"}): (
@@ -55,7 +58,7 @@ CORRECTNESS_GATES: dict[frozenset[str], tuple[str, ...]] = {
         "parallelism/combined/test_ep_cp_train_correctness.py",
     ),
     frozenset({"ep", "etp"}): (
-        "parallelism/combined/test_ep_etp_correctness.py",
+        "parallelism/combined/test_ep_etp_inkling.py",
         "parallelism/combined/test_combined_ref_correctness.py",
     ),
     frozenset({"pp", "ep"}): ("parallelism/pp/test_pp_ep_vs_unsplit.py",),

@@ -79,13 +79,10 @@ hard-fails when the cache is missing and the Hub is unreachable; one going throu
 `tests/common/tokenizers.py` skips instead, or fails under `HALO_TEST_REQUIRE_HUB_CACHE=1`.
 `make seed-hf-cache` fills that cache ([what the seed holds](../infrastructure/ci.md#hub-seed)).
 
-Secrets live in the repo-root `.env`. Cache and path redirects are `-e` flags pointed at a **verified**
-large volume: the root filesystem is small, and a path named `/mnt` is not guaranteed to be a separate
-device, so check `findmnt` / `df -h` first. `TMPDIR` goes there too, as a short top-level path
-([why](../reference/troubleshooting.md)); the toolkit and cache variables are catalogued in
-[Environment variables](../reference/configuration-reference.md#environment-variables). On a host
-whose docker defaults to a runtime that rejects `--gpus` / `--ipc host` (e.g. sysbox-runc), set
-`DOCKER_RUNTIME=nvidia` — every `make` docker invocation then pins `--runtime nvidia` explicitly.
+Secrets live in the repo-root `.env`; the cache and path redirects onto a verified large volume and
+`DOCKER_RUNTIME` are on [Docker → Standard training launch](../infrastructure/docker.md#standard-training-launch),
+and the toolkit and cache variables are catalogued in
+[Environment variables](../reference/configuration-reference.md#environment-variables).
 
 | Variable | Purpose | Where set | Owner page |
 |---|---|---|---|
@@ -106,5 +103,5 @@ whose docker defaults to a runtime that rejects `--gpus` / `--ipc host` (e.g. sy
 
 ## Next steps
 
-- [Installation](../getting-started/installation.md) · [Docker](../infrastructure/docker.md) — the runtime in detail
+- [Installation](../../human-docs/installation.md) · [Docker](../infrastructure/docker.md) — the runtime in detail
 - [Contributing](README.md) — the `make`-driven dev loop and the gates

@@ -18,45 +18,25 @@ allowed-tools:
 
 # checkpoints — post-training & resume
 
-A **gathered** save (the default for every parallelism mode — EP/ETP/EP+TP/EP+CP/TP/CP/FSDP2) is
-already a single `from_pretrained`-loadable HF checkpoint. PP has its own saver
-(`save_pp_checkpoint`, selected first): one or more safetensors parts per stage (split at
-`save_max_shard_size`) under the **hub's** names, as the EP-gathered save writes them, plus a merged
-index — also directly `from_pretrained`-loadable, and deliberately carrying no `metadata.format`
-marker. The `scripts/after_training/` merge tools are
-only for the opt-in **per-rank sharded EP save** (`save_sharded_ep`) and for **LoRA** adapters. Per-script detail, the format matrix, and the footguns are in **`reference.md`** — read it
-before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
+A **gathered** save (the default for every parallelism mode) is already a single
+`from_pretrained`-loadable HF checkpoint, and so is a PP save on a shared output filesystem. The
+`scripts/after_training/` merge tools are only for the opt-in **per-rank sharded EP save**
+(`save_sharded_ep`), per-node PP directories and **LoRA** adapters. Owner pages:
+`agent-docs/reference/checkpoints.md` (layouts, saving, resume) and
+`agent-docs/reference/scripts-reference.md#post-training-scripts` (every tool's flags and input guards).
+Read the script's `--help` before running it — don't guess the flags.
 
 ## Two things people get wrong (read first)
 
-- **Resume: set `resume_from_checkpoint: true` (or a `checkpoint-N` path) and re-run the same
-  command; leave `model_name_or_path` at the base.** The scripts repoint the policy's weights at the
-  checkpoint themselves (`resolve_resume_weights_source`, `src/checkpoint/parallel/resume_source.py`) under
-  EP/ETP/EP+TP/EP+CP/CP/TP and, at the default `use_grouped_gemm: true`, every run, dense included
-  (an adapter-only checkpoint, and a merged one — `merge_expert_lora_on_save` or embedding LoRA —
-  through its `resume_adapter.json` marker, keeps the base and restores the adapter). The base keeps feeding the
-  DPO/KTO/SDPG reference and the dataset-compat check, so repointing `model_name_or_path` yourself
-  moves the reference onto trained weights. The model loads the
-  trained weights at construction and the loader skips the re-read; it restores `trainer_state.json`,
-  the LR scheduler from `scheduler.pt`, LoRA adapters, the router-balancing
-  biases, the frozen reference scores (`reference_logps.pt`: DPO/KTO precompute,
-  offline GRPO KL), and the **optimizer state from the per-rank shards when the topology
-  fingerprint matches** (`OptimizerStateFingerprint`); a mismatch warm-restarts instead, and a
-  matched restore that fails on any rank raises on every rank unless
-  `allow_optimizer_warm_restart: true`. Only a
-  `use_grouped_gemm: false` run with no EP/ETP/CP/TP reloads weights (FSDP2 via
-  `load_full_state_dict`; DDP and accelerate-managed FSDP via the base Trainer loader).
-  A model built from anything but the checkpoint (a custom
-  script) makes the loader **refuse the resume** under EP/CP and TP+DP rather than continue on the base
-  weights (`load_resume_weights`); only an adapter-only checkpoint, which ships no base weights to check
-  against, still resumes quietly. A merge-on-save checkpoint inverts the check: it refuses a model
-  built from its own merged weights (the delta would apply twice), and an unmarked merged checkpoint
-  under an adapter run raises. `load_best_model_at_end` is refused for a full fine-tune under CP, on
-  a MoE carrying EP or grouped-GEMM wrappers (`ep_size: 1` included), and under TP+DP — export the
-  best checkpoint directly. Owner:
-  `agent-docs/reference/checkpoints.md#resuming-training`.
-- **A per-rank sharded checkpoint is NOT directly loadable.** `load_full_state_dict` refuses
-  `metadata.format` `ep_sharded` and raises pointing at the merge tool. Run the merge first.
+- **Resume: set `resume_from_checkpoint: true` (or a `checkpoint-N` path), re-run the same command, and
+  leave `model_name_or_path` at the base.** The scripts repoint the policy's weights at the checkpoint
+  themselves; the base keeps feeding the DPO/KTO/SDPG reference and the dataset-compat check, so
+  repointing it yourself moves the reference onto trained weights. Exact resume needs the saved topology
+  fingerprint; a mismatch warm-restarts. Per-mode table and every restore verdict:
+  `agent-docs/reference/checkpoints.md#resume-by-parallelism-mode` and
+  `#warm-restart-vs-exact-resume-torchrun`.
+- **A per-rank sharded checkpoint is NOT directly loadable.** Every loader refuses `metadata.format`
+  `ep_sharded` and names the merge tool. Run the merge first.
 
 ## "I trained with X → single HF checkpoint" decision table
 
@@ -71,32 +51,15 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 | ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — plain `ep2` on 8, or EP+TP with `ep_size < world_size`), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), a load that converted names the merge cannot respell (Step-3.7 Flash, a vendor namespace, a SigLIP tower), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`reject_unmergeable_ep_sharded_save`, re-checked at save; PP by the pipeline gate) | use gathered directly |
 | PP | per-stage parts + merged index under the hub's names, loadable and servable as the EP-gathered save | per-node output FS: each node holds its own stages' parts | use directly; per-node directories **`merge_pp_stages.py`** first |
 
-Extra normalizers: **`convert_to_bf16.py`** (fp32→bf16, keeps norms fp32), **`quantize_to_lowp.py`**
-(mxfp8/mxfp4/nvfp4 export — an artifact tool, not a speedup), **`reset_sinks.py`** (neutralize GptOss
-attention sinks for FA2 inference), **`unfuse_moe_experts.py`** (fused → per-expert keys for engines
-that need them), **`merge_models.py`** (linear/slerp/task-arithmetic/TIES across several checkpoints),
-**`reattach_vision_tower.py`** (rebuild the VLM wrapper layout around a `text_only_model` export, so
-the pinned serving images can load it).
+Other tools: `convert_to_bf16.py`, `quantize_to_lowp.py` (an artifact tool, not a speedup),
+`reset_sinks.py`, `unfuse_moe_experts.py` (only for a per-expert-only serving loader),
+`merge_models.py`, `reattach_vision_tower.py` — what each does and refuses:
+`agent-docs/reference/scripts-reference.md#post-training-scripts`.
 
-## Training sidecars — carry them or serve a different model
-
-A run's output dir holds two files the weights cannot: **`router_balancing_biases.pt`** (the trained
-router-balancing biases under `moe_balancing: bias_update` / `bias_update_transient`; the **only**
-copy for families with no native slot) and **`training_provenance.json`** (the GptOss sink policy —
-an adapter trained under `reset_sinks` must be merged onto neutralized sinks).
-`apply_training_sidecars(model, source_dir)` (`src/checkpoint/sidecars.py`) is the one seam
-that re-applies both; `merge_peft_adapters.py` and `convert_to_bf16.py` call it and report what it
-did. Assembling an export any other way serves the **base** routing — near-tied top-k picks flip vs
-training, with no error anywhere. Detail in `reference.md`.
-
-## The scripts (`scripts/after_training/`)
-
-All run inside the Docker image (tools on `PATH`, no prefix). `merge_ep_shards` /
-`unfuse_moe_experts` / `merge_models` are pure safetensors rewriters (CPU, one tensor at a time);
-`quantize_to_lowp` streams safetensors too, one input shard at a time (quantizing on the GPU when
-one is visible); `merge_peft_adapters` / `convert_to_bf16` load a model. CLI flags,
-family-support limits, and the resume/format internals are in **`reference.md`** — read it, don't
-guess the flags.
+**Training sidecars:** export through `merge_peft_adapters.py` or `convert_to_bf16.py`, which re-apply
+`router_balancing_biases.pt` and `training_provenance.json` (`apply_training_sidecars`); any other
+assembly serves the base routing and sinks with no error
+(`agent-docs/reference/checkpoints.md#troubleshooting`).
 
 ## Verify the result
 
@@ -110,24 +73,8 @@ python -c "import json; ix=json.load(open('<out>/model.safetensors.index.json'))
 
 ## Sources of truth
 
-`agent-docs/reference/checkpoints.md` is the documented behavior — check it first. The code is the **ultimate**
-authority: when a doc, this skill, `reference.md`, or memory disagrees with the code — or you are unsure —
-read the actual file before you assert or act. Saving and resuming live in `src/checkpoint/parallel/`.
-Saves: `save.py` (the flat saver ladder, the tokenizer write, the streamed FSDP2/CP/TP rungs), `ep.py`
-(the EP gathered and sharded saves), `pp.py` (the PP stage saves and their resume), `adapters.py` (the PEFT
-and expert-LoRA adapter saves, `restore_adapters`), `writing.py` (the shared streaming writer every gathered
-save funnels through), `context.py` (the trainer-state snapshots the savers and the resume read).
-Resumes: `resume_weights.py` (`load_resume_weights`, every weight resume path), `resume_source.py` (which
-checkpoint, which weights), `optimizer.py` / `optimizer_meta.py` (the per-rank optimizer shards and their
-topology gate), `sidecars.py` (LR scheduler, router balancing biases), `completeness.py` (completion
-markers), `reading.py` (the rank consensus reads shared by the resume paths).
-Per-mode mechanics:
-`src/models/moe/expert_layout.py`, `src/checkpoint/` (`format.py` the shared on-disk names, `reading.py` the
-layout cascade and raw reads, `hub_layout.py` the hub's tensor names on save, `config_export.py` the config
-contract, `adapters.py` the saved-PEFT shape, `adapter_merge.py` the shared `merge_adapter_into_base`,
-`sidecars.py` the training sidecars, `offline_export.py` the tool-side model directory, `atomic.py` the staged,
-fsynced checkpoint-file publication, `writing.py` the save dtype and the weight-file writers, `fp8_dequant.py`
-the streaming fp8 → bf16, `model_card.py` the `halo` Hub tag on the model card of every checkpoint Halo
-writes, tool conversions included), and the
-`scripts/after_training/` script you are about to run.
-(`CLAUDE.md`: docs-first, but the code wins.)
+`agent-docs/reference/checkpoints.md` is the documented behavior — check it first; the module map is
+`agent-docs/reference/architecture.md`. The code is the **ultimate** authority: when a doc, this skill, or
+memory disagrees with the code — or you are unsure — read `src/checkpoint/` and the
+`scripts/after_training/` script you are about to run before you assert or act. (`CLAUDE.md`:
+docs-first, but the code wins.)

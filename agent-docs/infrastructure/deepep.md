@@ -5,8 +5,7 @@ NCCL fallback, so DeepEP is required for it — without it `DeepEPDispatcher.__i
 `ImportError` pointing here. Every other training mode (SFT, SMPO, GRPO) works without it. The prebuilt
 images already ship it; what follows is the from-source runbook and the runtime reference.
 
-The images pin **DeepEP V2 at commit `af9a040`** (mirrored as the `vendors/DeepEP` submodule for
-traceability; the image builds from a fresh clone, not from it), built with
+The images pin **DeepEP V2 at commit `af9a040`**, built with
 `TORCH_CUDA_ARCH_LIST=9.0+PTX` on both. That
 list governs only the ahead-of-time half — the `legacy` (V1) kernels compiled into `deep_ep._C`. The
 `elastic` V2 dispatch/combine kernels ship as sources under `deep_ep/include/deep_ep/impls/*.cuh` and
@@ -72,7 +71,7 @@ supported shape is known to need it: on 8 GPUs, `ep_size=2` (four 2-rank dispatc
 +1.5% (median of 2) and `ep_size=2` +0.2% (a separate run set); 8× B300, gpt-oss-20b, seq 4096, batch 1,
 GC on, Blackwell image. It is latched at `cuInit`, so a launch outside the image exports it before the
 process starts, and it does not make the racy single-domain multi-group shape safe
-([below](#ep-grouping-what-is-reliable)).
+([EP grouping](#ep-grouping-what-is-reliable)).
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
@@ -202,14 +201,9 @@ path peels `base_model` off the wrapper) and opens its own scope through `bump_f
 
 ## EP grouping: what is reliable
 
-Single-domain multi-group pure EP with `ep_size > 2` (`ep4` on one 8-GPU domain) is rejected at config
-time: the groups' combine barriers race FSDP2's DP-wide NCCL collectives. The two transports fail
-differently on 8×B300: `legacy` (V1 `Buffer`) deadlocks around step 2 (`DeepEP timeout check failed`
-→ `cudaErrorLaunchFailure`), the `elastic` default faults with `CUDA error: Invalid access of peer GPU
-memory over nvlink`. `CUDA_DEVICE_MAX_CONNECTIONS=1` prevents neither.
-
-Grouping rules, safe shapes and multi-node multi-group EP:
-[Expert Parallelism → EP grouping](../parallelism/expert-parallelism.md#ep-grouping).
+Single-domain multi-group pure EP with `ep_size > 2` (`ep4` on one 8-GPU domain) is refused at config
+time; the race, both transports' failures and the safe shapes:
+[Expert Parallelism → Single-domain multi-group EP](../parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs).
 
 ## Transport backend
 

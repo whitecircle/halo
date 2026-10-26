@@ -28,6 +28,7 @@ from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.parallel_shape import parallel_shape_checks
+from tests.common.peft_helpers import load_peft_model
 from tests.common.utils import cleanup_memory, gpu_mem_gb, log, max_or_nan, step_losses, training_run_checks
 
 SEED = 42
@@ -65,6 +66,13 @@ class SFTMode:
     # ``(train, eval)`` sample counts; ``None`` keeps the suite's.
     num_samples: tuple[int, int] | None = None
     extra_checks: TrainerChecks | None = None
+    # :func:`~tests.common.peft_helpers.load_peft_model` kwargs (``mode``, ``lora_target_modules``): the model
+    # loads through the production adapter path and the trainer wraps it.
+    adapters: Mapping[str, Any] | None = None
+    # Run on the built trainer before training; returns the checks to run on it after.
+    before_train: Callable[[DistributedSFTTrainer], TrainerChecks] | None = None
+    # ``False`` keeps GptOss's pretrained sinks live, as on-policy RL loads them.
+    reset_sinks: bool = True
 
 
 @dataclass(frozen=True)
@@ -74,7 +82,8 @@ class SFTSuite:
     ``sft_args`` sit over :data:`BASE_SFT_ARGS` and must name ``max_steps``. ``dataset`` is called as
     ``dataset(num_samples, tokenizer, seed=...)``; an eval count of 0 builds no eval split.
     ``evaluate`` runs an evaluation before and after training (plus the trainer's own at the last
-    step) and checks the final eval loss; ``loss_decreased`` adds the first-vs-last step-loss check.
+    step) and checks the final eval loss; ``loss_decreased`` adds the first-vs-last step-loss check and
+    ``loss_band`` the band check on the reported training loss.
     """
 
     model_name: str
@@ -85,6 +94,7 @@ class SFTSuite:
     use_liger_kernel: bool = True
     evaluate: bool = True
     loss_decreased: bool = False
+    loss_band: tuple[float, float] | None = None
     extra_checks: TrainerChecks | None = None
 
 
@@ -98,14 +108,26 @@ def run_sft_mode(ctx, suite: SFTSuite, key: str, mode: SFTMode, tokenizer) -> di
     train_dataset = suite.dataset(num_train, tokenizer, seed=SEED)
     eval_dataset = suite.dataset(num_eval, tokenizer, seed=SEED + EVAL_SEED_OFFSET) if num_eval else None
 
-    model, _ = load_distributed_model(
-        model_name_or_path=suite.model_name,
-        parallelism_config=parallelism_config,
-        dtype=torch.bfloat16,
-        trust_remote_code=True,
-        attn_implementation=attn_implementation,
-        use_liger_kernel=suite.use_liger_kernel,
-    )
+    if mode.adapters is None:
+        model, _ = load_distributed_model(
+            model_name_or_path=suite.model_name,
+            parallelism_config=parallelism_config,
+            dtype=torch.bfloat16,
+            trust_remote_code=True,
+            attn_implementation=attn_implementation,
+            use_liger_kernel=suite.use_liger_kernel,
+            reset_sinks=mode.reset_sinks,
+        )
+        peft_config = None
+    else:
+        model, _, peft_config = load_peft_model(
+            parallelism_config=parallelism_config,
+            model_name=suite.model_name,
+            attn_implementation=attn_implementation,
+            use_liger_kernel=suite.use_liger_kernel,
+            reset_sinks=mode.reset_sinks,
+            **mode.adapters,
+        )
     log(f"  Loaded {type(model).__name__} ({attn_implementation}), GPU memory {gpu_mem_gb():.1f}GB")
 
     sft_args = {**BASE_SFT_ARGS, **suite.sft_args, **mode.sft_args}
@@ -130,28 +152,48 @@ def run_sft_mode(ctx, suite: SFTSuite, key: str, mode: SFTMode, tokenizer) -> di
         processing_class=tokenizer,
         parallelism_config=parallelism_config,
         data_collator=data_collator,
+        peft_config=peft_config,
     )
 
     checks = parallel_shape_checks(model, parallelism_config)
+    after_train = mode.before_train(trainer) if mode.before_train is not None else None
     if suite.evaluate:
         barrier()
         log(f"  Initial eval loss: {trainer.evaluate().get('eval_loss', math.nan):.4f}")
     barrier()
     train_result = trainer.train()
     checks |= training_run_checks(
-        train_result, trainer, max_steps, grad_norms=True, loss_decreased=suite.loss_decreased
+        train_result,
+        trainer,
+        max_steps,
+        loss_band=suite.loss_band,
+        grad_norms=True,
+        loss_decreased=suite.loss_decreased,
     )
     if suite.evaluate:
         barrier()
         final_eval_loss = trainer.evaluate().get("eval_loss", math.nan)
         checks["final_eval_loss_finite"] = math.isfinite(final_eval_loss)
         log(f"  Final eval loss: {final_eval_loss:.4f}")
-    for extra_checks in (suite.extra_checks, mode.extra_checks):
+    for extra_checks in (suite.extra_checks, mode.extra_checks, after_train):
         if extra_checks is not None:
             checks |= extra_checks(trainer)
 
     trainer.cleanup_ep()
     return {f"{key}_{name}": ok for name, ok in checks.items()}
+
+
+def load_suite_tokenizer(ctx, model_name: str):
+    """Register the DeepEP teardown, download ``model_name`` and return its tokenizer, padding with EOS when
+    it names no pad token."""
+    # Registry-wide rather than per trainer: a finalizer bound to a trainer would keep each mode's model
+    # alive into the next mode.
+    ctx.on_teardown(destroy_all_dispatchers)
+    ensure_model_downloaded(model_name, ctx.rank)
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    return tokenizer
 
 
 def run_sft_suite(ctx, suite: SFTSuite, modes: Mapping[str, SFTMode], *, default_mode: str) -> dict:
@@ -164,14 +206,7 @@ def run_sft_suite(ctx, suite: SFTSuite, modes: Mapping[str, SFTMode], *, default
     log(f"\nSFT suite: {suite.model_name}, world {ctx.world_size}, {torch.cuda.get_device_name(ctx.local_rank)}")
     log(f"Modes: {selected}")
 
-    # Registry-wide rather than per trainer: a finalizer bound to a trainer would keep each mode's model
-    # alive into the next mode.
-    ctx.on_teardown(destroy_all_dispatchers)
-    ensure_model_downloaded(suite.model_name, ctx.rank)
-    tokenizer = AutoTokenizer.from_pretrained(suite.model_name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-
+    tokenizer = load_suite_tokenizer(ctx, suite.model_name)
     checks: dict[str, bool] = {}
     for key in selected:
         checks |= run_sft_mode(ctx, suite, key, modes[key], tokenizer)

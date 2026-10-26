@@ -131,19 +131,10 @@ accept list to keep in sync.
 | `BailingMoeV2Attention` / `…FlashAttention2` / `…SdpaAttention` (Ling 2.0) | `BailingMoeV2UlyssesAttention` | fused `query_key_value`, `dense` output projection, Q/K norm before partial RoPE | [bailing.md](../models/bailing.md#cp-wrapper) |
 | `Cohere2MoeAttention` | `Cohere2MoeUlyssesAttention` | interleaved fp32 rotary on sliding layers only; full-attention layers are NoPE | [cohere2-moe.md](../models/cohere2-moe.md) |
 
-**Not supported on production checkpoints:**
-
-- **Qwen3.5 / Qwen3.6** — the full-attention wrapper exists, but every released checkpoint also ships `Qwen3_5MoeGatedDeltaNet` linear-attention layers (sequence-axis Conv1d + recurrent scan) that can't be sharded. Validation rejects the `GatedDeltaNet` classes by name, and any config whose `layer_types` contains `"linear_attention"`. See [qwen3_5.md — Why CP is blocked on real checkpoints](../models/qwen3_5.md#why-cp-is-blocked-on-real-checkpoints).
-- **Ring-mini-linear-2.0** (`bailing_moe_linear`) — Lightning Attention-2 in most layers; validation rejects `BailingMoeV2LinearAttention` by name. Ling 2.0 itself is supported (table above).
-- **Ling 3.0** (`bailing_hybrid`) — 3 of every 4 layers are `BailingMoeV3KimiDeltaAttention`, a KDA linear recurrence, and the MLA layers carry no wrapper; validation rejects the model as having no supported attention module.
-- **LFM-2** — hybrid short-convolution layers mix tokens along the sequence axis, so a Ulysses split severs the conv receptive field.
-- **Gemma 4** — KV-shared layers + `attention_k_eq_v`.
-- **Laguna** — `LagunaAttention` has no Ulysses wrapper registered.
-- **Inkling** — `InklingShortConvolution` runs a depthwise causal `Conv1d` over the sequence axis, and position enters as an additive relative-logits bias `flash_attn_func` cannot take (the family declares `_supports_flash_attn = False`). Validation rejects the conv class. Use EP (optionally + ETP) instead — see [Inkling](../models/inkling.md).
-- **Zaya** — the CCA front-end runs depthwise + grouped `Conv1d` (kernel size 2) along the sequence axis and concatenates a delayed `v_proj_delayed(h_{t-1})` into V; both cross Ulysses chunk boundaries and would need a per-layer halo exchange the path does not provide.
-- **DeepSeek-V4** — the CSA/HCA compressors (and the Lightning Indexer scoring against them) pool non-overlapping token windows along the sequence axis, so a CP shard would compress incomplete windows at every chunk boundary. Validation rejects the classes. Use EP instead — see [DeepSeek-V4](../models/deepseek-v4.md).
-- **GLM-5 Next** (`glm5_next`) — 34 of 45 layers are `Glm5NextTextLinearAttention`, a KDA linear recurrence (sequence-axis conv1d k=4 + delta-rule scan); validation rejects the class by name (and the `"linear_attention"` entries in `layer_types`). Use EP instead — see [GLM-5 Next](../models/glm5-next.md).
-- **Step-3.7 Flash** — `Step3p7Attention` has no Ulysses wrapper registered, so validation rejects the model as having no supported attention module. Nothing architectural blocks a wrapper (plain full/sliding GQA; 64/96 heads and 8 KV heads divide cp 2/4/8). Use EP instead — see [Step-3.7 Flash](../models/step3p7.md).
+Every other attention class raises `CPConfigError`, and a model carrying state along the sequence
+axis (linear attention, sequence-axis convolutions, window pooling) is refused by class name even
+where its attention is wrapped — Qwen3.5/3.6 on every released checkpoint. Per family, with the reason
+on its page: [Compatibility matrix](../models/README.md#compatibility-matrix).
 
 ## CP with EP
 
@@ -158,9 +149,8 @@ CP always requires gradient sync when `world_size > 1`, even at DP=1 — each ra
 gradients from its chunk. `DistributedTrainerMixin` applies FSDP2 across all ranks; for EP+CP the
 same wrapper runs with EP params in `ignored_params`.
 
-EP+CP requires node-local EP with `ep_group_size == nvlink_domain_size`
-(`parallelism_rules._reject_ep_cp` rejects cross-domain EP under CP). Supported 8-GPU shapes:
-ep8/cp2 → DP4, ep8/cp4 → DP2, ep8/cp8 → DP1.
+EP+CP needs node-local EP filling the NVLink domain: on 8 GPUs ep8/cp2 → DP4, ep8/cp4 → DP2,
+ep8/cp8 → DP1 ([Topology rules](README.md#topology-rules)).
 
 **Pure CP on a MoE still gets expert wrappers.** `load_cp_model` builds an `ep_size == 1` EP
 config whenever `needs_ep_wrappers` holds and the model declares experts, so the
@@ -224,11 +214,10 @@ Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
 
 ## Limitations
 
-**Trainers.** CP is declare-to-enable (`SUPPORTS_CP`, default `False`): only
-`DistributedSFTTrainer`, `SmoothMarginPOTrainer` and `OfflineGRPOTrainer` declare it. Offline GRPO
+**Trainers.** CP is declare-to-enable (`SUPPORTS_CP`, default `False`). Offline GRPO
 under CP requires full fine-tuning: it rejects PEFT and native expert LoRA at any `kl_beta`, and an
 explicit `ref_model`, since it scores the run-start reference through the distributed policy
-(`reject_offline_cp_options`). Every other trainer raises at construction, and its entry script
+(`reject_offline_cp_options`). A trainer that does not declare CP raises at construction, and its entry script
 rejects `--context_parallel_size > 1` earlier through
 `parallelism_config_from_args(..., trainer_cls=...)`, which reads the same flag. Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). Nothing
@@ -242,9 +231,8 @@ are rejected by class name even when the surrounding attention is wrapped.
 **Generation.** `UlyssesModel.generate()` raises: each rank holds one sequence chunk and the
 Ulysses attention has no KV-cache path. Generate from a saved checkpoint without CP.
 
-**Axis combinations.** CP composes with EP only; TP+CP and ETP+CP are refused by the
-[allowlist](README.md#supported-combinations). EP alone OOMs at long sequences (it shards experts,
-not activations) — that is the case CP exists for.
+**Axis combinations.** CP composes with EP only ([allowlist](README.md#supported-combinations)). EP
+alone OOMs at long sequences (it shards experts, not activations) — that is the case CP exists for.
 
 **Knobs.** Everything below raises unless the verdict says otherwise.
 

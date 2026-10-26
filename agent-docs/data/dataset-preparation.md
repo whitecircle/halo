@@ -232,17 +232,13 @@ at the directory.
 
 ## Sharded loading
 
-Each rank loads only its assigned shards, reducing memory and startup time. Point the training config
-at the dataset:
+Point the training config at the dataset (`dataset: "s3://my-bucket/preprocessed/my_dataset"`); each
+data-parallel rank then loads only its own shards. How ranks split them, the
+`num_shards >= data_parallel_size` requirement and what a starved rank does:
+[Distributed Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets).
 
-```yaml
-dataset: "s3://my-bucket/preprocessed/my_dataset"
-```
-
-`--num_shards` must be `>= data_parallel_size`; a sharded train split with fewer shards raises at
-load instead of training ranks on zero examples. Match shards to the largest DP degree you train at;
-a multiple of it balances evenly. Example: 64 GPUs across 8 nodes (DP 64, no CP/TP) →
-`--num_shards 64`.
+Size `--num_shards` to the largest DP degree you train at; a multiple of it balances evenly. Example:
+64 GPUs across 8 nodes (DP 64, no CP/TP) → `--num_shards 64`.
 
 > [!WARNING]
 > **Verify the effective shard count**
@@ -252,16 +248,3 @@ a multiple of it balances evenly. Example: 64 GPUs across 8 nodes (DP 64, no CP/
 > of preparation** naming the resulting ceiling ("this dataset can only train at
 > `data_parallel_size <= N`"); only `shard_index.json` records the real per-split count
 > (`num_shards=len(shards)`), while `metadata.json` keeps the requested value.
-
-Above that ceiling a rank gets zero examples: a hard failure on train, and a rejected eval (it would
-otherwise hang the metrics gather). A starved rank is handed an empty split carrying the artifact's
-**schema** (read off the split's first shard), never a column-less one — every downstream
-`column_names` test gates a coordinated operation, so a rank whose split had no columns would skip a
-barrier its peers make.
-
-Shard assignment is keyed on data-parallel size, not global rank, so CP/TP/ETP group members share
-shards; EP is orthogonal to DP and does not reduce the shard count needed. See
-[Distributed Data Loading](../parallelism/data-loading.md#pre-processed-sharded-datasets). Loading
-helpers: `load_datasets_auto` and `load_preprocessed_dataset` in
-`src/data/sources/loading.py`; `is_preprocessed_dataset` in
-`src/data/preprocessed/metadata.py`.

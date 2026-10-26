@@ -32,14 +32,7 @@ lora_alpha: 16
 output_dir: checkpoints/distill-qwen3.5-9b-from-qwen3.6-35b-a3b
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `distill_loss` | `kl_divergence` | The divergence against the teacher; see below |
-| `distill_temperature` | `1.0` | Softmax temperature; reaches only the four losses that declare it |
-| `distill_alpha` | `1.0` | Weight on the distillation term, `1 − distill_alpha` on CLM; `1.0` drops CLM from the loss |
-| `apply_hard_labels` | `False` | Scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; refused at trainer construction under `slim`, which weights by its own gold-token rule |
-| `max_length` | `2048` | Over-length conversations are **dropped**, not truncated; `null` → context window |
-| `teacher_model_revision` | `None` | Pins the teacher repo; the student's `model_revision` names a commit elsewhere |
+`distill_alpha` weighs the distillation term and `1 − distill_alpha` the CLM term (`1.0` drops CLM), and `distill_temperature` reaches only the four losses that declare it. `apply_hard_labels` scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; `slim`, which weights by its own gold-token rule, refuses it. `teacher_model_revision` pins the teacher repo, since the student's `model_revision` names a commit elsewhere. Over-length conversations are **dropped**, not truncated. Types and defaults: [DistillationConfig](../../reference/configuration-reference.md#distillationconfig) and [TeacherDistillScriptArguments](../../reference/configuration-reference.md#teacherdistillscriptarguments).
 
 The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teacher fits rounded targets) and under the run's `trust_remote_code`. Student and teacher make the same padded-workload attention request, so the two compared forwards cannot split across kernels — but it resolves against the **teacher's** config, so the teacher's per-family kernel limits apply (DeepSeek-V4 eager-only, Gemma 4 head_dim 512).
 

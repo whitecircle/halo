@@ -305,21 +305,16 @@ def randomize_adapters(
                 param.copy_(torch.empty_like(param, dtype=dtype).normal_(std=std))
 
 
-def _is_trainable_adapter(name: str) -> bool:
-    """A param that LoRA legitimately trains: a ``lora_*`` adapter, or a ``modules_to_save`` copy
-    (e.g. the randomly-initialised SEQ_CLS ``score``/``classifier`` head, which must train)."""
-    return "lora_" in name or "modules_to_save" in name
-
-
 def assert_only_adapters_trainable(model) -> tuple[bool, str]:
-    """Static invariant: every trainable param is an adapter (or a modules_to_save head), and at
-    least one ``lora_*`` adapter is trainable.
+    """Static invariant: every trainable param is an adapter (or a modules_to_save copy, such as the
+    randomly initialised SEQ_CLS ``score``/``classifier`` head, which must train), and at least one
+    ``lora_*`` adapter is trainable.
 
     This is the frozen-base guarantee: configure_adapter_training / get_peft_model freeze the base (the 4-bit
     QLoRA weights included) and leave only adapters (plus any modules_to_save) trainable, so the
     optimizer can only move adapters."""
     trainable_non_adapter = [
-        n for n, p in model.named_parameters() if p.requires_grad and not _is_trainable_adapter(n)
+        n for n, p in model.named_parameters() if p.requires_grad and "lora_" not in n and "modules_to_save" not in n
     ]
     trainable_loras = [n for n, p in model.named_parameters() if p.requires_grad and "lora_" in n]
     if trainable_non_adapter:
@@ -340,8 +335,9 @@ def snapshot_adapters(model, *, expert_lora: bool) -> dict[str, torch.Tensor]:
     return {n: _materialize(p) for n, p in adapter_param_items(model) if p.requires_grad}
 
 
-def assert_adapters_moved(before: dict, after: dict) -> tuple[bool, str]:
-    """Every adapter is finite, at least one changed, and at least one zero-init B matrix moved."""
+def assert_adapters_moved(before: dict, after: dict, *, require_all: bool = False) -> tuple[bool, str]:
+    """Every adapter is finite, at least one changed (every one with ``require_all``, which a partially wired
+    adapter fails), and at least one zero-init B matrix moved."""
     nonfinite = [k for k, t in after.items() if not torch.isfinite(t).all()]
     if nonfinite:
         return False, f"{len(nonfinite)} adapters are non-finite after training (e.g. {nonfinite[:3]})"
@@ -349,6 +345,9 @@ def assert_adapters_moved(before: dict, after: dict) -> tuple[bool, str]:
     b_moved = [k for k in moved if is_lora_b_key(k)]
     if not moved:
         return False, "no adapter tensors changed after training"
+    if require_all and len(moved) < len(before):
+        unmoved = [k for k in before if k not in moved]
+        return False, f"{len(unmoved)}/{len(before)} adapters did not move (e.g. {unmoved[:3]})"
     if not b_moved:
         return False, f"{len(moved)} adapters changed but no lora_B moved (B is zero-init; must move)"
     return True, f"{len(moved)}/{len(before)} adapters changed (lora_B moved: {len(b_moved)})"
@@ -431,7 +430,7 @@ def adapter_save_checks(save_dir: str, rank: int) -> dict[str, bool]:
     return checks
 
 
-def _portable_adapter_key(name: str) -> str:
+def portable_adapter_key(name: str) -> str:
     """A live adapter param name in the spelling the saver writes: adapter segment dropped, CP-wrapper
     artifacts stripped. Idempotent, so a plain reloaded model's names land on the same keys."""
     return plain_adapter_key(strip_peft_adapter_segment(name))
@@ -476,9 +475,9 @@ def verify_adapter_reload(
         reloaded = PeftModel.from_pretrained(base_model, save_dir)
 
         restored = {
-            _portable_adapter_key(n): p.detach().float().cpu() for n, p in reloaded.named_parameters() if "lora_" in n
+            portable_adapter_key(n): p.detach().float().cpu() for n, p in reloaded.named_parameters() if "lora_" in n
         }
-        trained = {_portable_adapter_key(n): t.float() for n, t in trained_lora.items()}
+        trained = {portable_adapter_key(n): t.float() for n, t in trained_lora.items()}
         missing = sorted(k for k in trained if k not in restored)
         differ = sorted(
             k for k in trained if k in restored and not torch.allclose(trained[k], restored[k], atol=TOL.weight_atol)

@@ -11,6 +11,7 @@ Run: python tests/cpu/environments/test_registry_defaults.py  (or pytest)
 
 import pytest
 
+from scripts.docs.markdown import parse_tables
 from src.configs.grpo_environmental import EnvironmentConfig
 from src.environments.environment_base import EnvironmentBase
 from src.environments.episode_keys import EPISODE_INVALID_KEY, EPISODE_INVALID_REASON_KEY
@@ -64,23 +65,15 @@ def _declared_max_turns(env_type: str) -> int:
     return type(build_environment(env_type, _ENV_KWARGS[env_type])).DEFAULT_MAX_TURNS
 
 
-def _table_cells(line: str) -> list[str]:
-    return [cell.strip() for cell in line.strip().strip("|").split("|")]
-
-
 def _documented_max_turns() -> dict[str, int]:
     """``environment_type`` → the default ``max_turns`` the environments overview's registry table states."""
-    lines = _ENVIRONMENTS_OVERVIEW.read_text(encoding="utf-8").splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith("| `environment_type` |"))
-    column = _table_cells(lines[start]).index(_MAX_TURNS_COLUMN)
-    documented = {}
-    # Past the header and its separator row, up to the first line that is no table row.
-    for line in lines[start + 2 :]:
-        if not line.startswith("|"):
-            break
-        cells = _table_cells(line)
-        documented[cells[0].strip("`")] = int(cells[column])
-    return documented
+    table = next(
+        table
+        for table in parse_tables(_ENVIRONMENTS_OVERVIEW.read_text(encoding="utf-8"))
+        if table.headers[0] == "`environment_type`"
+    )
+    column = table.headers.index(_MAX_TURNS_COLUMN)
+    return {row[0].strip("`"): int(row[column]) for row in table.rows}
 
 
 @pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))

@@ -30,12 +30,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/kto-qwen3.5-9b
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `beta` | `0.1` | Deviation allowed from the reference |
-| `desirable_weight` / `undesirable_weight` | `1.0` / `1.0` | Re-weight the two classes when the label counts are skewed |
-| `loss_type` | `kto` | Or `apo_zero_unpaired`, which carries no KL term |
-| `max_length` | `1024` | Truncates prompt + completion, keeping the start |
+`beta` bounds the deviation from the reference, `desirable_weight` / `undesirable_weight` re-weight the two classes when the label counts are skewed, `loss_type: apo_zero_unpaired` carries no KL term, and `max_length` truncates prompt + completion keeping the start. Types and defaults: [KTOConfig](../../reference/configuration-reference.md#ktoconfig--distributedktotrainer).
 
 The default `kto` loss builds each row's KL completion from its neighbors in a fixed-order batch, so TRL raises at `per_device_train_batch_size: 1` and at any `train_sampling_strategy` other than the default `sequential`. Only `apo_zero_unpaired` is exempt. KTO has no prompt cap, so an over-long prompt eats its own completion.
 

@@ -35,17 +35,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/sft-qwen3-4b
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `train_on_completions_only` | `true` | Mask prompt tokens; loss on assistant turns only |
-| `assistant_message_template` | unset | The rendered assistant-turn prefix; required by the flag above and checked against the chat template at startup |
-| `train_on_last_assistant_only` | `false` | Loss on the final assistant turn only; needs completions-only |
-| `packing` / `packing_strategy` | `false` / `bfd` | Pack short rows into fixed `max_length` blocks |
-| `tree_packing` | `false` | Store a prefix shared by several rows once ([Tree Packing](../optimization/tree-packing.md)) |
-| `padding_free` | `false` | Flatten the batch into one varlen sequence |
-| `max_length` | `1024` | `null` or non-positive → the model context window |
-| `use_peft` | `false` | LoRA; 5–10× the full-FT rate ([PEFT](../optimization/peft.md#hyperparameters)) |
-| `lowp_precision` | `bf16` | `fp8`/`fp4`/`mxfp4` matmuls over bf16 masters ([QAT](../optimization/low-precision-moe-kernels.md)) |
+`train_on_completions_only` masks prompt tokens, so the loss covers assistant turns only; it needs `assistant_message_template`, the rendered assistant-turn prefix, which startup checks against the chat template. `train_on_last_assistant_only` narrows the loss to the final assistant turn. `packing` packs short rows into fixed `max_length` blocks, [`tree_packing`](../optimization/tree-packing.md) stores a prefix several rows share once, and `padding_free` flattens the batch into one varlen sequence. LoRA (`use_peft`) wants 5–10× the full-FT learning rate ([PEFT](../optimization/peft.md#hyperparameters)), and `lowp_precision` runs fp8/fp4 matmuls over bf16 masters ([QAT](../optimization/low-precision-moe-kernels.md)).
 
 Refused at startup:
 
@@ -53,7 +43,7 @@ Refused at startup:
 - `padding_free` on a non-varlen attention implementation, or under CP (which refuses `packing` too).
 - TRL's `completion_only_loss` / `assistant_only_loss`, and a non-default `dataset_text_field` / `dataset_kwargs`: they act inside the dataset prep and collator this script replaces. The script renders `conversation_field` itself; tokenize a raw-text column offline with `prepare_dataset.py --mode text`.
 
-Per-family configs live under `examples/sft/`; full field list in [Configuration Reference](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
+Per-family configs live under `examples/sft/`; every field's type and default is in [SFTConfig](../reference/configuration-reference.md#trl-trainer-configs) and [SFTScriptArguments](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
 
 ## Launch
 
@@ -69,7 +59,7 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml --nproc 8
 python scripts/training/sft.py examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml
 ```
 
-Scalar YAML fields override on the command line (`--learning_rate=1e-5`; container fields such as `dataset` stay in the YAML, [rules](../getting-started/configuration.md#cli-overrides)); `accelerate launch` with `launcher-configs/accelerate/fsdp2_gradop_config.yaml` stays supported for plain data-parallel. Saves are gathered HF-standard checkpoints by default; per-rank `save_sharded_ep` ones need `scripts/after_training/merge_ep_shards.py` before resume or serving, and that merge drops optimizer state ([Checkpoints](../reference/checkpoints.md)).
+Scalar YAML fields override on the command line (`--learning_rate=1e-5`; container fields such as `dataset` stay in the YAML, [rules](../reference/configuration-reference.md#cli-overrides)); `accelerate launch` with `launcher-configs/accelerate/fsdp2_gradop_config.yaml` stays supported for plain data-parallel. Saves are gathered HF-standard checkpoints by default; per-rank `save_sharded_ep` ones need `scripts/after_training/merge_ep_shards.py` before resume or serving, and that merge drops optimizer state ([Checkpoints](../reference/checkpoints.md)).
 
 ## Learning rate and global batch size
 

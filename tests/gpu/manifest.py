@@ -191,6 +191,22 @@ _SYNC_EXACTNESS_SWEEP_FAMILIES = (
     "step3p7",
 )
 
+# test_lora_sft_modes.py's rows, `--mode` and its flags per `--model`: one per distinct assertion set.
+_LORA_SFT_ROWS = {
+    "gpt_oss_20b": (
+        "ep --convergence --save-reload",
+        "ep --attn flash_attention_2",
+        "ep_cp --save-reload",
+        "etp --save-reload",
+    ),
+    "qwen3_0_6b": (
+        "fsdp --save-reload",
+        "fsdp --qlora --save-reload",
+        "cp --save-reload --resume",
+        "cp --qlora --save-reload",
+    ),
+}
+
 MANIFEST: dict[str, TestSpec] = {
     # ── data ──
     "data/test_cache_isolation.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
@@ -276,20 +292,8 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/combined/test_ep_etp_combo_correctness.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "gptoss"), timeout=1000
     ),
-    "parallelism/combined/test_ep_etp_correctness.py": TestSpec(
-        # Loads gpt-oss-20b twice (undistributed reference on rank 0, then the ETP model).
-        nproc=2,
-        markers=("gpu", "core", "2gpu", "ep", "etp", "moe", "gptoss"),
-        timeout=1200,
-    ),
     "parallelism/combined/test_ep_etp_fused_glu_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "etp", "mistral4"), timeout=600
-    ),
-    "parallelism/combined/test_ep_tp_correctness.py": TestSpec(
-        # Loads gpt-oss-20b twice (undistributed reference on rank 0, then the EP+TP model).
-        nproc=2,
-        markers=("gpu", "core", "2gpu", "ep", "tp", "moe", "gptoss"),
-        timeout=1200,
     ),
     "parallelism/combined/test_ep_tp_replicated_grad_sync.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "gptoss"), timeout=900
@@ -314,9 +318,6 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/cp/test_bailing_cp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "cp", "moe", "bailing"), timeout=900
-    ),
-    "parallelism/ep/test_ep_vs_reference_bailing_v3.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "bailing"), timeout=900
     ),
     "parallelism/ep/test_ep1_fsdp_shard_experts.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1500
@@ -350,8 +351,17 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_ep_long_context.py": TestSpec(
         nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "gptoss"), timeout=1200
     ),
-    "parallelism/ep/test_ep_correctness.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
+    # Each row loads its checkpoint twice: the undistributed reference on rank 0, then the parallel model.
+    "parallelism/ep/test_ep_modes_vs_reference.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "tp", "etp", "moe", "gptoss", "qwen3"),
+        args_matrix=(
+            "--model gpt_oss_20b --mode ep",
+            "--model gpt_oss_20b --mode ep_tp",
+            "--model gpt_oss_20b --mode etp",
+            "--model qwen3_30b_a3b --mode ep",
+        ),
+        timeout=1200,
     ),
     "parallelism/ep/test_ep2_weight_sync_values.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1200
@@ -447,20 +457,11 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=600,
         args_matrix=("--family qwen3_moe", "--family gpt_oss", "--family zaya"),
     ),
-    "parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "deepseek_v4"), timeout=900
-    ),
-    "parallelism/ep/test_ep_vs_fsdp_cohere2_moe.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "cohere2_moe"), timeout=900
-    ),
-    "parallelism/ep/test_ep_vs_fsdp_glm5_next.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "glm5"), timeout=900
-    ),
-    "parallelism/ep/test_ep_vs_fsdp_step3p7.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "step3p7"), timeout=900
-    ),
-    "parallelism/ep/test_ep_vs_reference_inkling.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "inkling"), timeout=900
+    "parallelism/ep/test_ep_family_vs_reference.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", *_family_markers(_TINY_MOE_FAMILIES)),
+        args_matrix=tuple(f"--family {family}" for family in _TINY_MOE_FAMILIES),
+        timeout=1500,
     ),
     "parallelism/combined/test_ep_etp_inkling.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "inkling"), timeout=900
@@ -480,14 +481,9 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=900,
         args_matrix=("--family glm5_next", "--family step3p7"),
     ),
-    "parallelism/ep/test_ep_vs_fsdp_glm4_moe.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "glm4"), timeout=1500
-    ),
-    "parallelism/ep/test_ep_vs_reference_qwen3_moe.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"), timeout=1200
-    ),
+    # Three loads of gpt-oss-20b: the rank-0 reference, the no-EP load on every rank, the EP model.
     "parallelism/ep/test_ep_vs_no_ep.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"), timeout=1000
+        nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"), timeout=1500
     ),
     "parallelism/ep/test_gptoss_bias_balancing.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1500
@@ -645,43 +641,26 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/test_fsdp_tied_embeddings.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
-    "parallelism/test_mistral4_all_parallelism.py": TestSpec(
+    # One node per family and mode; the markers are the union over the rows. EP+TP needs a single dispatch group
+    # (ep_size == world): ep4+tp2 on 8 forms two 4-rank groups, the topology ParallelismConfig rejects.
+    # Node-local EP+CP pins ep_size to the 8-GPU domain, cp dividing it (EP is orthogonal to DP); Mistral4 runs
+    # EP+CP at ep2+cp2 in the merged-resume family rows.
+    "parallelism/test_moe_all_parallelism.py": TestSpec(
         nproc=8,
-        markers=("gpu", "full", "8gpu", "ep", "cp", "tp", "etp", "moe", "mistral4"),
-        # One node per parallelism mode; --mode is required. EP+CP (ep8+cp2 is a valid single-node
-        # shape — EP is orthogonal to DP) is no row here: the tiny Mistral4 runs it at ep2+cp2 in the
-        # merged-resume family rows, and the cohere2_moe matrix below carries the 8-GPU ep_cp row.
+        markers=("gpu", "full", "8gpu", "ep", "cp", "tp", "etp", "moe", "cohere2_moe", "mistral4"),
         args_matrix=(
-            "--mode ep --ep 8 --liger",
-            "--mode cp --cp 8",
-            "--mode tp --tp 8",
-            # EP+TP needs a single dispatch group (ep_size == world): ep4+tp2 on 8 forms two 4-rank
-            # groups, the topology ParallelismConfig rejects (combine-vs-DP-NCCL race).
-            "--mode ep_tp --ep 8 --tp 2",
-            # 4-way expert sharding via ETP with a benign 2-rank dispatch group. The sibling ep4+etp2
-            # is a valid shape too (ETP raises ep_group_size to the domain), absent only because it
-            # has not been validated on this model.
-            "--mode ep_etp --ep 2 --etp 4",
-        ),
-        timeout=1500,
-    ),
-    "parallelism/test_cohere2_moe_all_parallelism.py": TestSpec(
-        nproc=8,
-        markers=("gpu", "full", "8gpu", "ep", "cp", "tp", "etp", "moe", "cohere2_moe"),
-        # One node per parallelism mode; --mode is required.
-        args_matrix=(
-            "--mode ep --ep 8",
-            "--mode cp --cp 8",
-            "--mode tp --tp 8",
-            # Node-local EP+CP pins ep_size to the 8-GPU domain; cp divides it (EP is orthogonal to DP).
-            "--mode ep_cp --ep 8 --cp 2",
-            # EP+TP needs a single dispatch group (ep_size == world): ep4+tp2 on 8 forms two 4-rank
-            # groups, the topology ParallelismConfig rejects (combine-vs-DP-NCCL race).
-            "--mode ep_tp --ep 8 --tp 2",
-            # Pure ETP (ep_size=1, experts replicated, FFN sharded 8-way) and EP+ETP with a benign
-            # 2-rank dispatch group and one domain-wide EP group.
-            "--mode etp --etp 8",
-            "--mode ep_etp --ep 2 --etp 4",
+            "--family mistral4 --mode ep --ep 8 --liger",
+            "--family mistral4 --mode cp --cp 8",
+            "--family mistral4 --mode tp --tp 8",
+            "--family mistral4 --mode ep_tp --ep 8 --tp 2",
+            "--family mistral4 --mode ep_etp --ep 2 --etp 4",
+            "--family cohere2_moe --mode ep --ep 8",
+            "--family cohere2_moe --mode cp --cp 8",
+            "--family cohere2_moe --mode tp --tp 8",
+            "--family cohere2_moe --mode ep_cp --ep 8 --cp 2",
+            "--family cohere2_moe --mode ep_tp --ep 8 --tp 2",
+            "--family cohere2_moe --mode etp --etp 8",
+            "--family cohere2_moe --mode ep_etp --ep 2 --etp 4",
         ),
         timeout=2100,
     ),
@@ -1092,18 +1071,6 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
-    "trainers/lora/test_lora_bailing_moe.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "lora", "moe", "etp", "bailing"), timeout=1500
-    ),
-    "trainers/lora/test_lora_cp_dense.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "lora", "cp", "qwen3"), timeout=1300
-    ),
-    "trainers/lora/test_lora_cp_tp.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "lora", "cp", "tp", "qwen3"), timeout=1000
-    ),
-    "trainers/lora/test_lora_ep.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1000
-    ),
     "trainers/lora/test_lora_ep_experts.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1200
     ),
@@ -1179,22 +1146,18 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
-    "trainers/lora/test_lora_ep_convergence.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1000
-    ),
-    "trainers/lora/test_lora_ep_cp_etp.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "cp", "etp", "moe", "gptoss"), timeout=1000
-    ),
-    "trainers/lora/test_lora_tp_save_load.py": TestSpec(
+    # Real checkpoints, so `full`; one row per distinct assertion set (`_LORA_SFT_ROWS`).
+    "trainers/lora/test_lora_sft_modes.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "lora", "tp", "ep", "moe", "qwen3", "gptoss"),
-        timeout=1000,
+        markers=("gpu", "full", "2gpu", "lora", "ep", "cp", "etp", "moe", "gptoss", "qwen3"),
+        args_matrix=tuple(f"--model {model} --mode {row}" for model, rows in _LORA_SFT_ROWS.items() for row in rows),
+        timeout=1500,
     ),
-    "trainers/lora/test_sft_oss20b_ep_lora.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss"), timeout=1500
-    ),
-    "trainers/lora/test_sft_qwen3_4b_lora.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "lora", "tp", "qwen3"), timeout=1000
+    "trainers/lora/test_lora_sft_bailing.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "lora", "ep", "etp", "moe", "bailing"),
+        args_matrix=("--mode ep", "--mode etp"),
+        timeout=1500,
     ),
     "trainers/lora/test_lora_offline_grpo.py": TestSpec(
         nproc=2,
@@ -1362,20 +1325,6 @@ MANIFEST: dict[str, TestSpec] = {
         # shape, and every mode runs the same 6-step two-phase resume.
         timeout=2400,
     ),
-    "trainers/sft/test_sft_ep_fa2_modes.py": TestSpec(
-        nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"),
-        args_matrix=("--mode full", "--mode lora", "--mode qlora"),
-        timeout=1000,
-    ),
-    "trainers/sft/test_sft_ep_flex_vs_fa2.py": TestSpec(
-        nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "moe", "gptoss"),
-        # FA2 needs --reset_sinks: validate_attn_implementation rejects FA2 while sinks are live, so
-        # without the flag the test fails on its own premise.
-        args_matrix=("--mode flex", "--mode fa2 --reset_sinks"),
-        timeout=1000,
-    ),
     # EP+TP only (EP+TP+ETP is not a supported axis set, so this carries no `etp` marker).
     "trainers/sft/test_sft_ep_tp_flex.py": TestSpec(
         nproc=2,
@@ -1505,18 +1454,17 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=1500,
     ),
     # `full` rather than `core`: plain SFT smokes on the 20B checkpoint. The core tier keeps the
-    # gpt-oss correctness gates (`parallelism/ep/test_ep_correctness.py`), not smokes.
-    "trainers/sft/test_sft_oss20b_default.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "gptoss"), timeout=1500
-    ),
-    # One row per parallel shape. The markers are the union over the rows, so `-m "gpu and etp"` selects
-    # the other shapes too.
+    # gpt-oss correctness gates (`parallelism/ep/test_ep_modes_vs_reference.py`), not smokes. One row per
+    # parallel shape and attention kernel; the markers are the union over the rows, so `-m "gpu and etp"`
+    # selects the other shapes too.
     "trainers/sft/test_sft_gptoss_modes.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "cp", "tp", "etp", "moe", "gptoss"),
         args_matrix=(
             "--mode fsdp",
+            "--mode fsdp_fa2",
             "--mode ep",
+            "--mode ep_fa2",
             "--mode cp",
             "--mode tp",
             "--mode ep_cp",

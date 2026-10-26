@@ -1,6 +1,6 @@
 # Multi-Node Launch Recipes
 
-Runnable launches for multi-node training: torchrun and SLURM commands, EP checkpoint save/load, filesystem setup, and sharded data loading. For the process-group layout, node-local vs cross-node scope, and the `ParallelismConfig` API, see [Multi-Node Training](multi-node.md). For SkyPilot cluster provisioning, see [SkyPilot](../infrastructure/skypilot.md).
+Runnable launches for multi-node training: torchrun and SLURM commands, EP checkpoint save/load and filesystem setup. For the process-group layout, node-local vs cross-node scope, and the `ParallelismConfig` API, see [Multi-Node Training](multi-node.md). For SkyPilot cluster provisioning, see [SkyPilot](../infrastructure/skypilot.md).
 
 These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or AWS EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)). Launch one `torchrun` per node (it forks the 8 per-GPU ranks); EP all-to-all uses NVLink within a node and RDMA only when `ep_scope="global"` makes the EP group span nodes. A ready-to-run example covering cross-node EP, node-local EP + DP, EP+TP, and the NVL72 variant ships at `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml`.
 
@@ -21,6 +21,10 @@ torchrun \
     scripts/training/sft.py \
     examples/sft/gptoss/gptoss-20b-multinode-ep.yaml
 ```
+
+On one node the launch drops `--nnodes`, `--node_rank` and `--master_*`: `torchrun --nproc_per_node=8 scripts/training/sft.py <config> --expert_parallel_size=8`. Each axis is one `--*_parallel_size` flag, in the YAML or on the CLI, combinable where [Supported combinations](README.md#supported-combinations) allows, and each needs `torchrun` ([Two launchers](data-parallelism.md#two-launchers)): `accelerate launch`, detected through `ACCELERATE_MIXED_PRECISION` or `ACCELERATE_USE_FSDP` (`is_accelerate_launch`), raises on any of them. A plain `python` launch trains on the one GPU it binds however many are visible: `init_training_script` pins `n_gpu` to 1, so HF never wraps the model in `nn.DataParallel`. `halo launch` is single-node only.
+
+The log-writing rank (global rank 0 on a shared output filesystem, each node's local rank 0 otherwise) tees its stdout and stderr to `<output_dir>/log/run.log`, so a detached run keeps its console without a redirect. Redirecting the launch (`> "$D/<job>.log" 2>&1`, as the [detached Docker launch](../infrastructure/docker.md#standard-training-launch) does) also captures the other ranks, such as a crash off rank 0. A log directory or `tee` that cannot be set up is warned on that rank, and the run continues without the file.
 
 ## SLURM
 
@@ -128,39 +132,18 @@ The toolkit coordinates file operations (model downloads, dataset loading, direc
 
 Weights take ~2 bytes/param in bf16 (7B MoE ≈ 14 GB, 20B ≈ 40 GB, 70B ≈ 140 GB), the size of a `save_model` export; per-rank sharded is roughly `full / ep_size`. A training checkpoint keeps fp32 masters (`fp32_router`, `fp32_experts`, `fp32_non_ep_params`) at 4 bytes per element and adds the optimizer state (4 bytes/param for AdamWBF16) unless `save_only_model: true`.
 
-## Sharded data loading
+## Preflight
 
-For large-scale multi-node training, pre-process and shard SFT datasets offline so each rank loads only its `1/data_parallel_size` slice. Pre-processing is **SFT-only** — DPO, SMPO, and GRPO require on-the-fly processing.
-
-```bash
-python scripts/before_training/prepare_dataset.py \
-    --input "s3://my-bucket/raw/my_sft_data" \
-    --output "s3://my-bucket/preprocessed/my_sft_data" \
-    --model_name_or_path "Qwen/Qwen3-8B" \
-    --max_length 8192 \
-    --test_size 0.01 \
-    --num_shards 64 \
-    --pack_sequences \
-    --conversation_field conversation \
-    --assistant_message_template $'<|im_start|>assistant\n'
-```
-
-The SFT trainer auto-detects the sharded layout and loads each rank's shards via `ShardedDatasetLoader` keyed on the **data-parallel** rank/size, not global world, and refuses `num_shards < data_parallel_size`. Layout and shard assignment: [Data Loading → Pre-processed (sharded) datasets](data-loading.md#pre-processed-sharded-datasets).
-
-## Troubleshooting
-
-**Preflight NVLink health** — EP all-to-all rides NVLink intra-node, so a marginal lane silently caps throughput or hangs a run. `scripts/profiling/nvlink_health.py` reads `nvidia-smi` counters (no GPU allocation, safe alongside a live job), separates hard faults from FEC-absorbed correctable churn, and exits non-zero on any unhealthy link — run it as a gate before a long multi-node launch:
+EP all-to-all rides NVLink inside a node, so a marginal lane silently caps throughput or hangs a run.
+`scripts/profiling/nvlink_health.py` reads `nvidia-smi` counters (no GPU allocation, safe beside a live
+job), separates hard faults from FEC-absorbed churn, and exits non-zero on an unhealthy link; run it
+before a long launch:
 
 ```bash
 python scripts/profiling/nvlink_health.py            # summary, exit 1 if unhealthy
-python scripts/profiling/nvlink_health.py --per-link  # every link
-python scripts/profiling/nvlink_health.py --json      # raw report, for a wrapper to parse
 ```
 
-**NVSHMEM not found for inter-node EP** — DeepEP V2 links NVSHMEM for device linking only (`nvidia-nvshmem-cu13` on CUDA 13.x, a transitive dep of `torch 2.11+cu130`; `nvidia-nvshmem-cu12` on CUDA 12.x — never both). Rebuild DeepEP with the full env the build needs: [DeepEP → Build from source](../infrastructure/deepep.md#build-from-source), which clones upstream at the pinned commit.
-
-**RDMA connection timeout** — verify the fabric first (`ibstat` on IB/RoCE, `fi_info -p efa` on EFA — [RDMA fabrics](multi-node.md#rdma-fabrics)), then re-run with `NCCL_DEBUG=INFO` for the transport logs.
-
-**`context_parallel_size (16) cannot exceed the NVLink domain (8)`** — set `cp_size <= nvlink_domain_size` (= `gpus_per_node` on a standard cluster, the rack on NVL72). EP+CP also requires node-local EP (`ep_scope=node` with `ep_group_size == nvlink_domain_size`); `parallelism_rules._reject_ep_cp` rejects cross-node EP (`ep_scope=global`) combined with CP. Cross-node EP combines with DP, TP and ETP (not CP) and needs an RDMA fabric for its all-to-all.
-
-**Rendezvous never completes / one node hangs at startup** — every node must pass the identical `--nnodes`, `--master_addr`, `--master_port` and a distinct `--node_rank`, and every rank must reach `init_distributed` in the same order. Symptom-to-cause table for the rest: [Troubleshooting](../reference/troubleshooting.md).
+Pre-tokenized, per-rank sharded datasets (`num_shards >= data_parallel_size`):
+[Data Loading → Pre-processed (sharded) datasets](data-loading.md#pre-processed-sharded-datasets).
+Symptoms and fixes for a failed launch (rendezvous, RDMA, config rejections):
+[Troubleshooting](../reference/troubleshooting.md).

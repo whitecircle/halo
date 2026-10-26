@@ -31,20 +31,12 @@ curl -s localhost:8000/health
 This server takes GPUs 6 and 7, so start the trainer with
 `TRAINER_CUDA_DEVICES=0,1,2,3,4,5`; its default `0,1,2,3,4,5,6` overlaps GPU 6.
 
-`docker-compose.vllm.yml` already passes the flags RL depends on. These are the
-variables you normally set:
-
-| Variable | Default | What it does |
-| --- | --- | --- |
-| `VLLM_MODEL` | `Qwen/Qwen3-0.6B` | Hub id or local checkpoint path |
-| `VLLM_CUDA_DEVICES` | `7` | the server's GPUs; must not overlap `TRAINER_CUDA_DEVICES` |
-| `VLLM_PORT` | `8000` | host port for the API and the health check |
-| `VLLM_TP` | `1` | tensor-parallel size, matching the device list |
-| `VLLM_GPU_MEM` | `0.85` | fraction of each GPU for weights and KV cache; `0.9` on dedicated GPUs, at most `0.80` with `isr_engine_reference` |
-| `VLLM_MOE_BACKEND` | `triton` | leave it; any other backend breaks weight sync |
-| `VLLM_TOOL_PARSER` | `hermes` | tool-call parser, set per family (below) |
-| `VLLM_REASONING_PARSER` | unset | required if the run caps reasoning: an enforced thinking budget, or a soft one's ceiling |
-| `VLLM_CHAT_TEMPLATE` | unset | the same `.jinja` file as the trainer's `chat_template:`, visible in this container |
+`docker-compose.vllm.yml` already passes the flags RL depends on. You normally
+set `VLLM_MODEL`, `VLLM_CUDA_DEVICES` (never overlapping `TRAINER_CUDA_DEVICES`),
+`VLLM_TP` to match the device list, `VLLM_GPU_MEM`, `VLLM_TOOL_PARSER` (below),
+`VLLM_REASONING_PARSER` when the run caps reasoning, and `VLLM_CHAT_TEMPLATE` to
+the trainer's `chat_template:` file. Every variable and its default:
+[Rollout Servers → vLLM](../agent-docs/infrastructure/rollout-servers.md#vllm) ↗.
 
 ### Tool parsers
 
@@ -83,11 +75,11 @@ SGLANG_MODEL=Qwen/Qwen3-30B-A3B SGLANG_CUDA_DEVICES=7 \
     docker compose -f docker-compose.sglang.yml up -d
 ```
 
-The variables mirror vLLM's: `SGLANG_MODEL` (required), `SGLANG_PORT` (`30000`),
-`SGLANG_CUDA_DEVICES`, `SGLANG_TP`, `SGLANG_GPU_MEM`, `SGLANG_TOOL_PARSER`
-(`auto`, read from the chat template) and `SGLANG_MOE_RUNNER_BACKEND`
-(`triton`, for the same reason as vLLM's). The compose file also sets
-`NCCL_CUMEM_ENABLE=1`; a container you start by hand needs it too.
+The variables mirror vLLM's (`SGLANG_MODEL`, `SGLANG_PORT`, `SGLANG_CUDA_DEVICES`,
+`SGLANG_TP`, `SGLANG_GPU_MEM`), except that `SGLANG_TOOL_PARSER` reads the parser
+off the chat template by default. The compose file also sets
+`NCCL_CUMEM_ENABLE=1`; a container you start by hand needs it too
+([Rollout Servers → SGLang](../agent-docs/infrastructure/rollout-servers.md#sglang) ↗).
 
 Weight sync needs **this repo's** SGLang image, not upstream's. It matches NCCL
 with the training image and patches the Gemma 4 router so a synced router weight
@@ -140,12 +132,13 @@ halo run weight-sync-transport --server-url http://<server>:8000 --backend vllm 
 
 ## How the trainer finds it
 
-| Config | Method | Meaning |
-| --- | --- | --- |
-| `rollout_server_url` | async GRPO | one server; default `http://localhost:8000` |
-| `rollout_server_configs` | async GRPO | a list of `{url, group_port}`, one per server; `enable_prefetch` needs two or more |
-| `vllm_server_host` / `vllm_server_port` | online GRPO | the address the **trainer dials**, not a bind address |
-| `vllm_group_port` | both | the weight-sync port, bound on the **trainer** host (default `51216`); a server entry without its own `group_port` takes `vllm_group_port` plus its index |
+Async GRPO names one server with `rollout_server_url`, or several with
+`rollout_server_configs` (a list of `{url, group_port}`; `enable_prefetch` needs
+two or more). Online GRPO dials `vllm_server_host` / `vllm_server_port`: the
+address the **trainer dials**, not a bind address. `vllm_group_port` is the
+weight-sync port, bound on the **trainer** host; a server entry without its own
+`group_port` takes it plus the entry's index
+([fields and defaults](../agent-docs/reference/configuration-reference.md#asynctrainingconfig) ↗).
 
 - **Group ports are unique across servers**, even on different hosts, because
   all of them bind on the trainer.
@@ -162,25 +155,21 @@ halo run weight-sync-transport --server-url http://<server>:8000 --backend vllm 
 ## What weight sync does
 
 After an optimizer step the trainer streams the whole model into the running
-engine over NCCL. The engine keeps serving with the new weights, with no restart
-and no checkpoint on disk.
-
-The server pauses for the push. vLLM freezes in-flight requests and resumes
-them; SGLang drops them and the rollout actor re-issues the turn. With several
-servers, every push pauses all of them.
+engine over NCCL: no restart, no checkpoint on disk. Every server pauses for the
+push. vLLM freezes in-flight requests and resumes them; SGLang drops them and the
+rollout actor re-issues the turn.
 
 MoE models must be served with `--moe-backend triton` (`--moe-runner-backend
-triton` on SGLang). The backends the engine picks on its own repack expert
-weights after loading, so an update writes into the wrong layout and the served
-model quietly diverges from the trainer. Nothing errors; the trainer's
-engine-versus-policy log-ratio drifts negative. The compose files default to
-`triton`.
+triton` on SGLang), the compose default. The backends the engine picks on its
+own repack expert weights after loading, so an update writes into the wrong
+layout and the served model quietly diverges: nothing errors, and the trainer's
+engine-versus-policy log-ratio drifts negative.
 
 ## When it goes wrong
 
 | Sign | Cause and fix |
 | --- | --- |
-| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER`, or drop `rollout_max_thinking_tokens`. Leave `VLLM_USE_V2_MODEL_RUNNER` unset: the image's Model Runner V2 is the runner R3 and the gpt-oss budget need. Code contests also send vLLM a cap whenever `reasoning_effort` is set, as the shipped recipes do: a soft budget sends its ceiling. |
+| 400 on every rollout, zero tokens back | The server cannot take a thinking budget. Set `VLLM_REASONING_PARSER`, or drop the run's reasoning cap, and leave `VLLM_USE_V2_MODEL_RUNNER` unset. |
 | The run finishes with a flat zero reward | Wrong tool-call parser on a tool-using environment; the calls came back as text. A missing parser returns 400 instead. |
 | `Could not bind the weight-transfer group port` | Another process holds the port, two servers share one, or an outbound connection took it. Give each server its own `group_port`, reserve it or pick one outside `32768–60999`, and remove stale containers. |
 | `/health` is 200 but nothing generates | A trainer died mid-sync and left the engine paused. Resume it, or restart the container if the push had started. |

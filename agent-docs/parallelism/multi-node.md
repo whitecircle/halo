@@ -116,23 +116,12 @@ The sweep lands every grad at the `/world_size` DP average over the whole job:
 enforced once per optimizer step — its expert `SUM / world_size` leg is not idempotent, so a second
 pass raises rather than halving every expert gradient.
 
-Single-domain multi-group EP with dispatch groups wider than 2 ranks is rejected at config time
-rather than deferred: the race is FSDP2's DP-wide reduce-scatter against the narrower DeepEP combine,
-which moving the cross-replica average out of the backward does not address.
+Deferral does not rescue single-domain multi-group EP wider than 2 ranks, which is refused instead
+([why](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
 
 ## Configuration matrix
 
-**Single node (8 GPUs):**
-
-| Config | EP | CP | ETP | DP | Note |
-|--------|----|----|-----|----|------|
-| EP only | 8 | 1 | 1 | 8 | Full DP |
-| EP only | 2 | 1 | 1 | 8 | 2-rank dispatch groups |
-| EP+CP orthogonal | 8 | 8 | 1 | 1 | Same batch, seq split 8-way |
-| EP+CP | 8 | 4 | 1 | 2 | 2 CP groups |
-| Pure ETP | 1 | 1 | 8 | 1 | Experts replicated, FFN sharded 8-way |
-
-**2 nodes × 8 GPUs (16 total):**
+**2 nodes × 8 GPUs (16 total)** (single-node DP sizes follow [Stacking the dimensions](README.md#stacking-the-dimensions)):
 
 | Config | EP | CP | TP | ETP | EP scope | DP |
 |--------|----|----|----|-----|----------|----|
@@ -143,28 +132,8 @@ which moving the cross-replica average out of the backward does not address.
 | EP+TP | 16 | 1 | 2 | 1 | global | 8 |
 | EP+ETP per domain | 2 | 1 | 1 | 8 | global | 2 |
 
-Three shapes are narrower than they look; all are rejected at config time, not at runtime:
-
-- **EP+TP across domains must be a SINGLE global EP group** (`ep_size == world_size`,
-  `ep_scope=global`). `ep8+tp2` on 16 GPUs is rejected; `ep16+tp2` is the working shape.
-
-    Cross-domain multi-group EP needs FSDP to shard non-expert params over the EP group
-    (`is_deferred_dp`), while EP+TP shards them over the `(dp, tp)` mesh; the two contracts cannot
-    both hold.
-
-- **EP+CP requires `ep_group_size == nvlink_domain_size`** — on 8-GPU nodes, `ep_size=8` exactly.
-  `ep2+cp2` and `ep4+cp2` are rejected, as is cross-domain EP under CP (`ep_scope=global`).
-
-- **EP+ETP across domains** takes exactly one ETP group per NVLink domain under a single EP group — on
-  2×8, `ep2+etp8` only; narrower splits are refused at either `ep_scope`
-  ([Expert-Tensor Parallelism → Validation rules](expert-tensor-parallelism.md#validation-rules)).
-
-> [!WARNING]
-> **Single-domain pure EP needs a single dispatch group**
->
-> Across domains `ep4` node-scope on 2×8 is accepted and routes through the deferred sweep above;
-> on one domain the same shape is rejected before model loading —
-> [Expert Parallelism](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs).
+Which other EP+TP, EP+CP and cross-domain EP+ETP layouts pass the config-time checks:
+[Topology rules](README.md#topology-rules).
 
 ## Gradient synchronization
 
@@ -202,16 +171,7 @@ full-world FSDP shards are reduced over their own tiling group and counted once.
 
 TP (DTensor) shards attention within each NVLink domain; EP (DeepEP) distributes experts; FSDP2
 syncs DP across domains. Attention TP leaves `ep_group_size` at `ep_size`, so it adds no expert
-sharding. DP = `world_size / tp_size`. Rules, all checked at config time:
-
-- `tp_size` divides the NVLink domain, and `ep_size` is a multiple of `tp_size` (`_reject_tp`).
-- **One domain:** the
-  [single-domain multi-group rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)
-  applies unchanged, so `ep_size` is 2 or fills the domain. `ep2+tp2` on 8 GPUs (four 2-rank EP
-  groups) passes; `ep4+tp2` is rejected like bare `ep4`.
-- **More than one domain:** a **single** EP group spanning the job (`ep_size == world_size`,
-  which `ep_scope=auto` resolves to `global`); multi-group EP+TP is rejected
-  ([why](#configuration-matrix)).
+sharding. DP = `world_size / tp_size`. Its rules: [Topology rules → EP+TP](README.md#topology-rules).
 
 Mechanism and load path: [tensor-parallelism.md](tensor-parallelism.md#eptp-mode).
 
@@ -229,15 +189,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 config = ParallelismConfig(ep_size=8, tp_size=8, ep_scope="node")
 ```
 
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `ep_size` | Expert distribution size | 1 |
-| `cp_size` | Context parallel size | 1 |
-| `tp_size` | Tensor parallel size (attention) | 1 |
-| `expert_tp_size` | Expert FFN TP size (MoE-only) | 1 |
-| `pp_size` | Pipeline stages, each a whole number of NVLink domains ([Pipeline Parallelism](pipeline-parallelism.md)) | 1 |
-| `ep_scope` | `"node"`, `"global"`, or `"auto"` (node-local when the EP group fits one domain) | `"auto"` |
-| `world_size` / `gpus_per_node` / `nvlink_domain_size` | Override the detected topology | 0 (auto) |
+Fields, defaults and their `ParallelismArguments` spellings: [Configuration reference → ParallelismConfig](../reference/configuration-reference.md#parallelismconfig).
 
 The dataclass and the `--ep_scope` CLI flag share that default, so a hand-built config behaves like a
 YAML-built one. Derived fields: `data_parallel_size`,
@@ -405,8 +357,8 @@ are contiguous rank blocks, and a non-dividing width straddles a domain boundary
 
 At `NVLINK_DOMAIN_SIZE=72` the legal widths are the divisors of 72
 (1, 2, 3, 4, 6, 8, 9, 12, 18, 24, 36, 72); 16, 32 and 64 are rejected at config time. Pure EP is
-narrower still: on a single 72-GPU domain the racy-topology gate leaves only `ep_size=2` and
-`ep_size=72` ([Recommended cell](large-scale-scenarios.md#recommended-cell)).
+narrower still: on a single 72-GPU domain only `ep_size=2` and `ep_size=72` pass
+([single-domain rule](expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
 
 On a rack whose GPU count is not a power of two, declare the largest power-of-two divisor your model
 can use (`NVLINK_DOMAIN_SIZE=64` over 16 of the rack's 18 compute trays) and leave the remainder

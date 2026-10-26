@@ -18,7 +18,10 @@ def gpu_test_main(
 It wraps a `def run(ctx) -> dict` body and owns the full lifecycle so the body is just
 *load → train → assert*:
 
-1. `init_distributed()` → `(rank, world_size, local_rank)`, optional `PartialState()`.
+1. `CAUSAL_CONV1D_DETERMINISTIC=1` unless the caller exported a value (causal_conv1d's default
+   backward sums the conv weight gradient with atomics, so the gated-DeltaNet families would miss an
+   exact resume replay now and then), then `init_distributed()` → `(rank, world_size, local_rank)`,
+   optional `PartialState()`.
 2. **Validate the launch before allocating** — wrong world size emits an `error` result and
    `sys.exit(2)` (the launcher reports the `status="error"` line as a FAIL naming the launch).
 3. `setup_cache_dirs(prefix, rank)` → per-rank isolated `output_dir` / `cache_dir`.
@@ -73,7 +76,7 @@ Build checks from these rather than re-deriving them per file:
 | `parallel_shape_checks(model, parallelism_config)` | `tests/common/parallel_shape.py` | one model-side probe per axis the config enables: EP wrappers, the expert bank split EP-way, ETP sharding, TP-sharded params, Ulysses attention layers |
 | `ep_layers(model)` | `tests/common/ep_reference.py` | every EP/ETP-wrapped MoE layer |
 | `group_max_abs_diff(tensor, group)` | `tests/common/distributed.py` | the replica-identity probe: the largest elementwise difference across a group, NaN-propagating (collective) |
-| `pin_deterministic_ep_dispatch()` | `tests/common/distributed.py` | every DeepEP `ElasticBuffer` of the process built in deterministic mode, for an EP body that replays a run exactly without `full_determinism` (under it the dispatcher does this itself); the default dispatch claims receive slots with atomics, so expert weight gradients round differently run to run |
+| `pin_deterministic_ep_dispatch()` | `tests/common/distributed.py` | every DeepEP `ElasticBuffer` of the process built in deterministic mode, for an EP body that replays a run exactly without `full_determinism` (under it the dispatcher does this itself); the default dispatch claims receive slots with atomics, so expert weight gradients round differently run to run. A forward-only comparison on the grouped-GEMM path needs no pin: each expert row is independent of arrival order and the combine sums in top-k slot order ([EP → Determinism](../../agent-docs/parallelism/expert-parallelism.md#determinism)) |
 | `model_save_checks` / `resume_checkpoint_checks` / `resume_continuity_checks` | `tests/common/checkpoint_io.py` | the files a `save_model` or a mid-training checkpoint must hold, and what a resume restored at its first step |
 | `run_sft_suite(ctx, SFTSuite(...), {key: SFTMode(...)}, default_mode=)` | `tests/common/sft_modes.py` | the whole SFT smoke body: one `--mode` per manifest row, load → train → the checks above |
 | `train_recording_first_step` / `score_first_step` / `first_step_checks` / `first_step_gradient_checks` | `tests/common/first_step.py` | a parallel run's first optimizer step (microbatch losses, logged loss, sharded gradients, c10d autograd fallbacks) scored against a reference trainer on the same microbatches, for an objective a parallel axis could miscount |
@@ -191,14 +194,10 @@ those, kept separate only so the manifest can attach its family markers, timeout
 
 ## Ports, tolerances, reporting
 
-- **Ports** (`tests/common/ports.py`) — never hardcode `--master_port`. The launcher calls
-  `free_port()` (a port below the kernel's ephemeral range, from this xdist worker's own slice
-  of the pool) and passes it via env; your script's `init_distributed()` reads it. A
-  CPU test that spawns ranks or starts a server takes its port from `free_port()` too. Hardcoded
-  ports race across CI shards (`Errno 98`). The pool runs from 20000 up to
-  `net.ipv4.ip_local_port_range`, so a host whose range starts less than one port per xdist
-  worker above 20000 raises `... leaves N test worker(s) no port`: move the range up to `32768 60999`
-  ([Troubleshooting](../../agent-docs/reference/troubleshooting.md) has the commands).
+- **Ports** (`tests/common/ports.py`) — the launcher calls `free_port()` (a port below the kernel's
+  ephemeral range, from this xdist worker's own slice of the pool) and passes it via env, where your
+  script's `init_distributed()` reads it; a CPU test that spawns ranks or starts a server takes its port
+  from `free_port()` too. Never hardcode one ([conventions](../../agent-docs/contributing/README.md#tests)).
 - **Hub files** (`tests/common/tokenizers.py`) — load a real tokenizer, processor, config or
   chat template through these helpers, and name its repo in `tests/common/models.py`. `make
   seed-hf-cache` fetches a seed derived from that module and the `examples/` configs, and an

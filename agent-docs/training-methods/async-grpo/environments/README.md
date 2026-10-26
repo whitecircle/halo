@@ -62,12 +62,10 @@ environment_kwargs:
 
 ## Common knobs
 
-Every environment accepts these. `max_turns` and `rewards` are top-level fields; the rest go in `environment_kwargs`.
+Every environment accepts these `environment_kwargs`, beside the top-level `max_turns` and `rewards` ([Configuration](#configuration)).
 
 | Knob | Default | Effect |
 |---|---|---|
-| `max_turns` | the class default ([Registry](#registry)) | Turns before the episode truncates; ≥ 1 |
-| `rewards` | `[{source: environment}]` | The reward terms ([Reward Terms](../../grpo/rewards/README.md)) |
 | `tool_success_reward` / `tool_error_penalty` | `0.05` / `0.1` (`mcp` pays `0.1`; code contests `0` / `0`) | Paid per successful tool call, charged per failed one, logged as `reward/turn_shaping`. A call a sandbox outage ended is unpriced ([Sandbox faults](sandbox.md#sandbox-faults)) |
 | `tool_reward_cap` | `tool_success_reward × max_turns` | Episode cap on successful-call pay, so call spam cannot out-earn the objective |
 | `max_observation_chars` | `16384` | Longer tool observations are truncated |

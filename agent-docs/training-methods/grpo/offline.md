@@ -45,20 +45,7 @@ expert_parallel_size: 8
 learning_rate: 5.0e-06
 ```
 
-| Knob | Default | Effect |
-|---|---|---|
-| `advantage_method` | `quantile_norm` | Reward → advantage per group ([Advantages](#advantages)) |
-| `best_completion_emphasis` | `0.0` | Top-reward boost ([Advantages](#advantages)) |
-| `loss_type` | `bnpo` | Loss normalization: `bnpo`, `grpo`, `dr_grpo` |
-| `policy_gradient_formulation` | `prob_weighted` | Per token `-(π·A)`; `reinforce` uses `-(log π·A)` |
-| `min_log_prob` | `-3.0` | Log-prob floor, on negative-advantage rows only |
-| `initial_min_log_prob` | `null` | Linearly schedule that floor from this start |
-| `kl_beta` | `0.0` | k3 KL coefficient (Schulman's KL estimator) ([Reference model](#reference-model)) |
-| `drop_degenerate_groups` | `false` | Drop exactly-tied and singleton groups at tokenization, train and eval splits alike |
-| `use_chunked_grpo_logprobs` | `false` | Vocab-chunked log-probs, not full logits |
-| `max_prompt_length` | `512` | Prompt budget, left-truncated; `null` = no cap |
-| `max_completion_length` | `null` | Completion budget, cut from the end; `null` = no cap |
-| `max_length` | `null` | Fixed padded row length under [pipeline parallelism](../../parallelism/pipeline-parallelism.md) (`null` = prompt + completion budgets); rejected at construction off PP |
+Per token the default `policy_gradient_formulation: prob_weighted` trains `-(π·A)`, and `reinforce` trains `-(log π·A)`. `min_log_prob` floors the log-probs of negative-advantage rows only, ramped linearly from `initial_min_log_prob` when that is set; `kl_beta` is the k3 KL coefficient (Schulman's KL estimator, [Reference model](#reference-model)). `max_length` is read only under [pipeline parallelism](../../parallelism/pipeline-parallelism.md), as the fixed padded row length. Types and defaults: [OfflineGRPOConfig](../../reference/configuration-reference.md#offlinegrpoconfig).
 
 - The shipped recipes run `learning_rate: 5.0e-06`, the top of the SFT full-FT band; a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 - Both length knobs truncate, and the tokenizer's window is pinned only when both are bounded. A completion cut at its cap gets no EOS, so it is never taught to stop there.
