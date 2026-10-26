@@ -16,13 +16,11 @@ Run with 2 GPUs:
         tests/gpu/parallelism/test_fsdp_tied_embeddings.py
 """
 
-from types import SimpleNamespace
-
 import torch
 import torch.distributed as dist
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from src.distributed.fsdp import setup_fsdp2_for_dp
+from src.distributed.fsdp import apply_fsdp2_for_dp
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.utils import log
@@ -67,7 +65,7 @@ def run(ctx):
 
     model = build_model(tie=True)
     tied_before = model.get_input_embeddings().weight is model.lm_head.weight
-    setup_fsdp2_for_dp(model, dp_size=ctx.world_size, args=SimpleNamespace(bf16=True, fp16=False))
+    apply_fsdp2_for_dp(model, dp_size=ctx.world_size, compute_dtype=torch.bfloat16, fp32_reduce=False)
     tied_after = model.get_input_embeddings().weight is model.lm_head.weight
 
     model(input_ids=ids, labels=ids).loss.backward()

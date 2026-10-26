@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Multi-Node NVLink prerequisites are judged on EVERY rank, and the verdict is enforced.
 
-``check_mnnvl_prerequisites`` fires only where the topology REQUIRES MNNVL — a declared
+``verify_mnnvl_prerequisites`` fires only where the topology REQUIRES MNNVL — a declared
 ``NVLINK_DOMAIN_SIZE`` wider than the OS node, i.e. NVL72, where "node-local" EP/TP/CP groups span
 OS nodes over NVLink. Two properties matter there:
 
@@ -22,7 +22,7 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from src.distributed.nvlink import NO_FABRIC, check_mnnvl_prerequisites, mnnvl_prerequisite_reason
+from src.distributed.nvlink import NO_FABRIC, mnnvl_prerequisite_reason, verify_mnnvl_prerequisites
 
 _MOD = "src.distributed.nvlink"
 
@@ -75,7 +75,7 @@ def _run_required(clique, imex_ok: bool, *, world: int = 16, all_reasons=None):
         patch(f"{_MOD}.imex_channels_present", return_value=imex_ok),
         patch(f"{_MOD}.nvlink_fabric_clique_id", return_value=clique),
     ):
-        check_mnnvl_prerequisites(nvlink_domain_size=72, gpus_per_node=8)
+        verify_mnnvl_prerequisites(nvlink_domain_size=72, gpus_per_node=8)
 
 
 def test_a_provisioned_job_passes():
@@ -103,9 +103,8 @@ def test_a_topology_that_does_not_need_mnnvl_is_never_enforced():
         patch(f"{_MOD}.dist.get_rank", return_value=0),
         patch(f"{_MOD}.imex_channels_present", return_value=False),
         patch(f"{_MOD}.nvlink_fabric_clique_id", return_value=NO_FABRIC),
-        patch(f"{_MOD}.detect_nvlink_fabric_present", return_value=False),
     ):
-        check_mnnvl_prerequisites(nvlink_domain_size=8, gpus_per_node=8)
+        verify_mnnvl_prerequisites(nvlink_domain_size=8, gpus_per_node=8)
 
 
 def test_outside_a_live_job_it_only_advises():
@@ -117,7 +116,7 @@ def test_outside_a_live_job_it_only_advises():
         patch(f"{_MOD}.imex_channels_present", return_value=False),
         patch(f"{_MOD}.nvlink_fabric_clique_id", return_value=None),
     ):
-        check_mnnvl_prerequisites(nvlink_domain_size=72, gpus_per_node=8)  # must not raise
+        verify_mnnvl_prerequisites(nvlink_domain_size=72, gpus_per_node=8)  # must not raise
 
 
 if __name__ == "__main__":

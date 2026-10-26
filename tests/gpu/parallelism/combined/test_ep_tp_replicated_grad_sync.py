@@ -31,6 +31,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
+from src.distributed.mesh import tp_group
 from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import supports_grouped_mm
 from src.model_loading.parallel.loader import load_distributed_model
@@ -103,14 +104,14 @@ def run(ctx):
     train_result = trainer.train()
     log(f"Final loss: {train_result.training_loss:.6f}")
 
-    tp_group = trainer.parallel_dims.tp_group()
-    assert tp_group is not None and dist.get_world_size(tp_group) == TP_SIZE, "TP group not reachable"
+    group = tp_group(trainer._device_mesh)
+    assert group is not None and dist.get_world_size(group) == TP_SIZE, "TP group not reachable"
     expert_ids = trainer._get_sharded_expert_param_ids()
 
     # 1) Replicated non-expert plain params must be bit-identical across the TP axis. A NaN diff
     # counts as drifted (NaN != 0.0).
     replicated_diffs = [
-        group_max_abs_diff(p.data, tp_group)
+        group_max_abs_diff(p.data, group)
         for p in model.parameters()
         if not isinstance(p.data, DTensor) and id(p) not in expert_ids
     ]
@@ -123,7 +124,7 @@ def run(ctx):
 
     # 2) EP-distributed experts must STILL differ across TP (not averaged/corrupted).
     expert_diffs = [
-        group_max_abs_diff(p.data, tp_group)
+        group_max_abs_diff(p.data, group)
         for p in model.parameters()
         if id(p) in expert_ids and not isinstance(p.data, DTensor)
     ]

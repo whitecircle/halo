@@ -7,7 +7,7 @@ step, when the post-backward reshard has registered the sharded params. peft cle
 ``requires_grad`` on the params registered at entry (the sharded ones) and restores it on those
 registered at exit (the unsharded copies the forward leaves behind), and FSDP2 copies the sharded
 flag onto the unsharded param at every unshard. Unless the trainer's wrapper
-(``make_disable_adapter_fsdp2_safe``) reshards before peft's exit, the sharded adapters stay frozen,
+(``install_fsdp2_safe_disable_adapter``) reshards before peft's exit, the sharded adapters stay frozen,
 and every micro-step that unshards afresh (the second of each accumulation window) trains without
 them — silently, since gradient checkpointing's input-grad hook keeps the loss attached.
 

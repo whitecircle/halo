@@ -172,7 +172,8 @@ class _SaveRoutingTrainer(_StubTrainer):
         self.parallelism_config.has_ep_group = False
         self.parallelism_config.tp_size = 1
         self.args = SimpleNamespace(output_dir=output_dir)
-        self.parallel_dims = SimpleNamespace(tp_local_rank=lambda: 0)
+        self._device_mesh = None
+        self.accelerator = SimpleNamespace(process_index=0)
 
     save_model = DistributedTrainerMixin.save_model
     _write_model_payload = DistributedTrainerMixin._write_model_payload

@@ -33,7 +33,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from transformers.distributed.tensor_parallel import gather_state_dict_for_save
 from trl import SFTConfig
 
-from src.distributed.mesh import MeshDim, mesh_dim_names, model_tp_mesh
+from src.distributed.mesh import MeshDim, mesh_dim_names, model_tp_mesh, tp_group
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.runtime.collectives import barrier
@@ -276,7 +276,7 @@ def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
     Collective on every rank — the identical fixed batch keeps the walk order and grad-presence
     pattern rank-uniform."""
     unwrapped = tp_model.module if hasattr(tp_model, "module") else tp_model
-    tp_group = trainer.parallel_dims.tp_group()
+    group = tp_group(trainer._device_mesh)
     checked, diffs = 0, []
     for _name, p in unwrapped.named_parameters():
         if p.grad is None:
@@ -285,7 +285,7 @@ def assert_tp_synced_grads_identical(trainer, tp_model) -> tuple[bool, int]:
             continue  # plan-sharded: ranks legitimately hold different slices
         grad = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
         checked += 1
-        diffs.append(group_max_abs_diff(grad, tp_group))
+        diffs.append(group_max_abs_diff(grad, group))
     max_diff = max_or_nan(diffs, default=0.0)
     log_all(f"  TP-synced grads: {checked} params checked, max cross-TP diff {max_diff:.3e}")
     return max_diff == 0.0 and checked > 0, checked

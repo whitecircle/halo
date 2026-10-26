@@ -66,39 +66,43 @@ def test_mixed_dtypes_are_reduced_in_separate_buckets(one_rank_group, tiny_bucke
 
 def test_lone_chunk_is_reduced_in_its_own_storage(one_rank_group):
     grad = torch.randn(64, 64, dtype=torch.bfloat16)
-    bucket, flat, buf, work, scatter = _launch_flat_chunk([grad], op=dist.ReduceOp.SUM, group=None, fp32=False)
-    work.wait()
-    assert flat.data_ptr() == grad.data_ptr(), "a single contiguous grad must not be copied into a flat buffer"
-    assert buf is flat and not scatter
+    pending = _launch_flat_chunk([grad], op=dist.ReduceOp.SUM, group=None, fp32=False)
+    pending.work.wait()
+    assert pending.flat.data_ptr() == grad.data_ptr(), "a single contiguous grad must not be copied into a flat buffer"
+    assert pending.buf is pending.flat and not pending.scatter
 
 
 def test_lone_chunk_fp32_upcast_writes_back_to_the_grad(one_rank_group):
     grad = torch.randn(64, 64, dtype=torch.bfloat16)
     want = (grad.float() / 3).to(torch.bfloat16)
-    bucket, flat, buf, work, scatter = _launch_flat_chunk([grad], op=dist.ReduceOp.SUM, group=None, fp32=True)
-    assert buf.dtype is torch.float32 and buf is not flat and flat.data_ptr() == grad.data_ptr()
-    grad_reduce._finish_flat_chunk(bucket, flat, buf, work, scatter, divisor=3)
+    pending = _launch_flat_chunk([grad], op=dist.ReduceOp.SUM, group=None, fp32=True)
+    assert (
+        pending.buf.dtype is torch.float32
+        and pending.buf is not pending.flat
+        and pending.flat.data_ptr() == grad.data_ptr()
+    )
+    grad_reduce._finish_flat_chunk(pending, divisor=3)
     torch.testing.assert_close(grad, want, rtol=0, atol=0)
 
 
 def test_multi_tensor_chunk_is_flattened_and_scattered_back(one_rank_group):
     grads = [torch.randn(4, 4, dtype=torch.bfloat16), torch.randn(2, 8, dtype=torch.bfloat16)]
-    bucket, flat, buf, work, scatter = _launch_flat_chunk(grads, op=dist.ReduceOp.SUM, group=None, fp32=False)
-    assert scatter and flat.numel() == 32
-    assert flat.data_ptr() not in {g.data_ptr() for g in grads}
-    flat.mul_(2)  # stands in for the peers' contributions
-    grad_reduce._finish_flat_chunk(bucket, flat, buf, work, scatter, divisor=None)
-    torch.testing.assert_close(torch.cat([g.reshape(-1) for g in grads]), flat)
+    pending = _launch_flat_chunk(grads, op=dist.ReduceOp.SUM, group=None, fp32=False)
+    assert pending.scatter and pending.flat.numel() == 32
+    assert pending.flat.data_ptr() not in {g.data_ptr() for g in grads}
+    pending.flat.mul_(2)  # stands in for the peers' contributions
+    grad_reduce._finish_flat_chunk(pending, divisor=None)
+    torch.testing.assert_close(torch.cat([g.reshape(-1) for g in grads]), pending.flat)
 
 
 def test_non_contiguous_lone_grad_still_takes_the_flat_path(one_rank_group):
     base = torch.randn(8, 8, dtype=torch.bfloat16)
     grad = base.t()  # non-contiguous view: reducing it "in place" through a flat view is impossible
-    bucket, flat, buf, work, scatter = _launch_flat_chunk([grad], op=dist.ReduceOp.SUM, group=None, fp32=False)
-    assert scatter and flat.is_contiguous() and flat.data_ptr() != base.data_ptr()
-    grad_reduce._finish_flat_chunk(bucket, flat, buf, work, scatter, divisor=2)
+    pending = _launch_flat_chunk([grad], op=dist.ReduceOp.SUM, group=None, fp32=False)
+    assert pending.scatter and pending.flat.is_contiguous() and pending.flat.data_ptr() != base.data_ptr()
+    grad_reduce._finish_flat_chunk(pending, divisor=2)
     torch.testing.assert_close(base, (base * 1).to(torch.bfloat16))  # base was written through the view
-    torch.testing.assert_close(grad, flat.view_as(grad))
+    torch.testing.assert_close(grad, pending.flat.view_as(grad))
 
 
 if __name__ == "__main__":

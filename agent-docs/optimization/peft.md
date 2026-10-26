@@ -303,7 +303,7 @@ reference pass that is the first forward after a reshard — online GRPO at `bet
 recompute (`vllm_importance_sampling_correction: false`, aligned accumulation) — enters on the sharded params
 and exits on the unsharded copies the forward leaves registered, which would freeze every sharded adapter:
 each later micro-step that unshards afresh trains without it, silently under gradient checkpointing. The
-mixin therefore also wraps the context for every PEFT model (`make_disable_adapter_fsdp2_safe`): when the
+mixin therefore also wraps the context for every PEFT model (`install_fsdp2_safe_disable_adapter`): when the
 trainable params registered at exit are not the ones registered at entry, it reshards the FSDP2 modules
 before peft's exit, so the restore lands on the sharded params, and the next forward or backward re-gathers
 them once. A pass behind the policy forward (DPO, KTO, offline GRPO) enters and exits on the same unsharded

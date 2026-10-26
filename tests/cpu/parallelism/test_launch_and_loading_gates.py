@@ -159,7 +159,7 @@ def test_loader_allows_fp32_without_expert_parallelism():
 
 
 class _FakeDeviceMesh:
-    """Stand-in for the (dp, tp) mesh, shaped like one: ``setup_fsdp2_for_tp`` reads the stamped
+    """Stand-in for the (dp, tp) mesh, shaped like one: ``apply_fsdp2_for_tp`` reads the stamped
     mesh's ``mesh_dim_names`` and indexes it, so a bare string here would be a mesh no code path
     could consume."""
 
@@ -196,8 +196,8 @@ def _load_collaborators(model):
         return model
 
     with (
-        patch.object(tp_loading, "create_dp_tp_mesh", return_value=_DP_TP_MESH),
-        patch.object(tp_loading, "get_tp_submesh", return_value="tp-mesh"),
+        patch.object(tp_loading, "build_dp_tp_mesh", return_value=_DP_TP_MESH),
+        patch.object(tp_loading, "tp_submesh", return_value="tp-mesh"),
         patch.object(tp_loading, "joined_node_load", _throttle),
         patch.object(tp_loading, "from_pretrained_verified", _load),
         patch("src.distributed.tensor_parallel.hf_plan.retarget_hf_replicated_grad_hooks", lambda _model: None),

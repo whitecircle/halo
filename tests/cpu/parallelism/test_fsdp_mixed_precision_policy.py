@@ -1,40 +1,68 @@
 #!/usr/bin/env python
-"""The FSDP2 mixed-precision policy follows the run's precision flags through one dtype resolver.
+"""The FSDP2 mixed-precision policy computes in the run's dtype and reduces in fp32 on request.
 
-``create_mixed_precision_policy_v2`` computes in the dtype ``resolve_training_dtype`` reads off the
-training args (``bf16`` wins over ``fp16``, neither means fp32) and reduces in fp32 whenever fp32
-master weights or ``fp32_grad_reduce`` ask for it. The full table is pinned here.
+``mixed_precision_policy`` computes in the dtype the trainer resolves off the training args and
+reduces in fp32 under ``fp32_reduce``; the wrap asks for that whenever ``fp32_grad_reduce`` or fp32
+master weights do. Both tables are pinned here.
 
     python tests/cpu/parallelism/test_fsdp_mixed_precision_policy.py
 """
 
-from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 import torch
+import torch.nn as nn
 
-from src.distributed.fsdp import create_mixed_precision_policy_v2
+import src.distributed.fsdp as fsdp
+from src.distributed.fsdp import mixed_precision_policy
 
 
 @pytest.mark.parametrize(
-    ("bf16", "fp16", "fp32_grad_reduce", "fp32_master_weights", "param_dtype", "reduce_dtype"),
+    ("compute_dtype", "fp32_reduce", "reduce_dtype"),
     [
-        (True, False, False, False, torch.bfloat16, torch.bfloat16),
-        (True, False, True, False, torch.bfloat16, torch.float32),
-        (True, False, False, True, torch.bfloat16, torch.float32),
-        (False, True, False, False, torch.float16, torch.float16),
-        (False, True, True, False, torch.float16, torch.float32),
-        (False, False, False, False, torch.float32, torch.float32),
-        (False, False, True, True, torch.float32, torch.float32),
+        (torch.bfloat16, False, torch.bfloat16),
+        (torch.bfloat16, True, torch.float32),
+        (torch.float16, False, torch.float16),
+        (torch.float16, True, torch.float32),
+        (torch.float32, False, torch.float32),
+        (torch.float32, True, torch.float32),
     ],
 )
-def test_policy_dtypes_follow_the_precision_flags(
-    bf16, fp16, fp32_grad_reduce, fp32_master_weights, param_dtype, reduce_dtype
-):
-    args = SimpleNamespace(bf16=bf16, fp16=fp16, fp32_grad_reduce=fp32_grad_reduce)
-    policy = create_mixed_precision_policy_v2(args, fp32_master_weights=fp32_master_weights, cast_forward_inputs=False)
-    assert (policy.param_dtype, policy.reduce_dtype) == (param_dtype, reduce_dtype)
+def test_policy_dtypes_follow_the_precision_flags(compute_dtype, fp32_reduce, reduce_dtype):
+    policy = mixed_precision_policy(compute_dtype, fp32_reduce=fp32_reduce, cast_forward_inputs=False)
+    assert (policy.param_dtype, policy.reduce_dtype) == (compute_dtype, reduce_dtype)
     assert policy.cast_forward_inputs is False
+
+
+@pytest.mark.parametrize(
+    ("fp32_reduce", "fp32_master_weights", "reduce_dtype"),
+    [
+        (False, False, torch.bfloat16),
+        (True, False, torch.float32),
+        (False, True, torch.float32),
+    ],
+)
+def test_the_wrap_reduces_in_fp32_under_either_knob(fp32_reduce, fp32_master_weights, reduce_dtype):
+    policies = []
+
+    def record(_model, _mesh, policy, *_):
+        policies.append(policy)
+        return 1
+
+    with (
+        patch.object(fsdp, "apply_fsdp2_per_layer", side_effect=record),
+        patch.object(fsdp, "is_global_main_process", return_value=False),
+    ):
+        fsdp._apply_fsdp2(
+            nn.Linear(2, 2),
+            object(),
+            compute_dtype=torch.bfloat16,
+            fp32_reduce=fp32_reduce,
+            topology="1D full-shard",
+            fp32_master_weights=fp32_master_weights,
+        )
+    assert [(p.param_dtype, p.reduce_dtype) for p in policies] == [(torch.bfloat16, reduce_dtype)]
 
 
 if __name__ == "__main__":

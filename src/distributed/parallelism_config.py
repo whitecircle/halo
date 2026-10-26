@@ -12,9 +12,9 @@ from src.distributed import group_layout
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.expert_parallel.config import EPBufferBackend, EPConfig
 from src.distributed.nvlink import (
-    check_mnnvl_prerequisites,
-    get_nvlink_domain_size,
+    requested_nvlink_domain_size,
     validate_nvlink_domain_against_fabric,
+    verify_mnnvl_prerequisites,
 )
 from src.distributed.parallelism_rules import (
     AXES,
@@ -123,7 +123,7 @@ class ParallelismConfig:
             "rank runs the Multi-Node NVLink prerequisite collective at all.",
         )
 
-        check_mnnvl_prerequisites(self.nvlink_domain_size, self.gpus_per_node)
+        verify_mnnvl_prerequisites(self.nvlink_domain_size, self.gpus_per_node)
         validate_nvlink_domain_against_fabric(self.nvlink_domain_size, self.world_size, self.gpus_per_node)
 
         if is_global_main_process():
@@ -195,7 +195,7 @@ class ParallelismConfig:
                 f"gpus_per_node), got {self.nvlink_domain_size}."
             )
         if self.nvlink_domain_size == 0:
-            self.nvlink_domain_size = get_nvlink_domain_size(self.gpus_per_node)
+            self.nvlink_domain_size = requested_nvlink_domain_size() or self.gpus_per_node
         # A rack-wide domain must never be silently shrunk onto a multi-node sub-job (may span racks).
         if self.nvlink_domain_size > self.world_size and self.world_size > self.gpus_per_node:
             raise ValueError(

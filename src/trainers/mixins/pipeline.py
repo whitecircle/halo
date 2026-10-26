@@ -298,7 +298,6 @@ class PipelineTrainerMixin:
         # one stage no EP modules). Gating this deadlocks inside new_group, before any raise prints.
         self._pp_stage_group = build_stage_group(config)
         reject_across_ranks(pp_ep_coverage_reason(config, ep_modules), "PP stage EP coverage")
-        topo = f", PP stage {config.pp_rank}/{config.pp_size}"
         if ep_modules:
             # The stage registered the EP capacity-generation hook on itself (PipelineStageModule); only
             # the FSDP2 wrap is left to do here.
@@ -307,7 +306,6 @@ class PipelineTrainerMixin:
                 exclusions=self._fsdp_exclusions(),
                 fallback_dp_size=config.stage_world_size,
                 fallback_dp_group=self._pp_stage_group,
-                topo=topo,
             )
         else:
             self._apply_dp_fsdp2(
@@ -315,8 +313,6 @@ class PipelineTrainerMixin:
                 config.stage_world_size,
                 excluded_params=self._fsdp_exclusions().params,
                 dp_group=self._pp_stage_group,
-                topo=topo,
-                detail=f"stage-scoped data parallel ({config.stage_world_size} ranks per stage)",
             )
 
         self._pp_runner = PipelineRunner(

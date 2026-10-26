@@ -61,10 +61,9 @@ class _Model(nn.Module):
 def _trainer(model: nn.Module) -> SimpleNamespace:
     trainer = SimpleNamespace(
         _top_level_model=lambda: model,
-        parallel_dims=SimpleNamespace(tp_group=lambda: "tp-group"),
         _sharded_grad_bucket=DistributedTrainerMixin._sharded_grad_bucket,
-        # A TP run: the mesh is present (its groups are the stubbed reduce below), no expert shards.
-        _device_mesh=object(),
+        # A TP run: a bare TP mesh (its group is the stubbed reduce below), no expert shards.
+        _device_mesh=SimpleNamespace(get_group=lambda: "tp-group"),
         _fsdp_wrapped=False,
         _ep_config=None,
         _get_sharded_expert_param_ids=lambda: set(),

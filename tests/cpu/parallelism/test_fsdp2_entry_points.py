@@ -2,7 +2,7 @@
 """The two FSDP2 entry points must wrap a model identically — one body, one mesh — and the EP+TP
 wrap must go through the TP one.
 
-``setup_fsdp2_for_dp`` (plain/EP/CP data parallelism) and ``setup_fsdp2_for_tp`` (the DP dimension of
+``apply_fsdp2_for_dp`` (plain/EP/CP data parallelism) and ``apply_fsdp2_for_tp`` (the DP dimension of
 a TP run) differ only in how the DP mesh is obtained. A copy of the wrap per path would let a policy
 or reshard fix land on one path and leave the other behind — silently, because both still report
 success and every failure mode of a wrong FSDP2 policy (a cast that should not happen, a reduce
@@ -28,8 +28,8 @@ import src.distributed.fsdp as fsdp
 from src.distributed.mesh import MeshDim
 from src.trainers.mixins.grad_sync import GradientSyncMixin
 
-_ARGS = SimpleNamespace(bf16=True, fp16=False, fp32_grad_reduce=False)
-_FP32_ARGS = SimpleNamespace(bf16=False, fp16=False, fp32_grad_reduce=False)
+_BF16 = {"compute_dtype": torch.bfloat16, "fp32_reduce": False}
+_FP32 = {"compute_dtype": torch.float32, "fp32_reduce": False}
 
 
 class _FakeMesh:
@@ -89,8 +89,8 @@ def _record_wrap(entry, **kwargs) -> list[tuple[str, int, torch.dtype | None, bo
     with (
         _fake_world(),
         patch.object(fsdp, "fully_shard", side_effect=fake_fully_shard),
-        patch.object(fsdp, "create_dp_mesh", return_value=_FakeMesh(4)),
-        patch.object(fsdp, "create_dp_tp_mesh", return_value=_FakeMesh(4, (MeshDim.DP, MeshDim.TP))),
+        patch.object(fsdp, "build_dp_mesh", return_value=_FakeMesh(4)),
+        patch.object(fsdp, "build_dp_tp_mesh", return_value=_FakeMesh(4, (MeshDim.DP, MeshDim.TP))),
     ):
         entry(model, **kwargs)
     return calls
@@ -106,21 +106,21 @@ def test_the_tp_entry_point_takes_its_dp_width_from_the_caller_not_the_world():
 
     # world 8, tp 2 -> the world-derived answer is 4; a cp2/pp2 composition makes the true DP 2.
     with _fake_world(world_size=8), patch.object(fsdp, "_apply_fsdp2") as applied:
-        wrapped, _ = fsdp.setup_fsdp2_for_tp(model, tp_size=2, dp_size=2, args=_ARGS)
+        wrapped, _ = fsdp.apply_fsdp2_for_tp(model, tp_size=2, dp_size=2, **_BF16)
     assert wrapped and "2×2" in applied.call_args.kwargs["topology"], (
         f"the wrap reported {applied.call_args.kwargs['topology']}, not the caller's dp_size"
     )
 
     # And dp_size==1 skips FSDP even though world // tp_size would say 4.
     with _fake_world(world_size=8), patch.object(fsdp, "_apply_fsdp2") as never:
-        assert fsdp.setup_fsdp2_for_tp(model, tp_size=2, dp_size=1, args=_ARGS) == (False, None)
+        assert fsdp.apply_fsdp2_for_tp(model, tp_size=2, dp_size=1, **_BF16) == (False, None)
     never.assert_not_called()
 
 
 def test_both_entry_points_wrap_the_same_modules_the_same_way():
     """The shared body, pinned end to end: same groups, same mesh, same policy, same reshard mode."""
-    dp_calls = _record_wrap(fsdp.setup_fsdp2_for_dp, dp_size=4, args=_ARGS)
-    tp_calls = _record_wrap(fsdp.setup_fsdp2_for_tp, tp_size=2, dp_size=4, args=_ARGS)
+    dp_calls = _record_wrap(fsdp.apply_fsdp2_for_dp, dp_size=4, **_BF16)
+    tp_calls = _record_wrap(fsdp.apply_fsdp2_for_tp, tp_size=2, dp_size=4, **_BF16)
 
     assert dp_calls, "the DP entry point wrapped nothing"
     assert dp_calls == tp_calls, f"the two entry points diverged:\n  dp={dp_calls}\n  tp={tp_calls}"
@@ -133,13 +133,15 @@ def test_both_entry_points_wrap_the_same_modules_the_same_way():
 def test_both_entry_points_carry_the_reshard_and_precision_knobs_into_the_wrap():
     """Anti-vacuity for the comparison above: the recorded fields must track the arguments."""
     for entry, axis in (
-        (fsdp.setup_fsdp2_for_dp, {"dp_size": 4}),
-        (fsdp.setup_fsdp2_for_tp, {"tp_size": 2, "dp_size": 4}),
+        (fsdp.apply_fsdp2_for_dp, {"dp_size": 4}),
+        (fsdp.apply_fsdp2_for_tp, {"tp_size": 2, "dp_size": 4}),
     ):
-        full_shard = _record_wrap(entry, args=_ARGS, reshard_after_forward=True, **axis)
+        full_shard = _record_wrap(entry, **_BF16, reshard_after_forward=True, **axis)
         assert all(reshard for *_, reshard in full_shard), f"reshard_after_forward never reached fully_shard: {axis}"
-        fp32 = _record_wrap(entry, args=_FP32_ARGS, **axis)
-        assert {dtype for _, _, dtype, _ in fp32} == {torch.float32}, f"the args never reached the policy: {axis}"
+        fp32 = _record_wrap(entry, **_FP32, **axis)
+        assert {dtype for _, _, dtype, _ in fp32} == {torch.float32}, (
+            f"the compute dtype never reached the policy: {axis}"
+        )
 
 
 def test_the_tp_entry_point_reuses_the_mesh_the_loader_attached():
@@ -150,9 +152,9 @@ def test_the_tp_entry_point_reuses_the_mesh_the_loader_attached():
     with (
         _fake_world(),
         patch.object(fsdp, "fully_shard"),
-        patch.object(fsdp, "create_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
+        patch.object(fsdp, "build_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
     ):
-        wrapped, mesh = fsdp.setup_fsdp2_for_tp(model, tp_size=2, dp_size=4, args=_ARGS)
+        wrapped, mesh = fsdp.apply_fsdp2_for_tp(model, tp_size=2, dp_size=4, **_BF16)
 
     assert wrapped and mesh is model._device_mesh
 
@@ -167,7 +169,7 @@ def test_the_tp_entry_point_refuses_a_mesh_with_no_dp_dimension():
         patch.object(fsdp, "fully_shard"),
         pytest.raises(RuntimeError, match="requires a device mesh with a 'dp' dimension"),
     ):
-        fsdp.setup_fsdp2_for_tp(model, tp_size=2, dp_size=4, args=_ARGS)
+        fsdp.apply_fsdp2_for_tp(model, tp_size=2, dp_size=4, **_BF16)
 
 
 class _Fp32ResidualLayer(nn.Linear):
@@ -181,9 +183,13 @@ class _EPTPHost(GradientSyncMixin):
 
     def __init__(self, model, excluded):
         self.model = model
-        self.args = _ARGS
+        self.args = SimpleNamespace(bf16=True)
         self.parallelism_config = SimpleNamespace(
-            tp_size=2, data_parallel_size=4, fp32_non_ep_params=False, fsdp_reshard_after_forward=False
+            tp_size=2,
+            data_parallel_size=4,
+            fp32_grad_reduce=False,
+            fp32_non_ep_params=False,
+            fsdp_reshard_after_forward=False,
         )
         self._excluded = excluded
 
@@ -211,7 +217,7 @@ def test_the_ep_tp_wrap_runs_the_shared_body_with_its_ep_modules_left_out():
     with (
         _fake_world(),
         patch.object(fsdp, "fully_shard", side_effect=fake_fully_shard),
-        patch.object(fsdp, "create_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
+        patch.object(fsdp, "build_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
     ):
         _EPTPHost(model, [expert])._setup_ep_tp_gradient_sync()
 
@@ -235,8 +241,8 @@ def test_the_ep_tp_wrap_refuses_a_model_spread_over_two_devices():
 def test_neither_entry_point_wraps_a_single_rank_dp_group():
     """One DP rank has nothing to synchronize, and both paths must skip rather than shard."""
     with _fake_world(world_size=2), patch.object(fsdp, "fully_shard", side_effect=AssertionError("wrapped")):
-        assert fsdp.setup_fsdp2_for_dp(_CausalLmLike(), dp_size=1, args=_ARGS) is False
-        assert fsdp.setup_fsdp2_for_tp(_CausalLmLike(), tp_size=2, dp_size=1, args=_ARGS) == (False, None)
+        assert fsdp.apply_fsdp2_for_dp(_CausalLmLike(), dp_size=1, **_BF16) is False
+        assert fsdp.apply_fsdp2_for_tp(_CausalLmLike(), tp_size=2, dp_size=1, **_BF16) == (False, None)
 
 
 if __name__ == "__main__":

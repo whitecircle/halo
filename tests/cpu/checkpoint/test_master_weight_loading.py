@@ -130,7 +130,7 @@ def _native_tp_rank(rank, source, strict, keep):
     with pytest.MonkeyPatch.context() as monkeypatch:
         monkeypatch.setattr(
             tp_loading,
-            "create_dp_tp_mesh",
+            "build_dp_tp_mesh",
             lambda tp_size, dp_size: init_device_mesh("cpu", (tp_size,), mesh_dim_names=("tp",)),
         )
         pc = SimpleNamespace(tp_size=2, data_parallel_size=1, fp32_non_ep_params=keep, max_concurrent_loading=None)

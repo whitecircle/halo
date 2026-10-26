@@ -189,7 +189,7 @@ torchrun --nproc_per_node=4 scripts/training/sft.py \
 2D `(dp, tp)` mesh: TP within a node, FSDP2 across replicas. DTensor gradients cannot be reduced
 with plain `dist.all_reduce` or DDP — FSDP2's `fully_shard` understands DTensor semantics. The
 loader builds the mesh and attaches it to the model; the trainer wraps over the DP dimension via
-`setup_fsdp2_for_tp` (`src/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
+`apply_fsdp2_for_tp` (`src/distributed/fsdp.py`), reusing that mesh. EP+TP takes the same entry
 point with its EP modules as `ignored_params`. Pure TP (DP=1)
 skips FSDP. Prefer `tp_size = world_size` when the model fits the TP group's memory.
 

@@ -28,13 +28,11 @@ Run:
 """
 
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
 from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.distributed.mesh import get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.plain_params import per_head_norm_param_names
 from src.model_loading.parallel.loader import load_distributed_model
@@ -74,20 +72,16 @@ class _StepSync:
     """Drives the PRODUCTION reduction (the trainer's step-time sync) against a bare model.
 
     The methods below are the real ones off ``DistributedTrainerMixin`` — a stand-in for the trainer
-    only in what it supplies them (the model and the TP group), never in what they do.
+    only in what it supplies them (the model and its TP mesh), never in what they do.
     """
 
-    def __init__(self, model, tp_group, parallelism_config):
+    def __init__(self, model, parallelism_config):
         self._model = model
-        self._tp_group = tp_group
+        self._device_mesh = model._device_mesh
         self.parallelism_config = parallelism_config
 
     def _top_level_model(self):
         return self._model
-
-    @property
-    def parallel_dims(self):
-        return SimpleNamespace(tp_group=lambda: self._tp_group)
 
     _tp_sharded_plain_param_ids = DistributedTrainerMixin._tp_sharded_plain_param_ids
     _tp_per_head_norm_param_ids = DistributedTrainerMixin._tp_per_head_norm_param_ids
@@ -168,8 +162,7 @@ def run(ctx):
     _accumulate(model, batches)
 
     # Exactly one reduction, after all micro-batches — where the trainer runs it.
-    tp_group = get_tp_submesh(model._device_mesh).get_group()
-    _StepSync(model, tp_group, pc)._sync_tp_replicated_grads(list(model.parameters()))
+    _StepSync(model, pc)._sync_tp_replicated_grads(list(model.parameters()))
 
     live = dict(model.named_parameters())
     rels = []

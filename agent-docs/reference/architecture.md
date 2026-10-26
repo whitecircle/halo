@@ -145,7 +145,7 @@ tail (`materialization.py`), meta-shell instantiation (`meta_shell.py`) — live
 
 The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`src/distributed/mesh.py`); EP and CP use
 hand-built `dist.new_group` groups whose all-to-all patterns do not map to a mesh. The trainer reads
-the mesh groups (DP, TP) through the `ParallelDims` view (`src/distributed/mesh.py`) and the expert
+the mesh groups (DP, TP) through the mesh accessors (`dp_group`, `tp_group`) and the expert
 groups (dispatch, expert-TP, expert-replica) off `EPConfig`. The bucketed
 gradient all-reduce and the grad-presence agreement every post-backward sweep shares — deferred EP
 cross-replica, TP replicated, QLoRA — live in a leaf (`src/distributed/grad_reduce.py`) that

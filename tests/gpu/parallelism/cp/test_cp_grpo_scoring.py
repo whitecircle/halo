@@ -19,7 +19,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.fsdp import reshard_fsdp2_modules, setup_fsdp2_for_dp
+from src.distributed.fsdp import apply_fsdp2_for_dp, reshard_fsdp2_modules
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
 from src.trainers.grpo.objective.offline import offline_loss
@@ -206,10 +206,11 @@ def run(ctx) -> dict:
     cp_config = CPConfig(2, stage_world_size=ctx.world_size, stage_base_rank=0, nvlink_domain_size=ctx.world_size)
     model = UlyssesModel(_model(ctx.device), cp_config)
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": True})
-    setup_fsdp2_for_dp(
+    apply_fsdp2_for_dp(
         model,
         dp_size=ctx.world_size,
-        args=SimpleNamespace(bf16=True, fp16=False, fp32_grad_reduce=True),
+        compute_dtype=torch.bfloat16,
+        fp32_reduce=True,
         reshard_after_forward=False,
     )
     checks["fsdp2_root_wrapped"] = isinstance(model, FSDPModule) and any(

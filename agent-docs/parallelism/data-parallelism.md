@@ -239,8 +239,8 @@ collectives on NVLink so only one gradient all-reduce crosses RDMA per backward 
 with [`fsdp_defer_grad_sync`](#deferred-gradient-reduce-fsdp_defer_grad_sync).
 
 Enable with `--use_hsdp`. The layout is derived from topology — no shard-size knob: shard width =
-`nvlink_domain_size`, replica count = `num_nvlink_domains`. `setup_fsdp2_for_dp()` applies FSDP2 over
-the 2D `(dp_replicate, dp_shard)` mesh built by `create_dp_mesh` (`src/distributed/mesh.py`);
+`nvlink_domain_size`, replica count = `num_nvlink_domains`. `apply_fsdp2_for_dp()` applies FSDP2 over
+the 2D `(dp_replicate, dp_shard)` mesh built by `build_dp_mesh` (`src/distributed/mesh.py`);
 grad-norm sums shard norms over the `dp_shard` sub-group only.
 
 - **Scope:** pure DP and CP only; every other mode rejects `use_hsdp` at config time
@@ -308,8 +308,9 @@ Accelerate's DDP wrapping is skipped whenever the mixin syncs gradients
 `use_grouped_gemm` does not count as custom parallelism; it only activates for MoE models during
 loading, and an MoE under `accelerate launch` is rejected at load ([Two launchers](#two-launchers)).
 
-Mixed precision is auto-detected from training args by `create_mixed_precision_policy_v2`
-(`src/distributed/fsdp.py`). With `fp32_non_ep_params: true`, non-expert params are
+The trainer resolves the compute dtype from the training args (`bf16` / `fp16`) and hands it, with
+`fp32_grad_reduce`, to the FSDP2 entry points, which build the policy (`mixed_precision_policy`,
+`src/distributed/fsdp.py`). With `fp32_non_ep_params: true`, non-expert params are
 stored fp32 while compute and the param all-gather run in bf16 and gradients reduce in fp32 — an
 alternative to `AdamWBF16` when exact fp32 updates beat stochastic rounding (12 vs 6 B/param). The
 lighter `fp32_grad_reduce` sets `reduce_dtype=fp32` **without** moving storage, keeping BF16 masters

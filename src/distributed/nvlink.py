@@ -1,8 +1,6 @@
-"""NVLink / MNNVL topology probes: the per-GPU fabric-clique read, the cross-check of a declared
-``NVLINK_DOMAIN_SIZE`` against the fabric the GPUs report, and the Multi-Node NVLink prerequisites.
-
-Nothing here builds a process group; the results are consumed by
-:class:`~src.distributed.parallelism_config.ParallelismConfig`.
+"""NVLink / MNNVL topology probes: the ``NVLINK_DOMAIN_SIZE`` reader, the per-GPU fabric-clique read,
+the cross-check of a declared domain against the fabric the GPUs report, and the Multi-Node NVLink
+prerequisites. Nothing here builds a process group; ``ParallelismConfig`` consumes the results.
 """
 
 import functools
@@ -15,54 +13,47 @@ import torch
 import torch.distributed as dist
 
 from src.env import env_int
+from src.log import warn_once
 from src.runtime.consensus import reject_across_ranks
 from src.runtime.ranks import is_global_main_process, is_multi_rank_run
 
 logger = logging.getLogger(__name__)
 
-# Bounds the nvidia-smi query so a driver fault cannot stall startup.
-_NVIDIA_SMI_TIMEOUT_S = 30
-
 # Definite "this GPU is not on an MNNVL fabric", distinct from ``None`` ("could not tell"): only the
 # definite answer lets the domain cross-check reject a too-wide domain. Never a real clique id.
 NO_FABRIC = -1
-
 # Kernel-side capability for cross-OS-node NVLink P2P, populated by the nvidia-imex service.
 _MNNVL_IMEX_DIR = "/dev/nvidia-caps-imex-channels"
 
+_warned_domain_sizes: set[int] = set()
 
-def get_nvlink_domain_size(default: int) -> int:
-    """GPUs reachable over NVLink: ``gpus_per_node`` normally, up to the whole rack on NVL72.
 
-    ``NVLINK_DOMAIN_SIZE`` env → ``default``; the caller supplies the fallback because only it knows
-    its per-node count (a hand-built ``ParallelismConfig`` sets ``gpus_per_node``, which
-    ``get_local_world_size()`` would override). No NVML auto-detection: counting the domain across
-    ranks needs a collective that would hang where NVML succeeds on only some ranks.
+def requested_nvlink_domain_size() -> int | None:
+    """The GPU count ``NVLINK_DOMAIN_SIZE`` declares (up to a whole NVL72 rack), or None when unset.
+
+    A malformed or non-positive value warns and reads as unset (0 would divide by zero in the rank
+    math). No NVML auto-detection: counting the domain across ranks needs a collective that would hang
+    where NVML succeeds on only some ranks.
     """
-    domain = env_int("NVLINK_DOMAIN_SIZE", None)  # malformed → warn + fall back, not a crash
-    if domain is not None:
-        if domain > 0:
-            return domain
-        # 0 is ParallelismConfig's "unset" sentinel: it passes the validators and then raises a bare
-        # ZeroDivisionError in the rank math; a negative one corrupts every group.
-        logger.warning(
+    domain = env_int("NVLINK_DOMAIN_SIZE", None)
+    if domain is not None and domain < 1:
+        warn_once(
+            logger,
+            _warned_domain_sizes,
+            domain,
             "NVLINK_DOMAIN_SIZE=%d is not a positive GPU count — ignoring it and falling back to the "
             "per-node NVLink domain. Set it to the real domain size (e.g. 72 on an NVL72 rack).",
             domain,
         )
-    return default
+        return None
+    return domain
 
 
 def _parse_fabric_clique(nvidia_smi_query: str) -> int | None:
-    """``CliqueId`` from an ``nvidia-smi -q`` dump: an id, :data:`NO_FABRIC`, or ``None``.
-
-    The three cases differ: :data:`NO_FABRIC` (no ``Fabric`` block, or clique 0) is the definite
-    "not on an MNNVL fabric" every plain HGX/NVL8 part reports, while ``None`` (registration not
-    ``COMPLETED``, or an unparseable id) is "could not tell" over a possibly real fabric. Only the
-    definite answer lets the cross-check judge a declared domain on non-MNNVL hardware.
-
-    Parsed within the ``Fabric`` block alone: ``State`` is a common key name elsewhere in the dump,
-    and the top-level ``GPU Fabric GUID`` line must not open the block.
+    """``CliqueId`` from an ``nvidia-smi -q`` dump: an id, :data:`NO_FABRIC` (no ``Fabric`` block, or
+    clique 0, as every plain HGX/NVL8 part reports), or ``None`` (registration not ``COMPLETED``, or an
+    unparseable id). Parsed within the ``Fabric`` block alone, which the top-level ``GPU Fabric GUID``
+    line must not open: ``State`` recurs elsewhere in the dump.
     """
     indent, state, clique = None, None, None
     for line in nvidia_smi_query.splitlines():
@@ -89,30 +80,10 @@ def _parse_fabric_clique(nvidia_smi_query: str) -> int | None:
         return None
 
 
-def nvlink_fabric_clique_id() -> int | None:
-    """This GPU's NVLink fabric-clique id, :data:`NO_FABRIC`, or ``None`` when it cannot be read.
-
-    Two GPUs share NVLink iff they report the same clique. Three-way contract in
-    :func:`_parse_fabric_clique`; ``None`` here also covers a missing or failing ``nvidia-smi``.
-
-    Read out of process rather than through NVML's Python binding: the binding's fabric getters take
-    a versioned out-param struct whose layout must match the driver's, and a mismatch segfaults
-    inside the C call, uncatchably, on every rank during ``ParallelismConfig.__post_init__``.
-    """
-    try:
-        return _fabric_clique_for_device(torch.cuda.current_device())
-    except Exception:  # advisory only, never fatal
-        return None
-
-
 @functools.cache
 def _fabric_clique_for_device(device_index: int) -> int | None:
-    """One device's fabric clique. Cached for the life of the process.
-
-    Fabric membership is fixed once the driver is up, and the ~60 ms read runs on every
-    ``ParallelismConfig`` construction through the MNNVL advisory — negligible for a training
-    process, but not for a config sweep that builds tens of thousands of them.
-    """
+    """One device's fabric clique, cached: membership is fixed once the driver is up, and the ~60 ms
+    read runs on every ``ParallelismConfig`` construction (tens of thousands in a config sweep)."""
     try:
         # By PCI bus id, not index: nvidia-smi enumerates every host GPU while the local rank indexes
         # the CUDA_VISIBLE_DEVICES-masked view, so under masking the read would hit another GPU.
@@ -122,7 +93,7 @@ def _fabric_clique_for_device(device_index: int) -> int | None:
             ["nvidia-smi", "-q", "-i", bus_id],
             capture_output=True,
             text=True,
-            timeout=_NVIDIA_SMI_TIMEOUT_S,
+            timeout=30,  # a driver fault must not stall startup
             check=True,
         )
     except Exception:  # advisory only, never fatal
@@ -130,27 +101,26 @@ def _fabric_clique_for_device(device_index: int) -> int | None:
     return _parse_fabric_clique(query.stdout)
 
 
-def detect_nvlink_fabric_present() -> bool:
-    """Best-effort, non-collective check for a multi-node NVLink (MNNVL) fabric.
+def nvlink_fabric_clique_id() -> int | None:
+    """This GPU's NVLink fabric-clique id, :data:`NO_FABRIC`, or ``None`` when it cannot be read; two
+    GPUs share NVLink iff they report the same clique.
 
-    Only a real clique id counts; neither the definite negative nor "could not tell" is evidence.
+    Read out of process: NVML's Python fabric getters take a versioned struct whose layout must match
+    the driver's, and a mismatch segfaults uncatchably on every rank.
     """
-    clique = nvlink_fabric_clique_id()
-    return clique is not None and clique != NO_FABRIC
+    try:
+        return _fabric_clique_for_device(torch.cuda.current_device())
+    except Exception:  # advisory only, never fatal
+        return None
 
 
 def node_placement_contradiction(host_ids: list[str], gpus_per_node: int) -> str | None:
     """Why the ranks are not laid out ``gpus_per_node`` per node, or ``None`` when they are.
 
-    ``host_ids[rank]`` is that rank's machine identity. Pure, so it is testable without a job, and
-    identical on every rank because the gathered list is.
-
-    Every node-local group (EP, CP, TP, ETP) is a contiguous global-rank block
-    (:mod:`~src.distributed.group_layout`), which is one machine only while rank ``r`` sits on node
-    ``r // gpus_per_node``. One torchrun per node makes that true; round-robin rank numbering
-    (``srun --distribution=cyclic`` with an exported rendezvous) does not, and then the groups
-    straddle machines while ``requires_rdma`` reports False, so DeepEP takes its intranode CUDA-IPC
-    path to peers on another host.
+    ``host_ids[rank]`` is that rank's machine identity. Every node-local group is a contiguous rank
+    block, one machine only while rank ``r`` sits on node ``r // gpus_per_node``; cyclic rank numbering
+    (``srun --distribution=cyclic``) breaks that, and DeepEP then takes its intranode CUDA-IPC path to
+    peers on another host.
     """
     if gpus_per_node <= 0 or not host_ids:
         return None
@@ -171,33 +141,61 @@ def node_placement_contradiction(host_ids: list[str], gpus_per_node: int) -> str
     )
 
 
+def fabric_domain_contradiction(
+    cliques: list[int], node_widths: list[int], nvlink_domain_size: int, world_size: int
+) -> str | None:
+    """Why the declared domain contradicts the gathered per-rank cliques and node widths, or ``None``.
+    The width verdict comes first: fabric-less ranks share one sentinel, so a domain across two of
+    them passes the straddle check."""
+    # Domain-major contiguous blocks — the same layout the node-local EP/CP groups are cut from.
+    fabricless: dict[int, int] = {}
+    for domain, start in enumerate(range(0, world_size, nvlink_domain_size)):
+        block = slice(start, start + nvlink_domain_size)
+        if all(clique == NO_FABRIC for clique in cliques[block]):
+            width = min(node_widths[block])
+            if 0 < width < nvlink_domain_size:
+                fabricless[domain] = width
+    if fabricless:
+        return (
+            f"NVLINK_DOMAIN_SIZE={nvlink_domain_size} exceeds the GPUs per node of domain(s) "
+            f"{sorted(fabricless)}, where every rank reports NO NVLink fabric — there is no multi-node "
+            f"NVLink for them to span, so a domain wider than one node cannot exist there. Their "
+            f"'node-local' EP/TP/CP groups would straddle nodes over the network while requires_rdma "
+            f"reports False. Unset NVLINK_DOMAIN_SIZE (per-node NVLink), or set it to at most "
+            f"{min(fabricless.values())}."
+        )
+    straddling = [
+        domain
+        for domain in range(world_size // nvlink_domain_size)
+        if len(set(cliques[domain * nvlink_domain_size : (domain + 1) * nvlink_domain_size])) > 1
+    ]
+    if not straddling:
+        return None
+    ranks_per_clique = {clique: cliques.count(clique) for clique in sorted(set(cliques))}
+    return (
+        f"NVLINK_DOMAIN_SIZE={nvlink_domain_size} does not match the NVLink fabric: domain(s) "
+        f"{straddling} span more than one fabric clique, so their 'node-local' EP/TP/CP groups "
+        f"would be part NVLink and part RDMA while requires_rdma still reports False. Set "
+        f"NVLINK_DOMAIN_SIZE to a value that divides the real clique size "
+        f"(this job's ranks per clique: {ranks_per_clique})."
+    )
+
+
 def validate_nvlink_domain_against_fabric(nvlink_domain_size: int, world_size: int, gpus_per_node: int = 0) -> None:
-    """Check the declared NVLink domain against the fabric the GPUs actually report.
+    """COLLECTIVE: check the declared NVLink domain against the fabric the GPUs report.
 
-    ``nvlink_domain_size`` is otherwise an unchecked assertion about the hardware: a domain
-    straddling two racks makes every "node-local" group half RDMA while ``requires_rdma`` reports
-    False, and one left at ``gpus_per_node`` on an NVL72 rack caps expert sharding at 4-8 GPUs.
-
-    Collective and rank-uniform by construction: every rank contributes its clique id and decides
-    from the same gathered list, so this cannot raise on a subset of ranks. A ``None`` anywhere
-    no-ops the fabric legs, since a partial view is not evidence; :data:`NO_FABRIC` is evidence, and
-    ``gpus_per_node`` then rejects a domain wider than the node its ranks sit on (omit it to skip
-    that leg). Fabric verdicts are taken per domain, as one job may hold an NVLink island and
-    fabric-less nodes at once.
-
-    The machine identity rides along in the same gather and carries its own verdict
-    (:func:`node_placement_contradiction`), taken first because the fabric legs and the rank layout
-    rest on it and it needs no clique read.
+    The domain is otherwise an unchecked assertion: one straddling two racks makes every "node-local"
+    group half RDMA while ``requires_rdma`` reports False, and one left at ``gpus_per_node`` on NVL72
+    caps expert sharding. Every rank gathers (clique, node width, machine) and decides from the same
+    list, so it never raises on a subset of ranks; a ``None`` clique anywhere no-ops the fabric legs.
+    ``gpus_per_node=0`` skips the fabric-less width leg.
     """
     if not (dist.is_available() and dist.is_initialized()):
         return
-    # Size the buffer from the live group, not the declared world: all_gather_object fills exactly
-    # get_world_size() slots, so an oversized list keeps pre-fill Nones the straddle math misreads.
+    # all_gather_object fills exactly get_world_size() slots; an oversized list would keep pre-fill Nones.
     group_world = dist.get_world_size()
     if group_world <= 1 or group_world != world_size:
         return
-    # The node width and the machine identity ride along with the clique id: both are per-node, so
-    # the verdicts below have to be taken over the gathered values, not this rank's own.
     slots: list[tuple[int | None, int, str] | None] = [None] * group_world
     dist.all_gather_object(slots, (nvlink_fabric_clique_id(), gpus_per_node, socket.gethostname()))
     gathered = [entry for entry in slots if entry is not None]
@@ -212,48 +210,16 @@ def validate_nvlink_domain_against_fabric(nvlink_domain_size: int, world_size: i
     if any(clique is None for clique in cliques):
         return  # unreadable somewhere — a partial view is not evidence
 
-    # Fabric-less ranks share one sentinel, so a domain laid across two of them shows one clique to
-    # the straddle check below and passes it; the gathered node widths are the only evidence that
-    # such a domain cannot exist.
     node_widths = [entry[1] for entry in gathered]
-    # Domain-major contiguous blocks — the same layout the node-local EP/CP groups are cut from.
-    fabricless: dict[int, int] = {}
-    for domain, start in enumerate(range(0, world_size, nvlink_domain_size)):
-        block = slice(start, start + nvlink_domain_size)
-        if all(clique == NO_FABRIC for clique in cliques[block]):
-            width = min(node_widths[block])
-            if 0 < width < nvlink_domain_size:
-                fabricless[domain] = width
-    if fabricless:
-        narrowest = min(fabricless.values())
-        raise ValueError(
-            f"NVLINK_DOMAIN_SIZE={nvlink_domain_size} exceeds the GPUs per node of domain(s) "
-            f"{sorted(fabricless)}, where every rank reports NO NVLink fabric — there is no multi-node "
-            f"NVLink for them to span, so a domain wider than one node cannot exist there. Their "
-            f"'node-local' EP/TP/CP groups would straddle nodes over the network while requires_rdma "
-            f"reports False. Unset NVLINK_DOMAIN_SIZE (per-node NVLink), or set it to at most "
-            f"{narrowest}."
-        )
+    reason = fabric_domain_contradiction(cliques, node_widths, nvlink_domain_size, world_size)
+    if reason:
+        raise ValueError(reason)
     if all(clique == NO_FABRIC for clique in cliques):
         return  # no fabric anywhere, every domain within a node — nothing left to cross-check
 
-    straddling = [
-        domain
-        for domain in range(world_size // nvlink_domain_size)
-        if len(set(cliques[domain * nvlink_domain_size : (domain + 1) * nvlink_domain_size])) > 1
-    ]
-    ranks_per_clique = {clique: cliques.count(clique) for clique in sorted(set(cliques))}
-    if straddling:
-        raise ValueError(
-            f"NVLINK_DOMAIN_SIZE={nvlink_domain_size} does not match the NVLink fabric: domain(s) "
-            f"{straddling} span more than one fabric clique, so their 'node-local' EP/TP/CP groups "
-            f"would be part NVLink and part RDMA while requires_rdma still reports False. Set "
-            f"NVLINK_DOMAIN_SIZE to a value that divides the real clique size "
-            f"(this job's ranks per clique: {ranks_per_clique})."
-        )
     # NO_FABRIC is one sentinel shared by every fabric-less node, not an island of that many ranks,
     # so such nodes cap the advice at their own width instead of widening it past what they can span.
-    local_widths = [count for clique, count in ranks_per_clique.items() if clique != NO_FABRIC]
+    local_widths = [cliques.count(clique) for clique in set(cliques) - {NO_FABRIC}]
     fabricless_width = min(
         (width for clique, width in zip(cliques, node_widths, strict=True) if clique == NO_FABRIC), default=0
     )
@@ -273,11 +239,8 @@ def validate_nvlink_domain_against_fabric(nvlink_domain_size: int, world_size: i
 
 
 def imex_channels_present() -> bool:
-    """Whether this node exposes IMEX channels — the kernel side of cross-OS-node NVLink P2P.
-
-    A filesystem check needing no NVIDIA tooling; an unlistable caps dir returns False rather than
-    raising, since this runs inside a rank-uniform gate that must reach its collective.
-    """
+    """Whether this node exposes IMEX channels, the kernel side of cross-OS-node NVLink P2P. Never
+    raises: it runs inside a rank-uniform gate that must reach its collective."""
     try:
         return bool(os.listdir(_MNNVL_IMEX_DIR))
     except OSError:
@@ -285,12 +248,9 @@ def imex_channels_present() -> bool:
 
 
 def mnnvl_prerequisite_reason(imex_ok: bool, fabric_clique: int | None) -> str | None:
-    """Why this rank cannot take part in Multi-Node NVLink, or ``None`` when it can.
-
-    Pure verdict for one rank, called only where the topology requires MNNVL. There a ``None``
-    clique is not the benign "could not tell" it is elsewhere: an incomplete Fabric Manager
-    registration reports it, which is the failure this check exists to catch.
-    """
+    """Why this rank cannot take part in Multi-Node NVLink, or ``None`` when it can. Called only where
+    the topology requires MNNVL, where a ``None`` clique is an incomplete Fabric Manager registration,
+    not the benign "could not tell"."""
     if not imex_ok:
         return (
             f"no IMEX channels at {_MNNVL_IMEX_DIR}. Cross-OS-node NVLink P2P needs NVIDIA Fabric "
@@ -308,24 +268,18 @@ def mnnvl_prerequisite_reason(imex_ok: bool, fabric_clique: int | None) -> str |
     return None
 
 
-def check_mnnvl_prerequisites(nvlink_domain_size: int, gpus_per_node: int) -> None:
-    """Check Multi-Node NVLink prerequisites on every rank. Collective when MNNVL is required.
+def verify_mnnvl_prerequisites(nvlink_domain_size: int, gpus_per_node: int) -> None:
+    """COLLECTIVE when MNNVL is required: verify the Multi-Node NVLink prerequisites on every rank.
 
-    Required means ``nvlink_domain_size > gpus_per_node`` (NVL72). Every rank judges its own node
-    and the verdicts are joined, so one node missing IMEX channels or still registering with Fabric
-    Manager fails by name instead of as a peer-memory fault mid-dispatch; a rank-0-only check would
-    miss the failing node.
-
-    Below that threshold, and outside a live multi-rank job, this only advises: a fabric present
-    while ``NVLINK_DOMAIN_SIZE`` is unset caps node-local TP/CP/EP at one node for no reason.
+    Required means ``nvlink_domain_size > gpus_per_node`` (NVL72). The per-rank verdicts are joined,
+    so one node missing IMEX channels or still registering fails by name instead of as a peer-memory
+    fault mid-dispatch. Below that threshold, and outside a live multi-rank job, this only advises.
     """
     if nvlink_domain_size <= gpus_per_node:
         if not is_global_main_process():
             return
-        # Gate on the resolved value: a malformed NVLINK_DOMAIN_SIZE falls back to the per-node
-        # domain, exactly when the advisory is needed.
-        requested = env_int("NVLINK_DOMAIN_SIZE", None)
-        if (requested is None or requested < 1) and detect_nvlink_fabric_present():
+        # Only a real clique id is evidence of a fabric; neither NO_FABRIC nor "could not tell" is.
+        if requested_nvlink_domain_size() is None and nvlink_fabric_clique_id() not in (None, NO_FABRIC):
             logger.warning(
                 "An NVLink fabric (NVL72/MNNVL?) appears present but NVLINK_DOMAIN_SIZE is "
                 "unset, so node-local TP/CP/EP are capped at gpus_per_node=%d. Set "

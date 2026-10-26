@@ -39,7 +39,7 @@ from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
-from src.distributed.mesh import create_dp_tp_mesh
+from src.distributed.mesh import build_dp_tp_mesh
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
 from src.model_loading.parallel.cp import load_ep_cp_model
@@ -612,8 +612,8 @@ def _patch_cpu_tp_loading(monkeypatch):
     _patch_cpu_loading(monkeypatch)
     monkeypatch.setattr(
         tp_loading,
-        "create_dp_tp_mesh",
-        lambda tp_size, dp_size: create_dp_tp_mesh(tp_size, dp_size, device_type="cpu"),
+        "build_dp_tp_mesh",
+        lambda tp_size, dp_size: build_dp_tp_mesh(tp_size, dp_size, device_type="cpu"),
     )
 
 

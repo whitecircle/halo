@@ -207,7 +207,7 @@ def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
         )
 
     if pc.stage_world_size == 1:
-        # setup_fsdp2_for_dp skips wrapping at dp<=1, so the runtime FSDP contract assert would
+        # apply_fsdp2_for_dp skips wrapping at dp<=1, so the runtime FSDP contract assert would
         # blame a wrap bug that doesn't exist. Reject honestly instead.
         raise ValueError(
             f"pipeline_parallel_size={pc.pp_size} leaves each pipeline stage with a single "
@@ -234,7 +234,7 @@ def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
             f"stage_world_size={pc.stage_world_size}, {pc.num_nvlink_domains} NVLink domain(s) "
             f"per stage). HSDP's 2-D (dp_replicate, dp_shard) mesh is built by init_device_mesh "
             f"over the whole world, and cannot be restricted to a stage's rank block "
-            f"(create_dp_mesh takes a process group on the 1-D path only) — a stage-sized 2-D mesh "
+            f"(build_dp_mesh takes a process group on the 1-D path only) — a stage-sized 2-D mesh "
             f"would silently be made of the FIRST stage's ranks on every rank. Enabling it needs "
             f"the pipeline as an outer mesh dimension: init_device_mesh((pp, dp_replicate, "
             f"dp_shard))[dp_replicate, dp_shard]. At one domain per stage HSDP is a no-op anyway "

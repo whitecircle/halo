@@ -393,7 +393,9 @@ export NVLINK_DOMAIN_SIZE=72
 
 The toolkit then builds node-local EP/CP groups as contiguous blocks across the domain and sets
 `requires_rdma=False` for EP within the domain. Leaving it unset caps node-local TP/CP/EP at
-`gpus_per_node=4`, and warns if it detects an NVLink fabric anyway.
+`gpus_per_node=4`, and warns if it detects an NVLink fabric anyway. `requested_nvlink_domain_size`
+(`src/distributed/nvlink.py`) is the variable's one reader: a malformed value warns, a non-positive
+one warns once, and either reads as unset.
 
 **The domain is the tiling unit, so every node-local width must divide it.** `tp_size`, `cp_size`,
 `expert_tp_size` and a node-scope `ep_group_size` are each required to divide `nvlink_domain_size`
@@ -441,7 +443,7 @@ GPU's clique.
 | NVSHMEM (`nvidia-nvshmem-cu13`) | DeepEP device linking only — not the V2 transport |
 
 The first two are **enforced, not advisory**. Whenever `nvlink_domain_size > gpus_per_node`, every
-rank of a live multi-rank job runs `check_mnnvl_prerequisites`, and the job raises (`ValueError`,
+rank of a live multi-rank job runs `verify_mnnvl_prerequisites`, and the job raises (`ValueError`,
 naming the first failing rank) if any rank has no IMEX channels, reports an NVLink fabric
 registration other than `COMPLETED` (`nvidia-smi` "Fabric State"), or sees no fabric clique at all.
 

@@ -29,8 +29,8 @@ from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
-from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
+from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
+from src.distributed.mesh import build_dp_tp_mesh, tp_submesh
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from src.kernels.lowp.spec import LowpSpec
@@ -277,11 +277,11 @@ def captured_records() -> Iterator[list[list[str]]]:
 
 def _apply_tensor_parallelism(model: torch.nn.Module, family: str, parallelism) -> None:
     """The TP sharding the loaders apply: attention-only on a MoE family, transformers' own plan on a dense one."""
-    mesh = create_dp_tp_mesh(parallelism.tp_size, parallelism.data_parallel_size, device_type="cpu")
+    mesh = build_dp_tp_mesh(parallelism.tp_size, parallelism.data_parallel_size, device_type="cpu")
     if family in MOE_FAMILIES:
         apply_tp_to_attention_only(model, mesh)
     else:
-        apply_tensor_parallelism(model, get_tp_submesh(mesh))
+        apply_tensor_parallelism(model, tp_submesh(mesh))
 
 
 def _model(case: EfficiencyCase, scenario: Scenario, parallelism) -> torch.nn.Module:
@@ -313,7 +313,9 @@ def _model(case: EfficiencyCase, scenario: Scenario, parallelism) -> torch.nn.Mo
             if parallelism.experts_fsdp_managed
             else [p for _, layer in named_ep_layers(model) for p in layer.parameters()]
         )
-        policy = create_mixed_precision_policy_v2(SimpleNamespace(bf16=scenario.bf16))
+        policy = mixed_precision_policy(
+            torch.bfloat16 if scenario.bf16 else torch.float32, fp32_reduce=False, cast_forward_inputs=True
+        )
         apply_fsdp2_per_layer(
             model, init_device_mesh("cpu", (parallelism.world_size,)), policy, False, IdentityParamSet(ignored)
         )

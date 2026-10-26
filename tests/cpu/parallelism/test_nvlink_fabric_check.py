@@ -183,7 +183,7 @@ def test_a_per_node_domain_drift_is_rejected_before_this_collective():
         patch(f"{_CONFIG_MOD}.get_local_world_size", return_value=8),
         patch(f"{_CONFIG_MOD}.get_global_rank", return_value=0),
         patch(f"{_CONFIG_MOD}.is_global_main_process", return_value=False),
-        patch(f"{_CONFIG_MOD}.check_mnnvl_prerequisites", side_effect=lambda *a: order.append("mnnvl")),
+        patch(f"{_CONFIG_MOD}.verify_mnnvl_prerequisites", side_effect=lambda *a: order.append("mnnvl")),
         patch(f"{_CONFIG_MOD}.validate_nvlink_domain_against_fabric", side_effect=lambda *a: order.append("fabric")),
         patch(f"{_CONFIG_MOD}.reject_divergent_settings") as divergent,
     ):

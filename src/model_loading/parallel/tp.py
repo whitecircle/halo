@@ -8,7 +8,7 @@ from transformers import DistributedConfig, PreTrainedModel
 
 from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
+from src.distributed.mesh import build_dp_tp_mesh, tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, finish_hf_tp_load
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
@@ -35,8 +35,8 @@ def load_tp_model(
 ) -> PreTrainedModel:
     """COLLECTIVE: load a dense model with HF-native ``tp_plan`` weight sharding over a (DP, TP) mesh."""
     tp_size, dp_size = pc.tp_size, pc.data_parallel_size
-    device_mesh = create_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
-    tp_mesh = get_tp_submesh(device_mesh)
+    device_mesh = build_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
+    tp_mesh = tp_submesh(device_mesh)
     logger.info(f"Created device mesh ({'DP x TP' if dp_size > 1 else 'TP only'}): {device_mesh}")
 
     # Not node-throttled: the load ends in ``tie_weights``, whose equality check on a tied pair of
@@ -75,7 +75,7 @@ def load_tp_model(
 
 def _apply_attention_only_tp(model: PreTrainedModel, rank: int, tp_size: int, dp_size: int) -> None:
     """Shard attention via DTensor TP, leaving the MoE experts alone, and stamp the mesh onto the model."""
-    device_mesh = create_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
+    device_mesh = build_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
     num_tp_modules = apply_tp_to_attention_only(model, device_mesh)
     logger.info(f"[Rank {rank}] TP applied to {num_tp_modules} attention modules")
     model._device_mesh = device_mesh

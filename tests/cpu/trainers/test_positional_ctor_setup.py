@@ -3,10 +3,10 @@
 CP save finds the Ulysses wrapper beneath ``torch.compile``.
 
 ``_init_distributed_config`` runs before ``super().__init__`` and reads both arguments: the config to
-surface ``fp32_grad_reduce``, resolve AdamWBF16, filter Liger and force ``save_on_each_node``, and the
-model's config to force reentrant checkpointing on a MoE. Arguments passed positionally never reach
-``kwargs``, so each ``(*args, **kwargs)`` trainer hands its positionals over and the mixin reads them
-off the slot table of the TRL base they are forwarded to. The construction is cut short right after
+resolve AdamWBF16, filter Liger and force ``save_on_each_node``, and the model's config to force
+reentrant checkpointing on a MoE. Arguments passed positionally never reach ``kwargs``, so each
+``(*args, **kwargs)`` trainer hands its positionals over and the mixin reads them off the slot table
+of the TRL base they are forwarded to. The construction is cut short right after
 that setup (TRL's own ctor needs a live model and, for GRPO, a server).
 
     python tests/cpu/trainers/test_positional_ctor_setup.py
@@ -98,10 +98,9 @@ def _construct(trainer_cls, *args, **kwargs):
 
 
 def _assert_setup_applied(training_args):
-    assert hasattr(training_args, "fp32_grad_reduce"), "the config never reached the mixin's setup"
     assert training_args.gradient_checkpointing_kwargs == {"use_reentrant": True}, (
-        "the model's config never reached the reentrant-checkpointing rule, so a MoE would recompute "
-        "its router non-reentrantly"
+        "the config or the model never reached the reentrant-checkpointing rule, so a MoE would "
+        "recompute its router non-reentrantly"
     )
 
 

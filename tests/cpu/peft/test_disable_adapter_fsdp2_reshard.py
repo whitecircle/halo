@@ -4,7 +4,7 @@
 peft clears ``requires_grad`` on the adapter params registered at entry and restores it on those
 registered at exit, while FSDP2 swaps the registered params between the sharded DTensors and their
 unsharded copies. A single-rank gloo mesh makes those swaps for real on CPU. The trainer's wrapper
-(``make_disable_adapter_fsdp2_safe``) meets two orders:
+(``install_fsdp2_safe_disable_adapter``) meets two orders:
 
 - a reference pass that is the first forward after a reshard (online GRPO / SDPG at ``beta > 0``)
   enters on the sharded params and exits on the unsharded ones. The wrapper reshards before peft's
@@ -29,7 +29,7 @@ from trl import ModelConfig
 from src.distributed.fsdp import (
     IdentityParamSet,
     apply_fsdp2_per_layer,
-    make_disable_adapter_fsdp2_safe,
+    install_fsdp2_safe_disable_adapter,
     reshard_fsdp2_modules,
 )
 from src.model_loading.parallel.peft_setup import build_peft_config
@@ -68,7 +68,7 @@ def sharded_lora(tmp_path, reshard_after_forward, modules_to_save):
         apply_fsdp2_per_layer(
             model, init_device_mesh("cpu", (1,)), MixedPrecisionPolicy(), reshard_after_forward, IdentityParamSet()
         )
-        make_disable_adapter_fsdp2_safe(model, model)
+        install_fsdp2_safe_disable_adapter(model, model)
         trained = {name for name, param in model.named_parameters() if param.requires_grad}
         yield model, trained
     finally:

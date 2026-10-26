@@ -58,8 +58,8 @@ Two ways to group ranks, used where each fits:
 
     The meshes are built in one place, `src/distributed/mesh.py`: a 1D `(dp,)` mesh, a 2D HSDP
     `(dp_replicate, dp_shard)` mesh (replicate across NVLink domains, shard within one), and the
-    `(tp,)` / `(dp, tp)` tensor mesh. The trainer reads the resulting groups through one
-    `ParallelDims` view.
+    `(tp,)` / `(dp, tp)` tensor mesh. The trainer reads the resulting groups through its accessors
+    (`tp_group`, `tp_local_rank`, `dp_group`).
 
 - **Hand-built process groups** (`dist.new_group`) for EP and CP, whose communication DTensor cannot
   express: EP routing is *data-dependent* (the router picks each token's experts at runtime), and

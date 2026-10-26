@@ -28,7 +28,7 @@ from transformers import AutoModelForImageTextToText
 
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.mesh import create_dp_tp_mesh
+from src.distributed.mesh import build_dp_tp_mesh
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from tests.common.distributed import ensure_model_downloaded, world_mean, world_spread
 from tests.common.harness import gpu_test_main
@@ -277,7 +277,7 @@ def test_tp_patching(inputs: dict[str, torch.Tensor], local_rank: int, baseline_
     )
 
     log(f"\n  Creating TP mesh (tp_size={TP_SIZE})...")
-    tp_mesh = create_dp_tp_mesh(tp_size=TP_SIZE)
+    tp_mesh = build_dp_tp_mesh(tp_size=TP_SIZE)
     log(f"    mesh={tp_mesh}")
 
     log("\n  Applying TP to attention layers...")

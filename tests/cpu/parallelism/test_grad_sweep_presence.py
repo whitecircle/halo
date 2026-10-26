@@ -70,7 +70,7 @@ def _tp(model: _Model, tp_group=None) -> None:
     host = SimpleNamespace(
         state=SimpleNamespace(global_step=0),
         parallelism_config=SimpleNamespace(fp32_grad_reduce=False),
-        parallel_dims=SimpleNamespace(tp_group=lambda: dist.group.WORLD if tp_group is None else tp_group),
+        _device_mesh=SimpleNamespace(get_group=lambda: dist.group.WORLD if tp_group is None else tp_group),
         _tp_sharded_plain_param_ids=lambda: set(),
         _tp_per_head_norm_param_ids=lambda: set(),
     )

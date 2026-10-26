@@ -1,4 +1,4 @@
-"""Torch ``DeviceMesh`` construction and a typed view over one (torch-native DP / HSDP / TP only).
+"""Torch ``DeviceMesh`` construction and the TP/DP group accessors over one (DP / HSDP / TP only).
 
 EP/CP use hand-built process groups (``group_layout.py``): their rank orderings do not map to a
 row-major DeviceMesh, and their groups live on ``EPConfig``.
@@ -20,66 +20,57 @@ class MeshDim:
     TP = "tp"
 
 
-def create_dp_mesh(
+def _require_whole_world(dp_size: int, mesh_kind: str, remedy: str) -> None:
+    """Raise unless ``dp_size`` is the world: ``init_device_mesh`` numbers a mesh ``0..dp_size-1``
+    unchecked, so the ranks left out raise a bare ``IndexError`` while the rest block on collectives."""
+    world_size = dist.get_world_size() if dist.is_initialized() else dp_size
+    if dp_size != world_size:
+        raise ValueError(
+            f"build_dp_mesh: a {mesh_kind} must span the whole world; got dp_size={dp_size} with "
+            f"world_size={world_size}. {remedy}"
+        )
+
+
+def build_dp_mesh(
     dp_size: int,
     dp_replicate_size: int = 1,
-    dp_group=None,
+    dp_group: dist.ProcessGroup | None = None,
     device_type: str = "cuda",
 ) -> DeviceMesh:
-    """Build the data-parallel mesh for FSDP2 ``fully_shard``.
-
-    - ``dp_replicate_size > 1`` → 2D HSDP mesh ``(dp_replicate, dp_shard)`` with
-      ``dp_shard = dp_size // dp_replicate_size``: shard within each NVLink domain,
-      replicate across domains.
-    - ``dp_group`` given (1D only) → wrap that process group as a ``(dp,)`` mesh.
-    - otherwise → 1D ``(dp,)`` full-shard mesh.
-    """
+    """The FSDP2 data-parallel mesh: 2D HSDP ``(dp_replicate, dp_shard)`` when
+    ``dp_replicate_size > 1``, else 1D ``(dp,)`` over ``dp_group`` (a sub-world scope) or the world."""
     if dp_replicate_size > 1:
         if dp_group is not None:
-            raise ValueError("create_dp_mesh: dp_group is 1D-only and cannot be combined with dp_replicate_size > 1.")
+            raise ValueError("build_dp_mesh: dp_group is 1D-only and cannot be combined with dp_replicate_size > 1.")
         if dp_size % dp_replicate_size != 0:
             raise ValueError(f"HSDP dp_replicate_size ({dp_replicate_size}) must divide the DP world ({dp_size}).")
-        # init_device_mesh numbers the mesh 0..dp_size-1 without checking it against the world, so a
-        # dp_size below the world gives every rank a mesh of ranks 0..dp_size-1 and the rest shard over
-        # a mesh they are not in. A sub-world DP scope (a pipeline stage) needs an outer pipeline mesh
-        # dimension instead: init_device_mesh((pp, dp_replicate, dp_shard))[dp_replicate, dp_shard].
-        world_size = dist.get_world_size() if dist.is_initialized() else dp_size
-        if dp_size != world_size:
-            raise ValueError(
-                f"create_dp_mesh: a 2-D HSDP mesh must span the whole world; got dp_size={dp_size} "
-                f"with world_size={world_size}. A sub-world DP scope (a pipeline stage) needs the "
-                f"stage dimension in the mesh itself, not a smaller 2-D mesh."
-            )
-        dp_shard_size = dp_size // dp_replicate_size
+        # A sub-world DP scope needs the pipeline as an outer mesh dimension instead:
+        # init_device_mesh((pp, dp_replicate, dp_shard))[dp_replicate, dp_shard].
+        _require_whole_world(
+            dp_size,
+            "2-D HSDP mesh",
+            "A sub-world DP scope (a pipeline stage) needs the stage dimension in the mesh itself, not a "
+            "smaller 2-D mesh.",
+        )
         return init_device_mesh(
             device_type,
-            (dp_replicate_size, dp_shard_size),
+            (dp_replicate_size, dp_size // dp_replicate_size),
             mesh_dim_names=(MeshDim.DP_REPLICATE, MeshDim.DP_SHARD),
         )
     if dp_group is not None:
         return DeviceMesh.from_group(dp_group, device_type, mesh_dim_names=(MeshDim.DP,))
-    # Same sub-world hazard as the 2-D branch: init_device_mesh numbers a 1-D mesh 0..dp_size-1, so a
-    # dp_size below the world builds a mesh of ranks 0..dp_size-1. torch does not reject it up front —
-    # the excluded ranks raise a bare "IndexError: list index out of range" while the ranks inside
-    # proceed and then block on collectives their peers never reach.
-    world_size = dist.get_world_size() if dist.is_initialized() else dp_size
-    if dp_size != world_size:
-        raise ValueError(
-            f"create_dp_mesh: a 1-D DP mesh must span the whole world; got dp_size={dp_size} with "
-            f"world_size={world_size}. Pass the sub-world's process group as dp_group (a pipeline "
-            f"stage's DP scope) so the mesh is built from ITS ranks, not ranks 0..{dp_size - 1}."
-        )
+    _require_whole_world(
+        dp_size,
+        "1-D DP mesh",
+        f"Pass the sub-world's process group as dp_group (a pipeline stage's DP scope) so the mesh is "
+        f"built from ITS ranks, not ranks 0..{dp_size - 1}.",
+    )
     return init_device_mesh(device_type, (dp_size,), mesh_dim_names=(MeshDim.DP,))
 
 
-def create_dp_tp_mesh(tp_size: int, dp_size: int = 1, device_type: str = "cuda") -> DeviceMesh:
-    """Build the TP mesh, adding a data-parallel dim when ``dp_size > 1``.
-
-    ``dp_size == 1`` → 1D ``(tp,)``; else 2D ``(dp, tp)`` row-major (EP groups align with TP rows).
-    Example ``TP=4`` on 8 GPUs (``dp_size=2``)::
-
-        2D mesh: [[0, 1, 2, 3], [4, 5, 6, 7]]
-        DP pairs:  (0, 4), (1, 5), (2, 6), (3, 7)
+def build_dp_tp_mesh(tp_size: int, dp_size: int = 1, device_type: str = "cuda") -> DeviceMesh:
+    """The TP mesh: 1D ``(tp,)`` at ``dp_size == 1``, else 2D ``(dp, tp)`` row-major, so EP groups
+    align with TP rows (TP=4 on 8 GPUs: rows ``[0..3]``, ``[4..7]``; DP pairs ``(0, 4)`` … ``(3, 7)``).
     """
     if dp_size == 1:
         return init_device_mesh(device_type, (tp_size,), mesh_dim_names=(MeshDim.TP,))
@@ -92,67 +83,47 @@ def mesh_dim_names(device_mesh: DeviceMesh | None) -> tuple[str, ...]:
 
 
 def has_tp_dim(device_mesh: DeviceMesh | None) -> bool:
-    """Whether ``device_mesh`` carries a named ``tp`` dim.
-
-    Every TP-mesh consumer branches on this, so a DP-only ``(dp,)`` / HSDP mesh cannot have its DP
-    group relabelled as TP. An unnamed mesh returns False; callers that accept a bare TP mesh treat
-    it as one themselves.
-    """
+    """Whether ``device_mesh`` carries a named ``tp`` dim, so a DP-only ``(dp,)`` / HSDP mesh never
+    has its DP group read as TP. An unnamed mesh returns False; callers that accept a bare TP mesh
+    treat it as one themselves."""
     return MeshDim.TP in mesh_dim_names(device_mesh)
 
 
-def get_tp_submesh(device_mesh: DeviceMesh) -> DeviceMesh:
-    """Return the TP sub-mesh of a 1D ``(tp,)`` or 2D ``(dp, tp)`` mesh.
-
-    A mesh with no named dims is treated as a bare TP mesh; one whose names omit ``tp`` (a DP-only
-    or HSDP mesh) is returned unchanged rather than indexed into a dim it does not have.
-    """
+def tp_submesh(device_mesh: DeviceMesh) -> DeviceMesh:
+    """The ``tp`` slice of a 2D ``(dp, tp)`` mesh. A 1D ``(tp,)`` or unnamed (bare TP) mesh is its own
+    TP mesh, and a DP-only / HSDP mesh is returned unchanged rather than indexed into a missing dim."""
     if has_tp_dim(device_mesh) and len(mesh_dim_names(device_mesh)) > 1:
         return device_mesh[MeshDim.TP]
     return device_mesh
 
 
-class ParallelDims:
-    """Typed accessors for the active device mesh of one trainer."""
+def tp_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
+    """The attention-TP process group, or None when TP is inactive.
 
-    def __init__(self, device_mesh: DeviceMesh | None = None):
-        self.device_mesh = device_mesh
+    A named mesh must carry a ``tp`` dim (a DP-only ``(dp,)`` / HSDP mesh returns None); an unnamed
+    mesh is a bare TP mesh.
+    """
+    if has_tp_dim(device_mesh):
+        return device_mesh[MeshDim.TP].get_group()
+    if device_mesh is not None and not mesh_dim_names(device_mesh):
+        return device_mesh.get_group()
+    return None
 
-    @property
-    def mesh_dims(self) -> tuple[str, ...]:
-        return mesh_dim_names(self.device_mesh)
 
-    def tp_group(self) -> dist.ProcessGroup | None:
-        """Attention-TP process group, or None when TP is inactive.
+def tp_local_rank(device_mesh: DeviceMesh | None) -> int | None:
+    """This rank's index in the mesh's ``tp`` dim, or None when it has none."""
+    return device_mesh[MeshDim.TP].get_local_rank() if has_tp_dim(device_mesh) else None
 
-        A named mesh must carry a ``tp`` dim: a DP-only mesh (``(dp,)`` / HSDP) returns None rather
-        than its DP group relabeled as TP. An unnamed mesh is treated as a bare TP mesh.
-        """
-        if self.device_mesh is None:
-            return None
-        if has_tp_dim(self.device_mesh):
-            return self.device_mesh[MeshDim.TP].get_group()
-        if not self.mesh_dims:
-            return self.device_mesh.get_group()
-        return None
 
-    def tp_local_rank(self) -> int | None:
-        """Rank within the attention-TP group from the mesh, or None if not 2D/1D-TP."""
-        if self.device_mesh is not None and has_tp_dim(self.device_mesh):
-            return self.device_mesh[MeshDim.TP].get_local_rank()
-        return None
-
-    def dp_group(self) -> dist.ProcessGroup | None:
-        """Data-parallel sub-group of a 2D ``(dp, tp)`` mesh, else None."""
-        if self.device_mesh is not None and MeshDim.DP in self.mesh_dims:
-            return self.device_mesh[MeshDim.DP].get_group()
-        return None
+def dp_group(device_mesh: DeviceMesh | None) -> dist.ProcessGroup | None:
+    """The mesh's ``dp`` process group, or None when it has no ``dp`` dim."""
+    return device_mesh[MeshDim.DP].get_group() if MeshDim.DP in mesh_dim_names(device_mesh) else None
 
 
 def model_tp_mesh(model) -> DeviceMesh | None:
     """The TP mesh ``model`` was parallelized on, or ``None`` for a model with no mesh or a mesh without a ``tp``
-    dim, rather than :func:`get_tp_submesh`'s fallback to a DP-only mesh."""
+    dim, rather than :func:`tp_submesh`'s fallback to a DP-only mesh."""
     device_mesh = getattr(model, "_device_mesh", None)
     if device_mesh is None or not has_tp_dim(device_mesh):
         return None
-    return get_tp_submesh(device_mesh)
+    return tp_submesh(device_mesh)

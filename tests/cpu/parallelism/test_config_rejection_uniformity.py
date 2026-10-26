@@ -31,7 +31,7 @@ def _build(**kwargs):
     this file exists to pin — not merely that the config was rejected.
     """
     with (
-        patch(f"{_MOD}.check_mnnvl_prerequisites") as mnnvl,
+        patch(f"{_MOD}.verify_mnnvl_prerequisites") as mnnvl,
         patch(f"{_MOD}.validate_nvlink_domain_against_fabric") as fabric,
     ):
         try:
@@ -112,7 +112,7 @@ def test_a_legacy_backend_this_topology_cannot_drive_is_rejected_at_config_time(
 def _build_multinode(**kwargs):
     """Two 8-GPU nodes — the smallest world where a cross-node EP group is expressible."""
     with (
-        patch(f"{_MOD}.check_mnnvl_prerequisites"),
+        patch(f"{_MOD}.verify_mnnvl_prerequisites"),
         patch(f"{_MOD}.validate_nvlink_domain_against_fabric"),
     ):
         try:

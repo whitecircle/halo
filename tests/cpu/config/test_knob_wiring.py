@@ -54,7 +54,6 @@ def _resolve_bf16_optimizer(*, config_value, bf16=True, optim="adamw_torch_fused
     stub = SimpleNamespace(
         parallelism_config=SimpleNamespace(
             bf16_optimizer=config_value,
-            fp32_grad_reduce=False,
             ep_group_size=1,
             needs_ep_wrappers=False,
             experts_fsdp_managed=False,
@@ -62,7 +61,7 @@ def _resolve_bf16_optimizer(*, config_value, bf16=True, optim="adamw_torch_fused
         ),
         _should_accelerate_manage_ddp=lambda: False,
     )
-    training_args = SimpleNamespace(bf16=bf16, optim=optim, fp32_grad_reduce=None)
+    training_args = SimpleNamespace(bf16=bf16, optim=optim)
     kwargs = {} if ctor_value is None else {"bf16_optimizer": ctor_value}
     DistributedTrainerMixin._configure_mixed_precision(stub, kwargs, training_args)
     return stub._bf16_optimizer
@@ -95,7 +94,6 @@ def _mixed_precision_stub(
     return SimpleNamespace(
         parallelism_config=SimpleNamespace(
             bf16_optimizer=bf16_optimizer,
-            fp32_grad_reduce=False,
             ep_group_size=ep_group_size,
             needs_ep_wrappers=True,
             experts_fsdp_managed=experts_fsdp_managed,
@@ -177,7 +175,7 @@ def test_fp32_on_a_moe_builds_the_trainer_and_only_refuses_at_the_optimizer():
     defect."""
     stub = _mixed_precision_stub(ep_group_size=8, bf16_optimizer=None)
     DistributedTrainerMixin._configure_mixed_precision(
-        stub, _moe_model_kwargs(), SimpleNamespace(bf16=False, optim="adamw_torch_fused", fp32_grad_reduce=None)
+        stub, _moe_model_kwargs(), SimpleNamespace(bf16=False, optim="adamw_torch_fused")
     )
     assert stub._bf16_optimizer is False
 
@@ -215,7 +213,7 @@ def test_explicit_bf16_optimizer_false_selects_the_stock_path_without_raising_at
     the unsupported combination is caught by the build guard above, not here."""
     stub = _mixed_precision_stub(ep_group_size=8, bf16_optimizer=False)
     DistributedTrainerMixin._configure_mixed_precision(
-        stub, _moe_model_kwargs(), SimpleNamespace(bf16=True, optim="adamw_torch_fused", fp32_grad_reduce=None)
+        stub, _moe_model_kwargs(), SimpleNamespace(bf16=True, optim="adamw_torch_fused")
     )
     assert stub._bf16_optimizer is False
 
@@ -226,7 +224,7 @@ def test_fp32_non_ep_params_is_the_remedy_the_message_names_and_is_not_itself_re
     mixed plain/DTensor set. Construction must not refuse it either, or it blocks the fix it names."""
     stub = _mixed_precision_stub(ep_group_size=8, fp32_non_ep_params=True, bf16_optimizer=None)
     DistributedTrainerMixin._configure_mixed_precision(
-        stub, {}, SimpleNamespace(bf16=False, optim="adamw_torch_fused", fp32_grad_reduce=None)
+        stub, {}, SimpleNamespace(bf16=False, optim="adamw_torch_fused")
     )
     assert stub._bf16_optimizer is False
 

@@ -13,7 +13,7 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
 
 from src.distributed.grad_reduce import SumGradAcrossGroup
-from src.distributed.mesh import get_tp_submesh
+from src.distributed.mesh import tp_submesh
 from src.distributed.tensor_parallel.plain_params import register_hand_sliced, register_per_head_norm_params
 from src.models.config_access import get_config_field
 from src.models.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
@@ -56,7 +56,7 @@ _ATTENTION_TP_STYLES: dict[str, type] = {
 def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int:
     """Shard the attention modules of ``model`` over the ``tp`` dim of ``device_mesh`` (1-D, or 2-D with DP);
     returns how many were parallelized. MoE blocks are never visited."""
-    tp_mesh = get_tp_submesh(device_mesh)
+    tp_mesh = tp_submesh(device_mesh)
     patched = 0
     per_head_norms: list[nn.Module] = []
 

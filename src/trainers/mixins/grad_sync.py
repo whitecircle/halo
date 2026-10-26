@@ -14,12 +14,12 @@ from accelerate.logging import get_logger
 from torch.distributed.tensor import DTensor
 from transformers.trainer_utils import IntervalStrategy
 
-from src.distributed.fsdp import fsdp2_modules, setup_fsdp2_for_tp
+from src.distributed.fsdp import apply_fsdp2_for_tp, fsdp2_modules
 from src.distributed.grad_reduce import agree_grad_presence, reduce_grads_bucketed
-from src.distributed.mesh import MeshDim, mesh_dim_names
+from src.distributed.mesh import MeshDim, dp_group, mesh_dim_names, tp_group
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, per_head_norm_param_names
 from src.hardware import current_device
-from src.model_loading.dtype import has_packed_quantized_params
+from src.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
 from src.trainers.mixins.ep_introspection import require_ep_config
 from src.trainers.mixins.grad_clip import (
     bucketed_grad_norm_sq,
@@ -139,7 +139,6 @@ class GradientSyncMixin:
             exclusions=self._fsdp_exclusions(),
             fallback_dp_size=config.stage_world_size,
             dp_replicate_size=config.dp_replicate_size,
-            topo=f", HSDP {config.dp_replicate_size}×{config.dp_shard_size}" if config.is_hsdp else "",
         )
 
     def _setup_ep_tp_gradient_sync(self) -> None:
@@ -149,10 +148,11 @@ class GradientSyncMixin:
         the single-device check) and takes the mesh the DTensors are sharded on, never a fresh one.
         """
         config = self.parallelism_config
-        self._fsdp_wrapped, _ = setup_fsdp2_for_tp(
+        self._fsdp_wrapped, _ = apply_fsdp2_for_tp(
             self.model,
             config.tp_size,
-            self.args,
+            compute_dtype=resolve_training_dtype(self.args),
+            fp32_reduce=config.fp32_grad_reduce,
             dp_size=config.data_parallel_size,
             ignored_params=self._fsdp_exclusions().params,
             fp32_master_weights=config.fp32_non_ep_params,
@@ -172,8 +172,6 @@ class GradientSyncMixin:
             config.stage_world_size,
             excluded_params=self._fsdp_exclusions().params,
             dp_replicate_size=config.dp_replicate_size,
-            topo=f", HSDP {config.dp_replicate_size}×{config.dp_shard_size}" if config.is_hsdp else "",
-            detail="applied for CP gradient sync",
         )
 
     def _patch_gradient_clipping_for_qlora(self):
@@ -391,14 +389,11 @@ class GradientSyncMixin:
         chain reduction would count them again. ``_pp_stage_group`` is ``None`` without PP, i.e. the
         default world group, since the stage is the world at ``pp_size == 1``.
         """
-        pdims = self.parallel_dims
-        tp_group = pdims.tp_group()
-        if tp_group is not None:
-            dist.all_reduce(tp1d_sq, op=dist.ReduceOp.SUM, group=tp_group)
-        dp_group = pdims.dp_group()
-        if dp_group is not None:
+        if (group := tp_group(self._device_mesh)) is not None:
+            dist.all_reduce(tp1d_sq, op=dist.ReduceOp.SUM, group=group)
+        if (group := dp_group(self._device_mesh)) is not None:
             dist.all_reduce(tp2d_sq, op=dist.ReduceOp.SUM, group=self._pp_stage_group)
-            dist.all_reduce(dp_sq, op=dist.ReduceOp.SUM, group=dp_group)
+            dist.all_reduce(dp_sq, op=dist.ReduceOp.SUM, group=group)
         return tp1d_sq + tp2d_sq + dp_sq
 
     @staticmethod
@@ -593,8 +588,8 @@ class GradientSyncMixin:
         agreed over the TP group (:func:`agree_grad_presence`): a router tie-break can leave
         grad=None on one rank only.
         """
-        tp_group = self.parallel_dims.tp_group()
-        if tp_group is None or dist.get_world_size(group=tp_group) <= 1:
+        group = tp_group(self._device_mesh)
+        if group is None or dist.get_world_size(group=group) <= 1:
             return
         # Once per step: max_grad_norm == 0 still reaches the clip via _get_grad_norm, and the SUM is not idempotent.
         step = getattr(getattr(self, "state", None), "global_step", None)
@@ -620,15 +615,15 @@ class GradientSyncMixin:
             candidates.append(p)
         replicated_grads = []
         per_head_norm_grads = []
-        for p in agree_grad_presence(candidates, tp_group):
+        for p in agree_grad_presence(candidates, group):
             # TP siblings hold the same dp shard of the same replica, so reducing local shards is the
             # exact cross-replica sync. Per-head norms SUM, not AVG: each rank's gradient covers its
             # own heads, and DP shards the norm identically.
             local = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
             (per_head_norm_grads if id(p) in per_head_norm_ids else replicated_grads).append(local)
         fp32 = bool(self.parallelism_config.fp32_grad_reduce)
-        reduce_grads_bucketed(replicated_grads, op=dist.ReduceOp.AVG, group=tp_group, fp32=fp32)
-        reduce_grads_bucketed(per_head_norm_grads, op=dist.ReduceOp.SUM, group=tp_group, fp32=fp32)
+        reduce_grads_bucketed(replicated_grads, op=dist.ReduceOp.AVG, group=group, fp32=fp32)
+        reduce_grads_bucketed(per_head_norm_grads, op=dist.ReduceOp.SUM, group=group, fp32=fp32)
 
     def _logs_after_this_step(self) -> bool:
         """Whether ``_maybe_log_save_evaluate`` will log the step now being completed.

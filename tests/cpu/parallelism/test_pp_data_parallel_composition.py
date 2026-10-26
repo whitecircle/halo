@@ -172,7 +172,7 @@ def test_a_stage_sized_hsdp_mesh_is_refused_rather_than_silently_misbuilt():
 
     ``init_device_mesh`` numbers a mesh ``0..prod(shape)-1`` and does NOT check it against the world,
     so a 2-D mesh sized to a pipeline STAGE would hand every rank a mesh made of the FIRST stage's
-    ranks — stage 1 would then reduce-scatter over stage 0's ranks, silently. ``create_dp_mesh``
+    ranks — stage 1 would then reduce-scatter over stage 0's ranks, silently. ``build_dp_mesh``
     refuses that shape instead; a real PP+HSDP needs the pipeline as an outer mesh dimension.
     """
     with (
@@ -180,7 +180,7 @@ def test_a_stage_sized_hsdp_mesh_is_refused_rather_than_silently_misbuilt():
         patch.object(mesh_mod.dist, "get_world_size", return_value=16),
     ):
         with pytest.raises(ValueError, match="must span the whole world"):
-            mesh_mod.create_dp_mesh(8, dp_replicate_size=2, device_type="cpu")
+            mesh_mod.build_dp_mesh(8, dp_replicate_size=2, device_type="cpu")
 
 
 def test_nvl72_pipeline_needs_more_than_one_rack():

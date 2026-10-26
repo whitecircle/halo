@@ -16,7 +16,6 @@ import tempfile
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -30,7 +29,7 @@ from src.checkpoint.parallel.optimizer import OptimizerShardStore
 from src.checkpoint.parallel.save import save_checkpoint
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.expert_parallel.parallelize import apply_ep_layers
-from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
+from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.checkpoint_io import save_context, shard_store_context
@@ -127,7 +126,7 @@ def _context(model, parallelism_config=None, *, training: bool, **fields):
 
 def _shard(model, mesh: DeviceMesh, dtype: torch.dtype, ignored: Iterable = ()) -> None:
     """FSDP2 per layer under the run's mixed-precision policy, as a run's DP wrap applies it."""
-    policy = create_mixed_precision_policy_v2(SimpleNamespace(bf16=dtype == torch.bfloat16))
+    policy = mixed_precision_policy(dtype, fp32_reduce=False, cast_forward_inputs=True)
     apply_fsdp2_per_layer(model, mesh, policy, False, IdentityParamSet(ignored))
 
 

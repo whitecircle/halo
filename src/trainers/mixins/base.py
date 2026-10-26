@@ -31,13 +31,12 @@ from src.distributed.expert_parallel.moe_layer.expert_lora import (
 )
 from src.distributed.fsdp import (
     IdentityParamSet,
-    make_disable_adapter_fsdp2_safe,
+    apply_fsdp2_for_dp,
+    apply_fsdp2_for_tp,
+    install_fsdp2_safe_disable_adapter,
     reshard_fsdp2_modules,
-    reshard_label,
-    setup_fsdp2_for_dp,
-    setup_fsdp2_for_tp,
 )
-from src.distributed.mesh import ParallelDims
+from src.distributed.mesh import tp_group, tp_local_rank
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.parallelism_rules import reject_cross_domain_determinism
 from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
@@ -385,17 +384,13 @@ class DistributedTrainerMixin(
         return kwargs
 
     def _configure_mixed_precision(self, kwargs: dict, training_args: Any):
-        """Surface fp32_grad_reduce onto training_args and resolve whether to use AdamWBF16
-        (``self._bf16_optimizer``). Whether the selected stock optimizer can be built over a mixed
-        plain/DTensor parameter set is decided later, in create_optimizer."""
+        """Resolve whether to use AdamWBF16 (``self._bf16_optimizer``). Whether the selected stock
+        optimizer can be built over a mixed plain/DTensor parameter set is decided later, in
+        create_optimizer."""
         # Ctor kwarg wins (tests construct trainers directly); else the YAML/CLI value on the config.
         bf16_optimizer_explicit = kwargs.pop("bf16_optimizer", None)
         if bf16_optimizer_explicit is None:
             bf16_optimizer_explicit = self.parallelism_config.bf16_optimizer
-
-        # create_mixed_precision_policy_v2 sees only args, so surface it there for every FSDP path.
-        if training_args is not None:
-            training_args.fp32_grad_reduce = self.parallelism_config.fp32_grad_reduce
 
         # Auto-enable only on the default optimizer; an explicit choice (adamw_bnb_8bit) must stand.
         # load_best_model_at_end (needs post-PEFT state) and stock-optimizer buildability are decided later.
@@ -611,7 +606,7 @@ class DistributedTrainerMixin(
         if peft_model is not None:
             if model_has_expert_lora(self.model):
                 install_ep_aware_disable_adapter(peft_model)
-            make_disable_adapter_fsdp2_safe(peft_model, self.model)
+            install_fsdp2_safe_disable_adapter(peft_model, self.model)
 
         self._validate_merge_expert_lora_save()
 
@@ -769,13 +764,15 @@ class DistributedTrainerMixin(
         drifts across DP replicas on TP+DP with untied embeddings). Pure TP (DP=1) skips FSDP.
         """
         model = self._top_level_model()
-        self._fsdp_wrapped, self._device_mesh = setup_fsdp2_for_tp(
+        config = self.parallelism_config
+        self._fsdp_wrapped, self._device_mesh = apply_fsdp2_for_tp(
             model,
-            self.parallelism_config.tp_size,
-            self.args,
-            dp_size=self.parallelism_config.data_parallel_size,
-            fp32_master_weights=self.parallelism_config.fp32_non_ep_params,
-            reshard_after_forward=self.parallelism_config.fsdp_reshard_after_forward,
+            config.tp_size,
+            compute_dtype=resolve_training_dtype(self.args),
+            fp32_reduce=config.fp32_grad_reduce,
+            dp_size=config.data_parallel_size,
+            fp32_master_weights=config.fp32_non_ep_params,
+            reshard_after_forward=config.fsdp_reshard_after_forward,
         )
         if self._device_mesh is None:
             # Pure TP skips FSDP, so recover the loader's mesh or clipping/sync miss the TP group.
@@ -873,32 +870,27 @@ class DistributedTrainerMixin(
         excluded_params: Iterable[nn.Parameter] = (),
         dp_group: dist.ProcessGroup | None = None,
         dp_replicate_size: int = 1,
-        topo: str = "",
-        detail: str,
     ) -> None:
-        """Apply FSDP2 for DP gradient sync, record it, and log it.
+        """Apply FSDP2 for DP gradient sync and record it.
 
-        Shared by every parallelism mode's DP wrap: ``reshard_after_forward`` and
-        ``fp32_master_weights`` always come from ``parallelism_config``, so a mode cannot diverge
-        from the others on either. ``topo``/``detail`` carry only the mode-specific log text.
+        Shared by every parallelism mode's DP wrap: the compute dtype comes from the run's args and
+        the reduce dtype, ``reshard_after_forward`` and ``fp32_master_weights`` from
+        ``parallelism_config``, so a mode cannot diverge from the others on any of them.
         """
         config = self.parallelism_config
         excluded_params = list(excluded_params)
-        applied = setup_fsdp2_for_dp(
+        if apply_fsdp2_for_dp(
             model,
             dp_size,
-            self.args,
+            compute_dtype=resolve_training_dtype(self.args),
+            fp32_reduce=config.fp32_grad_reduce,
             ignored_params=excluded_params or None,
             dp_group=dp_group,
             reshard_after_forward=config.fsdp_reshard_after_forward,
             fp32_master_weights=config.fp32_non_ep_params,
             dp_replicate_size=dp_replicate_size,
-        )
-        if applied:
+        ):
             self._fsdp_wrapped = True
-            logger.info(
-                f"✓ FSDP2 ({reshard_label(self.parallelism_config.fsdp_reshard_after_forward)}{topo}) {detail}"
-            )
 
     def _setup_standard_data_parallel(self):
         """Setup standard data parallel gradient sync (no EP/CP/TP) via FSDP v2.
@@ -915,21 +907,11 @@ class DistributedTrainerMixin(
             self._setup_qlora_sync("data parallel")
             return
 
-        excluded = self._fsdp_exclusions().params
-        dp_replicate_size = self.parallelism_config.dp_replicate_size
-        extra = f", {len(excluded)} dtype-excluded params" if excluded else ""
-        topo = (
-            f", HSDP {dp_replicate_size}×{world_size // dp_replicate_size}"
-            if dp_replicate_size > 1
-            else ", 1D full-shard"
-        )
         self._apply_dp_fsdp2(
             self.model,
             world_size,
-            excluded_params=excluded,
-            dp_replicate_size=dp_replicate_size,
-            topo=topo,
-            detail=f"applied for data parallel gradient sync ({world_size} ranks{extra})",
+            excluded_params=self._fsdp_exclusions().params,
+            dp_replicate_size=self.parallelism_config.dp_replicate_size,
         )
 
     def _dtype_excluded_params(self) -> list[nn.Parameter]:
@@ -1004,7 +986,6 @@ class DistributedTrainerMixin(
         fallback_dp_size: int,
         fallback_dp_group: dist.ProcessGroup | None = None,
         dp_replicate_size: int = 1,
-        topo: str = "",
     ) -> None:
         """FSDP2 wrap for a model carrying EP wrappers, shared by the EP mode and the PP stage wrap.
 
@@ -1016,7 +997,6 @@ class DistributedTrainerMixin(
         DP average deferred to :meth:`_sync_deferred_expert_grads`. Everything else shards over the
         caller's DP scope (the world without PP, the stage group under PP).
         """
-        ep_modules, dtype_params, excluded_params = exclusions
         ep_cfg = require_ep_config(self._ep_config)
         if ep_cfg.is_deferred_dp:
             # Sharded over the EP group, not the stage: non-expert memory per rank is `replicas`x
@@ -1032,47 +1012,30 @@ class DistributedTrainerMixin(
             self._apply_dp_fsdp2(
                 model,
                 ep_cfg.ep_group_size,
-                excluded_params=excluded_params,
+                excluded_params=exclusions.params,
                 dp_group=ep_cfg.process_group,
-                topo=f", EP-group {ep_cfg.ep_group_size}-way{topo}",
-                detail=(
-                    f"for EP gradient sync; cross-replica DP average deferred post-backward "
-                    f"({ep_cfg.num_ep_groups} EP groups, {len(ep_modules)} EP modules ignored)"
-                ),
             )
         else:
-            extra = f", {len(dtype_params)} dtype-excluded params" if dtype_params else ""
             self._apply_dp_fsdp2(
                 model,
                 fallback_dp_size,
-                excluded_params=excluded_params,
+                excluded_params=exclusions.params,
                 dp_group=fallback_dp_group,
                 dp_replicate_size=dp_replicate_size,
-                topo=topo,
-                detail=(
-                    f"for EP gradient sync ({fallback_dp_size} ranks, {len(ep_modules)} EP modules{extra} ignored)"
-                ),
             )
-
-    @property
-    def parallel_dims(self) -> ParallelDims:
-        """Typed view over the active device mesh, rebuilt each access from current state (cheap; it
-        holds a reference) so it cannot go stale across the setup lifecycle. EP/ETP groups are read
-        off ``_ep_config`` directly, which is where they are stored."""
-        return ParallelDims(device_mesh=self._device_mesh)
 
     def _get_tp_rank(self) -> int:
         """Get TP rank from DeviceMesh if available, fallback to modular arithmetic."""
-        tp_local_rank = self.parallel_dims.tp_local_rank()
-        if tp_local_rank is not None:
-            return tp_local_rank
+        rank = tp_local_rank(self._device_mesh)
+        if rank is not None:
+            return rank
         return self.accelerator.process_index % self.parallelism_config.tp_size
 
     def _get_tp_or_etp_process_group(self) -> dist.ProcessGroup | None:
         """The process group whose ranks must share identical generation data: TP group (TP mode),
         expert-TP group (ETP mode), or None."""
         if self.parallelism_config.is_tp_mode:
-            return self.parallel_dims.tp_group()
+            return tp_group(self._device_mesh)
         if self.parallelism_config.is_expert_tp_mode:
             return require_ep_config(self._ep_config).expert_tp_group
         return None

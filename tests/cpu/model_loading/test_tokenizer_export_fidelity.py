@@ -149,7 +149,8 @@ class _Fsdp2SaveTrainer:
             merge_expert_lora_on_save=False,
             expert_lora=None,
         )
-        self.parallel_dims = types.SimpleNamespace(tp_local_rank=lambda: 0)
+        self._device_mesh = None
+        self.accelerator = types.SimpleNamespace(process_index=0)
 
     save_model = DistributedTrainerMixin.save_model
     _write_model_payload = DistributedTrainerMixin._write_model_payload

@@ -281,8 +281,8 @@ In CP-only mode each rank computes partial gradients from its chunk and FSDP ave
 correct global mean (`effective_grad = (1/cp_size) * sum(partial_grad_i)`). In EP+TP with DP=1,
 DTensor and EP hooks alone sync; with DP>1, FSDP2 syncs non-EP params across nodes.
 
-Clipping and sync read the mesh groups (TP, DP) through the `ParallelDims` view
-(`src/distributed/mesh.py`) and the expert groups (dispatch-EP, expert-TP, expert-replica) off
+Clipping and sync read the mesh groups (TP, DP) through the mesh accessors (`tp_group`, `dp_group`
+in `src/distributed/mesh.py`) and the expert groups (dispatch-EP, expert-TP, expert-replica) off
 `EPConfig`, rather than re-deriving them per call site.
 
 ### EP-aware gradient clipping

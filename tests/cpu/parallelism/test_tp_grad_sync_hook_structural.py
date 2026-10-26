@@ -67,7 +67,8 @@ def test_sync_is_idempotent_within_one_step():
     trainer = _trainer(max_grad_norm=0.0)
     trainer.state = SimpleNamespace(global_step=7)
     trainer.parallelism_config = SimpleNamespace(is_tp_mode=True, fp32_grad_reduce=False)
-    trainer.parallel_dims = SimpleNamespace(tp_group=lambda: object())  # a group with peers, per the patch below
+    # A bare TP mesh whose group has peers, per the patch below.
+    trainer._device_mesh = SimpleNamespace(get_group=lambda: object())
     trainer._tp_sharded_plain_param_ids = lambda: set()
     trainer._tp_per_head_norm_param_ids = lambda: set()
     params = list(trainer.model.parameters())
