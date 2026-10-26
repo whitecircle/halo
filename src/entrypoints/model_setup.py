@@ -15,8 +15,8 @@ from transformers import (
     PreTrainedTokenizer,
     PreTrainedTokenizerBase,
 )
-from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME
 
+from src.checkpoint.format import PROCESSOR_FILES
 from src.configs.script_arguments import ModelArguments
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.entrypoints.script import ScriptContext
@@ -33,10 +33,6 @@ from src.runtime.filesystem import hub_metadata_main_first
 from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
-
-# The files ``AutoProcessor`` reads a checkpoint's image processor from; a checkpoint shipping neither
-# has no native processor to build.
-_PROCESSOR_CONFIG_FILES = (PROCESSOR_NAME, IMAGE_PROCESSOR_NAME)
 
 
 class PolicyLoad(NamedTuple):
@@ -144,8 +140,8 @@ def _ships_processor_config(model_path: str, revision: str | None) -> bool:
     would drop the processor from the run's exports.
     """
     if os.path.isdir(model_path):
-        return any(os.path.isfile(os.path.join(model_path, name)) for name in _PROCESSOR_CONFIG_FILES)
-    for name in _PROCESSOR_CONFIG_FILES:
+        return any(os.path.isfile(os.path.join(model_path, name)) for name in PROCESSOR_FILES)
+    for name in PROCESSOR_FILES:
         try:
             hf_hub_download(model_path, name, revision=revision)
             return True

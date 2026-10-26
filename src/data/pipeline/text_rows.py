@@ -6,12 +6,12 @@ from typing import Any
 from transformers import PreTrainedTokenizer
 
 from src.data.pipeline.chat_render import render_conversation, tokenize_rendered
-from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
+from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
 from src.data.pipeline.rejected_rows import build_rejection_row
 from src.models.context_window import is_bounded_length
 
 # The chat-render knobs a text run's script args carry, named as the text renderers take them.
-TEXT_RENDER_KNOBS = (
+_TEXT_RENDER_KNOBS = (
     "conversation_field",
     "system_prompt",
     "model_supports_system_role",
@@ -21,9 +21,9 @@ TEXT_RENDER_KNOBS = (
 
 
 def text_render_kwargs(args) -> dict[str, Any]:
-    """The run's :data:`TEXT_RENDER_KNOBS`, passed to a text renderer and to its map-cache key from
+    """The run's :data:`_TEXT_RENDER_KNOBS`, passed to a text renderer and to its map-cache key from
     this one dict, so the key cannot miss a knob the render reads."""
-    return {name: getattr(args, name) for name in TEXT_RENDER_KNOBS}
+    return {name: getattr(args, name) for name in _TEXT_RENDER_KNOBS}
 
 
 def render_row_conversation(
@@ -39,7 +39,7 @@ def render_row_conversation(
     """Chat-template the conversation at ``row[conversation_field]`` through :func:`render_conversation`.
     ``add_generation_prompt`` drops the final message: on the generation-eval path the trailing assistant turn is
     the reference answer to regenerate."""
-    conversation = maybe_parse_json(row[conversation_field])
+    conversation = resolve_json_value(row[conversation_field])
     if add_generation_prompt:
         conversation = conversation[:-1]
 

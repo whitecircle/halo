@@ -156,8 +156,9 @@ def test_a_model_without_an_output_embedding_is_refused_by_name(free_memory):
 
 def _env_host(*, per_turn: bool, row_cap: int | None):
     return types.SimpleNamespace(
-        _train_on_sampled_tokens=per_turn,
-        async_config=types.SimpleNamespace(rollout_max_tokens=4096, max_train_row_tokens=row_cap),
+        async_config=types.SimpleNamespace(
+            rollout_max_tokens=4096, max_train_row_tokens=row_cap, train_on_sampled_tokens=per_turn
+        ),
         _context_limit=lambda: 32768,
     )
 

@@ -42,6 +42,12 @@ _SAFETENSORS_DTYPE_BYTES = {
     **dict.fromkeys(("F16", "BF16", "I16", "U16"), 2),
     **dict.fromkeys(("F8_E4M3", "F8_E5M2", "I8", "U8", "BOOL"), 1),
 }
+# Why a stage finds its own tensors absent from a per-node pipeline checkpoint: each node's directory holds
+# only the shards of the stages that node ran.
+PER_NODE_PLACEMENT_REMEDY = (
+    "A per-node pipeline checkpoint resumes only onto the same topology and rank placement; for "
+    "anything else merge every node's directory with scripts/after_training/merge_pp_stages.py first."
+)
 
 
 @dataclass(frozen=True)
@@ -372,11 +378,3 @@ def detect_model_type(checkpoint_dir: str) -> str:
     the ``text_config`` one of a composite config that declares none."""
     model_types = detect_model_types(checkpoint_dir)
     return model_types[-1] if model_types else ""
-
-
-# Why a stage finds its own tensors absent from a per-node pipeline checkpoint: each node's directory holds
-# only the shards of the stages that node ran.
-PER_NODE_PLACEMENT_REMEDY = (
-    "A per-node pipeline checkpoint resumes only onto the same topology and rank placement; for "
-    "anything else merge every node's directory with scripts/after_training/merge_pp_stages.py first."
-)

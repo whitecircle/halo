@@ -16,6 +16,9 @@ import torch.nn as nn
 from src.distributed.mesh import model_tp_mesh
 from src.runtime.dtensor import materialize_dtensor
 
+_HAND_SLICED_ATTR = "_halo_tp_hand_sliced"
+_PER_HEAD_NORM_PARAMS_ATTR = "_halo_tp_per_head_norm_params"
+
 
 def register_hand_sliced(model: nn.Module, suffix: str, shard_dim: int) -> None:
     """Record that every parameter named ``*suffix`` holds this rank's slice along ``shard_dim``."""
@@ -25,12 +28,12 @@ def register_hand_sliced(model: nn.Module, suffix: str, shard_dim: int) -> None:
             f"{suffix!r} is already registered as hand-sliced along dim {entries[suffix]}, not {shard_dim}"
         )
     entries[suffix] = shard_dim
-    model._halo_tp_hand_sliced = entries
+    setattr(model, _HAND_SLICED_ATTR, entries)
 
 
 def hand_sliced_dims(model: nn.Module) -> dict[str, int]:
     """``{suffix: shard_dim}`` of the hand-sliced parameters, in registration order."""
-    return dict(getattr(model, "_halo_tp_hand_sliced", None) or {})
+    return dict(getattr(model, _HAND_SLICED_ATTR, None) or {})
 
 
 def hand_sliced_suffixes(model: nn.Module) -> tuple[str, ...]:
@@ -78,9 +81,9 @@ def register_per_head_norm_params(model: nn.Module, modules: list[nn.Module]) ->
     owned = {id(p) for module in modules for p in module.parameters()}
     registered = {name for name, p in model.named_parameters() if id(p) in owned}
     registered.update(per_head_norm_param_names(model))
-    model._halo_tp_per_head_norm_params = sorted(registered)
+    setattr(model, _PER_HEAD_NORM_PARAMS_ATTR, sorted(registered))
 
 
 def per_head_norm_param_names(model: nn.Module) -> tuple[str, ...]:
     """The registered per-head norm parameter names, sorted."""
-    return tuple(getattr(model, "_halo_tp_per_head_norm_params", None) or ())
+    return tuple(getattr(model, _PER_HEAD_NORM_PARAMS_ATTR, None) or ())

@@ -248,7 +248,9 @@ def test_base_profiles_bind_the_thinking_budget_per_level():
 def test_base_rejects_non_finite_and_non_numeric_profile_values():
     """NaN passes a plain minimum check and would reach the engine as a thinking budget."""
     for bad in (float("nan"), float("inf"), True, "0.05", None):
-        with pytest.raises(ValueError, match="thinking_tokens for effort 'low' must be a finite number"):
+        with pytest.raises(
+            ValueError, match=r"reasoning_effort_profiles\['low'\]: thinking_tokens must be an integer >= 1, got"
+        ):
             NativeToolUseEnvironment(
                 tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": bad}}
             )
@@ -267,7 +269,9 @@ def test_a_profile_may_make_its_budget_soft_but_only_a_budget_it_has():
     assert (env.thinking_budget_for_effort("high"), env.thinking_budget_enforced("high")) == (2048, False)
     assert env.thinking_budget_enforced("medium") is True, "a budget is enforced unless its profile says otherwise"
     for bad in (0, 1, "false", None):
-        with pytest.raises(ValueError, match="enforce_thinking_cap for effort 'high' must be true or false"):
+        with pytest.raises(
+            ValueError, match=r"reasoning_effort_profiles\['high'\]: enforce_thinking_cap must be true or false"
+        ):
             NativeToolUseEnvironment(
                 tool_registry=_registry(),
                 reasoning_effort_profiles={"high": {"thinking_tokens": 2048, "enforce_thinking_cap": bad}},
@@ -282,7 +286,9 @@ def test_a_profile_may_make_its_budget_soft_but_only_a_budget_it_has():
 
 def test_base_rejects_a_fractional_count_budget():
     """A cap of 1.5 calls admits two; the registry's int minimum marks the key a count."""
-    with pytest.raises(ValueError, match="thinking_tokens for effort 'low' is a count"):
+    with pytest.raises(
+        ValueError, match=r"reasoning_effort_profiles\['low'\]: thinking_tokens must be an integer >= 1, got 1.5"
+    ):
         NativeToolUseEnvironment(
             tool_registry=_registry(), reasoning_effort_profiles={"low": {"thinking_tokens": 1.5}}
         )
@@ -340,7 +346,7 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
     assert env.get_trajectories(ids)[0].info["seen"] == ("medium", {"max_probes": 2})
     ids, _ = env.reset(["t"], [{"reasoning_effort": "random"}])
     assert env.get_trajectories(ids)[0].info["seen"] == (None, {}), "an undetermined level binds an empty profile"
-    with pytest.raises(ValueError, match="max_probes for effort 'low' must be >= 0"):
+    with pytest.raises(ValueError, match=r"reasoning_effort_profiles\['low'\]: max_probes must be an integer >= 0"):
         _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_probes": -1}})
 
 

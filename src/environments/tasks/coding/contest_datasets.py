@@ -135,7 +135,7 @@ def format_codeforces_prompt(row: dict[str, Any]) -> str:
     )
 
 
-def stdin_tests(items: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
+def _stdin_tests(items: Iterable[dict[str, Any]]) -> list[dict[str, str]]:
     """``{input, output}`` pairs from test dicts, missing halves as empty strings — the env's test shape."""
     return [{"input": t.get("input", ""), "output": t.get("output", "")} for t in items]
 
@@ -147,7 +147,7 @@ def joined_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     if not raw:
         return []
     tests = json.loads(raw) if isinstance(raw, str) else raw
-    return stdin_tests(tests)
+    return _stdin_tests(tests)
 
 
 def _test_input(test: dict[str, Any]) -> str:
@@ -173,7 +173,7 @@ def codeforces_examples_only(row: dict[str, Any]) -> bool:
 def pack_codeforces_verification(row: dict[str, Any]) -> dict[str, Any]:
     """Extract the grading payload from an ``open-r1/codeforces`` row: the tests it ships, falling back to
     ``examples`` where it ships none. ``None`` checker => token grading."""
-    tests = _codeforces_graded_tests(row) or stdin_tests(row.get("examples") or [])
+    tests = _codeforces_graded_tests(row) or _stdin_tests(row.get("examples") or [])
     return {
         "tests": tests,
         "checker": row.get("generated_checker") or None,
@@ -181,7 +181,7 @@ def pack_codeforces_verification(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def keep_codeforces(row: dict[str, Any]) -> bool:
+def _keep_codeforces(row: dict[str, Any]) -> bool:
     """Keep executable, stdin/stdout Codeforces problems with tests; drop interactive and empty-test rows."""
     if not row.get("executable"):
         return False
@@ -192,7 +192,7 @@ def keep_codeforces(row: dict[str, Any]) -> bool:
     return len(pack_codeforces_verification(row)["tests"]) > 0
 
 
-def format_deepcoder_prompt(row: dict[str, Any]) -> str:
+def _format_deepcoder_prompt(row: dict[str, Any]) -> str:
     """Return the DeepCoder problem statement, which already includes the I/O spec and examples."""
     return (row.get("problem") or "").strip()
 
@@ -223,12 +223,12 @@ def _parse_deepcoder_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     ]
 
 
-def pack_deepcoder_verification(row: dict[str, Any]) -> dict[str, Any]:
+def _pack_deepcoder_verification(row: dict[str, Any]) -> dict[str, Any]:
     """Pack a DeepCoder row's stdin/stdout tests into the env payload (no checker, default time limit)."""
     return {"tests": _parse_deepcoder_tests(row), "checker": None, "time_limit": None}
 
 
-def keep_deepcoder(row: dict[str, Any]) -> bool:
+def _keep_deepcoder(row: dict[str, Any]) -> bool:
     """Keep DeepCoder rows that have at least one stdin/stdout test (drops functional-only specs)."""
     return len(_parse_deepcoder_tests(row)) > 0
 
@@ -256,7 +256,7 @@ def decode_test_payload(raw: str) -> list[dict[str, Any]]:
 
 def _lcb_stdin_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     """Collect a LiveCodeBench row's stdin/stdout tests; LeetCode ``functional`` problems are skipped."""
-    return stdin_tests(
+    return _stdin_tests(
         t
         for field in ("public_test_cases", "private_test_cases")
         for t in decode_test_payload(row.get(field) or "[]")
@@ -282,7 +282,7 @@ def keep_livecodebench(row: dict[str, Any]) -> bool:
     return len(_lcb_stdin_tests(row)) > 0
 
 
-def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
+def _load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
     """Raw LiveCodeBench rows from release ``config``'s ``test*.jsonl`` files (default ``release_v6``; ``split`` is
     ignored): the newest file first, each in stored order, the order the eval and the re-grader index. Bypasses
     ``load_dataset``, whose loading script datasets 4.x does not run; a contamination-clean subset is a
@@ -299,7 +299,7 @@ def load_livecodebench(dataset: str, config: str | None, split: str) -> Iterator
                     yield json.loads(line)
 
 
-def livecodebench_contest_date(row: dict[str, Any]) -> date:
+def _livecodebench_contest_date(row: dict[str, Any]) -> date:
     """The calendar day of a LiveCodeBench row's ``contest_date`` (an ISO datetime). A row without one
     raises: a date window cannot place it, and dropping it would shrink the window unannounced."""
     raw = row.get("contest_date")
@@ -355,7 +355,7 @@ def keep_icpc(row: dict[str, Any]) -> bool:
     return row.get("type") == "traditional" and len(_icpc_tests(row)) > 0
 
 
-def load_icpc(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
+def _load_icpc(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
     """Stream ICPC-Eval rows. Streaming avoids pulling the full multi-GB test payload for a small probe."""
     yield from load_dataset(dataset, config, split=split, streaming=True)
 
@@ -448,7 +448,7 @@ def keep_hardtests(row: dict[str, Any]) -> bool:
 
 def _hlce_tests(row: dict[str, Any]) -> list[dict[str, str]]:
     """Collect an HLCE row's stdin/stdout ``test_cases`` (a list of ``{input, output}`` dicts)."""
-    return stdin_tests(t for t in (row.get("test_cases") or []) if isinstance(t, dict))
+    return _stdin_tests(t for t in (row.get("test_cases") or []) if isinstance(t, dict))
 
 
 def pack_hlce_verification(row: dict[str, Any]) -> dict[str, Any]:
@@ -461,7 +461,7 @@ def keep_hlce(row: dict[str, Any]) -> bool:
     return len(_hlce_tests(row)) > 0
 
 
-def load_hlce(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
+def _load_hlce(dataset: str, config: str | None, split: str) -> Iterator[dict[str, Any]]:
     """Stream HLCE ICPC World Finals rows. ``split`` is ignored — the dataset is a single ``train`` set.
     Only the icpc-world-finals subset is gradable; the sibling ioi set has no hidden tests."""
     yield from load_dataset(dataset, config, split=_HLCE_SPLIT, streaming=True)
@@ -650,7 +650,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
     "codeforces": CodeDatasetAdapter(
         format_codeforces_prompt,
         pack_codeforces_verification,
-        keep_codeforces,
+        _keep_codeforces,
         examples_only=codeforces_examples_only,
     ),
     "hardtests": CodeDatasetAdapter(
@@ -658,7 +658,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
     ),
     # DeepCoder rows have no rating/difficulty column, so no report bucket (overall metrics only), and
     # no id column, so its examples go unnamed.
-    "deepcoder": CodeDatasetAdapter(format_deepcoder_prompt, pack_deepcoder_verification, keep_deepcoder),
+    "deepcoder": CodeDatasetAdapter(_format_deepcoder_prompt, _pack_deepcoder_verification, _keep_deepcoder),
     "livecodebench": CodeDatasetAdapter(
         format_titled_statement,
         pack_livecodebench_verification,
@@ -666,9 +666,9 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         group_field="difficulty",
         group_label="difficulty",
         id_field="question_id",
-        load=load_livecodebench,
+        load=_load_livecodebench,
         split="test",
-        contest_date=livecodebench_contest_date,
+        contest_date=_livecodebench_contest_date,
         platform_field="platform",
         platforms=_LCB_GRADABLE_PLATFORMS,
     ),
@@ -678,7 +678,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         keep_icpc,
         group_field="source",
         group_label="contest",
-        load=load_icpc,
+        load=_load_icpc,
     ),
     "hlce": CodeDatasetAdapter(
         format_titled_statement,
@@ -687,7 +687,7 @@ CODE_DATASET_ADAPTERS: dict[str, CodeDatasetAdapter] = {
         group_field="platform",
         group_label="contest",
         id_field="question_id",
-        load=load_hlce,
+        load=_load_hlce,
         split=_HLCE_SPLIT,
     ),
 }

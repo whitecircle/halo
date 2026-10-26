@@ -156,9 +156,10 @@ No parallelism package imports `src/model_loading/parallel/`, so what both sides
 parallelism packages: `expert_parallel/lazy_plan.py` holds the expert-key vocabulary, the lazy gate, the
 per-key weight planner and the prologue both lazy loaders share, and
 `expert_parallel/expert_fuser.py` stacks a per-expert checkpoint's local experts. The loaders themselves
-sit in the dispatch package: `ep.py`, `pp.py`, and `fp32_masters.py`, which selects the configured FP32
-parameter masters off the EP layer registry, captures them for a lazy load and streams their stored
-values back for eager construction ([Load precision](../models/README.md#load-precision)).
+sit in the dispatch package: `ep.py`, `pp.py`, the weight load both run once their plans are final
+(`lazy_load.py`), and `fp32_masters.py`, which selects the configured FP32 parameter masters off the EP
+layer registry and streams their stored values back for eager construction
+([Load precision](../models/README.md#load-precision)).
 
 The machinery both lazy loaders share — the conversion-op vocabulary and the key plan translated into it
 (`conversion.py`), which transformers conversions a load plans with (`conversion_selection.py`), per-key

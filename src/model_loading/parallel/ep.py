@@ -4,9 +4,9 @@ cannot read the checkpoint, loads the whole model through ``from_pretrained`` an
 from __future__ import annotations
 
 import logging
+from collections import Counter
 from functools import partial
 
-import torch
 import torch.nn as nn
 from transformers import AutoModelForCausalLM
 
@@ -16,6 +16,7 @@ from src.distributed.expert_parallel.expert_fuser import ExpertFuser
 from src.distributed.expert_parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
     ExpertKeyLayout,
+    LazyLoadPlan,
     is_lazy_loadable,
     lazy_load_prologue,
 )
@@ -23,26 +24,25 @@ from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import resolve_load_dtype
-from src.model_loading.lazy_safetensors.materialization import WeightAction, stream_planned_weights
+from src.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.model_loading.parallel.fp32_masters import capture_fp32_masters, verify_fp32_master_coverage
+from src.model_loading.parallel.lazy_load import load_planned_weights
 from src.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
 from src.model_loading.parallel.whole_model import load_whole_model
 from src.models.attention.selection import revalidate_attn_kwarg
 from src.models.moe.config_fields import require_expert_count
-from src.runtime.consensus import DeferredRankFailure
 from src.runtime.load_coordination import timed_global_load
-from src.runtime.ranks import get_global_rank, get_local_rank, is_global_main_process
+from src.runtime.ranks import get_global_rank, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
 
-def _check_fused_experts_mapped(expert_layout: ExpertKeyLayout, weight_map: dict[str, str], n_shard: int) -> None:
-    """Fail loud when a fused checkpoint's expert weights all missed the model's namespace: a silently empty
-    expert plan would train freshly-initialized experts on real attention weights."""
-    if expert_layout != ExpertKeyLayout.FUSED or n_shard > 0:
+def _check_fused_experts_mapped(base: LazyLoadPlan) -> None:
+    """Fail loud when a fused checkpoint's expert weights all missed the model's namespace (a fused layout fuses
+    nothing, so its plans are final): a silently empty expert plan would train fresh experts on real attention."""
+    if base.expert_layout != ExpertKeyLayout.FUSED or any(p.action is WeightAction.EXPERT_SHARD for p in base.plans):
         return
-    sample = next((key for key in weight_map if FUSED_EXPERT_KEY_PATTERN.search(key)), None)
+    sample = next((key for key in base.weight_map if FUSED_EXPERT_KEY_PATTERN.search(key)), None)
     if sample is not None:
         raise RuntimeError(
             "The checkpoint contains fused expert weights, but none map to the instantiated model. "
@@ -69,7 +69,6 @@ def load_ep_model_lazy(
     """
     model_class = model_class or AutoModelForCausalLM
     rank = get_global_rank()
-    device = f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu"
     logger.info(f"[Rank {rank}] EP lazy loader: {model_name_or_path}")
     revalidate_attn_kwarg(model_kwargs, config)
 
@@ -83,73 +82,40 @@ def load_ep_model_lazy(
             model_name_or_path, model_class, config, dtype=dtype, trust_remote_code=trust_remote_code, **model_kwargs
         ),
     )
-    model, plans, dtype = base.model, base.plans, base.dtype
-
-    # Every step up to the reject is rank-local (each rank reads only its experts' shards): a raise there
-    # would strand the peers in the collective, blaming it for a disk error, so each is deferred to it.
-    guard = DeferredRankFailure(f"EP lazy load from {model_name_or_path}")
-    masters, master_state = guard.run(
-        lambda: capture_fp32_masters(
-            model, ep_config, keep_non_ep=keep_fp32_params, strict=preserve_checkpoint_precision
-        )
-    ) or (frozenset(), None)
-
-    fused_keys: set[str] = set()
-    if base.expert_layout == ExpertKeyLayout.PER_EXPERT:
-        fuser = ExpertFuser(ep_config.expert_start_idx, ep_config.expert_end_idx)
-        fusion_tasks = guard.run(partial(fuser.detect_tasks, base.weight_map, base.disk_to_model, base.model_keys))
-        if fusion_tasks:
-            fused_keys = (
-                guard.run(
-                    partial(
-                        fuser.execute,
-                        fusion_tasks,
-                        model,
-                        model_name_or_path,
-                        dtype=dtype,
-                        device=device,
-                        keep_fp32=masters,
-                    )
-                )
-                or set()
-            )
-        if fused_keys:
-            plans = [p for p in plans if p.model_key not in fused_keys]
-            logger.info(f"[Rank {rank}] Fused {len(fused_keys)} expert parameters from individual keys")
-
-    n_shard = sum(1 for p in plans if p.action == WeightAction.EXPERT_SHARD)
-    n_repl = sum(1 for p in plans if p.action == WeightAction.REPLICATE)
-    n_skip = sum(1 for p in plans if p.action == WeightAction.IGNORE)
     # Before the absent-module sweep, which would otherwise re-initialize the whole model first.
-    _check_fused_experts_mapped(base.expert_layout, base.weight_map, n_shard)
+    _check_fused_experts_mapped(base)
 
-    planned = {plan.model_key for plan in plans} | fused_keys
-    if preserve_checkpoint_precision:
-        guard.run(partial(verify_fp32_master_coverage, master_state, masters, planned, source=model_name_or_path))
-    logger.info(
-        f"[Rank {rank}] Loading: {n_shard} expert-sharded, {n_repl} replicated, "
-        f"{n_skip} ignored, {len(fused_keys)} fused"
-    )
-    stream_planned_weights(
-        model,
-        plans,
-        planned,
+    def report(plans: list[WeightPlan], fused_keys: set[str]) -> None:
+        if fused_keys:
+            logger.info(f"[Rank {rank}] Fused {len(fused_keys)} expert parameters from individual keys")
+        counts = Counter(plan.action for plan in plans)
+        logger.info(
+            f"[Rank {rank}] Loading: {counts[WeightAction.EXPERT_SHARD]} expert-sharded, "
+            f"{counts[WeightAction.REPLICATE]} replicated, {counts[WeightAction.IGNORE]} ignored, "
+            f"{len(fused_keys)} fused"
+        )
+
+    weights_already_sharded = load_planned_weights(
+        base,
+        base.plans,
         model_path=model_name_or_path,
-        weight_map=base.weight_map,
-        device=device,
-        dtype=dtype,
-        keep_fp32=masters,
-        run=guard.run,
+        ep_config=ep_config,
+        keep_fp32_params=keep_fp32_params,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
+        what=f"EP lazy load from {model_name_or_path}",
         label=f"EP lazy load (rank {rank})",
+        report=report,
+        fuser=(
+            ExpertFuser(ep_config.expert_start_idx, ep_config.expert_end_idx)
+            if base.expert_layout == ExpertKeyLayout.PER_EXPERT
+            else None
+        ),
     )
-
-    # The fence: a rank that failed above raises its reason on every rank, the rest synchronize here.
-    guard.reject()
 
     logger.info(f"[Rank {rank}] Applying EP patching...")
     # Derived, never asserted: a checkpoint whose expert keys match no pattern is planned REPLICATE, and
     # claiming "already sharded" there would give every rank global experts 0..E_local-1.
-    model = apply_ep_layers(model, ep_config, weights_already_sharded=bool(fused_keys) or n_shard > 0)
+    model = apply_ep_layers(base.model, ep_config, weights_already_sharded=weights_already_sharded)
     finalize_loaded_model(model)
     logger.info(f"[Rank {rank}] EP lazy loading complete")
     return model

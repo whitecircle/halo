@@ -12,10 +12,13 @@ import pytest
 from src.config_validation import (
     ValidatedConfig,
     differs_from_default,
+    is_finite_number,
     reject_non_default_args,
     reject_unsupported_args,
+    require_bool,
     require_finite,
     require_int,
+    require_text,
 )
 from src.configs.distillation import SelfDistillScriptArguments
 
@@ -67,6 +70,31 @@ def test_require_int_refuses_a_non_int_and_an_out_of_bound_int_alike(bounds, val
 def test_in_bound_values_pass():
     require_finite("Cfg", gt=0, le=1, a=1, b=0.5)
     require_int("Cfg", ge=0, a=0, b=7)
+
+
+def test_is_finite_number_admits_only_a_finite_int_or_float():
+    assert all(is_finite_number(value) for value in (0, -2.5))
+    assert not any(is_finite_number(value) for value in (True, float("nan"), float("-inf"), "1", None))
+
+
+# require_bool / require_text: the type guards, in the same "<owner>: <key> must be ..." form
+
+
+@pytest.mark.parametrize("value", ["no", 0, None])
+def test_require_bool_refuses_anything_but_a_bool(value):
+    with pytest.raises(ValueError, match=f"^{re.escape(f'Cfg: flag must be true or false, got {value!r}')}$"):
+        require_bool("Cfg", flag=value)
+
+
+@pytest.mark.parametrize("value", ["", "  ", 3, None])
+def test_require_text_refuses_anything_but_a_non_blank_string(value):
+    with pytest.raises(ValueError, match=f"^{re.escape(f'Cfg: name must be a non-blank string, got {value!r}')}$"):
+        require_text("Cfg", name=value)
+
+
+def test_type_guards_pass_valid_values():
+    require_bool("Cfg", a=True, b=False)
+    require_text("Cfg", a="x", b=" y ")
 
 
 # ValidatedConfig: the guards run on construction, before the next __post_init__ in the MRO

@@ -64,9 +64,9 @@ _UNCOMPARED_FIELDS = frozenset(
     }
 )
 
-PreprocessingMode = Literal["chat", "text"]
+_PreprocessingMode = Literal["chat", "text"]
 # The strategies TRL's pack_dataset accepts.
-PackingStrategy = Literal["bfd", "bfd_split", "wrapped"]
+_PackingStrategy = Literal["bfd", "bfd_split", "wrapped"]
 
 
 @dataclass
@@ -97,7 +97,7 @@ class PreprocessingConfig:
         default=None,
         metadata={"help": "(is_vlm) Column holding the images of a dataset that keeps them outside the messages."},
     )
-    mode: PreprocessingMode = field(
+    mode: _PreprocessingMode = field(
         default="chat",
         metadata={"help": "'chat' renders conversation_field (SFT); 'text' tokenizes text_field (pretraining)."},
     )
@@ -116,7 +116,7 @@ class PreprocessingConfig:
         default=None, metadata={"help": "The rendered start of an assistant turn, e.g. '<|im_start|>assistant\\n'."}
     )
     pack_sequences: bool = field(default=False, metadata={"help": "Pack rows to max_length (text only)."})
-    packing_strategy: PackingStrategy = field(
+    packing_strategy: _PackingStrategy = field(
         default="bfd",
         metadata={
             "help": "'bfd' drops a document's overflow, 'bfd_split' carries it into later rows, 'wrapped' "
@@ -155,7 +155,7 @@ class PreprocessingConfig:
     max_pixels: int | None = field(default=None, metadata={"help": "(is_vlm) Maximum pixels per image."})
 
     def __post_init__(self) -> None:
-        modes, strategies = get_args(PreprocessingMode), get_args(PackingStrategy)
+        modes, strategies = get_args(_PreprocessingMode), get_args(_PackingStrategy)
         if self.mode not in modes:
             raise ValueError(f"Invalid preprocessing mode '{self.mode}'. Expected one of {list(modes)}.")
         if self.pack_sequences and self.packing_strategy not in strategies:

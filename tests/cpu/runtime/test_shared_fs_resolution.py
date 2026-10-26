@@ -19,6 +19,7 @@ from datasets import Dataset
 from src.data.pipeline import coordinated_map as coordinated_map_module
 from src.entrypoints import run_setup as run_logger
 from src.runtime import filesystem
+from tests.common.distributed import reset_shared_filesystem_consensus
 
 FS_VARS = ("DIST_SHARED_FILESYSTEM", "DIST_INPUT_SHARED_FILESYSTEM", "DIST_OUTPUT_SHARED_FILESYSTEM")
 RANK_VARS = ("RANK", "SLURM_PROCID", "LOCAL_RANK", "SLURM_LOCALID")
@@ -88,7 +89,7 @@ def test_resolved_shared_filesystem_scope_is_logged(monkeypatch, caplog, env, ex
     the umbrella and rank 0's values override a disagreeing rank's, so only the agreed dict is the
     scope the run actually used.
     """
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
     for var, value in env.items():
         monkeypatch.setenv(var, value)
 
@@ -193,19 +194,15 @@ def test_fs_aware_makedirs_honours_the_writer_rank_side(monkeypatch, tmp_path):
     assert read_dir.exists(), "writer_rank was ignored — the read-side caller followed the output flag"
 
 
-def test_resetting_the_consensus_lets_the_flags_read_the_environment_again(monkeypatch):
-    """``reset_shared_filesystem_consensus`` is the seam that makes the memo re-readable.
-
-    The flags are agreed ONCE per process and then answered from the memo, so without a public
-    reset a later caller keeps getting the scope some earlier call agreed — silently, since every
-    getter still answers. A no-op reset would leave this asserting the stale value.
-    """
+def test_the_flags_answer_from_the_agreed_memo_and_read_the_environment_until_agreed(monkeypatch):
+    """The flags are agreed ONCE per process and then answered from the memo, whatever the environment
+    says; before the agreement they read this rank's environment."""
+    monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
     monkeypatch.setattr(filesystem, "_shared_filesystem_consensus", dict.fromkeys(FS_VARS, False))
     assert not filesystem.is_shared_filesystem(), "the memo is not being consulted at all"
 
-    filesystem.reset_shared_filesystem_consensus()
-    monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
-    assert filesystem.is_shared_filesystem(), "the memo survived the reset — the env is still ignored"
+    reset_shared_filesystem_consensus()
+    assert filesystem.is_shared_filesystem(), "an unagreed scope must read the environment"
 
 
 def test_a_second_log_tee_for_another_output_dir_warns_instead_of_silently_dropping_it(monkeypatch, caplog):

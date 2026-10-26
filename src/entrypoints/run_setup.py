@@ -83,7 +83,7 @@ def _validate_output_dir_across_ranks(output_dir: str) -> None:
     reject_across_ranks(validation_error, "output_dir validation", exc_type=ValueError)
 
 
-def _setup_tracking_env_vars(args, training_config, script_name: str) -> None:
+def _configure_tracking_env_vars(args, training_config, script_name: str) -> None:
     """COLLECTIVE: set the wandb and clearml env vars, with one run id agreed across ranks."""
     os.environ["WANDB_PROJECT"] = args.project_name
     os.environ["CLEARML_PROJECT"] = args.project_name
@@ -136,7 +136,7 @@ def configure_training_run(args, training_config, script_name: str, *, overwrite
     else:
         transformers.logging.set_verbosity_error()
     logger.setLevel(training_config.get_process_log_level())
-    _setup_tracking_env_vars(args, training_config, script_name)
+    _configure_tracking_env_vars(args, training_config, script_name)
 
     set_seed(training_config.seed)
     barrier()

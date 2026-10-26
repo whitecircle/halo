@@ -32,8 +32,8 @@ from src.weight_sync.transport.c10d_group import (
     build_weight_update_group,
     release_weight_update_group,
 )
+from src.weight_sync.transport.packed_broadcast import allocate_send_buffer, hold_for_stream
 from src.weight_sync.transport.rendezvous import RendezvousListener
-from src.weight_sync.transport.send_buffers import allocate_send_buffer, hold_for_stream
 
 logger = logging.getLogger(__name__)
 

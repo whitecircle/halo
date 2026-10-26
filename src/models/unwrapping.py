@@ -121,17 +121,18 @@ def plain_adapter_key(key: str) -> str:
     drops the PEFT prefix entirely, while adapter keys must KEEP it and additionally carry the
     attention-wrapper artifact and the shallower ``modules_to_save`` lm_head depth handled below.
     """
+    peft_cp = f"{PEFT_BASE_MODEL_PREFIX}{_CP_WRAPPER_MODULE_LEVEL}"
     new_key = strip_cp_attention_level(key)
-    if new_key.startswith("model.model."):
-        new_key = new_key[len("model.") :]
-    elif "base_model.model.model.model." in new_key:
-        new_key = new_key.replace("base_model.model.model.model.", "base_model.model.model.")
-    elif new_key.startswith("base_model.model.model.lm_head."):
+    if new_key.startswith(_CP_WRAPPER_MODULE_LEVEL * 2):
+        new_key = new_key.removeprefix(_CP_WRAPPER_MODULE_LEVEL)
+    elif f"{peft_cp}{_CP_WRAPPER_MODULE_LEVEL}" in new_key:
+        new_key = new_key.replace(f"{peft_cp}{_CP_WRAPPER_MODULE_LEVEL}", peft_cp)
+    elif new_key.startswith(f"{peft_cp}lm_head."):
         # A ``modules_to_save`` lm_head sits ABOVE the backbone — one fewer ``model.`` level
         # than the backbone keys the rule above collapses. A plain key can never spell lm_head
         # at this depth (plain is ``base_model.model.lm_head.``), so the collapse is unambiguous
         # and the normalization stays idempotent.
-        new_key = new_key.replace("base_model.model.model.lm_head.", "base_model.model.lm_head.", 1)
+        new_key = new_key.replace(f"{peft_cp}lm_head.", f"{PEFT_BASE_MODEL_PREFIX}lm_head.", 1)
     return new_key
 
 

@@ -100,7 +100,7 @@ class EPGradSyncMixin:
         ids |= {id(p) for _n, p in self._dp_averaged_named_params() if p.requires_grad}
         return ids
 
-    def _setup_gradient_sync(self) -> None:
+    def _install_gradient_sync_hooks(self) -> None:
         """Register the in-backward hooks, the only sync these FSDP-ignored params get: the router hook on
         the router and replicated submodules, the expert hook on the expert weights."""
         # FSDP reduce-scatters fully replicated experts (ep_group_size==1, not pure ETP), and the deferred

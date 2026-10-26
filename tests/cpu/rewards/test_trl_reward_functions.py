@@ -231,7 +231,10 @@ def test_composer_without_external_terms_builds_no_scorer():
 
 
 def test_composer_construction_refuses_an_ungated_veto_judge_and_an_unscored_term():
-    with pytest.raises(ValueError, match=r"veto judge term\(s\) \['gate'\] gate the objective"):
+    with pytest.raises(
+        ValueError,
+        match=r"\['gate'\] list 'checks' \(a veto judge\).*without a \{source: environment\} term \(add one to keep",
+    ):
         RewardComposer((GATE,))
     with pytest.raises(TypeError, match=r"reward source\(s\) \['local'\] have no external scorer"):
         RewardComposer((EnvironmentTerm(), _LocalTerm(name="local")))

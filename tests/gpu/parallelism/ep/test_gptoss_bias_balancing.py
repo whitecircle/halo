@@ -100,7 +100,7 @@ def check_route_injection(checks, cls, score_fn, device, **attrs):
     layer.balancing_biases = None
     layer.expert_load_counter = None
     # __init__ is bypassed (cls.__new__), so mirror the routing-replay defaults the selection
-    # helpers read (_maybe_replace_selection / capture).
+    # helpers read (_apply_routing_replay / capture).
     layer._forced_topk_indices = None
     layer._forced_cursor = 0
     layer._capture_routing = False

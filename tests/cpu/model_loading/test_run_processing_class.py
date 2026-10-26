@@ -136,6 +136,13 @@ def test_an_unreachable_hub_is_not_read_as_no_processor_config(monkeypatch):
     assert model_setup.load_vlm_processor(_HUB_MODEL, required=False) is None
 
 
+def test_a_video_processor_config_alone_counts_as_a_shipped_processor(tmp_path):
+    """The probe reads the processor files the merge tools copy, the video processor's included."""
+    assert not model_setup._ships_processor_config(str(tmp_path), None)
+    (tmp_path / "video_preprocessor_config.json").write_text("{}")
+    assert model_setup._ships_processor_config(str(tmp_path), None)
+
+
 def test_the_resolved_tokenizer_lands_on_whichever_class_the_run_loaded(tmp_path):
     """Read off the object: a multimodal checkpoint's text run can hold a bare tokenizer."""
     loaded, resolved = word_level_tokenizer(_TOKENIZER_WORDS), word_level_tokenizer(_TOKENIZER_WORDS)

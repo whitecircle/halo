@@ -19,7 +19,7 @@ from src.environments.episode_keys import (
     SOLVE_RATE_KEY,
 )
 from src.environments.episode_scoring import EpisodeGrade
-from src.environments.messages import TRUNCATION_MARKER, Trajectory
+from src.environments.messages import TRUNCATION_MARKER, StepOutcome, Trajectory
 from src.environments.protocols.native_tool_use import NativeToolUseEnvironment
 from src.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from src.environments.sandbox.factory import build_sandbox, warn_if_unisolated
@@ -84,7 +84,7 @@ EVAL_PROTOCOLS: dict[str, dict[str, int]] = {
 DEFAULT_EVAL_PROTOCOL = "harness"
 
 
-def require_eval_protocol_pins(eval_protocol: str) -> dict[str, int]:
+def _require_eval_protocol_pins(eval_protocol: str) -> dict[str, int]:
     """The knobs ``eval_protocol`` pins; an unknown protocol raises."""
     if eval_protocol not in EVAL_PROTOCOLS:
         raise ValueError(f"eval_protocol must be one of {sorted(EVAL_PROTOCOLS)}, got {eval_protocol!r}")
@@ -95,7 +95,7 @@ def without_eval_protocol_pins(config: dict[str, Any], eval_protocol: str, sourc
     """``config`` without the knobs ``eval_protocol`` pins, each dropped one logged. For a contract
     written under another protocol (a training config's env options, an effort profile's budgets):
     its values give way to the pins instead of contradicting them."""
-    pins = require_eval_protocol_pins(eval_protocol)
+    pins = _require_eval_protocol_pins(eval_protocol)
     dropped = sorted(pins.keys() & config.keys())
     if dropped:
         logger.info("eval_protocol %r pins %s; the values %s sets give way", eval_protocol, dropped, source)
@@ -250,7 +250,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         """Each :data:`EVAL_PROTOCOL_KNOB_DEFAULTS` knob under ``eval_protocol``: its pin, else the
         configured value, else the default. A configured value contradicting a pin raises — the run
         would carry the protocol's name without following it."""
-        pins = require_eval_protocol_pins(eval_protocol)
+        pins = _require_eval_protocol_pins(eval_protocol)
         conflicts = {k: v for k, v in configured.items() if v is not None and k in pins and v != pins[k]}
         if conflicts:
             raise ValueError(
@@ -517,19 +517,18 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             language=language,
         )
 
-    def _step_single(
-        self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    def _step_single(self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None) -> StepOutcome:
         """Native tool step, then end the episode once the submission budget is spent or a submission passed every
         hidden test, after which a resubmission could only lose the solve.
         """
-        trajectory, reward, done, truncated, info = super()._step_single(trajectory, action, context)
+        outcome = super()._step_single(trajectory, action, context)
+        info = outcome.trajectory.info
         # A turn that also booked a sandbox fault ends on it, uncompleted, whatever it submitted.
-        spent = self._tool_budget_exhausted(trajectory, SUBMIT_TOOL) is not None
-        if not done and (spent or is_accepted(trajectory.info)) and SANDBOX_FAULT_KEY not in trajectory.info:
-            trajectory.info["completed"] = True
-            done = True
-        return trajectory, reward, done, truncated, info
+        spent = self._tool_budget_exhausted(outcome.trajectory, SUBMIT_TOOL) is not None
+        if not outcome.done and (spent or is_accepted(info)) and SANDBOX_FAULT_KEY not in info:
+            info["completed"] = True
+            return outcome._replace(done=True)
+        return outcome
 
     def _grade_episode(self, trajectory: Trajectory, context: dict[str, Any] | None = None) -> EpisodeGrade:
         """The objective is 1 when the submitted solution passed every hidden test, else 0 (the judge's accept, what

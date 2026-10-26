@@ -17,7 +17,7 @@ TRAINED_COLUMN = "trained"
 
 
 @dataclass(frozen=True)
-class TreeNode:
+class _TreeNode:
     """A run of tokens shared by every path below it: ``length`` tokens of ``path`` from position ``start``."""
 
     parent: int
@@ -42,7 +42,7 @@ def _common_prefix(a: np.ndarray, b: np.ndarray) -> int:
     return int(differs.argmax()) if differs.any() else n
 
 
-def build_trie(paths: list[list[int]], share_limits: list[int], min_shared: int) -> list[TreeNode]:
+def build_trie(paths: list[list[int]], share_limits: list[int], min_shared: int) -> list[_TreeNode]:
     """Depth-first nodes of the trie over ``paths``; a shared span under ``min_shared`` (at least 1)
     tokens is not split off.
 
@@ -56,23 +56,23 @@ def build_trie(paths: list[list[int]], share_limits: list[int], min_shared: int)
         min(_common_prefix(a, b), share_limits[i], share_limits[j])
         for (a, i), (b, j) in pairwise(zip(arrays, order, strict=True))
     ]
-    nodes: list[TreeNode] = []
+    nodes: list[_TreeNode] = []
     pending = [(0, len(order), -1, 0)]  # paths order[lo:hi] share their first `start` tokens, held by `parent`
     while pending:
         lo, hi, parent, start = pending.pop()
         if hi - lo == 1:
-            nodes.append(TreeNode(parent=parent, start=start, path=order[lo], length=len(arrays[lo]) - start))
+            nodes.append(_TreeNode(parent=parent, start=start, path=order[lo], length=len(arrays[lo]) - start))
             continue
         common = min(shared[lo : hi - 1])
         if common - start >= min_shared:
-            nodes.append(TreeNode(parent=parent, start=start, path=order[lo], length=common - start))
+            nodes.append(_TreeNode(parent=parent, start=start, path=order[lo], length=common - start))
             parent, start = len(nodes) - 1, common
         cuts = [lo, *(i + 1 for i in range(lo, hi - 1) if shared[i] <= common), hi]
         pending.extend((a, b, parent, start) for a, b in reversed(list(pairwise(cuts))))
     return nodes
 
 
-def split_to_budget(nodes: list[TreeNode], max_tokens: int) -> tuple[list[list[TreeNode]], int]:
+def split_to_budget(nodes: list[_TreeNode], max_tokens: int) -> tuple[list[list[_TreeNode]], int]:
     """Partition a trie into trees of at most ``max_tokens`` tokens, each repeating the ancestors it needs.
 
     Leaves are taken in order and a tree is closed when the next leaf's unshared tokens would
@@ -80,7 +80,7 @@ def split_to_budget(nodes: list[TreeNode], max_tokens: int) -> tuple[list[list[T
     row is. Returned trees are depth-first with parents re-indexed.
     """
     has_child = {node.parent for node in nodes}
-    trees: list[list[TreeNode]] = []
+    trees: list[list[_TreeNode]] = []
     members: dict[int, int] = {}  # node index in `nodes` -> index in the open tree
     size = dropped = 0
 
@@ -108,7 +108,7 @@ def split_to_budget(nodes: list[TreeNode], max_tokens: int) -> tuple[list[list[T
     return trees, dropped
 
 
-def serialize_tree(nodes: list[TreeNode], paths: list[list[int]], trained: list[list[bool]]) -> dict[str, list]:
+def serialize_tree(nodes: list[_TreeNode], paths: list[list[int]], trained: list[list[bool]]) -> dict[str, list]:
     """The per-token columns of one tree. Only a leaf's tokens are trained; shared tokens never are."""
     has_child = {node.parent for node in nodes}
     depths = resolve_node_depths(node.parent for node in nodes)

@@ -17,6 +17,7 @@ from src.rewards.terms import (
     RewardTerm,
     ScoredTerm,
     component_key,
+    reject_veto_judges,
     scored_metric_key,
     validate_unique_names,
 )
@@ -68,11 +69,9 @@ class RewardComposer:
         ]
         if unscored:
             raise TypeError(f"reward source(s) {sorted(term.source for term in unscored)} have no external scorer")
-        vetoes = [term.name for term in self.external_terms if isinstance(term, JudgeTerm) and term.is_veto]
-        if vetoes and self.environment_term is None:
-            raise ValueError(
-                f"veto judge term(s) {vetoes} gate the objective, which only an environment term prices: add "
-                f"{{source: environment}} to the reward"
+        if self.environment_term is None:
+            reject_veto_judges(
+                self.external_terms, where="a reward without a {source: environment} term (add one to keep the veto)"
             )
         unbound = [
             term.name

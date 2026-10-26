@@ -124,7 +124,7 @@ class TrajectoryTokenizeMixin:
         self._rows_over_cap = 0
         per_trajectory = [
             self._tokenize_trajectory_turns(result)
-            if self._train_on_sampled_tokens
+            if self.async_config.train_on_sampled_tokens
             else single_trajectory_row(self._tokenize_trajectory(result))
             for result in rollout_results
         ]
@@ -138,7 +138,7 @@ class TrajectoryTokenizeMixin:
         self._world_metrics.fraction(
             UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY, untrainable_turns - tagged_rows, untrainable_turns
         )
-        if self._max_train_row_tokens is not None:
+        if self.async_config.max_train_row_tokens is not None:
             trainable_rows = sum(bool(row.completion_mask.any()) for rows in per_trajectory for row in rows)
             self._world_metrics.fraction(
                 "sampling/rows_over_cap_frac", self._rows_over_cap, self._rows_over_cap + trainable_rows
@@ -288,7 +288,7 @@ class TrajectoryTokenizeMixin:
     def _template_kwargs(self, trajectory) -> dict:
         """The chat-template kwargs ``trajectory``'s requests carried (:func:`rollout_template_kwargs`)."""
         return rollout_template_kwargs(
-            self._rollout_template_kwargs,
+            self.async_config.rollout_chat_template_kwargs,
             trajectory.reasoning_effort,
             trajectory.reasoning_budget,
             trajectory.reasoning_budget_soft,
@@ -331,7 +331,8 @@ class TrajectoryTokenizeMixin:
                 f"max_model_len / SGLang context-length), the trainer context, or {suspect} — trajectories are "
                 f"trained in full, never truncated."
             )
-        if self._max_train_row_tokens is not None and row_len > self._max_train_row_tokens:
+        cap = self.async_config.max_train_row_tokens
+        if cap is not None and row_len > cap:
             self._rows_over_cap += 1
             return False
         return True

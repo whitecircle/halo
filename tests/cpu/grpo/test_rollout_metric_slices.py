@@ -29,6 +29,7 @@ def _host():
     host._total_rollouts = 0
     host._total_rollout_latency = 0.0
     host._total_generation_tokens = 0
+    host.async_config = types.SimpleNamespace(truncation_alarm_rate=None)
     return host
 
 

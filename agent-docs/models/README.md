@@ -81,7 +81,7 @@ FP32 on every loader, including the lazy EP loader's `e_score_correction_bias`, 
 biases are FP32 by design.
 
 Configured FP32 parameter masters are the exception. The shared selector in
-`src/model_loading/parallel/fp32_masters.py` (selection, lazy capture, coverage check and eager restore) preserves non-EP weights under `fp32_non_ep_params`
+`src/model_loading/parallel/fp32_masters.py` (selection, coverage check and eager restore) preserves non-EP weights under `fp32_non_ep_params`
 and the EP wrapper's selected router/expert weights under their flags. Eager construction streams
 those checkpoint values back before wrapping; lazy EP construction reads and fuses them at FP32
 directly. Native dense TP rebuilds its existing TP shards at FP32 before the DP wrap, preserving tied

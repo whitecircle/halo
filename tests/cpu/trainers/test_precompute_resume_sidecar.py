@@ -46,6 +46,7 @@ from src.runtime.consensus import RankConsensus
 from src.trainers.checkpointing import CheckpointingMixin
 from src.trainers.preference.trl_preference import TRLPreferenceMixin
 from src.trainers.reference_logps import token_digest as _token_digest
+from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 from tests.common.preference_precompute import (
     BASE,
@@ -699,7 +700,7 @@ def _reference_writer_failure_worker(rank: int, root: str, shared: bool) -> None
             for name in REFERENCE_COLUMNS[kind]:
                 assert torch.equal(column(restored, name), column(prepared, name))
     finally:
-        filesystem.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
 
 
 @pytest.mark.parametrize("shared", [True, False], ids=["shared_fs", "node_local_fs"])

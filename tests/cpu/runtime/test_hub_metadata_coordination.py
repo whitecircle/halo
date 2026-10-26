@@ -22,7 +22,7 @@ import torch.distributed as dist
 
 from src.env import store_timeout
 from src.runtime import consensus, filesystem
-from tests.common.distributed import FakeStore
+from tests.common.distributed import FakeStore, reset_shared_filesystem_consensus
 
 _SHARED_FILESYSTEM_VARS = (
     filesystem._SHARED_FILESYSTEM_VAR,
@@ -115,7 +115,7 @@ def test_a_single_process_is_untouched(monkeypatch):
     """No process group (dataset prep tools, a laptop run): the fetch must run inline, no store."""
     monkeypatch.setattr(dist, "is_available", lambda: True)
     monkeypatch.setattr(dist, "is_initialized", lambda: False)
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
     assert filesystem.hub_metadata_main_first("vlm_probe", lambda: "inline") == "inline"
 
 
@@ -124,7 +124,7 @@ def test_the_scope_is_agreed_before_the_first_coordinated_phase(fake_job, monkey
     be the run's first coordinated phase. The scope comes from the shared-filesystem flags: if a
     per-node override left them un-agreed, this tag's participants split across two scopes and the
     ones whose scope has no main rank wait out the whole store timeout."""
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
     resolved = []
     monkeypatch.setattr(
         filesystem,

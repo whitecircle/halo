@@ -16,7 +16,7 @@ from src.config_validation import require_finite
 from src.environments.environment_base import EnvironmentBase
 from src.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, LAST_TURN_KEY
 from src.environments.episode_scoring import EpisodeGrade
-from src.environments.messages import Message, Trajectory
+from src.environments.messages import Message, StepOutcome, Trajectory
 from src.environments.tool_accounting import (
     MAGNITUDE_WHY,
     initial_tool_counters,
@@ -54,7 +54,7 @@ _ARGUMENT_RE = re.compile(r'(\w+)\s*=\s*(?:"([^"]*?)"|\'([^\']*?)\'|(\{[^}]*\})|
 
 
 @dataclass
-class ReActStep:
+class _ReActStep:
     """Parsed ReAct step from model output."""
 
     thought: str | None = None
@@ -130,9 +130,9 @@ def _parse_action(action_text: str) -> tuple[str | None, dict[str, Any] | None]:
     return None, None
 
 
-def parse_react_output(text: str) -> ReActStep:
+def parse_react_output(text: str) -> _ReActStep:
     """Parse ReAct output: a Thought followed by an Action (function-call/JSON/simple) or a Final Answer."""
-    step = ReActStep()
+    step = _ReActStep()
 
     thought_match = _THOUGHT_RE.search(text)
     if thought_match:
@@ -251,9 +251,7 @@ Always think before acting, and provide a Final Answer when you're done."""
             extra_info={"final_answer": None, **initial_tool_counters(self.tool_budgets)},
         )
 
-    def _step_single(
-        self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    def _step_single(self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None) -> StepOutcome:
         """Process model output in ReAct format (Thought: <reasoning>; Action: <tool_call> OR Final Answer: <answer>)."""
         # A turn the engine cut short is a fragment whatever the parser would salvage from it — the
         # base flags the message untrainable, so an Action executed or a Final Answer graded here would
@@ -261,10 +259,10 @@ Always think before acting, and provide a Final Answer when you're done."""
         ctx = context or {}
         last_turn = bool(ctx.get(LAST_TURN_KEY))
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
-            return self._handle_length_cutoff(trajectory, last_turn=last_turn)
+            return self._recover_length_cutoff(trajectory, last_turn=last_turn)
         # Nothing to parse: not a format failure the hint below corrects, but a stop on nothing.
         if not action.strip():
-            return self._handle_empty_turn(trajectory, last_turn=last_turn)
+            return self._recover_empty_turn(trajectory, last_turn=last_turn)
 
         step = parse_react_output(action)
         reward = 0.0
@@ -276,10 +274,10 @@ Always think before acting, and provide a Final Answer when you're done."""
         if step.has_final_answer:
             trajectory.info[COMPLETED_KEY] = True
             trajectory.info["final_answer"] = step.final_answer
-            return trajectory, reward, True, False, {}
+            return StepOutcome(trajectory=trajectory, reward=reward, done=True, truncated=False, info={})
         if step.has_action:
             delta, info = self._act(trajectory, step)
-            return trajectory, reward + delta, False, False, info
+            return StepOutcome(trajectory=trajectory, reward=reward + delta, done=False, truncated=False, info=info)
 
         hint = (
             "Please provide either:\n"
@@ -288,9 +286,9 @@ Always think before acting, and provide a Final Answer when you're done."""
             "Remember to include a Thought before your action."
         )
         trajectory.add_message(Message.user(hint))
-        return trajectory, reward, False, False, {"no_action": True}
+        return StepOutcome(trajectory=trajectory, reward=reward, done=False, truncated=False, info={"no_action": True})
 
-    def _act(self, trajectory: Trajectory, step: ReActStep) -> tuple[float, dict[str, Any]]:
+    def _act(self, trajectory: Trajectory, step: _ReActStep) -> tuple[float, dict[str, Any]]:
         """Run the step's Action and record its observation: the call's reward delta and the step info."""
         info = {}
         tool = self.registry.get(step.action)

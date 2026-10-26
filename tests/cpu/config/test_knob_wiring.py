@@ -785,9 +785,8 @@ _IS_MASK_CONSUMER_ROOT = "src/trainers/grpo"
 # the YAML surface spells them with. Derived, so a stage added to the mask config is covered here.
 _IS_MASK_SOURCES = {f.name: f"isr_{f.name}" for f in dataclasses.fields(ISMaskConfig)}
 
-# Not an ISMaskConfig field: the circuit breaker reads the mask stages' OUTPUT, so the trainer holds
-# it directly. Named unprefixed, which is only how the config read is spelled (the trainer's own
-# attribute is ``_skip_update_masked_frac``).
+# Not an ISMaskConfig field: the circuit breaker reads the mask stages' OUTPUT, so the trainer reads it
+# off the config directly, unprefixed.
 _MASK_FRACTION_KNOB = "skip_update_masked_frac"
 
 

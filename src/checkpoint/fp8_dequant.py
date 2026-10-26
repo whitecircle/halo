@@ -46,34 +46,6 @@ class DequantRules:
     passthrough_nbytes: Callable[[Any], int] = header_nbytes
 
 
-def run_dequant_conversion(
-    model_id: str,
-    output_dir: str,
-    *,
-    tool: str,
-    rules: Callable[[str], DequantRules],
-    revision: str | None = None,
-    max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
-) -> None:
-    """Stream an fp8 release into its bf16 checkpoint; ``rules`` is called with the resolved source, so
-    rules read off its own config come from there."""
-    source = resolve_checkpoint_source(model_id, revision)
-    destination = os.path.abspath(output_dir)
-
-    input_shards = checkpoint_shard_files(source)
-    reject_in_place_conversion(source, destination)
-
-    conversion = rules(source)
-    output_bytes = _preflight_dequant_shards(source, destination, tool=tool, rules=conversion)
-    logger.info("Validated %d input shards; BF16 output will be %.1f GiB", len(input_shards), output_bytes / 1024**3)
-
-    total_bytes = _stream_dequantized_checkpoint(
-        input_shards, destination, rules=conversion, max_shard_size=max_shard_size
-    )
-    _copy_dequantized_assets(source, destination)
-    logger.info("Conversion complete: %.2f GiB written to %s", total_bytes / 1024**3, destination)
-
-
 def _preflight_dequant_shards(source: str, output_dir: str, *, tool: str, rules: DequantRules) -> int:
     """Header-only validation of every shard before anything is written, so a structural fault fails
     here rather than hours in; returns the output byte count."""
@@ -130,3 +102,31 @@ def _copy_dequantized_assets(source: str, output_dir: str) -> None:
     config.pop("quantization_config", None)
     config["dtype"] = "bfloat16"
     write_config_json(output_dir, config)
+
+
+def run_dequant_conversion(
+    model_id: str,
+    output_dir: str,
+    *,
+    tool: str,
+    rules: Callable[[str], DequantRules],
+    revision: str | None = None,
+    max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
+) -> None:
+    """Stream an fp8 release into its bf16 checkpoint; ``rules`` is called with the resolved source, so
+    rules read off its own config come from there."""
+    source = resolve_checkpoint_source(model_id, revision)
+    destination = os.path.abspath(output_dir)
+
+    input_shards = checkpoint_shard_files(source)
+    reject_in_place_conversion(source, destination)
+
+    conversion = rules(source)
+    output_bytes = _preflight_dequant_shards(source, destination, tool=tool, rules=conversion)
+    logger.info("Validated %d input shards; BF16 output will be %.1f GiB", len(input_shards), output_bytes / 1024**3)
+
+    total_bytes = _stream_dequantized_checkpoint(
+        input_shards, destination, rules=conversion, max_shard_size=max_shard_size
+    )
+    _copy_dequantized_assets(source, destination)
+    logger.info("Conversion complete: %.2f GiB written to %s", total_bytes / 1024**3, destination)

@@ -89,9 +89,9 @@ def test_dtensor_adapter_tensors_are_distributed_in_sorted_key_order(single_rank
     monkeypatch.setattr(
         dtensor,
         "distribute_tensor",
-        lambda tensor, device_mesh, placements: (
+        lambda tensor, device_mesh, placements, **kwargs: (
             issued.append(tensor.flatten()[0].item()),
-            real_distribute(tensor, device_mesh, placements),
+            real_distribute(tensor, device_mesh, placements, **kwargs),
         )[1],
     )
 

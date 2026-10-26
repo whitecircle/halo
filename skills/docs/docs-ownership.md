@@ -52,7 +52,7 @@ changes.
 | `src/distributed/tensor_parallel/`, `src/model_loading/parallel/tp.py` | `agent-docs/parallelism/tensor-parallelism.md` |
 | `src/distributed/pipeline_parallel/` | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `src/model_loading/lazy_safetensors/`, `src/model_loading/checkpoint_keys.py` | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
-| `src/distributed/expert_parallel/lazy_plan.py`, `src/distributed/expert_parallel/expert_fuser.py`, `src/model_loading/parallel/ep.py`, `src/models/gradient_checkpointing.py` | `agent-docs/parallelism/expert-parallelism.md` |
+| `src/distributed/expert_parallel/lazy_plan.py`, `src/distributed/expert_parallel/expert_fuser.py`, `src/model_loading/parallel/ep.py`, `src/model_loading/parallel/lazy_load.py`, `src/models/gradient_checkpointing.py` | `agent-docs/parallelism/expert-parallelism.md` |
 | `src/model_loading/parallel/pp.py` | `agent-docs/parallelism/pipeline-parallelism.md` |
 | `src/distributed/{group_layout,mesh}.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/architecture.md` |
 | `src/subclass_registry.py` | `agent-docs/models/adding-a-model.md`, `agent-docs/reference/architecture.md` |

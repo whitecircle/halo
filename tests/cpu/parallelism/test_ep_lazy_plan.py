@@ -240,13 +240,18 @@ def test_nested_expert_layout_misdetected_as_fused():
 def test_unmapped_fused_experts_fail_loud():
     """A fused checkpoint whose expert keys all miss the model namespace must raise, not train
     freshly-initialized experts."""
+
+    def check(layout, weight_map, *actions):
+        plans = [SimpleNamespace(action=action) for action in actions]
+        _check_fused_experts_mapped(SimpleNamespace(expert_layout=layout, weight_map=weight_map, plans=plans))
+
     wm = _fused_expert_weight_map()
     with pytest.raises(RuntimeError, match="none map"):
-        _check_fused_experts_mapped(ExpertKeyLayout.FUSED, wm, 0)
+        check(ExpertKeyLayout.FUSED, wm, WeightAction.REPLICATE)
     # Anti-vacuity: mapped experts, individual format and expertless maps must all pass.
-    _check_fused_experts_mapped(ExpertKeyLayout.FUSED, wm, 4)
-    _check_fused_experts_mapped(ExpertKeyLayout.PER_EXPERT, _individual_expert_weight_map(), 0)
-    _check_fused_experts_mapped(ExpertKeyLayout.FUSED, {"model.embed_tokens.weight": "s.safetensors"}, 0)
+    check(ExpertKeyLayout.FUSED, wm, WeightAction.REPLICATE, WeightAction.EXPERT_SHARD)
+    check(ExpertKeyLayout.PER_EXPERT, _individual_expert_weight_map())
+    check(ExpertKeyLayout.FUSED, {"model.embed_tokens.weight": "s.safetensors"})
 
 
 def test_load_ep_model_lazy_raises_on_unmapped_fused_experts(monkeypatch):

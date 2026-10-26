@@ -53,14 +53,56 @@ _ATTENTION_TP_STYLES: dict[str, type] = {
 }
 
 
-def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int:
-    """Shard the attention modules of ``model`` over the ``tp`` dim of ``device_mesh`` (1-D, or 2-D with DP);
-    returns how many were parallelized. MoE blocks are never visited."""
-    tp_mesh = tp_submesh(device_mesh)
-    patched = 0
-    per_head_norms: list[nn.Module] = []
+def _find_attention(layer: nn.Module) -> tuple[nn.Module | None, str | None]:
+    """``(attention module, attribute)`` for the first of ``self_attn``/``attention``/``attn`` on ``layer``,
+    else ``(None, None)``."""
+    for name in ("self_attn", "attention", "attn"):
+        if hasattr(layer, name):
+            return getattr(layer, name), name
+    return None, None
 
-    # embed_tokens/lm_head stay replicated: DTensor-sharding them faults cuBLAS under EP+TP.
+
+def _is_mla_attention(attn: nn.Module) -> bool:
+    """An MLA attention (compressed KV) shards by query head through its ``q_b_proj``/``kv_b_proj`` expansions.
+
+    ``is not None``, not ``hasattr``: transformers keeps an unused MLA Q-branch attribute present but None.
+    """
+    return getattr(attn, "q_b_proj", None) is not None or getattr(attn, "kv_b_proj", None) is not None
+
+
+def _parallelize_or_raise(module: nn.Module, tp_mesh: DeviceMesh, plan: dict, what: str) -> None:
+    """``parallelize_module``, with any failure raised as a ``RuntimeError`` naming ``what``."""
+    try:
+        parallelize_module(module, tp_mesh, plan)
+    except Exception as e:
+        raise RuntimeError(f"TP sharding failed for {what}: {e}") from e
+
+    # Plan keys resolve against child MODULES: a parameter-keyed plan silently leaves weights full-size.
+    if not any(isinstance(p, DTensor) for p in module.parameters(recurse=True)):
+        logger.warning(
+            f"TP plan for {what} was a no-op: no parameter became a DTensor. Plan keys must name "
+            f"CHILD MODULES, not parameters (a parameter-keyed plan like {{'weight': ...}} on a leaf "
+            f"module is silently skipped by torch). This module stays REPLICATED — correct numerics, "
+            f"but the promised memory saving does not apply."
+        )
+
+
+def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
+    """The unplanned trainable children of ``attn``: norms applied after a colwise projection (Qwen3 ``q_norm``,
+    LFM2 ``q_layernorm``), whose replicated gradient covers this rank's heads only, as the projection's local
+    output ends the DTensor graph. MLA's norms sit before the colwise expansion, whose backward all-reduces."""
+    if _is_mla_attention(attn):
+        return []
+    return [
+        child
+        for child_name, child in attn.named_children()
+        if child_name not in plan and any(p.requires_grad for p in child.parameters(recurse=True))
+    ]
+
+
+def _tp_decoder_layers(model: nn.Module, cfg, tp_size: int) -> nn.ModuleList:
+    """The decoder layers TP shards, their attention heads checked to divide ``tp_size``. Only these: the
+    embed_tokens/lm_head stay replicated, since DTensor-sharding them faults cuBLAS under EP+TP."""
     underlying = backbone_with_layers(model)
     layers = decoder_layers(underlying) if underlying is not None else None
     if layers is None:
@@ -70,13 +112,21 @@ def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int
             f"TP cannot shard this layout — train it without tensor parallelism, or teach "
             f"backbone_with_layers to reach its decoder layers."
         )
-
-    tp_size = tp_mesh.size()
-    cfg = getattr(model, "config", None)
     first_attn = next((a for a in (_find_attention(layer)[0] for layer in layers) if a is not None), None)
     uses_mla = first_attn is not None and _is_mla_attention(first_attn)
     validate_tp_head_divisibility(cfg.get_text_config() if cfg is not None else None, tp_size, uses_mla=uses_mla)
+    return layers
 
+
+def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int:
+    """Shard the attention modules of ``model`` over the ``tp`` dim of ``device_mesh`` (1-D, or 2-D with DP);
+    returns how many were parallelized. MoE blocks are never visited."""
+    tp_mesh = tp_submesh(device_mesh)
+    tp_size = tp_mesh.size()
+    cfg = getattr(model, "config", None)
+    layers = _tp_decoder_layers(model, cfg, tp_size)
+    patched = 0
+    per_head_norms: list[nn.Module] = []
     unsharded: Counter[str] = Counter()
 
     for layer_idx, layer in enumerate(layers):
@@ -140,21 +190,15 @@ def apply_tp_to_attention_only(model: nn.Module, device_mesh: DeviceMesh) -> int
     return patched
 
 
-def _find_attention(layer: nn.Module) -> tuple[nn.Module | None, str | None]:
-    """``(attention module, attribute)`` for the first of ``self_attn``/``attention``/``attn`` on ``layer``,
-    else ``(None, None)``."""
-    for name in ("self_attn", "attention", "attn"):
-        if hasattr(layer, name):
-            return getattr(layer, name), name
-    return None, None
-
-
-def _is_mla_attention(attn: nn.Module) -> bool:
-    """An MLA attention (compressed KV) shards by query head through its ``q_b_proj``/``kv_b_proj`` expansions.
-
-    ``is not None``, not ``hasattr``: transformers keeps an unused MLA Q-branch attribute present but None.
-    """
-    return getattr(attn, "q_b_proj", None) is not None or getattr(attn, "kv_b_proj", None) is not None
+def _declared_head_counts(text_config, field: str) -> tuple[int, ...]:
+    """Every distinct declared value of ``field`` (each per-layer value of a heterogeneous config, step3p7's 64
+    full / 96 sliding heads), empty when unset: TP must split every layer's heads evenly."""
+    value = get_config_field(text_config, field, per_layer_reduce=frozenset)
+    if value is None:
+        return ()
+    if isinstance(value, frozenset):
+        return tuple(sorted(int(v) for v in value))
+    return (int(value),)
 
 
 def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool | None = None) -> None:
@@ -182,47 +226,6 @@ def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool |
                 f"split individual KV heads (numerically wrong). Reduce tensor_parallel_size or use "
                 f"EP for this model."
             )
-
-
-def _declared_head_counts(text_config, field: str) -> tuple[int, ...]:
-    """Every distinct declared value of ``field`` (each per-layer value of a heterogeneous config, step3p7's 64
-    full / 96 sliding heads), empty when unset: TP must split every layer's heads evenly."""
-    value = get_config_field(text_config, field, per_layer_reduce=frozenset)
-    if value is None:
-        return ()
-    if isinstance(value, frozenset):
-        return tuple(sorted(int(v) for v in value))
-    return (int(value),)
-
-
-def _parallelize_or_raise(module: nn.Module, tp_mesh: DeviceMesh, plan: dict, what: str) -> None:
-    """``parallelize_module``, with any failure raised as a ``RuntimeError`` naming ``what``."""
-    try:
-        parallelize_module(module, tp_mesh, plan)
-    except Exception as e:
-        raise RuntimeError(f"TP sharding failed for {what}: {e}") from e
-
-    # Plan keys resolve against child MODULES: a parameter-keyed plan silently leaves weights full-size.
-    if not any(isinstance(p, DTensor) for p in module.parameters(recurse=True)):
-        logger.warning(
-            f"TP plan for {what} was a no-op: no parameter became a DTensor. Plan keys must name "
-            f"CHILD MODULES, not parameters (a parameter-keyed plan like {{'weight': ...}} on a leaf "
-            f"module is silently skipped by torch). This module stays REPLICATED — correct numerics, "
-            f"but the promised memory saving does not apply."
-        )
-
-
-def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
-    """The unplanned trainable children of ``attn``: norms applied after a colwise projection (Qwen3 ``q_norm``,
-    LFM2 ``q_layernorm``), whose replicated gradient covers this rank's heads only, as the projection's local
-    output ends the DTensor graph. MLA's norms sit before the colwise expansion, whose backward all-reduces."""
-    if _is_mla_attention(attn):
-        return []
-    return [
-        child
-        for child_name, child in attn.named_children()
-        if child_name not in plan and any(p.requires_grad for p in child.parameters(recurse=True))
-    ]
 
 
 def register_mla_rope_grad_reduction(attn: nn.Module, tp_mesh: DeviceMesh, config) -> None:

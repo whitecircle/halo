@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 from safetensors.torch import save_file
 
-FILE_STAGING_SUFFIX = ".tmp"
+_FILE_STAGING_SUFFIX = ".tmp"
 # A complete file held off its published name, as ``.<name>.uncommitted``, until the rest of its checkpoint is
 # on disk.
 WITHHELD_FILE_SUFFIX = ".uncommitted"
@@ -26,7 +26,7 @@ _LINK_COPY_ERRNOS = {errno.EXDEV, errno.EPERM, errno.EACCES, errno.ENOSYS, errno
 
 def create_staged_file(directory: str | Path, filename: str) -> Path:
     """Create an exclusive sibling under the same ``0o666``-and-umask mode as a normal file."""
-    staged = Path(directory) / f".{filename}.{uuid.uuid4().hex}{FILE_STAGING_SUFFIX}"
+    staged = Path(directory) / f".{filename}.{uuid.uuid4().hex}{_FILE_STAGING_SUFFIX}"
     os.close(os.open(staged, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666))
     return staged
 
@@ -34,7 +34,7 @@ def create_staged_file(directory: str | Path, filename: str) -> Path:
 def is_atomic_staging_file(name: str) -> bool:
     """Whether ``name`` is an unpublished stage a crash left: one :func:`create_staged_file` made, or a
     withheld file (:data:`WITHHELD_FILE_SUFFIX`)."""
-    return name.startswith(".") and name.endswith((FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX))
+    return name.startswith(".") and name.endswith((_FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX))
 
 
 def link_or_copy_file(source: str | Path, destination: str | Path) -> None:

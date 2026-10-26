@@ -94,4 +94,4 @@ def _reset_shared_filesystem_consensus():
     yield
     filesystem = sys.modules.get("src.runtime.filesystem")
     if filesystem is not None:
-        filesystem.reset_shared_filesystem_consensus()
+        filesystem._shared_filesystem_consensus = None

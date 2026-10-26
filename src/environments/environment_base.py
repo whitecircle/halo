@@ -19,10 +19,15 @@ from src.environments.episode_keys import (
     SANDBOX_FAULT_KEY,
 )
 from src.environments.episode_scoring import REWARD_PENDING_KEY, EpisodeGrade, EpisodeScoringMixin
-from src.environments.messages import EnvStep, Message, Trajectory, engine_view
+from src.environments.messages import EnvStep, Message, StepOutcome, Trajectory, engine_view
 from src.environments.reasoning_effort import EffortProfilesMixin
 from src.environments.tool_accounting import TOTAL_TOOL_CALLS_KEY, ToolCallAccountingMixin
-from src.environments.turn_recovery import TurnRecoveryMixin
+from src.environments.turn_recovery import (
+    EMPTY_TURNS_KEY,
+    LENGTH_CUTOFF_IN_CALL_TURNS_KEY,
+    LENGTH_CUTOFF_TURNS_KEY,
+    TurnRecoveryMixin,
+)
 from src.inference.response import ENGINE_CUT_FINISH_REASONS
 from src.rewards.samples import CUT_TOOL_CALLS_KEY
 from src.rewards.terms import RewardTerm
@@ -180,9 +185,8 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
             metrics["episode/sandbox_infra_fault"] = 1.0 if fault == SANDBOX_FAULT_INFRA else 0.0
             metrics["episode/sandbox_agent_fault"] = 1.0 if fault == SANDBOX_FAULT_AGENT else 0.0
         # Apart: a termination rate cannot tell a cut-off turn, or one that stopped inside its reasoning, from an answer.
-        metrics["episode/length_cutoff_turns"] = float(trajectory.info.get("length_cutoff_turns", 0))
-        metrics["episode/length_cutoff_in_call_turns"] = float(trajectory.info.get("length_cutoff_in_call_turns", 0))
-        metrics["episode/empty_turns"] = float(trajectory.info.get("empty_turns", 0))
+        for key in (LENGTH_CUTOFF_TURNS_KEY, LENGTH_CUTOFF_IN_CALL_TURNS_KEY, EMPTY_TURNS_KEY):
+            metrics[f"episode/{key}"] = float(trajectory.info.get(key, 0))
         # Turns whose counted reasoning reached their cap, emitted only where the rollout counts reasoning.
         counted = [m for m in trajectory.messages if m.role == "assistant" and m.reasoning_tokens is not None]
         if counted:
@@ -204,9 +208,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
         """Initialize a single episode."""
 
     @abstractmethod
-    def _step_single(
-        self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    def _step_single(self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None) -> StepOutcome:
         """Process a single action in the environment."""
 
     @abstractmethod
@@ -416,6 +418,6 @@ class AsyncEnvironmentBase(EnvironmentBase):
 
     async def _step_single_async(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    ) -> StepOutcome:
         """Async version of step. Override for async I/O."""
         return self._step_single(trajectory, action, context)

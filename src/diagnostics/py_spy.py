@@ -26,7 +26,7 @@ _PGREP_TIMEOUT_S = 5
 
 
 @dataclass(frozen=True)
-class PySpyCapture:
+class _PySpyCapture:
     """One py-spy sweep: its artifact ``directory`` and, by pid, why each failed attach failed."""
 
     directory: Path
@@ -85,7 +85,7 @@ def _run_py_spy_per_pid(
     *,
     timeout: int,
     output_suffix: str,
-) -> PySpyCapture:
+) -> _PySpyCapture:
     """Run ``build_command(pid, target)`` for every pid at once, so all ranks share one window; output
     lands in ``pid<pid><output_suffix>`` and a failed attach writes ``pid<pid>.error`` while the rest run on.
     """
@@ -112,14 +112,14 @@ def _run_py_spy_per_pid(
                 failures[pid] = f"py-spy exited {returncode}: {lines[-1] if lines else '(no output)'}"
     for pid, reason in failures.items():
         (target / f"pid{pid}.error").write_text(f"{reason}\n")
-    return PySpyCapture(target, dict(sorted(failures.items())))
+    return _PySpyCapture(target, dict(sorted(failures.items())))
 
 
 def dump_distributed_stacks(
     output_dir: str | Path = STACK_DUMP_DIR,
     *,
     pids: Iterable[int] | None = None,
-) -> PySpyCapture | None:
+) -> _PySpyCapture | None:
     """Capture a ``py-spy dump`` for every Python rank on this node.
 
     Writes one file per pid into a timestamped sub-directory and returns the capture, or ``None``
@@ -146,7 +146,7 @@ def record_distributed_flamegraph(
     native: bool = False,
     this_rank_only: bool = True,
     pids: Iterable[int] | None = None,
-) -> PySpyCapture | None:
+) -> _PySpyCapture | None:
     """Record a ``py-spy`` CPU flame graph (SVG) for this node's ranks.
 
     Samples over ``duration`` seconds to find CPU-side bottlenecks (dataloader stalls,

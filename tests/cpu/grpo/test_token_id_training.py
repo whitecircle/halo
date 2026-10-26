@@ -78,9 +78,8 @@ def _make_trainer_stub(tok):
         _tokenizer=tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        _rollout_template_kwargs={},
+        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
     )
     # gpt-oss ships model_max_length as the unset sentinel, so _context_limit falls back to the config.
@@ -111,9 +110,8 @@ def test_per_turn_prompt_uses_engine_ids_verbatim():
         _tokenizer=fake_tok,
         _tools_schema=None,
         _rollout_routing_replay=False,
-        _rollout_template_kwargs={},
+        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
     )
     stub.model = types.SimpleNamespace(config=types.SimpleNamespace(max_position_embeddings=131072))
@@ -241,7 +239,7 @@ def test_a_per_turn_row_over_the_train_row_cap_leaves_the_batch():
     traj.add_message(Message.assistant("short", token_ids=[5, 6], prompt_token_ids=[1, 2]))
     traj.add_message(Message.assistant("long", token_ids=[7, 8, 9, 10], prompt_token_ids=[1, 2, 3, 4]))
     stub = _turns_stub()
-    stub._max_train_row_tokens = 6
+    stub.async_config.max_train_row_tokens = 6
     rows = stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
     assert [row.completion_ids.tolist() for row in rows] == [[5, 6]]
     assert stub._rows_over_cap == 1
@@ -253,7 +251,7 @@ def test_every_turn_over_the_cap_trains_as_one_masked_row():
     traj.add_message(Message.user("q"))
     traj.add_message(Message.assistant("long", token_ids=[7, 8, 9, 10], prompt_token_ids=[1, 2, 3, 4]))
     stub = _turns_stub()
-    stub._max_train_row_tokens = 6
+    stub.async_config.max_train_row_tokens = 6
     stub.eos_token_id = 2
     stub.pad_token_id = 0
     stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
@@ -268,9 +266,8 @@ def _turns_stub():
     stub = types.SimpleNamespace(
         _warned_once=set(),
         _rollout_routing_replay=False,
-        _rollout_template_kwargs={},
+        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
     )
     stub._render_messages_to_ids = lambda *a, **k: [1, 2, 3]
@@ -322,9 +319,8 @@ def test_turns_path_records_context_overflow():
     stub = _turns_stub()
     stub._context_limit = lambda: 4  # render=3 prompt tokens + 5 completion ids = 8 > 4
     stub._batch_errors = BatchBuildFence()
-    stub._rollout_template_kwargs = {}
+    stub.async_config = types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None)
     stub._carry_reasoning = False
-    stub._max_train_row_tokens = None
     stub._rows_over_cap = 0
     traj = Trajectory()
     traj.add_message(Message.user("q"))
@@ -342,9 +338,8 @@ def _render_stub(render):
         _rollout_routing_replay=False,
         _rollout_backend="vllm",
         _batch_errors=BatchBuildFence(),
-        _rollout_template_kwargs={},
+        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
         eos_token_id=2,
         pad_token_id=0,

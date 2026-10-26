@@ -142,6 +142,7 @@ class ParallelismConfig:
         self._validate_field_values()
         # Before any rank math, so an unsupported combination is not reported as a divisibility error.
         reject_unsupported_axes(self)
+        self._resolve_nvlink_domain()
         self._resolve_topology()
         reject_invalid_composition(self)
         self._validate_lowp()
@@ -172,7 +173,8 @@ class ParallelismConfig:
                 f"the node width), got {self.max_concurrent_loading}"
             )
 
-    def _resolve_topology(self) -> None:
+    def _resolve_nvlink_domain(self) -> None:
+        """Resolve ``nvlink_domain_size`` (0: ``NVLINK_DOMAIN_SIZE``, else the node) into whole nodes of the world."""
         # First: the domain math below is in whole nodes and would misreport an unequal node size.
         if self.gpus_per_node > 0 and self.world_size % self.gpus_per_node != 0:
             raise ValueError(
@@ -229,6 +231,7 @@ class ParallelismConfig:
                 f"node-local EP/CP group."
             )
 
+    def _resolve_topology(self) -> None:
         # PP carves the world first: every other mode's group math uses stage_world_size, not world_size.
         if self.world_size % self.pp_size != 0:
             raise ValueError(

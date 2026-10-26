@@ -288,7 +288,7 @@ def test_zero_bias_routing_matches_the_stock_qwen3_5_router():
         _biased_topk = EPMoELayerBase._biased_topk
         _balancing_bias = EPMoELayerBase._balancing_bias
 
-        def _maybe_replace_selection(self, indices):
+        def _apply_routing_replay(self, indices):
             return indices
 
     logits, router_weights, router_indices = router(torch.randn(64, config.hidden_size))

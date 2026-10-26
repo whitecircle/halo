@@ -40,9 +40,8 @@ def _stub(tokenizer):
         pad_token_id=tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id,
         _tools_schema=None,  # resolved None → cached_property short-circuits, no env built
         _batch_errors=BatchBuildFence(),
-        _rollout_template_kwargs={},
+        async_config=SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
     )
     stub._tokenizer = tokenizer  # mirror __init__: processing_class may be a Processor
@@ -190,9 +189,8 @@ def _tokenize_with(tok, reasoning_effort):
         pad_token_id=0,
         _tools_schema=None,
         _batch_errors=BatchBuildFence(),
-        _rollout_template_kwargs={},
+        async_config=SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
     )
     stub._tokenizer = tok
@@ -249,6 +247,7 @@ def test_episode_generation_tokens_mean_max_p90():
         for v in vals
     ]
     host = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
+    host.async_config = SimpleNamespace(truncation_alarm_rate=None)
     host._metrics = {"train": defaultdict(list)}
     host._log_rollout_metrics(results, "train", [[] for _ in vals])
     m = host._metrics["train"]

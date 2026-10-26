@@ -26,7 +26,7 @@ from src.model_loading.tokenizer_setup import resolve_peft_processing_class
 logger = logging.getLogger(__name__)
 
 
-class AdapterBaseModel(NamedTuple):
+class _AdapterBaseModel(NamedTuple):
     """The base an adapter applies to, and whether it is a multimodal checkpoint's text-only class."""
 
     model: PreTrainedModel
@@ -50,7 +50,7 @@ def load_base_for_adapter(
     *,
     excuse_task_head: bool,
     log,
-) -> AdapterBaseModel:
+) -> _AdapterBaseModel:
     """The base loaded through the class whose module tree the adapter's keys address.
 
     ``PeftModel.from_pretrained`` only warns when saved keys name no live module, then merges nothing. An
@@ -61,7 +61,7 @@ def load_base_for_adapter(
     base_model = load_base_model(base_model_path, excuse_task_head=excuse_task_head)
     absent = _paths_absent_from(base_model, paths)
     if not absent:
-        return AdapterBaseModel(base_model, text_only=False)
+        return _AdapterBaseModel(base_model, text_only=False)
     # A path both classes carry (a ``modules_to_save`` lm_head) resolves on the wrapper too, so any
     # absence is the text-only hypothesis.
     wrapper = type(base_model).__name__
@@ -77,7 +77,7 @@ def load_base_for_adapter(
         raise ValueError(mismatch) from no_text_only_class
     if not _paths_absent_from(text_only_model, paths):
         log(f"The adapter addresses the text-only class of {wrapper}; merging as {type(text_only_model).__name__}.")
-        return AdapterBaseModel(text_only_model, text_only=True)
+        return _AdapterBaseModel(text_only_model, text_only=True)
     raise ValueError(mismatch)
 
 

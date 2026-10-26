@@ -47,6 +47,7 @@ from tests.common.checkpoint_io import (
     shard_store_context,
     step_on_seeded_data,
 )
+from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import make_parallelism_config
 from tests.common.utils import assert_optimizer_state_bit_exact
@@ -123,7 +124,7 @@ def _worker(rank: int, root: str) -> None:
 
     with open(os.path.join(root, f"result_{rank}.txt"), "w") as fh:
         fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems))
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
 
 
 def _torn_node_worker(rank: int, root: str) -> None:
@@ -152,7 +153,7 @@ def _torn_node_worker(rank: int, root: str) -> None:
         outcome["raised"] = f"setup {type(e).__name__}: {e}"
     with open(os.path.join(root, f"torn_{rank}.json"), "w") as fh:
         json.dump(outcome, fh)
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
 
 
 @pytest.fixture(scope="module")

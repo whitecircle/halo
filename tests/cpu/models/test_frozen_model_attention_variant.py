@@ -57,8 +57,8 @@ class _Finalized(Exception):
 
 
 def _load_policy(config, seam, seen) -> None:
-    def dispatch(source, parallelism_config, model_class, from_pretrained_kwargs, **kwargs):
-        seen["build"] = from_pretrained_kwargs["attn_implementation"]
+    def dispatch(*args, **kwargs):
+        seen["build"] = kwargs["attn_implementation"]
         return MagicMock()
 
     def finalize(model, model_config, **kwargs):

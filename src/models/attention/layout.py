@@ -28,7 +28,7 @@ SCORE_PASSES = 6.0
 INDEX_PASSES = 2.0
 
 
-class AttentionKind(enum.StrEnum):
+class _AttentionKind(enum.StrEnum):
     """How many keys a decoder layer's score matrix spans per token."""
 
     FULL = "full"
@@ -41,21 +41,21 @@ class AttentionKind(enum.StrEnum):
 
 # ``config.layer_types`` entry -> cost kind ("hybrid" is full attention with a convolution branch). An
 # entry outside this table raises rather than costing an unknown mixer as full attention.
-LAYER_TYPE_KINDS: dict[str, AttentionKind] = {
-    "full_attention": AttentionKind.FULL,
-    "hybrid": AttentionKind.FULL,
-    "sliding_attention": AttentionKind.WINDOW,
-    "hybrid_sliding": AttentionKind.WINDOW,
-    "chunked_attention": AttentionKind.CHUNKED,
-    "indexed_attention": AttentionKind.SPARSE,
-    "compressed_sparse_attention": AttentionKind.COMPRESSED,
-    "heavily_compressed_attention": AttentionKind.COMPRESSED,
-    "linear_attention": AttentionKind.NONE,
-    "conv": AttentionKind.NONE,
+LAYER_TYPE_KINDS: dict[str, _AttentionKind] = {
+    "full_attention": _AttentionKind.FULL,
+    "hybrid": _AttentionKind.FULL,
+    "sliding_attention": _AttentionKind.WINDOW,
+    "hybrid_sliding": _AttentionKind.WINDOW,
+    "chunked_attention": _AttentionKind.CHUNKED,
+    "indexed_attention": _AttentionKind.SPARSE,
+    "compressed_sparse_attention": _AttentionKind.COMPRESSED,
+    "heavily_compressed_attention": _AttentionKind.COMPRESSED,
+    "linear_attention": _AttentionKind.NONE,
+    "conv": _AttentionKind.NONE,
 }
 
 # The kinds whose keys a fixed count bounds: the window, the chunk, the sparse top-k.
-_BOUNDED_KINDS = frozenset({AttentionKind.WINDOW, AttentionKind.CHUNKED, AttentionKind.SPARSE})
+_BOUNDED_KINDS = frozenset({_AttentionKind.WINDOW, _AttentionKind.CHUNKED, _AttentionKind.SPARSE})
 
 # The layer types that select their keys through a QK-only indexer bounded by ``index_topk``.
 _INDEXED_LAYER_TYPES = frozenset({"indexed_attention", "compressed_sparse_attention"})
@@ -73,7 +73,7 @@ class LayerAttention:
     compressed layer's local band, and ``index_width`` / ``index_pool`` describe the indexer.
     """
 
-    kind: AttentionKind
+    kind: _AttentionKind
     width: float
     keys: int | None = None
     rate: int = 1
@@ -83,9 +83,9 @@ class LayerAttention:
 
     def score_keys(self, lengths: torch.Tensor) -> torch.Tensor:
         """Keys a token of a document of each length attends through the score matrix."""
-        if self.kind == AttentionKind.NONE:
+        if self.kind == _AttentionKind.NONE:
             return torch.zeros_like(lengths)
-        if self.kind == AttentionKind.FULL:
+        if self.kind == _AttentionKind.FULL:
             return lengths
         if self.kind in _BOUNDED_KINDS:
             return lengths.clamp(max=self.keys)
@@ -146,17 +146,17 @@ class AttentionLayout:
         """``18×full + 18×window(128) @ width 8192`` — the banner form."""
         counts: dict[tuple[str, int | None, int], int] = {}
         for layer in self.layers:
-            key = (layer.kind, layer.keys if layer.kind != AttentionKind.COMPRESSED else None, layer.rate)
+            key = (layer.kind, layer.keys if layer.kind != _AttentionKind.COMPRESSED else None, layer.rate)
             counts[key] = counts.get(key, 0) + 1
         parts = []
         for (kind, keys, rate), count in counts.items():
-            label = "linear" if kind == AttentionKind.NONE else str(kind)
+            label = "linear" if kind == _AttentionKind.NONE else str(kind)
             if kind in _BOUNDED_KINDS:
                 label += f"({keys})"
-            elif kind == AttentionKind.COMPRESSED:
+            elif kind == _AttentionKind.COMPRESSED:
                 label += f"(/{rate})"
             parts.append(f"{count}×{label}")
-        widths = sorted({layer.width for layer in self.layers if layer.kind != AttentionKind.NONE})
+        widths = sorted({layer.width for layer in self.layers if layer.kind != _AttentionKind.NONE})
         if not widths:
             return " + ".join(parts)
         width = f"{widths[0]:.0f}" if len(widths) == 1 else f"{widths[0]:.0f}–{widths[-1]:.0f}"
@@ -225,17 +225,17 @@ def _layer_attention(decoder, layer_type: str, index: int) -> LayerAttention:
             f"{sorted(LAYER_TYPE_KINDS)}"
         )
     width = _score_width(decoder, index)
-    if kind is AttentionKind.NONE:
+    if kind is _AttentionKind.NONE:
         return LayerAttention(kind, 0.0)
-    if kind is AttentionKind.FULL:
+    if kind is _AttentionKind.FULL:
         return LayerAttention(kind, width)
-    if kind is AttentionKind.WINDOW:
+    if kind is _AttentionKind.WINDOW:
         return LayerAttention(kind, width, keys=_positive(decoder, index, "sliding_window", layer_type))
-    if kind is AttentionKind.CHUNKED:
+    if kind is _AttentionKind.CHUNKED:
         return LayerAttention(kind, width, keys=_positive(decoder, index, "attention_chunk_size", layer_type))
     indexed = layer_type in _INDEXED_LAYER_TYPES
     index_width, index_pool = _indexer(decoder, index) if indexed else (0.0, 1)
-    if kind is AttentionKind.SPARSE:
+    if kind is _AttentionKind.SPARSE:
         return LayerAttention(
             kind,
             width,
@@ -359,5 +359,5 @@ def compressed_layer_types(config) -> list[str]:
     pool KV over windows cut at fixed row indices."""
     declared = get_config_field(config, "layer_types") or ()
     return sorted(
-        {layer_type for layer_type in declared if LAYER_TYPE_KINDS.get(layer_type) is AttentionKind.COMPRESSED}
+        {layer_type for layer_type in declared if LAYER_TYPE_KINDS.get(layer_type) is _AttentionKind.COMPRESSED}
     )

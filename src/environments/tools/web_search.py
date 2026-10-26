@@ -16,7 +16,7 @@ from ddgs import DDGS
 from src.env import env_flag, env_str
 
 # Per-request wall-clock cap (seconds) for every HTTP search backend.
-SEARCH_TIMEOUT = 15.0
+_SEARCH_TIMEOUT = 15.0
 # Results a search returns when the call names no count.
 DEFAULT_MAX_RESULTS = 5
 
@@ -44,7 +44,7 @@ async def _async_search_duckduckgo(query: str, max_results: int) -> list[dict[st
 
 
 @dataclass(frozen=True)
-class HttpSearchSpec:
+class _HttpSearchSpec:
     """A keyed JSON search API, shared by the sync and async transports: ``build(query, max_results, key)`` gives the
     httpx request kwargs for the key read from ``env_key``, ``parse(data)`` the ``{"title", "url", "snippet"}`` dicts.
     """
@@ -59,16 +59,16 @@ class HttpSearchSpec:
         return self.build(query, max_results, env_str(self.env_key, ""))
 
 
-def _sync_call(spec: HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
+def _sync_call(spec: _HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
     """Run ``spec`` over a blocking httpx request."""
-    resp = httpx.request(spec.method, spec.url, timeout=SEARCH_TIMEOUT, **spec.request_kwargs(query, max_results))
+    resp = httpx.request(spec.method, spec.url, timeout=_SEARCH_TIMEOUT, **spec.request_kwargs(query, max_results))
     resp.raise_for_status()
     return spec.parse(resp.json())[:max_results]
 
 
-async def _async_call(spec: HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
+async def _async_call(spec: _HttpSearchSpec, query: str, max_results: int) -> list[dict[str, Any]]:
     """Run ``spec`` over an async httpx client."""
-    async with httpx.AsyncClient(timeout=SEARCH_TIMEOUT) as client:
+    async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT) as client:
         resp = await client.request(spec.method, spec.url, **spec.request_kwargs(query, max_results))
         resp.raise_for_status()
         data = resp.json()
@@ -100,7 +100,7 @@ async def _async_search_mock(query: str, max_results: int) -> list[dict[str, Any
 
 
 @dataclass(frozen=True)
-class SearchBackend:
+class _SearchBackend:
     """A selectable search backend: its sync/async entry points and the API-key env var (None = keyless)."""
 
     sync: Callable[..., list[dict[str, Any]]]
@@ -108,15 +108,15 @@ class SearchBackend:
     env_key: str | None = None
 
 
-def _http_backend(spec: HttpSearchSpec) -> SearchBackend:
-    """Bind a :class:`HttpSearchSpec` to the shared sync/async transports."""
-    return SearchBackend(sync=partial(_sync_call, spec), async_=partial(_async_call, spec), env_key=spec.env_key)
+def _http_backend(spec: _HttpSearchSpec) -> _SearchBackend:
+    """Bind a :class:`_HttpSearchSpec` to the shared sync/async transports."""
+    return _SearchBackend(sync=partial(_sync_call, spec), async_=partial(_async_call, spec), env_key=spec.env_key)
 
 
 # Insertion order is the auto-select priority; the keyless last entry always qualifies.
-_BACKENDS: dict[str, SearchBackend] = {
+_BACKENDS: dict[str, _SearchBackend] = {
     "serper": _http_backend(
-        HttpSearchSpec(
+        _HttpSearchSpec(
             method="POST",
             url="https://google.serper.dev/search",
             env_key="SERPER_API_KEY",
@@ -131,7 +131,7 @@ _BACKENDS: dict[str, SearchBackend] = {
         )
     ),
     "brave": _http_backend(
-        HttpSearchSpec(
+        _HttpSearchSpec(
             method="GET",
             url="https://api.search.brave.com/res/v1/web/search",
             env_key="BRAVE_API_KEY",
@@ -146,7 +146,7 @@ _BACKENDS: dict[str, SearchBackend] = {
         )
     ),
     "tavily": _http_backend(
-        HttpSearchSpec(
+        _HttpSearchSpec(
             method="POST",
             url="https://api.tavily.com/search",
             env_key="TAVILY_API_KEY",
@@ -159,16 +159,16 @@ _BACKENDS: dict[str, SearchBackend] = {
             ],
         )
     ),
-    "duckduckgo": SearchBackend(sync=_search_duckduckgo, async_=_async_search_duckduckgo),
+    "duckduckgo": _SearchBackend(sync=_search_duckduckgo, async_=_async_search_duckduckgo),
 }
 
 # Fabricated snippets score ``tool_success_reward`` like a real search, so naming this backend
 # requires the flag below (read per call); tests and smoke runs set it.
-_MOCK_BACKEND = SearchBackend(sync=_search_mock, async_=_async_search_mock)
+_MOCK_BACKEND = _SearchBackend(sync=_search_mock, async_=_async_search_mock)
 _ALLOW_MOCK_SEARCH_FLAG = "HALO_ALLOW_MOCK_SEARCH"
 
 
-def _selectable_backends() -> dict[str, SearchBackend]:
+def _selectable_backends() -> dict[str, _SearchBackend]:
     """The backends a caller may name. The flag is read per call, making it a runtime opt-in that
     does not depend on import order."""
     if env_flag(_ALLOW_MOCK_SEARCH_FLAG):
@@ -193,7 +193,7 @@ def validate_search_backend(backend: str | None) -> None:
         raise ValueError(f"Unknown search backend: {backend}. Available: {list(selectable)}.{hint}")
 
 
-def _resolve_backend(backend: str | None) -> tuple[str, SearchBackend]:
+def _resolve_backend(backend: str | None) -> tuple[str, _SearchBackend]:
     """The backend a search runs on, by name: the named one, else the first in :data:`_BACKENDS` order this process
     can reach (keyless, or its key present)."""
     backend = backend or next(

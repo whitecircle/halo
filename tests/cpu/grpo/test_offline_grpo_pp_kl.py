@@ -94,12 +94,11 @@ def _stub(*, beta, loss_type, pg, min_log_prob, policy, reference) -> types.Simp
     me = types.SimpleNamespace(
         beta=beta,
         loss_type=loss_type,
-        policy_gradient_formulation=pg,
         min_log_prob=min_log_prob,
         max_completion_length=COMPLETION,
         padding_value=PAD,
         parallelism_config=types.SimpleNamespace(is_cp_mode=False),
-        args=types.SimpleNamespace(max_length=MAX_LENGTH),
+        args=types.SimpleNamespace(max_length=MAX_LENGTH, policy_gradient_formulation=pg),
         model=types.SimpleNamespace(training=True),
         ref_model=_FixedLogits(reference),
         _precompute_reference=False,

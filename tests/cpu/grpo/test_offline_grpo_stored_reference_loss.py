@@ -68,7 +68,7 @@ def test_loss_consumes_stored_raw_reference_at_the_live_scheduled_floor(loss_typ
     trainer.ref_model = None
     trainer.beta = 0.2
     trainer.loss_type = loss_type
-    trainer.policy_gradient_formulation = formulation
+    trainer.args = SimpleNamespace(policy_gradient_formulation=formulation)
     trainer.max_completion_length = 4
     trainer._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
     batch = _batch()

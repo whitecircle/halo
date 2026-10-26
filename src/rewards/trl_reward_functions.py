@@ -11,14 +11,14 @@ from src.rewards.samples import samples_from_completions
 from src.rewards.scorers.base import Scorer
 from src.rewards.terms import OnError, RewardTerm, ScoredTerm, reject_veto_judges, scored_metric_key
 
-Grader = Callable[..., Sequence[float | None]]
+_Grader = Callable[..., Sequence[float | None]]
 
 
 class TermRewardFunction:
     """A synchronous TRL reward function over a local grader: ``grader(prompts=…, completions=…, **cols)``
     returns one score in ``[0, 1]`` (or ``None``) per completion, which the term shapes."""
 
-    def __init__(self, term: RewardTerm, grader: Grader):
+    def __init__(self, term: RewardTerm, grader: _Grader):
         self.term = term
         self.grader = grader
         self.__name__ = term.name
@@ -75,7 +75,7 @@ class ScorerRewardFunction:
 
 def build_trl_reward_functions(
     terms: Sequence[RewardTerm],
-    graders: Mapping[type[RewardTerm], Callable[[RewardTerm], Grader]],
+    graders: Mapping[type[RewardTerm], Callable[[RewardTerm], _Grader]],
     *,
     prompt_column: str | None = None,
     reference_column: str | None,

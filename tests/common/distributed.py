@@ -21,6 +21,7 @@ from transformers import AutoConfig, AutoTokenizer
 
 from src.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
 from src.kernels.jit_cache import ensure_fa4_kernel_cache_env
+from src.runtime import filesystem
 from src.runtime.collectives import barrier, broadcast_from_rank0
 from tests.common.scratch import SCRATCH_DIR_TAG
 
@@ -65,6 +66,12 @@ class FakeStore:
 
     def delete_key(self, key):
         return self.kv.pop(key, None) is not None
+
+
+def reset_shared_filesystem_consensus() -> None:
+    """Drop the process's agreed shared-filesystem flags, so they read the environment again as in a fresh
+    process: a run's scope is fixed once, a test varies it."""
+    filesystem._shared_filesystem_consensus = None
 
 
 @contextlib.contextmanager

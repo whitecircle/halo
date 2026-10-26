@@ -29,7 +29,7 @@ EPISODE_TOOL_BUDGETS_KEY = "episode_tool_budgets"
 TOOL_CALL_COUNTS_KEY = "tool_call_counts"
 # The episode's executed and successful calls, and what its successful ones were paid against ``tool_reward_cap``.
 TOTAL_TOOL_CALLS_KEY = "total_tool_calls"
-SUCCESSFUL_TOOL_CALLS_KEY = "successful_tool_calls"
+_SUCCESSFUL_TOOL_CALLS_KEY = "successful_tool_calls"
 TOOL_REWARD_PAID_KEY = "tool_reward_paid"
 # Calls a handler returned to the budget that the accounting has yet to book (:meth:`_refund_tool_call`).
 _REFUNDED_TOOL_CALLS_KEY = "_refunded_tool_calls"
@@ -57,7 +57,7 @@ def initial_tool_counters(budgets: dict[str, int]) -> dict[str, Any]:
     call into, and the episode's copy of the per-tool ``budgets``."""
     return {
         TOTAL_TOOL_CALLS_KEY: 0,
-        SUCCESSFUL_TOOL_CALLS_KEY: 0,
+        _SUCCESSFUL_TOOL_CALLS_KEY: 0,
         TOOL_CALL_COUNTS_KEY: {},
         EPISODE_TOOL_BUDGETS_KEY: dict(budgets),
     }
@@ -187,7 +187,7 @@ class ToolCallAccountingMixin:
             # booking the next successes unpaid books exactly the refunded ones.
             trajectory.info[_REFUNDED_TOOL_CALLS_KEY] = refunded - 1
             return 0.0
-        trajectory.info[SUCCESSFUL_TOOL_CALLS_KEY] += 1
+        trajectory.info[_SUCCESSFUL_TOOL_CALLS_KEY] += 1
         paid = trajectory.info.get(TOOL_REWARD_PAID_KEY, 0.0)
         credit = max(0.0, min(self.tool_success_reward, self.tool_reward_cap - paid))
         trajectory.info[TOOL_REWARD_PAID_KEY] = paid + credit

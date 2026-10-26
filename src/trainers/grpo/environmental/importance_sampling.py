@@ -78,9 +78,8 @@ class ImportanceSamplingMixin:
     def _arm_update_breaker(self) -> None:
         """Take ``skip_update_masked_frac`` and, with it set, attach the hook that acts on the breaker's
         per-round verdict (:meth:`_update_breaker_tripped`)."""
-        self._skip_update_masked_frac = self.async_config.skip_update_masked_frac
         self._breaker_tripped_this_step = False
-        if self._skip_update_masked_frac is not None:
+        if self.async_config.skip_update_masked_frac is not None:
             self.add_callback(_BreakerOptimizerSkipCallback(self))
 
     def _configure_importance_sampling(self) -> None:
@@ -96,8 +95,8 @@ class ImportanceSamplingMixin:
             self.temperature = cfg.rollout_temperature
             self.args.temperature = cfg.rollout_temperature
         # Truncated per-token ratio vs the captured sampling logprobs, so it needs train_on_sampled_tokens.
-        self._is_correction = self._train_on_sampled_tokens and self.vllm_importance_sampling_correction
-        if self.vllm_importance_sampling_correction and not self._train_on_sampled_tokens:
+        self._is_correction = cfg.train_on_sampled_tokens and self.vllm_importance_sampling_correction
+        if self.vllm_importance_sampling_correction and not cfg.train_on_sampled_tokens:
             logger.warning(
                 "vllm_importance_sampling_correction is ON but train_on_sampled_tokens is off, so the "
                 "correction is DISABLED: the ratio needs the sampling log-probs the server returns "
@@ -107,14 +106,13 @@ class ImportanceSamplingMixin:
                 "--return-tokens-as-token-ids), or set the correction to false deliberately."
             )
         reject_unneutralized_forced_closes(self._forced_close_ids, self._is_correction)
-        reject_inert_is_stages(self._is_mask_config, self._is_correction, self._skip_update_masked_frac)
+        reject_inert_is_stages(self._is_mask_config, self._is_correction, cfg.skip_update_masked_frac)
         early_stop = build_early_stop_callback(
             cfg.build_early_stop_config(), gap_key=LOGRATIO_MEAN_KEY, gap_logged=self._is_correction
         )
         if early_stop is not None:
             self.add_callback(early_stop)
-        self._isr_engine_reference = cfg.isr_engine_reference
-        if self._isr_engine_reference:
+        if cfg.isr_engine_reference:
             reject_unsupported_engine_reference(
                 resolve_weight_sync_client(self._rollout_backend), cfg, self._is_correction
             )
@@ -298,7 +296,8 @@ class ImportanceSamplingMixin:
         corrected trajectories or of masked corrected tokens is over the threshold, so the survivors are a
         selection-biased sample that would amplify the drift. On a trip the caller zeroes both advantage sets
         and every optimizer step of the round is skipped; the next sync re-anchors the rollouts."""
-        if self._skip_update_masked_frac is None or mode != "train" or traj_row_ids is None:
+        threshold = self.async_config.skip_update_masked_frac
+        if threshold is None or mode != "train" or traj_row_ids is None:
             return False
         counts = _masked_fraction_counts(importance_sampling_ratio, eff_corrected, traj_row_ids, num_trajectories)
         traj_masked, traj_total, token_masked, token_total = world_sums([count for pair in counts for count in pair])
@@ -306,7 +305,7 @@ class ImportanceSamplingMixin:
         token_frac = token_masked / token_total if token_total else 0.0
         self._metrics[mode]["sampling/is_masked_traj_frac"].append(traj_frac)
         self._metrics[mode]["sampling/is_masked_token_frac"].append(token_frac)
-        skipped = max(traj_frac, token_frac) > self._skip_update_masked_frac
+        skipped = max(traj_frac, token_frac) > threshold
         self._metrics[mode][UPDATE_SKIPPED_KEY].append(float(skipped))
         # The flag stays up for every optimizer step the round feeds and comes down only here.
         self._breaker_tripped_this_step = skipped
@@ -314,7 +313,7 @@ class ImportanceSamplingMixin:
             return False
         logger.warning(
             f"IS trust region: {traj_frac:.0%} of corrected trajectories fully masked, {token_frac:.0%} of "
-            f"corrected tokens masked (> skip_update_masked_frac={self._skip_update_masked_frac}) — zeroing "
+            f"corrected tokens masked (> skip_update_masked_frac={threshold}) — zeroing "
             "this step's policy gradient and skipping its optimizer step; rollouts re-anchor at the next weight sync."
         )
         return True

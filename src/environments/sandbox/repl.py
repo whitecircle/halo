@@ -9,7 +9,7 @@ from src.environments.sandbox.results import SandboxAgentFault, SandboxInfraErro
 # Shared REPL observation for a run that produced no output, so every backend uses the same wording.
 REPL_NO_OUTPUT_MESSAGE = "Code executed successfully (no output)"
 # What the usual fatal signals mean for a contest program, so a crash reads as its cause, not a number.
-SIGNAL_CAUSES: dict[int, str] = {
+_SIGNAL_CAUSES: dict[int, str] = {
     signal.SIGSEGV: "invalid memory access or stack overflow",
     signal.SIGABRT: "aborted: a failed assert, an uncaught exception, or an allocation past the memory limit",
     signal.SIGFPE: "arithmetic error, e.g. integer division by zero",
@@ -18,7 +18,7 @@ SIGNAL_CAUSES: dict[int, str] = {
 }
 # Characters of compiler diagnostics / runtime stderr a REPL reply carries: enough for the first
 # errors of a compile or the frames of a traceback, bounded so the reply leaves room for stdout.
-REPL_STDERR_EXCERPT_CHARS = 2000
+_REPL_STDERR_EXCERPT_CHARS = 2000
 
 
 def repl_timeout_message(timeout: float) -> str:
@@ -35,7 +35,7 @@ def signal_description(returncode: int | None) -> str | None:
         name = signal.Signals(-returncode).name
     except ValueError:
         name = f"signal {-returncode}"
-    cause = SIGNAL_CAUSES.get(-returncode)
+    cause = _SIGNAL_CAUSES.get(-returncode)
     return f"killed by {name} ({cause})" if cause else f"killed by {name}"
 
 
@@ -66,12 +66,12 @@ def format_sandbox_repl_output(result: SandboxResult, timeout: float) -> str:
     if result.error:
         raise SandboxInfraError(f"sandbox backend failure: {result.error}")
     if result.compile_failed:
-        diagnostics = stderr_head(result.stderr, REPL_STDERR_EXCERPT_CHARS)
+        diagnostics = stderr_head(result.stderr, _REPL_STDERR_EXCERPT_CHARS)
         return "Error: compilation failed" + (f"\n{diagnostics}" if diagnostics else "")
 
     stdout = result.stdout.rstrip("\n")
     if result.returncode not in (0, None):
-        stderr = stderr_tail(result.stderr, REPL_STDERR_EXCERPT_CHARS)
+        stderr = stderr_tail(result.stderr, _REPL_STDERR_EXCERPT_CHARS)
         killed = signal_description(result.returncode)
         if killed:
             error = f"{killed}\n{stderr}" if stderr else killed

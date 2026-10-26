@@ -308,7 +308,7 @@ class RoutingReplayMixin:
         )
         reject_unsupported_routing_replay(
             mode,
-            train_on_sampled_tokens=self._train_on_sampled_tokens,
+            train_on_sampled_tokens=self.async_config.train_on_sampled_tokens,
             runs_logprob_recompute=self._runs_logprob_recompute,
         )
         logger.info(f"Routing replay enabled (mode={mode}) over {injector.num_ep_layers} EP MoE layers")

@@ -19,9 +19,8 @@ not parallelized: use PEFT/LoRA or ``precompute_ref_log_probs``. Under PP the tr
 import torch
 from trl import KTOTrainer
 
-from src.data.collators.fixed_shape import pad_to_fixed_length
 from src.data.completion_spans import completion_labels
-from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
+from src.kernels.logprobs import sequence_logprobs
 from src.trainers.ctor_slots import get_ctor_arg
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, row_count_normalizer, rows_with_labels
@@ -108,29 +107,18 @@ class DistributedKTOTrainer(TRLPreferenceMixin, DistributedTrainerMixin, TRLData
         )
 
     def _pp_kto_batch_transform(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
-        """TRL's unpaired-preference collator batch → the pipeline's fixed-shape batch contract.
+        """TRL's unpaired-preference collator batch, already padded to ``args.max_length`` by the pipeline's
+        fixed-shape collator, → the pipeline's batch contract.
 
-        Labels are the completion token ids at their positions (ignore elsewhere) — exactly the
-        positions TRL's shifted ``completion_mask`` scores. Right-pads to ``args.max_length``
-        because the P2P buffer shapes freeze on the first step; ``label`` (a list of bools from
-        the collator) becomes a per-row float tensor so the microbatch split can carry it.
+        Labels are the completion token ids at their positions (ignore elsewhere) — exactly the positions
+        TRL's shifted ``completion_mask`` scores; ``label`` (a list of bools from the collator) becomes a
+        per-row float tensor so the microbatch split can carry it.
         """
         input_ids = batch["input_ids"]
-        attention_mask = batch["attention_mask"]
-        completion_mask = batch["completion_mask"]
-        labels = completion_labels(input_ids, completion_mask)
-        # Over-length is unreachable with TRL's collator; the helper's raise guards a custom one.
-        padded = pad_to_fixed_length(
-            {
-                "input_ids": (input_ids, self._tokenizer.pad_token_id),
-                "attention_mask": (attention_mask, 0),
-                "labels": (labels, LABEL_IGNORE_INDEX),
-            },
-            self.args.max_length,
-            "Truncate in the collator, or raise max_length.",
-        )
         return {
-            **padded,
+            "input_ids": input_ids,
+            "attention_mask": batch["attention_mask"],
+            "labels": completion_labels(input_ids, batch["completion_mask"]),
             "ref_logps": batch["ref_logps"].float(),
             "label": torch.as_tensor(batch["label"], dtype=torch.float32, device=input_ids.device),
         }

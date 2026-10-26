@@ -78,7 +78,7 @@ class MFUMetrics:
 
 
 @dataclass
-class SMFUMetrics:
+class _SMFUMetrics:
     """Sparse MFU over the active FLOPs of :class:`~src.callbacks.model_flops.RankFlopsModel`; equal to MFU
     on a dense model."""
 
@@ -91,7 +91,7 @@ class SMFUMetrics:
 
 
 @dataclass
-class MemoryMetrics:
+class _MemoryMetrics:
     """GPU memory in GiB; ``peak_allocated_gb`` is this step's, ``training_peak_allocated_gb`` the run's."""
 
     allocated_gb: float = 0.0
@@ -209,8 +209,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self.time = StepTimeMetrics()
         self.tps = ThroughputMetrics()
         self.mfu = MFUMetrics()
-        self.smfu = SMFUMetrics()
-        self.memory = MemoryMetrics()
+        self.smfu = _SMFUMetrics()
+        self.memory = _MemoryMetrics()
         self.model_ref = None
         self.training_args = None
         self._run = _RunState(n_warmup_steps)
@@ -269,7 +269,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
             report, self._run.total_active_flops = self._record_utilization(
                 active_per_token, self._run.total_active_flops, smfu_ratio, *step
             )
-            self.smfu = SMFUMetrics(*report)
+            self.smfu = _SMFUMetrics(*report)
             self._record_memory()
         if state.num_input_tokens_seen is not None:
             self._run.step_start_tokens_seen = state.num_input_tokens_seen
@@ -495,7 +495,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         memory = read_cuda_memory()
         if memory is None:
             return
-        self.memory = MemoryMetrics(
+        self.memory = _MemoryMetrics(
             round(memory.allocated, _DISPLAY_DECIMALS),
             round(memory.reserved, _DISPLAY_DECIMALS),
             round(memory.peak_allocated, _DISPLAY_DECIMALS),

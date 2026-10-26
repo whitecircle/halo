@@ -20,7 +20,7 @@ from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.models.moe.family_specs import find_moe_family_spec
-from src.runtime import filesystem
+from tests.common.distributed import reset_shared_filesystem_consensus
 
 
 def _fake_model(model_type):
@@ -59,7 +59,7 @@ class _FakeEPLayer(EPMoELayerBase):
 
 def _non_shared_two_node_fs(monkeypatch, ranks_per_node=8):
     """Non-shared output FS on a 2-node shape (16 ranks / 8 per node), consensus memo cleared."""
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "0")
     monkeypatch.setattr(ep_saving_mod, "get_local_world_size", lambda: ranks_per_node)
 

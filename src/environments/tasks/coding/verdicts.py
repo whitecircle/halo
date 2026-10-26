@@ -19,14 +19,14 @@ from src.environments.sandbox.results import run_reporting_faults
 # every resubmission into a probe of the hidden tests.
 VERDICT_DETAIL_FULL = "full"
 VERDICT_DETAIL_OUTCOME = "outcome"
-VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
+_VERDICT_DETAILS = (VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME)
 
 # The checker's argv contract: the test input, the reference output, the candidate output, in this order.
-CHECKER_FILES = ("input.txt", "correct_output.txt", "solution_output.txt")
+_CHECKER_FILES = ("input.txt", "correct_output.txt", "solution_output.txt")
 # run() cannot pass argv, so a runpy shim supplies the Codeforces checker argv contract.
 _CHECKER_DRIVER = (
     "import runpy, sys\n"
-    f"sys.argv = {['checker.py', *CHECKER_FILES]!r}\n"
+    f"sys.argv = {['checker.py', *_CHECKER_FILES]!r}\n"
     'runpy.run_path("checker.py", run_name="__main__")\n'
 )
 
@@ -137,22 +137,22 @@ def exact_output_match(expected: str, actual: str) -> bool:
 
 
 # A GradingSpec's ``comparison`` (the env's ``output_comparison``) -> the comparator it names.
-OUTPUT_COMPARATORS: dict[str, Callable[[str, str], bool]] = {"exact": exact_output_match, "tokens": compare_tokens}
+_OUTPUT_COMPARATORS: dict[str, Callable[[str, str], bool]] = {"exact": exact_output_match, "tokens": compare_tokens}
 
 
 def require_comparator(comparison: str) -> Callable[[str, str], bool]:
     """The comparator ``comparison`` (the env's ``output_comparison``) names; an unknown name raises."""
-    if comparison not in OUTPUT_COMPARATORS:
+    if comparison not in _OUTPUT_COMPARATORS:
         raise ValueError(
-            f"comparison (output_comparison) must be one of {list(OUTPUT_COMPARATORS)}, got {comparison!r}"
+            f"comparison (output_comparison) must be one of {list(_OUTPUT_COMPARATORS)}, got {comparison!r}"
         )
-    return OUTPUT_COMPARATORS[comparison]
+    return _OUTPUT_COMPARATORS[comparison]
 
 
 def require_verdict_detail(verdict_detail: str) -> str:
-    """``verdict_detail`` when it is one of :data:`VERDICT_DETAILS`; any other value raises."""
-    if verdict_detail not in VERDICT_DETAILS:
-        raise ValueError(f"verdict_detail must be one of {VERDICT_DETAILS}, got {verdict_detail!r}")
+    """``verdict_detail`` when it is one of :data:`_VERDICT_DETAILS`; any other value raises."""
+    if verdict_detail not in _VERDICT_DETAILS:
+        raise ValueError(f"verdict_detail must be one of {_VERDICT_DETAILS}, got {verdict_detail!r}")
     return verdict_detail
 
 
@@ -195,7 +195,7 @@ class CheckerVerdict:
             timeout=self.timeout,
             files={
                 "checker.py": self.checker_code,
-                **dict(zip(CHECKER_FILES, (test_input, expected, actual), strict=True)),
+                **dict(zip(_CHECKER_FILES, (test_input, expected, actual), strict=True)),
             },
         )
         if result.error:

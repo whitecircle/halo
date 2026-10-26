@@ -73,7 +73,7 @@ def multiple_choice_match(predicted: str, expected: str) -> bool:
     return False
 
 
-QA_SEARCH_SYSTEM_PROMPT = (
+_QA_SEARCH_SYSTEM_PROMPT = (
     "You are a research assistant. Use the available tools to find "
     "information and answer the question accurately.\n\n"
     "When you have enough information, provide your final answer "
@@ -104,7 +104,7 @@ def build_qa_search_environment(
         kwargs["requires_answer"] = True
     return NativeToolUseEnvironment(
         tool_registry=registry,
-        system_prompt=system_prompt or QA_SEARCH_SYSTEM_PROMPT,
+        system_prompt=system_prompt or _QA_SEARCH_SYSTEM_PROMPT,
         **kwargs,
     )
 

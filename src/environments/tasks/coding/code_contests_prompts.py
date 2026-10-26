@@ -50,10 +50,10 @@ SYSTEM_PROMPT = (
     "of what you did this turn (your approach and what you tested)."
 )
 # Appended when the run lists several languages: the choice is the model's, per program.
-LANGUAGE_CHOICE_PROMPT = " Choose each program's language with the tool's language argument ({names})."
+_LANGUAGE_CHOICE_PROMPT = " Choose each program's language with the tool's language argument ({names})."
 # Appended when the set mixes interpreted and compiled languages: the grading contract each runs under
 # (``multiplier`` is empty at scale 1, else e.g. ``"2x "``).
-TIME_LIMIT_FLOOR_PROMPT = (
+_TIME_LIMIT_FLOOR_PROMPT = (
     " A {interpreted} solution gets at least {floor:g} s per test; a compiled one runs at {multiplier}the "
     "problem's stated time limit, at most {cap:g} s."
 )
@@ -237,11 +237,11 @@ def default_system_prompt(specs: Sequence[LanguageSpec], test_tool: str, grading
     prompt = SYSTEM_PROMPT.format(language=_language_phrase(specs), test_tool=test_tool)
     if len(specs) < 2:
         return prompt
-    prompt += LANGUAGE_CHOICE_PROMPT.format(names=", ".join(spec.name for spec in specs))
+    prompt += _LANGUAGE_CHOICE_PROMPT.format(names=", ".join(spec.name for spec in specs))
     interpreted = [spec.name for spec in specs if not spec.is_compiled]
     if interpreted and len(interpreted) < len(specs):
         scale = grading.compiled_time_limit_scale
-        prompt += TIME_LIMIT_FLOOR_PROMPT.format(
+        prompt += _TIME_LIMIT_FLOOR_PROMPT.format(
             interpreted=" or ".join(interpreted),
             floor=grading.default_timeout,
             multiplier="" if scale == 1 else f"{scale:g}x ",

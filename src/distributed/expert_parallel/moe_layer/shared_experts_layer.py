@@ -130,7 +130,7 @@ class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
             scores_for_select = scores_for_select.masked_fill(~score_mask.bool(), float("-inf"))
 
         topk_indices = torch.topk(scores_for_select, k=self.top_k, dim=-1, sorted=False)[1]
-        topk_indices = self._maybe_replace_selection(topk_indices)
+        topk_indices = self._apply_routing_replay(topk_indices)
         topk_weights = gate_scores.gather(1, topk_indices)
         if self.norm_topk_prob:
             topk_weights = self._renormalize_topk_weights(topk_weights)

@@ -188,7 +188,7 @@ def test_a_router_master_at_another_dtype_is_a_dtype_delta(monkeypatch, tmp_path
 
 def test_unregistered_gradient_hooks_are_an_order_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", ["gpt_oss"], ["in_backward_grad_sync"])
-    monkeypatch.setattr(EPMoELayerBase, "_setup_gradient_sync", lambda self: None)
+    monkeypatch.setattr(EPMoELayerBase, "_install_gradient_sync_hooks", lambda self: None)
 
     entries = _differences(
         baseline,
@@ -250,10 +250,10 @@ def test_a_saved_router_left_unhooked_is_an_order_delta(monkeypatch, tmp_path):
 
 def test_a_shifted_replay_selection_is_a_routing_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", ["mistral4"], ["routing_replay"])
-    replace = EPMoELayerBase._maybe_replace_selection
+    replace = EPMoELayerBase._apply_routing_replay
     monkeypatch.setattr(
         EPMoELayerBase,
-        "_maybe_replace_selection",
+        "_apply_routing_replay",
         lambda self, indices: (replace(self, indices) + 1) % self.num_experts,
     )
 

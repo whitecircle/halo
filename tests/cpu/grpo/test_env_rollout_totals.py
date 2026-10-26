@@ -27,6 +27,7 @@ class _MetricsHost(rm.RolloutMetricsMixin):
 
     def __init__(self):
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
+        self.async_config = types.SimpleNamespace(truncation_alarm_rate=None)
 
 
 def _episode(latency: float, tokens: int, requests_expired_in_sync: int = 0):

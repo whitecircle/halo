@@ -17,7 +17,7 @@ from transformers import PreTrainedTokenizer
 
 from src.data.completion_spans import PACKED_SPAN_POLICY, build_span_labels, resolve_spans_or_warn
 from src.data.pipeline.chat_render import tokenize_rendered
-from src.data.pipeline.conversation import maybe_parse_json
+from src.data.pipeline.conversation import resolve_json_value
 from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from src.data.pipeline.map_cache_key import carry_cache_key
 from src.data.pipeline.rejected_rows import dataset_total_size, report_rejected_rows
@@ -90,7 +90,7 @@ def build_share_key_map(
     def key_batch(batch: dict[str, list]) -> dict[str, list]:
         return {
             SHARE_KEY_COLUMN: [
-                share_key(maybe_parse_json(conversation), markers, requires)
+                share_key(resolve_json_value(conversation), markers, requires)
                 for conversation in batch[conversation_field]
             ]
         }
@@ -172,7 +172,7 @@ def build_tree_row_processor(
     def process_batch(batch: dict[str, list]) -> dict[str, list]:
         out: dict[str, list] = {column: [] for column in TREE_ROW_FEATURES}
         rows = [{column: values[i] for column, values in batch.items()} for i in range(len(batch[conversation_field]))]
-        keys = [share_key(maybe_parse_json(row[conversation_field]), share_markers, share_requires) for row in rows]
+        keys = [share_key(resolve_json_value(row[conversation_field]), share_markers, share_requires) for row in rows]
         for _, run in groupby(range(len(rows)), key=keys.__getitem__):
             paths = [
                 tokenize_rendered(tokenizer, render(rows[i]), truncation=False, padding=False)["input_ids"]

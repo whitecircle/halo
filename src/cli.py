@@ -16,8 +16,8 @@ import click
 import typer
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SCRIPTS_ROOT = Path("scripts")
-TRAINING_ROOT = SCRIPTS_ROOT / "training"
+_SCRIPTS_ROOT = Path("scripts")
+TRAINING_ROOT = _SCRIPTS_ROOT / "training"
 
 # Excluded from ``halo run``: ``training`` belongs to ``halo launch``, and ``diagrams`` holds
 # doc-asset generators that mostly lack a ``__main__`` guard, so indexing it would surface only the
@@ -58,11 +58,11 @@ def _tool_roots(repo_root: Path) -> tuple[Path, ...]:
     Discovered from the tree, so a new subtree (e.g. ``profiling``) indexes without a code change;
     directories holding no runnable scripts drop out in :func:`_index`.
     """
-    scripts_root = repo_root / SCRIPTS_ROOT
+    scripts_root = repo_root / _SCRIPTS_ROOT
     if not scripts_root.exists():
         return ()
     return tuple(
-        SCRIPTS_ROOT / entry.name
+        _SCRIPTS_ROOT / entry.name
         for entry in sorted(scripts_root.iterdir())
         if entry.is_dir() and entry.name not in _NON_TOOL_DIRS and not entry.name.startswith("_")
     )
@@ -129,7 +129,7 @@ def tool_commands(root: Path | None = None) -> dict[str, Path]:
     """Index the non-training tools (after-training, inference, before-training, environments,
     profiling, ...) from every ``scripts/`` subtree :data:`_NON_TOOL_DIRS` does not exclude."""
     repo_root = root or REPO_ROOT
-    return _index(_tool_roots(repo_root), repo_root, SCRIPTS_ROOT)
+    return _index(_tool_roots(repo_root), repo_root, _SCRIPTS_ROOT)
 
 
 def build_launch_command(

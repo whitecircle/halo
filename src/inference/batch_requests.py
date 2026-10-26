@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
-class RequestTools:
+class _RequestTools:
     """The tool declarations of a batch: one list shared by every message, or one list per message."""
 
     raw: list[dict[str, object]] | list[list[dict[str, object]] | None] | None
@@ -34,7 +34,7 @@ class RequestTools:
 
 
 @dataclass(slots=True)
-class ResumeLoad:
+class _ResumeLoad:
     """A resume store read back: one slot per request (``None`` where nothing replays), the replayed
     indices and the count of lines skipped as unreadable or out of range."""
 
@@ -122,14 +122,14 @@ def _parse_resume_line(line: str) -> tuple[int, OpenAIResponse]:
 def resolve_request_tools(
     tools: list[dict[str, object]] | list[list[dict[str, object]] | None] | None,
     message_count: int,
-) -> RequestTools:
+) -> _RequestTools:
     per_message = _is_per_message_tools(tools)
     if per_message and tools is not None and len(tools) != message_count:
         raise ValueError(
             "If tools is per-message, it must have the same length as messages. "
             f"Got {len(tools)} tools and {message_count} messages."
         )
-    return RequestTools(raw=tools, per_message=per_message)
+    return _RequestTools(raw=tools, per_message=per_message)
 
 
 def resume_store_path(
@@ -138,7 +138,7 @@ def resume_store_path(
     messages: list[str] | list[list[dict]],
     temperature: float | None,
     max_tokens: int,
-    request_tools: RequestTools,
+    request_tools: _RequestTools,
 ) -> str:
     """The resume-store path under the temp dir, keyed by the request identity."""
     hash_content = {
@@ -153,14 +153,14 @@ def resume_store_path(
     return str(Path(tempfile.gettempdir()) / f"openai_requests_{task_hash}.jsonl")
 
 
-def load_resume_records(store_path: str, *, result_count: int) -> ResumeLoad:
+def load_resume_records(store_path: str, *, result_count: int) -> _ResumeLoad:
     results: list[OpenAIResponse | None] = [None] * result_count
     processed_indices: set[int] = set()
     skipped_records = 0
     path = Path(store_path)
 
     if not path.exists():
-        return ResumeLoad(results=results, processed_indices=processed_indices)
+        return _ResumeLoad(results=results, processed_indices=processed_indices)
 
     with path.open("r", encoding="utf-8") as file:
         for line in file:
@@ -177,7 +177,7 @@ def load_resume_records(store_path: str, *, result_count: int) -> ResumeLoad:
             results[index] = response
             processed_indices.add(index)
 
-    return ResumeLoad(
+    return _ResumeLoad(
         results=results,
         processed_indices=processed_indices,
         skipped_records=skipped_records,

@@ -15,8 +15,8 @@ _WITHHOLDABLE_UPSTREAM_ROLES = {"rms_norm": "rms_norm", "swiglu": "glu_mlp", "ge
 
 _RMS_NORM_CASTING_MODES = ("llama", "gemma")
 
-RmsNormKernel = Literal["liger", "native"]
-_RMS_NORM_KERNELS = get_args(RmsNormKernel)
+_RmsNormKernel = Literal["liger", "native"]
+_RMS_NORM_KERNELS = get_args(_RmsNormKernel)
 
 
 @dataclass(frozen=True)
@@ -42,7 +42,7 @@ class LigerFamilySpec:
     # "liger" swaps in LigerRMSNorm; "native" swaps in torch's fused `F.rms_norm` under the same casting
     # mode (offset 0 only), which also serves weightless norms and is several times cheaper to launch and
     # to run.
-    rms_norm_kernel: RmsNormKernel = "liger"
+    rms_norm_kernel: _RmsNormKernel = "liger"
     # Gated norm classes: `norm(x) * weight * act(gate)` over the last dim, served by `fla`'s fused kernel
     # under the same `rms_norm` flag. A grouped gated norm is a different function and must not be listed.
     gated_rms_norm: tuple[str, ...] = ()

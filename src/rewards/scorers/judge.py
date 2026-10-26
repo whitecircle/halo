@@ -3,7 +3,6 @@ and answers with one JSON verdict — integer scores per requirement, or per che
 and the lines of the policy's actions that show it."""
 
 import json
-import math
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ from typing import Any
 
 from openai import AsyncOpenAI
 
+from src.config_validation import is_finite_number
 from src.env import env_str
 from src.inference.endpoints import EXTERNAL_API_KEY_CHAIN, resolve_external_api_key
 from src.inference.openai_client import build_openai_client, chat_completion
@@ -40,7 +40,7 @@ SYSTEM_PROMPT = (
 # A quote longer than this is a copy of the response, not evidence of one span in it.
 MAX_EVIDENCE_CHARS = 400
 # How much of a reply an error result quotes.
-REPLY_EXCERPT_CHARS = 200
+_REPLY_EXCERPT_CHARS = 200
 
 # The lines a fired check may quote: one found among them supports it. A judge misquotes a line of a long program
 # about one time in four, and a second and third line make losing a true flag to a slip rare.
@@ -48,8 +48,8 @@ MAX_EVIDENCE_QUOTES = 3
 # A judge copying a line out of a long program slips a word now and then (a synonym, a capital, a word dropped); a
 # quote is still evidence when all but this share of its words — one word at least — run in order at one place in
 # the actions, case aside. A quote shorter than the minimum must match whole.
-EVIDENCE_SLIP_SHARE = 0.2
-EVIDENCE_MIN_SLIP_WORDS = 4
+_EVIDENCE_SLIP_SHARE = 0.2
+_EVIDENCE_MIN_SLIP_WORDS = 4
 
 _WHITESPACE = re.compile(r"\s+")
 _JSON_OBJECT = re.compile(r"\{.*\}", re.DOTALL)
@@ -219,7 +219,7 @@ def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
             except ValueError:
                 return None
         # JSON admits NaN and Infinity, which a clamp reads as full credit.
-        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        if not is_finite_number(value):
             return None
         parsed[requirement.name] = float(value)
     return Verdict(parsed, {}, rationale)
@@ -227,7 +227,7 @@ def parse_verdict(content: str, term: JudgeTerm) -> Verdict | None:
 
 def evidence_supported(evidence: str, text: str) -> bool:
     """Whether ``evidence`` is a span of ``text``, both read as the prompt shows them (:func:`escape_tags`), whitespace
-    folded since a model reflows what it quotes, case aside with a slipped word or so (:data:`EVIDENCE_SLIP_SHARE`),
+    folded since a model reflows what it quotes, case aside with a slipped word or so (:data:`_EVIDENCE_SLIP_SHARE`),
     and short enough to be a span rather than a copy of the text.
     """
     quote = _WHITESPACE.sub(" ", escape_tags(evidence)).strip()
@@ -237,7 +237,7 @@ def evidence_supported(evidence: str, text: str) -> bool:
     if quote in flat:
         return True
     words, haystack = quote.lower().split(" "), flat.lower().split(" ")
-    if len(words) < EVIDENCE_MIN_SLIP_WORDS:
+    if len(words) < _EVIDENCE_MIN_SLIP_WORDS:
         return False
     anchor = SequenceMatcher(None, haystack, words, autojunk=False).find_longest_match(0, len(haystack), 0, len(words))
     if not anchor.size:
@@ -249,7 +249,7 @@ def evidence_supported(evidence: str, text: str) -> bool:
     blocks = [
         block for block in SequenceMatcher(None, window, words, autojunk=False).get_matching_blocks() if block.size
     ]
-    slips = max(1, int(EVIDENCE_SLIP_SHARE * len(words)))
+    slips = max(1, int(_EVIDENCE_SLIP_SHARE * len(words)))
     # The matched words must also sit together, and a slip falls inside the quote: the same words strewn among
     # others are not the line quoted, and words added at either end may be the reasoning's, not the action's.
     spread = blocks[-1].a + blocks[-1].size - blocks[0].a
@@ -335,7 +335,7 @@ class GenerativeJudge(Scorer):
         content = choice.message.content or ""
         verdict = parse_verdict(content, term)
         if verdict is None:
-            excerpt = content[:REPLY_EXCERPT_CHARS]
+            excerpt = content[:_REPLY_EXCERPT_CHARS]
             return ScoreResult(
                 None, error=f"unparseable judge reply (finish_reason={get_finish_reason(choice)!r}): {excerpt!r}"
             )

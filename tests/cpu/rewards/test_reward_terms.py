@@ -111,7 +111,7 @@ def test_price_is_weight_times_shaped_score():
 
 @pytest.mark.parametrize("score", [-0.1, 1.5, float("nan"), True, "0.5"])
 def test_scores_outside_the_unit_interval_are_refused(score):
-    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+    with pytest.raises(ValueError, match=r"score must be (in \[0, 1\]|a finite number), got"):
         EnvironmentTerm().shape(score)
 
 

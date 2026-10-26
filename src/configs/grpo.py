@@ -7,7 +7,7 @@ from typing import ClassVar, Literal, get_args
 from src.config_validation import ValidatedConfig, present, require_finite, require_int
 
 # The RLRR shaping modes: the annotation gates YAML/CLI and RLRRConfig validates against it.
-RLRRMode = Literal["hrr", "prr"]
+_RLRRMode = Literal["hrr", "prr"]
 
 
 def rlrr_arg_name(config_field: str) -> str:
@@ -45,7 +45,7 @@ class RLRRConfig:
     declaration :class:`RLRRArguments` derives its ``rlrr_*`` fields from, help included. Messages name the YAML
     spelling, since the script arguments build one at parse time."""
 
-    mode: RLRRMode = field(
+    mode: _RLRRMode = field(
         default="hrr",
         metadata={"help": "RLRR mode: 'hrr' (hybrid rank correction, Eq. 3) or 'prr' (pure relative, Eq. 4)."},
     )
@@ -77,8 +77,8 @@ class RLRRConfig:
     )
 
     def __post_init__(self) -> None:
-        if self.mode not in get_args(RLRRMode):
-            raise ValueError(f"{rlrr_arg_name('mode')} must be one of {get_args(RLRRMode)}, got {self.mode!r}")
+        if self.mode not in get_args(_RLRRMode):
+            raise ValueError(f"{rlrr_arg_name('mode')} must be one of {get_args(_RLRRMode)}, got {self.mode!r}")
         # Both divide inside the shaping (Eq. 3 / Eq. 6): zero is a ZeroDivisionError deep in the advantage
         # pass, a negative one inverts the ranking, an infinite λ silently disables the length tie-break.
         require_finite(

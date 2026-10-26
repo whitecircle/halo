@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """
 Tests for dataset processing fingerprinting utilities:
-function_cache_id(), kwargs_fingerprint(), maybe_parse_json(),
+function_cache_id(), kwargs_fingerprint(), resolve_json_value(),
 tools_field threading, and cache-key invalidation.
 
 Run: python tests/cpu/data/test_processing_utils.py
@@ -13,7 +13,7 @@ import json
 import pytest
 
 from src.data.pipeline import vlm_rows
-from src.data.pipeline.conversation import maybe_parse_json
+from src.data.pipeline.conversation import resolve_json_value
 from src.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
 from src.data.pipeline.preferences import render_preference_row
 from src.data.pipeline.text_rows import build_chat_row_processor, prepare_generative_row, render_row_conversation
@@ -193,27 +193,27 @@ def test_kwargs_fingerprint_sorted_keys():
     assert fp1 == fp2, f"Different key orders should produce same fingerprint: '{fp1}' vs '{fp2}'"
 
 
-# maybe_parse_json tests
+# resolve_json_value tests
 
 
-def test_maybe_parse_json_passthrough_list():
+def test_resolve_json_value_passthrough_list():
     """Already-parsed list values should be returned as-is."""
     value = [{"role": "user", "content": "hi"}]
-    assert maybe_parse_json(value) is value
+    assert resolve_json_value(value) is value
 
 
-def test_maybe_parse_json_passes_through_invalid_string():
+def test_resolve_json_value_passes_through_invalid_string():
     """A non-JSON string is returned unchanged (the documented fallback): a mis-specified
     conversation_field then surfaces as a clear chat-template error downstream instead of an opaque
     JSONDecodeError deep inside a multiprocess map worker. Valid JSON still parses."""
-    assert maybe_parse_json("{not valid json") == "{not valid json"
-    assert maybe_parse_json("plain text") == "plain text"
-    assert maybe_parse_json("") == ""
+    assert resolve_json_value("{not valid json") == "{not valid json"
+    assert resolve_json_value("plain text") == "plain text"
+    assert resolve_json_value("") == ""
     # Valid JSON strings still decode to Python objects...
-    assert maybe_parse_json('{"role": "user"}') == {"role": "user"}
-    assert maybe_parse_json("[1, 2]") == [1, 2]
+    assert resolve_json_value('{"role": "user"}') == {"role": "user"}
+    assert resolve_json_value("[1, 2]") == [1, 2]
     # ...and non-string values pass through unchanged.
-    assert maybe_parse_json([{"role": "user"}]) == [{"role": "user"}]
+    assert resolve_json_value([{"role": "user"}]) == [{"role": "user"}]
 
 
 # tools_field threading tests (render_row_conversation + processor)

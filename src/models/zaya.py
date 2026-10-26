@@ -15,6 +15,7 @@ from src.kernels.histogram import accumulate_bincount
 from src.models.attention.packed_position_ids import install_packed_position_ids_injection
 from src.models.attention.selection import is_flash_attn_implementation
 from src.models.gradient_checkpointing import counts_toward_expert_load
+from src.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR
 from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -80,7 +81,7 @@ def patch_zaya_gradient_checkpointing_refusal() -> None:
 def patch_zaya_fp32_interlayer_residual() -> None:
     """Declare on the decoder-layer class that Zaya carries an fp32 residual across FSDP layers, so the
     FSDP2 wrap leaves ``cast_forward_inputs`` off (the bf16 cast breaks non-reentrant GC recompute)."""
-    zaya_modeling.ZayaDecoderLayer._fp32_interlayer_residual = True
+    setattr(zaya_modeling.ZayaDecoderLayer, FP32_INTERLAYER_RESIDUAL_ATTR, True)
 
 
 def patch_zaya_flash_packed_position_ids() -> None:

@@ -65,15 +65,6 @@ def fp32_master_param_keys(
     )
 
 
-def capture_fp32_masters(
-    model: nn.Module, ep_config: EPConfig | None, *, keep_non_ep: bool, strict: bool
-) -> tuple[frozenset[str], dict[str, torch.Tensor] | None]:
-    """A lazy load's masters, and under ``strict`` (a resume) the identity-keyed state their coverage check
-    groups tied aliases by, read on the shell before a fusion replaces parameters."""
-    masters = fp32_master_param_keys(model, ep_config, keep_non_ep=keep_non_ep)
-    return masters, model.state_dict(keep_vars=True) if strict else None
-
-
 def verify_fp32_master_coverage(
     state: dict[str, torch.Tensor], masters: frozenset[str], loaded: Iterable[str], *, source: str
 ) -> None:

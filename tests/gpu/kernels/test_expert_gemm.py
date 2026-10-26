@@ -8,7 +8,7 @@ Validates:
   (the native DeepGEMM kernel is opt-in and net-slower than bf16, so never auto-selected), producing
   the expected block-scaled error vs bf16 with finite grads flowing to the bf16 masters.
 
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_grouped_gemm.py
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_expert_gemm.py
 """
 
 import torch

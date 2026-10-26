@@ -136,7 +136,9 @@ def test_the_leaderboard_pins_hold_at_every_effort_level():
 
 def test_a_pinned_profile_key_is_still_validated():
     """The pins supersede a profile's budgets; they do not excuse an invalid one."""
-    with pytest.raises(ValueError, match="max_submissions for effort 'high' must be >= 1"):
+    with pytest.raises(
+        ValueError, match=r"reasoning_effort_profiles\['high'\]: max_submissions must be an integer >= 1"
+    ):
         _env(eval_protocol="leaderboard", reasoning_effort_profiles={"high": {"max_submissions": 0}})
 
 

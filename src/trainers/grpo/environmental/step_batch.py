@@ -159,10 +159,12 @@ class StepBatchMixin:
         # After the fence and ahead of every collective: the re-score never raises, but it must not sit between
         # a rank's collectives. Train mode only: eval runs the ratio and mask stages on the trainer's log-probs.
         engine_logps = None
-        if self._is_correction and self._isr_engine_reference and mode == "train":
+        if self._is_correction and self.async_config.isr_engine_reference and mode == "train":
             engine_logps = self._rescore_rows_on_engine(rows, turns_per_traj)
         num_dummy_rows = self._pad_rows_across_ranks(rows, engine_logps, device)
-        batch_rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, self._train_on_sampled_tokens)
+        batch_rows = BatchRows(
+            rollout_results, turns_per_traj, num_dummy_rows, self.async_config.train_on_sampled_tokens
+        )
         step = self._stack_rows(rows, device)
         rollout_routing_masks = self._assemble_rollout_routing(rows, step, device, mode)
 
@@ -234,7 +236,7 @@ class StepBatchMixin:
         world's largest row count, rounded up to a multiple of ``steps_per_generation``, and return how many: the
         per-turn split gives each rank a variable row count, unequal forwards deadlock, and TRL drops a remainder."""
         num_dummy_rows = 0
-        if self._train_on_sampled_tokens:
+        if self.async_config.train_on_sampled_tokens:
             global_rows = torch.tensor([len(rows)], device=device)
             if is_multi_rank_run():
                 dist.all_reduce(global_rows, op=dist.ReduceOp.MAX)

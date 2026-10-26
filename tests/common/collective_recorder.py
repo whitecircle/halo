@@ -36,8 +36,7 @@ import torch.distributed._functional_collectives as funcol
 from torch.distributed import device_mesh
 from torch.distributed import distributed_c10d as c10d
 
-from src.runtime.filesystem import reset_shared_filesystem_consensus
-from tests.common.distributed import fake_process_group
+from tests.common.distributed import fake_process_group, reset_shared_filesystem_consensus
 
 _WORLD = "world"
 # The ``torch.distributed`` queries and process-group lifecycle calls, which issue no collective. A

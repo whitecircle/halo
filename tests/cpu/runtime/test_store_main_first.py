@@ -28,7 +28,7 @@ import torch.distributed as dist
 from src.env import DEFAULT_STORE_TIMEOUT_HOURS, store_timeout
 from src.runtime import consensus, filesystem
 from src.runtime.filesystem import fs_aware_main_first
-from tests.common.distributed import FakeStore
+from tests.common.distributed import FakeStore, reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -124,7 +124,7 @@ def _split_fs_flag_worker(rank: int, tmp_dir: str) -> None:
         with open(os.path.join(tmp_dir, f"fs_{rank}.txt"), "w") as fh:
             fh.write(repr(filesystem.is_shared_filesystem()))
     finally:
-        filesystem.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
 
 
 def _split_side_fs_flags_worker(rank: int, tmp_dir: str) -> None:
@@ -139,7 +139,7 @@ def _split_side_fs_flags_worker(rank: int, tmp_dir: str) -> None:
         with open(os.path.join(tmp_dir, f"sides_{rank}.txt"), "w") as fh:
             fh.write(f"{filesystem.is_input_shared_filesystem()},{filesystem.is_output_shared_filesystem()}")
     finally:
-        filesystem.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
 
 
 def test_store_main_first_orders_and_releases(tmp_path):
@@ -230,7 +230,7 @@ def fake_world(monkeypatch):
     monkeypatch.setattr(consensus.c10d, "_get_default_store", lambda: store)
     monkeypatch.setattr(filesystem, "get_global_world_size", lambda: 2)
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
     return store
 
 

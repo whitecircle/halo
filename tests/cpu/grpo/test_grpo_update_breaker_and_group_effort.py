@@ -66,7 +66,7 @@ def _skip_hook(host):
 def _breaker_host(threshold):
     """Minimal stand-in exposing exactly what ``_update_breaker_tripped`` reads."""
     host = types.SimpleNamespace(
-        _skip_update_masked_frac=threshold,
+        async_config=types.SimpleNamespace(skip_update_masked_frac=threshold),
         _breaker_tripped_this_step=False,
         accelerator=types.SimpleNamespace(gather=lambda x: x),  # single-process: identity
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
@@ -219,7 +219,7 @@ def test_the_optimizer_skip_hook_is_attached_only_behind_the_breaker_knob():
     assert _armed(None).callbacks == []
     host = _armed(0.3)
     (hook,) = host.callbacks
-    assert host._skip_update_masked_frac == 0.3 and host._breaker_tripped_this_step is False
+    assert host._breaker_tripped_this_step is False
     calls = []
     host.optimizer = types.SimpleNamespace(zero_grad=lambda set_to_none: calls.append(set_to_none))
     hook.on_pre_optimizer_step(None, None, None)
@@ -343,7 +343,7 @@ def test_the_token_mass_balance_leaves_a_negative_only_row_raw_and_records_the_t
         balance_token_mass=True,
         save_completions=True,
     )
-    host._train_on_sampled_tokens = True
+    host.async_config.train_on_sampled_tokens = True
     host._tokenize_step_rows = lambda results: [[solve], [failure, cut]]
     batch = build(host, [episode(1.0), episode(0.0)])
     assert batch["advantages"].tolist() == pytest.approx([0.5, -0.25, -0.5])

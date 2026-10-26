@@ -13,7 +13,7 @@ from src.rewards.terms import ScoredTerm, metric_key
 logger = logging.getLogger(__name__)
 
 # The sample a scorer's launch probe grades: tiny, so the probe costs nothing, yet in the run's exact shape.
-PROBE_SAMPLE = ScoringSample(
+_PROBE_SAMPLE = ScoringSample(
     prompt=[{"role": "user", "content": "Reply with the single word: ready"}],
     completion=[{"role": "assistant", "content": "ready"}],
     final_answer="ready",
@@ -79,7 +79,7 @@ class Scorer(ABC):
         Ray actor run on different loops, and a client's pool binds to the loop it was built on; a verdict
         the scorer never reached raises."""
         try:
-            result = await self.score_one(PROBE_SAMPLE)
+            result = await self.score_one(_PROBE_SAMPLE)
         finally:
             await self.aclose()
         if result.score is None:

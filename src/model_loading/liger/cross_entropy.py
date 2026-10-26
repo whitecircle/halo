@@ -15,7 +15,7 @@ from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutpu
 from transformers.loss import loss_utils
 
 from src.models.config_access import get_config_field
-from src.models.head_transform import resolve_head_transform_spec
+from src.models.head_transform import HeadTransform, resolve_head_transform_spec
 
 # Captured before any patch so the CPU / unsupported-kwarg fallback below cannot recurse.
 _TORCH_CROSS_ENTROPY = F.cross_entropy
@@ -95,6 +95,75 @@ def patch_loss_utils_cross_entropy() -> None:
     loss_utils.nn = _LOSS_UTILS_NN
 
 
+def _resolve_fused_scoring(model: nn.Module, skip_logits: bool | None, has_labels: bool) -> tuple[bool, HeadTransform]:
+    """Whether a forward scores through the fused loss (``skip_logits``; unset, a training forward with labels does),
+    and the family's head transform. Checked before the backbone runs, so a forward that cannot score is refused
+    without running it."""
+    if skip_logits and not has_labels:
+        raise ValueError("skip_logits is True, but labels and shift_labels are None")
+    if skip_logits is None:
+        skip_logits = model.training and has_labels
+    transform = resolve_head_transform_spec(type(model)).transform(model.config)
+    if skip_logits and (transform.softcap is not None or transform.vocab_size is not None):
+        raise ValueError(
+            f"Liger fused_linear_cross_entropy cannot reproduce the head of {type(model).__name__} "
+            f"({transform}): the fused loss contracts the hidden states with lm_head.weight directly, "
+            f"so a softcap or a vocabulary cut would be dropped. Set fused_linear_cross_entropy: false "
+            f"in liger_kernel_config."
+        )
+    return skip_logits, transform
+
+
+def _resolve_router_logits_flag(model: nn.Module, explicit: bool | None, router_aux_loss_in_head: bool) -> bool | None:
+    """The ``output_router_logits`` to forward to the backbone as the family's own head forwards it: an explicit
+    value as given (a caller's False over a config True included), True where only the config asks, else ``None``
+    (the backbone resolves an omitted flag from the config)."""
+    requested = explicit if explicit is not None else get_config_field(model.config, "output_router_logits", False)
+    if requested and router_aux_loss_in_head:
+        raise ValueError(
+            f"Liger fused_linear_cross_entropy on {type(model).__name__} requires "
+            f"output_router_logits=False: the fused loss replaces the lm_head projection the "
+            f"family's own head runs before assembling a router aux loss, so nothing would add "
+            f"that term to the objective. Use moe_balancing: bias_update (or none), or set "
+            f"fused_linear_cross_entropy: false in liger_kernel_config."
+        )
+    if explicit is not None:
+        return explicit
+    return True if requested else None
+
+
+def _fused_causal_lm_loss(
+    model: nn.Module, transform, hidden_states: torch.Tensor, labels, shift_labels, kwargs: dict
+) -> tuple[torch.Tensor, torch.Tensor | None]:
+    """The fused loss and token accuracy over the kept hidden states, the logit scale folded onto them."""
+    if getattr(model.lm_head, "bias", None) is not None:
+        raise ValueError(
+            f"Liger fused_linear_cross_entropy computes logits from lm_head.weight alone, but "
+            f"{type(model).__name__} carries an lm_head bias — the fused loss would silently "
+            f"differ from the unfused one. Set fused_linear_cross_entropy: false for this "
+            f"checkpoint."
+        )
+    # LigerForCausalLMLoss, not the bare loss module: it applies the shift, the
+    # `num_items_in_batch` normalisation that matches transformers' ForCausalLMLoss (a mean
+    # reduction would normalise per-rank, scaling the loss by world_size), and the token
+    # accuracy TRL reads whenever use_liger_kernel is on.
+    fused_hidden_states = transform.scale_hidden(hidden_states)
+    if transform.logit_scale is not None:
+        fused_hidden_states = fused_hidden_states * transform.logit_scale
+    result = LigerForCausalLMLoss(
+        hidden_states=fused_hidden_states,
+        lm_head_weight=model.lm_head.weight,
+        labels=labels,
+        shift_labels=shift_labels,
+        # Read off the head, not the config: a composite wrapper's `config.hidden_size` is
+        # the wrapper's, and the fused loss reshapes against the projection's own width.
+        hidden_size=model.lm_head.weight.shape[-1],
+        **kwargs,
+    )
+    loss, _, token_accuracy, _ = unpack_cross_entropy_result(result)
+    return loss, token_accuracy
+
+
 def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
     """A fused-loss ``forward`` for one family, applying the head transform its ``HeadTransformSpec`` declares.
 
@@ -127,38 +196,12 @@ def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
         # parameter on the forward the model runs, and declaring it would report that a family whose own
         # head lacks it honors the flag, moving its router balancing off `bias_update`.
         explicit_router_logits = kwargs.pop("output_router_logits", None)
-
-        # Checked before the backbone runs, so a forward that cannot score is refused without running it.
-        if skip_logits and labels is None and shift_labels is None:
-            raise ValueError("skip_logits is True, but labels and shift_labels are None")
-        if skip_logits is None:
-            skip_logits = self.training and (labels is not None or shift_labels is not None)
-        transform = resolve_head_transform_spec(type(self)).transform(self.config)
-        if skip_logits and (transform.softcap is not None or transform.vocab_size is not None):
-            raise ValueError(
-                f"Liger fused_linear_cross_entropy cannot reproduce the head of {type(self).__name__} "
-                f"({transform}): the fused loss contracts the hidden states with lm_head.weight directly, "
-                f"so a softcap or a vocabulary cut would be dropped. Set fused_linear_cross_entropy: false "
-                f"in liger_kernel_config."
-            )
-
-        output_router_logits = explicit_router_logits
-        if output_router_logits is None:
-            output_router_logits = get_config_field(self.config, "output_router_logits", False)
-        if output_router_logits and router_aux_loss_in_head:
-            raise ValueError(
-                f"Liger fused_linear_cross_entropy on {type(self).__name__} requires "
-                f"output_router_logits=False: the fused loss replaces the lm_head projection the "
-                f"family's own head runs before assembling a router aux loss, so nothing would add "
-                f"that term to the objective. Use moe_balancing: bias_update (or none), or set "
-                f"fused_linear_cross_entropy: false in liger_kernel_config."
-            )
-        # The backbone resolves an omitted flag from the config, so an explicit value — a caller's
-        # False over a config True included — is forwarded as the family's own head forwards it.
-        if explicit_router_logits is not None:
-            kwargs["output_router_logits"] = explicit_router_logits
-        elif output_router_logits:
-            kwargs["output_router_logits"] = True
+        skip_logits, transform = _resolve_fused_scoring(
+            self, skip_logits, labels is not None or shift_labels is not None
+        )
+        router_logits_flag = _resolve_router_logits_flag(self, explicit_router_logits, router_aux_loss_in_head)
+        if router_logits_flag is not None:
+            kwargs["output_router_logits"] = router_logits_flag
 
         outputs = self.model(
             input_ids=input_ids,
@@ -170,48 +213,18 @@ def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
             **kwargs,
         )
 
-        hidden_states = outputs.last_hidden_state
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
-        kept_hidden_states = hidden_states[:, slice_indices, :]
-
-        logits = None
-        loss = None
-        token_accuracy = None
+        kept_hidden_states = outputs.last_hidden_state[:, slice_indices, :]
+        logits = loss = token_accuracy = None
         if skip_logits:
-            if getattr(self.lm_head, "bias", None) is not None:
-                raise ValueError(
-                    f"Liger fused_linear_cross_entropy computes logits from lm_head.weight alone, but "
-                    f"{type(self).__name__} carries an lm_head bias — the fused loss would silently "
-                    f"differ from the unfused one. Set fused_linear_cross_entropy: false for this "
-                    f"checkpoint."
-                )
-            # LigerForCausalLMLoss, not the bare loss module: it applies the shift, the
-            # `num_items_in_batch` normalisation that matches transformers' ForCausalLMLoss (a mean
-            # reduction would normalise per-rank, scaling the loss by world_size), and the token
-            # accuracy TRL reads whenever use_liger_kernel is on.
-            fused_hidden_states = transform.scale_hidden(kept_hidden_states)
-            if transform.logit_scale is not None:
-                fused_hidden_states = fused_hidden_states * transform.logit_scale
-            result = LigerForCausalLMLoss(
-                hidden_states=fused_hidden_states,
-                lm_head_weight=self.lm_head.weight,
-                labels=labels,
-                shift_labels=shift_labels,
-                # Read off the head, not the config: a composite wrapper's `config.hidden_size` is
-                # the wrapper's, and the fused loss reshapes against the projection's own width.
-                hidden_size=self.lm_head.weight.shape[-1],
-                **kwargs,
+            loss, token_accuracy = _fused_causal_lm_loss(
+                self, transform, kept_hidden_states, labels, shift_labels, kwargs
             )
-            loss, _, token_accuracy, _ = unpack_cross_entropy_result(result)
         else:
             logits = transform.project(self.lm_head, kept_hidden_states)
             if labels is not None or shift_labels is not None:
                 loss = self.loss_function(
-                    logits=logits,
-                    labels=labels,
-                    shift_labels=shift_labels,
-                    vocab_size=logits.shape[-1],
-                    **kwargs,
+                    logits=logits, labels=labels, shift_labels=shift_labels, vocab_size=logits.shape[-1], **kwargs
                 )
 
         # Liger's own output class: TRL reads token_accuracy off it whenever use_liger_kernel is on.

@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
-class StatefulMixer:
+class _StatefulMixer:
     """Where a linear-attention layer keeps state along the sequence, as its modeling module spells it.
 
     ``conv`` and ``recurrence`` are the module-level functions the causal convolution and the
@@ -61,10 +61,10 @@ class TreeFamily:
     and the stateful mixer its linear-attention layers are, where it has any."""
 
     module: ModuleType
-    stateful: StatefulMixer | None = None
+    stateful: _StatefulMixer | None = None
 
 
-_GATED_DELTA_NET = StatefulMixer(
+_GATED_DELTA_NET = _StatefulMixer(
     conv="causal_conv1d_fn",
     recurrence="torch_chunk_gated_delta_rule",
     layer_attr="linear_attn",
@@ -331,7 +331,7 @@ def _tree_recurrence(recurrence):
     return with_tree_plan
 
 
-def require_tree_family(model_config) -> TreeFamily:
+def _require_tree_family(model_config) -> TreeFamily:
     """The family entry for this model, or the refusal of a family tree packing cannot run."""
     model_type = getattr(text_config(model_config), "model_type", None)
     family = TREE_FAMILIES.get(model_type)
@@ -345,7 +345,7 @@ def require_tree_family(model_config) -> TreeFamily:
 
 def resolve_tree_plan_options(model_config) -> dict[str, int | None]:
     """The model-dependent arguments of :func:`~src.models.attention.tree_plan.build_tree_attention_plan`."""
-    stateful, config = require_tree_family(model_config).stateful, text_config(model_config)
+    stateful, config = _require_tree_family(model_config).stateful, text_config(model_config)
     return {
         "sliding_window": getattr(config, "sliding_window", None),
         "conv_kernel": getattr(config, stateful.conv_kernel_field) if stateful else None,
@@ -366,7 +366,7 @@ def reject_unsupported_tree_attention(
     outside :data:`TREE_FAMILIES`, a backend with no tree form, the split form off FA4, and linear-attention kernels
     that ignore segments. Needs no weights, so a run checks it before the load; :func:`install_tree_attention`
     repeats it on the loaded model."""
-    require_tree_family(model_config)
+    _require_tree_family(model_config)
     if attn_implementation not in TREE_ATTN_IMPLEMENTATIONS:
         raise ValueError(
             f"tree packing is verified on {list(TREE_ATTN_IMPLEMENTATIONS)}, but this model resolved to "
@@ -390,7 +390,7 @@ def install_tree_attention(model, full_form: FullAttentionForm) -> None:
     another module than the one the view goes on (a remote-code class of the same model type).
     """
     reject_unsupported_tree_attention(model.config, effective_attn_implementation(model.config), full_form)
-    family = require_tree_family(model.config)
+    family = _require_tree_family(model.config)
     module = family.module
     attentions = _decoder_layer_modules(model, "self_attn")
     foreign = sorted({type(layer).__module__ for layer in attentions} - {module.__name__})
@@ -452,7 +452,7 @@ def warm_split_form_kernels(model_config, *, dtype: torch.dtype) -> None:
 def warm_recurrent_mixer_kernels(model, *, dtype: torch.dtype) -> None:
     """Run one stateful linear-attention layer forward and backward over a small tree, compiling
     the recurrence kernels that take and return a state. A no-op for a family without one."""
-    stateful = require_tree_family(model.config).stateful
+    stateful = _require_tree_family(model.config).stateful
     if stateful is None:
         return
     config = text_config(model.config)

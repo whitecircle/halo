@@ -189,13 +189,34 @@ def _dispatch_model_loading(
     source: ModelSource,
     pc: ParallelismConfig,
     model_class,
-    from_pretrained_kwargs: dict,
+    model_config,
+    dtype: torch.dtype,
     *,
+    attn_implementation: str,
+    trust_remote_code: bool,
+    quantization_config,
     preserve_checkpoint_precision: bool,
     wraps_experts: bool,
     init_from_scratch: bool,
+    model_kwargs: dict,
 ) -> PreTrainedModel:
-    """The per-mode loader ``pc`` selects."""
+    """The per-mode loader ``pc`` selects, given the run's ``from_pretrained`` kwargs."""
+    from_pretrained_kwargs = dict(
+        config=model_config,
+        dtype=dtype,
+        trust_remote_code=trust_remote_code,
+        attn_implementation=attn_implementation,
+        **model_kwargs,
+    )
+    if source.revision is not None:
+        from_pretrained_kwargs["revision"] = source.revision
+    if quantization_config is not None:
+        from_pretrained_kwargs["quantization_config"] = quantization_config
+        if is_global_main_process():
+            logger.info(f"Using quantization config: {quantization_config}")
+    if init_from_scratch and is_global_main_process():
+        logger.info("init_from_scratch=True — building model with RANDOM weights from config (no checkpoint load).")
+
     rung = (source, pc, model_class, from_pretrained_kwargs)
     # First: a stage owns only its layer slice, so every other loader materializes pp_size× too much.
     if pc.is_pp_mode:
@@ -242,6 +263,52 @@ def _dispatch_model_loading(
     )
 
 
+def _resolve_run_config(
+    model_name_or_path: str,
+    revision: str | None,
+    pc: ParallelismConfig,
+    dtype: torch.dtype,
+    *,
+    trust_remote_code: bool,
+    model_config_overrides: dict | None,
+    sinks_policy: SinksPolicy,
+    quantization_config,
+    init_from_scratch: bool,
+    model_class,
+    text_only_model: bool,
+) -> tuple[ModelSource, AutoConfig, type, bool]:
+    """COLLECTIVE: the agreed source, the run's config, its model class and whether the MoE wrappers apply, with
+    every refusal config.json answers raised before the process groups and the meta shell: a second, not minutes."""
+    apply_remote_code_compat_shims()
+    # Every read below — config, tokenizer, weights — takes this source's revision, so a Hub source loads
+    # one agreed commit on every rank, straight from the cache.
+    source = resolve_model_source(model_name_or_path, revision, tag="policy")
+    model_config = AutoConfig.from_pretrained(
+        model_name_or_path, trust_remote_code=trust_remote_code, revision=source.revision
+    )
+    apply_config_overrides(model_config, model_config_overrides)
+    wraps_experts = pc.needs_ep_wrappers and has_routed_experts(model_config)
+    reject_unsupported_model(pc, model_config, sinks_policy=sinks_policy, wraps_experts=wraps_experts)
+    reject_unsupported_load(
+        pc,
+        dtype,
+        quantization_config=quantization_config,
+        init_from_scratch=init_from_scratch,
+        wraps_experts=wraps_experts,
+    )
+
+    # Multimodal wrappers need AutoModelForImageTextToText (CausalLM drops the vision tower);
+    # text_only_model opts into that drop deliberately (and restores config-honored aux loss).
+    if model_class is None:
+        model_class = resolve_auto_model_class(model_config, text_only=text_only_model)
+    elif text_only_model and is_global_main_process():
+        logger.warning(
+            f"text_only_model=True is ignored: the caller pinned model_class={model_class} "
+            f"(task-head scripts resolve their own class). The flag only affects auto-resolution."
+        )
+    return source, model_config, model_class, wraps_experts
+
+
 def load_distributed_model(
     model_name_or_path: str,
     parallelism_config: ParallelismConfig,
@@ -279,36 +346,19 @@ def load_distributed_model(
     # True fp32 matmuls before any forward — the image's TF32 default corrupts long-context RoPE.
     configure_float32_matmul_precision()
 
-    apply_remote_code_compat_shims()
-    # Every read below — config, tokenizer, weights — takes this source's revision, so a Hub source loads
-    # one agreed commit on every rank, straight from the cache.
-    source = resolve_model_source(model_name_or_path, revision, tag="policy")
-
-    model_config = AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=trust_remote_code, revision=source.revision
-    )
-    apply_config_overrides(model_config, model_config_overrides)
-    wraps_experts = parallelism_config.needs_ep_wrappers and has_routed_experts(model_config)
-    # Before the process groups and the meta shell: config.json is all the sharding arithmetic needs,
-    # so failing here costs a second instead of minutes.
-    reject_unsupported_model(parallelism_config, model_config, sinks_policy=sinks_policy, wraps_experts=wraps_experts)
-    reject_unsupported_load(
+    source, model_config, model_class, wraps_experts = _resolve_run_config(
+        model_name_or_path,
+        revision,
         parallelism_config,
         dtype,
+        trust_remote_code=trust_remote_code,
+        model_config_overrides=model_config_overrides,
+        sinks_policy=sinks_policy,
         quantization_config=quantization_config,
         init_from_scratch=init_from_scratch,
-        wraps_experts=wraps_experts,
+        model_class=model_class,
+        text_only_model=text_only_model,
     )
-
-    # Multimodal wrappers need AutoModelForImageTextToText (CausalLM drops the vision tower);
-    # text_only_model opts into that drop deliberately (and restores config-honored aux loss).
-    if model_class is None:
-        model_class = resolve_auto_model_class(model_config, text_only=text_only_model)
-    elif text_only_model and is_global_main_process():
-        logger.warning(
-            f"text_only_model=True is ignored: the caller pinned model_class={model_class} "
-            f"(task-head scripts resolve their own class). The flag only affects auto-resolution."
-        )
 
     attn_implementation = _resolve_run_attention(
         model_config,
@@ -338,36 +388,24 @@ def load_distributed_model(
     # leading pads as an attended document and drop the last real document's labels.
     tokenizer.padding_side = "right"
 
-    from_pretrained_kwargs = dict(
-        config=model_config,
-        dtype=dtype,
-        trust_remote_code=trust_remote_code,
-        attn_implementation=attn_implementation,
-        **model_kwargs,
-    )
-    if source.revision is not None:
-        from_pretrained_kwargs["revision"] = source.revision
-    if quantization_config is not None:
-        from_pretrained_kwargs["quantization_config"] = quantization_config
-        if is_global_main_process():
-            logger.info(f"Using quantization config: {quantization_config}")
-    if init_from_scratch and is_global_main_process():
-        logger.info("init_from_scratch=True — building model with RANDOM weights from config (no checkpoint load).")
-
     model = _dispatch_model_loading(
         source,
         parallelism_config,
         model_class,
-        from_pretrained_kwargs,
+        model_config,
+        dtype,
+        attn_implementation=attn_implementation,
+        trust_remote_code=trust_remote_code,
+        quantization_config=quantization_config,
         preserve_checkpoint_precision=preserve_checkpoint_precision,
         wraps_experts=wraps_experts,
         init_from_scratch=init_from_scratch,
+        model_kwargs=model_kwargs,
     )
 
     # Where weights were actually READ, or None for a random init: the resume loaders key their
     # "already holds these weights" skip on this, since ``_name_or_path`` survives init_from_scratch.
     setattr(model, LOADED_WEIGHTS_FROM_ATTR, None if init_from_scratch else model_name_or_path)
-
     apply_run_model_policies(
         model,
         model_config,
@@ -375,12 +413,9 @@ def load_distributed_model(
         attn_implementation=attn_implementation,
         sinks_pretrained=not init_from_scratch,
     )
-
     if parallelism_config.lowp.enabled:
         apply_lowp_compute(
             model, parallelism_config.lowp, expert_weight_cacheable=not parallelism_config.experts_fsdp_managed
         )
-
     warm_attention_kernels(model, dtype=dtype)
-
     return model, tokenizer

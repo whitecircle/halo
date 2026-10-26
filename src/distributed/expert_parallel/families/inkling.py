@@ -52,7 +52,7 @@ class EPInklingMoELayer(EPMoELayerBase):
         routed_logits = router_logits[..., : -self.n_shared_experts]
         shared_logits = router_logits[..., -self.n_shared_experts :]
 
-        topk_indices = self._maybe_replace_selection(self._select_topk_on_scores(routed_logits.sigmoid()))
+        topk_indices = self._apply_routing_replay(self._select_topk_on_scores(routed_logits.sigmoid()))
 
         # Routed and shared logits are normalised together, so a shared expert takes mass away from
         # the routed ones; splitting this into two softmaxes would change the weights.

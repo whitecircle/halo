@@ -43,6 +43,7 @@ from src.environments.reasoning_effort import (
 )
 from src.environments.rollout_config import RANDOM_REASONING_EFFORT, RolloutConfig
 from src.environments.tool_accounting import TOTAL_TOOL_CALLS_KEY
+from src.environments.turn_recovery import EMPTY_TURNS_KEY
 from src.inference.openai_client import chat_completion
 from src.inference.response import FINISH_REASON_LENGTH
 from src.rewards.samples import CUT_TOOL_CALLS_KEY
@@ -281,7 +282,7 @@ async def run_episode(
         "tool_calls": traj.info.get(TOTAL_TOOL_CALLS_KEY, 0),
         "completion_tokens": played.generated,
         "length_capped": any(turn.finish_reason == FINISH_REASON_LENGTH for turn in played.turns),
-        "empty_turns": traj.info.get("empty_turns", 0),
+        "empty_turns": traj.info.get(EMPTY_TURNS_KEY, 0),
     }
     return traj
 

@@ -9,13 +9,13 @@ from dataclasses import dataclass, fields, replace
 from enum import StrEnum
 from typing import Any, ClassVar, Self
 
-from src.config_validation import present, require_finite, require_int
+from src.config_validation import present, require_bool, require_finite, require_int, require_text
 from src.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 
 # Metric key of a term's contribution, ``reward/<name>``; the keys of one reward sum to the reward.
 REWARD_COMPONENT_PREFIX = "reward/"
 # The leaf of every scored term's per-sample 1/0 of whether it reached a verdict.
-SCORED_METRIC_LEAF = "scored"
+_SCORED_METRIC_LEAF = "scored"
 # The environment's own grade always logs under this name.
 OBJECTIVE_TERM_NAME = "objective"
 # The ``checks`` of a veto judge that audits with the checks its environment declares.
@@ -32,7 +32,7 @@ class View(StrEnum):
 
 class JudgeMetric(StrEnum):
     """The leaves of a judge's own per-sample metrics beside its requirements' and checks'; with
-    :data:`SCORED_METRIC_LEAF` they are the names a requirement or check may not take."""
+    :data:`_SCORED_METRIC_LEAF` they are the names a requirement or check may not take."""
 
     COMPLETION_TOKENS = "completion_tokens"
     COST_USD = "cost_usd"
@@ -80,24 +80,11 @@ def metric_key(term: "RewardTerm", leaf: str) -> str:
 def scored_metric_key(term: "RewardTerm") -> str:
     """The per-sample 1/0 of whether the term reached a verdict, ``<source>/<name>/scored``: the metric
     that says a scorer is failing, logged by both arms."""
-    return metric_key(term, SCORED_METRIC_LEAF)
+    return metric_key(term, _SCORED_METRIC_LEAF)
 
 
 # The environment's own grade, priced by the reward's environment term, in ``reward_components``.
 OBJECTIVE_REWARD_KEY = component_key(OBJECTIVE_TERM_NAME)
-
-
-def _require_text(owner: str, **values: Any) -> None:
-    for key, value in values.items():
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError(f"{owner}: {key} must be a non-blank string, got {value!r}")
-
-
-def _require_bool(owner: str, **values: Any) -> None:
-    # YAML 1.2 reads ``no``/``off`` as strings, which would pass a truthiness check as True.
-    for key, value in values.items():
-        if not isinstance(value, bool):
-            raise ValueError(f"{owner}: {key} must be true or false, got {value!r}")
 
 
 def _coerce_enum(term: "RewardTerm", name: str, enum_type: type[StrEnum]) -> None:
@@ -182,8 +169,7 @@ class RewardTerm:
 
     def shape(self, score: float) -> float:
         """``score ** exponent``: the shaped score before the weight, what a TRL reward function returns."""
-        if isinstance(score, bool) or not isinstance(score, int | float) or not (0.0 <= score <= 1.0):
-            raise ValueError(f"{self.owner}: a score must lie in [0, 1], got {score!r}")
+        require_finite(self.owner, ge=0, le=1, score=score)
         return float(score) ** self.exponent
 
     def price(self, score: float) -> float:
@@ -250,7 +236,7 @@ class Requirement:
 
     def __post_init__(self) -> None:
         _require_name("requirement", self.name)
-        _require_text(f"requirement {self.name!r}", description=self.description)
+        require_text(f"requirement {self.name!r}", description=self.description)
         require_finite(f"requirement {self.name!r}", gt=0, weight=self.weight)
 
 
@@ -272,10 +258,10 @@ class Check:
     def __post_init__(self) -> None:
         owner = f"check {self.name!r}"
         _require_name("check", self.name)
-        _require_text(owner, description=self.description)
-        _require_bool(owner, veto=self.veto)
+        require_text(owner, description=self.description)
+        require_bool(owner, veto=self.veto)
         if self.unless is not None:
-            _require_text(owner, unless=self.unless)
+            require_text(owner, unless=self.unless)
         if self.weight is None:
             return
         require_finite(owner, ge=0, why=" (the term's own weight signs the price)", weight=self.weight)
@@ -328,7 +314,7 @@ class JudgeTerm(ScoredTerm):
         checks = () if self.checks == ENVIRONMENT_CHECKS else self.checks
         names = [item.name for item in (*self.requirements, *checks)]
         validate_unique_names(f"{owner}: requirement or check", names)
-        reserved = sorted(set(names) & {SCORED_METRIC_LEAF, *JudgeMetric})
+        reserved = sorted(set(names) & {_SCORED_METRIC_LEAF, *JudgeMetric})
         if reserved:
             raise ValueError(
                 f"{owner}: {reserved} are the term's own metric keys; name the requirement or check otherwise"
@@ -338,14 +324,14 @@ class JudgeTerm(ScoredTerm):
                 f"{owner}: a veto judge never adds reward — its weight prices the fired weighted checks, so it "
                 f"must be <= 0 (0 logs them unpriced), got {self.weight}"
             )
-        _require_text(owner, model=self.model, base_url=self.base_url, api_key_env=self.api_key_env)
+        require_text(owner, model=self.model, base_url=self.base_url, api_key_env=self.api_key_env)
         if self.context is not None:
-            _require_text(owner, context=self.context)
+            require_text(owner, context=self.context)
         require_int(owner, ge=1, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
         if self.reasoning_effort is not None:
             _coerce_enum(self, "reasoning_effort", JudgeReasoningEffort)
         require_finite(owner, ge=0, **present(temperature=self.temperature))
-        _require_bool(
+        require_bool(
             owner,
             include_reference=self.include_reference,
             include_reasoning=self.include_reasoning,
@@ -418,9 +404,9 @@ class RewardModelTerm(ScoredTerm):
     def __post_init__(self) -> None:
         super().__post_init__()
         owner = self.owner
-        _require_text(owner, url=self.url, model=self.model)
+        require_text(owner, url=self.url, model=self.model)
         if self.tokenizer is not None:
-            _require_text(owner, tokenizer=self.tokenizer)
+            require_text(owner, tokenizer=self.tokenizer)
         _coerce_enum(self, "backend", RewardModelBackend)
         require_int(owner, ge=0, label_index=self.label_index)
         require_finite(owner, logit_shift=self.logit_shift)

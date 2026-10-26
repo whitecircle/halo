@@ -47,13 +47,13 @@ def _shuffled_valid_indices(natural: torch.Tensor) -> torch.Tensor:
     return (natural + 1) % E
 
 
-# _maybe_replace_selection
+# _apply_routing_replay
 
 
 def test_unforced_path_returns_input_unchanged():
     layer = _BareLayer()
     idx = torch.randint(0, E, (T, K))
-    out = layer._maybe_replace_selection(idx)
+    out = layer._apply_routing_replay(idx)
     assert out is idx  # identical object: the default path must be bit-identical AND allocation-free
 
 
@@ -62,7 +62,7 @@ def test_forced_indices_replace_natural_and_count_flips():
     natural = torch.stack([torch.randperm(E)[:K] for _ in range(T)])
     forced = _shuffled_valid_indices(natural)
     layer._forced_topk_indices = forced
-    out = layer._maybe_replace_selection(natural)
+    out = layer._apply_routing_replay(natural)
     assert torch.equal(out, forced)
     flipped, total = layer._replay_flip_counts.tolist()
     assert (flipped, total) == (T, T)
@@ -74,7 +74,7 @@ def test_sentinel_rows_keep_natural_selection():
     forced = _shuffled_valid_indices(natural)
     forced[0] = -1  # sentinel: no mask for this token
     layer._forced_topk_indices = forced
-    out = layer._maybe_replace_selection(natural)
+    out = layer._apply_routing_replay(natural)
     assert torch.equal(out[0], natural[0])
     assert torch.equal(out[1:], forced[1:])
     flipped, total = layer._replay_flip_counts.tolist()
@@ -85,7 +85,7 @@ def test_matching_forced_mask_counts_zero_flips():
     layer = _BareLayer()
     natural = torch.stack([torch.randperm(E)[:K] for _ in range(T)])
     layer._forced_topk_indices = natural.flip(dims=[1])  # same SET per token, different order
-    out = layer._maybe_replace_selection(natural)
+    out = layer._apply_routing_replay(natural)
     assert torch.equal(out.sort(dim=-1).values, natural.sort(dim=-1).values)
     flipped, total = layer._replay_flip_counts.tolist()
     assert (flipped, total) == (0, T)
@@ -95,11 +95,11 @@ def test_mask_exhaustion_and_slice_shape_raise():
     layer = _BareLayer()
     layer._forced_topk_indices = torch.zeros(T - 1, K, dtype=torch.long)  # under-covers the forward
     with pytest.raises(RuntimeError, match="exhausted"):
-        layer._maybe_replace_selection(torch.randint(0, E, (T, K)))
+        layer._apply_routing_replay(torch.randint(0, E, (T, K)))
     layer = _BareLayer()
     layer._forced_topk_indices = torch.zeros(T, K + 1, dtype=torch.long)  # wrong top_k
     with pytest.raises(RuntimeError, match="does not match"):
-        layer._maybe_replace_selection(torch.randint(0, E, (T, K)))
+        layer._apply_routing_replay(torch.randint(0, E, (T, K)))
 
 
 def test_cursor_consumes_chunked_forwards_in_order():
@@ -109,11 +109,11 @@ def test_cursor_consumes_chunked_forwards_in_order():
     full = torch.stack([torch.randperm(E)[:K] for _ in range(2 * T)])
     layer._forced_topk_indices = full
     natural = torch.zeros(T, K, dtype=torch.long)
-    first = layer._maybe_replace_selection(natural)
-    second = layer._maybe_replace_selection(natural)
+    first = layer._apply_routing_replay(natural)
+    second = layer._apply_routing_replay(natural)
     assert torch.equal(first, full[:T]) and torch.equal(second, full[T:])
     assert layer._forced_cursor == 0  # wrapped on exact exhaustion
-    assert torch.equal(layer._maybe_replace_selection(natural), full[:T])  # reuse pass re-consumes
+    assert torch.equal(layer._apply_routing_replay(natural), full[:T])  # reuse pass re-consumes
 
 
 def test_concurrent_checkpoint_frames_replay_their_own_slice():
@@ -127,13 +127,13 @@ def test_concurrent_checkpoint_frames_replay_their_own_slice():
     natural = torch.zeros(T, K, dtype=torch.long)
     frame1, frame2 = RecomputeScope(), RecomputeScope()
     with frame1:  # microbatch 1 forward
-        layer._maybe_replace_selection(natural)
+        layer._apply_routing_replay(natural)
     with frame2:  # microbatch 2 forward
-        layer._maybe_replace_selection(natural)
+        layer._apply_routing_replay(natural)
     with frame1:  # microbatch 1 recompute — still its own slice
-        assert torch.equal(layer._maybe_replace_selection(natural), full[:T])
+        assert torch.equal(layer._apply_routing_replay(natural), full[:T])
     with frame2:
-        assert torch.equal(layer._maybe_replace_selection(natural), full[T:])
+        assert torch.equal(layer._apply_routing_replay(natural), full[T:])
 
 
 def test_recompute_call_the_forward_never_made_raises():
@@ -146,7 +146,7 @@ def test_recompute_call_the_forward_never_made_raises():
         pass
     layer._forced_topk_indices = torch.zeros(T, K, dtype=torch.long)
     with scope, pytest.raises(RuntimeError, match="different path"):
-        layer._maybe_replace_selection(torch.zeros(T, K, dtype=torch.long))
+        layer._apply_routing_replay(torch.zeros(T, K, dtype=torch.long))
 
 
 def test_gc_recompute_skips_flip_metric_but_still_replaces():
@@ -157,10 +157,10 @@ def test_gc_recompute_skips_flip_metric_but_still_replaces():
     layer._forced_topk_indices = forced
     scope = RecomputeScope()
     with scope:
-        layer._maybe_replace_selection(natural)  # original in-checkpoint forward (counts + saves)
+        layer._apply_routing_replay(natural)  # original in-checkpoint forward (counts + saves)
     counts_after_original = layer._replay_flip_counts.clone()
     with scope:  # the recompute: replaces, but must not double-count
-        out = layer._maybe_replace_selection(natural)
+        out = layer._apply_routing_replay(natural)
     assert torch.equal(out, forced)
     assert torch.equal(layer._replay_flip_counts, counts_after_original)
 
@@ -332,7 +332,7 @@ def test_injector_capture_assembles_and_arm_slices_per_layer():
         assert torch.equal(layer._forced_topk_indices, per_layer[i].long())
     # Consume every armed row before disarm — disarm asserts full consumption.
     for layer in layers:
-        layer._maybe_replace_selection(torch.zeros(rows * seq, K, dtype=torch.long))
+        layer._apply_routing_replay(torch.zeros(rows * seq, K, dtype=torch.long))
     injector.disarm()
     assert all(layer._forced_topk_indices is None for layer in layers)
 
@@ -375,7 +375,7 @@ def test_injector_span_capture_scatters_and_arm_trims():
         assert torch.equal(layer._forced_topk_indices, per_layer_trimmed[i].long())
         # per-row forwards of the span widths consume the mask exactly
         for w in widths:
-            layer._maybe_replace_selection(torch.zeros(w, K, dtype=torch.long))
+            layer._apply_routing_replay(torch.zeros(w, K, dtype=torch.long))
     injector.disarm()  # exact tiling: no partial-consumption raise
 
 
@@ -428,7 +428,7 @@ def test_injector_disarm_flags_partial_consumption():
     layer = _BareLayer()
     injector = _injector([layer])
     injector.arm(torch.zeros(2, T, 1, K, dtype=torch.int16))  # 2*T tokens armed
-    layer._maybe_replace_selection(torch.zeros(T, K, dtype=torch.long))  # consume only half
+    layer._apply_routing_replay(torch.zeros(T, K, dtype=torch.long))  # consume only half
     with pytest.raises(RuntimeError, match="mis-consumed at disarm"):
         injector.disarm()
     assert layer._forced_topk_indices is None  # state still cleared despite the raise

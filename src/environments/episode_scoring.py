@@ -3,11 +3,11 @@ settlement of the externally scored terms (a judge, a reward model) that complet
 
 import asyncio
 import logging
-import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.config_validation import is_finite_number, require_finite
 from src.environments.episode_keys import (
     ANSWER_KEY,
     CONTEXT_KEY,
@@ -55,9 +55,7 @@ class EpisodeGrade:
     shaping: Mapping[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
-        objective = self.objective
-        if isinstance(objective, bool) or not isinstance(objective, int | float) or not (0.0 <= objective <= 1.0):
-            raise ValueError(f"an episode's objective grade must lie in [0, 1], got {objective!r}")
+        require_finite("EpisodeGrade", ge=0, le=1, objective=self.objective)
         for name, value in self.shaping.items():
             if (
                 not isinstance(name, str)
@@ -66,7 +64,7 @@ class EpisodeGrade:
                 or name in (OBJECTIVE_TERM_NAME, _TURN_SHAPING_COMPONENT)
             ):
                 raise ValueError(f"shaping term name {name!r} is malformed or reserved")
-            if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+            if not is_finite_number(value):
                 raise ValueError(f"shaping term {name!r} must be a finite number, got {value!r}")
 
 

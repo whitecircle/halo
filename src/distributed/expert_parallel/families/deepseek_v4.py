@@ -82,7 +82,7 @@ class EPDeepseekV4MoELayer(EPSharedExpertsMoELayerBase):
         else:
             indices = self.gate.tid2eid[input_ids.reshape(-1)].long()
         # Replay stays in lockstep across EP layers, so hash layers consume their identity slice too.
-        indices = self._maybe_replace_selection(indices)
+        indices = self._apply_routing_replay(indices)
         weights = self._renormalize_topk_weights(scores.gather(1, indices)) * self.routed_scaling_factor
         self._record_expert_load(indices)
         return indices, weights

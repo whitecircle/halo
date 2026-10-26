@@ -35,15 +35,15 @@ from src.inference.endpoints import is_loopback
 logger = logging.getLogger(__name__)
 
 # The engine-paused seconds a deadline credits: the count, or an awaitable of it (a read of the actor's Ray copy).
-PausedClock = Callable[[], float | Awaitable[float]]
+_PausedClock = Callable[[], float | Awaitable[float]]
 
 # Ray's plasma socket lives under the temp dir and AF_UNIX paths cap at ~107 bytes: a deep TMPDIR crashes ray.init.
-MAX_RAY_TEMP_DIR_LEN = 40
-RAY_FALLBACK_TEMP_DIR = "/tmp/ray"
+_MAX_RAY_TEMP_DIR_LEN = 40
+_RAY_FALLBACK_TEMP_DIR = "/tmp/ray"
 
 # In-flight rollouts per actor when ``max_concurrent_rollouts`` is unset: actors multiplex episodes on one loop,
 # so oversubscribing keeps the servers fed while a turn is graded.
-DEFAULT_ROLLOUTS_PER_WORKER = 4
+_DEFAULT_ROLLOUTS_PER_WORKER = 4
 
 
 class RolloutHTTPError(RuntimeError):
@@ -94,7 +94,7 @@ async def _clock_reading(reading: float | Awaitable[float]) -> float:
 
 
 async def _await_with_deadline(
-    awaitable, timeout: float, paused_clock: PausedClock | None = None, *, what: str = "episode"
+    awaitable, timeout: float, paused_clock: _PausedClock | None = None, *, what: str = "episode"
 ):
     """Await ``awaitable`` under ``timeout`` seconds of engine-serving time, raising :class:`DeadlineExpired`: the
     weight-sync pauses ``paused_clock`` reads are credited back, read only at the start and at expiry."""
@@ -172,8 +172,8 @@ def ray_init_kwargs(**overrides) -> dict:
     # Dashboard off: unused by the RL actors and exposes Ray's jobs-API HTTP surface
     # (CVE-2023-48022 job-submission RCE, CVE-2025-62593 DNS rebinding).
     kwargs: dict = {"ignore_reinit_error": True, "include_dashboard": False, **overrides}
-    if len(tempfile.gettempdir()) > MAX_RAY_TEMP_DIR_LEN:
-        kwargs["_temp_dir"] = RAY_FALLBACK_TEMP_DIR
+    if len(tempfile.gettempdir()) > _MAX_RAY_TEMP_DIR_LEN:
+        kwargs["_temp_dir"] = _RAY_FALLBACK_TEMP_DIR
     return kwargs
 
 
@@ -196,7 +196,7 @@ class EnvironmentActor:
         self.actor_id = actor_id
         self.env_type = env_type
         self.env_config = env_config
-        self._paused_clock: PausedClock | None = (
+        self._paused_clock: _PausedClock | None = (
             None if pause_clock is None else lambda: pause_clock.paused_seconds.remote()
         )
 
@@ -396,7 +396,7 @@ class RolloutManager:
         self.server_urls = server_urls
         self.rollout_config = rollout_config
 
-        requested = max_concurrent_rollouts or self.num_workers * DEFAULT_ROLLOUTS_PER_WORKER
+        requested = max_concurrent_rollouts or self.num_workers * _DEFAULT_ROLLOUTS_PER_WORKER
         if requested < self.num_workers:
             logger.warning(
                 f"max_concurrent_rollouts ({requested}) < num_workers ({self.num_workers}), "

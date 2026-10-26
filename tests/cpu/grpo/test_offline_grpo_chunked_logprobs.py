@@ -41,7 +41,7 @@ def _stub_trainer(chunked: bool) -> OfflineGRPOTrainer:
     trainer._use_chunked_grpo_logprobs = chunked
     trainer.temperature = 1.0
     trainer.accelerator = SimpleNamespace(unwrap_model=lambda m, **kw: m)
-    trainer.policy_gradient_formulation = "reinforce"
+    trainer.args = SimpleNamespace(policy_gradient_formulation="reinforce")
     trainer.beta = 0.0
     return trainer
 

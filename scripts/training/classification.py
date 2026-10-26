@@ -26,7 +26,7 @@ from src.configs.classification import ClassificationConfig, ClassificationScrip
 from src.configs.parallelism_arguments import ParallelismArguments
 from src.configs.script_arguments import ModelArguments
 from src.data.pipeline.chat_render import tokenize_rendered
-from src.data.pipeline.conversation import chat_template_kwargs, maybe_parse_json, reject_image_content
+from src.data.pipeline.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
 from src.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from src.data.sources.paths import EVAL_SPLIT_NAMES
 from src.data.vlm_routing import reject_image_columns
@@ -84,7 +84,7 @@ def tokenize_classification_row(
     label describes the whole document, so a shortened document keeps a valid label, while dropping
     the row would shrink the training set and skew the class balance.
     """
-    prompt = maybe_parse_json(example.get("prompt"))
+    prompt = resolve_json_value(example.get("prompt"))
     if prompt is None and text_field:
         prompt = [{"role": "user", "content": example[text_field]}]
 

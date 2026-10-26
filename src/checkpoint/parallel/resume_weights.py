@@ -15,7 +15,7 @@ from typing import TYPE_CHECKING
 
 import torch
 from torch.distributed.checkpoint.state_dict import StateDictOptions, set_model_state_dict
-from torch.distributed.tensor import DTensor, distribute_tensor
+from torch.distributed.tensor import DTensor
 from transformers import PreTrainedModel
 
 from src.checkpoint.adapters import (
@@ -44,6 +44,7 @@ from src.models.param_roles import persistent_buffers
 from src.models.unwrapping import find_peft_model, unwrap_framework_wrappers, unwrap_toolkit_wrappers
 from src.runtime.collectives import barrier, broadcast_from_rank0
 from src.runtime.consensus import DeferredRankFailure, raise_rank0_failure, rank0_verdict, rank_consensus
+from src.runtime.dtensor import copy_full_tensor
 from src.runtime.ranks import is_global_main_process
 
 if TYPE_CHECKING:
@@ -265,15 +266,10 @@ def _copy_into_live(
     with torch.no_grad():
         for name, value in tensors:
             target = live[name]
-            data = target.data if isinstance(target, torch.nn.Parameter) else target
-            value = value.to(data.dtype)
-            if isinstance(data, DTensor):
-                value = distribute_tensor(value, data.device_mesh, data.placements, src_data_rank=None)
-            else:
-                dim = next((d for suffix, d in hand_sliced.items() if name.endswith(suffix)), None)
-                if dim is not None:
-                    value = value.chunk(tp_size, dim=dim)[tp_rank]
-            data.copy_(value)
+            dim = next((d for suffix, d in hand_sliced.items() if name.endswith(suffix)), None)
+            if dim is not None and not isinstance(target, DTensor):
+                value = value.chunk(tp_size, dim=dim)[tp_rank]
+            copy_full_tensor(target, value, src_data_rank=None)
             del value
 
 

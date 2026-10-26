@@ -35,8 +35,10 @@ STREAM_PART_PREFIX = "model-streaming"
 # A PP checkpoint's part names. Each stage picks its own prefix without coordinating with the other writers: a
 # global "k-of-n" counter is not derivable locally once a stage emits a variable number of parts.
 PP_WRAPPER_PART_PREFIX = "model-wrapper"
-# Matches a :func:`pp_stage_part_prefix` name; group 1 is the stage, group 2 the stage count.
-PP_STAGE_PART_RE = re.compile(r"model-pp(\d+)-of-(\d+)")
+# A pipeline stage's part-name prefix (:func:`pp_stage_part_prefix`) and its matcher: group 1 is the stage,
+# group 2 the stage count.
+_PP_STAGE_PART = "model-pp{}-of-{}"
+PP_STAGE_PART_RE = re.compile(_PP_STAGE_PART.format(r"(\d+)", r"(\d+)"))
 LEGACY_WEIGHTS_FILE = "pytorch_model.bin"
 # Every filename that makes a directory a whole-model checkpoint, in the layout cascade's order.
 WHOLE_MODEL_WEIGHT_FILES = (SAFETENSORS_INDEX_FILE, SAFETENSORS_WEIGHTS_FILE, LEGACY_WEIGHTS_FILE)
@@ -142,7 +144,7 @@ def stream_part_filename(prefix: str, part_index: int) -> str:
 
 def pp_stage_part_prefix(pp_rank: int, pp_size: int) -> str:
     """The part-name prefix of pipeline stage ``pp_rank``'s checkpoint shards."""
-    return f"model-pp{pp_rank:05d}-of-{pp_size:05d}"
+    return _PP_STAGE_PART.format(f"{pp_rank:05d}", f"{pp_size:05d}")
 
 
 def index_declares_ep_shards(index: dict) -> bool:

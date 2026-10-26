@@ -15,16 +15,17 @@ def materialize_dtensor(data: torch.Tensor | None) -> torch.Tensor | None:
     return data
 
 
-def copy_full_tensor(target: torch.Tensor, value: torch.Tensor) -> None:
+def copy_full_tensor(target: torch.Tensor, value: torch.Tensor, *, src_data_rank: int | None = 0) -> None:
     """Copy the whole tensor ``value`` into the live parameter or buffer ``target``, at its dtype.
 
-    A DTensor target goes through ``distribute_tensor``, which broadcasts mesh rank 0's copy: a mesh
-    COLLECTIVE every rank issues in the same key order.
+    A DTensor target goes through ``distribute_tensor``, which by default broadcasts mesh rank 0's copy: a
+    mesh COLLECTIVE every rank issues in the same key order. ``src_data_rank=None`` shards each rank's own
+    copy instead, collective-free, where every rank holds the whole tensor.
     """
     data = target.data if isinstance(target, torch.nn.Parameter) else target
     value = value.to(data.dtype)
     if isinstance(data, DTensor):
-        value = distribute_tensor(value, data.device_mesh, data.placements)
+        value = distribute_tensor(value, data.device_mesh, data.placements, src_data_rank=src_data_rank)
     data.copy_(value)
 
 

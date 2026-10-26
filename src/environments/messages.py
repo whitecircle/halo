@@ -1,9 +1,9 @@
-"""The conversation an episode carries: its messages, the trajectory holding them, the step result an
+"""The conversation an episode carries: its messages, the trajectory holding them, the step results an
 environment returns, and the view of them the engine is shown."""
 
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, NamedTuple
 
 from src.environments.episode_keys import EPISODE_INVALID_KEY
 
@@ -220,3 +220,13 @@ class EnvStep:
     done: bool = False
     truncated: bool = False
     info: dict[str, Any] = field(default_factory=dict)
+
+
+class StepOutcome(NamedTuple):
+    """A protocol step's result: an :class:`EnvStep` before ``_finalize_step``, no observation, reward unrecorded."""
+
+    trajectory: Trajectory
+    reward: float
+    done: bool
+    truncated: bool
+    info: dict[str, Any]

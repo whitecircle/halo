@@ -55,7 +55,7 @@ class ConversationRenderArguments:
 
 
 @dataclass
-class TreePackingArguments(ValidatedConfig):
+class _TreePackingArguments(ValidatedConfig):
     """``tree_packing`` and the ``tree_*`` options it gates (``agent-docs/optimization/tree-packing.md``)."""
 
     tree_packing: bool = field(
@@ -99,12 +99,12 @@ class TreePackingArguments(ValidatedConfig):
 
 
 # What a run that packs no trees must find at its default: set there, these options do nothing.
-TREE_PACKING_FIELDS = tuple(f.name for f in fields(TreePackingArguments))
+TREE_PACKING_FIELDS = tuple(f.name for f in fields(_TreePackingArguments))
 
 
 @dataclass
 class SFTScriptArguments(
-    TreePackingArguments, ConversationRenderArguments, GenerationEvalArguments, CommonScriptArguments
+    _TreePackingArguments, ConversationRenderArguments, GenerationEvalArguments, CommonScriptArguments
 ):
     PROJECT_NAME: ClassVar[str] = "sft-tuning"
 

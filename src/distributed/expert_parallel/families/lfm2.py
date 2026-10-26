@@ -103,7 +103,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
 
         if self._forced_topk_indices is not None:
             # Replay re-gathers weights from the live unbiased scores, keeping norm/scaling native.
-            selected_experts = self._maybe_replace_selection(selected_experts)
+            selected_experts = self._apply_routing_replay(selected_experts)
             topk_weights = torch.gather(routing_weights, dim=1, index=selected_experts)
 
         if self.norm_topk_prob:

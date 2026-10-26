@@ -9,7 +9,7 @@ from typing import Any, ClassVar
 from src.rewards.graders.matching import extract_last_boxed
 from src.rewards.terms import JudgeTerm, RewardModelTerm, RewardTerm, sources_of
 
-DEFAULT_FORMAT_PATTERN = r"<think>.*?</think>\s*<answer>.*?</answer>"
+_DEFAULT_FORMAT_PATTERN = r"<think>.*?</think>\s*<answer>.*?</answer>"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,7 +28,7 @@ class FormatTerm(RewardTerm):
     source: ClassVar[str] = "format"
 
     name: str = "format"
-    pattern: str = DEFAULT_FORMAT_PATTERN
+    pattern: str = _DEFAULT_FORMAT_PATTERN
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -75,23 +75,15 @@ def accuracy_reward(completions: Sequence[Any], answer: Sequence[Any], **kwargs:
     return rewards
 
 
-def format_reward(completions: Sequence[Any], pattern: re.Pattern, **kwargs: Any) -> list[float]:
-    """1.0 where the completion matches the compiled ``pattern``, else 0.0."""
-    return [1.0 if pattern.search(completion_text(completion)) else 0.0 for completion in completions]
-
-
-def accuracy_grader(term: RewardTerm):
-    return accuracy_reward
-
-
-def format_grader(term: FormatTerm):
+def _format_grader(term: FormatTerm):
     def grader(completions: Sequence[Any], **kwargs: Any) -> list[float]:
-        return format_reward(completions, term.compiled)
+        """1.0 where the completion matches the term's compiled pattern, else 0.0."""
+        return [1.0 if term.compiled.search(completion_text(completion)) else 0.0 for completion in completions]
 
     return grader
 
 
 # Term type → grader builder, for the RLVR arm.
-RLVR_GRADERS = {AccuracyTerm: accuracy_grader, FormatTerm: format_grader}
+RLVR_GRADERS = {AccuracyTerm: lambda term: accuracy_reward, FormatTerm: _format_grader}
 # The reward sources the RLVR arm admits: its two graders plus the externally scored terms.
 RLVR_REWARD_SOURCES = sources_of(AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm)

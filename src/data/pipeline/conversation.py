@@ -9,7 +9,7 @@ IMAGE_PART_TYPE = "image"
 IMAGE_PART_PAYLOAD_KEY = "image"
 
 
-def maybe_parse_json(value):
+def resolve_json_value(value):
     """A JSON-encoded string parsed, any other value (an invalid JSON string included) unchanged: a mis-specified
     column then fails in the chat template, not as an opaque ``JSONDecodeError`` in a map worker."""
     if isinstance(value, str):
@@ -31,7 +31,7 @@ def as_conversation(prompt: Any) -> Any:
 def conversation_carries_images(conversation: Any) -> bool:
     """Whether a conversation (or its JSON string) embeds image parts in its message content; anything that is not
     a message list reads as text, left for the renderer to refuse."""
-    conversation = maybe_parse_json(conversation)
+    conversation = resolve_json_value(conversation)
     if not isinstance(conversation, list):
         return False
     return any(
@@ -59,7 +59,7 @@ def chat_template_kwargs(row: dict[str, Any], interleaved_thinking: bool, tools_
     """The ``apply_chat_template`` kwargs every text render shares: the interleaved-thinking flag and parsed tools."""
     template_kwargs = {"clear_thinking": False} if interleaved_thinking else {}
     if tools_field and tools_field in row:
-        tools = maybe_parse_json(row[tools_field])
+        tools = resolve_json_value(row[tools_field])
         if tools is not None:
             template_kwargs["tools"] = tools
     return template_kwargs

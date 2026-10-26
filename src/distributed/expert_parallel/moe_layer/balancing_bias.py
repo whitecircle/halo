@@ -42,7 +42,7 @@ class EPBalancingBiasMixin:
     SUPPORTS_BIAS_BALANCING: bool = False
 
     # False when selection happens entirely inside the hub gate (Bailing), where a transient
-    # side-buffer could never shift routing: ``_create_balancing_bias`` raises instead of falling
+    # side-buffer could never shift routing: ``_ensure_balancing_bias`` raises instead of falling
     # back to a buffer the callback would sign-update while selection ignores it.
     _supports_transient_balancing_bias: bool = True
 
@@ -67,7 +67,7 @@ class EPBalancingBiasMixin:
         """Create bias-update balancing state, or no-op (returning False) for aux-loss families."""
         if not self.SUPPORTS_BIAS_BALANCING:
             return False
-        self._create_balancing_bias()
+        self._ensure_balancing_bias()
         return True
 
     def can_adopt_native_balancing(self) -> bool:
@@ -105,7 +105,7 @@ class EPBalancingBiasMixin:
             value = nn.Parameter(value, requires_grad=current.requires_grad)
         setattr(owner, name, value)
 
-    def _create_balancing_bias(self) -> None:
+    def _ensure_balancing_bias(self) -> None:
         """Attach the bias-update state once: the native slot re-registered as an fp32 persistent buffer (out of
         grad and FSDP2 sharding), else a plain fp32 side-buffer that never exports (the sidecar restores it)."""
         if getattr(self, BALANCING_BIASES_ATTR, None) is not None:

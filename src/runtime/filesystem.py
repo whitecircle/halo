@@ -114,13 +114,6 @@ def resolve_shared_filesystem_consensus() -> None:
         )
 
 
-def reset_shared_filesystem_consensus() -> None:
-    """Drop the memoized consensus so the flags re-read the environment. Tests only: a run's scope is
-    fixed."""
-    global _shared_filesystem_consensus
-    _shared_filesystem_consensus = None
-
-
 def is_fs_save_rank() -> bool:
     """Whether this rank writes shared files: global rank 0 on a shared output filesystem, else each
     node's local rank 0."""

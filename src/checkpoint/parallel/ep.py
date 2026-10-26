@@ -180,54 +180,9 @@ def save_ep_gathered_checkpoint(ctx: CheckpointContext, output_dir: str) -> None
         torch.cuda.empty_cache()
 
 
-def reject_unmergeable_ep_sharded_save(
-    model: torch.nn.Module, world_size: int | None = None, merge_expert_lora_on_save: bool = False
-) -> None:
-    """Refuse a ``save_sharded_ep=True`` run whose per-rank shards ``merge_ep_shards.py`` could not merge.
-
-    Called at construction, so an unsupported shape raises before training, and again by a save of a
-    model with EP layers.
-    Sharded EP keys each shard by global rank and the merge needs every shard co-located; it streams key
-    by key with no model behind it, picking the HF-layout transform through the same resolver and
-    applying only the family's ``export_key_renames`` (``MoEFamilySpec.to_hub_key``).
-    """
-    if merge_expert_lora_on_save:
-        raise ValueError(
-            "merge_expert_lora_on_save=True is incompatible with save_sharded_ep=True: "
-            "merge_lora is only supported with gathered EP save (sharded=False). "
-            "Use save_sharded_ep=False, or disable merge_expert_lora_on_save."
-        )
-    if world_size is None:
-        world_size = get_global_world_size()
-    ep_layers = named_ep_layers(model)
-    if not ep_layers:
-        # Accepting the flag on a run that can never shard would write ordinary gathered checkpoints
-        # while a planned merge_ep_shards.py step waits for shards that never exist.
-        raise ValueError(
-            "save_sharded_ep=True, but this run has no EP MoE layers (dense model, or a MoE without "
-            "EP wrappers — e.g. accelerate launch with use_grouped_gemm=false): every save would be "
-            "an ordinary gathered checkpoint, not the sharded format this flag names. Remove "
-            "save_sharded_ep, or run an EP mode."
-        )
-
-    if any(isinstance(m, UlyssesAttention) for m in model.modules()):
-        raise ValueError(
-            "Sharded EP save (save_sharded_ep=True) is not supported with Context Parallelism: "
-            "the per-rank shards would carry CP-patched '.original_attention.' keys that "
-            "merge_ep_shards.py cannot remap to the HF layout. Use save_sharded_ep=False "
-            "(gathered) — it remaps CP attention keys on save."
-        )
-
-    if model_has_expert_lora(model):
-        raise ValueError(
-            "Sharded EP save (save_sharded_ep=True) is not supported with native expert LoRA: the "
-            "shard key set comes from expert_named_params(), so the grouped '<attr>_lora_A/_lora_B' "
-            "adapters are written as '.shard_N' keys that merge_ep_shards.py's base-root pattern "
-            "never matches — they pass through dead while the merged experts are the FROZEN base. "
-            "Use save_sharded_ep=False (gathered), which folds the adapters via "
-            "merge_expert_lora_on_save or writes them alongside the base."
-        )
-
+def _reject_unmergeable_hub_keys(model: torch.nn.Module) -> None:
+    """Refuse a family the merge cannot transform to the hub layout, or a load whose namespace conversions the
+    merge's key-by-key stream cannot revert."""
     model_type = getattr(getattr(model, "config", None), "model_type", "") or ""
     spec = find_moe_family_spec(model_type)
     if spec is None:
@@ -261,9 +216,10 @@ def reject_unmergeable_ep_sharded_save(
             f"save_sharded_ep=False (gathered) instead."
         )
 
-    # Attribute access, not getattr with a default: on anything but a finalized EPConfig the guards
-    # below must raise rather than pass, or the sharded save merges to duplicated/missing experts.
-    ep_cfg = ep_layers[0][1].ep_config
+
+def _reject_unmergeable_ep_topology(ep_cfg, world_size: int) -> None:
+    """Refuse an expert layout the merge cannot reassemble: expert TP, several EP groups, or shards scattered
+    over nodes' local disks."""
     expert_tp_size = ep_cfg.expert_tp_size
     if expert_tp_size > 1:
         raise ValueError(
@@ -294,6 +250,58 @@ def reject_unmergeable_ep_sharded_save(
             f"Use save_sharded_ep=False (gathered) — it writes a complete checkpoint on each node — "
             f"or run on a shared filesystem."
         )
+
+
+def reject_unmergeable_ep_sharded_save(
+    model: torch.nn.Module, world_size: int | None = None, merge_expert_lora_on_save: bool = False
+) -> None:
+    """Refuse a ``save_sharded_ep=True`` run whose per-rank shards ``merge_ep_shards.py`` could not merge.
+
+    Called at construction, so an unsupported shape raises before training, and again by a save of a
+    model with EP layers.
+    Sharded EP keys each shard by global rank and the merge needs every shard co-located; it streams key
+    by key with no model behind it, picking the HF-layout transform through the same resolver and
+    applying only the family's ``export_key_renames`` (``MoEFamilySpec.to_hub_key``).
+    """
+    if merge_expert_lora_on_save:
+        raise ValueError(
+            "merge_expert_lora_on_save=True is incompatible with save_sharded_ep=True: "
+            "merge_lora is only supported with gathered EP save (sharded=False). "
+            "Use save_sharded_ep=False, or disable merge_expert_lora_on_save."
+        )
+    ep_layers = named_ep_layers(model)
+    if not ep_layers:
+        # Accepting the flag on a run that can never shard would write ordinary gathered checkpoints
+        # while a planned merge_ep_shards.py step waits for shards that never exist.
+        raise ValueError(
+            "save_sharded_ep=True, but this run has no EP MoE layers (dense model, or a MoE without "
+            "EP wrappers — e.g. accelerate launch with use_grouped_gemm=false): every save would be "
+            "an ordinary gathered checkpoint, not the sharded format this flag names. Remove "
+            "save_sharded_ep, or run an EP mode."
+        )
+    if any(isinstance(m, UlyssesAttention) for m in model.modules()):
+        raise ValueError(
+            "Sharded EP save (save_sharded_ep=True) is not supported with Context Parallelism: "
+            "the per-rank shards would carry CP-patched '.original_attention.' keys that "
+            "merge_ep_shards.py cannot remap to the HF layout. Use save_sharded_ep=False "
+            "(gathered) — it remaps CP attention keys on save."
+        )
+
+    if model_has_expert_lora(model):
+        raise ValueError(
+            "Sharded EP save (save_sharded_ep=True) is not supported with native expert LoRA: the "
+            "shard key set comes from expert_named_params(), so the grouped '<attr>_lora_A/_lora_B' "
+            "adapters are written as '.shard_N' keys that merge_ep_shards.py's base-root pattern "
+            "never matches — they pass through dead while the merged experts are the FROZEN base. "
+            "Use save_sharded_ep=False (gathered), which folds the adapters via "
+            "merge_expert_lora_on_save or writes them alongside the base."
+        )
+    _reject_unmergeable_hub_keys(model)
+    # Attribute access, not getattr with a default: on anything but a finalized EPConfig the guards
+    # below must raise rather than pass, or the sharded save merges to duplicated/missing experts.
+    _reject_unmergeable_ep_topology(
+        ep_layers[0][1].ep_config, get_global_world_size() if world_size is None else world_size
+    )
 
 
 def _rank_shard(model: torch.nn.Module, ep_layers, rank: int, *, keep_live_dtype: bool) -> dict[str, torch.Tensor]:

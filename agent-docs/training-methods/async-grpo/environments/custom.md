@@ -5,6 +5,7 @@ Subclass `EnvironmentBase` (`src/environments/environment_base.py`) and implemen
 ```python
 from src.environments.environment_base import EnvironmentBase
 from src.environments.episode_scoring import EpisodeGrade
+from src.environments.messages import StepOutcome
 
 class GuessEnvironment(EnvironmentBase):
     DEFAULT_MAX_TURNS = 6
@@ -17,7 +18,7 @@ class GuessEnvironment(EnvironmentBase):
     def _step_single(self, trajectory, action, context=None):
         done = "Final Answer:" in action
         trajectory.info["completed"] = done
-        return trajectory, 0.0, done, False, {}
+        return StepOutcome(trajectory=trajectory, reward=0.0, done=done, truncated=False, info={})
 
     def _grade_episode(self, trajectory, context=None):
         expected = trajectory.info.get("expected")
@@ -37,9 +38,9 @@ Rules that bite:
 - **Declare differing defaults on the class** (`DEFAULT_MAX_TURNS`, `DEFAULT_TOOL_SUCCESS_REWARD`, `DEFAULT_TOOL_ERROR_PENALTY`, `requires_answer`), not in the factory, so a YAML `max_turns` still wins.
 - **Build through `self._init_trajectory(...)`**, so the system turn, the task turn and the context land where the base expects them.
 - **Route an unproductive turn, never grade it** ([Unproductive turns](../episodes.md#unproductive-turns)).
-    - An engine cut arrives with `context["finish_reason"] in ENGINE_CUT_FINISH_REASONS` (`src/inference/response.py`): call `self._handle_length_cutoff(trajectory)`. A turn with neither visible content nor a tool call: call `self._handle_empty_turn(trajectory)`. Both nudge and retry within `max_turns` and the shared `max_length_cutoff_recoveries` cap.
+    - An engine cut arrives with `context["finish_reason"] in ENGINE_CUT_FINISH_REASONS` (`src/inference/response.py`): call `self._recover_length_cutoff(trajectory)`. A turn with neither visible content nor a tool call: call `self._recover_empty_turn(trajectory)`. Both nudge and retry within `max_turns` and the shared `max_length_cutoff_recoveries` cap.
     - Declare `LENGTH_CUTOFF_NUDGE` and `EMPTY_TURN_NUDGE`, or the base raises `NotImplementedError` on the first such turn.
-    - A token-cap cut's unfinished tool calls arrive under `context[CUT_TOOL_CALLS_KEY]`, not `context["tool_calls"]`; never execute them. Pass `in_tool_call=bool(context.get(CUT_TOOL_CALLS_KEY))` to `_handle_length_cutoff` so the turn counts under `episode/length_cutoff_in_call_turns` and gets `LENGTH_CUTOFF_IN_CALL_NUDGE` (the plain nudge if unset).
+    - A token-cap cut's unfinished tool calls arrive under `context[CUT_TOOL_CALLS_KEY]`, not `context["tool_calls"]`; never execute them. Pass `in_tool_call=bool(context.get(CUT_TOOL_CALLS_KEY))` to `_recover_length_cutoff` so the turn counts under `episode/length_cutoff_in_call_turns` and gets `LENGTH_CUTOFF_IN_CALL_NUDGE` (the plain nudge if unset).
     - A native-protocol environment with no tools sends the `TOOLLESS_*` nudges, which ask for the final answer. A subclass with its own wording declares those too.
 - **For I/O-bound steps** subclass `AsyncEnvironmentBase` and override `_reset_single_async` / `_step_single_async`; free per-episode resources in `_release_episode`, which `cleanup` calls after every episode, error and timeout paths included.
 - **Probe your own backend.** Extend `verify_backend` and call `super()`, so a bad URL fails the launch instead of every episode.

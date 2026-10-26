@@ -67,11 +67,11 @@ def _trainer(cap: int | None = None, per_turn: bool = True, context_limit: int =
     trainer._rollout_backend = "vllm"
     trainer._batch_errors = BatchBuildFence()
     trainer._warned_once = set()
-    trainer._rollout_template_kwargs = {}
+    trainer.async_config = types.SimpleNamespace(
+        rollout_chat_template_kwargs={}, max_train_row_tokens=cap, train_on_sampled_tokens=per_turn
+    )
     trainer._carry_reasoning = False
-    trainer._max_train_row_tokens = cap
     trainer._rows_over_cap = 0
-    trainer._train_on_sampled_tokens = per_turn
     trainer._context_limit = lambda: context_limit
     trainer._metrics = {"train": defaultdict(list)}
     attach_world_metrics(trainer)

@@ -25,6 +25,37 @@ from src.subclass_registry import swap_registered_modules
 logger = logging.getLogger(__name__)
 
 
+def _reject_left_padding(attention_mask) -> None:
+    """Raise on a left-padded row: the Ulysses path drops the mask and attends causally, so it tolerates only
+    trailing pads, while leading ones would be attended by every real token.
+
+    Checked on every forward (one device-to-host sync): under a collator that left-pads prompts, a batch whose
+    prompts happen to be equal-length certifies nothing about the next one.
+    """
+    if attention_mask is None:
+        return
+    # A left-padded row starts with 0 and contains a 1 later; an all-zero row carries no tokens.
+    starts_with_pad, has_tokens = torch.stack([(attention_mask[:, 0] == 0).any(), attention_mask.any()]).cpu().tolist()
+    if starts_with_pad and has_tokens:
+        raise ValueError(
+            "Context Parallelism received a LEFT-padded batch (row starts with attention_mask == 0). "
+            "The CP attention path ignores the mask and runs dense causal attention, so every real "
+            "token would attend the leading pads and the loss would differ from the same batch "
+            "without CP. Use right padding (tokenizer.padding_side='right')."
+        )
+
+
+def _plain_named_items(items):
+    """``(name, value)`` pairs with the ``original_attention`` level dropped from each name, the first of each
+    resulting name kept (a param reachable both directly and through that level, GptOss sinks, appears once)."""
+    seen = set()
+    for name, value in items:
+        name = strip_cp_attention_level(name)
+        if name not in seen:
+            seen.add(name)
+            yield name, value
+
+
 class UlyssesModel(nn.Module):
     """A transformers model under Ulysses CP over ``cp_config``'s process group.
 
@@ -231,26 +262,6 @@ def apply_ulysses_attention(model: nn.Module, cp_group: dist.ProcessGroup, cp_si
     return patched
 
 
-def _reject_left_padding(attention_mask) -> None:
-    """Raise on a left-padded row: the Ulysses path drops the mask and attends causally, so it tolerates only
-    trailing pads, while leading ones would be attended by every real token.
-
-    Checked on every forward (one device-to-host sync): under a collator that left-pads prompts, a batch whose
-    prompts happen to be equal-length certifies nothing about the next one.
-    """
-    if attention_mask is None:
-        return
-    # A left-padded row starts with 0 and contains a 1 later; an all-zero row carries no tokens.
-    starts_with_pad, has_tokens = torch.stack([(attention_mask[:, 0] == 0).any(), attention_mask.any()]).cpu().tolist()
-    if starts_with_pad and has_tokens:
-        raise ValueError(
-            "Context Parallelism received a LEFT-padded batch (row starts with attention_mask == 0). "
-            "The CP attention path ignores the mask and runs dense causal attention, so every real "
-            "token would attend the leading pads and the loss would differ from the same batch "
-            "without CP. Use right padding (tokenizer.padding_side='right')."
-        )
-
-
 def stale_dense_mlp_keys(keys, ep_mlp_paths=frozenset()):
     """The keys of a sparse layer's ``.mlp`` (one with ``experts.``/``router.`` sub-keys) that exactly match a
     dense ``.mlp`` key of the same model: stale duplicates. ``ep_mlp_paths`` exempts the EP layers, whose
@@ -267,17 +278,6 @@ def stale_dense_mlp_keys(keys, ep_mlp_paths=frozenset()):
     }
     dense_names = set().union(*(suffixes for prefix, suffixes in suffixes_by_prefix.items() if prefix not in sparse))
     return {f"{prefix}.mlp.{suffix}" for prefix in sparse for suffix in suffixes_by_prefix[prefix] & dense_names}
-
-
-def _plain_named_items(items):
-    """``(name, value)`` pairs with the ``original_attention`` level dropped from each name, the first of each
-    resulting name kept (a param reachable both directly and through that level, GptOss sinks, appears once)."""
-    seen = set()
-    for name, value in items:
-        name = strip_cp_attention_level(name)
-        if name not in seen:
-            seen.add(name)
-            yield name, value
 
 
 def find_ulysses_model(model: nn.Module) -> UlyssesModel | None:

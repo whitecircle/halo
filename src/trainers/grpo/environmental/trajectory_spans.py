@@ -27,12 +27,6 @@ class TrajectorySpans:
     turn_spans: list[tuple[int, int]]
 
 
-def locate_assistant_spans(render: RenderFn, messages: Sequence[Any], first_assistant_idx: int) -> TrajectorySpans:
-    """Every assistant turn's span inside one render of the whole trajectory; raises
-    :class:`TemplateSpanError` on a template this cannot decompose, which a caller must never paper over."""
-    return _SpanLocator(render, messages, first_assistant_idx).resolve()
-
-
 class _SpanLocator:
     """Resolves message-block boundaries of one trajectory in its authoritative render."""
 
@@ -168,3 +162,9 @@ class _SpanLocator:
             return self._render(messages, add_generation_prompt, include_thinking)
         except Exception:  # any template rejection means "this probe is unavailable"
             return None
+
+
+def locate_assistant_spans(render: RenderFn, messages: Sequence[Any], first_assistant_idx: int) -> TrajectorySpans:
+    """Every assistant turn's span inside one render of the whole trajectory; raises
+    :class:`TemplateSpanError` on a template this cannot decompose, which a caller must never paper over."""
+    return _SpanLocator(render, messages, first_assistant_idx).resolve()

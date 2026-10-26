@@ -19,6 +19,14 @@ logger = logging.getLogger(__name__)
 _local = threading.local()
 
 
+def _stack() -> list[RecomputeScope]:
+    """The active scopes on this thread (the recompute pass runs on an autograd engine thread)."""
+    stack = getattr(_local, "stack", None)
+    if stack is None:
+        stack = _local.stack = []
+    return stack
+
+
 class RecomputeScope:
     """One checkpoint invocation's replay cache, entered once per pass.
 
@@ -69,14 +77,6 @@ class RecomputeScope:
     def __exit__(self, *exc_info) -> bool:
         _stack().pop()
         return False
-
-
-def _stack() -> list[RecomputeScope]:
-    """The active scopes on this thread (the recompute pass runs on an autograd engine thread)."""
-    stack = getattr(_local, "stack", None)
-    if stack is None:
-        stack = _local.stack = []
-    return stack
 
 
 def current_graph_task() -> int:

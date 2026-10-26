@@ -143,18 +143,14 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     def _configure_rollout_state(self) -> None:
         """The rollout, row and objective state the async config sets, refusing a knob that would go unread."""
         cfg = self.async_config
-        self._train_on_sampled_tokens = cfg.train_on_sampled_tokens
         self._rollout_backend = cfg.rollout_backend
-        self._rollout_template_kwargs = cfg.rollout_chat_template_kwargs
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
         self._reasoning_end_ids = self._resolve_reasoning_end_ids()
         self._forced_close_ids = self._resolve_forced_close_ids(self._reasoning_end_ids)
-        self._max_train_row_tokens = cfg.max_train_row_tokens
         self._rows_over_cap = 0
         # An eval round is the whole eval set; TRL's one-generation-batch buffer would keep its tail only.
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
-        self._truncation_alarm_rate = cfg.truncation_alarm_rate
         self._drop_degenerate_groups = cfg.drop_degenerate_groups
         self._scale_rewards_std_floor = cfg.scale_rewards_std_floor
         reject_inert_std_floor(self.args.scale_rewards, self._scale_rewards_std_floor)
@@ -313,7 +309,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         past the completion is kept for the next-token shift. Per turn this is the usual row, not a bound: a
         trajectory that lost its captured ids falls back to one whole-trajectory row."""
         cfg = self.async_config
-        if self._train_on_sampled_tokens:
+        if cfg.train_on_sampled_tokens:
             return LogitsWidth(cfg.rollout_max_tokens + 1, "rollout_max_tokens")
         if cfg.max_train_row_tokens is not None:
             return LogitsWidth(cfg.max_train_row_tokens + 1, "max_train_row_tokens")

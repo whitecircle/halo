@@ -85,9 +85,9 @@ class Concat:
     siblings: tuple[str, ...]
 
 
-TensorOp = Deinterleave | TakeChunk | PermuteRope
+_TensorOp = Deinterleave | TakeChunk | PermuteRope
 # A converted disk key's targets: (canonical key, op pipeline) per target.
-ConvertTargets = tuple[tuple[str, tuple[Concat | TensorOp, ...]], ...]
+ConvertTargets = tuple[tuple[str, tuple[Concat | _TensorOp, ...]], ...]
 
 
 def _op_kind(op) -> str:
@@ -113,7 +113,7 @@ def _permute_rope(op: PermuteForRope, config, entry: WeightConverter) -> Permute
     return PermuteRope(getattr(source, "num_attention_heads", 1), inverse=op.inverse)
 
 
-def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tuple[TensorOp, ...], ...], int | None]:
+def translate_converter(entry: WeightConverter, config=None) -> tuple[tuple[tuple[_TensorOp, ...], ...], int | None]:
     """One transformers ``WeightConverter`` → its op pipeline per target, in declared order, and a fan-in's
     concatenation dim (``None`` for one source); or raise.
 

@@ -36,7 +36,7 @@ def _skip_hook(host):
 
 def _breaker_host(threshold: float, tripped: bool = False):
     host = types.SimpleNamespace(
-        _skip_update_masked_frac=threshold,
+        async_config=types.SimpleNamespace(skip_update_masked_frac=threshold),
         _breaker_tripped_this_step=tripped,
         accelerator=types.SimpleNamespace(gather=lambda x: x),
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},

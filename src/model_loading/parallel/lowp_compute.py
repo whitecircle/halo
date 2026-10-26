@@ -72,6 +72,30 @@ def _convert_dense_linear(linear: nn.Linear, name: str, quant_format: QuantForma
     ALL_PARALLEL_STYLES[style_name].install_forward(linear, tp_mesh)
 
 
+def _convert_dense_mlps(
+    model: nn.Module, quant_format: QuantFormat, kept: set[int], backbone_prefix: str | None
+) -> int:
+    """Retype the text backbone's dense MLP projections outside the ``kept`` blocks; returns how many."""
+    tp_plan = getattr(model, "_tp_plan", None) or {}
+    tp_mesh = model_tp_mesh(model)
+    converted = 0
+    for name, module in model.named_modules():
+        # A vision tower or projector naming its projections like the text MLP stays bf16, as the
+        # export's tower fence assumes.
+        if (
+            isinstance(module, EPMoELayerBase)
+            or (backbone_prefix is not None and not name.startswith(f"{backbone_prefix}."))
+            or decoder_layer_index(name, backbone_prefix) in kept
+        ):
+            continue
+        for proj in MLP_PROJECTIONS:
+            child = getattr(module, proj, None)
+            if isinstance(child, nn.Linear) and not isinstance(child, LowPrecisionLinear):
+                _convert_dense_linear(child, f"{name}.{proj}" if name else proj, quant_format, tp_plan, tp_mesh)
+                converted += 1
+    return converted
+
+
 def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cacheable: bool) -> dict:
     """Enable ``lowp`` on ``model`` in place and return ``{precision, moe_layers, dense_linears,
     kept_blocks}``. ``expert_weight_cacheable`` is False when FSDP2 manages the experts: it pins the
@@ -108,22 +132,7 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
 
     dense_count = 0
     if lowp.apply_dense_mlp:
-        tp_plan = getattr(model, "_tp_plan", None) or {}
-        tp_mesh = model_tp_mesh(model)
-        for name, module in model.named_modules():
-            # A vision tower or projector naming its projections like the text MLP stays bf16, as the
-            # export's tower fence assumes.
-            if (
-                isinstance(module, EPMoELayerBase)
-                or (backbone_prefix is not None and not name.startswith(f"{backbone_prefix}."))
-                or decoder_layer_index(name, backbone_prefix) in kept
-            ):
-                continue
-            for proj in MLP_PROJECTIONS:
-                child = getattr(module, proj, None)
-                if isinstance(child, nn.Linear) and not isinstance(child, LowPrecisionLinear):
-                    _convert_dense_linear(child, f"{name}.{proj}" if name else proj, quant_format, tp_plan, tp_mesh)
-                    dense_count += 1
+        dense_count = _convert_dense_mlps(model, quant_format, kept, backbone_prefix)
         if dense_count == 0:
             _warn_if_dense_mlp_unmatched(model, precision)
 

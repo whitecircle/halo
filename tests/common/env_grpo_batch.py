@@ -73,14 +73,13 @@ def batch_host(
         mask_truncated_completions=False,
     )
     host.accelerator = types.SimpleNamespace(gather=lambda x: x)
-    host.async_config = AsyncTrainingConfig()
+    host.async_config = AsyncTrainingConfig(
+        train_on_sampled_tokens=False, skip_update_masked_frac=skip_update_masked_frac
+    )
     host._carry_reasoning = False
-    host._train_on_sampled_tokens = False
     host._is_correction = is_correction
-    host._isr_engine_reference = False
     host._forced_close_ids = forced_close_ids
     host._is_mask_config = is_mask_config or ISMaskConfig()
-    host._skip_update_masked_frac = skip_update_masked_frac
     host._breaker_tripped_this_step = False
     host._balance_token_mass = balance_token_mass
     host._drop_degenerate_groups = False

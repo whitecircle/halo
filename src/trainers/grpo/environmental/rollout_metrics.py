@@ -68,8 +68,7 @@ class RolloutMetricsMixin:
     _total_generation_tokens = 0
     # The mode whose rows ``self._logs`` holds.
     _completion_logs_mode: str | None = None
-    # ``truncation_alarm_rate`` (``None``: no alarm) and the modes whose last round was over it.
-    _truncation_alarm_rate: float | None = None
+    # The modes whose last round was over ``truncation_alarm_rate``.
     _truncation_alarmed: frozenset[str] = frozenset()
 
     def _populate_completion_logs(
@@ -212,9 +211,10 @@ class RolloutMetricsMixin:
     def _sound_truncation_alarm(self, truncation_rate: float, mode: str) -> None:
         """``episode/truncation_alarm`` for this round, and a warning when the rate crosses over
         ``truncation_alarm_rate``."""
-        if self._truncation_alarm_rate is None:
+        threshold = self.async_config.truncation_alarm_rate
+        if threshold is None:
             return
-        alarmed = truncation_rate > self._truncation_alarm_rate
+        alarmed = truncation_rate > threshold
         self._metrics[mode]["episode/truncation_alarm"].append(float(alarmed))
         if alarmed and mode not in self._truncation_alarmed and is_global_main_process():
             in_loss = (
@@ -224,7 +224,7 @@ class RolloutMetricsMixin:
             )
             logger.warning(
                 f"{truncation_rate:.0%} of this {mode} round's episodes ended truncated, over "
-                f"truncation_alarm_rate={self._truncation_alarm_rate}: the turn cap (max_turns), the episode "
+                f"truncation_alarm_rate={threshold}: the turn cap (max_turns), the episode "
                 f"output budget (rollout_max_episode_tokens) or unrecovered cut turns (rollout_max_tokens) bind, and "
                 f"{in_loss}. Warned again once "
                 f"the rate has dropped back under the threshold."

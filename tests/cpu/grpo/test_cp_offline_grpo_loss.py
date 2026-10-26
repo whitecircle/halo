@@ -59,7 +59,7 @@ def _trainer(logps, *, beta: float, loss_type: str):
     trainer.beta = beta
     trainer.loss_type = loss_type
     trainer.max_completion_length = 4
-    trainer.policy_gradient_formulation = "reinforce"
+    trainer.args = SimpleNamespace(policy_gradient_formulation="reinforce")
     trainer._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
     trainer._cp_chunked_logps = lambda model, ids, mask, labels: (logps, labels[:, 1:])
     return trainer
@@ -156,7 +156,7 @@ def _ranked_kl_oracle(rank: int, cp_size: int) -> None:
         for formulation in ("reinforce", "prob_weighted"):
             policy = scores.clone().requires_grad_()
             trainer.loss_type = loss_type
-            trainer.policy_gradient_formulation = formulation
+            trainer.args.policy_gradient_formulation = formulation
             trainer._cp_chunked_logps = lambda model, ids, mask, labels: (
                 policy[:, start:end],
                 labels[:, start + 1 : end + 1],

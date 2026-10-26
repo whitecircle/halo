@@ -15,6 +15,7 @@ Run: python tests/cpu/environments/test_length_cutoff_recovery.py  (or pytest)
 
 import json
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 
@@ -524,9 +525,8 @@ def _turns_trainer():
     trainer._rollout_routing_replay = False
     trainer._batch_errors = BatchBuildFence()
     trainer._warned_once = set()
-    trainer._rollout_template_kwargs = {}
+    trainer.async_config = SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None)
     trainer._carry_reasoning = False
-    trainer._max_train_row_tokens = None
     trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
     trainer.eos_token_id = 2
@@ -572,9 +572,8 @@ def _flat_render(msgs, add_generation_prompt, _include_thinking):
 def _render_trainer():
     trainer = object.__new__(DistributedAsyncEnvironmentalGRPOTrainer)
     trainer._batch_errors = BatchBuildFence()
-    trainer._rollout_template_kwargs = {}
+    trainer.async_config = SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None)
     trainer._carry_reasoning = False
-    trainer._max_train_row_tokens = None
     trainer._rows_over_cap = 0
     trainer._context_limit = lambda: 100_000
     trainer._tokenizer = type("T", (), {"name_or_path": "fake"})()
@@ -619,7 +618,7 @@ def test_whole_trajectory_render_does_not_weight_an_unproductive_turn(first):
 
 def test_whole_trajectory_row_over_the_train_row_cap_is_one_masked_row():
     trainer = _render_trainer()
-    trainer._max_train_row_tokens = 5
+    trainer.async_config.max_train_row_tokens = 5
     _prompt, completion_ids, mask = trainer._tokenize_trajectory(
         type("R", (), {"trajectory": _two_turn_trajectory()})()
     )

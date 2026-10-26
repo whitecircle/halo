@@ -19,7 +19,7 @@ from src.data.completion_spans import (
     build_completion_only_labels,
     mask_batch_to_completion_spans,
 )
-from src.data.pipeline.conversation import maybe_parse_json
+from src.data.pipeline.conversation import resolve_json_value
 from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, resolve_map_num_proc
 from src.data.pipeline.rejected_rows import is_valid_example, report_rejected_rows
 from src.data.pipeline.text_rows import build_chat_row_processor, build_text_row_processor
@@ -309,7 +309,7 @@ def tokenize_vlm_row(
     tokenizes exactly as an untouched run renders it. An empty, over-length or bad-data row becomes the all-None
     row, Arrow-safe because the map pins ``VLM_OUTPUT_FEATURES``."""
     try:
-        raw_conversation = maybe_parse_json(example.get(config.conversation_field))
+        raw_conversation = resolve_json_value(example.get(config.conversation_field))
         if not raw_conversation:
             return dict.fromkeys(VLM_OUTPUT_FEATURES)
         history, images = build_vlm_history(

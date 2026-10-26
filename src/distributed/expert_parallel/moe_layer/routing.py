@@ -131,7 +131,7 @@ class EPRoutingMixin:
         :meth:`_gate_weights_at` on the live logits, which keeps the router's gradient live."""
         if self._forced_topk_indices is None:
             return indices, weights
-        indices = self._maybe_replace_selection(indices.long())
+        indices = self._apply_routing_replay(indices.long())
         return indices, self._gate_weights_at(router_logits, indices)
 
     def _select_topk_on_scores(self, scores: torch.Tensor) -> torch.Tensor:
@@ -151,7 +151,7 @@ class EPRoutingMixin:
         else:
             probs = F.softmax(logits.float(), dim=-1)
             _, indices = torch.topk(probs.detach() + bias, self.top_k, dim=-1)
-        return self._maybe_replace_selection(indices)
+        return self._apply_routing_replay(indices)
 
     def _selection_scores(self, scores: torch.Tensor) -> torch.Tensor:
         """``scores`` plus the declared native correction slot, then the transient balancing bias, as a
@@ -172,7 +172,7 @@ class EPRoutingMixin:
             scores = scores + bias
         return scores
 
-    def _maybe_replace_selection(self, topk_indices: torch.Tensor) -> torch.Tensor:
+    def _apply_routing_replay(self, topk_indices: torch.Tensor) -> torch.Tensor:
         """``topk_indices`` with the armed routing-replay mask's rows swapped in (-1 keeps a token's natural
         pick), counting the flip rate outside the GC recompute. Callers gather gate weights afterwards."""
         forced_full = self._forced_topk_indices

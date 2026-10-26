@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for routing-replay mask consumption integrity
 (:class:`~src.trainers.grpo.environmental.routing_replay.RoutingReplayInjector` +
-``EPMoELayerBase._maybe_replace_selection``).
+``EPMoELayerBase._apply_routing_replay``).
 
 Consumption model under test: only non-recompute forwards advance the cursor / monotonic
 consumed-total; the cursor wraps to zero on exact exhaustion (whole-pass reuse); GC recomputes
@@ -28,7 +28,7 @@ ROWS, SEQ, K, E = 2, 4, 2, 8
 
 
 class _StubEPLayer(EPMoELayerBase):
-    """Minimal concrete layer exposing the REAL ``_maybe_replace_selection`` consumption logic —
+    """Minimal concrete layer exposing the REAL ``_apply_routing_replay`` consumption logic —
     bypasses the EP/DeepEP ``__init__`` and sets only the plain attributes the replay path reads."""
 
     FAMILY = MoEFamilySpec(model_types=())
@@ -59,7 +59,7 @@ def _armed_injector(layer=None):
 def _consume(layer, tokens):
     """Drive one chunk forward's replay consumption through the real selection swap."""
     natural = torch.randint(0, E, (tokens, K), dtype=torch.long)
-    layer._maybe_replace_selection(natural)
+    layer._apply_routing_replay(natural)
 
 
 def test_disarm_raises_on_never_consumed_mask():

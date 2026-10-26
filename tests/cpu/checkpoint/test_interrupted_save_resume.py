@@ -38,6 +38,7 @@ from src.runtime.filesystem import is_fs_save_rank
 from src.runtime.ranks import get_global_rank
 from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
+from tests.common.distributed import reset_shared_filesystem_consensus
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -155,7 +156,7 @@ def _worker(rank: int, root: str, per_node: bool, rewrite: bool, stop: str) -> N
     except Exception as e:  # the setup failing must still leave a verdict file for the assertions
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        filesystem.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 
@@ -221,7 +222,7 @@ def _uncommittable_worker(rank: int, root: str, per_node: bool, cause: str) -> N
     except Exception as e:  # the setup failing must still leave a verdict file for the assertions
         outcome["setup"] = f"{type(e).__name__}: {e}"
     finally:
-        filesystem.reset_shared_filesystem_consensus()
+        reset_shared_filesystem_consensus()
     with open(os.path.join(root, f"result_{get_global_rank()}.json"), "w") as fh:
         json.dump(outcome, fh)
 

@@ -41,6 +41,7 @@ from src.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmenta
 from src.trainers.grpo.on_policy import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
 from src.trainers.grpo.rollout.completions_logging import emit_completion_artifacts
+from tests.common.distributed import reset_shared_filesystem_consensus
 
 
 class _Accel:
@@ -142,7 +143,7 @@ def test_non_writer_rank_writes_nothing(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.delenv("DIST_SHARED_FILESYSTEM", raising=False)
     monkeypatch.delenv("DIST_OUTPUT_SHARED_FILESYSTEM", raising=False)
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=True, save=True)
@@ -159,7 +160,7 @@ def test_every_node_writes_when_the_output_filesystem_is_not_shared(tmp_path, mo
     monkeypatch.setattr(filesystem, "is_global_main_process", lambda: False)
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)
@@ -176,7 +177,7 @@ def test_a_per_node_writer_writes_its_record_but_leaves_the_console_table_to_ran
     monkeypatch.setattr(ranks, "get_global_rank", lambda: 8)  # the second node's local rank 0
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.setenv("DIST_OUTPUT_SHARED_FILESYSTEM", "0")
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
 
     emit_completion_artifacts(_Trainer(str(tmp_path)), console=True, save=True)
 
@@ -227,7 +228,7 @@ def test_a_non_writer_rank_empties_its_buffer_too(tmp_path, monkeypatch) -> None
     monkeypatch.setattr(filesystem, "is_local_main_process", lambda: True)
     monkeypatch.delenv("DIST_SHARED_FILESYSTEM", raising=False)
     monkeypatch.delenv("DIST_OUTPUT_SHARED_FILESYSTEM", raising=False)
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
 
     trainer = _Trainer(str(tmp_path))
     emit_completion_artifacts(trainer, console=False, save=True)

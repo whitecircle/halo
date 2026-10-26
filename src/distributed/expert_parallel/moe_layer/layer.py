@@ -284,7 +284,7 @@ class EPMoELayerBase(
         self._init_expert_lora()
         self._upcast_router_to_fp32()
         self._upcast_experts_to_fp32()
-        self._setup_gradient_sync()
+        self._install_gradient_sync_hooks()
 
     def _resident_device(self) -> torch.device:
         """Where this layer's state belongs: its parameters' device, so a layer materialized on CPU stays for

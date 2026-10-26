@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 # Cap on the cross-thread wait for the connection owner to unwind (stdio subprocess teardown). Bounded
 # because ``close()`` runs on the rollout shutdown path, where a wedged server must not hold the rank.
-MCP_DISCONNECT_TIMEOUT_S = 30.0
+_MCP_DISCONNECT_TIMEOUT_S = 30.0
 
 # Deadline on a single MCP request: the SDK waits forever by default, so a hung server would hold the episode
 # to its deadline; sized above a slow fetch/search round trip, a hung call returns as one tool error.
@@ -61,7 +61,7 @@ MCP_SERVERS = {
 }
 
 # Preset used when a config names none: no credentials, no network, restricted to /tmp.
-DEFAULT_MCP_SERVER = "filesystem"
+_DEFAULT_MCP_SERVER = "filesystem"
 
 
 class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
@@ -240,7 +240,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             if running is loop:
                 self._run_or_schedule(self.disconnect())
             elif loop.is_running():
-                asyncio.run_coroutine_threadsafe(self.disconnect(), loop).result(timeout=MCP_DISCONNECT_TIMEOUT_S)
+                asyncio.run_coroutine_threadsafe(self.disconnect(), loop).result(timeout=_MCP_DISCONNECT_TIMEOUT_S)
             else:
                 logger.warning("MCP close(): owning event loop already stopped; connection not unwound")
                 self._conn_task = None
@@ -281,7 +281,7 @@ def build_mcp_environment(
                 f"silently ignored. Drop them, or drop transport='sse' to spawn the preset."
             )
         return NativeMCPClientEnvironment(**kwargs)
-    mcp_server = mcp_server or DEFAULT_MCP_SERVER
+    mcp_server = mcp_server or _DEFAULT_MCP_SERVER
     config = get_mcp_server_config(mcp_server)
     explicit = dict(env_vars or {})
     declared = [name for name in config["env"] if name not in explicit]

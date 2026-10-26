@@ -165,6 +165,18 @@ def _collect_params_with_sr_seeds(state: dict, params: list, names: list[str]) -
     return with_grad, seeds
 
 
+def _resolve_adjust_lr_fn(adjust_lr):
+    """The per-shape learning-rate adjustment a group's ``adjust_lr`` names: upstream's RMS-norm match, a callable,
+    or ``None`` for the plain learning rate."""
+    if adjust_lr == "rms_norm":
+        return adjust_lr_rms_norm
+    if callable(adjust_lr) or adjust_lr is None:
+        return adjust_lr
+    raise ValueError(
+        f"Unsupported adjust_lr {adjust_lr!r} for the fused Muon step: expected 'rms_norm', a callable, or None."
+    )
+
+
 class Muon(UpstreamMuon):
     """Upstream Muon with the fused Triton matrix step and a state dict that carries the scalar leg.
 
@@ -180,85 +192,31 @@ class Muon(UpstreamMuon):
             self._compiled_scalar_step = self.scalar_optimizer.step
 
     def _muon_step(self, param_groups: list[dict]) -> None:
-        """The matrix step: fused momentum, Newton-Schulz per shape group, fused weight decay and update.
-
-        Stacking same-shape params reaches tens of GB on large MoE models, so the orthogonalization
-        runs in ``_GNS_CHUNK_SIZE`` chunks whose inputs are freed as they are consumed.
-        """
+        """The matrix step: fused momentum, Newton-Schulz per shape group, fused weight decay and update."""
         for group in param_groups:
             group_params, sr_seeds = _collect_params_with_sr_seeds(self.state, group["params"], group["param_names"])
             if not group_params:
                 continue
-
-            lr = group["lr"]
-            momentum_val = group["momentum"]
-            weight_decay = group["weight_decay"]
-            nesterov = group["nesterov"]
-            adjust_lr = group.get("adjust_lr", "rms_norm")
-            param_split_fn = group.get("param_split_fn", None)
-            param_recombine_fn = group.get("param_recombine_fn", None)
-
-            if adjust_lr == "rms_norm":
-                adjust_lr_fn = adjust_lr_rms_norm
-            elif callable(adjust_lr):
-                adjust_lr_fn = adjust_lr
-            elif adjust_lr is None:
-                adjust_lr_fn = None
-            else:
-                raise ValueError(
-                    f"Unsupported adjust_lr {adjust_lr!r} for the fused Muon step: "
-                    f"expected 'rms_norm', a callable, or None."
-                )
-
-            ns_inputs = []
-            for p in group_params:
-                m_local = to_local(self.state[p]["momentum"])
-                u = torch.empty_like(m_local)
-                n = m_local.numel()
-                _momentum_nesterov_kernel[(triton.cdiv(n, SR_BLOCK_SIZE),)](
-                    m_local.view(-1),
-                    to_local(p.grad).view(-1),
-                    u.view(-1),
-                    momentum_val,
-                    n,
-                    NESTEROV=nesterov,
-                    BLOCK_SIZE=SR_BLOCK_SIZE,
-                )
-                ns_inputs.append(u.view(m_local.shape))
-
+            adjust_lr_fn = _resolve_adjust_lr_fn(group.get("adjust_lr", "rms_norm"))
             ns_inputs_by_shape, shape_indices, split_metadata = get_newton_schulz_inputs_from_gradients(
-                ns_inputs, param_split_fn
+                self._nesterov_updates(group_params, group["momentum"], group["nesterov"]),
+                group.get("param_split_fn", None),
             )
-            del ns_inputs  # entries now held by ns_inputs_by_shape
-
-            orthogonalized_by_shape: dict[tuple, list[torch.Tensor]] = {}
-            for shape, ns_inputs_for_shape in ns_inputs_by_shape.items():
-                results_for_shape: list[torch.Tensor] = []
-                for start in range(0, len(ns_inputs_for_shape), _GNS_CHUNK_SIZE):
-                    stop = start + _GNS_CHUNK_SIZE
-                    batched = torch.stack(ns_inputs_for_shape[start:stop])
-                    ns_inputs_for_shape[start:stop] = [None] * len(batched)
-                    results_for_shape.append(self.newton_schulz(batched).clone())
-                    del batched
-                orthogonalized_by_shape[shape] = torch.cat(results_for_shape, dim=0)
-                del results_for_shape
-
+            orthogonalized_by_shape = self._orthogonalize_by_shape(ns_inputs_by_shape)
             del ns_inputs_by_shape
-
             orthogonalized_by_shape = scale_newton_schulz_outputs_with_adjusted_lr(
                 orthogonalized_by_shape,
-                lr,
+                group["lr"],
                 adjust_lr_fn,
             )
             orthogonalized = reconstruct_update_from_newton_schulz_outputs(
                 orthogonalized_by_shape,
                 shape_indices,
                 split_metadata,
-                param_recombine_fn,
+                group.get("param_recombine_fn", None),
             )
             del orthogonalized_by_shape
-
-            decay_factor = 1.0 - lr * weight_decay
+            decay_factor = 1.0 - group["lr"] * group["weight_decay"]
             for p, u, seed in zip(group_params, orthogonalized, sr_seeds, strict=True):
                 p_local = to_local(p.detach())
                 n = p_local.numel()
@@ -271,6 +229,41 @@ class Muon(UpstreamMuon):
                     BLOCK_SIZE=SR_BLOCK_SIZE,
                 )
                 torch.autograd.graph.increment_version(p)  # the raw-pointer store above is invisible to ATen
+
+    def _nesterov_updates(self, params: list, momentum: float, nesterov: bool) -> list[torch.Tensor]:
+        """Advance each param's momentum buffer by its gradient and return its (Nesterov) update."""
+        updates = []
+        for p in params:
+            m_local = to_local(self.state[p]["momentum"])
+            u = torch.empty_like(m_local)
+            n = m_local.numel()
+            _momentum_nesterov_kernel[(triton.cdiv(n, SR_BLOCK_SIZE),)](
+                m_local.view(-1),
+                to_local(p.grad).view(-1),
+                u.view(-1),
+                momentum,
+                n,
+                NESTEROV=nesterov,
+                BLOCK_SIZE=SR_BLOCK_SIZE,
+            )
+            updates.append(u.view(m_local.shape))
+        return updates
+
+    def _orthogonalize_by_shape(self, ns_inputs_by_shape: dict[tuple, list]) -> dict[tuple, torch.Tensor]:
+        """Newton-Schulz over each shape group's stacked inputs. Stacking same-shape params reaches tens of GB on
+        large MoE models, so it runs in ``_GNS_CHUNK_SIZE`` chunks whose inputs are freed as they are consumed."""
+        orthogonalized_by_shape: dict[tuple, torch.Tensor] = {}
+        for shape, ns_inputs_for_shape in ns_inputs_by_shape.items():
+            results_for_shape: list[torch.Tensor] = []
+            for start in range(0, len(ns_inputs_for_shape), _GNS_CHUNK_SIZE):
+                stop = start + _GNS_CHUNK_SIZE
+                batched = torch.stack(ns_inputs_for_shape[start:stop])
+                ns_inputs_for_shape[start:stop] = [None] * len(batched)
+                results_for_shape.append(self.newton_schulz(batched).clone())
+                del batched
+            orthogonalized_by_shape[shape] = torch.cat(results_for_shape, dim=0)
+            del results_for_shape
+        return orthogonalized_by_shape
 
     def state_dict(self) -> dict:
         """The state dict with the scalar optimizer's state merged in under the combined param index.

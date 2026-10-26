@@ -1,4 +1,6 @@
-"""Pack weights into ~1GB buffers before NCCL broadcast to amortize per-tensor overhead; double-buffered with async CUDA streams. Vendored from vLLM v0.18.0, Apache-2.0."""
+"""Pack weights into ~1GB buffers before an NCCL broadcast, double-buffered on CUDA streams (vendored from vLLM
+v0.18.0, Apache-2.0), and the send-buffer allocator bookkeeping the SGLang client's sends share: the caching
+allocator reuses a block only for the stream that allocated it and knows another stream's reads only once recorded."""
 
 from collections.abc import Iterator
 
@@ -6,10 +8,35 @@ import torch
 
 from src.weight_sync.transport.bounded_waits import BROADCAST_DRAIN_TIMEOUT_S, bounded_stream_sync
 from src.weight_sync.transport.pynccl import PyNcclCommunicator
-from src.weight_sync.transport.send_buffers import allocate_send_buffer, hold_for_stream
 
 PACKED_BUFFER_BYTES = 1024 * 1024 * 1024  # 1GB
 PACKED_NUM_BUFFERS = 2
+
+
+def allocate_send_buffer(
+    nbytes: int,
+    device: torch.device | None,
+    *,
+    pool_stream: torch.cuda.Stream,
+    send_stream: torch.cuda.Stream,
+) -> torch.Tensor:
+    """A ``uint8`` send buffer drawn from ``pool_stream``'s pool and held for ``send_stream``.
+
+    Drawn from the caller's stream, not the client's own, it returns to the pool the next client and the
+    training step use instead of stranding one per reconnect. ``send_stream`` must already wait on
+    ``pool_stream``: the block may last have been used there.
+    """
+    with torch.cuda.stream(pool_stream):
+        buffer = torch.empty(nbytes, dtype=torch.uint8, device=device)
+    buffer.record_stream(send_stream)
+    return buffer
+
+
+def hold_for_stream(tensor: torch.Tensor, stream: torch.cuda.Stream) -> None:
+    """Keep a CUDA ``tensor`` from reuse until ``stream``'s queued reads of it retire: the caller drops a chunk's
+    snapshots on the engine's reply, possibly before the send stream read them."""
+    if tensor.is_cuda:
+        tensor.record_stream(stream)
 
 
 def _pack(

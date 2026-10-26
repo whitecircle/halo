@@ -9,7 +9,7 @@ import datasets
 from datasets.features import Json
 from PIL import Image
 
-from src.data.pipeline.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, maybe_parse_json
+from src.data.pipeline.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, resolve_json_value
 from src.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from src.data.pipeline.rejected_rows import dataset_total_size, report_rejected_rows
 from src.data.render_columns import reject_missing_render_column
@@ -18,7 +18,7 @@ from src.data.vlm_render import extract_conversation_images, render_vlm_text, vl
 from src.runtime.consensus import agree_probe_across_ranks
 
 # A row's history to the longest conversation its collator renders from it, for the over-length filter.
-MeasuredHistory = Callable[[list[dict[str, Any]], dict[str, Any]], list[dict[str, Any]]]
+_MeasuredHistory = Callable[[list[dict[str, Any]], dict[str, Any]], list[dict[str, Any]]]
 
 
 def normalize_vlm_conversation(conversation: list[dict[str, Any]], images: Any = None) -> list[dict[str, Any]]:
@@ -83,7 +83,7 @@ def build_vlm_history(
     """One raw row's conversation to the placeholder history and PIL images every VLM render takes, shared by the
     runtime row map and the offline tokenizer. An empty conversation passes through; ``None`` or a string that is
     not JSON raises as a malformed column."""
-    conversation = maybe_parse_json(raw_conversation)
+    conversation = resolve_json_value(raw_conversation)
     if conversation is None or isinstance(conversation, str):
         raise ValueError(
             f"The conversation column holds a string that is not a valid JSON conversation: {conversation}"
@@ -143,7 +143,7 @@ _VLM_SIGNATURE_COLUMNS = ("input_ids", "labels", "attention_mask", *vlm_map_feat
 
 
 def _filter_vlm_over_length(
-    ds, processor, tokenizer, max_length: int, num_proc: int, measured_history: MeasuredHistory | None
+    ds, processor, tokenizer, max_length: int, num_proc: int, measured_history: _MeasuredHistory | None
 ):
     """Drop the mapped VLM rows whose rendered text alone exceeds ``max_length``, ahead of the collators that fail
     loud on them; vision tokens stay uncounted, the collator being the exact backstop. The all-dropped refusal is
@@ -183,7 +183,7 @@ def prepare_vlm_dataset(
     keep: tuple[str, ...] = (),
     features: datasets.Features | None = None,
     desc: str = "Processing VLM dataset",
-    measured_history: MeasuredHistory | None = None,
+    measured_history: _MeasuredHistory | None = None,
 ):
     """Map every split through :func:`build_vlm_row_processor`, dropping the columns outside the collator signature
     but ``keep``, then drop the over-length rows. ``features`` pins the map's schema (:func:`vlm_map_features`

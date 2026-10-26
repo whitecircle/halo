@@ -13,7 +13,7 @@ from src.data.pipeline.conversation import (
 )
 
 # Probe results cached per tokenizer instance (weak: a dropped tokenizer must not be kept alive).
-_tokenizer_specials_cache: "weakref.WeakKeyDictionary[Any, TokenizerSpecials]" = weakref.WeakKeyDictionary()
+_tokenizer_specials_cache: "weakref.WeakKeyDictionary[Any, _TokenizerSpecials]" = weakref.WeakKeyDictionary()
 
 
 def _strip_leading_bos(text: str, tokenizer: PreTrainedTokenizer) -> str:
@@ -24,7 +24,7 @@ def _strip_leading_bos(text: str, tokenizer: PreTrainedTokenizer) -> str:
 
 
 @dataclass(frozen=True)
-class TokenizerSpecials:
+class _TokenizerSpecials:
     """What a tokenizer's ``add_special_tokens=True`` post-processor adds around plain text;
     ``trailing_special_text`` decodes ``trailing_special_ids`` (empty when nothing is appended)."""
 
@@ -33,7 +33,7 @@ class TokenizerSpecials:
     trailing_special_text: str = ""
 
 
-def probe_tokenizer_specials(tokenizer: PreTrainedTokenizer) -> TokenizerSpecials:
+def probe_tokenizer_specials(tokenizer: PreTrainedTokenizer) -> _TokenizerSpecials:
     """What ``add_special_tokens=True`` actually adds, probed once per tokenizer instance on the empty string: a
     leading ``bos_token_id`` means the post-processor owns BOS, and the rest is the appended suffix.
 
@@ -47,7 +47,7 @@ def probe_tokenizer_specials(tokenizer: PreTrainedTokenizer) -> TokenizerSpecial
     bos_id = getattr(tokenizer, "bos_token_id", None)
     adds_leading_bos = bool(ids) and bos_id is not None and ids[0] == bos_id
     trailing = tuple(ids[1:] if adds_leading_bos else ids)
-    specials = TokenizerSpecials(
+    specials = _TokenizerSpecials(
         adds_leading_bos=adds_leading_bos,
         trailing_special_ids=trailing,
         trailing_special_text=tokenizer.decode(list(trailing)) if trailing else "",
@@ -65,7 +65,7 @@ def lacks_emitted_bos(ids: list[int], tokenizer: PreTrainedTokenizer) -> bool:
     )
 
 
-def _render_terminator_survived(encoded: Any, tokenizer: PreTrainedTokenizer, specials: TokenizerSpecials) -> bool:
+def _render_terminator_survived(encoded: Any, tokenizer: PreTrainedTokenizer, specials: _TokenizerSpecials) -> bool:
     """Whether the render's own turn terminator survives just before the tokenizer-appended copy, at most
     whitespace apart, which makes that copy a duplicate. Length cannot decide it: a render that exactly fills
     ``max_length`` measures the same as a cut one."""

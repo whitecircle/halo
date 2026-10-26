@@ -15,7 +15,7 @@ from src.models.unwrapping import base_transformers_model
 DECODER_LAYER_LIST_ATTRS: tuple[str, ...] = ("layers", "h")
 # ``<attr>.<N>`` at a name boundary inside a dotted module or parameter name: the decoder-layer index
 # every consumer numbers blocks by (``xlayers.3`` and ``layers.3x`` do not match).
-DECODER_LAYER_INDEX = re.compile(rf"(?<![^.])(?:{'|'.join(map(re.escape, DECODER_LAYER_LIST_ATTRS))})\.(\d+)(?![^.])")
+_DECODER_LAYER_INDEX = re.compile(rf"(?<![^.])(?:{'|'.join(map(re.escape, DECODER_LAYER_LIST_ATTRS))})\.(\d+)(?![^.])")
 
 
 def find_attr_name(module: torch.nn.Module, candidates: Sequence[str]) -> str | None:
@@ -46,7 +46,7 @@ def decoder_layer_index(name: str, backbone_prefix: str | None = None) -> int | 
         if not name.startswith(f"{backbone_prefix}."):
             return None
         name = name[len(backbone_prefix) + 1 :]
-    match = DECODER_LAYER_INDEX.search(name)
+    match = _DECODER_LAYER_INDEX.search(name)
     return int(match.group(1)) if match else None
 
 
@@ -56,7 +56,7 @@ def decoder_layer_stack_prefix(name: str) -> str | None:
     Numbering a name is unambiguous only while one stack is in play; a caller with no live module to
     resolve a backbone prefix from checks that its names share one stack prefix instead.
     """
-    match = DECODER_LAYER_INDEX.search(name)
+    match = _DECODER_LAYER_INDEX.search(name)
     return name[: match.start()] if match else None
 
 

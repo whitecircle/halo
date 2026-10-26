@@ -26,6 +26,10 @@ _STOCK_PEFT_TYPES = frozenset(peft_type.value for peft_type in PeftType)
 _WARNED_EXPORT_CARDS: set[str] = set()
 
 
+def _malformed_card_message(card: Path, reason: Exception) -> str:
+    return f"The model card {card} has malformed metadata ({reason})."
+
+
 class MalformedModelCardError(ValueError):
     """A ``README.md`` whose tags cannot be rewritten: its metadata block is not a YAML mapping, or
     its ``tags`` entry is neither a list nor a string."""
@@ -40,6 +44,30 @@ def with_halo_tags(tags: str | list[str] | None) -> list[str]:
     """``tags`` as a list, a bare string or ``None`` included, with :data:`HUB_TAGS` appended where absent."""
     tags = [tags] if isinstance(tags, str) else list(tags or [])
     return tags + [tag for tag in HUB_TAGS if tag not in tags]
+
+
+def _is_hub_repo_id(name: str) -> bool:
+    """Whether ``name`` names a Hub repo: the Hub rejects a card whose ``base_model`` is a local path."""
+    if os.path.isdir(name):
+        return False
+    try:
+        validate_repo_id(name)
+    except HFValidationError:
+        return False
+    return True
+
+
+def _fresh_card_metadata(directory: Path) -> dict:
+    """What a new card declares besides the tags: ``library_name: peft`` and ``base_model`` for an adapter
+    stock PEFT loads, nothing otherwise, so the card claims no loader that would refuse the files."""
+    config = read_checkpoint_config(directory, missing_ok=True, filename=ADAPTER_CONFIG_FILE)
+    if config is None or config.get("peft_type") not in _STOCK_PEFT_TYPES:
+        return {}
+    metadata = {"library_name": "peft"}
+    base_model = config.get("base_model_name_or_path")
+    if base_model and _is_hub_repo_id(base_model):
+        metadata["base_model"] = base_model
+    return metadata
 
 
 def tag_model_card(output_dir: str) -> None:
@@ -94,31 +122,3 @@ def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -
             f"{_malformed_card_message(card, error.reason)} The export keeps it verbatim, without the Halo "
             f"Hub tag; repair or remove {card}, then re-run to tag it.",
         )
-
-
-def _malformed_card_message(card: Path, reason: Exception) -> str:
-    return f"The model card {card} has malformed metadata ({reason})."
-
-
-def _fresh_card_metadata(directory: Path) -> dict:
-    """What a new card declares besides the tags: ``library_name: peft`` and ``base_model`` for an adapter
-    stock PEFT loads, nothing otherwise, so the card claims no loader that would refuse the files."""
-    config = read_checkpoint_config(directory, missing_ok=True, filename=ADAPTER_CONFIG_FILE)
-    if config is None or config.get("peft_type") not in _STOCK_PEFT_TYPES:
-        return {}
-    metadata = {"library_name": "peft"}
-    base_model = config.get("base_model_name_or_path")
-    if base_model and _is_hub_repo_id(base_model):
-        metadata["base_model"] = base_model
-    return metadata
-
-
-def _is_hub_repo_id(name: str) -> bool:
-    """Whether ``name`` names a Hub repo: the Hub rejects a card whose ``base_model`` is a local path."""
-    if os.path.isdir(name):
-        return False
-    try:
-        validate_repo_id(name)
-    except HFValidationError:
-        return False
-    return True

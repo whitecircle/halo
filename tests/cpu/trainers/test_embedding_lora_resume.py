@@ -100,7 +100,7 @@ from src.trainers.embedding.embedding_rules import reject_modules_outside_backbo
 from src.trainers.embedding.injected_lora import folded_backbone_chunks, has_injected_lora
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.checkpoint_io import loading_problems
-from tests.common.distributed import fake_process_group_mesh
+from tests.common.distributed import fake_process_group_mesh, reset_shared_filesystem_consensus
 from tests.common.embedding_lora_resume import backbone_prefix
 from tests.common.gloo import run_gloo_ranks
 from tests.common.peft_helpers import injected_lora_fold
@@ -589,7 +589,7 @@ def _node_worker(rank: int, root: str, base: str) -> None:
 
     with open(os.path.join(root, f"result_{rank}.txt"), "w") as fh:
         fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems))
-    filesystem.reset_shared_filesystem_consensus()
+    reset_shared_filesystem_consensus()
 
 
 def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):

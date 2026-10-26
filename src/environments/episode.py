@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 # What an engine's client error says, lowercased, when the conversation outgrew the served context (vLLM, SGLang,
 # and the OpenAI API's error code).
-CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
+_CONTEXT_OVERFLOW_MARKERS = ("context length", "maximum model length", "context_length_exceeded")
 
 
 @dataclass
@@ -97,9 +97,9 @@ def is_terminal_client_status(status: int, body: str) -> bool:
 
 def is_context_overflow(status: int, body: str) -> bool:
     """A terminal client error reporting that the conversation outgrew the served context
-    (:data:`CONTEXT_OVERFLOW_MARKERS`), the one terminal client error an episode's own length causes."""
+    (:data:`_CONTEXT_OVERFLOW_MARKERS`), the one terminal client error an episode's own length causes."""
     lowered = body.lower()
-    return is_terminal_client_status(status, body) and any(marker in lowered for marker in CONTEXT_OVERFLOW_MARKERS)
+    return is_terminal_client_status(status, body) and any(marker in lowered for marker in _CONTEXT_OVERFLOW_MARKERS)
 
 
 async def generate_turn(
@@ -261,7 +261,7 @@ class EpisodeDispatcher:
 
 
 @dataclass(frozen=True)
-class PlayedEpisode:
+class _PlayedEpisode:
     """One episode as :func:`play_episode` played it: its closed trajectory, every turn generation it stepped,
     the tokens they sampled, and the generation failure that ended it early, where one did."""
 
@@ -281,7 +281,7 @@ async def play_episode(
     *,
     log_prefix: str,
     keep_lost_episode: bool = False,
-) -> PlayedEpisode:
+) -> _PlayedEpisode:
     """Play one episode, the loop every driver shares: reset, request (``request_turn``, the driver's transport and
     retries) and step each turn under ``effort``'s caps, close it truncated where still open, stamp the effort,
     and release it on every path. A lost turn raises, unless ``keep_lost_episode``: then the episode closes on
@@ -324,7 +324,7 @@ async def play_episode(
                 trajectory.info[EPISODE_ERROR_KEY] = describe_exception(lost)
             trajectory = (await episode.finalize_truncated([eid]))[0].trajectory
         effort.stamp(trajectory, generated)
-        return PlayedEpisode(trajectory, turns, generated, lost)
+        return _PlayedEpisode(trajectory, turns, generated, lost)
     finally:
         # On every path: a stateful env (SweEnvironment) leaks a sandbox working dir per episode.
         try:

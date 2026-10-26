@@ -54,7 +54,7 @@ def is_accepted(info: dict[str, Any]) -> bool:
     return has_graded_submission(info) and info["tests_total"] == info.get("tests_passed", 0)
 
 
-def judged_failures(info: dict[str, Any]) -> int:
+def _judged_failures(info: dict[str, Any]) -> int:
     """Tests the grade judged and the program failed: graded minus passed minus those lost to the
     backend. A grade with no ``tests_graded`` counts as fully graded."""
     graded = info.get("tests_graded", info.get("tests_total", 0))
@@ -63,7 +63,7 @@ def judged_failures(info: dict[str, Any]) -> int:
 
 def is_grading_infra_outage(info: dict[str, Any]) -> bool:
     """True when the backend lost the grade: tests lost to it, none passed and none failed."""
-    return info.get("tests_infra_errors", 0) > 0 and info.get("tests_passed", 0) == 0 and judged_failures(info) == 0
+    return info.get("tests_infra_errors", 0) > 0 and info.get("tests_passed", 0) == 0 and _judged_failures(info) == 0
 
 
 def is_grade_inconclusive(info: dict[str, Any]) -> bool:
@@ -72,6 +72,6 @@ def is_grade_inconclusive(info: dict[str, Any]) -> bool:
     backend. All-or-nothing, such a grade would score a solution that may pass every test 0."""
     return (
         info.get("tests_passed", 0) < info.get("tests_total", 0)
-        and judged_failures(info) == 0
+        and _judged_failures(info) == 0
         and not is_grading_infra_outage(info)
     )

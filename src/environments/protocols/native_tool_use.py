@@ -10,7 +10,7 @@ from src.config_validation import require_finite
 from src.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
 from src.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, EPISODE_ERROR_KEY, LAST_TURN_KEY
 from src.environments.episode_scoring import EpisodeGrade
-from src.environments.messages import Trajectory
+from src.environments.messages import StepOutcome, Trajectory
 from src.environments.tool_accounting import (
     MAGNITUDE_WHY,
     TOTAL_TOOL_CALLS_KEY,
@@ -161,14 +161,12 @@ class NativeToolUseEnvironment(EnvironmentBase):
         """Book one result on the episode's counters and return its reward delta (the base's accounting)."""
         return self._book_tool_call(trajectory, result.name, result.success, result.sandbox_fault)
 
-    def _finalize_text_response(
-        self, trajectory: Trajectory, action: str
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    def _finalize_text_response(self, trajectory: Trajectory, action: str) -> StepOutcome:
         """The terminal step of a plain-text answer, which pays nothing: a finish without tool calls is priced once,
         by :meth:`_tool_use_shaping`."""
         trajectory.info[COMPLETED_KEY] = True
         trajectory.info["final_response"] = action
-        return trajectory, 0.0, True, False, {}
+        return StepOutcome(trajectory=trajectory, reward=0.0, done=True, truncated=False, info={})
 
     @contextmanager
     def _episode_binding(self, trajectory: Trajectory) -> Iterator[None]:
@@ -223,9 +221,7 @@ class NativeToolUseEnvironment(EnvironmentBase):
         # Executed calls (post per-turn cap), so this cannot disagree with total_tool_calls.
         return {"step_tool_calls": len(results)}
 
-    def _step_single(
-        self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    def _step_single(self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None) -> StepOutcome:
         """Process model response with potential tool calls."""
         ctx = context or {}
         tool_calls_data = ctx.get("tool_calls", [])
@@ -235,18 +231,16 @@ class NativeToolUseEnvironment(EnvironmentBase):
         tool_calls = self._coerce_tool_calls(tool_calls_data)
         results, reward = self._execute_tool_calls(tool_calls, trajectory)
         info = self._record_tool_interaction(results, trajectory)
-        return trajectory, reward, False, False, info
+        return StepOutcome(trajectory=trajectory, reward=reward, done=False, truncated=False, info=info)
 
-    def _step_without_tool_calls(
-        self, trajectory: Trajectory, action: str, ctx: dict[str, Any]
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    def _step_without_tool_calls(self, trajectory: Trajectory, action: str, ctx: dict[str, Any]) -> StepOutcome:
         """A turn that called no tool: an engine-cut or empty turn recovers, anything else is the final answer."""
         last_turn = bool(ctx.get(LAST_TURN_KEY))
         if ctx.get("finish_reason") in ENGINE_CUT_FINISH_REASONS:
             in_call = bool(ctx.get(CUT_TOOL_CALLS_KEY))
-            return self._handle_length_cutoff(trajectory, in_tool_call=in_call, last_turn=last_turn)
+            return self._recover_length_cutoff(trajectory, in_tool_call=in_call, last_turn=last_turn)
         if not action.strip():
-            return self._handle_empty_turn(trajectory, last_turn=last_turn)
+            return self._recover_empty_turn(trajectory, last_turn=last_turn)
         return self._finalize_text_response(trajectory, action)
 
     def _tool_use_shaping(self, trajectory: Trajectory) -> float:
@@ -318,7 +312,7 @@ class AsyncNativeToolUseEnvironment(AsyncEnvironmentBase, NativeToolUseEnvironme
 
     async def _step_single_async(
         self, trajectory: Trajectory, action: str, context: dict[str, Any] | None = None
-    ) -> tuple[Trajectory, float, bool, bool, dict[str, Any]]:
+    ) -> StepOutcome:
         """Process model response with async tool execution."""
         ctx = context or {}
         tool_calls_data = ctx.get("tool_calls", [])
@@ -328,4 +322,4 @@ class AsyncNativeToolUseEnvironment(AsyncEnvironmentBase, NativeToolUseEnvironme
         tool_calls = self._coerce_tool_calls(tool_calls_data)
         results, reward = await self._execute_tool_calls_async(tool_calls, trajectory)
         info = self._record_tool_interaction(results, trajectory)
-        return trajectory, reward, False, False, info
+        return StepOutcome(trajectory=trajectory, reward=reward, done=False, truncated=False, info=info)

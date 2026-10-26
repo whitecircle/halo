@@ -9,7 +9,7 @@ mem-efficient SDPA) and Mistral (a window on every layer). The loss and every pa
 agree: a block mask that leaked across a document boundary, dropped the window, or went stale between two
 different masks changes them.
 
-Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_flex_sliding_attention.py
+Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_sdpa_flex_sliding.py
 """
 
 import os

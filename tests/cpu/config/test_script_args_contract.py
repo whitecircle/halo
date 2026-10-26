@@ -31,7 +31,7 @@ from src.configs.preference import DPOScriptArguments, KTOScriptArguments, SMPOS
 from src.configs.reward import RewardScriptArguments
 from src.configs.script_arguments import GenerationEvalArguments
 from src.configs.sft import SFTScriptArguments
-from src.entrypoints.run_setup import _setup_tracking_env_vars
+from src.entrypoints.run_setup import _configure_tracking_env_vars
 
 # Every script-arg class and the tracking project its runs land in. Pinned by NAME, not merely "not
 # the placeholder": a class that declares no ``PROJECT_NAME`` of its own inherits a parent's project
@@ -120,7 +120,7 @@ def test_tracking_setup_writes_project_name_verbatim(monkeypatch):
     monkeypatch.setenv("WANDB_RUN_ID", "fixed-run-id")
     training_config = SimpleNamespace(run_name=None, output_dir="/tmp/test_script_args_contract")
 
-    _setup_tracking_env_vars(SFTScriptArguments(project_name="halo-sft"), training_config, "sft")
+    _configure_tracking_env_vars(SFTScriptArguments(project_name="halo-sft"), training_config, "sft")
 
     assert os.environ["WANDB_PROJECT"] == "halo-sft"
     assert os.environ["CLEARML_PROJECT"] == "halo-sft"

@@ -220,17 +220,14 @@ class OfflineGRPOTrainer(
         """Store the objective's settings. The loss-type and PG dispatches branch on these strings, so
         they are refused here, before model and dataset construction, not at the first microbatch."""
         self.padding_value = args.padding_value if args.padding_value is not None else tokenizer.pad_token_id
-        self.max_prompt_length = args.max_prompt_length
         self.max_completion_length = args.max_completion_length
-        self.advantage_method = args.advantage_method
-        self.best_completion_emphasis = args.best_completion_emphasis
         self.min_log_prob = args.min_log_prob
         self.loss_type = args.loss_type
         if self.loss_type not in LOSS_TYPES:
             raise ValueError(f"Unknown loss type: {self.loss_type!r}. Supported types: {list(LOSS_TYPES)}")
-        if self.advantage_method not in GROUP_ADVANTAGE_METHODS:
+        if args.advantage_method not in GROUP_ADVANTAGE_METHODS:
             raise ValueError(
-                f"Unknown advantage_method: {self.advantage_method!r}. Supported: {list(GROUP_ADVANTAGE_METHODS)}"
+                f"Unknown advantage_method: {args.advantage_method!r}. Supported: {list(GROUP_ADVANTAGE_METHODS)}"
             )
         if args.policy_gradient_formulation not in PG_FORMULATIONS:
             raise ValueError(
@@ -243,10 +240,9 @@ class OfflineGRPOTrainer(
                 f"positive value (got {self.max_completion_length!r}); it is the loss constant, not a "
                 f"generation budget. A zero or negative constant divides the loss by zero or flips its sign."
             )
-        self.policy_gradient_formulation = args.policy_gradient_formulation
         self.beta = args.kl_beta
         logger.info(f"Using loss type: {self.loss_type}")
-        logger.info(f"Using PG formulation: {self.policy_gradient_formulation}")
+        logger.info(f"Using PG formulation: {args.policy_gradient_formulation}")
 
     def _build_policy_model(self, model, args: OfflineGRPOConfig, parallelism_config, peft_config):
         """The policy loaded, adapted when ``peft_config`` is given, and its dropout disabled on request."""
@@ -444,7 +440,7 @@ class OfflineGRPOTrainer(
             clamp_negative_advantage_logps(logps, advantages, min_log_prob),
             logps,
             advantages,
-            policy_gradient_formulation=self.policy_gradient_formulation,
+            policy_gradient_formulation=self.args.policy_gradient_formulation,
             beta=self.beta,
             ref_logps=None
             if ref_logps is None

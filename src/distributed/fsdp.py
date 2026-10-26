@@ -23,7 +23,7 @@ from src.models.module_tree import (
     decoder_layers,
     input_embedding_backbone,
 )
-from src.models.param_roles import fp32_pinned_names
+from src.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR, fp32_pinned_names
 from src.models.unwrapping import base_transformers_model
 from src.runtime.ranks import is_global_main_process
 
@@ -59,9 +59,9 @@ def mixed_precision_policy(
 
 
 def _should_cast_forward_inputs(model: nn.Module) -> bool:
-    """False when a layer class declares ``_fp32_interlayer_residual`` (Zaya): a bf16 cast at the layer
+    """False when a layer class declares :data:`FP32_INTERLAYER_RESIDUAL_ATTR` (Zaya): a bf16 cast at the layer
     boundary makes non-reentrant GC save bf16 where the recompute keeps fp32, which torch rejects."""
-    return not any(getattr(type(module), "_fp32_interlayer_residual", False) for module in model.modules())
+    return not any(getattr(type(module), FP32_INTERLAYER_RESIDUAL_ATTR, False) for module in model.modules())
 
 
 def _reject_unreachable_decoder_layers(model: nn.Module) -> None:

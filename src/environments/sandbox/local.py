@@ -33,14 +33,14 @@ from src.environments.sandbox.results import (
 
 # The interpreter :data:`INTERPRETER_PLACEHOLDER` resolves to: this process's own, so a sandboxed
 # Python program runs on the same interpreter as the toolkit.
-PYTHON_INTERPRETER = sys.executable or "python"
+_PYTHON_INTERPRETER = sys.executable or "python"
 # That interpreter as a tool description names it (``CPython 3.12``).
-PYTHON_RUNTIME = f"{platform.python_implementation()} {sys.version_info.major}.{sys.version_info.minor}"
+_PYTHON_RUNTIME = f"{platform.python_implementation()} {sys.version_info.major}.{sys.version_info.minor}"
 
 SANDBOX_DEFAULT_MEMORY_MB = 1024
 # Build-step wall-clock cap (seconds); bounds an #include bomb in untrusted source.
-SANDBOX_DEFAULT_COMPILE_TIMEOUT = 30.0
-SANDBOX_DEFAULT_COMPILE_MEMORY_MB = 2048
+_SANDBOX_DEFAULT_COMPILE_TIMEOUT = 30.0
+_SANDBOX_DEFAULT_COMPILE_MEMORY_MB = 2048
 # Largest file a local-backend child may write (bytes); bounds FS disk-fill and binary size.
 LOCAL_FSIZE_LIMIT = 64 * 1024 * 1024
 # RLIMIT_NPROC for the run step. The kernel exempts uid 0: it binds every bubblewrap run (the jail's root
@@ -48,7 +48,7 @@ LOCAL_FSIZE_LIMIT = 64 * 1024 * 1024
 # another user, whose WHOLE task set it counts — there it must clear the trainer+Ray baseline.
 LOCAL_NPROC_LIMIT = 4096
 # RLIMIT_CPU headroom over the wall-clock timeout, so SIGXCPU only fires as the backstop.
-RLIMIT_CPU_SLACK_SECONDS = 1.0
+_RLIMIT_CPU_SLACK_SECONDS = 1.0
 
 # How long a run's launch (the limit shell and, on bubblewrap, the jail's namespaces and mounts) may take to
 # reach the program before the run is lost to the host. The program's time limit starts where the launch ends.
@@ -56,7 +56,7 @@ LAUNCH_TIMEOUT_SECONDS = 30.0
 
 # Math libraries size their thread pools to the host and allocate per-thread buffers at load, which
 # the run's address-space limit refuses: numpy's OpenBLAS then aborts a correct program at import.
-SINGLE_THREADED_MATH_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
+_SINGLE_THREADED_MATH_ENV = {"OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1", "MKL_NUM_THREADS": "1"}
 
 # The exit code a run is booked with when the program tampered with its working directory (a prepared
 # entry or the directory itself replaced): its own runtime error, never an infra fault that would void
@@ -319,7 +319,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
     """Run code in a child process under POSIX resource limits, in a managed working directory.
 
     An execution is three steps — :meth:`_write_sources`, :meth:`_compile` (compiled languages),
-    :meth:`_run_program` — which :class:`LocalSession` sequences so a session can reuse a build; the compile step
+    :meth:`_run_program` — which :class:`_LocalSession` sequences so a session can reuse a build; the compile step
     gets a larger time/memory budget than the run. Stateless aside from config, so one instance is safe across
     threads and Ray actors. Limits go through a ``ulimit`` shell wrapper (:meth:`_limit_wrap`), not a
     ``preexec_fn``, so launches stay ``vfork``/``exec`` fast under a large parent. The :meth:`_wrap_command` and
@@ -338,8 +338,8 @@ class LocalSubprocessSandbox(SandboxExecutor):
     def __init__(
         self,
         memory_limit_mb: int = SANDBOX_DEFAULT_MEMORY_MB,
-        compile_timeout: float = SANDBOX_DEFAULT_COMPILE_TIMEOUT,
-        compile_memory_limit_mb: int = SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
+        compile_timeout: float = _SANDBOX_DEFAULT_COMPILE_TIMEOUT,
+        compile_memory_limit_mb: int = _SANDBOX_DEFAULT_COMPILE_MEMORY_MB,
     ):
         self.memory_limit_mb = memory_limit_mb
         self.compile_timeout = compile_timeout
@@ -355,13 +355,13 @@ class LocalSubprocessSandbox(SandboxExecutor):
                 "'remote' sandbox backend."
             ) from exc
 
-    def open_session(self) -> "LocalSession":
+    def open_session(self) -> "_LocalSession":
         """Open a persistent session backed by a fresh temp working directory."""
-        return LocalSession(self._new_workdir(), self)
+        return _LocalSession(self._new_workdir(), self)
 
     def toolchain(self, language: str) -> str | None:
         """A compiled language's registry compile command, flags only (the output and source names are the
-        sandbox's own); :data:`PYTHON_RUNTIME` for a language run on :data:`INTERPRETER_PLACEHOLDER`; ``None``
+        sandbox's own); :data:`_PYTHON_RUNTIME` for a language run on :data:`INTERPRETER_PLACEHOLDER`; ``None``
         for one run by name off ``PATH``."""
         spec = require_language(language)
         if spec.is_compiled:
@@ -369,7 +369,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
             flags = [arg for arg in args if arg.startswith("-") and arg != "-o"]
             return f"is compiled with {' '.join([compiler, *flags])}"
         if INTERPRETER_PLACEHOLDER in spec.run_argv:
-            return f"runs on {PYTHON_RUNTIME}"
+            return f"runs on {_PYTHON_RUNTIME}"
         return None
 
     def _new_workdir(self) -> str:
@@ -460,14 +460,14 @@ class LocalSubprocessSandbox(SandboxExecutor):
     @staticmethod
     def _child_env(workdir: str) -> dict[str, str]:
         """Minimal environment: PATH, a HOME inside the sandbox, single-threaded math libraries
-        (:data:`SINGLE_THREADED_MATH_ENV`), no inherited proxy/secrets."""
+        (:data:`_SINGLE_THREADED_MATH_ENV`), no inherited proxy/secrets."""
         return {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": workdir,
             "TMPDIR": workdir,
             "LANG": os.environ.get("LANG", "C.UTF-8"),
             "LC_ALL": os.environ.get("LC_ALL", "C.UTF-8"),
-            **SINGLE_THREADED_MATH_ENV,
+            **_SINGLE_THREADED_MATH_ENV,
         }
 
     def _write_sources(
@@ -497,7 +497,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
         compile_argv = self._wrap_command(list(spec.compile_argv), workdir)
         compile_argv = self._limit_wrap(
             compile_argv,
-            int(math.ceil(self.compile_timeout + RLIMIT_CPU_SLACK_SECONDS)),
+            int(math.ceil(self.compile_timeout + _RLIMIT_CPU_SLACK_SECONDS)),
             self.compile_memory_limit_mb,
         )
         with sandbox_execution_gate.slot():
@@ -518,7 +518,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
         """Run the prepared (and built) program in ``workdir`` under the run-step limits, ``timeout`` measured
         from the program's start: the launch before it (on bubblewrap, a jail setup that queues on a
         host-wide kernel lock while other runs build theirs) is the host's cost, not the program's."""
-        run_argv = [PYTHON_INTERPRETER if tok == INTERPRETER_PLACEHOLDER else tok for tok in spec.run_argv]
+        run_argv = [_PYTHON_INTERPRETER if tok == INTERPRETER_PLACEHOLDER else tok for tok in spec.run_argv]
         # The slot is held for the whole run, so ``timeout`` measures near-dedicated-core time; the marker's pipe
         # opens inside it, so waiting runs hold no descriptors.
         with sandbox_execution_gate.slot(), _start_marker() as started:
@@ -528,7 +528,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
             # since glibc sizes every thread's stack by that limit and its worker threads would each take it.
             run_argv = self._limit_wrap(
                 run_argv,
-                int(math.ceil(timeout + RLIMIT_CPU_SLACK_SECONDS)),
+                int(math.ceil(timeout + _RLIMIT_CPU_SLACK_SECONDS)),
                 self.memory_limit_mb,
                 nproc=LOCAL_NPROC_LIMIT,
                 stack_mb=self.memory_limit_mb if spec.is_compiled else None,
@@ -550,7 +550,7 @@ class LocalSubprocessSandbox(SandboxExecutor):
             fh.write(utf8_encodable(content))
 
 
-class LocalSession(SandboxSession):
+class _LocalSession(SandboxSession):
     """Persistent working directory for a local backend: source and build survive between turns, and a compiled program
     reruns from its binary while language, source and ``files`` stay the same. A removed ``workdir`` is recreated
     empty; one the program replaced with a link or a file has broken the session (:class:`SandboxAgentFault`), since

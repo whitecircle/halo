@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+import torch
 import torch.nn as nn
 from accelerate import PartialState
 from transformers import CONFIG_MAPPING
@@ -52,10 +53,15 @@ def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
             ModelSource("stub/checkpoint", None, "stub/checkpoint"),
             pc,
             SimpleNamespace(),
-            {"config": config},
+            config,
+            torch.bfloat16,
+            attn_implementation="sdpa",
+            trust_remote_code=False,
+            quantization_config=None,
             preserve_checkpoint_precision=False,
             wraps_experts=pc.needs_ep_wrappers and has_routed_experts(config),
             init_from_scratch=False,
+            model_kwargs={},
         )
 
     assert model is loaded, "the undistributed path must return the loaded model itself"

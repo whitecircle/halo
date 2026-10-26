@@ -2,12 +2,12 @@
 contract one episode binds from them (:class:`EpisodeEffort`), the same whichever driver collects it."""
 
 import hashlib
-import math
 import random
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 
+from src.config_validation import require_bool, require_finite, require_int
 from src.environments.episode_keys import OUTPUT_BUDGET_EXHAUSTED_KEY
 from src.environments.messages import Trajectory, task_prompt
 from src.environments.rollout_config import RANDOM_REASONING_EFFORT, VALID_REASONING_EFFORTS
@@ -95,20 +95,14 @@ class EffortProfilesMixin:
                     f"reasoning_effort_profiles[{level!r}] has unknown keys {sorted(unknown)}; "
                     f"allowed: {sorted(set(minima) | flags)}"
                 )
-            for flag in flags & set(entry):
-                if not isinstance(entry[flag], bool):
-                    raise ValueError(f"{flag} for effort {level!r} must be true or false, got {entry[flag]!r}")
+            owner = f"reasoning_effort_profiles[{level!r}]"
+            require_bool(owner, **{flag: entry[flag] for flag in flags & set(entry)})
             for key, minimum in minima.items():
-                if key not in entry:
-                    continue
-                value = entry[key]
-                # NaN passes a plain minimum check and would poison every reward it enters.
-                if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
-                    raise ValueError(f"{key} for effort {level!r} must be a finite number, got {value!r}")
-                if isinstance(minimum, int) and not isinstance(value, int):
-                    raise ValueError(f"{key} for effort {level!r} is a count and must be an int, got {value!r}")
-                if value < minimum:
-                    raise ValueError(f"{key} for effort {level!r} must be >= {minimum}, got {value}")
+                if key in entry:
+                    # An int minimum makes the key a count, which a float would stand in for.
+                    (require_int if isinstance(minimum, int) else require_finite)(
+                        owner, ge=minimum, **{key: entry[key]}
+                    )
             profiles.setdefault(level, {}).update(entry)
         for level, profile in profiles.items():
             if profile.get("enforce_thinking_cap") is False and profile.get("thinking_tokens") is None:

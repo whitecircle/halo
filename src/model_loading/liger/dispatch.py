@@ -261,48 +261,16 @@ def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> Non
         )
 
 
-def _apply_liger_for_standard_models(
+def _build_liger_config(
+    apply_fn: Callable,
     model_type: str,
     user_overrides: dict,
-    fallback_model_type: str | None = None,
-    requested_kernels: frozenset[str] = frozenset(),
-) -> dict | None:
-    """Apply the applier :func:`_resolve_applier` picks; returns the applied (signature-filtered) config, or
-    ``None`` when none ran.
-
-    A family no applier covers warns, since ``use_liger_kernel`` defaults on, and raises when the config
-    asked for a specific kernel nothing can deliver.
-    """
-    resolved_type, apply_fn = _resolve_applier(model_type, fallback_model_type)
-    # Resolved through the text tower of a multimodal wrapper: the checkpoint loads as the wrapper
-    # class, whose own head runs. The applier's fused loss patches the tower's `*ForCausalLM`, which
-    # that model never instantiates, so it would report as applied while the logits plane materializes.
-    wrapper_head = apply_fn is not None and resolved_type != model_type
-    if wrapper_head:
-        suffix = " (toolkit applier)" if resolved_type in _TOOLKIT_LIGER_APPLIERS else ""
-        if is_global_main_process():
-            logger.info(
-                f"Liger Kernel not available for model_type={model_type}; "
-                f"falling back to text sub-config model_type={resolved_type}{suffix}"
-            )
-        model_type = resolved_type
-    if apply_fn is None:
-        if requested_kernels:
-            raise ValueError(
-                f"liger_kernel_config requests {sorted(requested_kernels)} for model_type={model_type}, "
-                f"but no Liger applier covers this family — neither LIGER_FAMILY_SPECS nor liger_kernel's "
-                f"own registry. Remove the keys and set use_liger_kernel: false, or add a LigerFamilySpec "
-                f"for the family (agent-docs/models/adding-a-model.md)."
-            )
-        if is_global_main_process():
-            logger.warning(
-                f"No Liger applier for model_type={model_type}: this run trains UNFUSED — RMSNorm, the "
-                f"GLU MLPs, cross-entropy and RoPE all run eager, costing throughput and the logits-plane "
-                f"memory a fused loss would save. Add a LigerFamilySpec to LIGER_FAMILY_SPECS, or set "
-                f"use_liger_kernel: false to state the choice."
-            )
-        return None
-
+    requested_kernels: frozenset[str],
+    wrapper_head: bool,
+) -> dict:
+    """The flags ``apply_fn`` is called with: the toolkit and per-model defaults under the user's overrides, the
+    fused loss off under a multimodal wrapper's own head, CE yielding to a requested FLCE, the applier's own
+    default-off flags kept off, and every key the applier does not accept dropped."""
     signature_params = inspect.signature(apply_fn).parameters
     valid_params = set(signature_params.keys())
 
@@ -357,7 +325,52 @@ def _apply_liger_for_standard_models(
             f"paths run eager. Coverage per family: agent-docs/optimization/liger-kernels.md."
         )
 
-    filtered_config = {k: v for k, v in config.items() if k in valid_params}
+    return {k: v for k, v in config.items() if k in valid_params}
+
+
+def _apply_liger_for_standard_models(
+    model_type: str,
+    user_overrides: dict,
+    fallback_model_type: str | None = None,
+    requested_kernels: frozenset[str] = frozenset(),
+) -> dict | None:
+    """Apply the applier :func:`_resolve_applier` picks; returns the applied (signature-filtered) config, or
+    ``None`` when none ran.
+
+    A family no applier covers warns, since ``use_liger_kernel`` defaults on, and raises when the config
+    asked for a specific kernel nothing can deliver.
+    """
+    resolved_type, apply_fn = _resolve_applier(model_type, fallback_model_type)
+    # Resolved through the text tower of a multimodal wrapper: the checkpoint loads as the wrapper
+    # class, whose own head runs. The applier's fused loss patches the tower's `*ForCausalLM`, which
+    # that model never instantiates, so it would report as applied while the logits plane materializes.
+    wrapper_head = apply_fn is not None and resolved_type != model_type
+    if wrapper_head:
+        suffix = " (toolkit applier)" if resolved_type in _TOOLKIT_LIGER_APPLIERS else ""
+        if is_global_main_process():
+            logger.info(
+                f"Liger Kernel not available for model_type={model_type}; "
+                f"falling back to text sub-config model_type={resolved_type}{suffix}"
+            )
+        model_type = resolved_type
+    if apply_fn is None:
+        if requested_kernels:
+            raise ValueError(
+                f"liger_kernel_config requests {sorted(requested_kernels)} for model_type={model_type}, "
+                f"but no Liger applier covers this family — neither LIGER_FAMILY_SPECS nor liger_kernel's "
+                f"own registry. Remove the keys and set use_liger_kernel: false, or add a LigerFamilySpec "
+                f"for the family (agent-docs/models/adding-a-model.md)."
+            )
+        if is_global_main_process():
+            logger.warning(
+                f"No Liger applier for model_type={model_type}: this run trains UNFUSED — RMSNorm, the "
+                f"GLU MLPs, cross-entropy and RoPE all run eager, costing throughput and the logits-plane "
+                f"memory a fused loss would save. Add a LigerFamilySpec to LIGER_FAMILY_SPECS, or set "
+                f"use_liger_kernel: false to state the choice."
+            )
+        return None
+
+    filtered_config = _build_liger_config(apply_fn, model_type, user_overrides, requested_kernels, wrapper_head)
 
     # The scoped CE patch serves an upstream applier's CE; a toolkit applier withholds the flag itself.
     call_config = dict(filtered_config)

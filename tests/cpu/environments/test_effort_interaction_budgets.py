@@ -454,11 +454,11 @@ def test_invalid_profiles_raise():
         _make_env(reasoning_effort_profiles={"extreme": {"max_submissions": 1}})
     with pytest.raises(ValueError, match="unknown keys"):
         _make_env(reasoning_effort_profiles={"low": {"max_turns": 3}})
-    with pytest.raises(ValueError, match="must be >= 1"):
+    with pytest.raises(ValueError, match="max_submissions must be an integer >= 1"):
         _make_env(reasoning_effort_profiles={"low": {"max_submissions": 0}})
-    with pytest.raises(ValueError, match="thinking_tokens.*must be >= 1"):
+    with pytest.raises(ValueError, match="thinking_tokens must be an integer >= 1"):
         _make_env(reasoning_effort_profiles={"low": {"thinking_tokens": 0}})
-    with pytest.raises(ValueError, match="must be >= 0"):
+    with pytest.raises(ValueError, match="max_test_calls must be an integer >= 0"):
         _make_env(reasoning_effort_profiles={"low": {"max_test_calls": -1}})
 
 

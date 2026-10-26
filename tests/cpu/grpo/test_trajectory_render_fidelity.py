@@ -128,9 +128,8 @@ def _stub(tok):
         _tokenizer=tok,
         _tools_schema=None,
         _batch_errors=BatchBuildFence(),
-        _rollout_template_kwargs={},
+        async_config=types.SimpleNamespace(rollout_chat_template_kwargs={}, max_train_row_tokens=None),
         _carry_reasoning=False,
-        _max_train_row_tokens=None,
         _rows_over_cap=0,
         _warned_once=set(),
         # Named in the fall-back warning, whose remedy differs per engine.

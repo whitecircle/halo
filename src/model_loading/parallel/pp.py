@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import replace
-from functools import partial
 
 import torch
 import torch.nn as nn
@@ -35,20 +34,15 @@ from src.distributed.pipeline_parallel.stage import (
 )
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.buffer_repair import finalize_loaded_model
-from src.model_loading.lazy_safetensors.materialization import (
-    WeightAction,
-    WeightPlan,
-    materialize_empty_like,
-    stream_planned_weights,
-)
+from src.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.model_loading.parallel.fp32_masters import capture_fp32_masters, verify_fp32_master_coverage
+from src.model_loading.parallel.lazy_load import load_planned_weights
 from src.model_loading.parallel.model_source import ModelSource, resolve_lazy_checkpoint
 from src.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, tie_flag_configs
 from src.models.module_tree import split_layer_path
-from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
+from src.runtime.consensus import reject_across_ranks
 from src.runtime.load_coordination import timed_global_load
-from src.runtime.ranks import get_global_rank, get_local_rank
+from src.runtime.ranks import get_global_rank
 
 logger = logging.getLogger(__name__)
 
@@ -246,18 +240,6 @@ def _plan_stage(
     return plans, dropped_keys, fusion_tasks, partition
 
 
-def _ep_patch_reason(
-    model: nn.Module, ep_config: EPConfig, pp_rank: int, *, weights_already_sharded: bool
-) -> str | None:
-    """Why EP patching failed on this stage, or ``None``: any exception, since the wrappers run over this
-    stage's layers alone, so every failure is stage-local and must reach the peers through the join."""
-    try:
-        apply_ep_layers(model, ep_config, weights_already_sharded=weights_already_sharded)
-    except Exception as e:  # a stage-local verdict, joined by the caller
-        return f"EP patching failed on pipeline stage {pp_rank}: {type(e).__name__}: {e}"
-    return None
-
-
 def _load_stage_lazy(
     model_path: str,
     pp_rank: int,
@@ -277,7 +259,6 @@ def _load_stage_lazy(
     its partition on ``PP_STAGE_PARTITION_ATTR``. fp32 masters are read or fused at fp32, the EP layers' only read
     (the PP resume reload skips them); ``preserve_checkpoint_precision`` requires every one restored."""
     rank = get_global_rank()
-    device = f"cuda:{get_local_rank()}" if torch.cuda.is_available() else "cpu"
     base = lazy_load_prologue(
         model_path,
         config,
@@ -296,7 +277,7 @@ def _load_stage_lazy(
             **model_kwargs,
         ),
     )
-    model, dtype = base.model, base.dtype
+    model = base.model
     fuser = (
         ExpertFuser(ep_config.expert_start_idx, ep_config.expert_end_idx)
         if ep_config is not None and base.expert_layout == ExpertKeyLayout.PER_EXPERT
@@ -305,58 +286,41 @@ def _load_stage_lazy(
     plans, dropped_keys, fusion_tasks, partition = _plan_stage(base, model_path, pp_rank, pp_size, pp_split, fuser)
     lo, hi = partition[pp_rank]
 
-    # Stage-dependent raises (a shape mismatch or a missing expert in one stage's layers) are deferred to the
-    # joined rejection instead of stranding the other stages.
-    guard = DeferredRankFailure(f"PP stage weight load from {model_path}")
-    # After the slice: the masters are named in the stage's own numbering, as the plans now are.
-    keep_fp32, master_state = guard.run(
-        lambda: capture_fp32_masters(
-            model, ep_config, keep_non_ep=keep_fp32_params, strict=preserve_checkpoint_precision
+    def report(plans: list[WeightPlan], fused_keys: set[str]) -> None:
+        live = [plan for plan in plans if plan.action is not WeightAction.IGNORE]
+        n_shard = sum(1 for plan in live if plan.action is WeightAction.EXPERT_SHARD)
+        logger.info(
+            f"[Rank {rank}] PP stage {pp_rank}/{pp_size} layers [{lo}, {hi}) of {partition[-1][1]}: "
+            f"{len(live)} tensors ({n_shard} expert-sharded, {len(fused_keys)} fused) from "
+            f"{len({plan.shard_file for plan in live})}/{len(base.shard_files)} shards"
         )
-    ) or (frozenset(), None)
-    fused_keys: set[str] = set()
-    if fusion_tasks:
-        fused_keys = (
-            guard.run(
-                partial(
-                    fuser.execute, fusion_tasks, model, model_path, dtype=dtype, device=device, keep_fp32=keep_fp32
-                )
-            )
-            or set()
-        )
-        plans = [plan for plan in plans if plan.model_key not in fused_keys]
-    # Empty storage, deliberately not an init pass: the stage build drops these modules, and an RNG draw
-    # would desynchronize the seed stream against ranks whose checkpoint carries them.
-    for key in dropped_keys:
-        guard.run(partial(materialize_empty_like, model, key, device, dtype))
-    # Dropped keys count as planned (materialized, not absent) and need no master.
-    planned = {plan.model_key for plan in plans} | fused_keys | set(dropped_keys)
-    if preserve_checkpoint_precision:
-        guard.run(partial(verify_fp32_master_coverage, master_state, keep_fp32, planned, source=model_path))
-    live = [plan for plan in plans if plan.action is not WeightAction.IGNORE]
-    n_shard = sum(1 for plan in live if plan.action is WeightAction.EXPERT_SHARD)
-    logger.info(
-        f"[Rank {rank}] PP stage {pp_rank}/{pp_size} layers [{lo}, {hi}) of {partition[-1][1]}: "
-        f"{len(live)} tensors ({n_shard} expert-sharded, {len(fused_keys)} fused) from "
-        f"{len({plan.shard_file for plan in live})}/{len(base.shard_files)} shards"
-    )
-    stream_planned_weights(
-        model,
+
+    # Stage-dependent raises (a shape mismatch or a missing expert in one stage's layers) defer to the fence
+    # instead of stranding the other stages. The masters are captured after the slice, in the stage's own
+    # numbering, as the plans now are.
+    weights_already_sharded = load_planned_weights(
+        base,
         plans,
-        planned,
         model_path=model_path,
-        weight_map=base.weight_map,
-        device=device,
-        dtype=dtype,
-        keep_fp32=keep_fp32,
-        run=guard.run,
+        ep_config=ep_config,
+        keep_fp32_params=keep_fp32_params,
+        preserve_checkpoint_precision=preserve_checkpoint_precision,
+        what=f"PP stage weight load from {model_path}",
         label=f"PP stage {pp_rank}",
+        report=report,
+        fuser=fuser,
+        fusion_tasks=fusion_tasks,
+        dropped_keys=dropped_keys,
     )
-    guard.reject()
 
     if ep_config is not None:
-        # Derived, never asserted, as in load_ep_model_lazy.
-        reason = _ep_patch_reason(model, ep_config, pp_rank, weights_already_sharded=bool(fused_keys) or n_shard > 0)
+        # The wrappers run over this stage's layers alone, so any failure is stage-local and reaches the peers
+        # through the join. ``weights_already_sharded`` is derived, never asserted, as in load_ep_model_lazy.
+        reason = None
+        try:
+            apply_ep_layers(model, ep_config, weights_already_sharded=weights_already_sharded)
+        except Exception as e:  # a stage-local verdict, joined below
+            reason = f"EP patching failed on pipeline stage {pp_rank}: {type(e).__name__}: {e}"
         reject_across_ranks(reason, _PP_LOAD_LABEL)
     finalize_loaded_model(model)
     reject_across_ranks(_unmaterialized_reason(model, model_path, pp_rank, lo, hi), _PP_LOAD_LABEL)

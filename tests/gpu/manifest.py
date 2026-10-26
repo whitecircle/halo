@@ -262,7 +262,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fa4_tree_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "gptoss", "qwen3"), timeout=900
     ),
-    "kernels/test_flex_sliding_attention.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "kernels/test_sdpa_flex_sliding.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
     "kernels/test_family_kernel_stack_numerics.py": TestSpec(
@@ -271,7 +271,7 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=tuple(f"--family {family}" for family in _TINY_MOE_FAMILIES),
         timeout=900,
     ),
-    "kernels/test_grouped_gemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "kernels/test_expert_gemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_grouped_mm_empty_groups.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
     "kernels/test_liger_family_kernels.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
     "kernels/test_liger_routed_experts.py": TestSpec(

@@ -106,7 +106,7 @@ async def _run(env, answer_text, answer="4"):
 
 @pytest.mark.parametrize("objective", [-0.01, 1.01, float("nan"), True, "1"])
 def test_grade_refuses_an_objective_outside_the_unit_interval(objective):
-    with pytest.raises(ValueError, match=r"\[0, 1\]"):
+    with pytest.raises(ValueError, match=r"^EpisodeGrade: objective must be (in \[0, 1\]|a finite number), got"):
         EpisodeGrade(objective)
 
 
@@ -262,7 +262,10 @@ def test_a_fired_veto_zeroes_the_objective_and_keeps_the_episode_valid(fake_judg
 
 
 def test_a_veto_judge_needs_the_environment_term_it_gates():
-    with pytest.raises(ValueError, match=r"veto judge term\(s\) \['conduct'\]"):
+    with pytest.raises(
+        ValueError,
+        match=r"\['conduct'\] list 'checks' \(a veto judge\).*without a \{source: environment\} term \(add one to",
+    ):
         build_environment("native_math", {"reward_terms": [CHECKS]})
 
 

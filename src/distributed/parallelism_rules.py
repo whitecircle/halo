@@ -161,31 +161,9 @@ def reject_unsupported_axes(pc: ParallelismConfig) -> None:
     )
 
 
-def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
-    """PP stages must be whole NVLink domains, keeping every domain-local group inside one stage, and PP
-    refuses the settings whose collectives or loss aggregation it would break."""
-    if pc.pp_size == 1:
-        # Nothing reads the PP-only knobs at pp_size == 1, so a set one does not do what it says.
-        for name, value, default in (
-            ("pipeline_split", pc.pp_split, None),
-            ("pipeline_microbatches", pc.pp_microbatches, 0),
-            ("pipeline_schedule", pc.pp_schedule, PP_DEFAULT_SCHEDULE),
-        ):
-            if value != default:
-                raise ValueError(
-                    f"{name}={value!r} is only meaningful with pipeline_parallel_size > 1; at 1 nothing reads it. "
-                    f"Remove it or set pipeline_parallel_size."
-                )
-        return
-
-    if pc.expert_lora is not None:
-        raise ValueError(
-            "Expert LoRA (native grouped adapters) is not supported under pipeline parallelism: "
-            "the adapter save/merge paths (save_expert_lora_adapters, merge_expert_lora_on_save) "
-            "write flat global expert names with no stage→global remap, so a PP save would "
-            "silently record stage-local layer indices. Train expert LoRA without PP."
-        )
-
+def _reject_pp_stage_shape(pc: ParallelismConfig) -> None:
+    """A split names one layer count per stage, and a stage is whole NVLink domains (every domain-local group
+    inside one stage) of at least two ranks."""
     if pc.pp_split is not None:
         if len(pc.pp_split) != pc.pp_size:
             raise ValueError(
@@ -217,6 +195,9 @@ def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
             f"per stage."
         )
 
+
+def _reject_pp_stage_sharding(pc: ParallelismConfig) -> None:
+    """The FSDP and precision settings whose collectives, memory or block numbering a stage would break."""
     if pc.needs_ep_wrappers and pc.ep_group_size == 1 and not pc.experts_fsdp_managed:
         raise ValueError(
             f"PP with fsdp_shard_ep1_experts=False (pipeline_parallel_size={pc.pp_size}, "
@@ -276,6 +257,35 @@ def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
             f"precision, with nothing raised. bf16 is the production default; train the "
             f"low-precision recipe without PP."
         )
+
+
+def _reject_pipeline_parallel(pc: ParallelismConfig) -> None:
+    """PP stages must be whole NVLink domains, keeping every domain-local group inside one stage, and PP
+    refuses the settings whose collectives or loss aggregation it would break."""
+    if pc.pp_size == 1:
+        # Nothing reads the PP-only knobs at pp_size == 1, so a set one does not do what it says.
+        for name, value, default in (
+            ("pipeline_split", pc.pp_split, None),
+            ("pipeline_microbatches", pc.pp_microbatches, 0),
+            ("pipeline_schedule", pc.pp_schedule, PP_DEFAULT_SCHEDULE),
+        ):
+            if value != default:
+                raise ValueError(
+                    f"{name}={value!r} is only meaningful with pipeline_parallel_size > 1; at 1 nothing reads it. "
+                    f"Remove it or set pipeline_parallel_size."
+                )
+        return
+
+    if pc.expert_lora is not None:
+        raise ValueError(
+            "Expert LoRA (native grouped adapters) is not supported under pipeline parallelism: "
+            "the adapter save/merge paths (save_expert_lora_adapters, merge_expert_lora_on_save) "
+            "write flat global expert names with no stage→global remap, so a PP save would "
+            "silently record stage-local layer indices. Train expert LoRA without PP."
+        )
+
+    _reject_pp_stage_shape(pc)
+    _reject_pp_stage_sharding(pc)
 
 
 def _reject_ep_group(pc: ParallelismConfig) -> None:

@@ -1,4 +1,4 @@
-"""Validation every config class shares: the bounds guards, the validation base guarded configs inherit, the
+"""Validation every config class shares: the bounds and type guards, the validation base guarded configs inherit, the
 declared-default comparison, and the refusals of parsed knobs a script cannot honor.
 
 A NaN passes every ordered comparison and a bool is an int a range check reads as 0 or 1, so the guards refuse
@@ -35,10 +35,15 @@ def _check_bounds(owner: str, values: dict[str, Any], *, integer: bool, gt, ge, 
             raise ValueError(f"{owner}: {key} must be {requirement}{why}, got {value!r}")
 
 
+def is_finite_number(value: Any) -> bool:
+    """Whether ``value`` is an int or float other than a bool, NaN or an infinity."""
+    return not isinstance(value, bool) and isinstance(value, int | float) and math.isfinite(value)
+
+
 def require_finite(owner: str, *, gt=None, ge=None, lt=None, le=None, why: str = "", **values: Any) -> None:
     """Refuse a value that is not a finite number, then one outside the given bounds."""
     for key, value in values.items():
-        if isinstance(value, bool) or not isinstance(value, int | float) or not math.isfinite(value):
+        if not is_finite_number(value):
             raise ValueError(f"{owner}: {key} must be a finite number, got {value!r}")
     _check_bounds(owner, values, integer=False, gt=gt, ge=ge, lt=lt, le=le, why=why)
 
@@ -46,6 +51,20 @@ def require_finite(owner: str, *, gt=None, ge=None, lt=None, le=None, why: str =
 def require_int(owner: str, *, gt=None, ge=None, lt=None, le=None, why: str = "", **values: Any) -> None:
     """Refuse anything but an int inside the given bounds; a float would stand in for a count."""
     _check_bounds(owner, values, integer=True, gt=gt, ge=ge, lt=lt, le=le, why=why)
+
+
+def require_bool(owner: str, **values: Any) -> None:
+    """Refuse anything but a bool: YAML 1.2 reads ``no``/``off`` as strings, which a truthiness check takes as true."""
+    for key, value in values.items():
+        if not isinstance(value, bool):
+            raise ValueError(f"{owner}: {key} must be true or false, got {value!r}")
+
+
+def require_text(owner: str, **values: Any) -> None:
+    """Refuse anything but a non-blank string."""
+    for key, value in values.items():
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{owner}: {key} must be a non-blank string, got {value!r}")
 
 
 class ValidatedConfig:

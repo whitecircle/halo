@@ -168,7 +168,7 @@ def _logprobs_backward(hidden, weight, targets, bias, log_z, grad_logprobs, temp
     return grad_hidden, grad_weight, grad_bias
 
 
-class HeadLogprobFunction(torch.autograd.Function):
+class _HeadLogprobFunction(torch.autograd.Function):
     """Selective log-probs and entropy in one vocab sweep, with the recompute backward. Only the
     log-probs carry gradient; the entropy is a detached diagnostic (``mark_non_differentiable``)."""
 
@@ -215,7 +215,7 @@ def chunked_head_logprobs(
     ``targets``. Differentiable in ``hidden``, ``weight`` and ``bias``; ``temperature`` matches TRL's
     pre-softmax division. ``entropy`` (``-Σ p·log p`` over the vocabulary) is ``None`` unless ``compute_entropy``.
     """
-    logps, entropy = HeadLogprobFunction.apply(
+    logps, entropy = _HeadLogprobFunction.apply(
         hidden.reshape(-1, hidden.shape[-1]),
         weight,
         targets.reshape(-1),

@@ -325,7 +325,7 @@ def run_env_grpo_e2e(
     # rather than raising, so on a backend whose capture spelling is wrong training succeeds while
     # optimizing tokens the engine never sampled.
     checks["trained_on_engine_sampled_ids"] = (
-        trainer._train_on_sampled_tokens and SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
+        trainer.async_config.train_on_sampled_tokens and SAMPLED_IDS_MISSING_WARNING not in trainer._warned_once
     )
 
     if peft is not None:
