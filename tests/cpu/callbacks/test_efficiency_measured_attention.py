@@ -20,7 +20,7 @@ from src.callbacks.efficiency import EfficiencyCallback
 from src.callbacks.model_flops import RankFlopsModel
 from src.models.attention.layout import AttentionLayout, LayerAttention
 from src.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
-from src.trainers.mixins.token_metrics import TokenMetricsMixin
+from src.trainers.token_metrics import TokenMetricsMixin
 from tests.common.parallelism import make_parallelism_config
 
 _NO_PARALLELISM = make_parallelism_config(world_size=1, gpus_per_node=1)

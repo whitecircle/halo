@@ -219,7 +219,7 @@ def test_offline_construction_weighs_the_plane_after_the_model_is_placed():
     """The offline trainer has no shared spine to call the check; its own ctor must, once the parallel
     wrap has put the model where the free memory is read."""
     checks = _call_lines(OfflineGRPOTrainer.__init__, "_check_full_logits_fit")
-    setups = _call_lines(OfflineGRPOTrainer.__init__, "_setup_distributed_modes")
+    setups = _call_lines(OfflineGRPOTrainer.__init__, "_configure_distributed_modes")
     assert checks and setups and min(checks) > max(setups)
 
 

@@ -26,7 +26,7 @@ from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 
 from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -79,10 +79,12 @@ def _fake_trainer(model: nn.Module) -> types.SimpleNamespace:
     me = types.SimpleNamespace(
         model=model,
         _ep_config=None,
+        _param_id_caches={},
         parallelism_config=types.SimpleNamespace(fp32_non_ep_params=False),
         args=types.SimpleNamespace(bf16=True, fp16=False),
     )
-    me._find_ep_modules = types.MethodType(DistributedTrainerMixin._find_ep_modules, me)
+    me._ep_layers = types.MethodType(DistributedTrainerMixin._ep_layers, me)
+    me._memoized_param_ids = types.MethodType(DistributedTrainerMixin._memoized_param_ids, me)
     me._get_ep_param_ids = types.MethodType(DistributedTrainerMixin._get_ep_param_ids, me)
     return me
 

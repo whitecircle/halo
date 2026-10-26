@@ -36,7 +36,7 @@ from src.entrypoints.run_setup import resume_checkpoint_from_config
 from src.runtime import collectives, filesystem
 from src.runtime.filesystem import is_fs_save_rank
 from src.runtime.ranks import get_global_rank
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.gloo import run_gloo_ranks
 

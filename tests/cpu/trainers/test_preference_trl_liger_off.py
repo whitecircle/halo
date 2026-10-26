@@ -18,7 +18,7 @@ from accelerate import PartialState
 from transformers import PretrainedConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 

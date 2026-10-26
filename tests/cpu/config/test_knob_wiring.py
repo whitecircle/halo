@@ -30,8 +30,10 @@ from src.entrypoints.data_setup import reject_trl_dataset_prep_args
 from src.entrypoints.script import distributed_trainer_kwargs
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.optimizer_selection import resolve_bf16_optimizer
+from src.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.repo import REPO_ROOT, load_script_module
@@ -50,21 +52,9 @@ def test_bf16_optimizer_reaches_parallelism_config(requested):
 
 
 def _resolve_bf16_optimizer(*, config_value, bf16=True, optim="adamw_torch_fused", ctor_value=None):
-    """Run the mixin's resolution with a stub trainer; returns the resolved ``_bf16_optimizer``."""
-    stub = SimpleNamespace(
-        parallelism_config=SimpleNamespace(
-            bf16_optimizer=config_value,
-            ep_group_size=1,
-            needs_ep_wrappers=False,
-            experts_fsdp_managed=False,
-            fp32_non_ep_params=False,
-        ),
-        _should_accelerate_manage_ddp=lambda: False,
-    )
-    training_args = SimpleNamespace(bf16=bf16, optim=optim)
-    kwargs = {} if ctor_value is None else {"bf16_optimizer": ctor_value}
-    DistributedTrainerMixin._configure_mixed_precision(stub, kwargs, training_args)
-    return stub._bf16_optimizer
+    """The trainer's resolution over a stub config."""
+    config = SimpleNamespace(bf16_optimizer=config_value)
+    return resolve_bf16_optimizer(ctor_value, config, SimpleNamespace(bf16=bf16, optim=optim), replicated_ddp=False)
 
 
 def test_bf16_optimizer_config_true_forces_on_where_auto_would_disable():
@@ -84,30 +74,14 @@ def test_bf16_optimizer_ctor_kwarg_wins_over_config():
     assert _resolve_bf16_optimizer(config_value=False, ctor_value=True) is True
 
 
-def _mixed_precision_stub(
-    *,
-    ep_group_size: int,
-    experts_fsdp_managed: bool = False,
-    bf16_optimizer=False,
-    fp32_non_ep_params: bool = False,
-):
+def _mixed_precision_config(*, ep_group_size: int, bf16_optimizer=False, fp32_non_ep_params: bool = False):
     return SimpleNamespace(
-        parallelism_config=SimpleNamespace(
-            bf16_optimizer=bf16_optimizer,
-            ep_group_size=ep_group_size,
-            needs_ep_wrappers=True,
-            experts_fsdp_managed=experts_fsdp_managed,
-            fp32_non_ep_params=fp32_non_ep_params,
-        ),
-        _should_accelerate_manage_ddp=lambda: False,
+        bf16_optimizer=bf16_optimizer,
+        ep_group_size=ep_group_size,
+        needs_ep_wrappers=True,
+        experts_fsdp_managed=False,
+        fp32_non_ep_params=fp32_non_ep_params,
     )
-
-
-def _moe_model_kwargs():
-    """Ctor kwargs whose model reads as a REGISTERED MoE family. The refusal resolves the family
-    through the EP-wrapper registry (``wraps_experts``), so a config without a registered
-    ``model_type`` never has plain expert tensors and would pin nothing."""
-    return {"model": SimpleNamespace(config=SimpleNamespace(num_local_experts=8, model_type="qwen3_moe"))}
 
 
 def _optimizer_build_stub(
@@ -140,7 +114,7 @@ def test_stock_adamw_refused_where_plain_experts_meet_dtensor_peers():
     ):
         for optim in ("adamw_torch_fused", "adamw_torch"):
             with pytest.raises(ValueError, match="mixed torch.Tensor and DTensor"):
-                DistributedTrainerMixin._refuse_stock_optimizer_on_mixed_params(stub, optim)
+                reject_stock_adamw_on_mixed_params(optim, stub.parallelism_config, stub.model.config)
 
 
 def test_stock_adamw_allowed_where_every_param_is_a_dtensor():
@@ -150,15 +124,12 @@ def test_stock_adamw_allowed_where_every_param_is_a_dtensor():
     wrapped, so its experts are ordinary FSDP2 DTensors. Refusing any of the three would block a
     shape that steps fine — which is what makes ``experts_fsdp_managed`` and the registry resolution
     load-bearing rather than decorative."""
-    DistributedTrainerMixin._refuse_stock_optimizer_on_mixed_params(
-        _optimizer_build_stub(ep_group_size=1, experts_fsdp_managed=True), "adamw_torch_fused"
-    )
-    DistributedTrainerMixin._refuse_stock_optimizer_on_mixed_params(
-        _optimizer_build_stub(ep_group_size=1, moe=False), "adamw_torch_fused"
-    )
-    DistributedTrainerMixin._refuse_stock_optimizer_on_mixed_params(
-        _optimizer_build_stub(ep_group_size=1, model_type="qwen3_next"), "adamw_torch_fused"
-    )
+    for stub in (
+        _optimizer_build_stub(ep_group_size=1, experts_fsdp_managed=True),
+        _optimizer_build_stub(ep_group_size=1, moe=False),
+        _optimizer_build_stub(ep_group_size=1, model_type="qwen3_next"),
+    ):
+        reject_stock_adamw_on_mixed_params("adamw_torch_fused", stub.parallelism_config, stub.model.config)
 
 
 def test_named_optimizers_are_not_refused_by_the_stock_adamw_guard():
@@ -166,18 +137,16 @@ def test_named_optimizers_are_not_refused_by_the_stock_adamw_guard():
     block optimizers that handle the mixed set."""
     stub = _optimizer_build_stub(ep_group_size=8)
     for optim in ("muon", "flash_adamw", "adamw_bnb_8bit"):
-        DistributedTrainerMixin._refuse_stock_optimizer_on_mixed_params(stub, optim)
+        reject_stock_adamw_on_mixed_params(optim, stub.parallelism_config, stub.model.config)
 
 
 def test_fp32_on_a_moe_builds_the_trainer_and_only_refuses_at_the_optimizer():
     """Constructing a trainer with ``bf16: false`` on a MoE must NOT raise: forward, backward and the
     EP-aware clip are correct over the mixed parameter set. Only building the stock optimizer is the
     defect."""
-    stub = _mixed_precision_stub(ep_group_size=8, bf16_optimizer=None)
-    DistributedTrainerMixin._configure_mixed_precision(
-        stub, _moe_model_kwargs(), SimpleNamespace(bf16=False, optim="adamw_torch_fused")
-    )
-    assert stub._bf16_optimizer is False
+    config = _mixed_precision_config(ep_group_size=8, bf16_optimizer=None)
+    args = SimpleNamespace(bf16=False, optim="adamw_torch_fused")
+    assert resolve_bf16_optimizer(None, config, args, replicated_ddp=False) is False
 
 
 def test_create_optimizer_wires_the_refusal_before_building_the_stock_optimizer():
@@ -188,7 +157,8 @@ def test_create_optimizer_wires_the_refusal_before_building_the_stock_optimizer(
     ``create_optimizer``), which is how the dense case proves the guard let it through."""
 
     class _Probe(DistributedTrainerMixin):
-        _has_ep_layers = False  # shadows the base property (it walks self.model.modules())
+        def _ep_layers(self):  # shadows the base walk over self.model
+            return []
 
     def _build(*, moe: bool):
         trainer = _Probe.__new__(_Probe)
@@ -197,6 +167,7 @@ def test_create_optimizer_wires_the_refusal_before_building_the_stock_optimizer(
         trainer._bf16_optimizer = False
         trainer.args = SimpleNamespace(optim="adamw_torch_fused")
         trainer.get_decay_parameter_names = lambda model: []
+        trainer.get_optimizer_cls_and_kwargs = lambda *args: None
         trainer.model = stub.model
         trainer.model.modules = lambda: []  # the FSDP2 re-registration seam walks modules; the stub is no nn.Module
         trainer.parallelism_config = stub.parallelism_config
@@ -211,22 +182,18 @@ def test_create_optimizer_wires_the_refusal_before_building_the_stock_optimizer(
 def test_explicit_bf16_optimizer_false_selects_the_stock_path_without_raising_at_construction():
     """``bf16_optimizer=False`` selects the stock optimizer rather than raising at construction —
     the unsupported combination is caught by the build guard above, not here."""
-    stub = _mixed_precision_stub(ep_group_size=8, bf16_optimizer=False)
-    DistributedTrainerMixin._configure_mixed_precision(
-        stub, _moe_model_kwargs(), SimpleNamespace(bf16=True, optim="adamw_torch_fused")
-    )
-    assert stub._bf16_optimizer is False
+    config = _mixed_precision_config(ep_group_size=8, bf16_optimizer=False)
+    args = SimpleNamespace(bf16=True, optim="adamw_torch_fused")
+    assert resolve_bf16_optimizer(None, config, args, replicated_ddp=False) is False
 
 
 def test_fp32_non_ep_params_is_the_remedy_the_message_names_and_is_not_itself_refused():
     """The refusal tells the user to set ``fp32_non_ep_params``, which routes ``create_optimizer`` to
     the tensor-type-grouped builder before the stock branch is reached — the one path that handles a
     mixed plain/DTensor set. Construction must not refuse it either, or it blocks the fix it names."""
-    stub = _mixed_precision_stub(ep_group_size=8, fp32_non_ep_params=True, bf16_optimizer=None)
-    DistributedTrainerMixin._configure_mixed_precision(
-        stub, {}, SimpleNamespace(bf16=False, optim="adamw_torch_fused")
-    )
-    assert stub._bf16_optimizer is False
+    config = _mixed_precision_config(ep_group_size=8, fp32_non_ep_params=True, bf16_optimizer=None)
+    args = SimpleNamespace(bf16=False, optim="adamw_torch_fused")
+    assert resolve_bf16_optimizer(None, config, args, replicated_ddp=False) is False
 
 
 # reject_trl_dataset_prep_args: the knobs only TRL's own dataset prep and collator read
@@ -449,7 +416,7 @@ _TRAINER_SCRIPTS = sorted(
 
 def test_every_training_script_forwards_moe_balancing_to_its_trainer():
     """``configure_moe_balancing`` reads ``moe_balancing`` off the script args to pick the strategy, but the
-    trainer needs its own copy: ``_validate_router_aux_loss_consumable`` decides raise-vs-warn from
+    trainer needs its own copy: ``_disable_inert_router_logits`` decides raise-vs-warn from
     ``self._moe_balancing``, which ``_init_distributed_config`` defaults to ``"auto"``. A script
     that omits the kwarg silently downgrades that rejection to a warning, so a run asking for
     ``aux_loss`` on a trainer whose objective never adds it pays the router-logit cost and balances

@@ -15,8 +15,8 @@ from types import SimpleNamespace
 import pytest
 from accelerate import PartialState
 
-import src.trainers.mixins.base as base_mod
-from src.trainers.mixins.base import align_save_on_each_node
+import src.trainers.training_args_overrides as base_mod
+from src.trainers.training_args_overrides import align_save_on_each_node
 
 PartialState()  # the mixin's accelerate logger requires an initialized state
 

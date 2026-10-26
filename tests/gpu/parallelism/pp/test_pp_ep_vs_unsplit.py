@@ -17,7 +17,7 @@ chain. Two unsplit references on the same bf16-rounded weights carry the checks:
   * router grads additionally bit-identical across each stage's ranks (the sweep's AVG collective)
   * the installed clip returns one identical norm on all 4 ranks
   * a second step proves kept-layer dispatch still works after the dropped-layer dispatcher
-    destroy in _maybe_prepare_pipeline_model
+    destroy in _split_pipeline_stage
 
 Topology: 4 GPUs as 2 simulated NVLink domains of 2 (pp2 crosses the domain edge, ep2 fills a
 stage). ``--gc`` re-runs the same equivalence with activation checkpointing on the stage.

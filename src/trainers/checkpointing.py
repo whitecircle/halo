@@ -1,7 +1,6 @@
 """Checkpoint save and resume orchestration: the saver ladder, :func:`load_resume_weights`, the optimizer
-shard store and the sidecars, with a hook for a trainer's own and rotation deferred until they are on
-disk. Its zero-arg ``super()`` calls must resolve past every sibling mixin to the base Trainer, which
-``tests/cpu/trainers/test_mixin_composition.py`` checks.
+shard store and the sidecars, with hooks for a trainer's own and rotation deferred until they are on disk.
+Its zero-arg ``super()`` calls must resolve past every sibling mixin to the base Trainer.
 """
 
 import os
@@ -13,6 +12,7 @@ from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR, rotate_checkpoints
 
 from src.checkpoint.atomic import apply_umask_mode
 from src.checkpoint.config_export import finalize_exported_config
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.checkpoint.hub_layout import save_pretrained_layout
 from src.checkpoint.model_card import with_halo_tags
 from src.checkpoint.parallel.adapters import save_resume_adapter
@@ -28,6 +28,7 @@ from src.checkpoint.parallel.resume_weights import load_resume_weights
 from src.checkpoint.parallel.save import save_checkpoint
 from src.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases, save_lr_scheduler
 from src.checkpoint.weights_source import config_schema_source
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.model_loading.tokenizer_setup import pristine_model_max_length
 from src.models.attention.gpt_oss_sinks import gpt_oss_sinks_restored
@@ -35,7 +36,7 @@ from src.models.config_access import config_export_ready, restore_config_fields
 from src.models.unwrapping import base_transformers_model
 from src.runtime.collectives import barrier
 from src.runtime.consensus import DeferredRankFailure
-from src.runtime.filesystem import fs_aware_makedirs
+from src.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 
 logger = get_logger(__name__, log_level="info")
 
@@ -43,12 +44,9 @@ logger = get_logger(__name__, log_level="info")
 class CheckpointingMixin:
     """Checkpoint save, resume and sidecars for :class:`DistributedTrainerMixin`."""
 
-    # Set by :meth:`_mark_model_save_collectives_done` at the end of every ``save_model``; read by
-    # :meth:`_save_checkpoint` to decide whether a recorded failure may be deferred to the collective
-    # rejection or must raise on this rank now.
+    # Whether this save's collectives are behind it, the line before which a failure raises rank-locally.
     _model_save_collectives_done: bool = False
-    # True while :meth:`_save_checkpoint`'s base save runs ``save_model``, whose context then marks a
-    # training checkpoint (tensors at their live dtype) rather than an export.
+    # True while :meth:`_save_checkpoint` runs ``save_model``: tensors keep their live dtype, unlike an export.
     _writing_training_checkpoint: bool = False
 
     def train(self, resume_from_checkpoint=None, *args, **kwargs):
@@ -61,6 +59,48 @@ class CheckpointingMixin:
                 raise ValueError(f"No valid checkpoint found in output directory ({self.args.output_dir})")
         return super().train(resume_from_checkpoint, *args, **kwargs)
 
+    def save_model(self, output_dir: str = None, _internal_call: bool = False):
+        """Save the model through the saver ladder (``save_checkpoint``), the base Trainer's save where no
+        saver owns it, under ``pristine_model_max_length``: the run's sequence budget pinned on the tokenizer
+        would otherwise persist as the exported model's served context."""
+        output_dir = output_dir or self.args.output_dir
+        # A mid-training save can land while FSDP2 modules hold the transient unsharded params a forward
+        # registered, which the optimizer never stepped: every writer would read them, and the PEFT path's
+        # DTensor probe would mis-route to the rank-0 save_pretrained branch, whose shared-tensor scan raises.
+        reshard_fsdp2_modules(self._top_level_model())
+        fs_aware_makedirs(output_dir)
+
+        restore_config_fields(getattr(self, "_pristine_special_token_ids", []))
+        save_balancing_biases(self._top_level_model(), output_dir, is_pp_mode=self.parallelism_config.is_pp_mode)
+
+        ctx = self._checkpoint_context()
+        with pristine_model_max_length(ctx.tokenizer):
+            self._write_model_payload(ctx, output_dir, _internal_call)
+        self._mark_model_save_collectives_done()
+
+    def create_model_card(self, *args, tags: str | list[str] | None = None, **kwargs):
+        """The base trainer's card (TRL's ``output_dir/README.md``, written from its ``_tag_names`` alone) with
+        the Halo Hub tags beside its own."""
+        return super().create_model_card(*args, tags=with_halo_tags(tags), **kwargs)
+
+    def _load_from_checkpoint(
+        self, resume_from_checkpoint: str, model: nn.Module = None, *, for_best_model: bool = False
+    ) -> None:
+        """Parallelism-aware weight resume (:func:`load_resume_weights`), the base Trainer's own load
+        where that declines, then the state saved beside the weights."""
+        ctx = self._weights_load_context()
+        if not load_resume_weights(ctx, resume_from_checkpoint, model, for_best_model=for_best_model):
+            self._load_weights_through_base(resume_from_checkpoint, model)
+        self._restore_state_beside_weights(resume_from_checkpoint, for_best_model=for_best_model)
+
+    def _weights_load_context(self) -> CheckpointLoadContext:
+        """The context the weight resume reads; a trainer whose saves write a sub-module's names re-points it."""
+        return self._checkpoint_load_context()
+
+    def _load_weights_through_base(self, checkpoint: str, model: nn.Module | None) -> None:
+        """The base Trainer's own weight load, where the parallelism-aware one declines."""
+        super()._load_from_checkpoint(checkpoint, model)
+
     def _checkpoint_load_context(self) -> CheckpointLoadContext:
         """The current model/optimizer/scheduler for a resume path, over the bare ``_fsdp_wrapped`` so
         accelerate-managed FSDP falls through to the base Trainer."""
@@ -69,7 +109,7 @@ class CheckpointingMixin:
             optimizer=self.optimizer,
             lr_scheduler=self.lr_scheduler,
             parallelism_config=self.parallelism_config,
-            has_ep_layers=self._has_ep_layers,
+            has_ep_layers=bool(self._ep_layers()),
             fsdp_wrapped=self._fsdp_wrapped,
             tp_rank=self._get_tp_rank(),
             super_load_optimizer_and_scheduler=super()._load_optimizer_and_scheduler,
@@ -77,37 +117,28 @@ class CheckpointingMixin:
             base_owns_whole_weight_load=self._accelerate_manages_fsdp,
         )
 
-    def _optimizer_store(self) -> OptimizerShardStore:
-        """The per-rank optimizer shard store over the current load context."""
-        return OptimizerShardStore(self._checkpoint_load_context())
-
-    def _load_from_checkpoint(
-        self, resume_from_checkpoint: str, model: nn.Module = None, *, for_best_model: bool = False
-    ) -> None:
-        """Parallelism-aware weight resume (:func:`load_resume_weights`), the base Trainer's own load
-        where that declines, then the state saved beside the weights."""
-        ctx = self._checkpoint_load_context()
-        if not load_resume_weights(ctx, resume_from_checkpoint, model, for_best_model=for_best_model):
-            super()._load_from_checkpoint(resume_from_checkpoint, model)
-        self._restore_state_beside_weights(resume_from_checkpoint, for_best_model=for_best_model)
-
     def _restore_state_beside_weights(self, checkpoint: str, *, for_best_model: bool) -> None:
         """Restore the router-balancing biases and, except for a best-model load, the trainer sidecars."""
         restore_balancing_biases(self._top_level_model(), checkpoint, is_pp_mode=self.parallelism_config.is_pp_mode)
         if not for_best_model:
             self._restore_trainer_sidecars(checkpoint)
 
-    def _load_optimizer_and_scheduler(self, checkpoint: str | None) -> None:
-        """Optimizer and LR-scheduler resume through the shard store.
+    def _restore_trainer_sidecars(self, checkpoint: str) -> None:
+        """Read back what :meth:`_persist_trainer_sidecars` wrote, on every rank of a resume (never a best-model
+        load), through :func:`~src.checkpoint.parallel.reading.consensus_read`; nothing by default."""
 
-        The flag mutes the step-pre-hooks: the restore's zero-LR init step would otherwise run the
-        deferred EP sweep at the restored ``global_step`` and trip the first real step's guard.
-        """
+    def _load_optimizer_and_scheduler(self, checkpoint: str | None) -> None:
+        """Optimizer and LR-scheduler resume through the shard store, with the step-pre-hooks muted: the
+        restore's zero-LR init step would otherwise run the deferred EP sweep and trip the first step's guard."""
         self._restoring_optimizer_state = True
         try:
             return self._optimizer_store().load(checkpoint)
         finally:
             self._restoring_optimizer_state = False
+
+    def _optimizer_store(self) -> OptimizerShardStore:
+        """The per-rank optimizer shard store over the current load context."""
+        return OptimizerShardStore(self._checkpoint_load_context())
 
     def _load_best_model(self) -> None:
         """``load_best_model_at_end`` through :meth:`_load_from_checkpoint`: the base's ``strict=False`` load
@@ -121,12 +152,9 @@ class CheckpointingMixin:
     def _save_checkpoint(self, model, trial):
         """COLLECTIVE. Save a checkpoint whose every file is on disk before it can vouch for itself.
 
-        The base save runs with rotation and the Hub push deferred and ``trainer_state.json`` withheld;
-        then come the resume adapter, the sidecars and, in sharded modes, the per-rank optimizer shards
-        that replace the base's rank-0 ``optimizer.pt``; only then is the trainer state published,
-        pushed and rotated (:meth:`_publish_checkpoint`). A preemption at any point leaves the previous
-        checkpoint intact and this one passed over on resume. Tensors keep their live dtype
-        (``CheckpointContext.training_checkpoint``), so fp32 masters are written unrounded.
+        The base save runs with rotation and the Hub push deferred and ``trainer_state.json`` withheld; then
+        the resume adapter, the sidecars and the per-rank optimizer shards are written, and only then is the
+        trainer state published, pushed and rotated, so a preemption leaves this one passed over on resume.
         """
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
@@ -145,12 +173,9 @@ class CheckpointingMixin:
         finally:
             self.args.save_total_limit, self.args.push_to_hub = save_total_limit, push_to_hub
             self._writing_training_checkpoint = False
-        # The fence covers the base's writer-local tail (rank-0 optimizer.pt, RNG,
-        # trainer_state.json), so an ENOSPC there reaches every rank as a diagnostic rather than
-        # leaving them blocked in the next collective. It cannot cover the region before that: the
-        # base save calls this class's ``save_model``, whose saver gathers are world collectives, so
-        # deferring a failure raised there would take this rank to ``reject``'s all_gather while its
-        # peers block in a gather it never entered. That one is re-raised rank-locally instead.
+        # The fence defers only a failure in the base's writer-local tail (rank-0 optimizer.pt, RNG,
+        # trainer_state.json). One raised inside save_model's world-collective gathers re-raises here:
+        # deferred, it would take this rank to reject's all_gather while its peers block in that gather.
         if guard.reason is not None and not self._model_save_collectives_done:
             raise RuntimeError(
                 f"Checkpoint save at step {self.state.global_step} failed on this rank before the "
@@ -167,6 +192,18 @@ class CheckpointingMixin:
             barrier()
             store.save(output_dir)
         self._publish_checkpoint(output_dir, trial)
+
+    def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
+        """COLLECTIVE. Write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters, which it resumes from
+        (:func:`~src.checkpoint.parallel.adapters.save_resume_adapter`), under ``save_only_model`` too; no-op for
+        any other run. A trainer whose payload folds adapters overrides it. The final export carries none."""
+        if not self.parallelism_config.merge_expert_lora_on_save:
+            return
+        save_resume_adapter(self._checkpoint_context(), checkpoint_dir)
+
+    def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
+        """Write a trainer's own resume state into ``checkpoint_dir`` on every rank, before rotation; none by
+        default. An override fences its write and reads it back in :meth:`_restore_trainer_sidecars`."""
 
     def _publish_checkpoint(self, checkpoint_dir: str, trial) -> None:
         """COLLECTIVE. Commit the complete checkpoint's trainer state, then run what the base save runs after
@@ -187,60 +224,29 @@ class CheckpointingMixin:
                 use_mtime=True,
             )
 
-    def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
-        """COLLECTIVE. Write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters, which it resumes from
-        (:func:`~src.checkpoint.parallel.adapters.save_resume_adapter`), under ``save_only_model`` too; no-op for
-        any other run. A trainer whose payload folds adapters overrides it. The final export carries none."""
-        if not self.parallelism_config.merge_expert_lora_on_save:
-            return
-        save_resume_adapter(self._checkpoint_context(), checkpoint_dir)
-
-    def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
-        """Write a trainer's own resume state into ``checkpoint_dir``; none by default.
-
-        Called on every rank of every checkpoint save, before rotation. An override fences its write
-        (:func:`~src.runtime.collectives.barrier_on_exit`, :class:`DeferredRankFailure`), lists its trainer
-        ahead of :class:`DistributedTrainerMixin`, and reads it back in :meth:`_restore_trainer_sidecars`.
-        """
-
-    def _restore_trainer_sidecars(self, checkpoint: str) -> None:
-        """Read back what :meth:`_persist_trainer_sidecars` wrote, on every rank of a resume (never a best-model
-        load), through :func:`~src.checkpoint.parallel.reading.consensus_read`; nothing by default."""
-
-    def save_model(self, output_dir: str = None, _internal_call: bool = False):
-        """Save the model parallelism-aware through the saver ladder (``save_checkpoint``).
-
-        PEFT models save adapters only; otherwise the per-mode saver gathers and writes the full
-        model. A False return (no active parallelism) falls back to the base Trainer.
-
-        Every writer runs under ``pristine_model_max_length``: the run's sequence budget is pinned on
-        the tokenizer as a truncation default, and ``save_pretrained`` would otherwise persist it as
-        the exported model's served context.
-        """
-        output_dir = output_dir or self.args.output_dir
-        # A mid-training save can land while the FSDP2 modules still hold the transient unsharded
-        # params a forward registered — objects the optimizer never stepped. Every writer below then
-        # reads the wrong tensors, and the PEFT path additionally mis-routes on them: its DTensor
-        # probe sees plain tensors, takes the rank-0 ``save_pretrained`` branch, and PEFT's
-        # shared-tensor scan raises on the first param whose storage that branch cannot address.
-        reshard_fsdp2_modules(self._top_level_model())
-        fs_aware_makedirs(output_dir)
-
-        restore_config_fields(getattr(self, "_pristine_special_token_ids", []))
-        save_balancing_biases(self._top_level_model(), output_dir, is_pp_mode=self.parallelism_config.is_pp_mode)
-
-        ctx = self._checkpoint_context()
-        with pristine_model_max_length(ctx.tokenizer):
-            self._write_model_payload(ctx, output_dir, _internal_call)
-        self._mark_model_save_collectives_done()
+    def _checkpoint_context(self) -> CheckpointContext:
+        """The trainer state a checkpoint saver reads: current object references, the resolved write gate
+        and shard size."""
+        model = self._top_level_model()
+        return CheckpointContext(
+            model=model,
+            parallelism_config=self.parallelism_config,
+            has_ep_layers=bool(self._ep_layers()),
+            toolkit_fsdp2=self._fsdp_wrapped and not self._accelerate_manages_fsdp,
+            accelerate_manages_fsdp=self._accelerate_manages_fsdp,
+            is_save_rank=is_fs_save_rank(),
+            max_shard_size=self.save_max_shard_size or DEFAULT_MAX_SHARD_SIZE,
+            save_sharded_ep=self.save_sharded_ep,
+            has_expert_lora=model_has_expert_lora(model),
+            cp_wrapper=self._find_cp_wrapper(),
+            tokenizer=getattr(self, "processing_class", None),
+            pp_wrapper_state=self._pp_wrapper_state,
+            training_checkpoint=self._writing_training_checkpoint,
+        )
 
     def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
-        """Write the model itself: the saver the ladder picks, or the base Trainer's save where none owns it.
-
-        The one step of :meth:`save_model` a trainer with its own model layout overrides; the steps
-        around it (the reshard, the special-token restore, the balancing sidecar, the max-length pin,
-        the collectives mark) stay shared. Runs on every rank: the savers gather.
-        """
+        """Write the model itself, on every rank: the saver the ladder picks, or the base Trainer's save where
+        none owns it. The one step of :meth:`save_model` a trainer with its own model layout overrides."""
         if not save_checkpoint(ctx, output_dir):
             # The base save has no re-emission seam: restore the sinks FA2 drops to None for the
             # write, serialize the config with its run-scoped router mutations restored, and keep its
@@ -262,24 +268,7 @@ class CheckpointingMixin:
                 apply_umask_mode(output_dir)
 
     def _mark_model_save_collectives_done(self) -> None:
-        """Record that this save's collectives are behind it: the fence in :meth:`_save_checkpoint`
-        defers a failure only past this mark, and re-raises anything earlier on the spot.
-
-        EVERY ``save_model`` implementation calls it as its last step, an override of the mixin's
-        included: its gathers are collectives just the same, and an unmarked save would downgrade a
-        writer-local tail failure to a rank-local raise.
-        ``tests/cpu/checkpoint/test_save_fence_placement.py`` fails if an override forgets.
-        """
+        """Record that this save's collectives are behind it: the fence in :meth:`_save_checkpoint` defers a
+        failure only past this mark. EVERY ``save_model`` implementation, an override included, calls it last:
+        an unmarked save would downgrade a writer-local tail failure to a rank-local raise."""
         self._model_save_collectives_done = True
-
-    def create_model_card(self, *args, tags: str | list[str] | None = None, **kwargs):
-        """The base trainer's card with the Halo Hub tags beside its own.
-
-        The card this adds them to is TRL's ``output_dir/README.md``, written before every checkpoint
-        from its ``_tag_names`` alone; ``push_to_hub`` already merges the model's ``model_tags``.
-        """
-        return super().create_model_card(*args, tags=with_halo_tags(tags), **kwargs)
-
-    def _checkpoint_context(self) -> CheckpointContext:
-        """Snapshot the trainer state a checkpoint saver needs (:meth:`CheckpointContext.capture`)."""
-        return CheckpointContext.capture(self)

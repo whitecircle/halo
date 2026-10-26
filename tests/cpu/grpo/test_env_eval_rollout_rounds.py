@@ -16,8 +16,8 @@ import pytest
 from trl import GRPOTrainer
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 
 SENTINEL = object()
 
@@ -93,7 +93,7 @@ def test_custom_dp_path_sizes_its_loader_params_from_the_hook():
     host = _trainer(68, custom_path=True)
     host._dataset_presharded = False
     host.eval_dataset = types.SimpleNamespace()
-    with mock.patch.object(DataParallelDataLoaderMixin, "_loader_params", loader_params):
+    with mock.patch.object(DataParallelLoaderMixin, "_loader_params", loader_params):
         host._cached_eval_dataloader = lambda eval_dataset, build: build(host.eval_dataset)
         with pytest.raises(RuntimeError, match="stop after sizing"):
             host.get_eval_dataloader()

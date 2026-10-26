@@ -49,7 +49,7 @@ def test_the_cute_dsl_deprecation_is_silenced():
 
 def test_other_modules_keep_their_deprecations():
     """Anti-over-reach on the module axis: only ``cutlass`` is muted, not every library."""
-    assert _caught("src.trainers.mixins.base", DeprecationWarning), (
+    assert _caught("src.trainers.distributed_trainer", DeprecationWarning), (
         "the filter swallowed a deprecation from our own code; its module scope is too wide"
     )
     assert _caught("cutlass_helper.utils", DeprecationWarning), (

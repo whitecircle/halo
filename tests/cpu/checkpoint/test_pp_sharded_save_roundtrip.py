@@ -60,7 +60,7 @@ from src.model_loading.parallel.pp import _load_stage_lazy
 from src.models.attention.gpt_oss_sinks import neutralized_sink_value
 from src.models.param_roles import persistent_buffers
 from src.runtime import dtensor
-from src.trainers.mixins.pipeline import stash_wrapper_state
+from src.trainers.parallelism.pipeline_trainer import stash_wrapper_state
 from tests.common.checkpoint_io import load_context, save_context
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks

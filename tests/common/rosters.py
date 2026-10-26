@@ -6,7 +6,7 @@ import pkgutil
 import src.trainers
 from src.distributed.expert_parallel.families.roster import ep_layer_classes
 from src.subclass_registry import iter_subclasses
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 def import_all_trainers() -> None:

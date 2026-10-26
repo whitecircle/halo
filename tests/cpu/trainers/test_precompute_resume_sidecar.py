@@ -43,7 +43,7 @@ from src.entrypoints.run_setup import resume_checkpoint_from_config
 from src.entrypoints.script import ScriptContext
 from src.runtime import filesystem
 from src.runtime.consensus import RankConsensus
-from src.trainers.mixins.checkpointing import CheckpointingMixin
+from src.trainers.checkpointing import CheckpointingMixin
 from src.trainers.mixins.reference_logps import token_digest as _token_digest
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from tests.common.gloo import run_gloo_ranks

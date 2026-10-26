@@ -42,11 +42,14 @@ bit-reproducible):
     python tests/cpu/trainers/test_embedding_lora_resume.py
 """
 
+import ast
 import datetime
+import inspect
 import json
 import os
 import shutil
 import sys
+import textwrap
 from types import SimpleNamespace
 
 import pytest
@@ -72,8 +75,8 @@ from transformers import (
 from transformers.trainer_utils import rotate_checkpoints
 
 import src.checkpoint.parallel.adapters as peft_mod
+import src.trainers.checkpointing as checkpointing_mod
 import src.trainers.embedding.trainer as embedding_module
-import src.trainers.mixins.checkpointing as checkpointing_mod
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.merge_models import merge_models
 from scripts.after_training.merge_peft_adapters import merge_peft_adapter
@@ -91,7 +94,10 @@ from src.checkpoint.reading import resolve_checkpoint_weights
 from src.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from src.configs.script_arguments import ModelArguments
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.peft_adapters import lora_fold_targets
 from src.runtime import filesystem
+from src.trainers.embedding.embedding_rules import reject_modules_outside_backbone
+from src.trainers.embedding.injected_lora import folded_backbone_items, has_injected_lora
 from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.checkpoint_io import loading_problems
 from tests.common.distributed import fake_process_group_mesh
@@ -693,11 +699,16 @@ def test_an_adapter_the_save_cannot_fold_is_refused_at_construction():
     every rank, rather than on the save rank alone at the first checkpoint, where its peers would
     block in the save's collectives."""
     backbone = inject_adapter_in_model(LoraConfig(r=2, target_modules=["attn"]), _AttentionBackbone())
-    host = _host(backbone)
-    host._backbone_model = lambda: backbone
 
     with pytest.raises(ValueError, match="cannot be folded out of place"):
-        EmbeddingTrainer._validate_injected_lora_foldable(host)
+        lora_fold_targets(backbone)
+    constructor = ast.parse(textwrap.dedent(inspect.getsource(EmbeddingTrainer.__init__)))
+    called = {
+        node.func.id
+        for node in ast.walk(constructor)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "lora_fold_targets" in called, "the trainer's construction no longer checks the fold"
 
 
 # --- the backbone's own lora_ parameters, and modules outside the backbone ---------------------
@@ -732,7 +743,7 @@ def test_a_backbones_own_lora_parameters_are_not_injected_lora(run):
     native = _with_native_lora(model)
 
     assert native, "premise: the backbone carries lora_-named parameters of its own"
-    assert not EmbeddingTrainer._has_injected_lora(_host(model))
+    assert not has_injected_lora(model[0].auto_model)
 
 
 def test_the_fold_keeps_a_backbones_own_lora_parameters_and_trains_only_the_injected_ones(run):
@@ -743,9 +754,9 @@ def test_the_fold_keeps_a_backbones_own_lora_parameters_and_trains_only_the_inje
     _lora_model(run.base, seed=1, model=model)
     backbone = model[0].auto_model
 
-    written = dict(embedding_module._folded_backbone_items(backbone))
+    written = dict(folded_backbone_items(backbone))
 
-    assert EmbeddingTrainer._has_injected_lora(_host(model))
+    assert has_injected_lora(backbone)
     assert all(name in written for name in native), "the fold dropped the backbone's own LoRA factors"
     assert not [key for key in written if ".lora_A.default" in key or ".base_layer" in key]
     assert all(f"encoder.layer.{i}.attention.self.query.weight" in written for i in range(NUM_LAYERS))
@@ -780,12 +791,6 @@ def test_lora_outside_the_backbone_is_refused_at_construction(run, tmp_path):
         _trainer(model, tmp_path / "out")
 
 
-def _wrapped_host(model: SentenceTransformer, *, fsdp: bool) -> EmbeddingTrainer:
-    host = _host(model)
-    host._fsdp_wrapped = fsdp
-    return host
-
-
 def test_a_trainable_parameter_outside_the_backbone_is_refused_under_fsdp2(run):
     """The save writes the head rank-locally and resume restores the backbone alone, so the head's
     training is lost; a single process and DDP save and train the whole pipeline."""
@@ -793,8 +798,8 @@ def test_a_trainable_parameter_outside_the_backbone_is_refused_under_fsdp2(run):
     _with_dense_head(model)
 
     with pytest.raises(ValueError, match="outside the SentenceTransformer's transformer backbone"):
-        EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=True))
-    EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=False))
+        reject_modules_outside_backbone(model, model[0].auto_model, saves_rank_locally=True)
+    reject_modules_outside_backbone(model, model[0].auto_model, saves_rank_locally=False)
 
 
 def test_a_frozen_head_passes_unless_fsdp2_shards_it(run):
@@ -803,14 +808,14 @@ def test_a_frozen_head_passes_unless_fsdp2_shards_it(run):
     model = SentenceTransformer(run.base, device="cpu")
     linear = _with_dense_head(model).linear
     linear.requires_grad_(False)
-    EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=True))
+    reject_modules_outside_backbone(model, model[0].auto_model, saves_rank_locally=True)
 
     with fake_process_group_mesh(rank=0, world_size=2) as mesh:
         linear.weight = torch.nn.Parameter(
             distribute_tensor(linear.weight.data, mesh, [Shard(0)]), requires_grad=False
         )
         with pytest.raises(ValueError, match="that FSDP2 shards"):
-            EmbeddingTrainer._validate_modules_outside_backbone(_wrapped_host(model, fsdp=True))
+            reject_modules_outside_backbone(model, model[0].auto_model, saves_rank_locally=True)
 
 
 # --- the resume-state rules every checkpoint follows ---------------------------------------------
@@ -925,7 +930,7 @@ def test_the_weight_loader_covers_the_names_a_full_fine_tune_saves(tmp_path, mon
 
     contexts = []
     monkeypatch.setattr(
-        embedding_module, "load_resume_weights", lambda ctx, *args, **kwargs: contexts.append(ctx) or True
+        checkpointing_mod, "load_resume_weights", lambda ctx, *args, **kwargs: contexts.append(ctx) or True
     )
     trainer._load_from_checkpoint(checkpoint)
     loader_model = contexts[0].model

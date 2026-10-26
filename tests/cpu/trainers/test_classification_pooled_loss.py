@@ -28,7 +28,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import Qwen3Config, Qwen3ForSequenceClassification
 
-import src.trainers.mixins.base as mixin_base
+import src.trainers.token_metrics as token_metrics
 from src.configs.classification import ClassificationConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers.reward.classification import ClassificationTrainer
@@ -648,11 +648,11 @@ def test_an_eval_split_s_padding_rows_leave_the_loss(overrides, multi_label):
 
 
 def test_compute_loss_never_runs_the_token_label_check(monkeypatch):
-    """The mixin's ``_validate_inputs`` reads ``labels`` as token ids and flags a batch whose labels
+    """The mixin's ``_warn_once_on_empty_labels`` reads ``labels`` as token ids and flags a batch whose labels
     are all pad/eos. Class ids are not token ids: under Gemma's pad=0 / eos=1 every binary batch
     "has no training signal", so the check must stay off this trainer's path."""
     warnings = []
-    monkeypatch.setattr(mixin_base, "logger", types.SimpleNamespace(warning=warnings.append))
+    monkeypatch.setattr(token_metrics, "logger", types.SimpleNamespace(warning=warnings.append))
     trainer = _trainer(nn.CrossEntropyLoss())
     trainer.processing_class = types.SimpleNamespace(pad_token_id=0, eos_token_id=1)
     trainer.accelerator = types.SimpleNamespace(device=torch.device("cpu"))
@@ -668,7 +668,7 @@ def test_compute_loss_never_runs_the_token_label_check(monkeypatch):
     trainer.compute_loss(_StubHead(logits), inputs)
     assert not warnings, f"compute_loss ran the token-label check on class ids: {warnings}"
 
-    trainer._validate_inputs(inputs)
+    trainer._warn_once_on_empty_labels(inputs)
     assert any("no training signal" in message for message in warnings), (
         "the check does not misfire on these class ids, so the assertion above proves nothing"
     )

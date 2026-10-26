@@ -29,13 +29,14 @@ from accelerate.data_loader import DataLoaderDispatcher, prepare_data_loader
 from accelerate.utils import DataLoaderConfiguration, gather_object
 from torch.utils.data import DataLoader, IterableDataset, SequentialSampler
 
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin, dp_representative_ranks
+from src.trainers.dataloaders import DataParallelLoaderMixin, dp_representative_ranks
+from src.trainers.evaluation import EvaluationMixin
 from tests.common.gloo import run_gloo_ranks
 
 WORLD, TP = 4, 2
 
 
-class _TpHost(DataParallelDataLoaderMixin):
+class _TpHost(DataParallelLoaderMixin, EvaluationMixin):
     """A tp2 x dp2 rank's loader and gather state; the HF seams the build calls are identities."""
 
     def __init__(self, accelerator, rank: int, batch_size: int):
@@ -43,7 +44,9 @@ class _TpHost(DataParallelDataLoaderMixin):
         self.model = SimpleNamespace(training=False)
         self.data_collator = torch.tensor
         self._dataset_presharded = False
-        self._dp_rank = rank // TP
+        self.parallelism_config = SimpleNamespace(
+            data_parallel_size=WORLD // TP, get_data_parallel_rank=lambda: rank // TP
+        )
         dp_rank_of = [r // TP for r in range(WORLD)]
         self._dp_metric_gather_scope = (dp_representative_ranks(dp_rank_of), WORLD)
         self.args = SimpleNamespace(
@@ -60,12 +63,6 @@ class _TpHost(DataParallelDataLoaderMixin):
 
     def _needs_custom_dataloader(self):
         return True
-
-    def get_data_parallel_size(self):
-        return WORLD // TP
-
-    def get_data_parallel_rank(self):
-        return self._dp_rank
 
     def _get_collator_with_removed_columns(self, collator, description=None):
         return collator

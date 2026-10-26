@@ -1,3 +1,2 @@
-"""Trainer spine (:mod:`~src.trainers.mixins.base`) and the sub-mixins it composes, plus the
-opt-in mixins (``stored_metrics``, ``reference_logps``, ``trl_dataset_prep``) and function modules
-(``grad_clip``, ``loss_masks``) that trainers use directly."""
+"""Opt-in trainer mixins (``stored_metrics``, ``reference_logps``, ``trl_dataset_prep``) that trainers
+compose directly."""

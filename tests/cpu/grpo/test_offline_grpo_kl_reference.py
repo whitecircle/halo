@@ -131,7 +131,7 @@ def test_constructor_places_and_freezes_every_external_reference(tmp_path, monke
         remove_unused_columns=False,
     )
     # Native adapter installation needs DeepEP; reference ownership is the constructor's seam.
-    monkeypatch.setattr(OfflineGRPOTrainer, "_setup_distributed_modes", lambda self: None)
+    monkeypatch.setattr(OfflineGRPOTrainer, "_configure_distributed_modes", lambda self: None)
     trainer = OfflineGRPOTrainer(
         model=policy,
         ref_model=reference,

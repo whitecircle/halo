@@ -358,8 +358,8 @@ def run(ctx):
         step_losses,
         BATCH,
         remainder=0,
-        dp_rank=trainer.get_data_parallel_rank(),
-        dp_size=trainer.get_data_parallel_size(),
+        dp_rank=trainer.parallelism_config.get_data_parallel_rank(),
+        dp_size=trainer.parallelism_config.data_parallel_size,
     )
     eval_loss = init_eval_metrics["eval_loss"]
     metrics["init_eval_loss"], metrics["init_eval_reference"] = eval_loss, expected_eval

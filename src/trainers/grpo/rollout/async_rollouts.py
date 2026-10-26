@@ -549,8 +549,8 @@ class AsyncRolloutMixin:
         return {
             "num_generations": self.num_generations,
             "rows_per_round": self._train_loader_batch_size(),
-            "data_parallel_rank": self.get_data_parallel_rank(),
-            "data_parallel_size": self.get_data_parallel_size(),
+            "data_parallel_rank": self.parallelism_config.get_data_parallel_rank(),
+            "data_parallel_size": self.parallelism_config.data_parallel_size,
         }
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:

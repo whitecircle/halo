@@ -10,8 +10,8 @@ from datasets import Dataset
 from torch import nn
 
 import src.trainers.grpo.offline as offline_module
+from src.trainers.checkpointing import CheckpointingMixin
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.checkpointing import CheckpointingMixin
 from src.trainers.mixins.reference_logps import ReferenceLogpsCheckpointMixin
 from tests.common.gloo import run_gloo_ranks
 

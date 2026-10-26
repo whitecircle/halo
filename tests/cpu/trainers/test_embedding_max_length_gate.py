@@ -15,7 +15,8 @@ import textwrap
 import pytest
 
 from src.configs.embedding import EmbeddingConfig
-from src.trainers.embedding.trainer import EmbeddingTrainer, reject_unresolved_max_length
+from src.trainers.embedding.embedding_rules import reject_unresolved_max_length
+from src.trainers.embedding.trainer import EmbeddingTrainer
 
 
 def _args(max_length, tmp_path) -> EmbeddingConfig:

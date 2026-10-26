@@ -32,8 +32,8 @@ from unittest.mock import patch
 import pytest
 from accelerate import PartialState
 
-import src.trainers.mixins.base as mixin_module
-from src.trainers.mixins.base import DistributedTrainerMixin
+import src.trainers.evaluation as mixin_module
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 PartialState()  # the mixin logs through accelerate's rank-aware logger
 

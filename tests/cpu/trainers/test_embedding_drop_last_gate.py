@@ -27,8 +27,9 @@ from sentence_transformers.base.sampler import DefaultBatchSampler
 from torch.utils.data import DataLoader, SequentialSampler
 
 from src.configs.embedding import EmbeddingConfig
-from src.trainers.embedding import trainer as embedding_module
-from src.trainers.embedding.trainer import EmbeddingTrainer, reject_uneven_sentence_transformers_batches
+from src.trainers.embedding import embedding_rules
+from src.trainers.embedding.embedding_rules import reject_uneven_sentence_transformers_batches
+from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.repo import REPO_ROOT
 
 _ROWS = Dataset.from_dict({"anchor": ["a", "b", "c"], "positive": ["x", "y", "z"]})
@@ -46,7 +47,7 @@ def _check(
     dispatch_batches: bool | None = None,
     split_batches: bool = False,
 ) -> None:
-    monkeypatch.setattr(embedding_module, "launcher_global_world_size", lambda: world_size)
+    monkeypatch.setattr(embedding_rules, "launcher_global_world_size", lambda: world_size)
     args = EmbeddingConfig(
         output_dir=str(tmp_path),
         dataloader_drop_last=drop_last,

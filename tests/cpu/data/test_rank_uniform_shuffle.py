@@ -23,7 +23,7 @@ from datasets import Dataset
 from transformers import Trainer
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin, set_sampler_epoch
+from src.trainers.dataloaders import DataParallelLoaderMixin, set_sampler_epoch
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 4
@@ -46,7 +46,7 @@ CASES = {
 }
 
 
-class _Host(DataParallelDataLoaderMixin, Trainer):
+class _Host(DataParallelLoaderMixin, Trainer):
     """The mixin over HF's own train sampler, with exactly what the loader build reads off a trainer."""
 
     def __init__(self, parallelism_config: ParallelismConfig, strategy: str, seedable: bool):
@@ -85,12 +85,6 @@ class _Host(DataParallelDataLoaderMixin, Trainer):
             non_blocking=False,
             use_stateful_dataloader=False,
         )
-
-    def get_data_parallel_size(self) -> int:
-        return self.parallelism_config.data_parallel_size
-
-    def get_data_parallel_rank(self) -> int:
-        return self.parallelism_config.get_data_parallel_rank()
 
 
 def _worker(rank: int, tmp_dir: str, case: str) -> None:

@@ -12,17 +12,13 @@ from typing import TYPE_CHECKING, Any
 
 import torch.nn as nn
 
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
-from src.runtime.filesystem import is_fs_save_rank
-
 if TYPE_CHECKING:
     from src.distributed.parallelism_config import ParallelismConfig
 
 
 @dataclass
 class CheckpointContext:
-    """Everything a checkpoint saver needs, captured from the trainer at call time.
+    """Everything a checkpoint saver needs, read off the trainer at call time.
 
     Every field but ``is_save_rank`` is rank-uniform, so every rank picks the same saver.
     """
@@ -31,7 +27,8 @@ class CheckpointContext:
     model: nn.Module
     parallelism_config: ParallelismConfig
     has_ep_layers: bool
-    # Mixin-managed FSDP2; accelerate-managed FSDP saves through the base Trainer.
+    # Mixin-managed FSDP2. An FSDP (v1) model only comes from an accelerate FSDP launch, which rejects every
+    # custom parallelism, so accelerate manages it and it saves through the base Trainer.
     toolkit_fsdp2: bool
     accelerate_manages_fsdp: bool
     is_save_rank: bool
@@ -47,28 +44,6 @@ class CheckpointContext:
     # A training checkpoint rather than an export: every tensor keeps its live dtype, so fp32 masters
     # are written unrounded; an export casts to the save dtype (``save_dtype_caster``).
     training_checkpoint: bool = False
-
-    @classmethod
-    def capture(cls, trainer) -> CheckpointContext:
-        """Snapshot ``trainer`` for a save: object references plus the resolved write gate and shard size."""
-        model = trainer._top_level_model()
-        return cls(
-            model=model,
-            parallelism_config=trainer.parallelism_config,
-            has_ep_layers=trainer._has_ep_layers,
-            # A FullyShardedDataParallel (v1) model only comes from an accelerate FSDP launch, which
-            # rejects every custom parallelism, so accelerate manages it.
-            toolkit_fsdp2=trainer._fsdp_wrapped and not trainer._accelerate_manages_fsdp,
-            accelerate_manages_fsdp=trainer._accelerate_manages_fsdp,
-            is_save_rank=is_fs_save_rank(),
-            max_shard_size=trainer.save_max_shard_size or DEFAULT_MAX_SHARD_SIZE,
-            save_sharded_ep=trainer.save_sharded_ep,
-            has_expert_lora=model_has_expert_lora(model),
-            cp_wrapper=trainer._find_cp_wrapper(),
-            tokenizer=getattr(trainer, "processing_class", None),
-            pp_wrapper_state=trainer._pp_wrapper_state,
-            training_checkpoint=trainer._writing_training_checkpoint,
-        )
 
     @property
     def merges_expert_lora(self) -> bool:

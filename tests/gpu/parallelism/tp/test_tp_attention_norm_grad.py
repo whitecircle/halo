@@ -36,7 +36,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.plain_params import per_head_norm_param_names
 from src.model_loading.parallel.loader import load_distributed_model
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.distributed import shared_scratch_dir, world_spread
 from tests.common.harness import gpu_test_main
 from tests.common.utils import cleanup_memory, log, log_all, max_or_nan
@@ -79,10 +79,12 @@ class _StepSync:
         self._model = model
         self._device_mesh = model._device_mesh
         self.parallelism_config = parallelism_config
+        self._param_id_caches = {}
 
     def _top_level_model(self):
         return self._model
 
+    _memoized_param_ids = DistributedTrainerMixin._memoized_param_ids
     _tp_sharded_plain_param_ids = DistributedTrainerMixin._tp_sharded_plain_param_ids
     _tp_per_head_norm_param_ids = DistributedTrainerMixin._tp_per_head_norm_param_ids
     _sync_tp_replicated_grads = DistributedTrainerMixin._sync_tp_replicated_grads

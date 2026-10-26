@@ -12,14 +12,11 @@ from dataclasses import replace
 import torch
 import torch.distributed as dist
 from accelerate.logging import get_logger
-from torch.distributed.tensor import DTensor
 
 from src.callbacks.moe_metrics import MoELoadMetricsCallback
 from src.checkpoint.writing import save_dtype_caster
 from src.data.collators.fixed_shape import FixedShapeCollator
-from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking, pad_tail_positions
-from src.data.vlm_routing import VLM_IMAGE_COLUMNS, dataset_image_evidence
-from src.distributed.fsdp import reshard_fsdp2_modules
+from src.data.collators.packing import DataCollatorWithPacking, pad_tail_positions
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.groups import (
     broadcast_scalar_from_last_stage,
@@ -37,31 +34,28 @@ from src.distributed.pipeline_parallel.stage import (
     PipelineStageModule,
     StageLayout,
     build_pipeline_stage,
-    reject_reentrant_checkpointing,
 )
-from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss
+from src.distributed.pipeline_parallel.stage_losses import FusedHeadLoss, causal_lm_token_loss
 from src.env import env_flag
-from src.hardware import current_device
 from src.kernels.logprobs import loss_token_counts_per_row
-from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.models.context_window import context_window_from_config
 from src.models.modality import is_vlm_model
 from src.runtime.consensus import reject_across_ranks
-from src.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
-from src.runtime.ranks import get_num_nodes, is_global_main_process
-from src.trainers.mixins.grad_clip import (
-    clip_parameters,
-    clipping_enabled,
-    local_grad_norm_sq,
-    require_l2,
-    scale_shards_to_max_norm_,
-)
-from src.trainers.mixins.validation import evaluation_runs
+from src.runtime.filesystem import is_fs_save_rank
+from src.runtime.ranks import is_global_main_process
+from src.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
-from src.trainers.parallelism.trainer_rules import (
-    reject_pp_activation_offloading,
+from src.trainers.parallelism.pipeline_rules import (
+    reject_pp_collator,
     reject_pp_compute_metrics,
     reject_pp_peft,
+    reject_pp_vlm,
+    reject_uncovered_pp_ep_layers,
+    reject_unsupported_pp_training_args,
+    require_pad_token_id,
+    require_pp_stage_model,
 )
+from src.trainers.training_args_overrides import uses_evaluation
 
 logger = get_logger(__name__, log_level="info")
 
@@ -77,13 +71,6 @@ def wrapper_state_outside_stages(model) -> dict[str, torch.Tensor]:
     return {name: tensor for name, tensor in model.state_dict().items() if not name.startswith(owned)}
 
 
-def collator_image_evidence(collator) -> str | None:
-    """Why ``collator`` counts as an image consumer, or ``None``: it declares a column of
-    :data:`~src.data.vlm_routing.VLM_IMAGE_COLUMNS` among those it needs."""
-    consumed = set(getattr(collator, "required_dataset_columns", ()) or ()) & set(VLM_IMAGE_COLUMNS)
-    return f"the data collator consuming {sorted(consumed)}" if consumed else None
-
-
 def stash_wrapper_state(model) -> dict[str, torch.Tensor]:
     """Host copies of :func:`wrapper_state_outside_stages`, at the artifact's save dtype.
 
@@ -95,69 +82,6 @@ def stash_wrapper_state(model) -> dict[str, torch.Tensor]:
         name: cast(name, tensor.detach()).to("cpu", copy=True)
         for name, tensor in wrapper_state_outside_stages(model).items()
     }
-
-
-def admit_multimodal_wrapper(model, kwargs: dict) -> dict[str, torch.Tensor]:
-    """Admit a multimodal wrapper under PP only for a run that feeds it no images.
-
-    The split keeps the text backbone and the task head, so the vision tower and projector are in no
-    stage; a run whose datasets or collator carry images is refused, naming the evidence. A text-only
-    run trains the text tower, and the tower's untouched tensors are returned (on the save rank) for
-    every checkpoint to re-emit under the wrapper layout.
-    """
-    evidence = next(
-        (
-            found
-            for found in (
-                dataset_image_evidence(kwargs.get("train_dataset")),
-                dataset_image_evidence(kwargs.get("eval_dataset")),
-                collator_image_evidence(kwargs.get("data_collator")),
-            )
-            if found
-        ),
-        None,
-    )
-    reason = (
-        (
-            f"Vision-language training is not supported under pipeline parallelism: the stage split "
-            f"keeps only the text backbone and the task head, and {evidence} means this run feeds "
-            f"images the model would never see. Train the VLM without pipeline parallelism, or drop "
-            f"the image data for a text-only run of its text tower."
-        )
-        if evidence
-        else None
-    )
-    # Joined across ranks: the dataset probe is rank-local (a pre-sharded dataset can carry images
-    # on one rank only), and a lone raise would leave the peers at the split's collectives.
-    reject_across_ranks(reason, "Pipeline-parallel multimodal gate", exc_type=ValueError)
-    # Every checkpoint re-emits these from the rank that writes the shared files; the other ranks
-    # free them with the wrapper right after the split.
-    stash = stash_wrapper_state(model) if is_fs_save_rank() else {}
-    if is_global_main_process():
-        params = sum(t.numel() for t in stash.values())
-        logger.info(
-            "Text-only run of a multimodal checkpoint under pipeline parallelism: %d tensors "
-            "(%.1fM values) outside the text backbone — the vision tower and projector — are held "
-            "by no stage. They stay untrained and are re-emitted unchanged in every checkpoint, so "
-            "the export keeps the %s layout.",
-            len(stash),
-            params / 1e6,
-            type(model).__name__,
-        )
-    return stash
-
-
-def pp_ep_coverage_reason(config: ParallelismConfig, ep_modules) -> str | None:
-    """Why this rank's stage cannot run PP+EP, or ``None``; rank-local, so the caller joins it across
-    ranks (a hybrid MoE with leading dense layers can give one stage no EP modules)."""
-    if not config.has_ep_group or ep_modules:
-        return None
-    return (
-        f"PP stage {config.pp_rank}/{config.pp_size} carries no EP-patched modules: the model was "
-        "loaded without EP patching (load_distributed_model must run before the trainer), or the "
-        "partition gave this stage only dense layers, whose collectives would deadlock against its MoE "
-        "peers. Pick a pipeline_parallel_size or pipeline_split that puts a MoE layer on every stage."
-    )
 
 
 class PipelineTrainerMixin:
@@ -175,71 +99,40 @@ class PipelineTrainerMixin:
     # values-only broadcast; empty when the adapter declares no ``metrics_fn``.
     _pp_metric_keys: tuple[str, ...] = ()
 
-    def _validate_pp_mode(self, ctor_args: tuple, kwargs: dict) -> None:
-        """Hook: reject this trainer's own PP-incompatible options, before the model is split.
+    def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
+        """Hook: reject this trainer's own PP-incompatible options, under PP only, before the split; ctor
+        parameters are read out of ``kwargs``, the remaining positionals out of ``ctor_args``."""
 
-        Runs only under PP. Ctor parameters are read out of ``kwargs``; ``ctor_args`` carries the
-        trainer's remaining positionals.
-        """
-
-    def _maybe_prepare_pipeline_model(self, kwargs: dict, training_args, ctor_args: tuple = ()) -> dict:
+    def _split_pipeline_stage(self, kwargs: dict, training_args, ctor_args: tuple = ()) -> dict:
         """Split the model into this rank's stage before ``super().__init__`` sees it, after the
-        rejections that must precede any wrapping. No-op at ``pp_size == 1``."""
+        refusals that must precede any wrapping. No-op at ``pp_size == 1``."""
         config: ParallelismConfig = self.parallelism_config
         if not config.is_pp_mode:
             return kwargs
 
-        self._validate_pp_mode(ctor_args, kwargs)
-
-        model = kwargs.get("model")
-        if not getattr(training_args, "max_length", None):
-            raise ValueError(
-                "Pipeline parallelism requires a fixed sequence length (the P2P buffer shapes "
-                "freeze on the first step). Set max_length in the training config."
-            )
-        if self.save_sharded_ep:
-            raise ValueError(
-                "save_sharded_ep is not supported under pipeline parallelism: the per-rank shard format "
-                "keys tensors with no pipeline-stage layer offset, so stages would collide. The PP save "
-                "already writes one complete-tensor shard per stage under the unsplit model's names."
-            )
-        if getattr(training_args, "push_to_hub", False) and not is_output_shared_filesystem() and get_num_nodes() > 1:
-            raise ValueError(
-                "push_to_hub is not supported under pipeline parallelism with a per-node output "
-                "filesystem (DIST_OUTPUT_SHARED_FILESYSTEM=0) across nodes: global rank 0 uploads, and its "
-                "node lacks the other nodes' stage shards. Write checkpoints to a shared output "
-                "filesystem, or gather every node's checkpoint directory into one and upload that."
-            )
-        if training_args.gradient_checkpointing:
-            # The stage's gradient_checkpointing_enable refuses it too; here it fails before the split.
-            reject_reentrant_checkpointing(training_args.gradient_checkpointing_kwargs)
-        if (
-            evaluation_runs(training_args)
-            and training_args.per_device_eval_batch_size != training_args.per_device_train_batch_size
-        ):
-            raise ValueError(
-                f"per_device_eval_batch_size ({training_args.per_device_eval_batch_size}) must "
-                f"equal per_device_train_batch_size ({training_args.per_device_train_batch_size}) "
-                f"under pipeline parallelism: the P2P buffer shapes are frozen to the training batch."
-            )
+        self._reject_unsupported_pp_options(ctor_args, kwargs)
+        reject_unsupported_pp_training_args(
+            training_args, save_sharded_ep=self.save_sharded_ep, evaluates=uses_evaluation(training_args)
+        )
         reject_pp_peft(kwargs.get("peft_config"))
-        # Here rather than per trainer: SFTConfig and RewardConfig carry the flag too.
-        reject_pp_activation_offloading(training_args)
-        if model is None or not hasattr(model, "config"):
-            raise ValueError(
-                "Pipeline parallelism requires the model to be passed as the `model` keyword (a "
-                "loaded PreTrainedModel), so the trainer can split it into this rank's stage."
-            )
+        model = require_pp_stage_model(kwargs)
         # The name catches an unregistered VLM (remote code, a custom class) whose config declares
         # nothing; passing the config keeps the probe off the hub.
         if is_vlm_model(getattr(model.config, "_name_or_path", "") or "", config=model.config):
-            self._pp_wrapper_state = admit_multimodal_wrapper(model, kwargs)
-        if training_args.torch_compile:
-            raise ValueError(
-                "torch_compile is not supported under pipeline parallelism: the schedule captures the "
-                "stage module at setup, so a compiled wrapper installed afterwards never runs. Disable "
-                "torch_compile."
-            )
+            reject_pp_vlm(kwargs.get("train_dataset"), kwargs.get("eval_dataset"), kwargs.get("data_collator"))
+            # Held on the rank that writes the shared files, for every checkpoint to re-emit under the
+            # wrapper layout.
+            self._pp_wrapper_state = stash_wrapper_state(model) if is_fs_save_rank() else {}
+            if is_global_main_process():
+                logger.info(
+                    "Text-only run of a multimodal checkpoint under pipeline parallelism: %d tensors "
+                    "(%.1fM values) outside the text backbone — the vision tower and projector — are held "
+                    "by no stage. They stay untrained and are re-emitted unchanged in every checkpoint, so "
+                    "the export keeps the %s layout.",
+                    len(self._pp_wrapper_state),
+                    sum(t.numel() for t in self._pp_wrapper_state.values()) / 1e6,
+                    type(model).__name__,
+                )
 
         self._pp_n_microbatches = resolve_microbatch_count(
             config, training_args.gradient_accumulation_steps, training_args.per_device_train_batch_size
@@ -250,7 +143,7 @@ class PipelineTrainerMixin:
             model, config.pp_rank, config.pp_size, moe_balancing=self._moe_balancing, pp_split=config.pp_split
         )
 
-        context_window = getattr(kwargs["model"].config.get_text_config(), "max_position_embeddings", None)
+        context_window = context_window_from_config(kwargs["model"].config)
         if context_window and training_args.max_length >= context_window:
             # `max_length: null` resolves to the context window, so every row pays full-window
             # compute with no visibly larger batch shape to explain it.
@@ -262,20 +155,80 @@ class PipelineTrainerMixin:
             )
         return kwargs
 
-    def _setup_pipeline_parallel(self):
-        """Post-``__init__`` PP setup: stage-scoped (EP-aware) FSDP, the runner, clip, and column pinning."""
+    def _configure_pipeline_parallel(self):
+        """Post-``__init__`` PP setup: the fixed-shape collator, the signature-column pin, the stage-scoped
+        (EP-aware) FSDP2 wrap, the runner and its clip.
+
+        ``_pp_loss_adapter`` is called once, here, before anything reads the adapter, so a trainer's
+        adapter builder may seed the per-step state its loss closes over.
+        """
         config: ParallelismConfig = self.parallelism_config
         stage: PipelineStageModule = self.model
-
         self._pp_adapter = adapter = self._pp_loss_adapter()
-
-        # Wrap first: the collator declares which dataset columns it needs, and the pin below must
-        # union them in. Pinning first would prune a packing collator's `seq_lengths`, collapsing
-        # every packed row into a single attended document instead of failing.
+        # Wrap first: the collator declares which dataset columns it needs, and the pin must union them
+        # in. Pinning first would prune a packing collator's `seq_lengths`, collapsing every packed row
+        # into a single attended document instead of failing.
         self._pp_wrap_collator()
+        self._pin_pp_signature_columns(adapter)
+        self._pp_chain_group = build_pipeline_group(config)
+        ep_layers = self._ep_layers()
+        self._wrap_pp_stage(stage, ep_layers)
+        self._pp_runner = PipelineRunner(
+            stage,
+            config,
+            self._pp_chain_group,
+            torch.device("cuda", torch.cuda.current_device()),
+            self._pp_n_microbatches,
+            adapter.stage_loss(fuse_head=env_flag("HALO_PP_FUSED_HEAD_LOSS", True)),
+            rows_per_example=type(self).FORWARD_ROWS_PER_EXAMPLE,
+        )
+        # Plain-tensor expert shards need the EP-aware clip (deferred sweep + dispatch-group norm
+        # aggregation); dense and ep1-FSDP-sharded stages are all DTensors → direct PP clip.
+        if ep_layers and not config.experts_fsdp_managed:
+            self._install_ep_clip()
+        else:
+            self.accelerator.clip_grad_norm_ = pp_clip_grad_norm
+        # Each stage holds different routers, so the callback's expert-load reduce must stay inside
+        # this stage's rank block; a world reduce is a shape mismatch or a cross-stage blend.
+        for callback in self.callback_handler.callbacks:
+            if isinstance(callback, MoELoadMetricsCallback):
+                callback.reduce_group = self._pp_stage_group
+        self._pp_adapter = adapter = self._pp_hoist_metrics_reduction(adapter)
+        self._pp_pin_metric_keys()
+        logger.info(
+            "✓ Pipeline parallelism: %d stages × %d ranks, %d microbatches, %s schedule%s%s",
+            config.pp_size,
+            config.stage_world_size,
+            self._pp_n_microbatches,
+            config.pp_schedule,
+            f", {len(ep_layers)} EP MoE layers" if ep_layers else "",
+            ", fused head loss (no logits plane)" if isinstance(self._pp_runner.loss, FusedHeadLoss) else "",
+        )
 
-        # HF prunes dataset columns against the forward signature, and a stage's forward takes
-        # hidden_states; without this pin, input_ids and labels are dropped.
+    def _pp_wrap_collator(self):
+        """Wrap the trainer's final collator for fixed shapes, after ``super().__init__`` so every
+        collator source is covered. Idempotent."""
+        collator = self.data_collator
+        if isinstance(collator, FixedShapeCollator):
+            return
+        reject_pp_collator(
+            collator,
+            per_device_train_batch_size=self.args.per_device_train_batch_size,
+            n_microbatches=self._pp_n_microbatches,
+        )
+        if isinstance(collator, DataCollatorWithPacking):
+            # The collator flattens [B, L] -> [1, B*L] for transformers' batch-size-1 packed path;
+            # under PP the dim-0 microbatch split does that instead, one packed row per microbatch.
+            collator.flatten_to_single_row = False
+        pad_id = require_pad_token_id(self.processing_class, "Pipeline parallelism pads every batch to max_length")
+        self.data_collator = FixedShapeCollator(
+            collator, self.args.max_length, resolve_batch_pad_values(pad_id, self._pp_adapter.pad_spec)
+        )
+
+    def _pin_pp_signature_columns(self, adapter: PipelineLossAdapter) -> None:
+        """Pin HF's signature columns to what the runner and the collator read: HF prunes dataset columns
+        against the forward signature, and a stage's forward takes hidden_states, so input_ids and labels
+        would be dropped. An adapter that keeps the trainer's own columns leaves HF's derivation."""
         if adapter.pin_runner_columns:
             collator_columns = getattr(self.data_collator, "required_dataset_columns", ())
             self._signature_columns = list(
@@ -290,17 +243,17 @@ class PipelineTrainerMixin:
             self._signature_columns = None
             self._set_signature_columns_if_needed()
 
-        self._pp_chain_group = build_pipeline_group(config)
-
-        ep_modules = self._find_ep_modules()
-        # Deliberately unconditional: build_stage_group issues pp_size collective dist.new_group
-        # calls while `ep_modules` is rank-dependent (a hybrid MoE with leading dense layers can give
-        # one stage no EP modules). Gating this deadlocks inside new_group, before any raise prints.
+    def _wrap_pp_stage(self, stage: PipelineStageModule, ep_layers: list) -> None:
+        """COLLECTIVE: build the stage group, refuse a PP+EP stage without EP layers, and FSDP2-wrap the
+        stage over the stage group, EP-aware when it carries EP layers (their capacity-generation hook the
+        stage already registered on itself)."""
+        config = self.parallelism_config
+        # Deliberately unconditional: build_stage_group issues pp_size collective dist.new_group calls
+        # while `ep_layers` is rank-dependent (a hybrid MoE with leading dense layers can give one stage
+        # none). Gating it deadlocks inside new_group, before any raise prints.
         self._pp_stage_group = build_stage_group(config)
-        reject_across_ranks(pp_ep_coverage_reason(config, ep_modules), "PP stage EP coverage")
-        if ep_modules:
-            # The stage registered the EP capacity-generation hook on itself (PipelineStageModule); only
-            # the FSDP2 wrap is left to do here.
+        reject_uncovered_pp_ep_layers(config, ep_layers)
+        if ep_layers:
             self._apply_ep_aware_dp_fsdp2(
                 stage,
                 exclusions=self._fsdp_exclusions(),
@@ -314,100 +267,6 @@ class PipelineTrainerMixin:
                 excluded_params=self._fsdp_exclusions().params,
                 dp_group=self._pp_stage_group,
             )
-
-        self._pp_runner = PipelineRunner(
-            stage,
-            config,
-            self._pp_chain_group,
-            torch.device("cuda", torch.cuda.current_device()),
-            self._pp_n_microbatches,
-            adapter.stage_loss(fuse_head=env_flag("HALO_PP_FUSED_HEAD_LOSS", True)),
-            rows_per_example=type(self).FORWARD_ROWS_PER_EXAMPLE,
-        )
-        # Plain-tensor expert shards need the EP-aware clip (deferred sweep + dispatch-group norm
-        # aggregation); dense and ep1-FSDP-sharded stages are all DTensors → direct PP clip.
-        if ep_modules and not config.experts_fsdp_managed:
-            self._patch_gradient_clipping_for_ep()
-        else:
-            self.accelerator.clip_grad_norm_ = self._pp_clip_grad_norm
-
-        # Each stage holds different routers, so the callback's expert-load reduce must stay inside
-        # this stage's rank block; a world reduce is a shape mismatch or a cross-stage blend.
-        for callback in self.callback_handler.callbacks:
-            if isinstance(callback, MoELoadMetricsCallback):
-                callback.reduce_group = self._pp_stage_group
-
-        self._pp_adapter = adapter = self._pp_hoist_metrics_reduction(adapter)
-        self._pp_pin_metric_keys()
-
-        logger.info(
-            "✓ Pipeline parallelism: %d stages × %d ranks, %d microbatches, %s schedule%s%s",
-            config.pp_size,
-            config.stage_world_size,
-            self._pp_n_microbatches,
-            config.pp_schedule,
-            f", {len(ep_modules)} EP MoE layers" if ep_modules else "",
-            ", fused head loss (no logits plane)" if isinstance(self._pp_runner.loss, FusedHeadLoss) else "",
-        )
-
-    def _pp_wrap_collator(self):
-        """Wrap the trainer's final collator for fixed shapes, after ``super().__init__`` so every
-        collator source is covered. Idempotent."""
-        inner = self.data_collator
-        if isinstance(inner, FixedShapeCollator):
-            return
-        if inner is None:
-            raise ValueError("Pipeline parallelism requires a data collator; the trainer has none.")
-        if isinstance(inner, DataCollatorWithFlattening):
-            # Its cu_seq_lens side outputs cannot be split per microbatch either, and its one row
-            # cannot be microbatched at all.
-            raise ValueError(
-                f"{type(inner).__name__} (padding-free) is incompatible with pipeline parallelism: "
-                f"its flattened width is the summed document length, which varies every step, and "
-                f"the pipeline's P2P buffers are frozen after the first. Use packing instead "
-                f"(`packing: true`), whose packed rows are a fixed shape."
-            )
-        if isinstance(inner, DataCollatorWithPacking):
-            # The collator flattens [B, L] -> [1, B*L] for transformers' batch-size-1 packed path;
-            # under PP the dim-0 microbatch split does that instead, one packed row per microbatch.
-            if self.args.per_device_train_batch_size != self._pp_n_microbatches:
-                raise ValueError(
-                    f"Packing under pipeline parallelism needs one packed row per microbatch, but "
-                    f"per_device_train_batch_size={self.args.per_device_train_batch_size} and the "
-                    f"microbatch count is {self._pp_n_microbatches}: a microbatch holding >1 packed row "
-                    f"leaks attention across documents under FlashAttention. Set "
-                    f"per_device_train_batch_size equal to the microbatch count."
-                )
-            inner.flatten_to_single_row = False
-        tokenizer = resolve_tokenizer(self.processing_class)
-        pad_id = getattr(tokenizer, "pad_token_id", None)
-        if pad_id is None:
-            raise ValueError(
-                "Pipeline parallelism pads every batch to max_length and needs the tokenizer's "
-                "pad_token_id; the processing_class passed to the trainer has none."
-            )
-        self.data_collator = FixedShapeCollator(
-            inner, self.args.max_length, resolve_batch_pad_values(pad_id, self._pp_adapter.pad_spec)
-        )
-
-    def _pp_clip_grad_norm(self, parameters, max_norm, norm_type=2):
-        """Gradient clipping with the norm accumulated across the whole pipeline.
-
-        Every parameter is sharded across exactly one stage's DP group, so the world sum of the local
-        squared norms is the global one (ep1 DTensor experts included; plain-tensor EP expert shards
-        use ``ep_clip_grad_norm_`` instead).
-        """
-        require_l2(norm_type, "Pipeline-parallel")
-        grads = [p.grad for p in clip_parameters(parameters) if p.grad is not None]
-        shards = [g.to_local() if isinstance(g, DTensor) else g for g in grads]
-        local = local_grad_norm_sq(shards, device=current_device())
-        dist.all_reduce(local, op=dist.ReduceOp.SUM)
-        total_norm = local.sqrt()
-        # max_norm <= 0 disables clipping (HF's max_grad_norm=0 convention); scaling by 0/norm would
-        # zero every grad. The clamped coefficient is applied unconditionally: no host sync.
-        if clipping_enabled(max_norm) and shards:
-            scale_shards_to_max_norm_(shards, max_norm, total_norm)
-        return total_norm
 
     def _pp_hoist_metrics_reduction(self, adapter: PipelineLossAdapter) -> PipelineLossAdapter:
         """Move the user's ``preprocess_logits_for_metrics`` onto the last stage, or refuse the metric.
@@ -533,11 +392,9 @@ class PipelineTrainerMixin:
     def _pp_prediction_step(self, inputs, prediction_loss_only: bool, ignore_keys=None):
         """COLLECTIVE over the chain: one evaluation step through the pipeline schedule.
 
-        Without ``compute_metrics`` the schedule runs its own microbatched loss; with it, one
-        forward-only pass yields the last stage's merged output, from which the loss and the
-        predictions derive. The examples padding an eval split's final round leave first and come
-        back as inert filler rows, so the loss, its normalizer and the metrics read the real examples
-        alone, while the predictions keep the batch's rows for the evaluation gather to cut.
+        Without ``compute_metrics`` the schedule runs its own microbatched loss; with it, one forward-only
+        pass yields the last stage's output, from which the loss and the predictions derive. The examples
+        padding an eval split's final round come back as inert filler rows the loss and metrics never read.
         """
         del ignore_keys
         adapter = self._pp_adapter
@@ -554,15 +411,7 @@ class PipelineTrainerMixin:
         inputs = {key: value[:real_rows] if key in pad_values else value for key, value in inputs.items()}
         if adapter.step_state_fn is not None:
             adapter.step_state_fn(inputs)
-        # Before the row padding, so pair/row-count normalizers see the real examples alone; a step of
-        # padding alone sums to 0 and divides by 1.
-        if not real_examples:
-            count = 1.0
-        elif adapter.eval_normalizer is not None:
-            count = adapter.eval_normalizer(inputs)
-        else:
-            # Eval loss is HF's mean over per-rank batch losses, so the rank's own count divides.
-            count = loss_token_counts_per_row(inputs["labels"]).sum().to(dtype=torch.float32).clamp(min=1.0)
+        count = self._pp_eval_count(inputs, real_examples)
         inputs = self._pp_pad_rows_to_frozen(inputs, frozen_rows, pad_values)
         extras = {key: inputs[key] for key in adapter.extra_target_keys} or None
 
@@ -593,14 +442,22 @@ class PipelineTrainerMixin:
         loss = self._pp_broadcast_loss_from_last_stage(loss)
         predictions = self._pp_broadcast_output_from_last_stage(predictions)
         labels = inputs["labels"] if adapter.eval_labels_fn is None else adapter.eval_labels_fn(inputs)
-        # Trim filler rows in the eval output's own row unit, which a predictions_fn may change: a
-        # preference adapter emits one row per pair, so slicing by the batch's row count would keep
-        # inert pad pairs, which score as ties and inflate every partial final batch's metric.
-        # Predictions and labels trim together: trimming one alone hands compute_metrics mismatched
-        # lengths and desyncs gather_for_metrics across replicas.
+        # Trim filler rows in the eval output's own row unit, which a predictions_fn may change (a
+        # preference adapter emits one row per pair), and trim both together, or gather_for_metrics
+        # desyncs across replicas.
         labels = labels[: labels.size(0) * rows // frozen_rows]
         predictions = predictions[: predictions.size(0) * rows // frozen_rows]
         return loss, predictions, labels
+
+    def _pp_eval_count(self, inputs: dict, real_examples: int) -> torch.Tensor | float:
+        """The eval loss denominator, taken before the row padding so a pair/row-count normalizer sees
+        the real examples alone; a step of padding alone divides by 1."""
+        if not real_examples:
+            return 1.0
+        if self._pp_adapter.eval_normalizer is not None:
+            return self._pp_adapter.eval_normalizer(inputs)
+        # Eval loss is HF's mean over per-rank batch losses, so the rank's own count divides.
+        return loss_token_counts_per_row(inputs["labels"]).sum().to(dtype=torch.float32).clamp(min=1.0)
 
     def _pp_frozen_row_pads(self) -> dict[str, int]:
         """Fill values for the inert rows :meth:`_pp_pad_rows_to_frozen` appends: the collator's pads,
@@ -641,25 +498,14 @@ class PipelineTrainerMixin:
         """The last stage's prediction tensor, broadcast down the chain (shape carried with it)."""
         return broadcast_tensor_from_last_stage(tensor, self._pp_last_stage_rank, self._pp_chain_group)
 
-    def _reshard_after_evaluation_loop(self) -> None:
-        """Re-register the sharded params once the eval loop ends: the forward-only drives leave the
-        stage gathered, and everything after the loop must read the shards. Per-rank, no collective."""
-        if self._pp_runner is not None:
-            reshard_fsdp2_modules(self.model)
-
-    def _pp_stage_gather(self, tensor: torch.Tensor) -> torch.Tensor:
-        """COLLECTIVE over the stage group: all-gather ``tensor`` over this stage's ranks, the DP scope
-        under PP (a world gather would mix stages)."""
-        stage_size = dist.get_world_size(self._pp_stage_group)
-        if stage_size == 1:
-            return tensor
-        buffers = [torch.empty_like(tensor) for _ in range(stage_size)]
-        dist.all_gather(buffers, tensor.contiguous(), group=self._pp_stage_group)
-        return torch.cat(buffers)
-
     def _pp_broadcast_log_metrics(self, metrics: dict[str, float]) -> dict[str, float]:
         """COLLECTIVE over the chain: the last stage's log-step metric dict, for metrics whose names
         depend on the data (one object hop per log step)."""
         shared = [metrics]
         dist.broadcast_object_list(shared, src=self._pp_last_stage_rank, group=self._pp_chain_group)
         return shared[0]
+
+    def _pp_loss_adapter(self) -> PipelineLossAdapter:
+        """This trainer's pipeline-loss contract: the causal-LM one (summed shifted CE, token-count normalizer)
+        SFT needs; a PP-enabled trainer with another objective overrides it."""
+        return PipelineLossAdapter(token_loss_fn=causal_lm_token_loss)

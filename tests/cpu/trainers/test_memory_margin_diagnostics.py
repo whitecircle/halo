@@ -18,11 +18,9 @@ import types
 import pytest
 import torch
 
-from src.trainers.mixins.base import (
-    _MEMORY_MARGIN_WARN_RATIO,
+from src.trainers.distributed_trainer import (
+    MEMORY_MARGIN_WARN_RATIO,
     DistributedTrainerMixin,
-    emit_primary_failure,
-    oom_banner,
     thin_memory_margin_message,
 )
 
@@ -40,26 +38,18 @@ def test_message_fires_above_the_ratio():
 
 def test_message_silent_below_the_ratio():
     total = 268 * _GIB
-    assert thin_memory_margin_message(int(total * (_MEMORY_MARGIN_WARN_RATIO - 0.01)), total, rank=0) is None
+    assert thin_memory_margin_message(int(total * (MEMORY_MARGIN_WARN_RATIO - 0.01)), total, rank=0) is None
 
 
 def test_message_boundary_is_the_ratio():
     total = 100 * _GIB
-    at = int(total * _MEMORY_MARGIN_WARN_RATIO)
+    at = int(total * MEMORY_MARGIN_WARN_RATIO)
     assert thin_memory_margin_message(at, total, rank=0) is not None
     assert thin_memory_margin_message(at - _GIB, total, rank=0) is None
 
 
 def test_message_survives_zero_total():
     assert thin_memory_margin_message(0, 0, rank=0) is None
-
-
-def test_oom_banner_names_the_primary_failure_and_the_collateral():
-    banner = oom_banner(5, RuntimeError("CUDA out of memory. Tried to allocate 7.84 GiB"))
-    assert "RANK 5" in banner
-    assert "PRIMARY FAILURE" in banner
-    assert "Xid 43" in banner
-    assert "7.84 GiB" in banner
 
 
 class _RecordingLogger:
@@ -75,6 +65,31 @@ class _RecordingLogger:
         self.calls.append(("warning", msg, kwargs))
 
 
+class _OOMingTrainer:
+    """Stands in for the TRL/HF base whose step the spine wraps."""
+
+    def training_step(self, model, inputs, num_items_in_batch=None):
+        raise torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 53.56 GiB")
+
+
+class _StepHost(DistributedTrainerMixin, _OOMingTrainer):
+    """The spine's real ``training_step`` over a base that OOMs; the token accounting has nothing to count."""
+
+    def _accumulate_unmasked_output_tokens(self, local_count):
+        pass
+
+    def _accumulate_attention_flops(self, inputs):
+        pass
+
+
+def _oom_step():
+    host = object.__new__(_StepHost)
+    host._memory_margin_checked = True
+    host._window_modules = []
+    host.accelerator = types.SimpleNamespace(sync_gradients=True)
+    DistributedTrainerMixin.training_step(host, None, {})
+
+
 def test_primary_failure_banner_escapes_the_main_process_only_default(monkeypatch):
     """The banner names the rank that OOMed, and this module logs through accelerate's
     ``MultiProcessAdapter``, which drops records on every non-main rank unless
@@ -82,9 +97,11 @@ def test_primary_failure_banner_escapes_the_main_process_only_default(monkeypatc
     died — never in the case it exists for, leaving a post-mortem with peer watchdog timeouts and no
     primary cause."""
     recorder = _RecordingLogger()
-    monkeypatch.setattr("src.trainers.mixins.base.logger", recorder)
+    monkeypatch.setattr("src.trainers.distributed_trainer.logger", recorder)
+    monkeypatch.setattr("src.trainers.distributed_trainer.get_global_rank", lambda: 3)
 
-    emit_primary_failure(3, RuntimeError("CUDA out of memory. Tried to allocate 53.56 GiB"))
+    with pytest.raises(torch.OutOfMemoryError):
+        _oom_step()
 
     assert len(recorder.calls) == 1
     level, msg, kwargs = recorder.calls[0]
@@ -94,6 +111,7 @@ def test_primary_failure_banner_escapes_the_main_process_only_default(monkeypatc
         "non-zero rank that actually OOMed"
     )
     assert "RANK 3" in msg and "53.56 GiB" in msg
+    assert "PRIMARY FAILURE" in msg and "Xid 43" in msg, "the banner must name the primary failure and the collateral"
 
 
 def test_thin_margin_warning_escapes_the_main_process_only_default(monkeypatch):
@@ -104,8 +122,8 @@ def test_thin_margin_warning_escapes_the_main_process_only_default(monkeypatch):
     CUDA is faked rather than skipped: on the CPU tier a skip would leave the kwarg unpinned, which
     is the whole behaviour under test."""
     recorder = _RecordingLogger()
-    monkeypatch.setattr("src.trainers.mixins.base.logger", recorder)
-    monkeypatch.setattr("src.trainers.mixins.base.thin_memory_margin_message", lambda *a, **k: "thin margin")
+    monkeypatch.setattr("src.trainers.distributed_trainer.logger", recorder)
+    monkeypatch.setattr("src.trainers.distributed_trainer.thin_memory_margin_message", lambda *a, **k: "thin margin")
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "max_memory_allocated", lambda: 99 * 1024**3)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)

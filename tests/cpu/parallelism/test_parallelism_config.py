@@ -16,7 +16,8 @@ from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.group_layout import NodeLocalLayout
 from src.kernels.lowp.spec import LowpSpec
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.gloo import run_gloo_ranks
@@ -764,6 +765,16 @@ def test_parallelism_config_from_args_builds_pp_only_for_trainers_that_support_i
             parallelism_config_from_args(pp_tp, trainer_cls=DistributedSFTTrainer)
         assert "pipeline_parallel_size=2" in str(excinfo.value)
         assert "tensor_parallel_size=2" in str(excinfo.value)
+
+
+def test_parallelism_config_from_args_names_the_trainers_own_pp_refusal():
+    """The config-time gate is the trainer's own, so it carries the mechanism the trainer declares rather
+    than a generic refusal."""
+    args = ParallelismArguments(pipeline_parallel_size=2, nvlink_domain_size=8)
+    with simulated_world(world_size=16, gpus_per_node=8):
+        with pytest.raises(ValueError, match="DistributedSelfDistillationTrainer does not support Pipeline") as err:
+            parallelism_config_from_args(args, trainer_cls=DistributedSelfDistillationTrainer)
+    assert DistributedSelfDistillationTrainer.PP_REFUSAL in str(err.value)
 
 
 def test_parallelism_config_from_args_rejects_cp_when_unsupported():

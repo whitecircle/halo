@@ -359,7 +359,7 @@ def _kl_checks(trainer, checks: dict) -> None:
 def _lora_under_tp_refused(**build_kwargs) -> dict[str, bool]:
     """The TP + LoRA refusal, asserted on a real construction rather than on a config object.
 
-    ``_validate_lora_tp_compatibility`` runs inside ``_setup_distributed_modes``, after the trainer's
+    ``reject_lora_under_tp`` runs inside ``_configure_distributed_modes``, after the trainer's
     own ``__init__`` has built the model wrappers and TRL's weight-transfer client, so a config-level
     assertion never reaches it. The client that construction left behind is closed by the ``atexit``
     hook ``init_communicator`` registers (``src/weight_sync/clients/vllm.py``), since the raise

@@ -17,6 +17,8 @@ from trl import GRPOTrainer
 
 from src.configs.grpo import EarlyStopConfig, RLRRConfig
 from src.environments.rollout_config import VLLM_BACKEND
+from src.trainers.ctor_slots import get_ctor_arg, resolve_ctor_positions
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedGRPOLogprobsMixin, LogitsWidth
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
@@ -41,16 +43,14 @@ from src.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLo
 from src.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
 from src.trainers.grpo.rollout.weight_push import sync_trainer_weights
 from src.trainers.grpo.world_metrics import gathered_fractions
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.loss_masks import effective_loss_mask
-from src.trainers.mixins.validation import ctor_positions, ctor_value
+from src.trainers.token_metrics import effective_loss_mask
 
 logger = get_logger(__name__, log_level="info")
 
 # TRL ctor parameters that run its tool-calling loop, whose round count is each rank's own.
-_TOOL_LOOP_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "tools", "environment_factory")
+_TOOL_LOOP_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "tools", "environment_factory")
 # TRL's custom rollout, which generates in place of _generate_single_turn.
-_ROLLOUT_FUNC_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "rollout_func")
+_ROLLOUT_FUNC_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "rollout_func")
 
 
 def _vllm_available_stub() -> bool:
@@ -82,8 +82,6 @@ class DistributedGRPOTrainer(
     # Online GRPO is vLLM-only by construction (TRL's server-mode generation), so the engine the
     # weight-sync gate reads is fixed here rather than configured.
     _rollout_backend = VLLM_BACKEND
-    # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
-    _loss_outside_model_forward = True
 
     def __init__(self, *args, **kwargs):
         self._use_chunked_grpo_logprobs = kwargs.pop("use_chunked_grpo_logprobs", False)
@@ -203,7 +201,7 @@ class DistributedGRPOTrainer(
         given = [
             name
             for name in _TOOL_LOOP_CTOR_POSITIONS
-            if ctor_value(ctor_args, kwargs, name, _TOOL_LOOP_CTOR_POSITIONS)
+            if get_ctor_arg(ctor_args, kwargs, name, _TOOL_LOOP_CTOR_POSITIONS)
         ]
         if given:
             raise ValueError(
@@ -221,7 +219,7 @@ class DistributedGRPOTrainer(
         config = self.parallelism_config
         if not (config.is_tp_mode or config.is_expert_tp_mode):
             return
-        if ctor_value(ctor_args, kwargs, "rollout_func", _ROLLOUT_FUNC_CTOR_POSITIONS) is not None:
+        if get_ctor_arg(ctor_args, kwargs, "rollout_func", _ROLLOUT_FUNC_CTOR_POSITIONS) is not None:
             raise ValueError(
                 "rollout_func is not supported under tensor or expert-tensor parallelism: it replaces the "
                 "generation that broadcasts the group leader's completions, so siblings sharing one sharded "

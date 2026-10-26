@@ -60,14 +60,11 @@ class _Trainer(GRPOTrainDataLoaderMixin, _TrlWorldRateBase):
         self.shuffle_dataset = False  # deterministic index geometry
         self.train_dataset = list(range(dataset_size))
         self._dataset_presharded = presharded
-        self._dp_size = dp_size
+        self.parallelism_config = SimpleNamespace(data_parallel_size=dp_size)
         self._custom = custom
 
     def _needs_custom_dataloader(self):
         return self._custom
-
-    def get_data_parallel_size(self):
-        return self._dp_size
 
 
 def _generated_prompts_per_round(sampler, *, loader_batch, shard_processes, consumer_ranks, generate_every):

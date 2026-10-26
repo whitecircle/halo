@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Every eval path must cache the SAME kind of object in ``_eval_dataloaders``.
 
-Two paths write that dict on one MRO — the shared ``DataParallelDataLoaderMixin`` one and offline
+Two paths write that dict on one MRO — the shared ``DataParallelLoaderMixin`` one and offline
 GRPO's grouped-sampler one. The base ``Trainer`` contract is to store the PREPARED loader, which is
 the whole point of ``dataloader_persistent_workers``: the next ``evaluate()`` reuses it instead of
 forking a new worker pool. A path storing the pre-prepare loader under the same key either hands
@@ -15,12 +15,12 @@ from types import SimpleNamespace
 import pytest
 from torch.utils.data import SequentialSampler
 
-import src.trainers.mixins.dataloader as dataloader_mod
+import src.trainers.dataloaders as dataloader_mod
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime.consensus import RankConsensus
+from src.trainers.dataloaders import DataParallelLoaderMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 
 _ROWS = [{"x": 1}, {"x": 2}]
 
@@ -56,7 +56,7 @@ def _base_stub(trainer_cls):
 
 def _mixin_stub():
     """The shared DP eval path, stopped just short of accelerate."""
-    t = _base_stub(DataParallelDataLoaderMixin)
+    t = _base_stub(DataParallelLoaderMixin)
     t._needs_custom_dataloader = lambda: True
     t._get_eval_sampler = SequentialSampler
 
@@ -65,7 +65,7 @@ def _mixin_stub():
         return dataset, {"batch_size": batch_size}
 
     t._loader_params = _loader_params
-    return t, lambda: DataParallelDataLoaderMixin.get_eval_dataloader(t)
+    return t, lambda: DataParallelLoaderMixin.get_eval_dataloader(t)
 
 
 def _offline_stub():
@@ -127,7 +127,7 @@ def test_a_split_cache_hit_rebuilds_in_lockstep_and_displaces_no_live_loader(mon
         built.append(_Prepared(dataset))
         return built[-1]
 
-    loader = DataParallelDataLoaderMixin._cached_eval_dataloader(trainer, _ROWS, build, key="eval/fingerprint")
+    loader = DataParallelLoaderMixin._cached_eval_dataloader(trainer, _ROWS, build, key="eval/fingerprint")
 
     assert len(built) == 1, "a rank skipped the rebuild its peers run in lockstep"
     expected = live if held else built[0]
@@ -145,7 +145,7 @@ class _InitStopped(Exception):
 class _InitHost:
     """A bare trainer host for the shared init, which must declare the cache before anything else."""
 
-    def _configure_mixed_precision(self, kwargs, training_args):
+    def _snapshot_model_config_state(self, model_config):
         raise _InitStopped
 
 
@@ -166,7 +166,7 @@ def test_the_test_loader_takes_the_eval_loaders_dp_sharded_body():
     trainer, get_eval_dataloader = _mixin_stub()
     eval_loader = get_eval_dataloader()
 
-    test_loader = DataParallelDataLoaderMixin.get_test_dataloader(trainer, _ROWS)
+    test_loader = DataParallelLoaderMixin.get_test_dataloader(trainer, _ROWS)
 
     assert isinstance(test_loader, _Prepared), "the test loader skipped the DP-aware prepare"
     assert type(test_loader.raw.sampler) is type(eval_loader.raw.sampler), "the test loader drew another sampler"

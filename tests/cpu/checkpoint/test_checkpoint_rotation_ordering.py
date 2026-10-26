@@ -34,9 +34,9 @@ from transformers import TrainerState
 from transformers.trainer_utils import rotate_checkpoints
 
 import src.checkpoint.parallel.optimizer as optimizer_mod
-import src.trainers.mixins.checkpointing as checkpointing_mod
+import src.trainers.checkpointing as checkpointing_mod
 from src.checkpoint.parallel.optimizer import OptimizerShardStore
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import load_context
 

@@ -26,20 +26,15 @@ class PipelineLossAdapter:
 
     Attributes:
         token_loss_fn: ``(output, target) -> summed loss``; target = labels, or ``{"labels", **extras}``.
-        batch_transform: collator-space transform of the prepared inputs before the step.
-        step_state_fn: ``(inputs) -> None``, the per-step constants a closure loss reads (eval: real rows).
-        normalizer: ``(inputs) -> step normalizer``; ``None`` = the DP-global loss-token count / dp.
-        extra_target_keys: batch keys shipped to the loss as per-example side tensors.
-        pad_spec: pad values for seq-shaped extra keys the fixed-shape collator must also pad.
-        eval_normalizer: ``(inputs) -> eval denominator`` over the real rows; ``None`` = this rank's count.
-        pin_runner_columns: pin the runner's keys as HF's signature columns; ``False`` keeps the trainer's.
-        extra_signature_columns: dataset columns added to the pinned set for the collator.
-        predictions_fn: ``(output, inputs) -> predictions``, reduced on the last stage before the broadcast.
-        eval_labels_fn: ``(inputs) -> labels`` paired with those predictions; ``None`` = ``inputs["labels"]``.
-        metrics_fn: ``() -> {name: 0-dim tensor}`` per step, names from config: only values cross the chain.
-
-    ``predictions_fn`` and ``eval_labels_fn`` emit a fixed number of entries per example, the unit the
-    mixin trims the frozen shape's filler rows in.
+        batch_transform / step_state_fn: the prepared inputs' transform, and the per-step constants a
+            closure loss reads (in eval, of the real rows).
+        normalizer / eval_normalizer: the step / eval denominator; ``None`` = the DP-global loss-token
+            count / dp, and this rank's count over the real rows.
+        extra_target_keys / pad_spec: per-example side tensors for the loss, and pads for the seq-shaped ones.
+        pin_runner_columns: pin the runner's keys (plus ``extra_signature_columns``) as HF's signature columns.
+        predictions_fn / eval_labels_fn: the eval output reduced on the last stage before the broadcast, and
+            the labels paired with it, a fixed number of entries per example.
+        metrics_fn: ``() -> {name: 0-dim tensor}`` per step, named from config: only values cross the chain.
     """
 
     token_loss_fn: TokenLossFn

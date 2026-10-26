@@ -179,7 +179,7 @@ def test_supported_combinations_table_matches_the_allowlist():
 def test_trainer_compatibility_table_matches_the_support_flags():
     """Every cell of the trainer × axis matrix must equal the class attribute the mixin reads.
 
-    ``ParallelismValidationMixin`` raises off ``SUPPORTS_CP`` / ``PP_REFUSAL``; a doc cell that
+    ``DistributedTrainerMixin`` raises off ``SUPPORTS_CP`` / ``PP_REFUSAL``; a doc cell that
     disagrees promises (or denies) a mode the trainer will refuse (or accept) at construction.
     """
     rows = _table_with_headers(_TRAINER_ARCHITECTURE, "Trainer", *_TRAINER_AXIS_SUPPORT)

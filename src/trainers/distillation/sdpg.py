@@ -14,10 +14,10 @@ from src.log import warn_once
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distillation.losses import global_token_mean, privileged_teacher_pass
 from src.trainers.distillation.opd_term import OPDTermMixin
+from src.trainers.evaluation import split_rows_head
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.dataloader import split_rows_head
-from src.trainers.mixins.loss_masks import effective_loss_mask
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
+from src.trainers.token_metrics import effective_loss_mask
 
 # Stdlib, not accelerate's adapter: the warning below fires per rollout row on whichever rank drew
 # it, and the adapter drops everything off rank 0 (warn_once cannot pass main_process_only).

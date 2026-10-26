@@ -172,7 +172,7 @@ Either way Gemma 4 gets no balancing **and** no `moe/*` metrics, and `output_rou
 - **Classification / embedding** — non-causal heads; the causal-LM forward never runs.
 - **GRPO (offline / online / async)** — the loss is per-token log-probs, so the mode warns and leaves the flag off; with `output_router_logits` already on at a positive `router_aux_loss_coef`, an explicit `aux_loss` raises at construction (below).
 
-Inertness is a **trainer-class contract**: `_consumes_router_aux_loss` declares whether the objective goes through a `labels` forward (`True` only on `DistributedSFTTrainer`, `DistributedDPOTrainer` and `DistributedKTOTrainer`). An explicit `aux_loss` on a non-consuming trainer **raises**; an `auto` resolution landing there turns `output_router_logits` back off.
+Inertness is a **trainer-class contract**: `ROUTER_AUX_LOSS_ADDED_BY` declares what adds the aux term: the model's `labels` forward (`DistributedSFTTrainer`), TRL's own loss (`DistributedDPOTrainer`, `DistributedKTOTrainer`), or nothing (every other trainer). An explicit `aux_loss` on a non-consuming trainer **raises**; an `auto` resolution landing there turns `output_router_logits` back off.
 
 Online and async GRPO go further: syncing weights to a live rollout engine downgrades **both bias modes to `none`**, since the sync ships parameters only — an adopted native slot is a buffer, a transient bias a plain attribute — and a bias the generator never sees drifts trainer routing off the trajectories it produced.
 

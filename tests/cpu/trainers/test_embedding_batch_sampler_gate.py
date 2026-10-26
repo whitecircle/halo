@@ -16,14 +16,13 @@ import textwrap
 import pytest
 
 from src.configs.embedding import EmbeddingConfig
+from src.trainers.embedding.embedding_rules import reject_batch_sampler_on_toolkit_loader
 from src.trainers.embedding.trainer import EmbeddingTrainer
 
 
 def _check(batch_sampler: str, *, toolkit_loader: bool, tmp_path) -> None:
-    host = object.__new__(EmbeddingTrainer)
-    host._needs_custom_dataloader = lambda: toolkit_loader
     args = EmbeddingConfig(output_dir=str(tmp_path), batch_sampler=batch_sampler, bf16=False, use_cpu=True)
-    host._reject_batch_sampler_on_toolkit_loader(args)
+    reject_batch_sampler_on_toolkit_loader(args, toolkit_loader=toolkit_loader)
 
 
 @pytest.mark.parametrize("batch_sampler", ["no_duplicates", "no_duplicates_hashed", "group_by_label"])
@@ -43,11 +42,11 @@ def test_the_sentence_transformers_loader_keeps_its_samplers(tmp_path):
 def test_the_gate_runs_in_the_trainers_init():
     source = textwrap.dedent(inspect.getsource(EmbeddingTrainer.__init__))
     called = {
-        node.func.attr
+        node.func.id
         for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "_reject_batch_sampler_on_toolkit_loader" in called
+    assert "reject_batch_sampler_on_toolkit_loader" in called
 
 
 if __name__ == "__main__":

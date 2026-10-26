@@ -1,17 +1,9 @@
 #!/usr/bin/env python
-"""Distributed embedding training.
+"""Distributed embedding training: sentence-transformers losses over pairs, triplets, scored pairs and labeled texts.
 
-Fine-tunes embedding models with sentence-transformers losses over the common dataset shapes (pairs,
-triplets, scored pairs, labeled texts).
-
-Modality: text-only. Multimodal embedding would need a multimodal preloaded transformer (the EP/TP
-path here only tokenizes text); standard sentence-transformers multimodal mode is out of scope.
-
-CP is not supported (pooling reads the complete sequence); use EP and/or TP.
-
-Usage:
-    torchrun --nproc_per_node=8 scripts/training/embedding.py \\
-        examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml
+Text-only (the EP/TP path's preloaded transformer only tokenizes text); CP is not supported, since pooling
+reads the complete sequence. Usage:
+    torchrun --nproc_per_node=8 scripts/training/embedding.py examples/embedding/gptoss/embedding-gptoss-20b-gooaq-ep.yaml
 """
 
 from accelerate.logging import get_logger
@@ -50,9 +42,10 @@ from src.models.peft_adapters import tuner_adapter_param_ids
 from src.runtime.collectives import barrier
 from src.runtime.load_coordination import joined_node_load
 from src.runtime.ranks import is_global_main_process
-from src.trainers.embedding.sentence_transformers_compat import PreloadedTransformer
-from src.trainers.embedding.trainer import EmbeddingTrainer, reject_uneven_sentence_transformers_batches
-from src.trainers.mixins.dataloader import needs_dp_sharded_loader
+from src.trainers.dataloaders import uses_dp_sharded_loader
+from src.trainers.embedding.embedding_rules import reject_uneven_sentence_transformers_batches
+from src.trainers.embedding.preloaded_transformer import PreloadedTransformer
+from src.trainers.embedding.trainer import EmbeddingTrainer
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -63,12 +56,8 @@ def build_sentence_transformer(
     model_config: ModelArguments,
     args: EmbeddingScriptArguments,
 ) -> SentenceTransformer:
-    """Build a SentenceTransformer with optional EP/TP parallelism.
-
-    Standard mode uses ``SentenceTransformer(model_name)`` directly; EP/TP mode loads the backbone
-    with ``load_model_and_tokenizer(model_class=AutoModel)``, wraps it in :class:`PreloadedTransformer` and
-    builds the ``SentenceTransformer`` pipeline from modules.
-    """
+    """Build the run's SentenceTransformer: under EP/TP the parallel loader's backbone wrapped in
+    :class:`PreloadedTransformer` and assembled into a pipeline, otherwise ``SentenceTransformer(model_name)``."""
     # QLoRA/k-bit is unsupported here: neither the EP/TP loader nor the SentenceTransformer path
     # applies it, so --load_in_4bit/--load_in_8bit would train at full precision.
     if get_quantization_config(model_config) is not None:
@@ -79,77 +68,101 @@ def build_sentence_transformer(
         )
     parallelism_config = context.parallelism_config
     if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
-        backbone, tokenizer = load_model_and_tokenizer(
-            context,
-            embedding_config,
-            model_config,
-            args,
-            model_class=AutoModel,
-        )
-
-        transformer_module = PreloadedTransformer(auto_model=backbone, tokenizer=tokenizer)
-        transformer_module.max_seq_length = resolve_embedding_max_length(embedding_config, transformer_module)
-
-        # get_text_config() resolves composite (multimodal) configs whose hidden_size lives in
-        # text_config (Qwen3.5, Gemma4); plain configs return themselves.
-        hidden_dim = backbone.config.get_text_config().hidden_size
-        pooling_module = Pooling(
-            word_embedding_dimension=hidden_dim,
-            pooling_mode=embedding_config.pooling_mode,
-        )
-
-        modules = [transformer_module, pooling_module]
-        if embedding_config.normalize_embeddings:
-            modules.append(Normalize())
-
-        st_model = SentenceTransformer(modules=modules)
-        # The TP loader attaches the (dp, tp) mesh to the backbone but the trainer reads it off the
-        # top-level ST model. Without propagating it, TP+DP builds a conflicting mesh and pure TP skips
-        # the TP grad-sync.
-        mesh = getattr(backbone, "_device_mesh", None)
-        if mesh is not None:
-            st_model._device_mesh = mesh
+        st_model = _assemble_preloaded_pipeline(context, embedding_config, model_config, args)
     else:
-        model_kwargs: dict = {"dtype": resolve_training_dtype(embedding_config)}
-        if model_config.attn_implementation:
-            model_kwargs["attn_implementation"] = model_config.attn_implementation
-
-        # The parallel loader's two seams, since sentence-transformers loads the backbone itself: the
-        # source fetched once per scope and agreed across ranks (revision threaded as on the EP/TP
-        # branch, so a pinned checkpoint does not depend on flags), then a node-batched load joined
-        # over the store. The whole repo: the pipeline's pooling and dense modules sit in subfolders.
-        apply_remote_code_compat_shims()
-        revision = resolve_model_source(
-            context.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
-        ).revision
-        with joined_node_load(
-            f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
-        ):
-            st_model = SentenceTransformer(
-                context.model_source,
-                revision=revision,
-                trust_remote_code=model_config.trust_remote_code,
-                model_kwargs=model_kwargs,
-            )
-        # Refuses a pipeline without a transformer backbone before anything reads it.
-        resolve_embedding_max_length(embedding_config, st_model[0])
-        # ST loads the backbone itself, so the post-load steps of the parallel loader run here too: the
-        # run-dtype cast, the buffer repair, and the shared finalization (a GptOss backbone would
-        # otherwise keep live sinks under an attention backend that drops them).
-        backbone = st_model[0].auto_model
-        cast_parameters_to_run_dtype(backbone, model_kwargs["dtype"], keep_fp32=parallelism_config.fp32_non_ep_params)
-        finalize_loaded_model(backbone)
-        apply_run_model_policies(
-            backbone,
-            backbone.config,
-            sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
-            attn_implementation=model_kwargs.get("attn_implementation"),
-        )
-        # The checkpoint's modules.json decides pooling/normalization/length here while the EP/TP branch
-        # builds them from the config; align them or those three knobs are inert on the default path.
-        align_st_pipeline_to_config(st_model, embedding_config)
+        st_model = _load_sentence_transformer(context, embedding_config, model_config, args)
     # sentence-transformers writes its card from model_card_data, never from the backbone's model_tags.
     st_model.model_card_data.add_tags(list(HUB_TAGS))
+    return st_model
+
+
+def _assemble_preloaded_pipeline(
+    context: ScriptContext,
+    embedding_config: EmbeddingConfig,
+    model_config: ModelArguments,
+    args: EmbeddingScriptArguments,
+) -> SentenceTransformer:
+    """The EP/TP pipeline: the parallel loader's backbone, its pooling and normalization from the config."""
+    backbone, tokenizer = load_model_and_tokenizer(
+        context,
+        embedding_config,
+        model_config,
+        args,
+        model_class=AutoModel,
+    )
+
+    transformer_module = PreloadedTransformer(auto_model=backbone, tokenizer=tokenizer)
+    transformer_module.max_seq_length = resolve_embedding_max_length(embedding_config, transformer_module)
+
+    # get_text_config() resolves composite (multimodal) configs whose hidden_size lives in
+    # text_config (Qwen3.5, Gemma4); plain configs return themselves.
+    hidden_dim = backbone.config.get_text_config().hidden_size
+    pooling_module = Pooling(
+        word_embedding_dimension=hidden_dim,
+        pooling_mode=embedding_config.pooling_mode,
+    )
+
+    modules = [transformer_module, pooling_module]
+    if embedding_config.normalize_embeddings:
+        modules.append(Normalize())
+
+    st_model = SentenceTransformer(modules=modules)
+    # The TP loader attaches the (dp, tp) mesh to the backbone but the trainer reads it off the
+    # top-level ST model. Without propagating it, TP+DP builds a conflicting mesh and pure TP skips
+    # the TP grad-sync.
+    mesh = getattr(backbone, "_device_mesh", None)
+    if mesh is not None:
+        st_model._device_mesh = mesh
+    return st_model
+
+
+def _load_sentence_transformer(
+    context: ScriptContext,
+    embedding_config: EmbeddingConfig,
+    model_config: ModelArguments,
+    args: EmbeddingScriptArguments,
+) -> SentenceTransformer:
+    """The pipeline sentence-transformers loads itself, given the parallel loader's post-load steps and the
+    config's pooling, normalization and length."""
+    parallelism_config = context.parallelism_config
+    model_kwargs: dict = {"dtype": resolve_training_dtype(embedding_config)}
+    if model_config.attn_implementation:
+        model_kwargs["attn_implementation"] = model_config.attn_implementation
+
+    # The parallel loader's two seams, since sentence-transformers loads the backbone itself: the
+    # source fetched once per scope and agreed across ranks (revision threaded as on the EP/TP
+    # branch, so a pinned checkpoint does not depend on flags), then a node-batched load joined
+    # over the store. The whole repo: the pipeline's pooling and dense modules sit in subfolders.
+    apply_remote_code_compat_shims()
+    revision = resolve_model_source(
+        context.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
+    ).revision
+    with joined_node_load(
+        f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
+    ):
+        st_model = SentenceTransformer(
+            context.model_source,
+            revision=revision,
+            trust_remote_code=model_config.trust_remote_code,
+            model_kwargs=model_kwargs,
+        )
+    # Refuses a pipeline without a transformer backbone before anything reads it.
+    resolve_embedding_max_length(embedding_config, st_model[0])
+    # ST loads the backbone itself, so the post-load steps of the parallel loader run here too: the
+    # run-dtype cast, the buffer repair, and the shared finalization (a GptOss backbone would
+    # otherwise keep live sinks under an attention backend that drops them).
+    backbone = st_model[0].auto_model
+    cast_parameters_to_run_dtype(backbone, model_kwargs["dtype"], keep_fp32=parallelism_config.fp32_non_ep_params)
+    finalize_loaded_model(backbone)
+    apply_run_model_policies(
+        backbone,
+        backbone.config,
+        sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
+        attn_implementation=model_kwargs.get("attn_implementation"),
+    )
+    # The checkpoint's modules.json decides pooling/normalization/length here while the EP/TP branch
+    # builds them from the config; align them or those three knobs are inert on the default path.
+    align_st_pipeline_to_config(st_model, embedding_config)
     return st_model
 
 
@@ -251,13 +264,9 @@ def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: 
         logger.info(f"Applied LoRA adapters (r={model_config.lora_r}); trainable params: {trainable / 1e6:.2f}M")
 
 
-def main():
-    args, embedding_config, model_config, dist_args = parse_script_args(
-        EmbeddingScriptArguments, EmbeddingConfig, ModelArguments, ParallelismArguments
-    )
-
-    # The ST path has no configure_run_tokenizer / freeze stage, so these shared knobs would parse
-    # and do nothing (a freeze request would become a full fine-tune). Reject them instead.
+def _reject_unhonored_args(args: EmbeddingScriptArguments) -> None:
+    """Refuse the shared script knobs the sentence-transformers path would parse and ignore: it has no
+    configure_run_tokenizer / freeze stage, so a freeze request would become a full fine-tune."""
     reject_unsupported_args(
         "Embedding training",
         pad_token=args.pad_token,
@@ -278,6 +287,13 @@ def main():
     # SentenceTransformer owns tokenization, so only the default backend is accepted.
     reject_non_default_args("Embedding training", args, "tokenizer_backend")
 
+
+def main():
+    args, embedding_config, model_config, dist_args = parse_script_args(
+        EmbeddingScriptArguments, EmbeddingConfig, ModelArguments, ParallelismArguments
+    )
+    _reject_unhonored_args(args)
+
     # LoRA on the SentenceTransformer path is injected below via inject_adapter_in_model (not the EP
     # grouped-adapter split, which is rejected together with EP/TP further down).
     context = init_training_script(
@@ -297,7 +313,7 @@ def main():
     eval_dataset = ds.get("test")
     # Here, ahead of the model load: the trainer would refuse the same run only after it.
     reject_uneven_sentence_transformers_batches(
-        embedding_config, train_dataset, toolkit_loader=needs_dp_sharded_loader(parallelism_config, dataset_presharded)
+        embedding_config, train_dataset, toolkit_loader=uses_dp_sharded_loader(parallelism_config, dataset_presharded)
     )
 
     if is_global_main_process():

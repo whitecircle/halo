@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for three PEFT seams on ``DistributedTrainerMixin``:
 
-* ``_validate_merge_expert_lora_save`` — the flag must be rejected exactly where it cannot deliver a
+* ``reject_unmergeable_expert_lora_save`` — the flag must be rejected exactly where it cannot deliver a
   merged checkpoint, and nowhere else. All three gates read the LIVE model rather than a mode list,
   so every parallelism/model combination is covered by construction: no native expert adapters means
   there is nothing to fold, accelerate-managed FSDP means the base Trainer owns the save, and a PEFT
@@ -32,13 +32,15 @@ from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from torch import nn
 
-import src.checkpoint.parallel.context as context_mod
 import src.checkpoint.parallel.ep as ep_mod
 import src.checkpoint.parallel.save as save_mod
-import src.trainers.mixins.base as mixin_mod
-import src.trainers.mixins.grad_sync as grad_sync_mod
+import src.trainers.checkpointing as checkpointing_mod
+import src.trainers.parallelism.adapter_rules as adapter_rules
+import src.trainers.parallelism.grad_sync as grad_sync_mod
+import src.trainers.parallelism.mode_setup as mode_setup_mod
 from src.checkpoint.reading import load_full_state_dict
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
+from src.trainers.parallelism.adapter_rules import reject_unmergeable_expert_lora_save
 from tests.common.peft_helpers import randomize_adapters
 
 PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
@@ -66,8 +68,7 @@ class _StubTrainer:
             merge_expert_lora_on_save=merge_expert_lora_on_save, fp32_grad_reduce=False
         )
 
-    _validate_merge_expert_lora_save = DistributedTrainerMixin._validate_merge_expert_lora_save
-    _setup_qlora_sync = DistributedTrainerMixin._setup_qlora_sync
+    _install_qlora_grad_sync = DistributedTrainerMixin._install_qlora_grad_sync
     _sync_qlora_grads = DistributedTrainerMixin._sync_qlora_grads
 
     state = SimpleNamespace(global_step=0)
@@ -76,30 +77,38 @@ class _StubTrainer:
         return self.model
 
 
+def _reject(trainer: _StubTrainer) -> None:
+    reject_unmergeable_expert_lora_save(
+        trainer.model,
+        merge_expert_lora_on_save=trainer.parallelism_config.merge_expert_lora_on_save,
+        accelerate_manages_fsdp=trainer._accelerate_manages_fsdp,
+    )
+
+
 def test_merge_flag_with_attention_peft_passes():
     """A MIXED run is the flag's headline case: the gathered EP save folds the expert deltas in the
     family gather and the attention deltas via merge_adapter, so it must NOT be rejected."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
-    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
-        trainer._validate_merge_expert_lora_save()
+    with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
+        _reject(trainer)
 
 
 def test_merge_flag_without_expert_adapters_raises():
     """Nothing to fold: dense runs, MoE runs naming no expert projection, and expert_tp_size > 1
     (where EPConfig rejects expert LoRA) all land here, and the flag would be silently ignored."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
-    with patch.object(mixin_mod, "model_has_expert_lora", return_value=False):
+    with patch.object(adapter_rules, "model_has_expert_lora", return_value=False):
         with pytest.raises(ValueError, match="no native grouped expert"):
-            trainer._validate_merge_expert_lora_save()
+            _reject(trainer)
 
 
 def test_merge_flag_under_accelerate_fsdp_raises():
     """Flat-param shards: the base Trainer owns that save, so the merged gather would write shard views."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
     trainer._accelerate_manages_fsdp = True
-    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
+    with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
         with pytest.raises(ValueError, match="accelerate-managed FSDP"):
-            trainer._validate_merge_expert_lora_save()
+            _reject(trainer)
 
 
 class _UnfoldableLM(nn.Module):
@@ -127,21 +136,21 @@ def test_merge_flag_with_a_layer_the_fold_cannot_reproduce_raises(config):
     """The merged save folds the attention half out of place and would raise on these at the first
     checkpoint, after the run has trained; construction refuses them instead."""
     trainer = _StubTrainer(get_peft_model(_UnfoldableLM(), LoraConfig(**config)), merge_expert_lora_on_save=True)
-    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
+    with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
         with pytest.raises(ValueError, match="cannot be folded out of place"):
-            trainer._validate_merge_expert_lora_save()
+            _reject(trainer)
 
 
 def test_merge_flag_expert_only_run_passes():
     """Expert-only native EP grouped-LoRA has no PeftModel wrapper — the merged-save path works."""
-    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
-        _StubTrainer(_TinyLM(), merge_expert_lora_on_save=True)._validate_merge_expert_lora_save()
+    with patch.object(adapter_rules, "model_has_expert_lora", return_value=True):
+        _reject(_StubTrainer(_TinyLM(), merge_expert_lora_on_save=True))
 
 
 def test_no_merge_flag_skips_every_check():
     """Flag off: adapter-only saves, so neither gate applies even with no expert adapters at all."""
-    with patch.object(mixin_mod, "model_has_expert_lora", return_value=False):
-        _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=False)._validate_merge_expert_lora_save()
+    with patch.object(adapter_rules, "model_has_expert_lora", return_value=False):
+        _reject(_StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=False))
 
 
 # --------------------------------------------------------------------------- #
@@ -156,7 +165,9 @@ class _SaveRoutingTrainer(_StubTrainer):
     the context it reads it from — is the production one.
     """
 
-    _has_ep_layers = True
+    def _ep_layers(self):
+        return [object()]
+
     _fsdp_wrapped = True
     save_sharded_ep = False
     save_max_shard_size = None
@@ -215,7 +226,7 @@ def _run_save(trainer):
 
     adapter_saver = MagicMock()
     with (
-        patch.object(context_mod, "model_has_expert_lora", return_value=True),
+        patch.object(checkpointing_mod, "model_has_expert_lora", return_value=True),
         patch.object(save_mod, "save_peft_adapters", adapter_saver),
         patch.object(save_mod, "save_ep_gathered_checkpoint", _recorded_ep_save),
     ):
@@ -280,15 +291,14 @@ def test_qlora_grad_sync_threads_fp32_grad_reduce(fp32_flag):
 
     calls: list[dict] = []
 
-    trainer._reject_fsdp_knobs_under_qlora = lambda: None
-    trainer._patch_gradient_clipping_for_qlora = lambda: None
-    trainer._setup_qlora_sync("data parallel")
+    trainer._install_qlora_clip = lambda: None
+    with patch.object(mode_setup_mod, "reject_fsdp_knobs_under_qlora"):
+        trainer._install_qlora_grad_sync("data parallel")
     assert getattr(trainer, "_qlora_grad_sync", False), "the sweep was never enabled — the test is vacuous"
 
     trainer.model(torch.randn(2, 8)).sum().backward()
 
     with (
-        patch.object(grad_sync_mod, "current_device", return_value=torch.device("cpu")),
         patch.object(grad_sync_mod.dist, "all_reduce", side_effect=lambda t, op=None, group=None: None),
         patch.object(
             grad_sync_mod,

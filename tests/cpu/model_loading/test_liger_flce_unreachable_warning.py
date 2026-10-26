@@ -17,10 +17,10 @@ import pytest
 from accelerate import PartialState
 
 from src.model_loading.liger.dispatch import warn_if_flce_unreachable
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
 
 # Dispatch logs through accelerate's rank-aware logger, which requires an initialized state.
 PartialState()
@@ -54,11 +54,11 @@ def test_silent_when_flce_not_applied(caplog, applied):
 
 
 def test_grpo_family_declares_the_flag():
-    # The warning only reaches users through _setup_distributed_modes' gate on this flag; a trainer
+    # The warning only reaches users through _configure_distributed_modes' gate on this flag; a trainer
     # silently dropping it re-opens the inert-FLCE trap.
-    assert DistributedTrainerMixin._loss_outside_model_forward is False  # SFT-shaped trainers keep FLCE
+    assert DistributedTrainerMixin.POLICY_GRADIENT_LOSS is False  # SFT-shaped trainers keep FLCE
     for trainer in (OfflineGRPOTrainer, DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
-        assert trainer._loss_outside_model_forward is True, trainer.__name__
+        assert trainer.POLICY_GRADIENT_LOSS is True, trainer.__name__
 
 
 if __name__ == "__main__":

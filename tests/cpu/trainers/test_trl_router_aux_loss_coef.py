@@ -13,15 +13,18 @@ set on the trainer config, and restores the config fields after TRL's constructi
 """
 
 import types
+from unittest.mock import patch
 
 import pytest
 import torch.nn as nn
 from transformers import CONFIG_MAPPING
 
+import src.trainers.distributed_trainer as spine
+from src.distributed.parallelism_config import ParallelismConfig
 from src.models.config_access import ROUTER_AUX_FIELDS, restore_config_fields, snapshot_config_fields
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.sft import DistributedSFTTrainer
@@ -38,9 +41,12 @@ def _model(output_router_logits: bool) -> nn.Module:
 
 
 def _handed(trainer_cls, output_router_logits: bool, coef=None) -> float:
-    args = types.SimpleNamespace(router_aux_loss_coef=coef)
+    """The coefficient the trainer's own TrainingArguments step hands TRL; the filesystem steps are stubbed."""
+    args = types.SimpleNamespace(router_aux_loss_coef=coef, output_dir="unused", use_liger_kernel=False)
     host = object.__new__(trainer_cls)
-    DistributedTrainerMixin._hand_trl_the_router_aux_loss_coef(host, _model(output_router_logits), args)
+    host.parallelism_config = ParallelismConfig()
+    with patch.object(spine, "verify_output_filesystem_sharing"), patch.object(spine, "align_save_on_each_node"):
+        DistributedTrainerMixin._apply_training_args_overrides(host, args, _model(output_router_logits))
     return args.router_aux_loss_coef
 
 

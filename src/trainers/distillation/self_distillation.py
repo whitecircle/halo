@@ -29,7 +29,7 @@ from src.trainers.distillation.losses import (
     shifted_token_cross_entropy,
 )
 from src.trainers.distillation.opd_term import OPDTermMixin
-from src.trainers.mixins.dataloader import split_rows_head
+from src.trainers.evaluation import split_rows_head
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 from src.trainers.sft import DistributedSFTTrainer
 
@@ -45,13 +45,12 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
 
     SUPPORTS_CP = False  # privileged teacher uses a separate, longer sequence
     SUPPORTS_LOWP_PRECISION = False
-    # Unconditional, unlike the SFT parent's CP-only property: the SDPG objective is its own mean
-    # on every axis, so HF must not rescale it by num_items_in_batch.
-    _loss_is_own_mean = True
+    # Unlike the SFT parent's CP-only opt-out, the SDPG objective is its own mean on every axis.
+    LOSS_IS_OWN_MEAN = True
     # Unlike its SFT base, this trainer forwards without labels and builds the CE itself.
-    _consumes_router_aux_loss = False
+    ROUTER_AUX_LOSS_ADDED_BY = None
     # Same reason: compute_loss reads outputs.logits, so eval must not take the base's skip_logits path.
-    _loss_reads_logits = True
+    LOSS_READS_LOGITS = True
     PP_REFUSAL = (
         "the privileged-teacher term needs a second, no-grad forward of the WHOLE model per batch on "
         "the hint-carrying sequence (and a third through the frozen reference when reference_kl_coef "
@@ -162,7 +161,7 @@ class DistributedSelfDistillationTrainer(OPDTermMixin, StoredMetricsMixin, Distr
         logger.info(f"Reference model moved to {device} and frozen (alpha={self.reference_kl_coef})")
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        self._validate_inputs(inputs)
+        self._warn_once_on_empty_labels(inputs)
 
         teacher = {k[len("teacher_") :]: inputs.pop(k) for k in list(inputs) if k.startswith("teacher_")}
         confidence_weights = inputs.pop("confidence_weights", None)

@@ -27,7 +27,7 @@ Or via CLI: `torchrun ... scripts/training/sft.py --torch_compile=true --torch_c
 `torch_compile_mode` and `torch_compile_backend` are HF `TrainingArguments` fields, both `None` by default. Left unset, the mixin's own compile call falls back to `reduce-overhead` / `inductor` (`_apply_torch_compile`); the accelerate-managed path (no custom parallelism) leaves the mode at inductor's default instead.
 
 `DistributedTrainerMixin` applies compilation **after FSDP wrapping** (`_apply_torch_compile`, at the end of
-`_setup_distributed_modes`) — compiling before FSDP fails because FSDP restructures the parameter layout. To
+`_configure_distributed_modes`) — compiling before FSDP fails because FSDP restructures the parameter layout. To
 stop HF Trainer from compiling too early, the mixin clears Accelerate's `ACCELERATE_DYNAMO_*` env vars while
 building its plain accelerator and re-applies `torch.compile` itself, assigning both `self.model` and
 `self.model_wrapped` (the training loop runs the latter).

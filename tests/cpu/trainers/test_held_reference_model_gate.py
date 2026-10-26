@@ -31,7 +31,7 @@ from trl.trainer.utils import create_model_from_path
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.frozen_models import PREFERENCE_REFERENCE_ALTERNATIVES
 from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, has_live_attention_sinks
-from src.trainers.mixins.validation import ParallelismValidationMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
@@ -75,9 +75,9 @@ def _guard(model, *, ref_model, ep_size):
         model=model,
         ref_model=ref_model,
         parallelism_config=make_parallelism_config(ep_size=ep_size) if ep_size > 1 else ParallelismConfig(),
-        _reference_alternatives=PREFERENCE_REFERENCE_ALTERNATIVES,
+        REFERENCE_ALTERNATIVES=PREFERENCE_REFERENCE_ALTERNATIVES,
     )
-    return ParallelismValidationMixin._validate_held_reference_model(stub)
+    return DistributedTrainerMixin._validate_held_reference_model(stub)
 
 
 def _trl_built_model():

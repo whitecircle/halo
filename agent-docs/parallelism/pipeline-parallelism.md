@@ -471,7 +471,21 @@ check. A part no input holds raises naming it and its stage. The merged director
 PP is declare-to-enable per trainer (like `SUPPORTS_CP`): `PP_REFUSAL` is the mechanism a refusing
 trainer's error names, `None` where PP is supported. An enabled trainer declares its
 pipeline-loss contract as a `PipelineLossAdapter` (`_pp_loss_adapter()`,
-`src/trainers/parallelism/pipeline_loss_adapter.py`).
+`src/trainers/parallelism/pipeline_loss_adapter.py`). `_configure_pipeline_parallel` calls
+`_pp_loss_adapter()` once, before anything reads the adapter, so an adapter builder may seed the
+per-step state its loss closes over.
+
+The refusals are pure functions in `src/trainers/parallelism/pipeline_rules.py`.
+`_split_pipeline_stage` runs them before the split, in this order: the trainer's own
+`_reject_unsupported_pp_options` hook (DPO and KTO: positional `model`/`args`, a live `ref_model`, the
+precompute-only reference contract, `compute_metrics`), then `reject_unsupported_pp_training_args`
+(`max_length`, `save_sharded_ep`, per-node `push_to_hub`, reentrant GC, eval batch size,
+`torch_compile`, TRL's `activation_offloading`), `reject_pp_peft`, `require_pp_stage_model` and,
+for a multimodal wrapper, `reject_pp_vlm`. After `super().__init__`, `reject_pp_collator`,
+`require_pad_token_id` and `reject_uncovered_pp_ep_layers` gate the collator wrap and the stage wrap.
+SMPO and offline GRPO call `reject_pp_peft` and `reject_pp_compute_metrics` on their explicit ctor
+parameters themselves. `reject_pp_vlm` and `reject_uncovered_pp_ep_layers` are collective: their
+evidence is rank-local, so the verdict is joined across ranks.
 
 | Trainer | Enabled | Contract notes |
 |---|---|---|
@@ -496,6 +510,7 @@ run-settings gate), `partition.py` (the head-weighted split and `validate_partit
 `stage_losses.py` (`TokenLoss`, `FusedHeadLoss`), `groups.py` (the chain and stage groups), `runner.py`
 (`PipelineRunner` over torch's `Schedule1F1B` / `ScheduleGPipe`, `resolve_microbatch_count`); the
 stage-aware loader is `src/model_loading/parallel/pp.py`. Trainer side: `PipelineTrainerMixin`
-(`src/trainers/mixins/pipeline.py`, inert at `pp_size == 1`), the shared refusals
-(`src/trainers/parallelism/trainer_rules.py`) and `PipelineLossAdapter`; the next-token label math the losses
+(`src/trainers/parallelism/pipeline_trainer.py`, inert at `pp_size == 1`), the refusals
+(`src/trainers/parallelism/pipeline_rules.py`), `PipelineLossAdapter` and the stage clip
+`pp_clip_grad_norm` (`src/trainers/parallelism/grad_clipping.py`); the next-token label math the losses
 share lives in `src/kernels/logprobs.py`.

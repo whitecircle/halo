@@ -12,7 +12,7 @@ import inspect
 
 import pytest
 
-from src.trainers.mixins.checkpointing import CheckpointingMixin
+from src.trainers.checkpointing import CheckpointingMixin
 from tests.common.rosters import distributed_trainer_classes
 
 _WRITER = "create_model_card"

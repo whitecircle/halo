@@ -20,7 +20,7 @@ Run: python tests/cpu/parallelism/test_ep_defer_grad_sync.py
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -29,12 +29,12 @@ import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import stubbed_process_groups
 
 _GS_MOD = "src.distributed.expert_parallel.moe_layer.grad_sync"
 # The trainer-side sweep, whose globals the deferred-sync tests patch.
-_MIXIN_MOD = "src.trainers.mixins.grad_sync"
+_MIXIN_MOD = "src.trainers.parallelism.grad_sync"
 
 
 def _make_ep(rank: int, *, world_size: int, stage_world_size: int, fsdp_shard_ep1_experts: bool = True, **kwargs):
@@ -268,7 +268,7 @@ def _deferred_sweep_host(**ep_attrs):
             **ep_attrs,
         }
     )
-    return SimpleNamespace(
+    host = SimpleNamespace(
         _ep_config=ep,
         state=SimpleNamespace(global_step=1),
         _deferred_sweep_last_step=None,
@@ -278,6 +278,8 @@ def _deferred_sweep_host(**ep_attrs):
             named_parameters=lambda: [("layers.0.mlp.gate.weight", _FakeParam(_FakeDTensor(1, 4)))]
         ),
     )
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
+    return host
 
 
 def test_deferred_replica_average_refuses_the_world_group_fallback():
@@ -333,19 +335,31 @@ def test_deferred_replica_average_uses_the_replica_group_when_there_is_one():
     assert (1, replica_group) in reduced, f"the sharded non-expert grad must average over the replicas: {reduced}"
 
 
-def test_canonical_fsdp_shard_group_falls_back_to_the_stage_not_the_world():
+def test_the_fsdp_norm_reduce_falls_back_to_the_stage_not_the_world():
     """No FSDP-sharded backbone param: the norm reduce must stay inside the pipeline stage.
 
     ``None`` is the default world group, which under PP spans stages holding different layers — the
     chain reduction would then count those norms a second time."""
     stage_group = object()
+    model = nn.Linear(2, 2)
     host = SimpleNamespace(
         _pp_stage_group=stage_group,
+        _pp_chain_group=None,
+        _device_mesh=None,
+        _fsdp_wrapped=True,
+        _ep_config=None,
+        _top_level_model=lambda: model,
+        _get_sharded_expert_param_ids=lambda: set(),
+        _tp_sharded_plain_param_ids=lambda: set(),
         _fsdp_shard_group=lambda mesh: pytest.fail("no DTensor param exists to derive a group from"),
     )
-    model = SimpleNamespace(named_parameters=lambda: [("embed.weight", nn.Parameter(torch.zeros(2)))])
-
-    assert DistributedTrainerMixin._canonical_fsdp_shard_group(host, model, set()) is stage_group
+    host._bucket_grad_shards = MethodType(DistributedTrainerMixin._bucket_grad_shards, host)
+    groups: list = []
+    with patch(
+        "src.trainers.parallelism.grad_clipping.dist.all_reduce", lambda t, op=None, group=None: groups.append(group)
+    ):
+        DistributedTrainerMixin._compute_global_grad_norm(host, list(model.parameters()))
+    assert groups == [stage_group]
 
 
 def test_restore_time_zero_lr_step_does_not_run_the_sweep():
@@ -361,8 +375,10 @@ def test_restore_time_zero_lr_step_does_not_run_the_sweep():
         state=SimpleNamespace(global_step=4),
         _deferred_sweep_last_step=None,
         _sync_deferred_expert_grads=lambda: calls.append(1),
+        parallelism_config=SimpleNamespace(is_tp_mode=False),
+        _sync_qlora_grads=lambda: None,
     )
-    DistributedTrainerMixin._register_deferred_ep_grad_sync_hook(fake)
+    DistributedTrainerMixin._register_grad_sync_step_hooks(fake)
     assert fake._deferred_ep_grad_sync_hook_registered
 
     fake._restoring_optimizer_state = True

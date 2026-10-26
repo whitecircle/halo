@@ -28,9 +28,9 @@ import torch.nn as nn
 from transformers import TrainerState
 
 import src.checkpoint.parallel.save as save_mod
-import src.trainers.mixins.checkpointing as checkpointing_mod
+import src.trainers.checkpointing as checkpointing_mod
 from src.runtime.consensus import DeferredRankFailure
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import save_context
 from tests.common.repo import REPO_ROOT

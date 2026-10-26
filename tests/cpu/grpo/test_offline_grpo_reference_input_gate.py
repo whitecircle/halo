@@ -96,7 +96,7 @@ def test_unused_supplied_reference_column_is_discarded_instead_of_refused(tmp_pa
     parallelism = (
         ParallelismConfig(expert_lora=ExpertLoraSpec(r=2, alpha=4)) if mode == "expert" else ParallelismConfig()
     )
-    monkeypatch.setattr(OfflineGRPOTrainer, "_setup_distributed_modes", lambda self: None)
+    monkeypatch.setattr(OfflineGRPOTrainer, "_configure_distributed_modes", lambda self: None)
     trainer = OfflineGRPOTrainer(
         model=_policy(),
         args=args,

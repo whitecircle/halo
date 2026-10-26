@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The shared PP rejection vocabulary (``src.trainers.parallelism.trainer_rules``) and its call sites.
+"""The shared PP rejection vocabulary (``src.trainers.parallelism.pipeline_rules``) and its call sites.
 
 ``test_pp_trainer_gates.py`` covers *which trainers* may run PP (``PP_REFUSAL``). This file covers
 what happens once a supported trainer is under PP and carries an option the pipeline cannot honor.
@@ -11,7 +11,7 @@ crash, it trains something else.
 Two layers, because each catches a different regression:
 
 * the helpers themselves — inert on the allowed value, and each raise names its mechanism;
-* the **wiring**, which drives the REAL ``_validate_pp_mode`` / ``_maybe_prepare_pipeline_model`` of
+* the **wiring**, which drives the REAL ``_reject_unsupported_pp_options`` / ``_split_pipeline_stage`` of
   every trainer that calls them. Deleting ``reject_pp_peft(...)`` from any single call site fails
   exactly one parametrized case here; helper-only tests would stay green.
 
@@ -25,16 +25,16 @@ from types import SimpleNamespace
 import pytest
 
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
-from src.trainers.parallelism.trainer_rules import (
-    reject_pp_activation_offloading,
+from src.trainers.parallelism.pipeline_rules import (
+    reject_missing_precomputed_columns,
+    reject_missing_precomputed_reference,
+    reject_positional_model_or_args,
     reject_pp_compute_metrics,
     reject_pp_peft,
     reject_pp_ref_model,
-    require_model_and_args_kwargs,
-    require_precomputed_columns,
-    require_precomputed_reference,
+    reject_unsupported_pp_training_args,
 )
+from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
@@ -53,7 +53,7 @@ class _Dataset:
 def _training_args(**overrides):
     """A PP-legal training-args namespace; overrides inject the one option under test.
 
-    Every field is one a validator on the path to a ``trainer_rules`` call reads, set to the value that
+    Every field is one a validator on the path to a ``pipeline_rules`` call reads, set to the value that
     lets the walk reach it — so a failure here is always the gate under test, never a neighbour.
     """
     base = {
@@ -64,6 +64,7 @@ def _training_args(**overrides):
         "eval_on_start": False,
         "per_device_train_batch_size": 1,
         "per_device_eval_batch_size": 1,
+        "torch_compile": False,
         "activation_offloading": False,
         "precompute_ref_log_probs": True,
         "ld_alpha": None,
@@ -97,11 +98,16 @@ def test_every_helper_is_inert_on_the_value_pp_accepts():
     reject_pp_peft(None, explicit_param_trainer="SMPO")
     reject_pp_ref_model(None, "the ref_logps column")
     reject_pp_compute_metrics(None, "mechanism")
-    reject_pp_activation_offloading(_training_args())
-    reject_pp_activation_offloading(SimpleNamespace())  # flag absent entirely (getattr default)
-    require_model_and_args_kwargs({"model": object(), "args": object()})
-    require_precomputed_columns(_Dataset("ref_logps", "prompt"), ("ref_logps",))
-    require_precomputed_reference(
+    reject_unsupported_pp_training_args(_training_args(), save_sharded_ep=False, evaluates=False)
+    # The flag absent entirely (plain TrainingArguments carry no activation_offloading).
+    reject_unsupported_pp_training_args(
+        SimpleNamespace(max_length=8, gradient_checkpointing=False, torch_compile=False),
+        save_sharded_ep=False,
+        evaluates=False,
+    )
+    reject_positional_model_or_args({"model": object(), "args": object()})
+    reject_missing_precomputed_columns(_Dataset("ref_logps", "prompt"), ("ref_logps",))
+    reject_missing_precomputed_reference(
         "DPO",
         _training_args(),
         _Dataset("ref_chosen_logps", "ref_rejected_logps"),
@@ -147,7 +153,9 @@ def test_compute_metrics_rejection_carries_the_callers_mechanism():
 
 def test_activation_offloading_rejection_names_the_bypassed_wrapper():
     with pytest.raises(ValueError) as err:
-        reject_pp_activation_offloading(_training_args(activation_offloading=True))
+        reject_unsupported_pp_training_args(
+            _training_args(activation_offloading=True), save_sharded_ep=False, evaluates=False
+        )
     assert "training_step" in str(err.value) and "never engage" in str(err.value)
 
 
@@ -156,12 +164,12 @@ def test_positional_model_or_args_is_rejected(missing):
     kwargs = {"model": object(), "args": object()}
     del kwargs[missing]
     with pytest.raises(ValueError, match="passed as keywords"):
-        require_model_and_args_kwargs(kwargs)
+        reject_positional_model_or_args(kwargs)
 
 
 def test_a_missing_reference_column_names_the_column_and_the_split():
     with pytest.raises(ValueError) as err:
-        require_precomputed_columns(_Dataset("prompt"), ("ref_logps",), role="eval")
+        reject_missing_precomputed_columns(_Dataset("prompt"), ("ref_logps",), role="eval")
     text = str(err.value)
     assert "'ref_logps'" in text and "eval dataset" in text
 
@@ -170,12 +178,12 @@ def test_a_partially_precomputed_pair_is_still_refused():
     """``all(...)`` not ``any(...)``: DPO needs BOTH columns, and a half-precomputed dataset would
     otherwise slip through to a TRL sweep that no stage can run."""
     with pytest.raises(ValueError, match="ref_chosen_logps"):
-        require_precomputed_columns(_Dataset("ref_chosen_logps"), ("ref_chosen_logps", "ref_rejected_logps"))
+        reject_missing_precomputed_columns(_Dataset("ref_chosen_logps"), ("ref_chosen_logps", "ref_rejected_logps"))
 
 
 def test_precompute_flag_off_is_refused_before_the_columns_are_even_checked():
     with pytest.raises(ValueError, match="precompute-only"):
-        require_precomputed_reference(
+        reject_missing_precomputed_reference(
             "KTO", _training_args(precompute_ref_log_probs=False), _Dataset("ref_logps"), None, ("ref_logps",)
         )
 
@@ -185,15 +193,15 @@ def test_the_eval_dataset_is_checked_too_including_a_dict_of_splits():
     sweep start on a rank holding one bare stage."""
     train = _Dataset("ref_logps")
     with pytest.raises(ValueError) as err:
-        require_precomputed_reference("KTO", _training_args(), train, _Dataset("prompt"), ("ref_logps",))
+        reject_missing_precomputed_reference("KTO", _training_args(), train, _Dataset("prompt"), ("ref_logps",))
     assert "eval dataset" in str(err.value)
 
     with pytest.raises(ValueError, match="eval dataset"):
-        require_precomputed_reference(
+        reject_missing_precomputed_reference(
             "KTO", _training_args(), train, {"a": _Dataset("ref_logps"), "b": _Dataset("prompt")}, ("ref_logps",)
         )
     # A dict whose every split carries the column is accepted (anti-vacuity for the loop above).
-    require_precomputed_reference(
+    reject_missing_precomputed_reference(
         "KTO", _training_args(), train, {"a": _Dataset("ref_logps"), "b": _Dataset("ref_logps")}, ("ref_logps",)
     )
 
@@ -206,8 +214,8 @@ def _pp_config(is_pp: bool = True):
 
 
 def _drive_gates(trainer_cls, **kwargs):
-    """The REAL construction-time walk: ``_maybe_prepare_pipeline_model`` plus the trainer's own
-    ``_validate_pp_mode`` hook, which it drives once the PP early-out has passed.
+    """The REAL construction-time walk: ``_split_pipeline_stage`` plus the trainer's own
+    ``_reject_unsupported_pp_options`` hook, which it drives once the PP early-out has passed.
 
     ``object.__new__`` rather than a namespace: the hook is dispatched through ``self``, so the
     walk has to run on the trainer class itself. The two attributes below are all it reads before
@@ -216,7 +224,7 @@ def _drive_gates(trainer_cls, **kwargs):
     stub = object.__new__(trainer_cls)
     stub.parallelism_config = kwargs.pop("parallelism_config")
     stub.save_sharded_ep = False
-    PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, kwargs, kwargs["args"])
+    PipelineTrainerMixin._split_pipeline_stage(stub, kwargs, kwargs["args"])
 
 
 def _drive_dpo(**overrides):
@@ -263,7 +271,7 @@ def _drive_offline_grpo(peft_config=None, compute_metrics=None):
 
 
 def _drive_pipeline_mixin(**overrides):
-    """``PipelineTrainerMixin._maybe_prepare_pipeline_model`` — the shared gate SFT/reward ride."""
+    """``PipelineTrainerMixin._split_pipeline_stage`` — the shared gate SFT/reward ride."""
     kwargs = {
         "model": SimpleNamespace(config=SimpleNamespace()),
         "args": _training_args(),
@@ -357,7 +365,7 @@ _REF_TRAINERS = [(_drive_dpo, _dpo_args), (_drive_kto, _kto_args)]
 @pytest.mark.parametrize(("driver", "make_args"), _REF_TRAINERS, ids=["dpo", "kto"])
 def test_the_precompute_contract_is_enforced_from_the_real_validator(driver, make_args):
     """The reference columns must already be in the dataset — the gate the DPO/KTO validators reach
-    through ``require_precomputed_reference``, not just the helper in isolation."""
+    through ``reject_missing_precomputed_reference``, not just the helper in isolation."""
     with pytest.raises(ValueError, match="precompute-only"):
         driver(args=make_args(precompute_ref_log_probs=False))
     with pytest.raises(ValueError, match="ALREADY"):

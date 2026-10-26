@@ -250,7 +250,7 @@ not activations) — that is the case CP exists for.
 
 | Knob | Under CP | Gate |
 |---|---|---|
-| `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `src/data/collators/factory.py`; `_reject_cp_incompatible_collator` re-checks a hand-built collator |
+| `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `src/data/collators/factory.py`; `reject_cp_packed_collator` re-checks a hand-built collator |
 | left-padded batches | rejected on **every** forward (not cached — a prompt-left-padding collator pads only its ragged batches) | `context_parallel/ulysses_model.py` |
 | `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on the `sdpa` label its model build forces | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `reject_unsupported_ulysses_model` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
@@ -260,8 +260,8 @@ not activations) — that is the case CP exists for.
 | CP's own metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | accumulated locally per micro-batch and reduced once per log, so the metric path adds one collective per log instead of five to six per micro-batch | `src/trainers/sft.py` (`_drain_cp_metrics`) |
 | multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/ulysses_model.py` |
 | `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_reject_fsdp_settings` |
-| `accelerate launch` | rejected — CP requires `torchrun` | `reject_unsupported_run` and `ParallelismValidationMixin` |
-| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `mixins/base.py` |
+| `accelerate launch` | rejected — CP requires `torchrun` | `reject_unsupported_run` and `reject_accelerate_launch` |
+| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `DistributedTrainerMixin._apply_training_args_overrides` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `src/model_loading/liger/dispatch.py` |
 | `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `_reject_cp_explicit_options` (offline GRPO) |
 | QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/load_rules.py`, `_reject_cp_explicit_options` |

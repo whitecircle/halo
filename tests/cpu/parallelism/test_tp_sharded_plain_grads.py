@@ -26,8 +26,9 @@ import torch.nn as nn
 
 from src.distributed.tensor_parallel.parallelize_attention import shard_sinks_param
 from src.distributed.tensor_parallel.plain_params import hand_sliced_dims, register_hand_sliced
-from src.trainers.mixins import grad_sync as grad_sync_module
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
+from src.trainers.parallelism import grad_clipping as grad_clipping_module
+from src.trainers.parallelism import grad_sync as grad_sync_module
 
 TP_SIZE = 2
 SINKS_SUFFIX = "self_attn.sinks"
@@ -72,8 +73,11 @@ def _trainer(model: nn.Module) -> SimpleNamespace:
         _pp_stage_group=None,
         _pp_chain_group=None,
     )
+    trainer._param_id_caches = {}
+    trainer._memoized_param_ids = MethodType(DistributedTrainerMixin._memoized_param_ids, trainer)
     trainer._tp_sharded_plain_param_ids = MethodType(DistributedTrainerMixin._tp_sharded_plain_param_ids, trainer)
     trainer._tp_per_head_norm_param_ids = MethodType(DistributedTrainerMixin._tp_per_head_norm_param_ids, trainer)
+    trainer._bucket_grad_shards = MethodType(DistributedTrainerMixin._bucket_grad_shards, trainer)
     trainer.parallelism_config = SimpleNamespace(fp32_grad_reduce=False)
     trainer.state = SimpleNamespace(global_step=0)
     return trainer
@@ -188,7 +192,7 @@ def test_sharded_sinks_are_excluded_from_the_tp_average(monkeypatch):
 
 def test_grad_norm_sums_sharded_sinks_over_the_tp_group(monkeypatch):
     """Sink shard norms belong in the TP-summed bucket, not the un-reduced replicated total."""
-    monkeypatch.setattr(grad_sync_module, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(grad_clipping_module, "current_device", lambda: torch.device("cpu"))
     model = _Model(n_layers=2, local_heads=2)
     _fill_grads(model, sink_grad=3.0, replicated_grad=0.5)
     trainer = _trainer(model)
@@ -216,7 +220,7 @@ def test_grad_norm_sums_sharded_sinks_over_the_tp_group(monkeypatch):
 
 def test_grad_norm_unchanged_without_hand_sharded_params(monkeypatch):
     """Families whose TP plan shards nothing by hand keep the plain replicated accounting."""
-    monkeypatch.setattr(grad_sync_module, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(grad_clipping_module, "current_device", lambda: torch.device("cpu"))
     model = _Model(n_layers=2, local_heads=2, register=False)
     _fill_grads(model, sink_grad=3.0, replicated_grad=0.5)
     trainer = _trainer(model)

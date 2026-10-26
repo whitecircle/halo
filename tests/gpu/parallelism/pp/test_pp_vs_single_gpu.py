@@ -34,7 +34,7 @@ from src.distributed.pipeline_parallel.groups import build_pipeline_group
 from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.distributed.pipeline_parallel.stage_losses import TokenLoss
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.tolerances import TOL
@@ -205,15 +205,12 @@ def run(ctx):
     # The clip must actually clip (every other call site uses max_norm=1e6, so a wrong coefficient
     # or a missed plain-vs-DTensor scale would never fail a test): clip to half the current norm,
     # verify the achieved norm halves; then max_norm=0 must disable (not zero the gradients).
-    # Runs after the grad comparisons — it scales the gradients. The unbound-call binding exercises
-    # the production method itself.
-    clip = PipelineTrainerMixin._pp_clip_grad_norm
-    holder = object.__new__(PipelineTrainerMixin)
+    # Runs after the grad comparisons — it scales the gradients.
     params = list(stage_module.parameters())
-    norm_full = clip(holder, params, 1e9)
-    clip(holder, params, float(norm_full) / 2)
-    norm_after_zero_disable = clip(holder, params, 0)  # must not scale
-    norm_final = clip(holder, params, 1e9)
+    norm_full = pp_clip_grad_norm(params, 1e9)
+    pp_clip_grad_norm(params, float(norm_full) / 2)
+    norm_after_zero_disable = pp_clip_grad_norm(params, 0)  # must not scale
+    norm_final = pp_clip_grad_norm(params, 1e9)
     halved_gap = abs(float(norm_final) - float(norm_full) / 2)
     checks["clip_halves_the_norm"] = halved_gap < TOL.clip_achieved_norm_rel * float(norm_full)
     checks["clip_zero_max_norm_disables"] = abs(float(norm_after_zero_disable) - float(norm_final)) < 1e-6 * max(

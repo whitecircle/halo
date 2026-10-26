@@ -16,10 +16,10 @@ import pytest
 from datasets import Dataset, IterableDataset
 
 from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.on_policy_init import OnPolicyGRPOInitMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
 
 _ROWS = [{"prompt": "p"}] * 4
 

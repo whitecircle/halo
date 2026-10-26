@@ -196,7 +196,7 @@ group only. The clip runs the deferred sweep first, so every replica already hol
 expert grads and no `expert_replica_group` reduce runs. Non-expert DTensor shards (TP) and
 full-world FSDP shards are reduced over their own tiling group and counted once. The global norm is
 `sqrt(expert² + non_expert²)`, computed in `_compute_global_grad_norm`
-(`src/trainers/mixins/grad_sync.py`).
+(`src/trainers/parallelism/grad_clipping.py`).
 
 ## EP+TP mode
 

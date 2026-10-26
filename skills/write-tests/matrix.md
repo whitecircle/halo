@@ -25,8 +25,8 @@ correctness test (loss finite + decreasing over ≥2 steps + cross-rank invarian
 | `EmbeddingTrainer` | Yes | **No** | Yes | Yes | **No** |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | Yes | **No** | Yes | Yes | **No** |
 
-`SUPPORTS_CP` (default `False`) and `PP_REFUSAL` (default a refusal; `None` admits PP), both in
-`src/trainers/mixins/base.py`, are the class declarations that drive the rejections. CP is
+`SUPPORTS_CP` (default `False`) and `PP_REFUSAL` (default a refusal; `None` admits PP), both on
+`DistributedTrainerMixin` (`src/trainers/distributed_trainer.py`), are the class declarations its `reject_undeclared_axes` reads. CP is
 incompatible with any trainer using `logits_to_keep`, global log-prob sums, full-sequence pooling, dual models, or a separate-length teacher or rollout
 sequence; PP additionally rejects PEFT/LoRA, a live `ref_model`, `activation_offloading` and
 reentrant GC at trainer construction, so a PP-supporting trainer still needs those rejection tests.
@@ -59,7 +59,7 @@ as a **rejection** test (CPU config test is enough), not a correctness test.
 | PP + TP, PP + CP (`pp_size>1` with either) | raises at the allowlist — untested on real multi-node hardware (TP); CP-scaled gradients with no error (CP) |
 | PP + EP + TP, PP + EP + CP, PP + EP + ETP (all three `>1`) | raises — outside the allowlist; FSDP mesh conflict (TP), CP-scaled expert gradients (CP), the expert-TP reduce cannot be deferred past the combine (ETP) |
 | QLoRA + EP | raises |
-| LoRA/PEFT + TP (`tp_size>1`), native EP expert LoRA included | raises at trainer construction — `_validate_lora_tp_compatibility` |
+| LoRA/PEFT + TP (`tp_size>1`), native EP expert LoRA included | raises at trainer construction — `reject_lora_under_tp` |
 | Multi-group >2-rank EP on one NVLink domain (`ep_size>2` with `nvlink_domain_size > ep_group_size`) | fails fast (DeepEP combine race) |
 | `SUPPORTS_CP = False` trainer with `cp_size>1`, a `PP_REFUSAL` trainer with `pp_size>1` | rejects in `parallelism_config_from_args`, and at trainer `__init__` for a hand-built config |
 

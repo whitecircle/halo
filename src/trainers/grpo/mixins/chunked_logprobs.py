@@ -26,7 +26,7 @@ from src.models.module_tree import embedding_module, find_module_path
 from src.models.unwrapping import base_transformers_model
 from src.runtime.consensus import rank_consensus
 from src.runtime.dtensor import materialize_dtensor
-from src.trainers.mixins.validation import evaluation_runs
+from src.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 
@@ -439,7 +439,7 @@ class ChunkedLogprobsCore:
         vocab = head.weight.shape[0]
         args = self.args
         rows, rows_set_by = args.per_device_train_batch_size, "per_device_train_batch_size"
-        if evaluation_runs(args) and args.per_device_eval_batch_size > rows:
+        if uses_evaluation(args) and args.per_device_eval_batch_size > rows:
             rows, rows_set_by = args.per_device_eval_batch_size, "per_device_eval_batch_size"
         free_bytes, _ = torch.cuda.mem_get_info(self.accelerator.device)
         verdict = full_logits_verdict(rows, rows_set_by, width, vocab, free_bytes)

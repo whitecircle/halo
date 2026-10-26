@@ -34,9 +34,9 @@ from src.data.pipeline.preferences import (
 from src.data.pipeline.rejected_rows import report_rejected_rows
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.runtime.consensus import agree_probe_across_ranks
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.ctor_slots import get_ctor_config, resolve_ctor_positions
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
-from src.trainers.mixins.validation import ctor_config, ctor_positions
 from src.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,
     interleave_pairs,
@@ -53,7 +53,7 @@ from src.trainers.reward.pooling import (
 logger = get_logger(__name__, log_level="info")
 
 # TRL RewardTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = ctor_positions(RewardTrainer, "model", "args")
+_CTOR_POSITIONS = resolve_ctor_positions(RewardTrainer, "model", "args")
 
 # The two rendered sides; their presence marks a dataset the VLM map has already prepared.
 _RENDERED_SIDE_COLUMNS = frozenset(VLM_PREFERENCE_COLUMNS[:2])
@@ -104,7 +104,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
                 # paired by hand.
                 kwargs["data_collator"] = DataCollatorForVLMPreference(
                     processor=processing_class,
-                    max_length=getattr(ctor_config(args, kwargs, _CTOR_POSITIONS), "max_length", None),
+                    max_length=getattr(get_ctor_config(args, kwargs, _CTOR_POSITIONS), "max_length", None),
                 )
             # TRL's reward ctor settles the pad token through the tokenizer api (``pad_token``,
             # ``get_vocab``), none of which a ProcessorMixin carries — handed a processor it raises
@@ -116,7 +116,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
         super().__init__(*args, **kwargs)
         if self._is_vlm:
             self.processing_class = self._processor
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
 
     def _prepare_dataset(self, dataset, processing_class, args, dataset_name: str):
         """Render VLM preference rows; text runs take TRL's own tokenize + filter path unchanged.
@@ -183,7 +183,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
         )
         return dataset
 
-    def _setup_pipeline_parallel(self):
+    def _configure_pipeline_parallel(self):
         """Seed the PP-only pooling state and refuse a head this objective cannot score, then run
         the mixin's setup.
 
@@ -197,7 +197,7 @@ class DistributedRewardTrainer(DistributedTrainerMixin, CoordinatedTRLDatasetPre
             )
         columns = getattr(self.train_dataset, "column_names", None) or []
         self._pp_use_margins = "margin" in columns
-        super()._setup_pipeline_parallel()
+        super()._configure_pipeline_parallel()
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """The Bradley-Terry objective as a last-stage pipeline loss.

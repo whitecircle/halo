@@ -42,7 +42,7 @@ from transformers import (
 from trl import SFTConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.pipeline import wrapper_state_outside_stages
+from src.trainers.parallelism.pipeline_trainer import wrapper_state_outside_stages
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import (

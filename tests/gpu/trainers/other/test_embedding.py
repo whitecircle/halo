@@ -126,7 +126,7 @@ def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Da
     """Train one loss type: halo's configured ``loss_scale`` must reach the loss, and the loss must
     actually come down.
 
-    The loss arithmetic itself is sentence-transformers'; what halo owns is ``create_loss`` — the
+    The loss arithmetic itself is sentence-transformers'; what halo owns is ``build_embedding_loss`` — the
     registry lookup and the ``scale`` forwarding — so that is pinned directly against a value chosen
     to differ from the library default. A single ``isfinite`` assertion would pass on an unwired
     scale and on a run whose loss never moved.
@@ -149,7 +149,7 @@ def check_loss_leg(ctx, loss_type: str, train_dataset: Dataset, eval_dataset: Da
 
     assert not trainer.parallelism_config.has_custom_parallelism, "this leg runs plain data parallelism"
 
-    # halo's create_loss is what forwards config.loss_scale; an unwired scale silently uses 20.0.
+    # halo's build_embedding_loss is what forwards config.loss_scale; an unwired scale silently uses 20.0.
     assert trainer.loss.scale == LOSS_SCALE, (
         f"configured loss_scale {LOSS_SCALE} did not reach the loss object (got {trainer.loss.scale})"
     )

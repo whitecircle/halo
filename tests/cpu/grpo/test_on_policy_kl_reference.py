@@ -232,12 +232,12 @@ def test_the_replica_warning_names_the_on_policy_way_around_the_reference(traine
         model=None,
         ref_model=object(),
         parallelism_config=make_parallelism_config(ep_size=8),
-        _reference_alternatives=trainer_cls._reference_alternatives,
+        REFERENCE_ALTERNATIVES=trainer_cls.REFERENCE_ALTERNATIVES,
     )
     with caplog.at_level(logging.WARNING, logger=frozen_models.__name__):
         trainer_cls._validate_held_reference_model(host)
     assert "dense replica" in caplog.text and "beta: 0" in caplog.text, caplog.text
-    assert trainer_cls._reference_alternatives != PREFERENCE_REFERENCE_ALTERNATIVES
+    assert trainer_cls.REFERENCE_ALTERNATIVES != PREFERENCE_REFERENCE_ALTERNATIVES
 
 
 def test_the_constructor_takes_ref_model_off_the_kwargs_trl_receives():

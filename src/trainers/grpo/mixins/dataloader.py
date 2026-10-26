@@ -1,6 +1,6 @@
 """Train-dataloader geometry of the on-policy GRPO trainers.
 
-:class:`GRPOTrainDataLoaderMixin` sizes the shared ``DataParallelDataLoaderMixin`` loader to the
+:class:`GRPOTrainDataLoaderMixin` sizes the shared ``DataParallelLoaderMixin`` loader to the
 GRPO train batch (``steps_per_generation`` micro-batches per generation round) and rebuilds the
 sampler to match.
 """
@@ -32,7 +32,7 @@ class GRPOTrainDataLoaderMixin:
             return super()._get_train_sampler(dataset)
         if dataset is None:
             dataset = self.train_dataset
-        consumers = 1 if self._dataset_presharded else self.get_data_parallel_size()
+        consumers = 1 if self._dataset_presharded else self.parallelism_config.data_parallel_size
         per_rank_rows = self._train_loader_batch_size()
         completions_per_round = per_rank_rows * consumers
         if completions_per_round % self.num_generations != 0:

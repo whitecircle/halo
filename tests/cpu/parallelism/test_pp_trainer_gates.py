@@ -6,8 +6,8 @@ batch, or normalizes by a whole-batch denominator produces a WRONG NUMBER under 
 not a crash. So the gate defaults to a refusal (declare-to-enable, mirroring ``SUPPORTS_CP``) and
 every rejection must name the mechanism so it is actionable.
 
-These tests drive the REAL ``_validate_parallelism_modes``; a re-implementation of the predicate
-could not catch a regression in the production guard.
+These tests drive the REAL ``reject_undeclared_axes`` and ``reject_pp_named_optimizer``; a
+re-implementation of the predicate could not catch a regression in the production guard.
 
 Run: python tests/cpu/parallelism/test_pp_trainer_gates.py
 """
@@ -26,9 +26,9 @@ from src.checkpoint.writing import save_dtype_caster
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from src.model_loading.parallel.freeze_patterns import _reject_layer_indexed_patterns_under_pp as guard
 from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.pipeline import PipelineTrainerMixin, wrapper_state_outside_stages
-from src.trainers.mixins.validation import ParallelismValidationMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
+from src.trainers.parallelism.pipeline_rules import reject_pp_named_optimizer
+from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin, wrapper_state_outside_stages
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.parallelism import make_parallelism_config
 from tests.common.rosters import distributed_trainer_classes
@@ -58,7 +58,7 @@ def _pc(**kwargs):
 def _pipeline_stub(**attrs):
     """A trainer-shaped stand-in for the split gate.
 
-    ``_maybe_prepare_pipeline_model`` dispatches the per-trainer ``_validate_pp_mode`` hook through
+    ``_split_pipeline_stage`` dispatches the per-trainer ``_reject_unsupported_pp_options`` hook through
     ``self``, so a bare namespace cannot stand in for a trainer; the mixin's own no-op hook is what
     a trainer that declares no extra gates inherits.
     """
@@ -67,14 +67,9 @@ def _pipeline_stub(**attrs):
     return stub
 
 
-class _Validating(ParallelismValidationMixin):
-    """Minimal stub carrying exactly what the real validator reads."""
-
-    SUPPORTS_CP = True
-
-    def __init__(self, pc, pp_refusal):
-        self.parallelism_config = pc
-        self.PP_REFUSAL = pp_refusal
+def _declaring(pp_refusal):
+    """A trainer class declaring ``pp_refusal``, the one attribute the PP gate reads."""
+    return type("_Declaring", (DistributedTrainerMixin,), {"PP_REFUSAL": pp_refusal})
 
 
 def test_base_default_is_off():
@@ -111,22 +106,19 @@ def test_only_sft_rides_the_base_causal_lm_contract():
 
 def test_validator_rejects_unsupported_trainer_under_pp():
     """The REAL guard raises, and the message carries the trainer's own reason."""
-    pc = _pc(pp_size=2)
-    stub = _Validating(pc, pp_refusal="the loss couples the whole batch")
-    with pytest.raises(ValueError, match="does not support Pipeline Parallelism"):
-        stub._validate_parallelism_modes()
-    with pytest.raises(ValueError, match="couples the whole batch"):
-        stub._validate_parallelism_modes()
+    trainer_cls = _declaring("the loss couples the whole batch")
+    with pytest.raises(ValueError, match="does not support Pipeline Parallelism.*couples the whole batch"):
+        trainer_cls.reject_undeclared_axes(cp_size=1, pp_size=2)
 
 
 def test_validator_accepts_supported_trainer_under_pp():
     """A validator that rejects everything would also pass the rejection test — pin the accept."""
-    _Validating(_pc(pp_size=2), pp_refusal=None)._validate_parallelism_modes()
+    _declaring(None).reject_undeclared_axes(cp_size=1, pp_size=2)
 
 
 def test_gate_is_inert_without_pp():
     """pp_size=1 must not reject a trainer that does not support PP."""
-    _Validating(_pc(pp_size=1), pp_refusal="irrelevant")._validate_parallelism_modes()
+    _declaring("irrelevant").reject_undeclared_axes(cp_size=1, pp_size=1)
 
 
 def test_rejection_falls_back_to_a_generic_reason():
@@ -135,25 +127,22 @@ def test_rejection_falls_back_to_a_generic_reason():
     class _Undeclared(DistributedTrainerMixin):
         pass
 
-    stub = object.__new__(_Undeclared)
-    stub.parallelism_config = _pc(pp_size=2)
     with pytest.raises(ValueError, match="_Undeclared does not support Pipeline Parallelism.*contiguous subset"):
-        stub._validate_parallelism_modes()
+        _Undeclared.reject_undeclared_axes(cp_size=1, pp_size=2)
 
 
 @pytest.mark.parametrize("optim", sorted(NAMED_OPTIMIZER_BUILDERS))
 def test_named_optimizers_are_refused_under_pp(optim):
     """No pipeline run validates a toolkit-named optimizer, so each is refused at construction, read off
     the registry so a new one joins the refusal; post-init ``args.optim`` is an ``OptimizerNames`` member."""
-    stub = _Validating(_pc(pp_size=2), pp_refusal=None)
     with pytest.raises(ValueError, match=rf"optim='{optim}' is not supported under pipeline parallelism"):
-        stub._validate_parallelism_modes(SimpleNamespace(optim=OptimizerNames(optim)))
+        reject_pp_named_optimizer(SimpleNamespace(optim=OptimizerNames(optim)), _pc(pp_size=2))
 
 
 def test_the_optimizer_refusal_spares_adamw_under_pp_and_named_optimizers_off_pp():
     """The converse: stock AdamW still runs under PP, and Muon still runs without it."""
-    _Validating(_pc(pp_size=2), pp_refusal=None)._validate_parallelism_modes(SimpleNamespace(optim="adamw_torch"))
-    _Validating(_pc(pp_size=1), pp_refusal=None)._validate_parallelism_modes(SimpleNamespace(optim="muon"))
+    reject_pp_named_optimizer(SimpleNamespace(optim="adamw_torch"), _pc(pp_size=2))
+    reject_pp_named_optimizer(SimpleNamespace(optim="muon"), _pc(pp_size=1))
 
 
 def test_layer_indexed_freeze_patterns_rejected_on_a_stage():
@@ -222,13 +211,13 @@ def _tiny_composite():
 
 
 def _drive_composite_split(train_dataset=None, eval_dataset=None, data_collator=None):
-    """``_maybe_prepare_pipeline_model`` on the tiny composite, as stage 0 of a pp2 x dp2 topology."""
+    """``_split_pipeline_stage`` on the tiny composite, as stage 0 of a pp2 x dp2 topology."""
     PartialState()  # the gate's accelerate logger needs an initialized state
     mixin = _pipeline_stub(parallelism_config=_pc(pp_size=2), save_sharded_ep=False, _moe_balancing="none")
     kwargs = {"model": _tiny_composite(), "train_dataset": train_dataset, "eval_dataset": eval_dataset}
     if data_collator is not None:
         kwargs["data_collator"] = data_collator
-    return mixin, PipelineTrainerMixin._maybe_prepare_pipeline_model(mixin, kwargs, _pp_args())
+    return mixin, PipelineTrainerMixin._split_pipeline_stage(mixin, kwargs, _pp_args())
 
 
 _IMAGE_TURN = [
@@ -255,7 +244,7 @@ def test_image_bearing_vlm_run_is_rejected_under_pp(evidence):
     (``pixel_values`` is pruned by the runner's column pin) while their placeholder tokens train as
     text. Silent, so the gate is a raise; every declaration the VLM data path accepts must trip it.
 
-    Driven through ``_maybe_prepare_pipeline_model`` itself. Asserting on ``is_vlm_model`` instead
+    Driven through ``_split_pipeline_stage`` itself. Asserting on ``is_vlm_model`` instead
     would pass with the entire gate deleted.
     """
     kwargs = {key: (Dataset.from_dict(value) if isinstance(value, dict) else value) for key, value in evidence.items()}
@@ -311,12 +300,12 @@ def test_sharded_ep_save_is_rejected_under_pp():
     sharded = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=True)
 
     with pytest.raises(ValueError, match="save_sharded_ep is not supported under pipeline parallelism"):
-        PipelineTrainerMixin._maybe_prepare_pipeline_model(sharded, {"model": model}, args)
+        PipelineTrainerMixin._split_pipeline_stage(sharded, {"model": model}, args)
 
     # The converse: the gathered save must get PAST this gate (it fails later, for other reasons).
     gathered = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=False)
     try:
-        PipelineTrainerMixin._maybe_prepare_pipeline_model(gathered, {"model": model}, args)
+        PipelineTrainerMixin._split_pipeline_stage(gathered, {"model": model}, args)
     except Exception as exc:  # noqa: BLE001 — any later failure is fine; the sharded-save one is not
         assert "save_sharded_ep" not in str(exc), f"the gathered save tripped the PP sharded-save gate: {exc}"
 
@@ -332,7 +321,7 @@ def test_eval_batch_mismatch_is_rejected_whenever_an_evaluation_runs(eval_strate
     stub = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=False)
     args = _pp_args(eval_strategy=eval_strategy, eval_on_start=eval_on_start, per_device_eval_batch_size=4)
     with pytest.raises(ValueError, match=r"per_device_eval_batch_size \(4\) must equal per_device_train_batch_size"):
-        PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, args)
+        PipelineTrainerMixin._split_pipeline_stage(stub, {}, args)
 
 
 @pytest.mark.parametrize(
@@ -353,10 +342,10 @@ def test_push_to_hub_is_refused_only_where_nodes_hold_different_stages(
     stub = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=False)
     if refused:
         with pytest.raises(ValueError, match="push_to_hub is not supported under pipeline parallelism"):
-            PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, _pp_args(push_to_hub=True))
+            PipelineTrainerMixin._split_pipeline_stage(stub, {}, _pp_args(push_to_hub=True))
     else:
         with pytest.raises(ValueError, match="requires the model to be passed"):
-            PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, _pp_args(push_to_hub=True))
+            PipelineTrainerMixin._split_pipeline_stage(stub, {}, _pp_args(push_to_hub=True))
 
 
 def test_eval_batch_mismatch_passes_when_no_evaluation_runs():
@@ -364,7 +353,7 @@ def test_eval_batch_mismatch_passes_when_no_evaluation_runs():
     past the gate to the next one (the missing ``model``)."""
     stub = _pipeline_stub(parallelism_config=SimpleNamespace(is_pp_mode=True), save_sharded_ep=False)
     with pytest.raises(ValueError, match="requires the model to be passed"):
-        PipelineTrainerMixin._maybe_prepare_pipeline_model(stub, {}, _pp_args(per_device_eval_batch_size=4))
+        PipelineTrainerMixin._split_pipeline_stage(stub, {}, _pp_args(per_device_eval_batch_size=4))
 
 
 if __name__ == "__main__":

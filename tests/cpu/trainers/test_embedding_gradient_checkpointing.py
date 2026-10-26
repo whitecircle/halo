@@ -5,10 +5,14 @@ transformers' trainer enables checkpointing through ``gradient_checkpointing_ena
 gradient_checkpointing_kwargs=..., every_n_layers=...)``; sentence-transformers' own override takes
 the kwargs dict only, so without the toolkit patch every embedding run with checkpointing on dies at
 that call, and one that swallowed the keyword would checkpoint every layer at the memory profile of a
-run that asked for fewer. Imported through the embedding trainer, the production path that installs it.
+run that asked for fewer. The embedding trainer installs the patch at construction.
 
 Run: ``pytest -m cpu tests/cpu/trainers/test_embedding_gradient_checkpointing.py``
 """
+
+import ast
+import inspect
+import textwrap
 
 import pytest
 import torch.nn as nn
@@ -17,7 +21,8 @@ from sentence_transformers.models import Normalize
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.modeling_layers import GradientCheckpointingLayer
 
-import src.trainers.embedding.trainer  # noqa: F401
+from src.trainers.embedding.preloaded_transformer import patch_sentence_transformer_gradient_checkpointing
+from src.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.models import TINY_QWEN3_CONFIG
 
 
@@ -34,6 +39,7 @@ def _layer_flags(model) -> list[bool]:
 
 
 def test_every_n_layers_reaches_the_transformers_model():
+    patch_sentence_transformer_gradient_checkpointing()
     model = SentenceTransformer(modules=[_Encoder(), Normalize()])
 
     model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False}, every_n_layers=2)
@@ -49,8 +55,19 @@ def test_every_n_layers_reaches_the_transformers_model():
 
 
 def test_a_pipeline_without_a_transformers_model_is_refused():
+    patch_sentence_transformer_gradient_checkpointing()
     with pytest.raises(ValueError, match="holds no transformers model"):
         SentenceTransformer(modules=[Normalize()]).gradient_checkpointing_enable(every_n_layers=1)
+
+
+def test_the_trainer_installs_the_patch_at_construction():
+    constructor = ast.parse(textwrap.dedent(inspect.getsource(EmbeddingTrainer.__init__)))
+    called = {
+        node.func.id
+        for node in ast.walk(constructor)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "patch_sentence_transformer_gradient_checkpointing" in called
 
 
 if __name__ == "__main__":

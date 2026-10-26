@@ -47,6 +47,7 @@ from src.models.config_access import config_model_types
 from src.models.unwrapping import unwrap_framework_wrappers
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.ranks import get_global_rank, is_multi_rank_run
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.early_stop import build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import (
     ChunkedGRPOLogprobsMixin,
@@ -104,9 +105,8 @@ from src.trainers.grpo.rollout.routing_replay import (
 )
 from src.trainers.grpo.rollout.trajectory_tokenize import TrajectoryTokenizeMixin, TurnRouting, single_trajectory_row
 from src.trainers.grpo.world_metrics import WorldMetrics, gathered_fractions
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.loss_masks import effective_loss_mask
-from src.trainers.mixins.validation import evaluation_runs, keep_all_dataset_columns
+from src.trainers.token_metrics import effective_loss_mask
+from src.trainers.training_args_overrides import keep_all_dataset_columns, uses_evaluation
 from src.weight_sync.registry import resolve_weight_sync_client
 
 logger = get_logger(__name__, log_level="INFO")
@@ -283,8 +283,6 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     # Set from async_config in __init__; declared here so the tokenize path's engine-specific remedy
     # reads a value on any trainer, constructed or not.
     _rollout_backend: str | None = None
-    # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
-    _loss_outside_model_forward = True
 
     # Defined before (or without) _setup_routing_replay so the tokenize/arm paths always read a value.
     _rollout_routing_replay = False
@@ -436,7 +434,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
 
         self._finish_on_policy_init()
 
-        # After _setup_distributed_modes (needs the EP wrappers); eager, so an unsupported setup fails now.
+        # After _configure_distributed_modes (needs the EP wrappers); eager, so an unsupported setup fails now.
         self._routing_injector = self._setup_routing_replay(self.async_config.routing_replay)
 
     def _loss_logits_width(self) -> LogitsWidth:
@@ -710,7 +708,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         only the GLOBAL eval batch against ``num_generations_eval``; groups are per rank here, so the
         per-rank round — ``eval_rollout_batch_size``, else ``per_device_eval_batch_size`` — must hold
         whole groups. A run that never evaluates has no eval round to check."""
-        if not evaluation_runs(self.args):
+        if not uses_evaluation(self.args):
             return
         rows = self.async_config.eval_rollout_batch_size
         if rows is None:

@@ -24,9 +24,9 @@ from trl import DPOTrainer
 
 from src.data.completion_spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
-from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 from src.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,
     interleave_pairs,
@@ -34,17 +34,18 @@ from src.trainers.parallelism.pipeline_loss_adapter import (
     rows_with_labels,
     split_pairs,
 )
-from src.trainers.parallelism.trainer_rules import (
+from src.trainers.parallelism.pipeline_rules import (
+    reject_missing_precomputed_reference,
+    reject_positional_model_or_args,
     reject_pp_compute_metrics,
     reject_pp_ref_model,
-    require_model_and_args_kwargs,
-    require_precomputed_reference,
 )
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
+from src.trainers.training_args_overrides import disable_trl_liger
 
 # TRL DPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = ctor_positions(DPOTrainer, "model", "args", "ref_model")
+_CTOR_POSITIONS = resolve_ctor_positions(DPOTrainer, "model", "args", "ref_model")
 
 _REF_LOGPS_COLUMNS = ("ref_chosen_logps", "ref_rejected_logps")
 
@@ -116,8 +117,7 @@ class DistributedDPOTrainer(
 
     PP_REFUSAL = None
     # TRL's DPO loss adds the aux term itself and this class does not override it.
-    _consumes_router_aux_loss = True
-    _trl_adds_router_aux_loss = True
+    ROUTER_AUX_LOSS_ADDED_BY = "trl_loss"
     # TRL concatenates chosen ⧺ rejected into one forward, so every MoE layer sees twice the rows.
     FORWARD_ROWS_PER_EXAMPLE = 2
 
@@ -125,35 +125,35 @@ class DistributedDPOTrainer(
         # TRL's chunked DPO path refuses the router aux loss this trainer hands it and skips the family's
         # head transform; must precede _init_distributed_config.
         disable_trl_liger(
-            ctor_config(args, kwargs, _CTOR_POSITIONS),
+            get_ctor_config(args, kwargs, _CTOR_POSITIONS),
             "Disabling TRL's use_liger_kernel for DPO: TRL's chunked DPO log-prob path refuses the router "
             "aux loss and skips the family's head transform. Liger kernels are still applied at the model "
             "level by load_distributed_model.",
         )
         self._init_reference_resume(kwargs)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
-        self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
+        self._validate_reference_model(get_ctor_arg(args, kwargs, "ref_model", _CTOR_POSITIONS))
         with self._trl_reference_hash_skipped():
             super().__init__(*args, **kwargs)
         # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
         # PEFT-wrapped and precompute_ref_log_probs is off.
         self._validate_held_reference_model()
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
 
-    def _validate_pp_mode(self, ctor_args: tuple, kwargs: dict) -> None:
+    def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
         """Reject DPO configurations pipeline parallelism cannot honor, at construction.
 
         Runs before the model is split, so every raise is cheap and rank-uniform. Remaining ctor
-        parameters are read from ``kwargs`` only: ``require_model_and_args_kwargs`` forces ``model``
+        parameters are read from ``kwargs`` only: ``reject_positional_model_or_args`` forces ``model``
         into kwargs, and any positional argument would rebind TRL's ``model`` slot.
         """
-        require_model_and_args_kwargs(kwargs)
+        reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
         reject_pp_ref_model(
-            ctor_value(ctor_args, kwargs, "ref_model", _CTOR_POSITIONS),
+            get_ctor_arg(ctor_args, kwargs, "ref_model", _CTOR_POSITIONS),
             "ref_chosen_logps/ref_rejected_logps dataset columns",
         )
-        require_precomputed_reference(
+        reject_missing_precomputed_reference(
             "DPO",
             training_args,
             kwargs.get("train_dataset"),
@@ -263,7 +263,7 @@ class DistributedDPOTrainer(
 
         Reproduces TRL's ``_compute_loss`` for the supported subset: reverse-KL scores against the
         precomputed reference, then the weighted sum over the configured loss types of their
-        ``_PP_PAIR_LOSSES`` implementations — the same mapping ``_validate_pp_mode`` gates on.
+        ``_PP_PAIR_LOSSES`` implementations — the same mapping ``_reject_unsupported_pp_options`` gates on.
         """
         labels = target["labels"]
         seq_logps = sequence_logprobs(logits, labels)

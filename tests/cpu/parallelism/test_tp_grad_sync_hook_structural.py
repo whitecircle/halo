@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """CPU test: the TP pre-step replicated-grad sync must run STRUCTURALLY, not grad-gated.
 
-``_register_tp_replicated_grad_sync_hook``'s pre-step hook issues a TP-group collective
+``_register_grad_sync_step_hooks``' TP pre-step hook issues a TP-group collective
 (``_sync_tp_replicated_grads``). Grad presence is rank-local (sparse routing / idle VLM tower can
 leave every grad ``None`` on one rank only), so gating the call on ``any(p.grad is not None)``
-desyncs the TP ranks into a hang — the codebase's structural-collective invariant (see
-``tp_clip_grad_norm_``). The hook must call the sync unconditionally; the sync itself agrees grad
+desyncs the TP ranks into a hang — the codebase's structural-collective invariant (see the TP
+clip, ``_install_tp_clip``). The hook must call the sync unconditionally; the sync itself agrees grad
 presence over the TP group, so the collective count stays uniform.
 
 Run: ``python tests/cpu/parallelism/test_tp_grad_sync_hook_structural.py`` (or ``pytest -m cpu``).
@@ -13,15 +13,15 @@ Run: ``python tests/cpu/parallelism/test_tp_grad_sync_hook_structural.py`` (or `
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
 import torch
 import torch.nn as nn
 
-import src.trainers.mixins.grad_sync as grad_sync_mod
-from src.trainers.mixins.base import DistributedTrainerMixin
+import src.trainers.parallelism.grad_sync as grad_sync_mod
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 def _trainer(max_grad_norm: float = 0.0):
@@ -31,15 +31,18 @@ def _trainer(max_grad_norm: float = 0.0):
         optimizer=torch.optim.SGD(model.parameters(), lr=0.1),
         args=SimpleNamespace(max_grad_norm=max_grad_norm),
         parallelism_config=SimpleNamespace(is_tp_mode=True),
+        _ep_config=None,
         _get_sharded_expert_param_ids=lambda: set(),
         _sync_tp_replicated_grads=Mock(),
+        _sync_qlora_grads=Mock(),
     )
+    trainer._tp_replicated_params = MethodType(DistributedTrainerMixin._tp_replicated_params, trainer)
     return trainer
 
 
 def test_pre_step_sync_runs_even_when_all_grads_are_none():
     trainer = _trainer(max_grad_norm=0.0)
-    DistributedTrainerMixin._register_tp_replicated_grad_sync_hook(trainer)
+    DistributedTrainerMixin._register_grad_sync_step_hooks(trainer)
     assert trainer._tp_grad_sync_hook_registered is True
 
     # No backward ran on this rank — every grad is None. Another TP rank may have grads, so the
@@ -53,8 +56,8 @@ def test_pre_step_sync_runs_even_when_all_grads_are_none():
 
 
 def test_pre_step_sync_skipped_when_clip_path_owns_it():
-    trainer = _trainer(max_grad_norm=1.0)  # clipping enabled → tp_clip_grad_norm_ syncs instead
-    DistributedTrainerMixin._register_tp_replicated_grad_sync_hook(trainer)
+    trainer = _trainer(max_grad_norm=1.0)  # clipping enabled → the TP clip syncs instead
+    DistributedTrainerMixin._register_grad_sync_step_hooks(trainer)
     trainer.optimizer.step()
     trainer._sync_tp_replicated_grads.assert_not_called()
 

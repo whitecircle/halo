@@ -147,7 +147,7 @@ Read it before giving a verdict on any non-trivial combo.
   the replicated adapter half would take a partial, never-synced gradient.
 - **LoRA/PEFT with TP** (`tp_size > 1`) — adapters are plain tensors outside the TP graph, so the
   replicated matrix diverges per rank and the sharded one is corrupted by the TP grad sync.
-  `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`) raises at trainer
+  `reject_lora_under_tp` (`src/trainers/parallelism/adapter_rules.py`) raises at trainer
   construction, **native EP expert LoRA included** (its own message: the expert adapters live on
   the EP-distributed weights, which every TP gate skips by param identity). CP and pure ETP leave
   attention unsharded, so LoRA is fine there.
@@ -167,7 +167,7 @@ ep4+etp2; EP+TP does not help — attention TP leaves `ep_group_size` at 4").
 
 `matrix.md` + `agent-docs/parallelism/` document the supported/rejected combos. The code is the **ultimate**
 authority: `src/distributed/parallelism_rules.py` (the refusals), `src/distributed/parallelism_config.py` and
-`src/trainers/mixins/ep_introspection.py` (the runtime EP-GC setup guard) decide what actually raises or
+`src/trainers/parallelism/ep_layers.py` (the runtime EP-GC setup guard) decide what actually raises or
 deadlocks — when a doc, this skill, or memory disagrees, or you are unsure, read those files before
 advising. (`CLAUDE.md`: docs-first, the code wins.) Related skill: `data` (sharded dataset ↔
 `data_parallel_size`).

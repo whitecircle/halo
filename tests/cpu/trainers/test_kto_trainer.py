@@ -19,7 +19,7 @@ from trl.trainer.kto_trainer import DataCollatorForUnpairedPreference
 
 from src.configs.preference import KTOScriptArguments
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.preference.kto import DistributedKTOTrainer
 
 
@@ -27,7 +27,7 @@ def test_kto_trainer_mro_and_flags():
     assert issubclass(DistributedKTOTrainer, DistributedTrainerMixin)
     assert issubclass(DistributedKTOTrainer, KTOTrainer)
     # KTO mirrors DPO: CP no (full-sequence log-prob pooling + KL ref),
-    # PP yes (apo_zero_unpaired only, precompute-only — gated in _validate_pp_mode).
+    # PP yes (apo_zero_unpaired only, precompute-only — gated in _reject_unsupported_pp_options).
     assert DistributedKTOTrainer.SUPPORTS_CP is False
     assert DistributedKTOTrainer.PP_REFUSAL is None
     assert "kto" in DistributedKTOTrainer._tag_names

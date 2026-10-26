@@ -11,22 +11,28 @@ from collections.abc import Iterator
 import datasets
 import torch
 import trl.trainer.grpo_trainer as trl_grpo_trainer
+from accelerate.logging import get_logger
 from trl import GRPOTrainer
+from trl.trainer.utils import disable_dropout_in_model
 
 from src.model_loading.parallel.frozen_models import (
     ON_POLICY_GRPO_REFERENCE_ALTERNATIVES,
     on_policy_grpo_holds_reference,
     place_and_freeze,
 )
+from src.models.config_access import config_sources
+from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from src.trainers.grpo.mixins.chunked_logprobs import LogitsWidth
 from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
-from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
+from src.trainers.training_args_overrides import disable_trl_liger
+
+logger = get_logger(__name__, log_level="info")
 
 # TRL GRPOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-GRPO_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "model", "args")
+GRPO_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "model", "args")
 # The slot of the adapter config, which with the model decides whether TRL holds a KL reference.
-_PEFT_CONFIG_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "peft_config")
-_DATASET_CTOR_POSITIONS = ctor_positions(GRPOTrainer, "train_dataset", "eval_dataset")
+_PEFT_CONFIG_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "peft_config")
+_DATASET_CTOR_POSITIONS = resolve_ctor_positions(GRPOTrainer, "train_dataset", "eval_dataset")
 
 
 def disable_trl_liger_grpo_loss(training_args) -> None:
@@ -57,7 +63,7 @@ class OnPolicyGRPOInitMixin:
 
     POLICY_GRADIENT_LOSS = True
     SYNCS_TO_EXTERNAL_GENERATOR = True
-    _reference_alternatives = ON_POLICY_GRPO_REFERENCE_ALTERNATIVES
+    REFERENCE_ALTERNATIVES = ON_POLICY_GRPO_REFERENCE_ALTERNATIVES
 
     def _begin_on_policy_init(self, args: tuple, kwargs: dict) -> tuple[object, dict]:
         """Resolve the training config and extract the distributed kwargs; ``(config, kwargs)``.
@@ -74,14 +80,14 @@ class OnPolicyGRPOInitMixin:
         """
         self._save_completions = kwargs.pop("save_completions", True)
         self._supplied_ref_model = kwargs.pop("ref_model", None)
-        training_args = ctor_config(args, kwargs, GRPO_CTOR_POSITIONS)
+        training_args = get_ctor_config(args, kwargs, GRPO_CTOR_POSITIONS)
         if (
             self._supplied_ref_model is not None
             and training_args is not None
             and not on_policy_grpo_holds_reference(
                 training_args.beta,
-                ctor_value(args, kwargs, "peft_config", _PEFT_CONFIG_CTOR_POSITIONS),
-                ctor_value(args, kwargs, "model", GRPO_CTOR_POSITIONS),
+                get_ctor_arg(args, kwargs, "peft_config", _PEFT_CONFIG_CTOR_POSITIONS),
+                get_ctor_arg(args, kwargs, "model", GRPO_CTOR_POSITIONS),
             )
         ):
             raise _unread_reference(training_args.beta)
@@ -114,7 +120,7 @@ class OnPolicyGRPOInitMixin:
         if not self._needs_custom_dataloader():
             return
         for name in ("train_dataset", "eval_dataset"):
-            dataset = ctor_value(args, kwargs, name, _DATASET_CTOR_POSITIONS)
+            dataset = get_ctor_arg(args, kwargs, name, _DATASET_CTOR_POSITIONS)
             splits = dataset.values() if isinstance(dataset, dict) else [dataset]
             if any(
                 isinstance(split, (datasets.IterableDataset, torch.utils.data.IterableDataset)) for split in splits
@@ -153,7 +159,7 @@ class OnPolicyGRPOInitMixin:
                     "revision, with the default attention and no repair of its non-persistent buffers, biasing the "
                     "KL against the policy. Pass ref_model=load_reference_model_for_on_policy_grpo(...), as the "
                     "GRPO training scripts do. Or hold none: "
-                    f"{self._reference_alternatives.under(self.parallelism_config)}"
+                    f"{self.REFERENCE_ALTERNATIVES.under(self.parallelism_config)}"
                 )
             handed = True
             place_and_freeze(supplied, self.model)
@@ -171,13 +177,13 @@ class OnPolicyGRPOInitMixin:
         """Realize the parallel modes, gate the reference model, the chunked head path and the
         full-logits plane, gate and wire weight sync, disable dropout.
 
-        Dropout goes last: it must reach the EP expert-LoRA dropout that ``_setup_distributed_modes``
+        Dropout goes last: it must reach the EP expert-LoRA dropout that ``_configure_distributed_modes``
         realizes, or the recomputed log-probs drift from the engine's dropout-free sampling. The plane
         is checked once the model is placed, so the free memory it is weighed against is real. The
         weight-sync gate refuses a model the trainer's engine (``_rollout_backend``) cannot take an
         update for here, not as an opaque server-side error at the first push.
         """
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
         self._validate_held_reference_model()
         self._resolve_chunked_head_transform()
         self._check_full_logits_fit(self._loss_logits_width())
@@ -193,3 +199,32 @@ class OnPolicyGRPOInitMixin:
         """The completion logits row this trainer's loss forward carries and the setting that bounds it;
         ``None`` when no setting does."""
         raise NotImplementedError
+
+    def _disable_dropout_for_onpolicy(self):
+        """Force dropout off, after the parallel modes so it reaches the EP grouped expert-LoRA dropout. Idempotent.
+
+        The recomputed log-probs must match vLLM's dropout-free sampling: active dropout lowers every
+        recomputed log-prob (Jensen), biasing the importance ratio, the k3 KL estimator and the PPO ratio.
+        """
+        if not self.args.disable_dropout:
+            logger.info("On-policy RL: disabling dropout for importance-sampling / vLLM consistency.")
+            self.args.disable_dropout = True
+        disable_dropout_in_model(self.model)
+        if getattr(self, "ref_model", None) is not None:
+            disable_dropout_in_model(self.ref_model)
+
+        # A config-float dropout inside attention/MLP survives disable_dropout_in_model and still perturbs log-probs.
+        config = getattr(self.model, "config", None)
+        if config is None:
+            return
+        for cfg in config_sources(config):
+            for field in ("attention_dropout", "attn_pdrop", "hidden_dropout", "resid_pdrop", "dropout"):
+                val = getattr(cfg, field, 0) or 0
+                if isinstance(val, (int, float)) and val > 0:
+                    logger.warning(
+                        "On-policy RL: model config %s=%s is a non-module dropout that cannot be zeroed by "
+                        "disable_dropout_in_model — it perturbs recomputed log-probs vs vLLM's dropout-free "
+                        "sampling (biases the importance ratio). Set it to 0 in the model config.",
+                        field,
+                        val,
+                    )

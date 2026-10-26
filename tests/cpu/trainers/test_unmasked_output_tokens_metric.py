@@ -16,12 +16,11 @@ import pytest
 import torch
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 _extract = DistributedTrainerMixin._extract_output_token_count
 _accumulate = DistributedTrainerMixin._accumulate_unmasked_output_tokens
 _drain = DistributedTrainerMixin._drain_unmasked_output_tokens
-_add_logs = DistributedTrainerMixin._add_parallelism_to_logs
 
 
 def _fake_self(*, training=True, num_processes=1, data_parallel_size=1, gather=None):
@@ -39,9 +38,25 @@ def _fake_self(*, training=True, num_processes=1, data_parallel_size=1, gather=N
     )
 
 
+class _RecordingBase:
+    """Stands in for the base Trainer's ``log``."""
+
+    def log(self, logs, start_time=None):
+        pass
+
+
+class _LogHost(DistributedTrainerMixin, _RecordingBase):
+    """The spine's real ``log`` over the real drain; no EP layers to introspect."""
+
+    def _ep_layers(self):
+        return []
+
+
 def _fake_log_self(*, training=True, global_step=5, cumulative=None):
-    """Minimal ``self`` for ``_add_parallelism_to_logs``: all parallelism modes off (single-GPU)."""
-    config = types.SimpleNamespace(
+    """A ``log`` host with all parallelism modes off (single-GPU)."""
+    me = object.__new__(_LogHost)
+    me.state = types.SimpleNamespace(global_step=global_step)
+    me.parallelism_config = types.SimpleNamespace(
         data_parallel_size=1,
         non_dp_replication_factor=1,
         has_ep_group=False,
@@ -49,15 +64,9 @@ def _fake_log_self(*, training=True, global_step=5, cumulative=None):
         is_cp_mode=False,
         is_expert_tp_mode=False,
     )
-    me = types.SimpleNamespace(
-        state=types.SimpleNamespace(global_step=global_step),
-        parallelism_config=config,
-        _has_ep_layers=False,
-        model=types.SimpleNamespace(training=training),
-        accelerator=types.SimpleNamespace(num_processes=1, gather=lambda x: x, device=torch.device("cpu")),
-    )
-    # _add_parallelism_to_logs drains first; the real drain gathers a zero here, isolating the emit.
-    me._drain_unmasked_output_tokens = types.MethodType(_drain, me)
+    me._ep_config = None
+    me.model = types.SimpleNamespace(training=training)
+    me.accelerator = types.SimpleNamespace(num_processes=1, gather=lambda x: x, device=torch.device("cpu"))
     if cumulative is not None:
         me._cumulative_unmasked_output_tokens = cumulative
     return me
@@ -218,7 +227,7 @@ def test_emit_logs_output_tokens_when_training_flag_false():
     # Gating the emit on model.training would hide the metric from the first logged step.
     me = _fake_log_self(training=False, cumulative=42)
     logs = {}
-    _add_logs(me, logs)
+    me.log(logs)
     assert logs["num_unmasked_output_tokens_seen"] == 42
 
 
@@ -226,7 +235,7 @@ def test_emit_skips_output_tokens_when_never_counted():
     # Trainers with no token-level loss mask must omit the key entirely, not log a 0.
     me = _fake_log_self(cumulative=None)
     logs = {}
-    _add_logs(me, logs)
+    me.log(logs)
     assert "num_unmasked_output_tokens_seen" not in logs
 
 
@@ -234,7 +243,7 @@ def test_emit_skips_before_first_step():
     # global_step == 0 returns before touching the log dict at all.
     me = _fake_log_self(global_step=0, cumulative=42)
     logs = {}
-    _add_logs(me, logs)
+    me.log(logs)
     assert logs == {}
 
 

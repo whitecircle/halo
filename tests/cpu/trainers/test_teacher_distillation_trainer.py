@@ -141,7 +141,7 @@ def _construct(args, *, peft_config=None):
         mock.patch.object(DistributedDistillationTrainer, "_init_distributed_config", init_config),
         mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: setattr(self, "model", model)),
         mock.patch.object(nn.Linear, "add_model_tags", create=True),
-        mock.patch.object(DistributedDistillationTrainer, "_setup_distributed_modes"),
+        mock.patch.object(DistributedDistillationTrainer, "_configure_distributed_modes"),
         mock.patch.object(DistributedDistillationTrainer, "_setup_teacher_model"),
     ):
         return DistributedDistillationTrainer(

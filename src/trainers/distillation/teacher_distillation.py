@@ -35,7 +35,7 @@ from src.trainers.distillation.losses import (
     shared_vocab_width,
     shifted_token_cross_entropy,
 )
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 
 logger = get_logger(__name__, log_level="info")
@@ -51,7 +51,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
 
     _tag_names = ["trl", "distillation", "knowledge-distillation"]
     # compute_loss returns the batch's own token mean over the distillation + CLM terms.
-    _loss_is_own_mean = True
+    LOSS_IS_OWN_MEAN = True
 
     PP_REFUSAL = (
         "each microbatch needs a second forward through a distinct frozen teacher network whose "
@@ -143,7 +143,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
 
         self.model.add_model_tags(self._tag_names)
 
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
         self._setup_teacher_model(teacher_tokenizer)
 
     def _setup_teacher_model(self, teacher_tokenizer: PreTrainedTokenizerBase):
@@ -162,7 +162,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict]:
         """Distillation loss: distill term (KL/MSE/...) between student/teacher logits + optional CLM on hard labels."""
-        self._validate_inputs(inputs)
+        self._warn_once_on_empty_labels(inputs)
 
         hard_labels = inputs["labels"][..., 1:]
         supervised = hard_labels != LABEL_IGNORE_INDEX

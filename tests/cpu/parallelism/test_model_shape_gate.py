@@ -32,7 +32,8 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.load_rules import _divisors_up_to, reject_unsupported_model
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.moe.config_fields import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_width
-from src.trainers.mixins.base import DistributedTrainerMixin, FsdpExclusions
+from src.trainers.distributed_trainer import DistributedTrainerMixin
+from src.trainers.parallelism.mode_setup import FsdpExclusions
 from tests.common.parallelism import make_parallelism_config
 
 _MOD = "src.distributed.parallelism_config"
@@ -214,7 +215,7 @@ def _stub(*, experts_fsdp_managed: bool, fp32_non_ep_params: bool, ep_modules, d
         parallelism_config=SimpleNamespace(
             experts_fsdp_managed=experts_fsdp_managed, fp32_non_ep_params=fp32_non_ep_params
         ),
-        _find_ep_modules=lambda: list(ep_modules),
+        _ep_layers=lambda: list(ep_modules),
         _dtype_excluded_params=lambda: list(dtype_params),
     )
 

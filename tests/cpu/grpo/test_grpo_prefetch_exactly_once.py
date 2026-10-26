@@ -35,13 +35,13 @@ from collections import deque
 import pytest
 import torch
 
+import src.trainers.checkpointing as checkpointing_mod
 import src.trainers.grpo.rollout.async_rollouts as async_mod
-import src.trainers.mixins.checkpointing as checkpointing_mod
 from src.configs.grpo_environmental import AsyncTrainingConfig
+from src.trainers.checkpointing import CheckpointingMixin
 from src.trainers.grpo.environmental import BatchBuildFence
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer as _T
 from src.trainers.grpo.rollout.async_rollouts import AsyncRolloutMixin
-from src.trainers.mixins.checkpointing import CheckpointingMixin
 from tests.common.repo import load_script_module
 
 env_grpo_script = load_script_module("scripts/training/environmental_grpo.py")
@@ -58,6 +58,7 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
     def __init__(self, buffer_size: int = 1):
         self.model = types.SimpleNamespace(training=True)
         self.accelerator = types.SimpleNamespace(device=torch.device("cpu"), is_main_process=False)
+        self.parallelism_config = types.SimpleNamespace(data_parallel_size=1, get_data_parallel_rank=lambda: 0)
         self.async_config = types.SimpleNamespace(episode_timeout=5.0, rollout_backend="vllm")
         # profiling_context reads these on the acquire path; report_to=[] makes it a no-op.
         self.state = types.SimpleNamespace(global_step=0)
@@ -114,12 +115,6 @@ class _Host(AsyncRolloutMixin, CheckpointingMixin):
         pass
 
     def _train_loader_batch_size(self) -> int:
-        return 1
-
-    def get_data_parallel_rank(self) -> int:
-        return 0
-
-    def get_data_parallel_size(self) -> int:
         return 1
 
 

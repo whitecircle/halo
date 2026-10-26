@@ -5,7 +5,7 @@
 then cuts a further ``1/dp_size`` out of whatever it is given. Applying both silently drops
 ``(dp-1)/dp`` of the training data — no warning, no error, just a run that sees a fraction of its
 corpus. Every trainer takes this decision through one shared accessor
-(``DataParallelDataLoaderMixin.dp_shard_geometry`` → ``(1, 0)`` when pre-sharded); this pins that
+(``DataParallelLoaderMixin.dp_shard_geometry`` → ``(1, 0)`` when pre-sharded); this pins that
 offline GRPO's own loader takes it too.
 
 Run: pytest tests/cpu/grpo/test_offline_grpo_presharded.py
@@ -19,8 +19,8 @@ from accelerate import PartialState
 
 PartialState()  # MultiGroupSampler logs through accelerate's logger, which requires the state
 
+from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 
 # 4 groups x 2 completions, as the per-rank slice of an already-sharded dataset.
 GROUP_IDS = [0, 0, 1, 1, 2, 2, 3, 3]
@@ -35,8 +35,7 @@ def _sampler_span(presharded: bool, dp_size: int, dp_rank: int) -> int:
     """
     stub = SimpleNamespace(
         _dataset_presharded=presharded,
-        get_data_parallel_size=lambda: dp_size,
-        get_data_parallel_rank=lambda: dp_rank,
+        parallelism_config=SimpleNamespace(data_parallel_size=dp_size, get_data_parallel_rank=lambda: dp_rank),
         data_collator=lambda rows: rows,
         args=SimpleNamespace(
             dataloader_num_workers=0,
@@ -48,7 +47,7 @@ def _sampler_span(presharded: bool, dp_size: int, dp_rank: int) -> int:
             seed=0,
         ),
     )
-    stub.dp_shard_geometry = partial(DataParallelDataLoaderMixin.dp_shard_geometry, stub)
+    stub.dp_shard_geometry = partial(DataParallelLoaderMixin.dp_shard_geometry, stub)
 
     loader = OfflineGRPOTrainer._build_grouped_dataloader(
         stub, [{"row": index} for index in GROUP_IDS], GROUP_IDS, batch_size=1, shuffle=False

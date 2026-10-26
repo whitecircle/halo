@@ -1,19 +1,32 @@
-"""Per-batch token accounting: loss-contributing tokens and the attention-score work each batch costs.
+"""Per-batch token accounting: the loss mask, loss-contributing tokens and each batch's attention-score work.
 
 Nothing syncs the host per micro-batch: counts fold into on-device accumulators, the token total gathers
-once per log step and the attention work is read once per optimizer step, accumulated only once a callback
-binds itself as its sink (``bind_attention_work_source``).
+once per log step and the attention work is read once per optimizer step, once a callback binds as its sink.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import Any
 
 import torch
+from accelerate.logging import get_logger
 
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.models.attention.tree_plan import TREE_ATTENTION_KEY
-from src.trainers.mixins.loss_masks import effective_loss_mask
+
+logger = get_logger(__name__, log_level="info")
+
+
+def effective_loss_mask(masks: Mapping[str, torch.Tensor | Any]) -> torch.Tensor | None:
+    """The mask of loss-contributing tokens from a batch/result mapping, or ``None`` without one:
+    ``completion_mask ∧ tool_mask`` where a ``tool_mask`` exists (tool use), else ``completion_mask``, which
+    alone still counts tool-output tokens the loss never trains on."""
+    completion_mask = masks.get("completion_mask")
+    if completion_mask is None:
+        return None
+    tool_mask = masks.get("tool_mask")
+    return completion_mask if tool_mask is None else completion_mask * tool_mask
 
 
 class TokenMetricsMixin:
@@ -23,25 +36,10 @@ class TokenMetricsMixin:
     _attention_work_bound: bool = False
     _attention_layout = None
 
-    def _bind_attention_work_sources(self):
-        """Offer this trainer to every callback that consumes measured attention work (duck-typed, so
-        the trainer package imports nothing from the callbacks); the callback answers with the
-        attention layout it costs the batches with, or ``None`` when it could not build one."""
-        self._attention_work_bound = True
-        for callback in self.callback_handler.callbacks:
-            bind = getattr(callback, "bind_attention_work_source", None)
-            if bind is not None:
-                self._attention_layout = bind(self)
-
     def _extract_document_lengths(self, inputs):
-        """Token length of every document the batch's attention scores (zeros allowed), or ``None``
-        when the batch exposes no token layout (a trainer whose collator emits no ``input_ids``).
-
-        Padding-free batches carry ``cu_seq_lens_q``; packed rows carry ``position_ids`` that reset
-        at each document (the collators' boundary contract); a padded batch is one document per row
-        over its ``attention_mask``; a bare ``input_ids`` is one full-width document per row. Every
-        buffer is sized from a shape, so nothing here syncs the host.
-        """
+        """Token length of every document the batch's attention scores (zeros allowed), or ``None`` without
+        ``input_ids``: ``cu_seq_lens_q`` when padding-free, the ``position_ids`` resets of packed rows, else one
+        document per row over its ``attention_mask``. Every buffer is sized from a shape: no host sync."""
         if not isinstance(inputs, Mapping):
             return None
         cu_seq_lens = inputs.get("cu_seq_lens_q")
@@ -63,12 +61,9 @@ class TokenMetricsMixin:
         lengths.scatter_add_(0, document, valid.flatten().long())
         return lengths
 
-    def _extract_tree_nodes(self, inputs):
-        """``(path length, own tokens)`` of every node of a tree-packed batch, or ``None`` for any other.
-
-        A node's tokens attend along its root-to-leaf path, whose length is the position of the
-        node's last token plus one; position resets would read a whole tree as one document.
-        """
+    def _tree_node_lengths(self, inputs):
+        """``(path length, own tokens)`` of every node of a tree-packed batch, or ``None`` for any other: a
+        node attends along its root-to-leaf path, its last token's position plus one."""
         plan = inputs.get(TREE_ATTENTION_KEY) if isinstance(inputs, Mapping) else None
         if plan is None:
             return None
@@ -79,10 +74,16 @@ class TokenMetricsMixin:
         """Cost this micro-batch's documents through the bound layout into the on-device accumulator,
         read once per optimizer step by :meth:`drain_attention_flops`."""
         if not self._attention_work_bound:
-            self._bind_attention_work_sources()
+            # Offered to every callback that consumes measured attention work (duck-typed, so the trainer
+            # package imports nothing from the callbacks); one answers with the layout it costs batches with.
+            self._attention_work_bound = True
+            for callback in self.callback_handler.callbacks:
+                bind = getattr(callback, "bind_attention_work_source", None)
+                if bind is not None:
+                    self._attention_layout = bind(self)
         if self._attention_layout is None:
             return
-        nodes = self._extract_tree_nodes(inputs)
+        nodes = self._tree_node_lengths(inputs)
         lengths, own_tokens = nodes if nodes is not None else (self._extract_document_lengths(inputs), None)
         if lengths is None:
             return
@@ -93,13 +94,8 @@ class TokenMetricsMixin:
         self._local_attention_work_accum = step if prev is None else prev + step
 
     def drain_attention_flops(self) -> tuple[float, int]:
-        """``(this rank's attention-score FLOPs, documents)`` since the last drain, then reset — one
-        host read per optimizer step.
-
-        Rank-local by design: every pipeline stage costs the same documents through its own layer
-        slice, so a world average would hand stage 0 the chain's mean against its own ``6·N``; and
-        with no collective, a rank whose layout failed to build simply reports nothing.
-        """
+        """``(this rank's attention-score FLOPs, documents)`` since the last drain, then reset: one host read per
+        optimizer step. Rank-local: each pipeline stage costs the documents through its own layer slice."""
         accum = getattr(self, "_local_attention_work_accum", None)
         if accum is None:
             return 0.0, 0
@@ -108,31 +104,22 @@ class TokenMetricsMixin:
         return flops, int(documents)
 
     def _extract_output_token_count(self, inputs):
-        """Per-rank count of loss-contributing tokens, or ``None`` when the batch has no token-level mask.
-
-        Covers trainers whose loss mask is present in the per-step ``inputs``: causal-LM (``labels``
-        aligned to ``input_ids``), online/env GRPO (``completion_mask``, intersected with
-        ``tool_mask`` when present), offline GRPO (``completion_attention_mask``). Returns ``None``
-        for sequence-level trainers (classification / reward / embedding) and preference trainers
-        (chosen/rejected split until ``compute_loss``).
-        """
+        """Per-rank count of loss-contributing tokens: causal-LM ``labels``, online/env GRPO's
+        :func:`effective_loss_mask`, offline GRPO's ``completion_attention_mask``; ``None`` for sequence-level
+        and preference trainers, whose batches carry no token-level loss mask."""
         if not isinstance(inputs, Mapping):  # dict or transformers BatchEncoding (UserDict)
             return None
         labels, input_ids = inputs.get("labels"), inputs.get("input_ids")
         if labels is not None and input_ids is not None and labels.shape == input_ids.shape:
             return (labels != LABEL_IGNORE_INDEX).sum()
-        # online/env GRPO: "completion_mask" (∧ tool_mask); offline GRPO: "completion_attention_mask".
         loss_mask = effective_loss_mask(inputs)
         if loss_mask is None:
             loss_mask = inputs.get("completion_attention_mask")
         return loss_mask.sum() if loss_mask is not None else None
 
     def _accumulate_unmasked_output_tokens(self, local_count):
-        """Add this micro-batch's per-rank loss-contributing token count to the on-device accumulator.
-
-        Not gathered here — the cross-rank gather is deferred to :meth:`_drain_unmasked_output_tokens`
-        (once per log) so it doesn't stall every micro-batch.
-        """
+        """Add this micro-batch's loss-token count to the on-device accumulator, gathered once per log
+        (:meth:`_drain_unmasked_output_tokens`)."""
         if local_count is None:
             return
         # int64 always: the gather zero-fills absent ranks, so a float sum would make its dtype rank-dependent.
@@ -141,14 +128,9 @@ class TokenMetricsMixin:
         self._local_unmasked_token_accum = local if prev is None else prev + local
 
     def _drain_unmasked_output_tokens(self):
-        """Fold the on-device per-rank token accumulator into the run total (once per log).
-
-        Gathers across all ranks, corrects for non-DP replication (TP/ETP/CP), and resets. Called
-        from ``_add_parallelism_to_logs``, which every rank reaches together.
-
-        A rank with nothing accumulated enters with a zero rather than skipping the collective. The
-        run total stays unset until some rank contributes, so sequence-level trainers log nothing.
-        """
+        """COLLECTIVE. Fold every rank's token accumulator into the run total, corrected for non-DP replication
+        (TP/ETP/CP), and reset. A rank with nothing accumulated enters with a zero; the total stays unset until
+        some rank contributes, so sequence-level trainers log nothing."""
         accum = getattr(self, "_local_unmasked_token_accum", None)
         if accum is None:
             accum = torch.zeros((), dtype=torch.long, device=self.accelerator.device)
@@ -160,3 +142,28 @@ class TokenMetricsMixin:
         if previous is not None or gathered > 0:
             self._cumulative_unmasked_output_tokens = (previous or 0) + gathered
         self._local_unmasked_token_accum = None
+
+    def _warn_once_on_empty_labels(self, inputs: dict) -> None:
+        """Warn once if a batch carries no training signal (every label -100, pad or eos). First optimizer
+        step only: the collator config is static, and the ``.all()`` reduction is a host sync."""
+        if self._warned_empty_labels:
+            return
+        if getattr(self, "state", None) is not None and self.state.global_step > 0:
+            return
+        labels = inputs.get("labels")
+        if labels is None:
+            return
+        non_training = labels == LABEL_IGNORE_INDEX
+        tokenizer = getattr(self, "processing_class", None)
+        for attr in ("pad_token_id", "eos_token_id"):
+            token_id = getattr(tokenizer, attr, None)
+            if token_id is not None:
+                non_training = non_training | (labels == token_id)
+        if non_training.all():
+            self._warned_empty_labels = True
+            logger.warning(
+                "Batch contains no training signal — all labels are -100, pad, or eos. "
+                "This typically means the collator could not find the assistant_message_template "
+                "in the tokenized input, or the eval set is too small after packing. "
+                f"Labels shape: {list(labels.shape)}"
+            )

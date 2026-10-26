@@ -16,7 +16,7 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 class _ForgetGate(nn.Module):
@@ -34,7 +34,7 @@ def _trainer(model: nn.Module) -> SimpleNamespace:
     trainer = SimpleNamespace(
         model=model,
         parallelism_config=SimpleNamespace(experts_fsdp_managed=False),
-        _find_ep_modules=list,
+        _ep_layers=list,
     )
     trainer._dtype_excluded_params = lambda: DistributedTrainerMixin._dtype_excluded_params(trainer)
     return trainer

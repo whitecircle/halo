@@ -36,7 +36,7 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.liger import dispatch
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG, TINY_QWEN35_MOE_CONFIG
 from tests.common.repo import probe_findings
 
@@ -311,10 +311,11 @@ class _InitStopped(Exception):
 class _InitHost:
     """A bare trainer host for the shared init, stopped just past the Liger re-sanitization."""
 
-    def _configure_mixed_precision(self, kwargs, training_args):
+    def _snapshot_model_config_state(self, model_config):
         pass
 
-    def _should_accelerate_manage_fsdp(self):
+    def _apply_training_args_overrides(self, training_args, model):
+        DistributedTrainerMixin._apply_training_args_overrides(self, training_args, model)
         raise _InitStopped
 
 

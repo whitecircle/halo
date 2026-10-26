@@ -36,7 +36,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from src.model_loading.tokenizer_setup import configure_run_tokenizer, pristine_model_max_length
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
@@ -128,13 +128,15 @@ class _Fsdp2SaveTrainer:
     The model is a bare ``Linear`` because only the tokenizer half of the write is under test.
     """
 
-    _has_ep_layers = False
     _fsdp_wrapped = True
     _accelerate_manages_fsdp = False
     _pp_wrapper_state = None
     _writing_training_checkpoint = False
     save_sharded_ep = False
     save_max_shard_size = None
+
+    def _ep_layers(self):
+        return []
 
     def __init__(self, tokenizer, output_dir: str):
         self.model = nn.Linear(4, 4)

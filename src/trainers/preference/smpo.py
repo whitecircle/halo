@@ -69,8 +69,8 @@ from src.models.segment_markers import (
     segment_marker_kwargs,
     segment_markers_for,
 )
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.dataloader import split_rows_head, split_rows_mean
+from src.trainers.distributed_trainer import DistributedTrainerMixin
+from src.trainers.evaluation import split_rows_head, split_rows_mean
 from src.trainers.mixins.stored_metrics import StoredMetricsMixin
 from src.trainers.parallelism.pipeline_loss_adapter import (
     PipelineLossAdapter,
@@ -78,7 +78,8 @@ from src.trainers.parallelism.pipeline_loss_adapter import (
     rows_with_labels,
     split_pairs,
 )
-from src.trainers.parallelism.trainer_rules import reject_pp_peft
+from src.trainers.parallelism.pipeline_rules import reject_pp_peft
+from src.trainers.parallelism.trainer_rules import reject_cp_packed_collator
 
 logger = get_logger(__name__, log_level="info")
 
@@ -141,7 +142,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
     # Reference-free single forward; correct once the concat is interleaved so no pair splits.
     PP_REFUSAL = None
     # The objective is already its own mean, so HF's num_items_in_batch rescaling must stay off.
-    _loss_is_own_mean = True
+    LOSS_IS_OWN_MEAN = True
     # chosen ⧺ rejected ride one forward, so every MoE layer sees twice the collator's rows.
     FORWARD_ROWS_PER_EXAMPLE = 2
 
@@ -236,7 +237,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             model=model,
         )
         model = dist_kwargs.pop("model")
-        self._reject_cp_incompatible_collator(data_collator)
+        reject_cp_packed_collator(data_collator, is_cp_mode=self.parallelism_config.is_cp_mode)
 
         if data_collator is None:
             if self.is_vlm:
@@ -293,7 +294,7 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
 
         self.model.add_model_tags(self._tag_names)
 
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
 
     @staticmethod
     def _resolve_vlm_mode(processing_class, is_vlm: bool | None) -> bool:
@@ -588,7 +589,9 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
         pairs: the rest pad the split's final round, so their labels are ignored and no mean reads
         them. ``None`` supervises every pair.
         """
-        concat_batch = self.concatenated_inputs(batch, pad_token_id=self.pad_token_id, cp_size=self.cp_size)
+        concat_batch = self.concatenated_inputs(
+            batch, pad_token_id=self.pad_token_id, cp_size=self.parallelism_config.cp_size
+        )
 
         num_chosen = concat_batch["num_chosen"]
 
@@ -834,13 +837,13 @@ class SmoothMarginPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer
             return margin if margin is not None else self._top_level_model().target_margin
         return self.target_margin
 
-    def _setup_pipeline_parallel(self):
+    def _configure_pipeline_parallel(self):
         """Seed the PP-only loss state, then run the mixin's setup.
 
         Kept out of ``_pp_loss_adapter``, which the mixin may call as a declarative accessor.
         """
         self._pp_step_state = _PPStepState(target_margin=self.target_margin)
-        super()._setup_pipeline_parallel()
+        super()._configure_pipeline_parallel()
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """SMPO's pipeline-loss contract: interleaved pairs, closure loss over per-step constants.

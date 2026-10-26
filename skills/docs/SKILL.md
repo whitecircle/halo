@@ -59,7 +59,7 @@ owning doc page). This skill does both, to the house voice.
 
 ## Citing repo paths
 
-Cite a repo path as plain inline code (`` `src/trainers/mixins/base.py` ``,
+Cite a repo path as plain inline code (`` `src/trainers/distributed_trainer.py` ``,
 `scripts/...`, `examples/...`, `tests/...`, `Dockerfile`, …). Do **not**
 hand-write `github.com` URLs — a relative markdown link is fine where the reader
 should click through to another doc page, and plain code is right for source

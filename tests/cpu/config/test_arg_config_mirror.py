@@ -30,7 +30,7 @@ from src.configs.parser import _literal_choices
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.parallelism_rules import AXES
 from src.kernels.lowp.spec import LowpSpec
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 

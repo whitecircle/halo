@@ -17,7 +17,7 @@ import torch
 import transformers.trainer
 from transformers import Trainer
 
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from src.trainers.parallelism.grad_clipping import GradientClippingMixin
 
 
 class _Accelerator:
@@ -40,7 +40,7 @@ class _HFBase:
     _mixed_mesh_grad_norm = Trainer._mixed_mesh_grad_norm
 
 
-class _Composed(GradientSyncMixin, _HFBase):
+class _Composed(GradientClippingMixin, _HFBase):
     pass
 
 

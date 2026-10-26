@@ -3,7 +3,7 @@
 
 When a dataset is pre-sharded per DP rank, the shards can differ in length, so ranks would run a
 different number of optimizer steps and the next gradient all-reduce hangs forever.
-``DataParallelDataLoaderMixin.get_train_dataloader`` AND ``get_eval_dataloader`` (inherited by SMPO
+``DataParallelLoaderMixin.get_train_dataloader`` AND ``get_eval_dataloader`` (inherited by SMPO
 and Classification) truncate every rank to the global minimum via ``_equalize_presharded_length``.
 These tests fail if either call is dropped (the hang would return silently), if the eval zero-row
 case stops raising, or if the GRPO trainers stop inheriting the eval path from the mixin.
@@ -22,10 +22,10 @@ from datasets import Dataset
 # _equalize_presharded_length logs via the accelerate logger, which requires an initialized state.
 PartialState()
 
+from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.mixins.dataloader import GRPOTrainDataLoaderMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from src.trainers.reward.classification import ClassificationTrainer
 
@@ -128,12 +128,12 @@ class _FakeAllReduce:
 def _equalize_with_forced_min(dataset, forced_min: int, split: str):
     """Run the real _equalize_presharded_length with a faked distributed MIN reduction."""
     with (
-        patch("src.trainers.mixins.dataloader.dist", _FakeAllReduce(forced_min)),
+        patch("src.trainers.dataloaders.dist", _FakeAllReduce(forced_min)),
         # The shared multi-rank probe reads the real torch.distributed, which no CPU test initializes.
-        patch("src.trainers.mixins.dataloader.is_multi_rank_run", return_value=True),
-        patch("src.trainers.mixins.dataloader.current_device", return_value=torch.device("cpu")),
+        patch("src.trainers.dataloaders.is_multi_rank_run", return_value=True),
+        patch("src.trainers.dataloaders.current_device", return_value=torch.device("cpu")),
     ):
-        return DataParallelDataLoaderMixin._equalize_presharded_length(None, dataset, split=split)
+        return DataParallelLoaderMixin._equalize_presharded_length(None, dataset, split=split)
 
 
 @pytest.mark.parametrize("split", ["eval", "test"])
@@ -161,11 +161,11 @@ def test_eval_truncates_to_global_min():
 
 def test_grpo_trainers_inherit_mixin_eval_dataloader():
     """The GRPO dataloader mixin overrides only the TRAIN path; eval must resolve to
-    DataParallelDataLoaderMixin.get_eval_dataloader through the MRO (ahead of TRL's GRPOTrainer),
+    DataParallelLoaderMixin.get_eval_dataloader through the MRO (ahead of TRL's GRPOTrainer),
     so the pre-sharded eval equalization applies to online + environmental GRPO too."""
     assert "get_eval_dataloader" not in vars(GRPOTrainDataLoaderMixin)
     for cls in (DistributedGRPOTrainer, DistributedAsyncEnvironmentalGRPOTrainer):
-        assert cls.get_eval_dataloader is DataParallelDataLoaderMixin.get_eval_dataloader, (
+        assert cls.get_eval_dataloader is DataParallelLoaderMixin.get_eval_dataloader, (
             f"{cls.__name__}.get_eval_dataloader does not resolve to the DP mixin's eval path"
         )
 

@@ -23,8 +23,8 @@ import torch.nn as nn
 from accelerate import PartialState
 
 from src.distributed.fsdp import fsdp2_modules
-from src.trainers.mixins import grad_sync
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from src.trainers.parallelism import grad_sync
+from src.trainers.parallelism.grad_sync import GradientSyncMixin
 
 PartialState()  # the mixin logs through accelerate's rank-aware logger
 
@@ -91,7 +91,7 @@ def test_each_knob_drives_only_its_own_setter(
     trainer = StubTrainer(
         fsdp_wrapped=fsdp_wrapped, reshard_after_backward=reshard_after_backward, defer_grad_sync=defer_grad_sync
     )
-    trainer._setup_grad_accum_window()
+    trainer._install_grad_accum_window()
     assert trainer._window_modules == ([module] if setters else [])
 
     _run_windows(trainer)

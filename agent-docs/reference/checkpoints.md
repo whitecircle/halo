@@ -1,7 +1,7 @@
 # Checkpoints and Training Resume
 
 Saving and resuming live in `src/checkpoint/parallel/`. The trainer's `save_model()` hands a
-`CheckpointContext` (`CheckpointContext.capture`) to `save_checkpoint()`, which writes the tokenizer and
+`CheckpointContext` (built from explicit trainer fields by `CheckpointingMixin._checkpoint_context`) to `save_checkpoint()`, which writes the tokenizer and
 then runs the one saver its `select_checkpoint_saver()` ladder picks — PEFT adapters, PP, expert-LoRA
 adapters, EP sharded or gathered, CP, TP, FSDP2, first match. Every saver takes `(ctx, output_dir)`. On
 resume `load_resume_weights()` restores the weights (or declines to the base Trainer's own load),

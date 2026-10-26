@@ -4,7 +4,7 @@
 At ep_size==1 the grouped-GEMM EP wrappers stay on every MoE model and fsdp_shard_ep1_experts
 folds the replicated experts into the stage FSDP mesh: no EP hooks, no deferred sweep — FSDP's
 reduce-scatter is the sole grad sync and every parameter (experts included) is a stage-mesh
-DTensor, so the plain ``_pp_clip_grad_norm`` covers the whole stage. The reference is the same
+DTensor, so the plain ``pp_clip_grad_norm`` covers the whole stage. The reference is the same
 model with the same ep1 wrappers, single-process (its EPConfig is world_size=1, so every hook is
 inert), run on the full global batch — identical parametrization, so gradients compare per param
 through ``global_parameter_name`` with a full_tensor() gather.
@@ -12,7 +12,7 @@ through ``global_parameter_name`` with a full_tensor() gather.
 Checks: per-replica loss vs the reference slice loss; experts are DTensors on the stage mesh; no
 grad-sync hooks registered; every stage param's grad matches the reference (worst rel err, bf16
 gate) and the union of stage param names covers the reference exactly; the installed clip is
-``_pp_clip_grad_norm`` and returns one identical norm on all ranks.
+``pp_clip_grad_norm`` and returns one identical norm on all ranks.
 
 Topology: 4 GPUs as 2 simulated NVLink domains of 2. Run:
     torchrun --nproc_per_node=4 tests/gpu/parallelism/pp/test_pp_ep1_gmm_vs_unsplit.py
@@ -24,7 +24,7 @@ from torch.distributed.tensor import DTensor
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 
@@ -58,9 +58,7 @@ def run(ctx):
         isinstance(p, DTensor) and p.device_mesh.size() == config.stage_world_size for p in expert_params
     )
     checks["no_grad_sync_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
-    checks["clip_is_pp_clip"] = (
-        getattr(trainer.accelerator.clip_grad_norm_, "__func__", None) is PipelineTrainerMixin._pp_clip_grad_norm
-    )
+    checks["clip_is_pp_clip"] = trainer.accelerator.clip_grad_norm_ is pp_clip_grad_norm
     checks["no_deferred_sync"] = not trainer._ep_config.defer_grad_sync
 
     dp_rank = config.get_data_parallel_rank()

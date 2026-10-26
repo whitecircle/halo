@@ -34,9 +34,9 @@ from torch.distributed.tensor import Shard, distribute_tensor, init_device_mesh
 import src.trainers.grpo.rollout.async_rollouts as async_mod
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime import collectives, consensus
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.weight_push import sync_trainer_weights, sync_weights_to_client
-from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.gloo import run_gloo_ranks
 from tests.common.weight_sync import RecordingSender
 

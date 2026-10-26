@@ -31,8 +31,8 @@ from src.model_loading.parallel.frozen_models import (
     load_reference_model_for_preference,
 )
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer
-from src.trainers.mixins.validation import ParallelismValidationMixin
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import load_script_module
@@ -68,9 +68,9 @@ def _sizes(config) -> str:
 
 def _preference_gate(config, ref_model):
     host = types.SimpleNamespace(
-        parallelism_config=config, _reference_alternatives=ParallelismValidationMixin._reference_alternatives
+        parallelism_config=config, REFERENCE_ALTERNATIVES=DistributedTrainerMixin.REFERENCE_ALTERNATIVES
     )
-    ParallelismValidationMixin._validate_reference_model(host, ref_model)
+    DistributedTrainerMixin._validate_reference_model(host, ref_model)
 
 
 def _self_distillation(config, reference_kl_coef):
@@ -84,7 +84,7 @@ def _self_distillation(config, reference_kl_coef):
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", init_config),
         mock.patch.object(SFTTrainer, "__init__", lambda self, *a, **k: setattr(self, "data_collator", None)),
-        mock.patch.object(DistributedSelfDistillationTrainer, "_setup_distributed_modes"),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes"),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids"),
         mock.patch.object(
             DistributedSelfDistillationTrainer, "_setup_reference_model", lambda self: setup_calls.append(True)
@@ -234,7 +234,7 @@ def test_the_on_policy_grpo_loader_and_trainer_gate_report_one_reference_once(ca
             model=None,
             ref_model=result,
             parallelism_config=config,
-            _reference_alternatives=DistributedGRPOTrainer._reference_alternatives,
+            REFERENCE_ALTERNATIVES=DistributedGRPOTrainer.REFERENCE_ALTERNATIVES,
         )
         DistributedGRPOTrainer._validate_held_reference_model(host)
     assert result is loaded

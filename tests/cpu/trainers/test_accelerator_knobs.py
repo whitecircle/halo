@@ -3,7 +3,7 @@
 
 ``fp32_output_conversion`` (default False, i.e. off) clears accelerate's
 ``native_amp`` so ``prepare`` does not wrap the forward in ``convert_outputs_to_fp32`` — the full
-``[B, S, V]`` logits upcast. It must apply outside ``_create_plain_accelerator``, which an
+``[B, S, V]`` logits upcast. It must apply outside ``build_plain_accelerator``, which an
 ``accelerate launch`` that manages FSDP/DDP never reaches — a knob confined there leaves the upcast
 in place on that branch. The knobs that genuinely cannot apply there must say so instead of
 vanishing.
@@ -16,8 +16,9 @@ import types
 import pytest
 from accelerate import PartialState
 
-import src.trainers.mixins.base as mixin_module
-from src.trainers.mixins.base import DistributedTrainerMixin
+import src.trainers.accelerator as mixin_module
+from src.distributed.parallelism_config import ParallelismConfig
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 PartialState()  # the mixin's accelerate logger requires an initialized state
 
@@ -26,7 +27,9 @@ _warn_unapplied = DistributedTrainerMixin._warn_knobs_unapplied_under_accelerate
 
 
 def _fake_self(*, fp32_output_conversion=False, fp16=False, **knobs):
-    config = types.SimpleNamespace(
+    # Typed but unvalidated: the warning reads each knob's default off the dataclass that declares it.
+    config = object.__new__(ParallelismConfig)
+    vars(config).update(
         fp32_output_conversion=fp32_output_conversion,
         use_hsdp=False,
         fsdp_reshard_after_forward=False,
@@ -34,8 +37,7 @@ def _fake_self(*, fp32_output_conversion=False, fp16=False, **knobs):
         fsdp_defer_grad_sync=False,
         fp32_grad_reduce=False,
     )
-    for name, value in knobs.items():
-        setattr(config, name, value)
+    vars(config).update(knobs)
     return types.SimpleNamespace(
         parallelism_config=config,
         args=types.SimpleNamespace(fp16=fp16, bf16=not fp16),

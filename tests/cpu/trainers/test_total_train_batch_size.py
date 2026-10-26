@@ -15,7 +15,7 @@ import pytest
 import torch.nn as nn
 from transformers import Trainer
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 PER_DEVICE_BATCH = 4
 GRAD_ACCUM = 8

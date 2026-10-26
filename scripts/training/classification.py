@@ -50,8 +50,8 @@ from src.model_loading.parallel.peft_setup import configure_adapter_training
 from src.runtime.collectives import barrier
 from src.runtime.consensus import reject_across_ranks
 from src.runtime.ranks import get_global_world_size, is_global_main_process
-from src.trainers.mixins.validation import evaluation_runs
 from src.trainers.reward.classification import ClassificationTrainer
+from src.trainers.training_args_overrides import uses_evaluation
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -134,7 +134,7 @@ def require_prompt_or_text_column(train_columns: list[str], text_field: str | No
 
 def run_splits(training_config) -> tuple[str, ...]:
     """The splits the run reads: train, and the ``test`` eval split when the run evaluates."""
-    return ("train", "test") if evaluation_runs(training_config) else ("train",)
+    return ("train", "test") if uses_evaluation(training_config) else ("train",)
 
 
 def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:

@@ -2,7 +2,7 @@
 """End-to-end pipeline parallelism through the real DistributedSFTTrainer.
 
 The runner-level PP tests drive the engine directly; this one goes through the whole trainer
-stack — ``_maybe_prepare_pipeline_model`` splitting the model before TRL sees it, the stage-scoped
+stack — ``_split_pipeline_stage`` splitting the model before TRL sees it, the stage-scoped
 FSDP wrap, the schedule-driven ``training_step`` with the loss broadcast, the PP-aware gradient
 clip, and the sharded save with global names. It fails when any of those seams breaks:
 

@@ -15,19 +15,20 @@ import types
 import pytest
 from accelerate import PartialState
 
+import src.trainers.parallelism.mode_setup as mode_setup
 from src.distributed.context_parallel.config import CPConfigError
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 PartialState()  # the mixin's accelerate logger requires an initialized state
 
-_configure_cp = DistributedTrainerMixin._configure_cp_wrapper
+_configure_cp = DistributedTrainerMixin._adopt_cp_wrapper
 
 
 _LOADED_CP_CONFIG = object()
 
 
 class _Wrapper:
-    """Stands in for the loaded UlyssesModel (found via the injected _find_cp_wrapper)."""
+    """Stands in for the loaded UlyssesModel, the top-level model the patched ``find_ulysses_model`` finds."""
 
     cp_config = _LOADED_CP_CONFIG
 
@@ -51,8 +52,13 @@ def _fake_self(**args_overrides):
         preprocess_logits_for_metrics=None,
         parallelism_config=types.SimpleNamespace(cp_config=_second_cp_config),
     )
-    me._find_cp_wrapper = lambda: wrapper
+    me._top_level_model = lambda: wrapper
     return me
+
+
+@pytest.fixture(autouse=True)
+def _find_the_stand_in(monkeypatch):
+    monkeypatch.setattr(mode_setup, "find_ulysses_model", lambda model: model if isinstance(model, _Wrapper) else None)
 
 
 def test_clean_args_adopt_the_loaded_wrappers_config():

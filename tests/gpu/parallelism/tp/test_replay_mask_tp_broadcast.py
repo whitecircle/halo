@@ -25,7 +25,7 @@ import torch
 import torch.distributed as dist
 
 from src.runtime.collectives import nccl_safe_broadcast
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.harness import gpu_test_main
 
 ROWS, SEQ, LAYERS = 2, 16, 3

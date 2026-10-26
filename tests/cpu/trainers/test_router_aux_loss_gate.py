@@ -5,7 +5,7 @@
 loss only where it builds that loss from ``labels``. Preference / log-prob / distillation / pooled-
 head trainers forward without labels and assemble their own loss, so the aux term never enters the
 graph: routing collapses over training while the run still pays for ``output_router_logits``.
-``_validate_router_aux_loss_consumable`` raises on an EXPLICIT ``moe_balancing=aux_loss`` there and
+``_disable_inert_router_logits`` raises on an EXPLICIT ``moe_balancing=aux_loss`` there and
 warns when ``auto`` resolved to it — the non-PP counterpart of pipeline_parallel.model_rules' rejection.
 
 Run: python tests/cpu/trainers/test_router_aux_loss_gate.py
@@ -16,18 +16,18 @@ import types
 import pytest
 import torch.nn as nn
 
-import src.trainers.mixins.validation as validation_module
+import src.trainers.distributed_trainer as validation_module
 from src.models.moe.router_logits import router_logits_forced_off
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.offline import OfflineGRPOTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.validation import ParallelismValidationMixin, active_router_aux_loss_coef
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from src.trainers.sft import DistributedSFTTrainer
+from src.trainers.training_args_overrides import resolve_active_router_aux_loss_coef
 
 
 class _Cfg:
@@ -45,10 +45,10 @@ class _Model(nn.Module):
         self.config = config if config is not None else _Cfg()
 
 
-class _Trainer(ParallelismValidationMixin):
-    """Stand-in for a trainer whose loss cannot carry the aux term (the mixin default)."""
+class _Trainer:
+    """Stand-in for a trainer whose loss cannot carry the aux term (the spine default)."""
 
-    _consumes_router_aux_loss = DistributedTrainerMixin._consumes_router_aux_loss
+    ROUTER_AUX_LOSS_ADDED_BY = DistributedTrainerMixin.ROUTER_AUX_LOSS_ADDED_BY
     # Borrowed, not reimplemented: a stub unwrap could pass while the real one is broken.
     _top_level_model = DistributedTrainerMixin._top_level_model
 
@@ -58,11 +58,11 @@ class _Trainer(ParallelismValidationMixin):
 
 
 class _ConsumingTrainer(_Trainer):
-    _consumes_router_aux_loss = True
+    ROUTER_AUX_LOSS_ADDED_BY = "model_forward"
 
 
 def _validate(trainer):
-    ParallelismValidationMixin._validate_router_aux_loss_consumable(trainer)
+    DistributedTrainerMixin._disable_inert_router_logits(trainer)
 
 
 def _capture_warnings(trainer) -> list[str]:
@@ -78,10 +78,10 @@ def _capture_warnings(trainer) -> list[str]:
 
 def test_only_labels_forwarding_trainers_declare_consumption():
     # SFT hands the model ``labels`` (HF adds the aux term); everything else builds its own loss.
-    assert DistributedSFTTrainer._consumes_router_aux_loss is True
+    assert DistributedSFTTrainer.ROUTER_AUX_LOSS_ADDED_BY == "model_forward"
     # DPO and KTO build their own loss yet TRL adds the aux term back — declared, not inferred.
-    assert DistributedKTOTrainer._consumes_router_aux_loss is True
-    assert DistributedDPOTrainer._consumes_router_aux_loss is True
+    assert DistributedKTOTrainer.ROUTER_AUX_LOSS_ADDED_BY == "trl_loss"
+    assert DistributedDPOTrainer.ROUTER_AUX_LOSS_ADDED_BY == "trl_loss"
     for trainer_cls in (
         SmoothMarginPOTrainer,
         DistributedRewardTrainer,
@@ -90,7 +90,7 @@ def test_only_labels_forwarding_trainers_declare_consumption():
         # Inherits DistributedSFTTrainer but forwards WITHOUT labels — must override back to False.
         DistributedSelfDistillationTrainer,
     ):
-        assert trainer_cls._consumes_router_aux_loss is False, trainer_cls.__name__
+        assert trainer_cls.ROUTER_AUX_LOSS_ADDED_BY is None, trainer_cls.__name__
 
 
 def test_explicit_aux_loss_is_rejected():
@@ -153,11 +153,11 @@ def test_consuming_trainer_keeps_router_logits_on():
 def test_coef_read_from_the_text_config_of_a_multimodal_model():
     text_config = _Cfg()
     outer = types.SimpleNamespace(get_text_config=lambda: text_config)
-    assert active_router_aux_loss_coef(_Model(outer)) == pytest.approx(1e-3)
+    assert resolve_active_router_aux_loss_coef(_Model(outer)) == pytest.approx(1e-3)
 
 
 def test_coef_zero_without_router_logits():
-    assert active_router_aux_loss_coef(_Model(_Cfg(output_router_logits=False))) == 0.0
+    assert resolve_active_router_aux_loss_coef(_Model(_Cfg(output_router_logits=False))) == 0.0
 
 
 if __name__ == "__main__":

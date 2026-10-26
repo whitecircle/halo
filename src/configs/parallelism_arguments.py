@@ -336,8 +336,8 @@ def parallelism_config_from_args(
 ) -> ParallelismConfig:
     """The :class:`ParallelismConfig` parsed ``ParallelismArguments`` describe, for ``trainer_cls``'s script.
 
-    Refuses here, before any model loads, what the trainer would refuse only after: a CP/PP size its
-    ``SUPPORTS_CP`` / ``PP_REFUSAL`` gate rejects, ``lowp_*`` knobs without ``SUPPORTS_LOWP_PRECISION`` (SFT only),
+    Refuses here, before any model loads, what the trainer would refuse only after: a CP/PP size
+    ``trainer_cls.reject_undeclared_axes`` refuses, ``lowp_*`` knobs without ``SUPPORTS_LOWP_PRECISION`` (SFT only),
     ``init_from_scratch`` without ``supports_init_from_scratch``, and ``training_config.full_determinism`` on an
     EP group spanning NVLink domains. ``training_config`` also declares the per-rank token budget the DeepEP
     dispatch-ceiling gate judges. ``expert_lora`` is passed here, not assigned onto the result: only construction
@@ -354,17 +354,9 @@ def parallelism_config_from_args(
             "this script would silently ignore it and train pretrained weights."
         )
 
-    if not trainer_cls.SUPPORTS_CP and dist_args.context_parallel_size > 1:
-        raise ValueError(
-            f"{trainer_cls.__name__} does not support Context Parallelism (CP). Use Expert Parallelism "
-            "(EP) and/or Tensor Parallelism (TP) instead, or remove --context_parallel_size."
-        )
-
-    if trainer_cls.PP_REFUSAL is not None and dist_args.pipeline_parallel_size > 1:
-        raise ValueError(
-            f"{trainer_cls.__name__} does not support Pipeline Parallelism (PP). Use Expert Parallelism "
-            "(EP) and/or Tensor Parallelism (TP) instead, or remove --pipeline_parallel_size."
-        )
+    trainer_cls.reject_undeclared_axes(
+        cp_size=dist_args.context_parallel_size, pp_size=dist_args.pipeline_parallel_size
+    )
 
     # Fields the two dataclasses spell identically forward themselves, so a knob added to both needs no
     # wiring; only the renames and the derivations stay explicit.

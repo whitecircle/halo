@@ -107,7 +107,7 @@ L10 entrypoints
 
 Every distributed trainer uses multiple inheritance: a base trainer (`trl.SFTTrainer`,
 `transformers.Trainer`, `trl.GRPOTrainer`, …) plus `DistributedTrainerMixin`
-(`src/trainers/mixins/base.py`), which composes the sub-mixins listed in
+(`src/trainers/distributed_trainer.py`), which composes the concern mixins listed in
 [Trainer Architecture](trainer-architecture.md). The mixin overrides the parallelism-sensitive
 methods (accelerator creation, dataloader sharding, gradient clipping, model saving) and delegates
 the rest.
@@ -194,7 +194,7 @@ load_distributed_model            src/model_loading/parallel/loader.py
    │  • apply_ep_layers → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesModel (when cp_size > 1)
    ▼
-DistributedTrainerMixin._setup_distributed_modes
+DistributedTrainerMixin._configure_distributed_modes
    │  • FSDP2 fully_shard (EP modules in ignored_params, except at ep_group_size == 1)
    │  • router/expert grad-sync hooks already attached at EP-wrapper construction (load);
    │    PEFT modules_to_save router copies re-hooked here

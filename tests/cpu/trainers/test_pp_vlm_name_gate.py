@@ -10,7 +10,7 @@ silent on both counts. A multimodal wrapper is admitted under PP only for a run 
 images (its tower is dead weight the save re-emits), so the refusal is driven with an image-bearing
 dataset in hand: it fires exactly when the gate saw a VLM.
 
-The gate is driven through ``_maybe_prepare_pipeline_model`` itself: asserting on ``is_vlm_model``
+The gate is driven through ``_split_pipeline_stage`` itself: asserting on ``is_vlm_model``
 would pass with the whole PP call site deleted.
 
 Run: python tests/cpu/trainers/test_pp_vlm_name_gate.py
@@ -23,13 +23,13 @@ import pytest
 from datasets import Dataset
 
 import src.model_loading.parallel.model_source as model_source
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 
 _VLM_REJECTION = "Vision-language training is not supported under pipeline parallelism"
 
 
 def _mixin():
-    """A trainer-shaped stub: the split dispatches the ``_validate_pp_mode`` hook through ``self``."""
+    """A trainer-shaped stub: the split dispatches the ``_reject_unsupported_pp_options`` hook through ``self``."""
     stub = object.__new__(PipelineTrainerMixin)
     stub.parallelism_config = SimpleNamespace(is_pp_mode=True)
     stub.save_sharded_ep = False
@@ -63,7 +63,7 @@ def _drive(model_type, name, *, vision_config=None):
         config.vision_config = vision_config
     kwargs = {"model": SimpleNamespace(config=config), "train_dataset": _image_dataset()}
     try:
-        PipelineTrainerMixin._maybe_prepare_pipeline_model(_mixin(), kwargs, _args())
+        PipelineTrainerMixin._split_pipeline_stage(_mixin(), kwargs, _args())
     except Exception as exc:  # the gate's own raise is what is under test
         if _VLM_REJECTION in str(exc):
             return exc
@@ -99,7 +99,7 @@ def test_a_missing_name_field_is_not_an_error():
     verdict, not raise an AttributeError before it."""
     model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3"))
     try:
-        PipelineTrainerMixin._maybe_prepare_pipeline_model(_mixin(), {"model": model}, _args())
+        PipelineTrainerMixin._split_pipeline_stage(_mixin(), {"model": model}, _args())
     except Exception as exc:  # later failures are fine, faulting on the name is not
         assert "_name_or_path" not in str(exc), f"the name read must tolerate an absent field: {exc}"
         assert _VLM_REJECTION not in str(exc)

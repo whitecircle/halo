@@ -22,7 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 
-import src.trainers.mixins.base as base_mixin
+import src.trainers.distributed_trainer as base_mixin
 from src.distributed.parallelism_config import ParallelismConfig
 from src.runtime import filesystem, ranks
 from src.runtime.filesystem import output_filesystem_contradiction
@@ -155,7 +155,9 @@ class _ProbeReached(Exception):
 class _InitHost:
     """A bare trainer host for the shared init, stopped right after the output-filesystem probe."""
 
-    def _configure_mixed_precision(self, kwargs, training_args):
+    _apply_training_args_overrides = base_mixin.DistributedTrainerMixin._apply_training_args_overrides
+
+    def _snapshot_model_config_state(self, model_config):
         pass
 
 

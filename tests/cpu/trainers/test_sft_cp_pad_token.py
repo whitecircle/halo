@@ -29,15 +29,20 @@ def _inputs(seq_len):
     }
 
 
-def _trainer(processing_class, cp_size=2):
+class _CPHost(SimpleNamespace):
     """Fake ``self`` carrying only what the CP branch of ``compute_loss`` reads."""
-    return SimpleNamespace(
-        _validate_inputs=lambda inputs: None,
-        is_cp_mode=True,
-        cp_size=cp_size,
+
+    _compute_cp_loss = DistributedSFTTrainer._compute_cp_loss
+    _pad_to_cp_multiple = DistributedSFTTrainer._pad_to_cp_multiple
+
+
+def _trainer(processing_class, cp_size=2):
+    return _CPHost(
+        _warn_once_on_empty_labels=lambda inputs: None,
+        parallelism_config=SimpleNamespace(is_cp_mode=True, cp_size=cp_size),
         cp_config=SimpleNamespace(cp_rank=0),
         processing_class=processing_class,
-        _compute_cp_metrics=lambda *args, **kwargs: None,
+        model=SimpleNamespace(training=True),
     )
 
 

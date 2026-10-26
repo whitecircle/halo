@@ -16,16 +16,18 @@ from types import SimpleNamespace
 import pytest
 from torch.utils.data import SequentialSampler
 
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
+from src.trainers.dataloaders import DataParallelLoaderMixin
 
 _ROWS = list(range(8))
 
 
-def _host() -> DataParallelDataLoaderMixin:
+def _host() -> DataParallelLoaderMixin:
     """A TP-style rank on the toolkit's loader path; the prepare step is the identity, so the built
     ``DataLoader`` is what the assertions read."""
-    host = object.__new__(DataParallelDataLoaderMixin)
-    host.parallelism_config = SimpleNamespace(non_dp_replication_factor=2, is_pp_mode=False)
+    host = object.__new__(DataParallelLoaderMixin)
+    host.parallelism_config = SimpleNamespace(
+        non_dp_replication_factor=2, is_pp_mode=False, get_data_parallel_rank=lambda: 0
+    )
     host._dataset_presharded = False
     host.train_dataset = host.eval_dataset = _ROWS
     host._train_batch_size = 2
@@ -42,7 +44,6 @@ def _host() -> DataParallelDataLoaderMixin:
         eval_batch_size=2,
         per_device_eval_batch_size=2,
     )
-    host.get_data_parallel_rank = lambda: 0
     host._get_collator_with_removed_columns = lambda collator, description: collator
     host._get_train_sampler = lambda: SequentialSampler(_ROWS)
     host._get_eval_sampler = SequentialSampler

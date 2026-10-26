@@ -94,7 +94,7 @@ Every standard training script inherits these from `CommonScriptArguments`; `con
 | `muon` | [Muon](../optimization/muon-optimizer.md) | Newton-Schulz orthogonalization on 2-D params; embeddings and the LM head are excluded. |
 | `flash_adamw` | [FlashAdamW](../optimization/flash-adamw.md) | Quantized optimizer states, ~5 B/param. |
 
-`bf16_optimizer: true` together with `optim: muon` or `optim: flash_adamw` **raises** — both select an optimizer and the bf16 path would silently win (`DistributedTrainerMixin._configure_mixed_precision`). Any other explicit `optim` (e.g. `adamw_bnb_8bit`) suppresses the AdamWBF16 auto-enable.
+`bf16_optimizer: true` together with `optim: muon` or `optim: flash_adamw` **raises** — both select an optimizer and the bf16 path would silently win (`reject_conflicting_optimizer_choice`). Any other explicit `optim` (e.g. `adamw_bnb_8bit`) suppresses the AdamWBF16 auto-enable.
 
 ---
 

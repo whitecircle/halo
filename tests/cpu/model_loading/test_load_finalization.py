@@ -30,7 +30,7 @@ from transformers import Qwen3Config
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
 from src.model_loading.buffer_repair import finalize_loaded_model
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.repo import REPO_ROOT
 from tests.common.source_sweep import (
     TOOLKIT_LOAD_CALLS,

@@ -166,7 +166,7 @@ too, so a composite (VLM) wrapper is covered:
   at row indices, so a later document reads another document's compressed KV as its own context.
   Train with padded batches. The SFT script runs the same check before the model load,
   `prepare_dataset.py` before an offline `--pack_sequences` pass, and the SFT trainer for a
-  packing / padding-free collator handed to it directly (`_reject_compressed_kv_collator`, keyed on
+  packing / padding-free collator handed to it directly (`reject_compressed_kv_collator`, keyed on
   the same two collator roots as the CP gate), as does SMPO for its `padding_free` forward.
 
 Which families get which segment markers, and the kernel refusal below, live in

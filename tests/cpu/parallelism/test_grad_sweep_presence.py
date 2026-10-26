@@ -23,7 +23,7 @@ so a rank skipping the mask's all-reduce fails fast instead of waiting out the s
 
 import datetime
 import json
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 
 import pytest
 import torch
@@ -32,7 +32,7 @@ import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Shard
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 WORLD = 2
@@ -95,6 +95,7 @@ def _deferred_ep(model: _Model, *, experts: bool, replica_group, dp_scope_group=
         _get_ep_param_ids=lambda: ids,
         _top_level_model=lambda: model,
     )
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
     DistributedTrainerMixin._sync_deferred_expert_grads(host)
 
 
@@ -184,6 +185,7 @@ def _replica_leg(rank: int, ep_group, replica_group) -> list[float] | None:
         _get_ep_param_ids=lambda: set(),
         _top_level_model=lambda: model,
     )
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
     DistributedTrainerMixin._sync_deferred_expert_grads(host)
     return None if model.shard.grad is None else model.shard.grad.to_local().tolist()
 

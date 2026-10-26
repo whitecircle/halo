@@ -24,7 +24,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from src.trainers.parallelism.grad_clipping import GradientClippingMixin
+from src.trainers.parallelism.grad_sync import GradientSyncMixin
 from tests.common.gloo import new_groups, run_gloo_ranks
 
 WORLD = 4
@@ -64,7 +65,7 @@ class _Model(nn.Module):
         self.router = nn.Parameter(torch.zeros(2))
 
 
-class _Host(GradientSyncMixin):
+class _Host(GradientClippingMixin, GradientSyncMixin):
     """The state the EP clip reads, over the real sweep and the real norm."""
 
     def __init__(self, model, ep_config):
@@ -77,8 +78,8 @@ class _Host(GradientSyncMixin):
         self._device_mesh = None
         self._fsdp_wrapped = False
         self._pp_chain_group = None
-        self._has_ep_layers = True
-        self._patch_gradient_clipping_for_ep()
+        self._ep_layers = lambda: [model.expert]
+        self._install_ep_clip()
 
     def _top_level_model(self):
         return self.model

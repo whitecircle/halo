@@ -22,14 +22,14 @@ from accelerate.data_loader import prepare_data_loader
 from torch.utils.data import DataLoader
 
 from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
-from src.trainers.mixins.dataloader import (
-    DataParallelDataLoaderMixin,
+from src.trainers.dataloaders import (
+    _select_gathered_chunks,
     dp_representative_ranks,
     dp_scoped_gather,
-    select_gathered_chunks,
 )
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.evaluation import EvaluationMixin
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
+from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 
 PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
@@ -102,7 +102,7 @@ class _FakeAccelerator:
         return torch.cat(self._per_rank_rows)
 
 
-class _EvalTrainer(DataParallelDataLoaderMixin):
+class _EvalTrainer(EvaluationMixin):
     def __init__(self, accelerator, keep, world_size):
         self.accelerator = accelerator
         self.args = SimpleNamespace(eval_use_gather_object=False)
@@ -131,7 +131,7 @@ def test_the_chains_duplicate_copies_are_dropped():
     gathered = torch.cat(per_rank)
     assert gathered.numel() == WORLD * ROWS_PER_RANK
 
-    deduped = select_gathered_chunks(gathered, keep, WORLD)
+    deduped = _select_gathered_chunks(gathered, keep, WORLD)
     assert deduped.numel() == STAGE_WORLD * ROWS_PER_RANK
     assert deduped.tolist() == [0.0] * ROWS_PER_RANK + [1.0] * ROWS_PER_RANK
 

@@ -33,7 +33,7 @@ from src.data.preprocessed.preparation import shard_dataset
 from src.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from src.data.sources.loading import is_sharded_dataset_across_ranks
 from src.data.sources.sharded_dataset import ShardedDatasetLoader
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
+from src.trainers.dataloaders import DataParallelLoaderMixin
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
@@ -100,7 +100,7 @@ def test_equalize_to_global_min(rank: int, world_size: int) -> bool:
     """_equalize_presharded_length truncates every rank to the global-minimum length."""
     lengths = [10 + r for r in range(world_size)]  # 10, 11, 12, ...
     local = Dataset.from_dict({"x": list(range(lengths[rank]))})
-    equalized = DataParallelDataLoaderMixin._equalize_presharded_length(None, local)
+    equalized = DataParallelLoaderMixin._equalize_presharded_length(None, local)
     if len(equalized) != min(lengths):
         log(f"FAIL: equalized to {len(equalized)}, expected global min {min(lengths)}", rank=rank)
         return False
@@ -113,7 +113,7 @@ def test_zero_rank_raises(rank: int, world_size: int) -> bool:
     n = 0 if rank == world_size - 1 else 5
     ds = Dataset.from_dict({"x": list(range(n))})
     try:
-        DataParallelDataLoaderMixin._equalize_presharded_length(None, ds)
+        DataParallelLoaderMixin._equalize_presharded_length(None, ds)
     except ValueError:
         log("PASS: zero-example rank triggers ValueError on every rank")
         return True

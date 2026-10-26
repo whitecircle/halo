@@ -48,7 +48,7 @@ from src.model_loading.parallel.loader import _load_undistributed_model
 from src.model_loading.parallel.model_source import ModelSource
 from src.model_loading.parallel.pp import load_pp_stage_model
 from src.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
-from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from src.trainers.parallelism.mode_setup import ModeSetupMixin
 from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.pp_fakes import registered_pp_backbones
@@ -560,7 +560,7 @@ def test_pp_resume_reload_of_a_constructed_stage_writes_exactly_its_values(
         # at bf16 would reach the comparison as rounded FP32.
         ep_param_ids = {id(param) for _, layer in named_ep_layers(stage) for param in layer.parameters()}
         trainer = SimpleNamespace(_top_level_model=lambda: stage, _get_ep_param_ids=lambda: ep_param_ids)
-        EpIntrospectionMixin._upcast_non_ep_params_to_fp32(trainer)
+        ModeSetupMixin._upcast_non_ep_params_to_fp32(trainer)
     constructed = {name: tensor.detach().clone() for name, tensor in stage.state_dict().items()}
     mapped = set(stage.checkpoint_name_map().values())
     assert mapped, "the reload must cover the stage's non-expert state"

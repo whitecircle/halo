@@ -1,6 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the mixin's unsynced-trainable-param guard
-(``DistributedTrainerMixin._reject_unsynced_trainable_params``).
+"""CPU tests for the trainer's unsynced-trainable-param guard (``reject_unsynced_trainable_params``).
 
 EP modules are FSDP-ignored, so a trainable param the family's grad-sync hooks don't cover drifts
 silently across DP ranks. The guard must scan EVERY EP run — full-finetune included, not only PEFT
@@ -9,10 +8,10 @@ silently across DP ranks. The guard must scan EVERY EP run — full-finetune inc
 FSDP-managed EP layers register no hooks, so they cover nothing left out of the shard groups; the
 deferred post-backward sweep covers everything.
 
-Uses a stub trainer (only ``model`` + ``_find_ep_modules``) around a stub EP layer that exercises
+Uses a stub trainer (only ``model`` + its EP layers) around a stub EP layer that exercises
 the REAL ``synced_trainable_param_ids`` logic on the in-backward hook path. The guard runs once, at
-construction after the mode's wrap: the per-mode test drives the real ``_setup_distributed_modes``
-through every axis set whose wrap leaves an EP layer out of FSDP2 and holds each one to the refusal,
+construction after the mode's wrap: the per-mode test drives the real ``_configure_distributed_modes`` and
+mode ladder through every axis set whose wrap leaves an EP layer out of FSDP2 and holds each one to the refusal,
 refuses EP layers a hand-built config does not declare, and passes plain DP, CP and TP, whose frozen
 dtype exclusions and FSDP-managed ep1 experts leave no trainable parameter out.
 
@@ -28,48 +27,48 @@ import pytest
 import torch
 from torch import nn
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
+from src.trainers.parallelism.mode_setup import reject_unsynced_trainable_params
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.parallelism import make_parallelism_config
 
 E, H, M = 2, 4, 8
 _FABRIC_PROBE = "src.distributed.parallelism_config.validate_nvlink_domain_against_fabric"
-_RANK_UNIFORM_ENV = "src.trainers.mixins.base.agree_rank_uniform_env"
+_RANK_UNIFORM_ENV = "src.trainers.distributed_trainer.agree_rank_uniform_env"
 
-# Every axis set whose wrap leaves EP layers out of FSDP2, paired with the mode setup
-# _setup_distributed_modes dispatches it to: ep_group_size > 1, or plain DP with fsdp_shard_ep1_experts
-# off. CP and TP refuse that flag at config time, so their wraps shard every ep1 expert. The PP rows
-# span two nodes, one pipeline stage each.
+# Every axis set whose wrap leaves EP layers out of FSDP2, paired with the wrap _wrap_for_parallel_mode
+# dispatches it to: ep_group_size > 1, or plain DP with fsdp_shard_ep1_experts off. CP and TP refuse that
+# flag at config time, so their wraps shard every ep1 expert. The PP rows span two nodes, one pipeline
+# stage each.
 _EP_WRAPPER_MODES = {
-    "dp": ({"fsdp_shard_ep1_experts": False}, "_setup_ep_only"),
-    "ep": ({"ep_size": 8}, "_setup_ep_only"),
-    "etp": ({"expert_tp_size": 2}, "_setup_ep_only"),
-    "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, "_setup_ep_only"),
-    "ep_cp": ({"ep_size": 8, "cp_size": 2}, "_setup_ep_cp"),
-    "ep_tp": ({"ep_size": 8, "tp_size": 2}, "_setup_ep_tp"),
-    "pp_ep": ({"world_size": 16, "pp_size": 2, "ep_size": 8}, "_setup_pipeline_parallel"),
-    "pp_etp": ({"world_size": 16, "pp_size": 2, "expert_tp_size": 2}, "_setup_pipeline_parallel"),
+    "dp": ({"fsdp_shard_ep1_experts": False}, "_apply_ep_fsdp2"),
+    "ep": ({"ep_size": 8}, "_apply_ep_fsdp2"),
+    "etp": ({"expert_tp_size": 2}, "_apply_ep_fsdp2"),
+    "ep_etp": ({"ep_size": 4, "expert_tp_size": 2}, "_apply_ep_fsdp2"),
+    "ep_cp": ({"ep_size": 8, "cp_size": 2}, "_apply_ep_fsdp2"),
+    "ep_tp": ({"ep_size": 8, "tp_size": 2}, "_apply_ep_tp_fsdp2"),
+    "pp_ep": ({"world_size": 16, "pp_size": 2, "ep_size": 8}, "_configure_pipeline_parallel"),
+    "pp_etp": ({"world_size": 16, "pp_size": 2, "expert_tp_size": 2}, "_configure_pipeline_parallel"),
 }
-_MODE_SETUPS = (
-    "_setup_pipeline_parallel",
-    "_setup_ep_tp",
-    "_setup_ep_cp",
-    "_setup_cp_only",
-    "_setup_tp_only",
-    "_setup_ep_only",
-    "_setup_standard_data_parallel",
+# The wraps the ladder dispatches to; each stub records itself.
+_WRAPS = (
+    "_configure_pipeline_parallel",
+    "_apply_ep_tp_fsdp2",
+    "_apply_ep_fsdp2",
+    "_apply_cp_fsdp2",
+    "_apply_tp_fsdp2",
+    "_apply_dp_fsdp2",
+    "_install_qlora_grad_sync",
 )
 # Axis sets with no EP distribution; ep1 experts there are FSDP-managed (CP and TP refuse otherwise).
 _NON_EP_MODES = {"dp": {}, "cp": {"cp_size": 2}, "tp": {"tp_size": 2}}
-# Everything _setup_distributed_modes runs ahead of the guard that needs a live Trainer or process group.
+# Everything _configure_distributed_modes runs ahead of the guard that needs a live Trainer or process group.
 _PRE_GUARD_STEPS = (
-    "_log_parallelism_config",
-    "_validate_lora_tp_compatibility",
-    "_validate_router_aux_loss_consumable",
-    "_validate_load_best_model_reloadable",
     "_cast_peft_params_to_compute_dtype",
     "_upcast_non_ep_params_to_fp32",
-    "_validate_lora_ep_compatibility",
+    "_install_ep_clip",
+    "_install_tp_clip",
+    "_adopt_cp_wrapper",
 )
 
 
@@ -96,21 +95,18 @@ class _StubEPLayer(StubEPLayerBase):
 
 
 class _StubTrainer:
-    """Only what the guard reads: ``model`` (non-PEFT plain module holding the layers), ``_ep_config``
-    and ``_find_ep_modules``."""
+    """Only what the guard reads: ``model`` (non-PEFT plain module holding the layers), its EP layers and
+    the captured ``_ep_config``."""
 
     def __init__(self, layers, *, deferred: bool = False):
         self.model = nn.ModuleList(layers)
         self._layers = layers
         self._ep_config = SimpleNamespace(defer_grad_sync=deferred)
 
-    def _find_ep_modules(self):
-        return self._layers
-
     def check(self):
         """The guard over what an EP run leaves out of FSDP2: every EP layer's parameters."""
         candidates = [param for layer in self._layers for param in layer.parameters()]
-        DistributedTrainerMixin._reject_unsynced_trainable_params(self, self.model, candidates)
+        reject_unsynced_trainable_params(self.model, candidates, self._layers, self._ep_config)
 
 
 class _PastGuard(Exception):
@@ -129,26 +125,27 @@ class _FrozenFp32Block(nn.Module):
 class _ModeHost(DistributedTrainerMixin):
     """The mixin's real mode dispatch and guard over a stub model; each mode's wrap only records itself."""
 
-    _loss_is_own_mean = False
     _deferred_liger_kernel = False
-    _loss_outside_model_forward = False
     _accelerate_manages_fsdp = False
     _accelerate_manages_ddp = False
 
     def __init__(self, config, layers):
         self.parallelism_config = config
+        self.args = SimpleNamespace(load_best_model_at_end=False, optim="adamw_torch")
+        self._bf16_optimizer = False
         self.model = nn.ModuleList(layers)
+        self.model._device_mesh = object()  # what the TP loaders attach; the EP+TP wrap requires it
         self._ep_config = None
         self.ran_setups: list[str] = []
 
-    def _validate_expert_lora_realized(self):
+    def _warn_on_zeroed_lora_dropout(self):
         raise _PastGuard
 
 
 for _name in _PRE_GUARD_STEPS:
     setattr(_ModeHost, _name, lambda self: None)
-for _name in _MODE_SETUPS:
-    setattr(_ModeHost, _name, lambda self, _setup=_name: self.ran_setups.append(_setup))
+for _name in _WRAPS:
+    setattr(_ModeHost, _name, lambda self, *_args, _wrap=_name, **_kwargs: self.ran_setups.append(_wrap))
 
 
 def _config(world_size: int = 8, **kwargs):
@@ -185,6 +182,13 @@ def test_the_deferred_sweep_covers_every_trainable_param():
     _StubTrainer([_StubEPLayer(rogue=True)], deferred=True).check()  # must not raise
 
 
+def test_expert_tp_implies_an_ep_group():
+    """The ladder sends ETP down the EP branches on this alone (ep_group_size = ep_size * expert_tp_size), so a
+    grouped-GEMM fallback reached under ETP would mis-shard FSDP2."""
+    config = _config(expert_tp_size=2)
+    assert config.is_expert_tp_mode and config.has_ep_group
+
+
 @pytest.mark.parametrize("mode", sorted(_EP_WRAPPER_MODES))
 def test_construction_refuses_an_unsynced_param_in_every_ep_wrapper_mode(mode):
     """The construction check is the only one over what the wraps leave out, so it must refuse the
@@ -195,7 +199,7 @@ def test_construction_refuses_an_unsynced_param_in_every_ep_wrapper_mode(mode):
     host = _ModeHost(config, [_StubEPLayer(rogue=True)])
 
     with patch(_RANK_UNIFORM_ENV), pytest.raises(RuntimeError, match="rogue_scale"):
-        DistributedTrainerMixin._setup_distributed_modes(host)
+        DistributedTrainerMixin._configure_distributed_modes(host)
 
     assert host.ran_setups == [expected_setup]
 
@@ -208,9 +212,9 @@ def test_construction_refuses_ep_layers_a_hand_built_config_does_not_declare():
     host = _ModeHost(config, [_StubEPLayer(rogue=True)])
 
     with patch(_RANK_UNIFORM_ENV), pytest.raises(RuntimeError, match="rogue_scale"):
-        DistributedTrainerMixin._setup_distributed_modes(host)
+        DistributedTrainerMixin._configure_distributed_modes(host)
 
-    assert host.ran_setups == ["_setup_standard_data_parallel"]
+    assert host.ran_setups == ["_apply_dp_fsdp2"]
 
 
 @pytest.mark.parametrize("grouped_gemm", [False, True], ids=["plain", "grouped-gemm"])
@@ -225,7 +229,7 @@ def test_construction_passes_where_every_trainable_param_is_sharded(mode, groupe
     assert config.experts_fsdp_managed and host._dtype_excluded_params(), "premise: an exclusion, managed experts"
 
     with patch(_RANK_UNIFORM_ENV), pytest.raises(_PastGuard):
-        DistributedTrainerMixin._setup_distributed_modes(host)
+        DistributedTrainerMixin._configure_distributed_modes(host)
 
 
 if __name__ == "__main__":

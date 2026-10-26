@@ -252,7 +252,7 @@ def run_qwen3_tp_rejected(rank: int, local_rank: int, base_output_dir: str) -> b
             dataloader_num_workers=0,
         )
 
-        # The guard fires in _setup_distributed_modes (after super().__init__), deterministically
+        # The guard fires in _configure_distributed_modes (after super().__init__), deterministically
         # on every rank — so all ranks raise together; no collective desync.
         log("[A.3] Asserting DistributedSFTTrainer(LoRA, TP=2) raises ValueError...")
         raised, err = False, ""

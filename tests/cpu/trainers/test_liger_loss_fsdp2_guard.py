@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 from accelerate import PartialState
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 PartialState()  # the mixin logs through accelerate's rank-aware logger
 

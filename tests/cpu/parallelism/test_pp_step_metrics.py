@@ -19,8 +19,8 @@ import torch
 
 from src.distributed.pipeline_parallel.stage_losses import causal_lm_token_loss
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
+from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 
 LAST_STAGE_RANK = 1
 
@@ -76,10 +76,10 @@ class _Stage(PipelineTrainerMixin):
 @pytest.fixture
 def chain(monkeypatch):
     fake = _FakeChain()
-    monkeypatch.setattr("src.trainers.mixins.pipeline.dist", fake)
-    monkeypatch.setattr("src.trainers.mixins.pipeline.torch.cuda.current_device", lambda: "cpu")
+    monkeypatch.setattr("src.trainers.parallelism.pipeline_trainer.dist", fake)
+    monkeypatch.setattr("src.trainers.parallelism.pipeline_trainer.torch.cuda.current_device", lambda: "cpu")
     monkeypatch.setattr(
-        "src.trainers.mixins.pipeline.reject_across_ranks",
+        "src.trainers.parallelism.pipeline_trainer.reject_across_ranks",
         lambda reason, what, exc_type=RuntimeError: None
         if reason is None
         else (_ for _ in ()).throw(exc_type(reason)),

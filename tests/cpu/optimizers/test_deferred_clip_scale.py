@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from src.trainers.parallelism.grad_clipping import GradientClippingMixin
 
 
 def _params(n: int) -> list[nn.Parameter]:
@@ -23,7 +23,7 @@ def _named(params: list[nn.Parameter]) -> list[tuple[str, nn.Parameter]]:
 
 
 def _target(trainer, params):
-    return GradientSyncMixin._grad_scale_deferring_optimizer(trainer, params)
+    return GradientClippingMixin._grad_scale_deferring_optimizer(trainer, params)
 
 
 def test_adamw_bf16_owning_every_param_takes_the_scale():

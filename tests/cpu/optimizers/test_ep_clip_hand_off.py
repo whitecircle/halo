@@ -13,22 +13,21 @@ import torch
 import torch.nn as nn
 
 from src.optimizers.adamw_bf16 import AdamWBF16
-from src.trainers.mixins.grad_clip import clip_coefficient
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from src.trainers.parallelism.grad_clipping import GradientClippingMixin, clip_coefficient
 
 MAX_NORM = 0.5
 
 
-class _EPTrainer(GradientSyncMixin):
-    """The attributes ``ep_clip_grad_norm_`` reads, on one rank with EP layers and no TP."""
+class _EPTrainer(GradientClippingMixin):
+    """The attributes the EP clip reads, on one rank with EP layers and no TP."""
 
     def __init__(self, optimizer):
         self.optimizer = optimizer
         self.accelerator = SimpleNamespace(clip_grad_norm_=None)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False)
-        self._has_ep_layers = True
+        self._ep_layers = lambda: [object()]
         self._ep_config = SimpleNamespace()
-        self._patch_gradient_clipping_for_ep()
+        self._install_ep_clip()
 
     def _sync_deferred_expert_grads(self) -> None:
         pass
@@ -125,8 +124,8 @@ def test_installing_the_clip_on_a_model_without_ep_layers_raises():
     class _NoEPLayers(_EPTrainer):
         def __init__(self):
             self.accelerator = SimpleNamespace(clip_grad_norm_=None)
-            self._has_ep_layers = False
-            self._patch_gradient_clipping_for_ep()
+            self._ep_layers = list
+            self._install_ep_clip()
 
     with pytest.raises(RuntimeError, match="no EP-patched layers"):
         _NoEPLayers()
@@ -138,9 +137,9 @@ def test_installing_the_clip_without_an_ep_config_raises():
     class _NoEPConfig(_EPTrainer):
         def __init__(self):
             self.accelerator = SimpleNamespace(clip_grad_norm_=None)
-            self._has_ep_layers = True
+            self._ep_layers = lambda: [object()]
             self._ep_config = None
-            self._patch_gradient_clipping_for_ep()
+            self._install_ep_clip()
 
     with pytest.raises(RuntimeError, match="no EPConfig was captured"):
         _NoEPConfig()

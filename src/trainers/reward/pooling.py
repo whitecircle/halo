@@ -48,7 +48,7 @@ def sequence_classification_pad_id(config, tokenizer_pad_id: int | None) -> int:
 def pooling_pad_id_for(trainer) -> int:
     """The pooling pad id for ``trainer``'s PP loss adapter, read off its model and tokenizer.
 
-    Both pooled trainers resolve it identically at ``_setup_pipeline_parallel`` and assign it
+    Both pooled trainers resolve it identically at ``_configure_pipeline_parallel`` and assign it
     themselves; the two raises that guard it are in :func:`sequence_classification_pad_id`.
     """
     tokenizer = resolve_tokenizer(trainer.processing_class)

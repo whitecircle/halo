@@ -361,7 +361,7 @@ def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
         return
     declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
     assert declared is not False, (
-        "a MoE force-promotes use_reentrant to True (src/trainers/mixins/base.py), so this config's "
+        "a MoE force-promotes use_reentrant to True (src/trainers/distributed_trainer.py), so this config's "
         "use_reentrant: false is silently overridden — write true, or drop the kwarg"
     )
 

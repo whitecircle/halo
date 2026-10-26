@@ -14,9 +14,9 @@ import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 from trl.trainer.utils import disable_dropout_in_model
 
-import src.trainers.mixins.validation as validation
+import src.trainers.distributed_trainer as spine
 from src.configs.script_arguments import ModelArguments
-from src.trainers.mixins.validation import ParallelismValidationMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 
 class _Base(nn.Module):
@@ -28,7 +28,7 @@ class _Base(nn.Module):
         return self.q_proj(x)
 
 
-class _Trainer(ParallelismValidationMixin):
+class _Trainer:
     def __init__(self, lora_dropout: float):
         self.model = get_peft_model(_Base(), LoraConfig(r=2, target_modules=["q_proj"], lora_dropout=lora_dropout))
         disable_dropout_in_model(self.model)
@@ -37,11 +37,13 @@ class _Trainer(ParallelismValidationMixin):
     def _top_level_model(self):
         return self.model
 
+    _warn_on_zeroed_lora_dropout = DistributedTrainerMixin._warn_on_zeroed_lora_dropout
+
 
 @pytest.fixture
 def warnings(monkeypatch) -> list[str]:
     recorded: list[str] = []
-    monkeypatch.setattr(validation, "logger", SimpleNamespace(warning=recorded.append))
+    monkeypatch.setattr(spine, "logger", SimpleNamespace(warning=recorded.append))
     return recorded
 
 
@@ -51,13 +53,13 @@ def test_omitting_lora_dropout_keeps_a_nonzero_default():
 
 
 def test_a_zeroed_dropout_warns_with_the_setting_that_silences_it(warnings):
-    _Trainer(lora_dropout=0.05)._validate_lora_dropout_live()
+    _Trainer(lora_dropout=0.05)._warn_on_zeroed_lora_dropout()
     assert len(warnings) == 1
     assert "lora_dropout: 0.0" in warnings[0], warnings[0]
 
 
 def test_the_advised_setting_silences_the_warning(warnings):
-    _Trainer(lora_dropout=0.0)._validate_lora_dropout_live()
+    _Trainer(lora_dropout=0.0)._warn_on_zeroed_lora_dropout()
     assert warnings == []
 
 

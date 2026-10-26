@@ -159,7 +159,7 @@ The peel is **name-based, not module-based**. `gate_proj`/`up_proj`/`down_proj` 
 those are adapted by neither half once the name is peeled. A warning names what moved.
 
 Shared-expert LoRA has no supported route under EP: named generically it is peeled; named explicitly
-(`shared_experts.down_proj`) PEFT wraps a Linear inside the EP layer and `_validate_lora_ep_compatibility`
+(`shared_experts.down_proj`) PEFT wraps a Linear inside the EP layer and `reject_peft_lora_in_ep_layers`
 rejects it.
 
 Do not reach for TRL's `lora_target_parameters` on an MoE model — it is **rejected** on any model carrying
@@ -187,9 +187,9 @@ layer registers at construction on the *original* router param, one that never s
 (`fsdp_shard_ep1_experts`) and the multi-node deferred sweep already cover it.
 
 `modules_to_save` on any **other** EP-internal submodule is unsupported:
-`_reject_unsynced_trainable_params` raises naming any trainable param left inside an EP module with
+`reject_unsynced_trainable_params` raises naming any trainable param left inside an EP module with
 no gradient sync — it would otherwise silently drift across DP ranks. Its sibling
-`_validate_lora_ep_compatibility` (`src/trainers/mixins/validation.py`) rejects stock-PEFT LoRA layers placed
+`reject_peft_lora_in_ep_layers` (`src/trainers/parallelism/adapter_rules.py`) rejects stock-PEFT LoRA layers placed
 inside EP modules.
 
 ### Example: gpt-oss LoRA under EP
@@ -245,7 +245,7 @@ replicated. Nothing broadcasts the replicated matrix (it diverges from init) and
 sharded one from a replica (the TP replicated-grad sync averages and corrupts it), so the trained adapter is
 rank-inconsistent and will not reload onto a non-TP model. Use FSDP/DP, CP, or pure ETP instead.
 
-The gate is `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`) and it refuses both
+The gate is `reject_lora_under_tp` (`src/trainers/parallelism/adapter_rules.py`) and it refuses both
 adapter kinds: a `PeftModel` or any PEFT tuner layer injected in place (read off the tuner layers, so a
 backbone's own `lora_*` weights stay base weights), and — checked first, via `model_has_expert_lora` — the native
 grouped expert adapters, which are no tuner layer and which the TP replicated-grad sweep skips by param
@@ -491,7 +491,7 @@ base, so the run continues from its trained adapters rather than the fold
 ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 
 It needs native grouped expert adapters to exist: `lora_target_modules` must name at least one expert
-projection, or `_validate_merge_expert_lora_save` raises.
+projection, or `reject_unmergeable_expert_lora_save` raises.
 
 Both halves are folded: expert deltas inside each layer's `gather_expert_state_dict`, PEFT (attention)
 deltas out of place into each tensor as it is written, with the weight sync's fold

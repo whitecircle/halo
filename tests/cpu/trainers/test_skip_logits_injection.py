@@ -102,7 +102,7 @@ def test_no_injection_without_liger():
 
 
 def test_no_injection_in_cp_mode():
-    # _compute_cp_metrics reads local-chunk logits in CP mode
+    # the CP metrics read local-chunk logits in CP mode
     captured = captured_inputs(make_trainer(is_cp_mode=True), {"input_ids": LABELS, "labels": LABELS})
     assert "skip_logits" not in captured
 

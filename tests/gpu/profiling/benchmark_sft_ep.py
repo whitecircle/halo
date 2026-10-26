@@ -473,7 +473,7 @@ def main() -> int:
             bf16=not args.fp32,
             gradient_checkpointing=not args.no_gc,
             # Pass the real flag and let the mixin defer it across TRL's __init__ then restore it
-            # (_init_distributed_config / _setup_distributed_modes), exactly as production does. With
+            # (_init_distributed_config / _configure_distributed_modes), exactly as production does. With
             # it off, TRL's entropy guard is off and compute_loss dereferences outputs.logits — None on
             # every family whose Liger patch fuses the head into the loss (GLM-4 MoE Lite, Zaya default
             # fused_linear_cross_entropy).

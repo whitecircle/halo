@@ -1,9 +1,8 @@
 """sentence-transformers adapters for embedding training.
 
 :class:`PreloadedTransformer` wraps an already-loaded backbone in ST's ``Transformer`` interface (ST's own
-reloads from a path, discarding the EP/TP patches). Importing the module replaces ST's
-``gradient_checkpointing_*`` methods, which lack the ``every_n_layers`` / ``offload`` / ``disable`` transformers
-calls.
+reloads from a path, discarding the EP/TP patches); :func:`patch_sentence_transformer_gradient_checkpointing`
+gives ST's ``gradient_checkpointing_*`` the keywords transformers' trainer passes.
 """
 
 import inspect
@@ -19,10 +18,7 @@ from src.checkpoint.weights_source import config_schema_source
 
 
 class PreloadedTransformer(InputModule):
-    """SentenceTransformer Transformer module wrapping a pre-loaded backbone.
-
-    Backbone stored as ``self.auto_model`` so FSDP/EP/TP can traverse it via ``named_modules()``.
-    """
+    """sentence-transformers' Transformer module over a pre-loaded backbone, held as ``auto_model``."""
 
     config_file_name: str = "sentence_bert_config.json"
     config_keys: list = ["max_seq_length", "do_lower_case"]
@@ -69,12 +65,8 @@ class PreloadedTransformer(InputModule):
         max_length: int | None = None,
         **kwargs,
     ) -> dict[str, torch.Tensor]:
-        """Tokenize texts, as sentence-transformers' ``Transformer.preprocess`` does for text.
-
-        ``prompt`` is prepended to each text (a pair's first). ``max_length``, the per-batch override
-        sentence-transformers' collator passes, replaces ``max_seq_length`` as ST's own module does.
-        Other hints (``task``) are accepted and ignored: this module embeds raw text.
-        """
+        """Tokenize texts as sentence-transformers' ``Transformer.preprocess`` does: ``prompt`` prepended to each
+        text (a pair's first), the collator's per-batch ``max_length`` over ``max_seq_length``, other hints ignored."""
         if prompt:
             inputs = [(prompt + text[0], *text[1:]) if isinstance(text, tuple) else prompt + text for text in inputs]
         output: dict = {}
@@ -155,5 +147,8 @@ def _gradient_checkpointing_disable(self) -> None:
     _transformers_model(self).gradient_checkpointing_disable()
 
 
-BaseModel.gradient_checkpointing_enable = _gradient_checkpointing_enable
-BaseModel.gradient_checkpointing_disable = _gradient_checkpointing_disable
+def patch_sentence_transformer_gradient_checkpointing() -> None:
+    """Route ST's ``gradient_checkpointing_enable`` / ``_disable``, which lack transformers' ``every_n_layers``
+    and ``offload``, to the pipeline's transformers model; idempotent."""
+    BaseModel.gradient_checkpointing_enable = _gradient_checkpointing_enable
+    BaseModel.gradient_checkpointing_disable = _gradient_checkpointing_disable

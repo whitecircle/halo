@@ -20,7 +20,7 @@ import pytest
 from accelerate import PartialState
 from transformers import Trainer
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 PartialState()  # the mixin's accelerate logger refuses to emit without an initialized state
 
@@ -112,8 +112,8 @@ def test_the_escape_hatch_survives_the_per_split_recursion(monkeypatch):
     exit must not lift the OUTER hatch: the next split's loop would then re-arm the DP-scoped gather
     while the outer hatch's identity padding is still installed, on ranks whose eval batch counts do
     not match — the deadlock the hatch exists to avoid."""
-    monkeypatch.setattr("src.trainers.mixins.base.has_process_group", lambda: True)
-    monkeypatch.setattr("src.trainers.mixins.base.barrier", lambda *args, **kwargs: None)
+    monkeypatch.setattr("src.trainers.evaluation.has_process_group", lambda: True)
+    monkeypatch.setattr("src.trainers.evaluation.barrier", lambda *args, **kwargs: None)
     # The dict call and the first split are ragged; the second split is even, so it takes no hatch
     # of its own and must inherit the outer's.
     trainer = _NestingTrainer([True, True, False])

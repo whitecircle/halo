@@ -1,28 +1,38 @@
 # Trainer Architecture
 
-All distributed trainers inherit `DistributedTrainerMixin` (`src/trainers/mixins/base.py`), which sits
-alongside a base trainer class (`SFTTrainer`, `Trainer`, `GRPOTrainer`) and overrides the
-parallelism-sensitive methods while delegating the rest. `base.py` itself owns the core lifecycle:
-config extraction and mode dispatch, a custom `Accelerator` (no DDP wrapping, manual gradient sync),
-the FSDP2 wraps the modes share, optimizer construction and the parallelism-aware eval loop. It
-composes its seven sibling sub-mixins:
+All distributed trainers inherit `DistributedTrainerMixin` (`src/trainers/distributed_trainer.py`), which
+sits alongside a base trainer class (`SFTTrainer`, `Trainer`, `GRPOTrainer`) and overrides the
+parallelism-sensitive methods while delegating the rest. The spine itself holds construction
+(`_init_distributed_config`), the post-wrap orchestration (`_configure_distributed_modes`), the HF
+overrides (`training_step`, `prediction_step`, `log`, `create_optimizer`, `get_total_train_batch_size`,
+`_move_model_to_device`) and the reference-model hooks. Everything else sits in a module named for
+its concern:
 
-| Sub-mixin | Owns |
+| Module | Owns |
 |---|---|
-| `CheckpointingMixin` | Save / resume, plus the LR-scheduler and router-balancing-bias sidecars and a per-trainer sidecar hook |
-| `DataParallelDataLoaderMixin` | Parallelism-aware DP dataloaders |
-| `EpIntrospectionMixin` | EP module/param discovery, EP-safe gradient checkpointing |
-| `GradientSyncMixin` | The per-mode FSDP2 wrap, the QLoRA / deferred-EP / TP-replicated grad sweeps, the EP/DTensor-aware global-norm clips |
-| `ParallelismValidationMixin` | Mode and LoRA/EP/TP compatibility checks |
-| `PipelineTrainerMixin` | PP hooks, inert unless `pp_size > 1` |
-| `TokenMetricsMixin` | The loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device per-step accumulator, gathered once per log) and the per-document attention-work accumulator the MFU attention term reads |
+| `accelerator.py` | `AcceleratorMixin`: the plain `Accelerator` on the mixin-managed path (`build_plain_accelerator`, no DDP wrapping) and the training loop's no-wrap `prepare`; `accelerate_manages_fsdp` / `accelerate_manages_ddp` say when an `accelerate launch` owns the wrap |
+| `optimizer_selection.py` | `resolve_bf16_optimizer` and `build_optimizer` ([below](#optimizer-construction)) |
+| `training_args_overrides.py` | The TRL/HF `TrainingArguments` fields the toolkit owns: `align_save_on_each_node`, `disable_trl_liger`, `keep_all_dataset_columns`, `uses_evaluation`, `resolve_active_router_aux_loss_coef` |
+| `ctor_slots.py` | Positional ctor slots of a TRL/HF base, read off its installed signature (`resolve_ctor_positions`, `get_ctor_arg`, `get_ctor_config`, `get_ctor_model_and_config`) |
+| `checkpointing.py` | `CheckpointingMixin`: save / resume over an explicit `CheckpointContext`, the LR-scheduler and router-balancing-bias sidecars and a per-trainer sidecar hook |
+| `dataloaders.py` | `DataParallelLoaderMixin`: the parallelism-aware DP-sharded train / eval / test loaders and the pre-sharded length equalization |
+| `evaluation.py` | `EvaluationMixin`: `evaluate` / `evaluation_loop`, the unequal-batch escape hatch, the DP-scoped evaluation gather and the final round's padding cut (`eval_split_rows`) |
+| `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device per-step accumulator, gathered once per log) and the per-document attention-work accumulator the MFU attention term reads; `effective_loss_mask` |
+| `parallelism/mode_setup.py` | `ModeSetupMixin`: the mode ladder (`_wrap_for_parallel_mode`), every per-mode FSDP2 wrap and the QLoRA sync install, `FsdpExclusions`, the CP wrapper adoption, `reject_unsynced_trainable_params` (COLLECTIVE) |
+| `parallelism/ep_layers.py` | `EPLayersMixin`: the model's EP layers (`_ep_layers()`), their parameter-id sets (one `_param_id_caches` store, cleared after the wrap), EP-safe gradient checkpointing; `resolve_use_reentrant` |
+| `parallelism/grad_sync.py` | `GradientSyncMixin`: the grad-accum window, the QLoRA / deferred-EP / TP-replicated grad sweeps and their step-pre-hooks |
+| `parallelism/grad_clipping.py` | `GradientClippingMixin`: the EP / TP / QLoRA `clip_grad_norm_` replacements and the EP/DTensor-aware global norm they reduce; `pp_clip_grad_norm` and the clip primitives |
+| `parallelism/pipeline_trainer.py` | `PipelineTrainerMixin`: the PP split, setup, schedule-driven step and eval, inert unless `pp_size > 1` |
+| `parallelism/tp_leader.py` | `TPLeaderBroadcastMixin`: object and tensor broadcasts from the TP/ETP-group leader (the GRPO generation paths) |
+| `parallelism/trainer_rules.py`, `parallelism/pipeline_rules.py`, `parallelism/adapter_rules.py` | Every construction refusal as a pure `reject_*` over explicit inputs; `pipeline_rules.py` holds the PP ones, and the adapter rules cover LoRA, PEFT and native expert LoRA under the parallelism modes |
 
-Each is a class because it reads live trainer state; the methods a test or a caller reaches as
-`DistributedTrainerMixin.<name>` resolve through the MRO unchanged. `CheckpointingMixin`'s zero-arg
-`super()` calls (`_save_checkpoint`, `save_model`, the two loads) must reach the base Trainer —
-`tests/cpu/trainers/test_mixin_composition.py` fails if a sibling base ever intercepts one.
+Each mixin is a class because it reads live trainer state; the methods a test or a caller reaches as
+`DistributedTrainerMixin.<name>` resolve through the MRO unchanged. The HF overrides' zero-arg
+`super()` calls (the checkpoint methods, `evaluate`, `create_accelerator_and_postprocess`,
+`_inner_training_loop`) must reach the base Trainer — `tests/cpu/trainers/test_mixin_composition.py`
+fails if a sibling base ever intercepts one.
 
-Additional modules in the same package sit outside that composition. `StoredMetricsMixin`
+Additional modules in `src/trainers/mixins/` sit outside that composition. `StoredMetricsMixin`
 (`src/trainers/mixins/stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
 distillation, and SDPG for buffered per-step metric logging. `log` reports
 each metric's row-weighted world mean: one all-reduce of `(Σ value·rows, Σ rows)` per log call, after
@@ -41,10 +51,10 @@ on-policy trainers decouple the completions table from the metric drain. The emb
 `eval_embed/*` values are rank 0's per-batch means and count a padded final round's repeated rows
 ([Embedding](../training-methods/embedding.md#what-to-watch)).
 
-`GradientSyncMixin` dispatches by method, not by mode string: `_setup_ep_gradient_sync`,
-`_setup_cp_gradient_sync` and `_setup_ep_tp_gradient_sync` are called directly from `mixins/base.py`'s
-per-mode setup, and the EP one derives the FSDP ignored-module set in a single module-tree walk it
-hands to `_apply_ep_aware_dp_fsdp2`.
+`ModeSetupMixin` dispatches by method, not by mode string: `_apply_ep_fsdp2`,
+`_apply_cp_fsdp2` and `_apply_ep_tp_fsdp2` are called directly from the mode ladder
+(`_wrap_for_parallel_mode`), and the EP one derives the FSDP ignored-module set in a single
+module-tree walk it hands to `_apply_ep_aware_dp_fsdp2`.
 
 `CoordinatedTRLDatasetPrepMixin` (`trl_dataset_prep.py`) is mixed in directly by DPO, KTO and the
 reward trainer, ahead of TRL: it runs TRL's dataset preparation once per filesystem scope
@@ -62,11 +72,8 @@ Offline GRPO's `reference_cache.py` streams current-batch scores to filesystem-a
 maps the ordered ragged token values; its reference mixin attaches those buffers without repacking
 them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 
-Two mixin modules are imported as plain functions — `grad_clip.py` (`clip_coefficient` and
-`scale_shards_to_max_norm_`, the shared clip coefficient, below) and
-`loss_masks.py::effective_loss_mask` (`completion_mask ∧ tool_mask`
-where a `tool_mask` exists, else `completion_mask`); `src/trainers/parallelism/trainer_rules.py`
-holds the shared parallelism refusals (below).
+`token_metrics.py::effective_loss_mask` (`completion_mask ∧ tool_mask` where a `tool_mask` exists, else
+`completion_mask`) is imported as a plain function.
 
 ## Trainer compatibility
 
@@ -90,9 +97,10 @@ EP, ETP and TP run under every trainer. A **No** PP trainer is refused at config
 (`<Trainer> does not support Pipeline Parallelism (PP)`); see
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 
-A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`, read
-off the class at config time (`parallelism_config_from_args`) and enforced at construction
-(`ParallelismValidationMixin`):
+A trainer declares its capabilities as public class constants on `DistributedTrainerMixin`.
+`SUPPORTS_CP` and `PP_REFUSAL` are read by one classmethod, `reject_undeclared_axes(cp_size=,
+pp_size=)`, which `parallelism_config_from_args` runs before any model loads and
+`_init_distributed_config` runs again at construction:
 
 | ClassVar | Default | Meaning |
 |---|---|---|
@@ -100,8 +108,15 @@ off the class at config time (`parallelism_config_from_args`) and enforced at co
 | `PP_REFUSAL` | a generic refusal | the mechanism the PP refusal names; `None` where PP is supported |
 | `FORWARD_ROWS_PER_EXAMPLE` | `1` | rows one model call carries per example (`2` for the chosen ⧺ rejected concat of DPO, SMPO and the BT reward trainer); the EP dispatch-ceiling gate multiplies by it |
 | `SUPPORTS_LOWP_PRECISION` | `False` | the `lowp_*` knobs apply (SFT) |
-| `POLICY_GRADIENT_LOSS` | `False` | the loss never adds the router aux loss (the GRPO family) |
+| `POLICY_GRADIENT_LOSS` | `False` | the loss runs outside the forward with no labels (the GRPO family): it never adds the router aux loss, and an applied Liger FLCE draws a warning |
 | `SYNCS_TO_EXTERNAL_GENERATOR` | `False` | on-policy RL that syncs weights to a rollout engine (online and async GRPO, SDPG) |
+| `ROUTER_AUX_LOSS_ADDED_BY` | `None` | what adds the router aux loss: `"model_forward"` (SFT's `labels` forward), `"trl_loss"` (DPO, KTO; TRL is handed the balancing mode's coefficient, every other trainer `0.0`), or nothing, where `moe_balancing: aux_loss` is refused and `auto` turns the router logits back off |
+| `LOSS_IS_OWN_MEAN` | `False` | `compute_loss` returns the batch's own mean ([below](#training-loop-integration)) |
+| `REFERENCE_ALTERNATIVES` | the preference text | the trainer's way around holding a frozen reference, named by every reference warning and refusal |
+
+The refusal texts are `<Trainer> does not support Context Parallelism (CP). Use Expert Parallelism (EP)
+and/or Tensor Parallelism (TP) instead, or remove context_parallel_size.` and `<Trainer> does not
+support Pipeline Parallelism (PP): <PP_REFUSAL>. Use ... or remove pipeline_parallel_size.`
 
 Every PP-refusing trainer declares its own `PP_REFUSAL` text.
 
@@ -121,14 +136,15 @@ recomputed from trained weights on resume.
 **PP** needs a single-forward objective on one stage's logits, and the conditional rows above are
 constructor-time gates rather than class attributes. Rejections land in three places.
 
-`PipelineTrainerMixin._maybe_prepare_pipeline_model` rejects the generic blockers on every trainer:
+`PipelineTrainerMixin._split_pipeline_stage` rejects the generic blockers on every trainer
+(`src/trainers/parallelism/pipeline_rules.py`):
 an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `peft_config`, TRL's
 `activation_offloading`, `torch_compile`, image-bearing data, and an eval batch size differing
 from train. Padding-free collation is rejected at the collator wrap (its flattened width varies
 every step); packing passes the gates, at one packed row per microbatch.
 
-`src/trainers/parallelism/trainer_rules.py` holds the shared vocabulary the preference and offline-GRPO
-wrappers add on top — a live `ref_model`, missing precomputed reference columns, and
+`pipeline_rules.py` also holds the shared vocabulary the preference and offline-GRPO
+wrappers add on top, through the `_reject_unsupported_pp_options` hook or their own gate — a live `ref_model`, missing precomputed reference columns, and
 `compute_metrics` (no PP reduction reproduces their non-PP prediction convention). A tied-embedding
 checkpoint, live MTP tail layers, a family that is refused or not registered in `PP_FAMILY_SPECS`,
 and aux-loss MoE balancing are rejected later, at the model split
@@ -169,7 +185,7 @@ extraction is driven by part type. A new modality is an additive part type plus 
 
 ```python
 # Slots of the base the *args are forwarded to, read off its installed signature.
-_CTOR_POSITIONS = ctor_positions(SomeBaseTrainer, "model", "args")
+_CTOR_POSITIONS = resolve_ctor_positions(SomeBaseTrainer, "model", "args")
 
 
 class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
@@ -179,17 +195,20 @@ class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
     def __init__(self, *args, **kwargs):
         # Extract the parallelism kwargs; a positional model/config is read through the table.
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
-        super().__init__(*args, **kwargs)  # base init: accelerator, model, optimizer
-        self._setup_distributed_modes()    # apply parallelism after model exists
+        super().__init__(*args, **kwargs)    # base init: accelerator, model, optimizer
+        self._configure_distributed_modes()  # apply parallelism after the model exists
 ```
 
 **`_init_distributed_config(kwargs, training_args=None, ctor_args=(), ctor_positions=None, **explicit)`** pops the toolkit-only kwargs
 before the base trainer sees them: `parallelism_config` (a `ParallelismConfig`; passing `None`
 raises `ValueError`), the checkpoint knobs `save_sharded_ep` (default `False`), `save_max_shard_size`
 and `allow_optimizer_warm_restart`, `moe_balancing`, `dataset_presharded`, and `bf16_optimizer`.
-`_init_distributed_config` also sets `fsdp = ""` on the training args (the mixin owns sharding) and, under EP,
-`ddp_find_unused_parameters = True`, and reconciles `save_on_each_node`, the Liger config and the GC
-`use_reentrant` kwarg with the requested mode and the model (every MoE, EP or CP run goes reentrant).
+Its `_apply_training_args_overrides` step sets `fsdp = ""` on the training args (the mixin owns sharding)
+and, under EP, `ddp_find_unused_parameters = True`, hands TRL its router aux-loss coefficient, and
+reconciles `save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested
+mode and the model (every MoE, EP or CP run goes reentrant). It then runs the construction refusals
+(`reject_undeclared_axes`, `reject_pp_named_optimizer`, `reject_accelerate_launch`, the determinism
+gates) and the PP split.
 `distributed_trainer_kwargs` (`src/entrypoints/script.py`) is the bundle every entry script
 passes.
 
@@ -205,46 +224,51 @@ resolved it first, and `EmbeddingTrainer` passes a synthetic `{"model": model, "
 `is_cp_mode`, `is_tp_mode`, `is_expert_tp_mode`, `is_pp_mode`); `has_ep_group` is `ep_group_size > 1`,
 covering both EP and pure ETP.
 
-**`create_accelerator_and_postprocess()`** is overridden during base init, on the custom path only
-(`_needs_custom_accelerator()`; otherwise it delegates to the base): no DDP wrapping (manual gradient
-sync), `gradient_accumulation_steps=1` (the Trainer drives accumulation), bf16/fp16 autocast.
+**`create_accelerator_and_postprocess()`** (`AcceleratorMixin`) is overridden during base init, on the
+custom path only (`_needs_custom_accelerator()`; otherwise it delegates to the base):
+`build_plain_accelerator` applies no DDP wrapping (manual gradient sync), sets
+`gradient_accumulation_steps=1` (the Trainer drives accumulation) and bf16/fp16 autocast.
 
 On either path `fp32_output_conversion: false` (the default) clears `accelerator.native_amp`,
 dropping the fp32 logits upcast that can cost many GB at long sequence. Under `fp16` it is ignored
 with a warning: `native_amp` also gates GradScaler unscaling there, so clearing it would clip and
 step on scaled gradients.
 
-**`_setup_distributed_modes()`** dispatches on the mode flags, in this order:
+**`_configure_distributed_modes()`** takes back TRL's construction-time writes
+(`_restore_trl_overrides`), runs the pre-wrap gates (adapters under TP, inert router logits,
+`load_best_model_at_end`), aligns the PEFT and fp32-master dtypes, wraps the model, then runs the
+post-wrap gates (`reject_unsynced_trainable_params`, the expert-LoRA rules) and installs
+(`_configure_wrapped_model`). The wrap, `ModeSetupMixin._wrap_for_parallel_mode()`, dispatches on the
+mode flags in this order:
 
 ```text
-is_pp_mode         -> _setup_pipeline_parallel()   # stage-scoped (EP-aware) FSDP, runner, clip
-has_ep_group + TP  -> _setup_ep_tp()               # EP + attention TP
-has_ep_group + CP  -> _setup_ep_cp()               # EP + CP
-is_cp_mode         -> _setup_cp_only()
-is_tp_mode         -> _setup_tp_only()             # FSDP2 on the DP axis + TP clipping (TP applied at load)
-has_ep_group       -> _setup_ep_only()             # EP only, ETP only, or EP+ETP
-accelerate-managed -> accelerate FSDP / DDP        # raises if the model carries EP/grouped-GEMM wrappers
-needs_ep_wrappers  -> _setup_ep_only() if MoE, else _setup_standard_data_parallel()
-else               -> _setup_standard_data_parallel()   # standard FSDP2
+is_pp_mode                 -> _configure_pipeline_parallel()  # stage-scoped (EP-aware) FSDP, runner, clip
+has_ep_group + TP          -> EP clip, loader mesh, EP+TP FSDP2
+has_ep_group + CP          -> adopt the CP wrapper, EP clip, EP FSDP2
+is_cp_mode                 -> adopt the CP wrapper, CP FSDP2
+is_tp_mode                 -> _apply_tp_fsdp2() + TP clip     # FSDP2 on the DP axis (TP applied at load)
+has_ep_group, or EP layers -> EP clip, EP FSDP2               # EP, pure ETP, EP+ETP, grouped-GEMM ep1
+accelerate-managed         -> accelerate FSDP / DDP           # refuses EP/grouped-GEMM wrappers
+else                       -> plain DP FSDP2 (QLoRA: the DP sweep)
 ```
 
-TP/CP and the accelerate-managed branch are checked before `needs_ep_wrappers` because
-`use_grouped_gemm` defaults to True even for dense models — without this ordering a TP-only dense
-model would enter the EP path with the wrong DP size, and a dense accelerate launch would be
-hijacked onto the mixin's FSDP2. An MoE whose experts are already wrapped under `accelerate launch`
-raises here.
+TP/CP precede the EP branch because `use_grouped_gemm` defaults to True even for dense models —
+without this ordering a TP-only dense model would enter the EP path with the wrong DP size. The EP
+branch takes a model whose EP layers the config does not declare only off an accelerate launch, so a
+dense accelerate launch is never hijacked onto the mixin's FSDP2, and an MoE whose experts are
+already wrapped under `accelerate launch` raises.
 
-`_setup_ep_only()` patches gradient clipping and installs the EP gradient sync (which applies FSDP2
-with EP modules in `ignored_params`, except at `ep_group_size == 1` —
-[below](#gradient-synchronization)); it handles EP, pure ETP, and EP+ETP. CP setup validates the
-model is already a `UlyssesModel` (wrapped at load time). FSDP2 (`fully_shard`,
+The EP branch patches gradient clipping and installs the EP gradient sync (which applies FSDP2 with
+EP modules in `ignored_params`, except at `ep_group_size == 1` — [below](#gradient-synchronization)).
+CP setup requires the model to be a `UlyssesModel` already (wrapped at load time,
+`require_ulysses_model`). FSDP2 (`fully_shard`,
 `reshard_after_forward` from `fsdp_reshard_after_forward`, default `false`) carries non-EP gradient
 sync wherever DP > 1 — pure TP and EP+TP at DP=1 skip the wrap entirely. The wrap leaves out
 frozen parameters of a dtype no trainable parameter shares, and raises if it would leave out a
 trainable one nothing else syncs ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
 
 QLoRA skips FSDP2 on both the plain-DP and the CP path (`fully_shard` cannot wrap bnb's non-float
-`Params4bit`). `_setup_qlora_sync` sets a flag rather than per-parameter hooks, whose
+`Params4bit`). `_install_qlora_grad_sync` sets a flag rather than per-parameter hooks, whose
 rank-local firing would hang a job whose microbatch touches different adapters per rank.
 
 The sync is one bucketed all-reduce over every trainable grad per optimizer step, with membership
@@ -300,7 +324,7 @@ norms. The EP and TP clips share one norm, `_compute_global_grad_norm`:
 
 Then `global_norm = sqrt(expert_norm_sq + other_norm_sq)` sets the clip. Every clip derives one
 device-resident coefficient,
-`clip_coefficient` (`src/trainers/mixins/grad_clip.py`), and refuses any `norm_type` but 2 (`require_l2`).
+`clip_coefficient` (`src/trainers/parallelism/grad_clipping.py`), and refuses any `norm_type` but 2 (`require_l2`).
 The EP clip refuses to install on a model with no EP layers.
 The TP clip, and the EP clip under any other optimizer, scale every local gradient by it
 in place (`scale_shards_to_max_norm_`). Under EP with AdamWBF16 stepping exactly the clipped parameters
@@ -320,16 +344,16 @@ takes the model, args and decay parameters and returns an optimizer without touc
 | `fp32_non_ep_params` (or `optim: sgd` on a model with EP layers) | Param groups split by `(weight_decay, dtype, is_dtensor)` with `foreach`/`fused` disabled (PyTorch's foreach/fused optimizers cannot mix DTensor and plain-tensor params) |
 | else | The base Trainer optimizer |
 
-The last branch is gated, not a fallthrough: `_refuse_stock_optimizer_on_mixed_params` raises on a
+`build_optimizer` (`src/trainers/optimizer_selection.py`) returns `None` for that last row, and the
+stock build is gated, not a fallthrough: `reject_stock_adamw_on_mixed_params` raises on a
 stock fused/foreach AdamW whenever `ep_group_size > 1`, or the EP wrappers hold the experts and
 FSDP2 does not (`experts_fsdp_managed` false). `aten._fused_adamw_` raises "mixed torch.Tensor and
 DTensor" over that parameter set at the first step; the message names AdamWBF16 and
 `fp32_non_ep_params` as the two supported shapes.
 
-It then registers three step-pre-hooks so their grad syncs still run when `max_grad_norm: 0` skips
-clipping: `_register_tp_replicated_grad_sync_hook` (TP replicated-grad sync),
-`_register_deferred_ep_grad_sync_hook` (the multi-group-EP cross-replica sweep), and
-`_register_qlora_grad_sync_hook` (the QLoRA DP sweep).
+It then registers three step-pre-hooks (`_register_grad_sync_step_hooks`) so their grad syncs still
+run when `max_grad_norm: 0` skips clipping: the TP replicated-grad sync, the multi-group-EP
+cross-replica sweep, and the QLoRA DP sweep.
 
 The TP hook no-ops when `max_grad_norm > 0`. The EP hook must *not* gate on `max_grad_norm`: on a
 logging step at `max_grad_norm == 0` transformers still reaches the patched `clip_grad_norm_`, so it
@@ -345,7 +369,7 @@ The three hooks above are what keeps the grad sweeps running on those steps. See
 
 ## DataLoader and data parallelism
 
-`DataParallelDataLoaderMixin` overrides `get_train_dataloader()` / `get_eval_dataloader()` /
+`DataParallelLoaderMixin` overrides `get_train_dataloader()` / `get_eval_dataloader()` /
 `get_test_dataloader()` (the eval body, for `predict()`) to build
 dataloaders with a custom DP size/rank so ranks in the same TP/CP/ETP group receive identical data.
 The custom path fires when `_needs_custom_dataloader()` is True: TP, CP or ETP active, or the dataset is pre-sharded per DP rank. EP alone does not trigger
@@ -357,9 +381,10 @@ and rebuild TRL's `RepeatSampler` at the DP consumption rate
 ([batch geometry](../training-methods/grpo/online.md#data-flow-and-batch-construction));
 Offline GRPO uses `MultiGroupSampler`.
 
-`ParallelismConfig` computes both. DP size is
-`world_size / max(tp_size, cp_size, expert_tp_size)`; `get_data_parallel_rank()` derives
-the shard index per mode ([per-mode derivation](../parallelism/data-loading.md)).
+`ParallelismConfig` computes both: `data_parallel_size` is
+`world_size / pp_size / max(cp_size, tp_size, expert_tp_size)` (`stage_world_size` over the divisor), and
+`ParallelismConfig.get_data_parallel_rank()` derives the shard index per mode
+([per-mode derivation](../parallelism/data-loading.md)).
 
 `_prepare_dataloader()` passes the computed size/rank to
 `accelerate.prepare_data_loader()` as `num_processes` / `process_index`. A dataset already sharded
@@ -381,7 +406,7 @@ round in rank order, and the loader's `BatchSamplerShard` says how many: the row
 for torch's `BatchSampler` iteration over a sampler whose length is its rows (sequential, random,
 subset, group-by-length, `RepeatSampler`), which sentence-transformers' default batch sampler is.
 A batch sampler with its own iteration counts off its dataset only where its trainer declares it
-draws every row once (`_dataset_drawing_batch_samplers`: the embedding trainer's no-duplicates
+draws every row once (`DATASET_DRAWING_BATCH_SAMPLERS`: the embedding trainer's no-duplicates
 sampler, exact while only its last batch is short). Any other is not counted, so nothing is cut:
 group-by-label draws fewer rows than its dataset holds.
 
@@ -407,11 +432,11 @@ the eval loss and `compute_metrics` values it logs are then rank 0's shard, not 
 ## Training loop integration
 
 HuggingFace's `_inner_training_loop` calls `accelerator.prepare(model)`, which normally wraps in
-DDP. The mixin replaces `prepare()` with a no-op for model/optimizer/scheduler when
-`_should_skip_ddp_wrapping()` is True — `_fsdp_wrapped or _mixin_manages_gmm() or is_tp_mode or
-is_expert_tp_mode or is_pp_mode`. `_mixin_manages_gmm()` is `needs_ep_wrappers and not
-accelerate-managed`; `needs_ep_wrappers` alone defaults True even for dense models, so this guards
-against hijacking an accelerate-managed DDP/FSDP launch.
+DDP. `AcceleratorMixin` replaces `prepare()` with `no_wrap_prepare` for model/optimizer/scheduler when
+`_fsdp_wrapped or _mixin_manages_gmm or is_tp_mode or is_expert_tp_mode or is_pp_mode`.
+`_mixin_manages_gmm` is `needs_ep_wrappers and not accelerate-managed`; `needs_ep_wrappers` alone
+defaults True even for dense models, so this guards against hijacking an accelerate-managed DDP/FSDP
+launch.
 
 In CP mode `DistributedSFTTrainer` disables HuggingFace's `num_items_in_batch` loss scaling
 (`model_accepts_loss_kwargs = False`): CP ranks process chunks of the same sequence and FSDP
@@ -420,14 +445,14 @@ averaging already gives correct gradients, so without this both loss and `grad_n
 
 HuggingFace infers that flag from the model's forward signature alone — any `**kwargs` makes it True
 — and then drops its own `/gradient_accumulation_steps` division. A trainer whose `compute_loss`
-returns the batch's own mean therefore declares `_loss_is_own_mean`, which `_setup_distributed_modes`
+returns the batch's own mean therefore declares `LOSS_IS_OWN_MEAN`, which `_configure_distributed_modes`
 applies once for every trainer that declares it.
 
 ## CP loss and metrics in SFT
 
 `UlyssesModel.forward()` owns the boundary handling and the globally-normalized sum loss
-([the two corrections](../parallelism/context-parallelism.md)); `_compute_cp_metrics()` mirrors the
-boundary handling for accuracy. `DistributedSFTTrainer` calls base `Trainer.compute_loss`, not
+([the two corrections](../parallelism/context-parallelism.md)); `_cp_metric_row()` mirrors the
+boundary handling for accuracy, and the rows are reduced once per log. `DistributedSFTTrainer` calls base `Trainer.compute_loss`, not
 `SFTTrainer.compute_loss`: the TRL version adds metrics that assume logits cover the full sequence,
 but under CP they cover only the local chunk.
 
@@ -507,22 +532,24 @@ FSDP2 `fully_shard` creates dynamic subclasses at wrap time (`GptOssModel` → `
 are not in the registry, so capture silently fails.
 
 `_register_output_capturing_for_fsdp()` walks the wrapped model, finds modules with `_can_record_outputs` not yet registered, and adds them. It
-runs from `_setup_distributed_modes()` only when `_fsdp_wrapped=True` (the torchrun path);
+runs from `_configure_distributed_modes()` only when `_fsdp_wrapped=True` (the torchrun path);
 accelerate-managed FSDP v1 does not create dynamic subclasses and is unaffected.
 
 ## Checkpoint save and load
 
 Weight saves and loads live in `src/checkpoint/parallel/`.
-`save_model()` builds a `CheckpointContext` snapshot (`CheckpointContext.capture`, the one place
-trainer internals are read) and hands it to `save_checkpoint()`, which writes the tokenizer and runs
+`save_model()` builds a `CheckpointContext` from explicit trainer fields (`_checkpoint_context`, the
+one place a saver's trainer state is read) and hands it to `save_checkpoint()`, which writes the tokenizer and runs
 the `CheckpointSaver` its `select_checkpoint_saver()` ladder picks — PEFT and expert-LoRA adapters
 included (`None` = fall through to `Trainer.save_model`). The ladder reads rank-uniform state only,
 so every rank picks the identical saver.
 
-Weight resume goes through `load_resume_weights()` and the per-rank optimizer shards through
-`OptimizerShardStore` (`src/checkpoint/parallel/`), both over the mixin's `_checkpoint_load_context()`;
-where `load_resume_weights()` declines, `_load_from_checkpoint` runs the base Trainer's own load, and
-`_load_best_model` routes through it too.
+Weight resume goes through `load_resume_weights()` over `_weights_load_context()`, and the per-rank
+optimizer shards through `OptimizerShardStore` (`src/checkpoint/parallel/`) over
+`_checkpoint_load_context()`; where `load_resume_weights()` declines, `_load_weights_through_base` runs
+the base Trainer's own load, and `_load_best_model` routes through `_load_from_checkpoint` too. A trainer
+whose saves write a sub-module's names overrides the two hooks (the embedding trainer: the backbone,
+and sentence-transformers' own reload).
 
 Around it the mixin orchestrates the non-weight parts of a checkpoint: `_save_checkpoint` (which
 defers `save_total_limit` rotation until the new checkpoint is complete, and lets the shard store

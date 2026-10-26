@@ -76,9 +76,11 @@ from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_au
 from src.model_loading.parallel.whole_model import resolve_trainer_model
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.context_window import is_bounded_length
-from src.runtime.collectives import collective_device
+from src.runtime.collectives import all_gather_cat, collective_device
 from src.runtime.consensus import DeferredRankFailure, reject_across_ranks
 from src.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
+from src.trainers.dataloaders import resolve_data_seed
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
 from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin, reject_unsupported_reference_input
 from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS, compute_group_advantages
@@ -93,12 +95,10 @@ from src.trainers.grpo.objective.offline import (
 )
 from src.trainers.grpo.reference_cache import MappedReferenceScores, ReferenceScoreCache
 from src.trainers.grpo.reference_policy import reference_policy
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.dataloader import run_data_seed
 from src.trainers.mixins.reference_logps import LOGPROB_PRECISION_KEY
-from src.trainers.mixins.validation import keep_all_dataset_columns
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, rows_with_labels
-from src.trainers.parallelism.trainer_rules import reject_pp_compute_metrics, reject_pp_peft
+from src.trainers.parallelism.pipeline_rules import reject_pp_compute_metrics, reject_pp_peft
+from src.trainers.training_args_overrides import keep_all_dataset_columns
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -329,10 +329,8 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
     PP_REFUSAL = None
     SUPPORTS_CP = True
     POLICY_GRADIENT_LOSS = True
-    # The objective never passes labels into the forward, so Liger CE/FLCE cannot fire.
-    _loss_outside_model_forward = True
     # The objective divides by its own loss-type denominator, so the parent's grad-accum scaling stands.
-    _loss_is_own_mean = True
+    LOSS_IS_OWN_MEAN = True
     # Non-None only while the PP reference sweep drives the schedule: the last stage's loss stashes
     # its per-token log-probs here instead of computing the objective.
     _pp_ref_sweep: list[torch.Tensor] | None = None
@@ -584,7 +582,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         else:
             self._cached_eval_group_ids = None
 
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
         self._resolve_chunked_head_transform()
         self._check_full_logits_fit(self._loss_logits_width())
 
@@ -629,7 +627,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
     ) -> None:
         """Reject offline-GRPO options pipeline parallelism cannot honor, at construction.
 
-        Its own gate rather than the mixin's ``_validate_pp_mode`` hook: ``peft_config`` and
+        Its own gate rather than the mixin's ``_reject_unsupported_pp_options`` hook: ``peft_config`` and
         ``compute_metrics`` are explicit ctor parameters the mixin never sees, and the rejections
         must precede the in-ctor model load rather than follow it.
         """
@@ -799,7 +797,7 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
                 rank=dp_rank,
                 world_size=dp_size,
                 shuffle=shuffle,
-                seed=run_data_seed(self.args) if shuffle else 0,
+                seed=resolve_data_seed(self.args) if shuffle else 0,
             )
             if get_global_world_size() > 1:
                 # compute_loss gathers every batch: a rank with an extra batch blocks its peers.
@@ -1215,7 +1213,16 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
         # Under PP only the last stage's ranks buffer anything, and they are the DP replicas of the
         # whole sample set; a world gather would block the other stages in a collective they never
         # enter. The chain gets the drained scalars from ``log``.
-        gather = self._pp_stage_gather if self._pp_runner is not None else self.accelerator.gather
+        gather = (
+            partial(
+                all_gather_cat,
+                dim=0,
+                group=self._pp_stage_group,
+                world_size=dist.get_world_size(self._pp_stage_group),
+            )
+            if self._pp_runner is not None
+            else self.accelerator.gather
+        )
         positive = gather(torch.cat(buffer["positive_mask"]))
         for key, chunks in buffer.items():
             if key == "positive_mask":
@@ -1236,14 +1243,14 @@ class OfflineGRPOTrainer(ChunkedLogprobsCore, OfflineGRPOReferenceMixin, Distrib
                 self._metrics[mode][f"{prefix}_range"].append(high - low)
         buffer.clear()
 
-    def _setup_pipeline_parallel(self):
+    def _configure_pipeline_parallel(self):
         """Seed the PP-only live clamp floor, then run the mixin's setup.
 
         Kept out of ``_pp_loss_adapter``, which the mixin may call as a declarative accessor;
         ``_pp_batch_transform`` refreshes it from the scheduler every step.
         """
         self._pp_min_log_prob: float | None = self.min_log_prob
-        super()._setup_pipeline_parallel()
+        super()._configure_pipeline_parallel()
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """Offline GRPO's pipeline-loss contract.

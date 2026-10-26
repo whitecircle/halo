@@ -18,7 +18,7 @@ from transformers import PretrainedConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
-from src.trainers.mixins.validation import ParallelismValidationMixin
+from src.trainers.parallelism.trainer_rules import reject_unreloadable_best_model
 
 # A real PretrainedConfig, not a namespace: get_peft_model reads the config through ``to_dict()``
 # for its tied-weights probe, and the guard reads the expert count off it.
@@ -49,21 +49,17 @@ def _validate(
     if peft:
         model = get_peft_model(model, LoraConfig(target_modules=["fc"]))
         model.config = MOE_CONFIG if moe else DENSE_CONFIG
-    stub = SimpleNamespace(
-        parallelism_config=ParallelismConfig(
-            world_size=8,
-            gpus_per_node=8,
-            ep_size=ep,
-            cp_size=cp,
-            tp_size=tp,
-            use_grouped_gemm=grouped_gemm,
-            expert_lora=expert_lora,
-            merge_expert_lora_on_save=merge_expert_lora,
-        ),
-        args=SimpleNamespace(load_best_model_at_end=load_best),
-        model=model,
+    config = ParallelismConfig(
+        world_size=8,
+        gpus_per_node=8,
+        ep_size=ep,
+        cp_size=cp,
+        tp_size=tp,
+        use_grouped_gemm=grouped_gemm,
+        expert_lora=expert_lora,
+        merge_expert_lora_on_save=merge_expert_lora,
     )
-    ParallelismValidationMixin._validate_load_best_model_reloadable(stub)
+    reject_unreloadable_best_model(SimpleNamespace(load_best_model_at_end=load_best), config, model)
 
 
 def test_flag_off_never_raises():

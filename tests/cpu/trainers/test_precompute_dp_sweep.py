@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, SequentialSampler
 PartialState()
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
+from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
 from tests.common.parallelism import make_parallelism_config
@@ -69,7 +69,7 @@ class _ReferenceForward:
         return batch.float(), None
 
 
-class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixin, _ReferenceForward):
+class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelLoaderMixin, _ReferenceForward):
     """Real mixin over a stub reference forward, with a world gather simulated from all ranks' shards."""
 
     # The stub forward stands in for FP32LogprobsMixin's, so it declares that mixin's precision.
@@ -105,12 +105,6 @@ class _Trainer(PrecomputeRefLogpsRankConsistentMixin, DataParallelDataLoaderMixi
     def _reference_settings(self) -> dict:
         return {}
 
-    def get_data_parallel_size(self) -> int:
-        return self.parallelism_config.data_parallel_size
-
-    def get_data_parallel_rank(self) -> int:
-        return self.parallelism_config.get_data_parallel_rank()
-
     def _data_parallel_rank_by_global_rank(self) -> list[int]:
         return [_parallelism_config(rank).get_data_parallel_rank() for rank in range(WORLD_SIZE)]
 
@@ -141,13 +135,14 @@ def test_sweep_loader_shards_by_dp_rank_not_global_rank():
     trainer = _Trainer(PROBE_RANK, world_chunks=_world_chunks_per_step())
     trainer._precompute_ref_logps(_fake_dataset(), "train", BATCH_SIZE)
 
-    dp_size = trainer.get_data_parallel_size()
+    dp_size = trainer.parallelism_config.data_parallel_size
+    dp_rank = trainer.parallelism_config.get_data_parallel_rank()
     expected = [
         row
         for step in range(DATASET_SIZE // (BATCH_SIZE * dp_size))
         for row in range(
-            (step * dp_size + trainer.get_data_parallel_rank()) * BATCH_SIZE,
-            (step * dp_size + trainer.get_data_parallel_rank() + 1) * BATCH_SIZE,
+            (step * dp_size + dp_rank) * BATCH_SIZE,
+            (step * dp_size + dp_rank + 1) * BATCH_SIZE,
         )
     ]
     assert trainer.observed_rows == expected
@@ -193,8 +188,8 @@ def test_preference_trainers_supply_the_sweep_the_mixin_enters(kind):
     pinned by ``test_precompute_in_memory_attach.py::test_the_trainers_route_the_precompute_through_the_mixin``.
     """
     trainer_cls, _ = TRAINERS[kind]
-    assert issubclass(trainer_cls, DataParallelDataLoaderMixin)
-    assert trainer_cls.data_parallel_sweep is DataParallelDataLoaderMixin.data_parallel_sweep
+    assert issubclass(trainer_cls, DataParallelLoaderMixin)
+    assert trainer_cls.data_parallel_sweep is DataParallelLoaderMixin.data_parallel_sweep
 
 
 if __name__ == "__main__":

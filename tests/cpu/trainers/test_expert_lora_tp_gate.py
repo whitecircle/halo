@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Under TP, every kind of adapter is refused — native EP expert LoRA included.
 
-``_validate_lora_tp_compatibility`` must not test only the adapters PEFT owns — an ``isinstance``
+``reject_lora_under_tp`` must not test only the adapters PEFT owns — an ``isinstance``
 check plus the tuner layers' own parameters (``tuner_adapter_param_ids``), and the TP replicated-grad
 sweep skips EP expert params **by identity**. EP's native grouped expert adapters pass every such
 gate: not PEFT-wrapped, no tuner layer, excluded from the TP grad sweep — an expert-only LoRA run
@@ -13,18 +13,14 @@ own ``lora_*`` parameter is a base weight a TP full fine-tune may train.
     python tests/cpu/trainers/test_expert_lora_tp_gate.py
 """
 
-import types
-
 import pytest
 import torch
 import torch.nn as nn
 from peft import IA3Config, LoraConfig, PeftModel, get_peft_model, inject_adapter_in_model
 
-import src.trainers.mixins.validation as validation_mod
+import src.trainers.parallelism.adapter_rules as validation_mod
 from src.models.peft_adapters import tuner_adapter_param_ids
-from src.trainers.mixins.base import DistributedTrainerMixin
-
-_validate = DistributedTrainerMixin._validate_lora_tp_compatibility
+from src.trainers.parallelism.adapter_rules import reject_lora_under_tp
 
 
 class _TinyLM(nn.Module):
@@ -42,13 +38,6 @@ class _NativeLoraBackbone(_TinyLM):
         self.lora_B = nn.Parameter(torch.zeros(8, 4))
 
 
-def _fake_self(model):
-    # Borrowed, not reimplemented: a stub unwrap could pass while the real one is broken.
-    me = types.SimpleNamespace(model=model)
-    me._top_level_model = types.MethodType(DistributedTrainerMixin._top_level_model, me)
-    return me
-
-
 def test_native_expert_lora_is_rejected_under_tp(monkeypatch):
     model = _TinyLM()
     # Premise: this is exactly the shape both existing predicates wave through.
@@ -57,14 +46,14 @@ def test_native_expert_lora_is_rejected_under_tp(monkeypatch):
     monkeypatch.setattr(validation_mod, "model_has_expert_lora", lambda m: True)
 
     with pytest.raises(ValueError, match="expert LoRA is not supported with Tensor Parallelism"):
-        _validate(_fake_self(model))
+        reject_lora_under_tp(model)
 
 
 def test_a_full_finetune_under_tp_is_not_refused(monkeypatch):
     """No adapters of either kind: the gate must stay silent, or every EP+TP full fine-tune dies."""
     monkeypatch.setattr(validation_mod, "model_has_expert_lora", lambda m: False)
 
-    assert _validate(_fake_self(_TinyLM())) is None
+    assert reject_lora_under_tp(_TinyLM()) is None
 
 
 def test_attention_lora_under_tp_still_names_its_own_mechanism(monkeypatch):
@@ -74,7 +63,7 @@ def test_attention_lora_under_tp_still_names_its_own_mechanism(monkeypatch):
     peft_model = get_peft_model(_TinyLM(), LoraConfig(r=4, target_modules=["q_proj"]))
 
     with pytest.raises(ValueError, match="LoRA/PEFT adapters are not supported with Tensor Parallelism"):
-        _validate(_fake_self(peft_model))
+        reject_lora_under_tp(peft_model)
 
 
 def test_a_backbones_own_lora_named_weights_are_not_adapters(monkeypatch):
@@ -83,7 +72,7 @@ def test_a_backbones_own_lora_named_weights_are_not_adapters(monkeypatch):
     model = _NativeLoraBackbone()
     assert any("lora_" in name for name, _param in model.named_parameters()), "premise: adapter-like names"
 
-    assert _validate(_fake_self(model)) is None
+    assert reject_lora_under_tp(model) is None
 
 
 @pytest.mark.parametrize(
@@ -99,7 +88,7 @@ def test_adapters_injected_in_place_are_refused_under_tp(monkeypatch, config):
     assert not isinstance(model, PeftModel), "premise: injected in place, not wrapped"
 
     with pytest.raises(ValueError, match="LoRA/PEFT adapters are not supported with Tensor Parallelism"):
-        _validate(_fake_self(model))
+        reject_lora_under_tp(model)
 
 
 if __name__ == "__main__":

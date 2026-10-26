@@ -5,8 +5,8 @@ EP+TP replicated-gradient sync correctness.
 Under TP, truly-replicated params (LayerNorms, router; shared expert on families that have one)
 must be kept identical across the TP axis or the replicas drift apart over training → a
 rank-inconsistent model and per-rank-divergent grad clipping. TP-only does this inside
-``tp_clip_grad_norm_``; EP+TP installs ``ep_clip_grad_norm_`` instead, so that path owns the sync:
-``ep_clip_grad_norm_`` (and the max_grad_norm=0 fallback hook) TP-axis-average the replicated grads
+the TP clip; EP+TP installs the EP clip (``_install_ep_clip``) instead, so that path owns the sync:
+the EP clip (and the max_grad_norm=0 fallback hook) TP-axis-average the replicated grads
 — EXCLUDING the EP-distributed experts (different experts per TP rank; averaging them would corrupt
 them) and harmlessly including the already-world-synced router. A path that skips the average lets
 the replicas drift.
@@ -89,7 +89,7 @@ def run(ctx):
         max_length=2048,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        max_grad_norm=1.0,  # exercises the ep_clip_grad_norm_ sync path
+        max_grad_norm=1.0,  # exercises the EP clip's sync path
     )
     trainer = DistributedSFTTrainer(
         model=model,

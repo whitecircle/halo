@@ -168,7 +168,7 @@ def test_the_column_survives_the_pipeline_wrapper(collator_cls):
     position_ids, no boundary label masking, and the dense mask retained — the whole row attends as
     ONE document, with no error anywhere.
 
-    ``_setup_pipeline_parallel`` wraps the collator in ``FixedShapeCollator`` first — deliberately,
+    ``_configure_pipeline_parallel`` wraps the collator in ``FixedShapeCollator`` first — deliberately,
     so the pin can union the inner collator's columns — and then reads
     ``getattr(self.data_collator, "required_dataset_columns", ())`` off the wrapper. A wrapper that
     does not forward the attribute answers ``()``, HF prunes ``seq_lengths``, and every packed row

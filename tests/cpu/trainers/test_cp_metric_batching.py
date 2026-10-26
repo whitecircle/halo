@@ -13,16 +13,17 @@ Run: python tests/cpu/trainers/test_cp_metric_batching.py
 
 import types
 from collections import defaultdict
+from unittest import mock
 
 import pytest
 import torch
+from transformers import Trainer
 from trl.trainer.utils import entropy_from_logits
 
 from src.kernels.logprobs import LABEL_IGNORE_INDEX
 from src.trainers import sft as sft_trainer
 from src.trainers.sft import _CP_METRIC_COLUMNS, _CP_METRIC_DTYPE, DistributedSFTTrainer
 
-_accumulate = DistributedSFTTrainer._compute_cp_metrics
 _drain = DistributedSFTTrainer._drain_cp_metrics
 
 CP_SIZE = 2
@@ -44,16 +45,22 @@ def _rank(cp_rank, *, training=True, is_cp_mode=True, accelerator=None):
     me = types.SimpleNamespace(
         model=types.SimpleNamespace(training=training),
         cp_config=types.SimpleNamespace(cp_rank=cp_rank),
-        cp_size=CP_SIZE,
-        is_cp_mode=is_cp_mode,
+        parallelism_config=types.SimpleNamespace(cp_size=CP_SIZE, is_cp_mode=is_cp_mode),
         accelerator=accelerator or _NoCollective(),
         _cp_metric_accum={},
         _total_train_tokens=0,
         _metrics={"train": defaultdict(list), "eval": defaultdict(list)},
     )
-    me._compute_cp_metrics = types.MethodType(_accumulate, me)
+    me._pad_to_cp_multiple = types.MethodType(DistributedSFTTrainer._pad_to_cp_multiple, me)
     me._drain_cp_metrics = types.MethodType(_drain, me)
     return me
+
+
+def _accumulate(rank, outputs, full_labels, full_attention_mask):
+    """One micro-batch through the trainer's real CP loss path, the wrapped forward replaced by ``outputs``."""
+    inputs = {"labels": full_labels, "attention_mask": full_attention_mask}
+    with mock.patch.object(Trainer, "compute_loss", return_value=(torch.zeros(()), outputs)):
+        DistributedSFTTrainer._compute_cp_loss(rank, None, inputs)
 
 
 def _microbatch(seed, rows=2, aux_loss=None, attended=SEQ):
@@ -82,7 +89,7 @@ def _run(ranks, batches, *, drain_every_microbatch):
     """
     for batch in batches:
         for rank in ranks:
-            rank._compute_cp_metrics(*batch)
+            _accumulate(rank, *batch)
         if drain_every_microbatch:
             _drain_in_lockstep(ranks)
     if not drain_every_microbatch:
@@ -117,7 +124,7 @@ def test_accumulation_runs_no_collective_and_no_host_sync():
     """The whole point: the micro-batch path must not reach the wire or the host."""
     rank = _rank(0)
     for seed in range(4):
-        rank._compute_cp_metrics(*_microbatch(seed, aux_loss=0.25))
+        _accumulate(rank, *_microbatch(seed, aux_loss=0.25))
     assert rank._cp_metric_accum["train"].shape == (len(_CP_METRIC_COLUMNS),)
     assert not rank._metrics["train"], "accumulation emitted a metric, which means it reduced"
 
@@ -127,9 +134,9 @@ def test_buffer_width_is_fixed_however_many_microbatches_folded_in():
     is a hang, not an error."""
     few, many = _rank(0), _rank(1)
     for seed in range(2):
-        few._compute_cp_metrics(*_microbatch(seed))
+        _accumulate(few, *_microbatch(seed))
     for seed in range(9):
-        many._compute_cp_metrics(*_microbatch(seed))
+        _accumulate(many, *_microbatch(seed))
     assert few._cp_metric_accum["train"].shape == many._cp_metric_accum["train"].shape
 
 
@@ -208,7 +215,7 @@ def test_drain_is_one_collective_per_log_however_many_microbatches():
     calls = []
     rank = _rank(0)
     for seed in range(8):
-        rank._compute_cp_metrics(*_microbatch(seed, aux_loss=0.3))
+        _accumulate(rank, *_microbatch(seed, aux_loss=0.3))
     rank.accelerator = types.SimpleNamespace(
         device=torch.device("cpu"),
         reduce=lambda tensor, reduction="sum": calls.append(reduction) or tensor,
@@ -230,7 +237,7 @@ def test_columns_carry_the_quantities_their_names_claim():
     # without that, swapping the two columns is invisible.
     outputs, labels, mask = _microbatch(0, rows=2, attended=chunk // 2)
     rank = _rank(0, accelerator=types.SimpleNamespace(device=torch.device("cpu"), reduce=lambda t, reduction="sum": t))
-    rank._compute_cp_metrics(outputs, labels, mask)
+    _accumulate(rank, outputs, labels, mask)
     rank._drain_cp_metrics()
 
     expected_attended = int(mask[:, :chunk].sum())
@@ -258,7 +265,7 @@ def test_a_renamed_column_raises_instead_of_transposing_the_row(monkeypatch):
     rank = _rank(0)
 
     with pytest.raises(KeyError, match="aux_loss_total"):
-        rank._compute_cp_metrics(*_microbatch(0, aux_loss=0.3))
+        _accumulate(rank, *_microbatch(0, aux_loss=0.3))
 
 
 def test_empty_window_emits_nothing_rather_than_a_zero():
@@ -289,9 +296,9 @@ def test_train_and_eval_windows_do_not_contaminate_each_other():
     """``_metrics`` is keyed by mode and so is the accumulator; eval must not add to the run's
     train-token counter."""
     rank = _rank(0)
-    rank._compute_cp_metrics(*_microbatch(0))
+    _accumulate(rank, *_microbatch(0))
     rank.model.training = False
-    rank._compute_cp_metrics(*_microbatch(1))
+    _accumulate(rank, *_microbatch(1))
 
     assert set(rank._cp_metric_accum) == {"train", "eval"}
     # Eval's attended-token column is a structural zero, so draining eval leaves the counter alone.

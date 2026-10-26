@@ -19,8 +19,8 @@ import torch.nn as nn
 from transformers import TrainingArguments
 
 from src.entrypoints.script import distributed_trainer_kwargs
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.embedding.trainer import EmbeddingTrainer
-from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.rosters import distributed_trainer_classes
@@ -56,7 +56,7 @@ def test_the_binding_check_rejects_a_signature_missing_a_key():
 
 
 def test_the_checkpoint_knobs_reach_the_checkpoint_contexts(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.checkpoint.parallel.context.is_fs_save_rank", lambda: True)
+    monkeypatch.setattr("src.trainers.checkpointing.is_fs_save_rank", lambda: True)
     model = nn.Linear(2, 2)
     trainer = object.__new__(DistributedSFTTrainer)
     remaining = trainer._init_distributed_config(

@@ -208,7 +208,7 @@ wrong is silent — the loss stays finite and the objective is just different:
 The trap is the plain slice. It is indistinguishable from a replica by tensor type, and once FSDP2
 wraps the run for DP **both** become 1-D `dp` DTensors, so the mesh cannot separate them either.
 
-`_tp_sharded_plain_param_ids()` (`src/trainers/mixins/grad_sync.py`) is the single source of truth:
+`_tp_sharded_plain_param_ids()` (`src/trainers/parallelism/grad_sync.py`) is the single source of truth:
 it reads the hand-sliced registry (`hand_sliced_suffixes`: the suffixes `register_hand_sliced`
 records, each with its shard dim, when a param is sliced by hand), and both
 `_sync_tp_replicated_grads` and `_sharded_grad_bucket` key off it. Everything a TP plan shards is a DTensor whose gradient reduces itself, so the plan contributes
@@ -271,7 +271,7 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 
 | Knob | Under TP | Gate |
 |---|---|---|
-| `use_peft` / LoRA (incl. EP+TP) | rejected — PEFT adapters are plain tensors outside the TP graph, so the replicated half diverges and the sharded half is corrupted by the replicated-grad sync. Use LoRA with FSDP/DP, CP, or pure ETP | `_validate_lora_tp_compatibility` |
+| `use_peft` / LoRA (incl. EP+TP) | rejected — PEFT adapters are plain tensors outside the TP graph, so the replicated half diverges and the sharded half is corrupted by the replicated-grad sync. Use LoRA with FSDP/DP, CP, or pure ETP | `reject_lora_under_tp` |
 | native EP expert LoRA | rejected — the grouped expert adapters ride the EP-distributed expert weights, which both TP gates skip by param identity, so no adapter shape under EP+TP is gradient- or save/merge-covered. Train expert LoRA under EP without TP | same |
 | QLoRA / `load_in_4bit` | rejected — the TP loaders materialize plain de-quantized weights | `model_loading/parallel/load_rules.py` |
 | `fsdp_reshard_after_forward` | rejected at `data_parallel_size > 1` — a plain all-gather on TP-sharded DTensor params has no registered sharding strategy | `_reject_fsdp_settings` |
@@ -280,9 +280,9 @@ single-domain multi-group EP with `ep_size > 2` (`ep4+tp2` on 8) and multi-domai
 | `fsdp_shard_ep1_experts: false` | rejected — the TP path shards `ep1` experts unconditionally | same |
 | `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
-| `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `ParallelismValidationMixin` |
+| `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `reject_accelerate_launch` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
-| `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `_validate_load_best_model_reloadable` |
+| `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP/grouped-GEMM wrappers | `reject_unreloadable_best_model` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `src/model_loading/liger/dispatch.py` |
 | `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `configure_run_tokenizer` (`is_input_embedding_tp_sharded`) |
 | `gradient_checkpointing`, `packing`, `padding_free`, `lowp_precision`, `moe_balancing` | not gated under TP | — |

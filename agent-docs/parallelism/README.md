@@ -95,7 +95,7 @@ grads all-reduce over the expert-replica group only when a run holds more than o
 `fp32_grad_reduce` runs that reduction in fp32 over bf16 storage.
 
 The global batch is split along the data-parallel axis only: each of `data_parallel_size` ranks takes
-a disjoint slice, sharded by `data_parallel_rank` in `src/trainers/mixins/dataloader.py`. Ranks
+a disjoint slice, sharded by `data_parallel_rank` in `src/trainers/dataloaders.py`. Ranks
 inside a TP, CP, or ETP group see the **same** batch; they shard weights or the sequence, not the
 data.
 
@@ -152,7 +152,7 @@ traced to the code that raises. This table is the index into them, not a second 
 | [DP](data-parallelism.md#limitations) | all | all | MoE grouped GEMM under `accelerate launch`, multi-device `device_map` |
 
 EP, ETP and TP run under every trainer. CP and PP support is declared per class (`SUPPORTS_CP` /
-`PP_REFUSAL`) and enforced in `ParallelismValidationMixin`. Full matrix:
+`PP_REFUSAL`) and enforced by `DistributedTrainerMixin.reject_undeclared_axes`. Full matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). CP's `False`
 rows are per-trainer declarations — `logits_to_keep`, global log-probability sums, full-sequence
 pooling and dual models are the reasons behind them, not properties CP itself detects.

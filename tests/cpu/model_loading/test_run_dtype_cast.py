@@ -75,7 +75,7 @@ TRAINING_LOADERS = "src/model_loading/parallel/"
 # edit rather than a silently shrunk sweep.
 EAGER_LOADERS = frozenset(
     {
-        ("scripts/training/embedding.py", "build_sentence_transformer"),
+        ("scripts/training/embedding.py", "_load_sentence_transformer"),
         ("src/model_loading/parallel/frozen_models.py", "load_frozen_auxiliary_model"),
         ("src/model_loading/parallel/loader.py", "_build_random_init"),
         ("src/model_loading/parallel/whole_model.py", "load_whole_model"),
@@ -87,6 +87,9 @@ EAGER_LOADERS = frozenset(
 # already at the run dtype and raises on any other). No dense family pins a parameter, and a mixed load
 # there would fail FSDP2's wrap loudly.
 UNCAST_LOADERS = frozenset({("src/model_loading/parallel/tp.py", "load_tp_model")})
+
+# Pipelines assembled around a backbone the parallel loader already cast and finalized.
+ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_preloaded_pipeline")})
 
 # Model builds that are no training or scoring load: the PEFT merge folds an adapter into the base a
 # conversion tool loaded (conversions keep the pins), and the head-transform probe builds an fp32 meta
@@ -551,7 +554,7 @@ def _eager_loaders() -> dict[tuple[str, str], frozenset[str]]:
 
 
 def test_the_eager_load_surface_is_pinned():
-    pinned = EAGER_LOADERS | UNCAST_LOADERS | NON_TRAINING_BUILDS | NON_MODEL_BUILDERS
+    pinned = EAGER_LOADERS | UNCAST_LOADERS | ASSEMBLED_FROM_LOADED | NON_TRAINING_BUILDS | NON_MODEL_BUILDERS
     discovered = set(_eager_loaders())
     assert discovered == pinned, f"the model-build surface changed: {sorted(discovered ^ pinned)}; classify each"
 

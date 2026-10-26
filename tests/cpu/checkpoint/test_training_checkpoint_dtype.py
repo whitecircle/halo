@@ -35,7 +35,7 @@ from src.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gat
 from src.checkpoint.reading import load_full_state_dict
 from src.checkpoint.writing import normalize_gathered_state_dict
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
 from tests.common.checkpoint_io import save_context
 from tests.common.gloo import run_gloo_ranks
@@ -193,7 +193,8 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
     through ``save_model``; ``save_model`` records the context each save is handed. The base's
     optimizer write after it fails on ``base_save_fails``."""
 
-    _has_ep_layers = False
+    def _ep_layers(self):
+        return []
 
     def __init__(self, run_dir, *, base_save_fails=False):
         self.run_dir = run_dir

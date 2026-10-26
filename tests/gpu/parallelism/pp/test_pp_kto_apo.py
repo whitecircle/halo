@@ -374,7 +374,10 @@ def run(ctx):
         )
         for call, real in zip(eval_calls, real_row_flags, strict=True)
     ]
-    dp_size, dp_rank = trainer.get_data_parallel_size(), trainer.get_data_parallel_rank()
+    dp_size, dp_rank = (
+        trainer.parallelism_config.data_parallel_size,
+        trainer.parallelism_config.get_data_parallel_rank(),
+    )
     remainder = EVAL_ROWS % (ROWS_PER_RANK * dp_size)
     expected_eval = hf_eval_loss_reference(step_losses, ROWS_PER_RANK, remainder, dp_rank=dp_rank, dp_size=dp_size)
     eval_loss = init_eval_metrics["eval_loss"]

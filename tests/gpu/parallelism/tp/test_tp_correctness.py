@@ -167,7 +167,7 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
     All ranks build a ``DistributedSFTTrainer`` with ``tp_size=2`` — this is what
     sets ``trainer._device_mesh`` and installs the TP grad-norm machinery
     (``_sync_tp_replicated_grads`` + ``_compute_global_grad_norm``, the exact path
-    ``tp_clip_grad_norm_`` calls in production). We then run, on the SAME fixed
+    the TP clip calls in production). We then run, on the SAME fixed
     batch used by the baseline:
 
       * a forward (no_grad) for the loss, and
@@ -250,7 +250,7 @@ def compute_tp_loss_and_grad_norm(tokenizer, local_rank, output_dir):
     loss.backward()
 
     params = [p for p in tp_model.parameters() if p.grad is not None]
-    # Mirrors tp_clip_grad_norm_ — sync replicated grads across the TP axis, then take the global norm.
+    # Mirrors the TP clip — sync replicated grads across the TP axis, then take the global norm.
     trainer._sync_tp_replicated_grads(params)
     tp_synced_identical, tp_synced_count = assert_tp_synced_grads_identical(trainer, tp_model)
     tp_grad_norm_local = float(trainer._compute_global_grad_norm(params))

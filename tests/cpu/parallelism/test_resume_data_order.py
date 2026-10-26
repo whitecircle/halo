@@ -7,7 +7,7 @@ fixed shapes accelerate's ``set_epoch`` probes. The stock DP chain is rescued by
 toolkit brings itself, and a dispatching loader whose probe is a single level. Their epoch-seeded
 sampler stays at epoch 0, so the resumed epoch re-draws epoch 0's permutation (and every later
 epoch shifts by one).
-``set_sampler_epoch`` walks the whole chain instead, and ``DataParallelDataLoaderMixin._run_epoch``
+``set_sampler_epoch`` walks the whole chain instead, and ``DataParallelLoaderMixin._run_epoch``
 runs it before the base's epoch body — the seam every trainer, custom loader or not, goes through.
 
 Run: python tests/cpu/parallelism/test_resume_data_order.py
@@ -19,8 +19,8 @@ import torch
 from accelerate.data_loader import get_sampler, prepare_data_loader, skip_first_batches
 from torch.utils.data import DataLoader, RandomSampler, Sampler
 
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin, set_sampler_epoch
+from src.trainers.dataloaders import DataParallelLoaderMixin, set_sampler_epoch
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 
 _ROWS = 24
 _BATCH_SIZE = 2
@@ -156,7 +156,7 @@ class _ResumingBase:
         return "base"
 
 
-class _StubTrainer(DataParallelDataLoaderMixin, _ResumingBase):
+class _StubTrainer(DataParallelLoaderMixin, _ResumingBase):
     """The shape every concrete trainer has: the mixin ahead of a Trainer base."""
 
 
@@ -178,7 +178,7 @@ def test_run_epoch_stamps_the_epoch_the_base_then_resumes_into():
 def test_every_trainer_reaches_the_stamp_through_the_composed_mixin():
     """Including the plain FSDP2/DP path, whose loader the custom dataloader seam never sees."""
     owner = next(base for base in DistributedTrainerMixin.__mro__ if "_run_epoch" in base.__dict__)
-    assert owner is DataParallelDataLoaderMixin, (
+    assert owner is DataParallelLoaderMixin, (
         f"_run_epoch resolves to {owner.__name__} for the composed trainer mixin, not the dataloader mixin"
     )
 

@@ -22,7 +22,7 @@ from src.distributed.tensor_parallel.parallelize_attention import validate_tp_he
 from src.model_loading.parallel.load_rules import reject_unsupported_model
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.moe.expert_lora_spec import reject_expert_lora_with_expert_tp
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.parallelism.trainer_rules import reject_stock_adamw_on_mixed_params
 from tests.common.parallelism import make_parallelism_config
 
 INTERNAL_FIELD = re.compile(
@@ -206,9 +206,8 @@ def test_ep1_sharding_refusal_points_at_the_docs_instead_of_a_benchmark():
 
 
 def test_stock_adamw_refusal_names_the_yaml_knobs():
-    stub = SimpleNamespace(parallelism_config=SimpleNamespace(ep_group_size=8))
     with pytest.raises(ValueError, match="mixed torch.Tensor and DTensor") as err:
-        DistributedTrainerMixin._refuse_stock_optimizer_on_mixed_params(stub, "adamw_torch_fused")
+        reject_stock_adamw_on_mixed_params("adamw_torch_fused", SimpleNamespace(ep_group_size=8), None)
     _assert_names_knobs(str(err.value), ("expert_parallel_size=1",))
 
 

@@ -16,7 +16,7 @@ import torch
 from trl import DPOTrainer, KTOTrainer
 from trl.trainer.utils import hash_module
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.preference.dpo import DistributedDPOTrainer
 from src.trainers.preference.kto import DistributedKTOTrainer
 

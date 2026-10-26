@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""The one bucketed grad-norm accumulation the mixin's EP/TP norm and the PP clip share.
+"""The one grad-norm accumulation the mixin's EP/TP norm and the PP clip share.
 
-``bucketed_grad_norm_sq`` / ``local_grad_norm_sq`` (``src/trainers/mixins/grad_clip.py``) serve
+``local_grad_norm_sq`` (``src/trainers/parallelism/grad_clipping.py``), applied per bucket, serves
 every norm path, so two properties have to hold or a clip threshold silently drifts between
 topologies:
 
@@ -20,7 +20,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from src.trainers.mixins.grad_clip import bucketed_grad_norm_sq, local_grad_norm_sq
+from src.trainers.parallelism.grad_clipping import local_grad_norm_sq
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -51,6 +51,11 @@ def _shards(rank: int, bucket: str, index: int) -> list[torch.Tensor]:
     ]
 
 
+def _bucketed_norm_sq(buckets: dict[str, list[torch.Tensor]]) -> dict[str, torch.Tensor]:
+    """Each bucket's local squared norm, as both norm paths take it."""
+    return {name: local_grad_norm_sq(shards, device="cpu") for name, shards in buckets.items()}
+
+
 def _reference_norm_sq(shards: list[torch.Tensor]) -> torch.Tensor:
     """Per-tensor fp32 norm, squared and summed."""
     total = torch.zeros((), dtype=torch.float32)
@@ -63,9 +68,8 @@ def _reference_norm_sq(shards: list[torch.Tensor]) -> torch.Tensor:
 def test_local_value_matches_the_per_tensor_reference(topology):
     buckets = {name: _shards(0, name, i) for i, name in enumerate(TOPOLOGY_BUCKETS[topology])}
 
-    got = bucketed_grad_norm_sq(buckets, device="cpu")
+    got = _bucketed_norm_sq(buckets)
 
-    assert sorted(got) == sorted(buckets), "every declared bucket must come back — the reduces are structural"
     for name, shards in buckets.items():
         assert got[name].dtype is torch.float32 and got[name].shape == ()
         torch.testing.assert_close(got[name], _reference_norm_sq(shards), rtol=1e-6, atol=0)
@@ -73,21 +77,11 @@ def test_local_value_matches_the_per_tensor_reference(topology):
         assert got[empty].item() == 0.0
 
 
-def test_single_bucket_helper_agrees_with_the_bucketed_one():
-    shards = _shards(0, "stage", 0)
-    torch.testing.assert_close(
-        local_grad_norm_sq(shards, device="cpu"),
-        bucketed_grad_norm_sq({"stage": shards}, device="cpu")["stage"],
-        rtol=0,
-        atol=0,
-    )
-
-
 def _worker(rank: int, out: str) -> None:
     failures = []
     for topology, names in TOPOLOGY_BUCKETS.items():
         buckets = {name: _shards(rank, name, i) for i, name in enumerate(names)}
-        norm_sq = bucketed_grad_norm_sq(buckets, device="cpu")
+        norm_sq = _bucketed_norm_sq(buckets)
         for name in names:
             summed = norm_sq[name].clone()
             dist.all_reduce(summed, op=dist.ReduceOp.SUM)

@@ -273,7 +273,7 @@ def run_lora_tp_test(rank: int, base_output_dir: str) -> bool:
         log(f"  Trainable: {trainable / 1e6:.2f}M / {total / 1e6:.1f}M ({100 * trainable / total:.2f}%)")
 
         # Assert the trainer rejects LoRA+TP at construction. The guard fires in
-        # _setup_distributed_modes (after super().__init__) deterministically on every rank, so
+        # _configure_distributed_modes (after super().__init__) deterministically on every rank, so
         # all ranks raise together — no collective desync.
         log("[B.5] Asserting DistributedSFTTrainer(LoRA, TP=2) raises ValueError...")
         config = SFTConfig(

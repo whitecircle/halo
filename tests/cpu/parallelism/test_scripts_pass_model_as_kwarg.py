@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Every training script must construct its trainer with ``model=`` as a KEYWORD.
 
-The pipeline seam in ``src/trainers/mixins/base.py`` must SPLIT the model into this rank's stage
+The pipeline seam in ``src/trainers/distributed_trainer.py`` must SPLIT the model into this rank's stage
 before ``super().__init__`` ever sees it, and it rewrites ``kwargs["model"]`` to do so. A positional
 model lands in ``*args`` instead, so pipeline parallelism raises "Pipeline parallelism requires the
 model to be passed as the `model` keyword" no matter how the run is configured, leaving the shipped
@@ -101,7 +101,7 @@ def test_no_script_passes_the_model_positionally():
             offenders.append(f"{path.relative_to(REPO_ROOT)}:{call.lineno} {trainer}(<positional>, ...)")
     assert not offenders, (
         "These scripts pass the model positionally, so it never reaches the kwargs the pipeline "
-        "seam in src/trainers/mixins/base.py splits — PP becomes unreachable:\n  " + "\n  ".join(offenders)
+        "seam in src/trainers/distributed_trainer.py splits — PP becomes unreachable:\n  " + "\n  ".join(offenders)
     )
 
 

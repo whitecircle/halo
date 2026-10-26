@@ -47,7 +47,7 @@ def _build(
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", _init_cfg),
         mock.patch.object(SFTTrainer, "__init__", _sft_init),
-        mock.patch.object(DistributedSelfDistillationTrainer, "_setup_distributed_modes", return_value=None),
+        mock.patch.object(DistributedSelfDistillationTrainer, "_configure_distributed_modes", return_value=None),
         mock.patch.object(DistributedSelfDistillationTrainer, "_resolve_stop_token_ids", return_value=None),
         mock.patch.object(
             DistributedSelfDistillationTrainer,

@@ -17,8 +17,7 @@ import pytest
 import torch
 from transformers import Trainer
 
-from src.trainers.mixins.grad_sync import GradientSyncMixin
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.parallelism.grad_clipping import GradientClippingMixin, pp_clip_grad_norm
 
 
 class _NoHostSync(torch.Tensor):
@@ -42,7 +41,7 @@ class _Accelerator:
 class _Trainer:
     """Stands in for the trainer ``Trainer._get_grad_norm`` is a method of."""
 
-    _has_mixed_mesh_grads = GradientSyncMixin._has_mixed_mesh_grads
+    _has_mixed_mesh_grads = GradientClippingMixin._has_mixed_mesh_grads
 
     def __init__(self):
         self.accelerator = _Accelerator()
@@ -87,7 +86,7 @@ class _HFBase:
     _get_grad_norm = Trainer._get_grad_norm
 
 
-class _Gated(GradientSyncMixin, _HFBase):
+class _Gated(GradientClippingMixin, _HFBase):
     """The composition every distributed trainer has: the mixin ahead of the Trainer base."""
 
 
@@ -156,15 +155,15 @@ def test_the_pipeline_clip_returns_a_device_tensor(monkeypatch):
             self.all_reduces += 1
 
     fake = _Dist()
-    monkeypatch.setattr("src.trainers.mixins.pipeline.dist", fake)
-    monkeypatch.setattr("src.trainers.mixins.pipeline.torch.cuda.current_device", lambda: "cpu")
+    monkeypatch.setattr("src.trainers.parallelism.grad_clipping.dist", fake)
+    monkeypatch.setattr("src.trainers.parallelism.grad_clipping.torch.cuda.current_device", lambda: "cpu")
     monkeypatch.setattr(torch.Tensor, "item", _NoHostSync.item, raising=True)
 
     params = [torch.nn.Parameter(torch.ones(4)) for _ in range(2)]
     for param in params:
         param.grad = torch.full((4,), 3.0)
 
-    norm = PipelineTrainerMixin._pp_clip_grad_norm(object.__new__(PipelineTrainerMixin), params, max_norm=1.0)
+    norm = pp_clip_grad_norm(params, max_norm=1.0)
 
     assert isinstance(norm, torch.Tensor) and norm.device.type == "cpu"
     assert fake.all_reduces == 1, "one collective per step, over the whole pipeline"

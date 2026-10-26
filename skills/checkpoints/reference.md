@@ -67,8 +67,8 @@ Source: `src/checkpoint/parallel/resume_weights.py` (`load_resume_weights`),
 (`OptimizerShardStore.load` / `.save`), `src/checkpoint/parallel/optimizer_meta.py`,
 `src/checkpoint/parallel/sidecars.py` (`restore_lr_scheduler`), `src/checkpoint/reading.py`
 (`load_full_state_dict`), `src/checkpoint/hub_layout.py` (`ModuleLayoutView`).
-`src/trainers/mixins/checkpointing.py::_load_from_checkpoint` runs the base Trainer's load where
-`load_resume_weights` declines.
+`src/trainers/checkpointing.py::_load_from_checkpoint` runs the base Trainer's load (`_load_weights_through_base`)
+where `load_resume_weights` declines; `_weights_load_context` is the context the weight resume reads.
 
 ## Per-script reference (`scripts/after_training/`)
 
@@ -215,7 +215,7 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
 ## Footguns (source-cited)
 
 - **Every writer reads resharded params** — `save_model`
-  (`src/trainers/mixins/checkpointing.py`) calls `reshard_fsdp2_modules` on the top-level model
+  (`src/trainers/checkpointing.py`) calls `reshard_fsdp2_modules` on the top-level model
   before it touches a tensor. A mid-training save can land while the FSDP2 modules still hold the
   transient UNSHARDED params a forward registered — objects the optimizer never stepped — so every
   saver below would write the wrong tensors, and the PEFT path additionally **mis-routes**: its

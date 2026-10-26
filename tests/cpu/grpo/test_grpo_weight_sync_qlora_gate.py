@@ -84,7 +84,7 @@ def test_online_setup_weight_sync_raises_without_vllm_generation():
 
 
 _SPINE_STEPS = (
-    "_setup_distributed_modes",
+    "_configure_distributed_modes",
     "_validate_held_reference_model",
     "_resolve_chunked_head_transform",
     "_setup_weight_sync",
@@ -123,7 +123,7 @@ def test_both_trainers_reach_the_gate_through_the_shared_init_spine():
     # realized, the logits plane is weighed against memory the placed model left free, and the gates
     # must run before anything can push weights.
     assert ran == [
-        "_setup_distributed_modes",
+        "_configure_distributed_modes",
         "_validate_held_reference_model",
         "_resolve_chunked_head_transform",
         "_check_full_logits_fit(7)",

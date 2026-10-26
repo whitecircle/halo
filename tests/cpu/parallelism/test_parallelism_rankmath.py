@@ -5,7 +5,7 @@ Complements ``test_parallelism_config.py`` with the cases it does not cover:
 
 * H1 — the multi-group pure-EP REJECT (the documented ep4-on-8 run-killer), refused when the
   ``ParallelismConfig`` is built; the accept shapes drive the REAL
-  ``EpIntrospectionMixin._setup_ep_gradient_checkpointing`` through a minimal stub trainer.
+  ``EPLayersMixin._install_ep_gradient_checkpointing`` through a minimal stub trainer.
 * H2 — EP+ETP ``get_data_parallel_rank`` correctness with ep_size>1 (exercises the ``% ep_size``
   modulo that ep_size=1 makes a no-op): the DP-rank partition + genuine ETP-partner geometry.
 * H3 — cross-node column-block layout at a SECOND topology (world=32, 4 domains of 8).
@@ -23,7 +23,7 @@ import pytest
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from src.trainers.parallelism.ep_layers import EPLayersMixin
 from tests.common.parallelism import create_config
 
 
@@ -49,15 +49,15 @@ class _GCModel(nn.Module):
 
 
 def _run_ep_gc_guard(config):
-    """Invoke the real ``_setup_ep_gradient_checkpointing`` against ``config``.
+    """Invoke the real ``_install_ep_gradient_checkpointing`` against ``config``.
 
     Binds the unbound mixin method to a minimal stub that carries exactly the attributes the method
-    reads: ``parallelism_config``, ``_has_ep_layers`` (True so the method runs), ``_ep_config`` (the
-    EPConfig — production guarantees it is set whenever ``_has_ep_layers`` is True; the method reads
+    reads: ``parallelism_config``, ``_ep_layers`` (one GC-supporting layer, so the method runs),
+    ``_ep_config`` (the EPConfig — production guarantees it is set whenever the model has EP layers; the method reads
     ``_ep_config.is_deferred_dp``), and ``args.gradient_checkpointing`` (True so an ACCEPT shape falls
     through to the real GC-enable path rather than returning early) beside its
-    ``gradient_checkpointing_kwargs`` (TrainingArguments' ``None`` default). The stub ``model`` owns no
-    ``EPMoELayerBase``, so the accept path completes (logs + sets args.gradient_checkpointing=False)
+    ``gradient_checkpointing_kwargs`` (TrainingArguments' ``None`` default). The stub ``model`` is no real
+    model, so the accept path completes (logs + sets args.gradient_checkpointing=False)
     without needing a real model.
     """
 
@@ -70,9 +70,8 @@ def _run_ep_gc_guard(config):
 
     stub = _Stub()
     stub.parallelism_config = config
-    stub._has_ep_layers = True
-    # Production captures _ep_config from the first EP module, so it is set whenever _has_ep_layers is
-    # True. The method reads ``_ep_config.is_deferred_dp`` — mirror EPConfig.is_deferred_dp
+    # Production captures _ep_config from the first EP layer, so it is set whenever there is one. The
+    # method reads ``_ep_config.is_deferred_dp`` — mirror EPConfig.is_deferred_dp
     # (config.py): the deferred post-backward DP sweep engages only for multi-group, multi-node,
     # non-expert-TP EP.
     stub._ep_config = SimpleNamespace(
@@ -81,10 +80,10 @@ def _run_ep_gc_guard(config):
     stub.args = _Args()
     stub.model = _GCModel()
     stub._top_level_model = lambda: stub.model
-    stub._find_ep_modules = lambda: []
+    stub._ep_layers = lambda: [SimpleNamespace(FAMILY=SimpleNamespace(supports_gradient_checkpointing=True))]
 
-    with patch("src.trainers.mixins.ep_introspection.is_global_main_process", return_value=True):
-        EpIntrospectionMixin._setup_ep_gradient_checkpointing(stub)
+    with patch("src.trainers.parallelism.ep_layers.is_global_main_process", return_value=True):
+        EPLayersMixin._install_ep_gradient_checkpointing(stub)
 
 
 def _assert_config_rejects_multigroup_ep(*, ep_size, world, gpus_per_node):

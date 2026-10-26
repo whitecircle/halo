@@ -40,10 +40,10 @@ from sentence_transformers.base.sampler import NoDuplicatesBatchSampler
 from torch.utils.data import BatchSampler, DataLoader, SequentialSampler
 from trl.trainer.utils import RepeatSampler
 
+from src.trainers.dataloaders import dp_representative_ranks
 from src.trainers.embedding.trainer import EmbeddingTrainer
-from src.trainers.mixins.dataloader import (
-    DataParallelDataLoaderMixin,
-    dp_representative_ranks,
+from src.trainers.evaluation import (
+    EvaluationMixin,
     final_round_split_rows,
     split_rows_head,
     split_rows_mean,
@@ -57,11 +57,11 @@ BATCH = 2
 ROUND = 8
 
 
-class _EvalHost(DataParallelDataLoaderMixin):
+class _EvalHost(EvaluationMixin):
     """The state ``eval_split_rows`` and the evaluation gather read: the accelerator, the eval mode,
     the DP scope the install agreed on, and the embedding trainer's declared batch samplers."""
 
-    _dataset_drawing_batch_samplers = (NoDuplicatesBatchSampler,)
+    DATASET_DRAWING_BATCH_SAMPLERS = (NoDuplicatesBatchSampler,)
 
     def __init__(self, accelerator, scope=None, use_gather_object=False):
         self.accelerator = accelerator
@@ -357,7 +357,7 @@ def test_only_a_known_stream_is_counted():
     assert final_round_split_rows(_sharded(_st_batch_sampler("batch_sampler", rows))) == 23 % 8
     assert final_round_split_rows(_sharded(grouped)) is None
     assert final_round_split_rows(_sharded(_st_batch_sampler("no_duplicates", rows))) is None, "undeclared"
-    declared = EmbeddingTrainer._dataset_drawing_batch_samplers
+    declared = EmbeddingTrainer.DATASET_DRAWING_BATCH_SAMPLERS
     assert final_round_split_rows(_sharded(_st_batch_sampler("no_duplicates", rows)), declared) == 23 % 8
     assert final_round_split_rows(_sharded(grouped), declared) is None
     assert final_round_split_rows(_sharded(_NoStreamBatchSampler())) is None

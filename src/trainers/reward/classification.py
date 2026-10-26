@@ -56,7 +56,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.hardware import current_device
 from src.model_loading.parallel.peft_setup import build_peft_model, peft_bf16_autocast
 from src.runtime.ranks import has_process_group
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from src.trainers.reward.pooling import (
     decode_pooling_plane,
@@ -172,7 +172,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
 
     PP_REFUSAL = None
     # compute_loss returns the batch's own mean (per-replica; DP averages gradients).
-    _loss_is_own_mean = True
+    LOSS_IS_OWN_MEAN = True
 
     _pp_pool_pad_id: int | None = None
     # Set from build_peft_model's result; False whenever no PEFT config was passed.
@@ -302,7 +302,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
 
         self.model.add_model_tags(self._tag_names)
 
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
 
     def _default_compute_metrics(self, eval_pred: EvalPrediction) -> dict:
         """Compute classification metrics with proper multi-label handling."""
@@ -600,13 +600,13 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
             return torch.where(weight_sum > 0, weight_sum, weight_sum.new_ones(()))
         return rows.float().clamp(min=1.0)
 
-    def _setup_pipeline_parallel(self):
+    def _configure_pipeline_parallel(self):
         """Seed the PP-only pooling pad id, then run the mixin's setup.
 
         Kept out of ``_pp_loss_adapter``, which the mixin may call as a declarative accessor.
         """
         self._pp_pool_pad_id = pooling_pad_id_for(self)
-        super()._setup_pipeline_parallel()
+        super()._configure_pipeline_parallel()
 
     def _pp_loss_adapter(self) -> PipelineLossAdapter:
         """Pooled sequence classification as a last-stage pipeline loss.
@@ -677,7 +677,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
 
     def _pp_classification_normalizer(self, inputs: dict) -> torch.Tensor:
         """Chain-local batch denominator. This trainer's loss is a per-replica mean
-        (``_loss_is_own_mean``; DP averages gradients — a mean of per-replica
+        (``LOSS_IS_OWN_MEAN``; DP averages gradients — a mean of per-replica
         means), so unlike SFT's DP-global token count no cross-rank reduction is involved."""
         valid, _, plane_values = decode_pooling_plane(inputs["labels"])
         targets = inputs["class_targets"] if self.is_multi_label else plane_values
@@ -692,7 +692,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """The configured objective (``_build_loss_fn``) on the head's pooled logits, in fp32.
 
-        No ``_validate_inputs``: that check reads ``labels`` as token ids, and class ids collide with
+        No ``_warn_once_on_empty_labels``: that check reads ``labels`` as token ids, and class ids collide with
         the tokenizer's pad/eos ids (Gemma's pad=0 / eos=1 is every binary label).
         """
         with peft_bf16_autocast(self._peft_has_been_casted_to_bf16, self.accelerator.device):

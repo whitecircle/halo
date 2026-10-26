@@ -22,21 +22,22 @@ from trl import KTOTrainer
 from src.data.collators.fixed_shape import pad_to_fixed_length
 from src.data.completion_spans import completion_labels
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, sequence_logprobs
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
-from src.trainers.mixins.validation import ctor_config, ctor_positions, ctor_value, disable_trl_liger
 from src.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter, row_count_normalizer, rows_with_labels
-from src.trainers.parallelism.trainer_rules import (
+from src.trainers.parallelism.pipeline_rules import (
+    reject_missing_precomputed_reference,
+    reject_positional_model_or_args,
     reject_pp_compute_metrics,
     reject_pp_ref_model,
-    require_model_and_args_kwargs,
-    require_precomputed_reference,
 )
 from src.trainers.preference.logprobs import FP32LogprobsMixin
 from src.trainers.preference.precompute import PrecomputeRefLogpsRankConsistentMixin
+from src.trainers.training_args_overrides import disable_trl_liger
 
 # TRL KTOTrainer positional slots, for ctor params arriving via *args — derived from the installed signature.
-_CTOR_POSITIONS = ctor_positions(KTOTrainer, "model", "args", "ref_model")
+_CTOR_POSITIONS = resolve_ctor_positions(KTOTrainer, "model", "args", "ref_model")
 
 _REF_LOGPS_COLUMN = "ref_logps"
 
@@ -65,14 +66,13 @@ class DistributedKTOTrainer(
 
     PP_REFUSAL = None
     # TRL's KTO loss adds the aux term itself and this class does not override it.
-    _consumes_router_aux_loss = True
-    _trl_adds_router_aux_loss = True
+    ROUTER_AUX_LOSS_ADDED_BY = "trl_loss"
 
     def __init__(self, *args, **kwargs):
         # TRL's chunked KTO path refuses the router aux loss this trainer hands it; must precede
         # _init_distributed_config.
         disable_trl_liger(
-            ctor_config(args, kwargs, _CTOR_POSITIONS),
+            get_ctor_config(args, kwargs, _CTOR_POSITIONS),
             "Disabling TRL's use_liger_kernel for KTO: TRL's chunked KTO log-prob path refuses the "
             "router aux loss. Liger kernels are still applied at the model level by "
             "load_distributed_model.",
@@ -80,24 +80,24 @@ class DistributedKTOTrainer(
 
         self._init_reference_resume(kwargs)
         kwargs = self._init_distributed_config(kwargs, ctor_args=args, ctor_positions=_CTOR_POSITIONS)
-        self._validate_reference_model(ctor_value(args, kwargs, "ref_model", _CTOR_POSITIONS))
+        self._validate_reference_model(get_ctor_arg(args, kwargs, "ref_model", _CTOR_POSITIONS))
         with self._trl_reference_hash_skipped():
             super().__init__(*args, **kwargs)
         # Post-super: TRL builds its own reference inside __init__ when none is passed, the model is not
         # PEFT-wrapped and precompute_ref_log_probs is off.
         self._validate_held_reference_model()
-        self._setup_distributed_modes()
+        self._configure_distributed_modes()
 
-    def _validate_pp_mode(self, ctor_args: tuple, kwargs: dict) -> None:
+    def _reject_unsupported_pp_options(self, ctor_args: tuple, kwargs: dict) -> None:
         """Reject KTO configurations pipeline parallelism cannot honor, at construction.
 
         Runs before the model is split, so every raise is cheap and rank-uniform. The KTO options
         the PP loss reproduces — ``beta``, ``desirable_weight``, ``undesirable_weight`` — need no
         gate; the loss type is gated below. Remaining ctor parameters are read from ``kwargs`` only:
-        ``require_model_and_args_kwargs`` forces ``model`` into kwargs, and any positional argument
+        ``reject_positional_model_or_args`` forces ``model`` into kwargs, and any positional argument
         would rebind TRL's ``model`` slot.
         """
-        require_model_and_args_kwargs(kwargs)
+        reject_positional_model_or_args(kwargs)
         training_args = kwargs["args"]
         if training_args.loss_type != "apo_zero_unpaired":
             raise ValueError(
@@ -109,9 +109,9 @@ class DistributedKTOTrainer(
                 f"'apo_zero_unpaired' loss is decomposable and supported under PP."
             )
         reject_pp_ref_model(
-            ctor_value(ctor_args, kwargs, "ref_model", _CTOR_POSITIONS), "the ref_logps dataset column"
+            get_ctor_arg(ctor_args, kwargs, "ref_model", _CTOR_POSITIONS), "the ref_logps dataset column"
         )
-        require_precomputed_reference(
+        reject_missing_precomputed_reference(
             "KTO",
             training_args,
             kwargs.get("train_dataset"),

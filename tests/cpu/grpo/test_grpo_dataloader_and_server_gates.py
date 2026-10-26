@@ -2,7 +2,7 @@
 """GRPO train-dataloader column pruning + the vLLM server-mode construction gates.
 
 - the GRPO train dataloader builds its dataset/collator pair through the shared
-  ``DataParallelDataLoaderMixin._loader_params`` seam (sized by GRPO's ``_train_loader_batch_size``
+  ``DataParallelLoaderMixin._loader_params`` seam (sized by GRPO's ``_train_loader_batch_size``
   hook), so a train dataset that is NOT a ``datasets.Dataset`` still honours
   ``remove_unused_columns`` — via the collator, the base ``Trainer`` contract. A diverged copy that
   only prunes when the dataset exposes ``column_names`` silently trains such a dataset on every
@@ -48,7 +48,12 @@ def _train_loader(dataset, *, remove_unused_columns: bool):
     """
     trainer = object.__new__(DistributedGRPOTrainer)
     trainer.parallelism_config = SimpleNamespace(
-        is_tp_mode=True, is_cp_mode=False, is_expert_tp_mode=False, is_pp_mode=False, non_dp_replication_factor=2
+        is_tp_mode=True,
+        is_cp_mode=False,
+        is_expert_tp_mode=False,
+        is_pp_mode=False,
+        non_dp_replication_factor=2,
+        get_data_parallel_rank=lambda: 0,
     )
     trainer._dataset_presharded = False
     trainer.train_dataset = dataset
@@ -81,7 +86,6 @@ def _train_loader(dataset, *, remove_unused_columns: bool):
     trainer._remove_unused_columns = _prune_dataset
     trainer._get_train_sampler = lambda: SequentialSampler(dataset)
     trainer._prepare_dataloader = lambda loader: loader
-    trainer.get_data_parallel_rank = lambda: 0
 
     return DistributedGRPOTrainer.get_train_dataloader(trainer), calls
 
@@ -120,7 +124,7 @@ def test_train_batch_covers_a_whole_generation_round():
 
 
 def test_missing_training_config_raises():
-    """``ctor_config`` resolved no config: silently returning would leave in-process HF generation
+    """``get_ctor_config`` resolved no config: silently returning would leave in-process HF generation
     running under FSDP2/EP (slow and rank-divergent) with nothing in the log to say the gate never ran."""
     with pytest.raises(ValueError, match="GRPOConfig"):
         DistributedGRPOTrainer._require_vllm_server_mode(None)

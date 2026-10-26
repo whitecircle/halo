@@ -11,9 +11,10 @@ Run: pytest tests/cpu/trainers/test_reentrant_checkpointing_rule.py
 """
 
 import pytest
+from accelerate import PartialState
 from transformers import Qwen3Config, Qwen3MoeConfig
 
-from src.trainers.mixins.ep_introspection import forces_reentrant_checkpointing
+from src.trainers.parallelism.ep_layers import resolve_use_reentrant, uses_reentrant_checkpointing
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
@@ -28,22 +29,34 @@ def _config(**kwargs):
 
 
 def test_a_dense_data_parallel_run_keeps_the_configured_form():
-    assert forces_reentrant_checkpointing(_config(), DENSE) is False
-    assert forces_reentrant_checkpointing(_config(), None) is False
+    assert uses_reentrant_checkpointing(_config(), DENSE) is False
+    assert uses_reentrant_checkpointing(_config(), None) is False
 
 
 def test_a_moe_forces_reentrant_even_without_expert_parallelism():
     """The stock-experts path (``use_grouped_gemm: false``, no EP wrappers) routes in its recompute too."""
-    assert forces_reentrant_checkpointing(_config(), MOE) is True
+    assert uses_reentrant_checkpointing(_config(), MOE) is True
 
 
 @pytest.mark.parametrize("axis", ["ep_size", "cp_size"])
 def test_expert_and_context_parallelism_force_reentrant(axis):
-    assert forces_reentrant_checkpointing(_config(**{axis: 2}), DENSE) is True
+    assert uses_reentrant_checkpointing(_config(**{axis: 2}), DENSE) is True
 
 
 def test_pipeline_parallelism_keeps_non_reentrant_even_for_a_moe():
-    assert forces_reentrant_checkpointing(_config(pp_size=2, gpus_per_node=2), MOE) is False
+    assert uses_reentrant_checkpointing(_config(pp_size=2, gpus_per_node=2), MOE) is False
+
+
+@pytest.mark.parametrize("configured", [None, True, False])
+def test_a_forced_run_resolves_to_reentrant_whatever_is_configured(configured):
+    PartialState()  # the override warning logs through accelerate's logger
+    assert resolve_use_reentrant(_config(ep_size=2), DENSE, configured) is True
+
+
+@pytest.mark.parametrize("configured", [None, True, False])
+def test_an_unforced_run_keeps_the_configured_value(configured):
+    assert resolve_use_reentrant(_config(), DENSE, configured) is configured
+    assert resolve_use_reentrant(_config(pp_size=2, gpus_per_node=2), MOE, configured) is configured
 
 
 if __name__ == "__main__":

@@ -2,32 +2,77 @@
 """Composition contract of ``DistributedTrainerMixin``: which sub-mixin owns what, and where its
 zero-arg ``super()`` calls land.
 
-Two invariants the split into ``src/trainers/mixins/`` depends on, both silent when broken:
+Two invariants the split into concern modules depends on, both silent when broken:
 
 * every method the trainers and tests reach as ``DistributedTrainerMixin.<name>`` resolves through
   the MRO to the sub-mixin that owns it (a typo in the bases tuple drops it);
-* the checkpoint methods' zero-arg ``super()`` calls reach the **base Trainer**, not a sibling
-  mixin: a base declaring ``save_model`` or ``_save_checkpoint`` between the two would silently
-  intercept the save.
+* the HF overrides' zero-arg ``super()`` calls reach the **base Trainer**, not a sibling mixin: a base
+  declaring ``save_model``, ``evaluate`` or ``_inner_training_loop`` between the two would silently
+  intercept it.
 
 Run: python tests/cpu/trainers/test_mixin_composition.py
 """
 
 import pytest
 
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.checkpointing import CheckpointingMixin
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from src.trainers.accelerator import AcceleratorMixin
+from src.trainers.checkpointing import CheckpointingMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
+from src.trainers.evaluation import EvaluationMixin
+from src.trainers.parallelism.grad_clipping import GradientClippingMixin
+from src.trainers.parallelism.grad_sync import GradientSyncMixin
+from src.trainers.parallelism.mode_setup import ModeSetupMixin
+from src.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
 
 # name -> the sub-mixin that must own it. Each is reached off ``DistributedTrainerMixin`` by a
 # trainer, a test or a strategy, so an owner change must stay MRO-visible from the composed class.
 _OWNERSHIP = {
+    AcceleratorMixin: (
+        "_configure_fp32_output_conversion",
+        "_inner_training_loop",
+        "_needs_custom_accelerator",
+        "_warn_knobs_unapplied_under_accelerate",
+        "create_accelerator_and_postprocess",
+    ),
+    EvaluationMixin: (
+        "_dp_gather_for_metrics",
+        "_eval_ranks_have_unequal_batches",
+        "_install_dp_metric_gather",
+        "eval_split_rows",
+        "evaluate",
+        "evaluation_loop",
+        "suspended_dp_metric_gather",
+    ),
+    ModeSetupMixin: (
+        "_adopt_cp_wrapper",
+        "_apply_cp_fsdp2",
+        "_apply_dp_fsdp2",
+        "_apply_ep_aware_dp_fsdp2",
+        "_apply_ep_fsdp2",
+        "_apply_ep_tp_fsdp2",
+        "_apply_tp_fsdp2",
+        "_cast_peft_params_to_compute_dtype",
+        "_dtype_excluded_params",
+        "_find_cp_wrapper",
+        "_fsdp_exclusions",
+        "_get_tp_rank",
+        "_install_qlora_grad_sync",
+        "_upcast_non_ep_params_to_fp32",
+        "_wrap_for_parallel_mode",
+    ),
+    TPLeaderBroadcastMixin: (
+        "_broadcast_object_from_tp_leader",
+        "_broadcast_tensors_from_tp_leader",
+        "_get_tp_group_src_rank",
+        "_get_tp_or_etp_process_group",
+    ),
     CheckpointingMixin: (
         "_checkpoint_context",
         "_checkpoint_load_context",
         "_load_best_model",
         "_load_from_checkpoint",
         "_load_optimizer_and_scheduler",
+        "_load_weights_through_base",
         "_optimizer_store",
         "_persist_trainer_sidecars",
         "_publish_checkpoint",
@@ -35,23 +80,23 @@ _OWNERSHIP = {
         "_restore_trainer_sidecars",
         "_rotate_checkpoints_after_sidecars",
         "_save_checkpoint",
+        "_weights_load_context",
         "_write_model_payload",
         "create_model_card",
         "save_model",
         "train",
     ),
-    GradientSyncMixin: (
+    GradientClippingMixin: (
         "_compute_global_grad_norm",
-        "_patch_gradient_clipping_for_ep",
-        "_patch_gradient_clipping_for_qlora",
-        "_patch_gradient_clipping_for_tp",
-        "_register_deferred_ep_grad_sync_hook",
-        "_register_qlora_grad_sync_hook",
-        "_register_tp_replicated_grad_sync_hook",
-        "_setup_cp_gradient_sync",
-        "_setup_ep_gradient_sync",
-        "_setup_ep_tp_gradient_sync",
-        "_setup_qlora_sync",
+        "_get_grad_norm",
+        "_has_mixed_mesh_grads",
+        "_install_ep_clip",
+        "_install_qlora_clip",
+        "_install_tp_clip",
+    ),
+    GradientSyncMixin: (
+        "_install_grad_accum_window",
+        "_register_grad_sync_step_hooks",
         "_sync_deferred_expert_grads",
         "_sync_qlora_grads",
         "_sync_tp_replicated_grads",
@@ -60,15 +105,19 @@ _OWNERSHIP = {
     ),
 }
 
-# The checkpoint methods that call ``super()`` — the HF Trainer implementations they extend.
-_SUPER_DELEGATED = (
-    "_load_from_checkpoint",
-    "_load_optimizer_and_scheduler",
-    "_save_checkpoint",
-    "create_model_card",
-    "save_model",
-    "train",
-)
+# Owner -> the methods it extends with a zero-arg ``super()``: the HF Trainer implementations they reach.
+_SUPER_DELEGATED = {
+    AcceleratorMixin: ("_inner_training_loop", "create_accelerator_and_postprocess"),
+    CheckpointingMixin: (
+        "_load_from_checkpoint",
+        "_load_optimizer_and_scheduler",
+        "_save_checkpoint",
+        "create_model_card",
+        "save_model",
+        "train",
+    ),
+    EvaluationMixin: ("evaluate", "evaluation_loop"),
+}
 
 
 class _BaseTrainer:
@@ -92,6 +141,18 @@ class _BaseTrainer:
     def train(self, resume_from_checkpoint=None, trial=None, ignore_keys_for_eval=None):
         return "base"
 
+    def create_accelerator_and_postprocess(self):
+        return "base"
+
+    def _inner_training_loop(self, *args, **kwargs):
+        return "base"
+
+    def evaluate(self, *args, **kwargs):
+        return "base"
+
+    def evaluation_loop(self, *args, **kwargs):
+        return "base"
+
 
 class _ComposedTrainer(DistributedTrainerMixin, _BaseTrainer):
     """The shape every concrete trainer has: the mixin first, a Trainer base behind it."""
@@ -112,16 +173,18 @@ def test_every_method_is_owned_by_its_sub_mixin_and_reachable_from_the_composed_
             )
 
 
-def test_checkpoint_super_calls_reach_the_base_trainer():
-    """No class between ``CheckpointingMixin`` and the Trainer base may define the delegated names."""
+def test_super_calls_reach_the_base_trainer():
+    """No class between a delegating sub-mixin and the Trainer base may define the delegated names."""
     mro = _ComposedTrainer.__mro__
-    behind = mro[mro.index(CheckpointingMixin) + 1 :]
-    for name in _SUPER_DELEGATED:
-        owner = next(base for base in behind if name in base.__dict__)
-        assert owner is _BaseTrainer, (
-            f"super().{name}() from CheckpointingMixin resolves to {owner.__name__}, not the base Trainer — "
-            f"a sibling mixin now intercepts it."
-        )
+    for mixin, names in _SUPER_DELEGATED.items():
+        behind = mro[mro.index(mixin) + 1 :]
+        for name in names:
+            assert _owner(mixin, name) is mixin, f"{name} is not defined by {mixin.__name__}"
+            owner = next(base for base in behind if name in base.__dict__)
+            assert owner is _BaseTrainer, (
+                f"super().{name}() from {mixin.__name__} resolves to {owner.__name__}, not the base Trainer — "
+                f"a sibling mixin now intercepts it."
+            )
 
 
 def test_sibling_mixins_declare_no_overlapping_methods():

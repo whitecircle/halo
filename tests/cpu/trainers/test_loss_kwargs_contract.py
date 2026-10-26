@@ -6,8 +6,8 @@ makes it True — and then SKIPS the ``/gradient_accumulation_steps`` division, 
 the loss is a token sum the model already normalized by ``num_items_in_batch``. A trainer whose loss
 is its own mean has to say otherwise, or its gradients scale with the accumulation count.
 
-Two spellings satisfy that: the ``_loss_is_own_mean`` class attribute the mixin's
-``_setup_distributed_modes`` applies, and a direct ``model_accepts_loss_kwargs = False`` assignment
+Two spellings satisfy that: the ``LOSS_IS_OWN_MEAN`` class attribute the mixin's
+``_restore_trl_overrides`` applies, and a direct ``model_accepts_loss_kwargs = False`` assignment
 in a base BELOW HF's ``Trainer`` (TRL's own GRPO/DPO/reward trainers do exactly that).
 
     python tests/cpu/trainers/test_loss_kwargs_contract.py
@@ -18,10 +18,10 @@ import inspect
 import pytest
 from transformers.trainer import Trainer
 
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.rosters import distributed_trainer_classes
 
-_FLAG = "_loss_is_own_mean"
+_FLAG = "LOSS_IS_OWN_MEAN"
 _ASSIGNMENT = "model_accepts_loss_kwargs = False"
 
 
@@ -101,14 +101,13 @@ class _SpineHost:
     """A bare host carrying only what the spine reads before the parallelism setup it cannot run."""
 
     _deferred_liger_kernel = False
-    _loss_outside_model_forward = False
     model = None
 
     def __init__(self, loss_is_own_mean: bool):
-        self._loss_is_own_mean = loss_is_own_mean
+        self.LOSS_IS_OWN_MEAN = loss_is_own_mean
         self.model_accepts_loss_kwargs = True  # what HF inferred from the forward signature
 
-    def _log_parallelism_config(self):
+    def _snapshot_model_config_state(self, model_config):
         raise _SpineStopped
 
 
@@ -119,17 +118,17 @@ def test_the_spine_applies_the_declared_attribute(loss_is_own_mean):
     host = _SpineHost(loss_is_own_mean)
 
     with pytest.raises(_SpineStopped):
-        DistributedTrainerMixin._setup_distributed_modes(host)
+        DistributedTrainerMixin._restore_trl_overrides(host)
 
     assert host.model_accepts_loss_kwargs is not loss_is_own_mean, (
-        f"_setup_distributed_modes left model_accepts_loss_kwargs={host.model_accepts_loss_kwargs!r} "
+        f"_restore_trl_overrides left model_accepts_loss_kwargs={host.model_accepts_loss_kwargs!r} "
         f"for a trainer with {_FLAG}={loss_is_own_mean!r}"
     )
 
 
 def test_the_default_leaves_hf_inference_alone():
     """Declared-only: the mixin's own default must not opt anything out on its behalf."""
-    assert DistributedTrainerMixin._loss_is_own_mean is False
+    assert DistributedTrainerMixin.LOSS_IS_OWN_MEAN is False
 
 
 if __name__ == "__main__":

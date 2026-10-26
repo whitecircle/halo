@@ -31,7 +31,7 @@ import src.model_loading.parallel.ep as ep_lazy_loader
 from src.distributed.expert_parallel.config import EPConfig
 from src.model_loading.lazy_safetensors.materialization import init_checkpoint_absent_modules
 from src.model_loading.parallel.ep import load_ep_model_lazy
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.models import TINY_GPTOSS_CONFIG
 
 SEED = 1234

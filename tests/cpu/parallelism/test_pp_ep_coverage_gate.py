@@ -10,16 +10,16 @@ timeout with the explaining traceback only on the dead ranks; joined, every rank
 Run: ``python tests/cpu/parallelism/test_pp_ep_coverage_gate.py`` (or ``pytest -m cpu``).
 """
 
-import ast
-import inspect
+from types import SimpleNamespace
+from unittest import mock
 
 import pytest
 
-from src.trainers.mixins import pipeline as pipeline_mixin
-from src.trainers.mixins.pipeline import pp_ep_coverage_reason
+from src.trainers.parallelism.pipeline_rules import reject_uncovered_pp_ep_layers
+from src.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from tests.common.parallelism import make_parallelism_config
 
-_EP_MODULES = [("model.layers.0.mlp", object())]
+_EP_LAYERS = [object()]
 
 
 def _config(**overrides):
@@ -27,44 +27,60 @@ def _config(**overrides):
     return make_parallelism_config(world_size=8, gpus_per_node=4, pp_size=2, **overrides)
 
 
-def test_a_stage_without_ep_modules_is_refused_and_the_message_names_the_stage():
-    reason = pp_ep_coverage_reason(_config(ep_size=4), [])
-    assert reason is not None
-    assert "PP stage" in reason and "pipeline_parallel_size" in reason
+def _joined_reason(config, ep_layers) -> str | None:
+    """The reason the gate hands the cross-rank joiner; the joiner is stubbed, so nothing raises here."""
+    with mock.patch("src.trainers.parallelism.pipeline_rules.reject_across_ranks") as join:
+        reject_uncovered_pp_ep_layers(config, ep_layers)
+    join.assert_called_once()
+    return join.call_args.args[0]
 
 
-def test_a_stage_that_carries_ep_modules_passes():
-    assert pp_ep_coverage_reason(_config(ep_size=4), _EP_MODULES) is None
+def test_a_stage_without_ep_layers_is_refused_and_the_message_names_the_stage():
+    with pytest.raises(RuntimeError, match="PP stage .* carries no EP-patched modules") as err:
+        reject_uncovered_pp_ep_layers(_config(ep_size=4), [])
+    assert "pipeline_parallel_size" in str(err.value)
+
+
+def test_a_stage_that_carries_ep_layers_passes():
+    reject_uncovered_pp_ep_layers(_config(ep_size=4), _EP_LAYERS)
 
 
 def test_a_pp_run_without_ep_is_not_gated_at_all():
     """The dense stages of a dense run are the normal case, not a partition mistake."""
-    assert pp_ep_coverage_reason(_config(), []) is None
+    reject_uncovered_pp_ep_layers(_config(), [])
 
 
-def test_the_setup_hands_the_verdict_to_the_joiner_rather_than_raising_it():
-    """Single-process, the two shapes are indistinguishable — a lone raise and a joined one both stop
-    the caller — so the call site itself is the assertion. Every use of the reason inside the mixin
-    must be an argument to ``reject_across_ranks``; a bare raise is what strands the MoE stages in the
-    chain broadcast that follows two lines later."""
-    tree = ast.parse(inspect.getsource(pipeline_mixin.PipelineTrainerMixin))
-    joined = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and getattr(node.func, "id", None) == "reject_across_ranks"
-        and any(
-            getattr(arg.func, "id", None) == "pp_ep_coverage_reason" for arg in node.args if isinstance(arg, ast.Call)
-        )
-    ]
-    uses = [
-        node
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "pp_ep_coverage_reason"
-    ]
-    assert len(uses) == 1 and len(joined) == 1, (
-        f"{len(uses)} use(s) of pp_ep_coverage_reason, {len(joined)} of them joined across ranks"
+def test_the_verdict_is_handed_to_the_joiner_rather_than_raised():
+    """Single-process, a lone raise and a joined one both stop the caller, so the joiner is stubbed:
+    the refusal must reach ``reject_across_ranks`` and never raise on its own, or the MoE stages are
+    stranded in the chain broadcast that follows."""
+    assert "carries no EP-patched modules" in _joined_reason(_config(ep_size=4), [])
+    assert _joined_reason(_config(ep_size=4), _EP_LAYERS) is None
+
+
+@pytest.mark.parametrize("ep_layers", [[], _EP_LAYERS], ids=["dense_stage", "ep_stage"])
+def test_the_stage_wrap_builds_the_stage_group_then_gates_then_wraps(ep_layers):
+    """The gate runs inside the stage wrap, after the unconditional stage-group build: gating the
+    build on the rank-local layer list deadlocks inside ``dist.new_group`` before any raise prints,
+    and a wrap that skips the gate strands the MoE stages at the chain broadcast."""
+    config = _config(ep_size=4)
+    calls = mock.Mock()
+    trainer = SimpleNamespace(
+        parallelism_config=config,
+        _fsdp_exclusions=lambda: SimpleNamespace(params=()),
+        _apply_dp_fsdp2=calls.wrap,
+        _apply_ep_aware_dp_fsdp2=calls.wrap,
     )
+    stage = object()
+    with (
+        mock.patch(f"{PipelineTrainerMixin.__module__}.build_stage_group", calls.build_stage_group),
+        mock.patch(f"{PipelineTrainerMixin.__module__}.reject_uncovered_pp_ep_layers", calls.reject),
+    ):
+        PipelineTrainerMixin._wrap_pp_stage(trainer, stage, ep_layers)
+    assert [name for name, _, _ in calls.mock_calls] == ["build_stage_group", "reject", "wrap"]
+    assert calls.reject.call_args.args == (config, ep_layers)
+    assert calls.wrap.call_args.args[0] is stage
+    assert trainer._pp_stage_group is calls.build_stage_group.return_value
 
 
 if __name__ == "__main__":

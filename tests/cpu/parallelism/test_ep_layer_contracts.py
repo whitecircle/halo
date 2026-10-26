@@ -2,7 +2,7 @@
 """CPU tests for class-declared EP-layer contracts.
 
 * ``FAMILY.supports_gradient_checkpointing``: Zaya declares ``False`` (EDA/CCA recompute recursion) and
-  ``EpIntrospectionMixin._setup_ep_gradient_checkpointing`` must RAISE when GC is enabled on a
+  ``EPLayersMixin._install_ep_gradient_checkpointing`` must RAISE when GC is enabled on a
   declaring layer instead of silently corrupting backward; supporting families pass through.
 * GptOss activation constants: ``EPGptOssMoELayer`` must read ``alpha``/``limit`` from the wrapped
   experts (1.702 / swiglu_limit) — a missing attribute is an ``AttributeError``, never a silently
@@ -39,7 +39,7 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.fused_glu import GluCombine
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.models.moe.family_specs import MoEFamilySpec
-from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
+from src.trainers.parallelism.ep_layers import EPLayersMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
 
@@ -87,7 +87,7 @@ class _GCSequential(nn.Sequential):
         self._gradient_checkpointing_func = checkpoint
 
 
-class _Trainer(EpIntrospectionMixin):
+class _Trainer(EPLayersMixin):
     def __init__(
         self, layer: nn.Module, gradient_checkpointing: bool, gradient_checkpointing_kwargs=None, **config_kwargs
     ):
@@ -110,18 +110,18 @@ def test_zaya_declares_gc_unsupported_and_base_default_is_supported():
 def test_gc_on_declaring_false_layer_raises():
     trainer = _Trainer(_EPStub(supports_gc=False), gradient_checkpointing=True)
     with pytest.raises(ValueError, match="supports_gradient_checkpointing=False"):
-        trainer._setup_ep_gradient_checkpointing()
+        trainer._install_ep_gradient_checkpointing()
 
 
 def test_gc_disabled_skips_the_contract_check():
     trainer = _Trainer(_EPStub(supports_gc=False), gradient_checkpointing=False)
-    trainer._setup_ep_gradient_checkpointing()
+    trainer._install_ep_gradient_checkpointing()
 
 
 def test_gc_on_supporting_layer_passes():
     trainer = _Trainer(_EPStub(), gradient_checkpointing=True)
-    with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
-        trainer._setup_ep_gradient_checkpointing()
+    with patch("src.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+        trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is True
     assert trainer.args.gradient_checkpointing is False  # HF Trainer re-enable prevented
@@ -134,16 +134,16 @@ def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
     trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)
     trainer.model.config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
     assert not trainer.parallelism_config.has_ep_group, "fixture must leave only the config to decide"
-    with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
-        trainer._setup_ep_gradient_checkpointing()
+    with patch("src.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+        trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
 
 
 def test_gc_under_pp_is_non_reentrant():
     # PP needs non-reentrant GC: a reentrant forward runs under no_grad, so FSDP2 registers no pre-backward hooks.
     trainer = _Trainer(_EPStub(), gradient_checkpointing=True, world=4, gpus_per_node=2, pp_size=2)
-    with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
-        trainer._setup_ep_gradient_checkpointing()
+    with patch("src.trainers.parallelism.ep_layers.enable_scoped_gradient_checkpointing") as enable:
+        trainer._install_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": False})
     assert trainer.args.gradient_checkpointing_kwargs["use_reentrant"] is False
 
@@ -158,7 +158,7 @@ def test_enable_keywords_are_lifted_out_of_the_checkpoint_kwargs():
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"every_n_layers": 2, "offload": True},
     )
-    trainer._setup_ep_gradient_checkpointing()
+    trainer._install_ep_gradient_checkpointing()
     model = trainer.model
     assert (model.gc_kwargs, model.every_n_layers, model.offload) == ({"use_reentrant": True}, 2, True)
     assert trainer.args.gradient_checkpointing_kwargs == {"every_n_layers": 2, "offload": True, "use_reentrant": True}

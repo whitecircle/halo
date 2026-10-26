@@ -40,7 +40,7 @@ from src.entrypoints import model_setup
 from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.modality import config_declares_multimodality, is_vlm_model
 from src.models.seq_cls_heads import multimodal_sequence_classification_model_types
-from src.trainers.mixins.base import DistributedTrainerMixin
+from src.trainers.distributed_trainer import DistributedTrainerMixin
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.repo import load_script_module
 from tests.cpu.data.test_vlm_preference_collator import IMAGE_TOKEN, StubProcessor, StubTokenizer, make_row
@@ -205,7 +205,7 @@ def _construct(processing_class, max_length=64, data_collator=None):
     with (
         mock.patch.object(RewardTrainer, "__init__", fake_reward_init),
         mock.patch.object(DistributedTrainerMixin, "_init_distributed_config", lambda self, kwargs, **_: kwargs),
-        mock.patch.object(DistributedTrainerMixin, "_setup_distributed_modes", lambda self: None),
+        mock.patch.object(DistributedTrainerMixin, "_configure_distributed_modes", lambda self: None),
     ):
         trainer = DistributedRewardTrainer(
             model=nn.Linear(2, 2),
@@ -371,12 +371,12 @@ def test_the_checkpoint_context_hands_the_processor_to_the_save():
     trainer.save_max_shard_size = None
 
     with (
-        mock.patch.object(DistributedRewardTrainer, "_has_ep_layers", False),
+        mock.patch.object(DistributedRewardTrainer, "_ep_layers", lambda self: []),
         mock.patch.object(DistributedRewardTrainer, "_top_level_model", lambda self: model),
         mock.patch.object(DistributedRewardTrainer, "_get_tp_rank", lambda self: 0),
         mock.patch.object(DistributedRewardTrainer, "_find_cp_wrapper", lambda self: None),
-        mock.patch("src.checkpoint.parallel.context.is_fs_save_rank", return_value=True),
-        mock.patch("src.checkpoint.parallel.context.model_has_expert_lora", return_value=False),
+        mock.patch("src.trainers.checkpointing.is_fs_save_rank", return_value=True),
+        mock.patch("src.trainers.checkpointing.model_has_expert_lora", return_value=False),
     ):
         ctx = trainer._checkpoint_context()
 
@@ -469,7 +469,7 @@ def test_pipeline_parallelism_refuses_a_multimodal_reward_run_fed_images():
     }
 
     with pytest.raises(ValueError, match="Vision-language training is not supported under pipeline"):
-        trainer._maybe_prepare_pipeline_model(kwargs, training_args)
+        trainer._split_pipeline_stage(kwargs, training_args)
 
 
 def test_reward_trainer_declares_no_context_parallel_support():

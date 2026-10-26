@@ -1,144 +1,27 @@
-"""Trainer construction refusals for the parallelism modes.
-
-Each helper raises the mechanism-naming error its trainers share, parameterized by the per-trainer parts;
-gates unique to one trainer stay in its ``_validate_pp_mode`` / ``_reject_pp_explicit_options`` hook.
-"""
+"""Trainer construction refusals as pure reject_* functions over explicit inputs, called by the trainer spine and
+the trainers' own hooks."""
 
 from __future__ import annotations
 
+from src.config_validation import differs_from_default
+from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from src.distributed.context_parallel.config import CPConfigError
-from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, optim_name
+from src.models.attention.gpt_oss_sinks import has_live_attention_sinks
+from src.models.moe.config_fields import has_routed_experts
+from src.models.moe.family_specs import wraps_experts
+from src.models.segment_markers import reject_compressed_kv_rows
+from src.models.unwrapping import find_peft_model
+from src.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, STOCK_ADAMW_OPTIMIZERS, optim_name
 
-
-def require_model_and_args_kwargs(kwargs: dict) -> None:
-    """Reject positional ``model``/``args`` under PP: the pipeline seam rewrites both by key."""
-    if "model" not in kwargs or "args" not in kwargs:
-        raise ValueError(
-            "Pipeline parallelism requires `model` and `args` passed as keywords: the mixin's "
-            "pipeline seam splits kwargs['model'] into this rank's stage and reads "
-            "kwargs['args'] for the microbatch conversion."
-        )
-
-
-def reject_pp_compute_metrics(compute_metrics, mechanism: str) -> None:
-    """Reject ``compute_metrics`` under PP for a trainer whose prediction convention a pipeline
-    cannot serve, naming why.
-
-    The pipeline serves metrics by reducing the last stage's output through
-    ``PipelineLossAdapter.predictions_fn`` before broadcasting it down the chain. A trainer whose non-PP
-    ``prediction_step`` hands metrics the raw logits plane, or nothing at all, has no reduction to
-    reproduce. ``mechanism`` is that trainer's specific reason.
-    """
-    if compute_metrics is None:
-        return
-    raise ValueError(f"compute_metrics is not supported under pipeline parallelism: {mechanism}")
-
-
-def reject_pp_peft(peft_config, explicit_param_trainer: str | None = None) -> None:
-    """Reject PEFT/LoRA under PP (``explicit_param_trainer`` names a trainer whose ``peft_config``
-    is an explicit ctor parameter the mixin's kwargs-based rejection cannot see).
-
-    Injection itself would work on a stage; the checkpoint path does not. The adapter save runs
-    through ``save_peft_adapters`` ahead of the PP saver, so it writes stage-local layer indices from
-    the save rank alone, the PP resume path never reaches the adapter restore, and
-    ``layers_to_transform`` / ``all-linear`` would select re-based layers and the stage head.
-    """
-    if peft_config is None:
-        return
-    message = (
-        "PEFT/LoRA is not supported under pipeline parallelism: the adapter checkpoint path is "
-        "not stage-aware — PeftAdapterSaver writes adapter_model.safetensors from the save rank "
-        "under the stage's own re-based layer indices (stage 1's layers 0..k claim stage 0's "
-        "names, the other stages' adapters are never written), the PP resume path never reaches "
-        "the adapter restore, and layers_to_transform / target_modules='all-linear' would resolve "
-        "against a stage's re-based layers and its bare task head. Train the adapter without "
-        "pipeline parallelism, or fully fine-tune under PP."
-    )
-    if explicit_param_trainer:
-        message += (
-            f" ({explicit_param_trainer} takes peft_config as an explicit parameter, so the "
-            f"mixin's kwargs-based PP rejection cannot see it.)"
-        )
-    raise ValueError(message)
-
-
-def reject_pp_ref_model(ref_model, column_hint: str) -> None:
-    """Reject a live reference model under PP. ``column_hint`` names the trainer's precomputed
-    reference column(s) to ship instead."""
-    if ref_model is None:
-        return
-    raise ValueError(
-        f"An explicit ref_model is not supported under pipeline parallelism: TRL keeps the "
-        f"full reference resident beside this rank's stage and forwards it inside "
-        f"_compute_loss and the precompute sweep — full-model, PP-unaware paths (and a full "
-        f"model next to one stage defeats PP's memory point). Ship {column_hint} with "
-        f"precompute_ref_log_probs=True instead."
-    )
-
-
-def require_precomputed_columns(dataset, columns: tuple[str, ...], role: str = "train") -> None:
-    """Require the precomputed reference column(s) to already be in the ``role`` dataset under PP.
-
-    Applies to the eval dataset too: the loss-only PP eval consumes the same columns, and TRL's
-    in-init sweep otherwise runs over the eval dataset as well.
-    """
-    present = getattr(dataset, "column_names", None) or []
-    if all(column in present for column in columns):
-        return
-    subject = f"the '{columns[0]}' column" if len(columns) == 1 else f"the {columns} columns"
-    noun = "column" if len(columns) == 1 else "columns"
-    raise ValueError(
-        f"precompute_ref_log_probs=True under pipeline parallelism requires {subject} to ALREADY "
-        f"be in the {role} dataset: TRL's in-init precompute sweep forwards self.model over the "
-        f"whole dataset, and under PP self.model is this rank's bare stage (its forward takes "
-        f"hidden_states, before the pipeline runner even exists). Precompute the {noun} in a "
-        f"non-PP run first."
-    )
-
-
-def require_precomputed_reference(
-    trainer: str, training_args, train_dataset, eval_dataset, columns: tuple[str, ...]
-) -> None:
-    """Require PP's precompute-only reference contract: the flag set and the column(s) present.
-
-    ``trainer`` names the wrapper in the message; ``columns`` are its reference log-prob columns.
-    The eval dataset is checked too (a dict of splits included): TRL's in-init sweep runs over it as
-    well, and under PP no rank holds a full model to run it.
-    """
-    if not training_args.precompute_ref_log_probs:
-        subject = f"the {columns[0]} column" if len(columns) == 1 else f"the {'/'.join(columns)} columns"
-        raise ValueError(
-            f"{trainer} under pipeline parallelism is precompute-only: without "
-            f"precompute_ref_log_probs=True TRL instantiates a live reference model from the "
-            f"config path and forwards it every step — a full-model path no pipeline rank can "
-            f"run. Set precompute_ref_log_probs=True and put {subject} in the dataset."
-        )
-    require_precomputed_columns(train_dataset, columns)
-    if eval_dataset is not None:
-        for dataset in eval_dataset.values() if isinstance(eval_dataset, dict) else (eval_dataset,):
-            if dataset is not None:
-                require_precomputed_columns(dataset, columns, role="eval")
-
-
-def reject_pp_activation_offloading(training_args) -> None:
-    """Reject TRL's activation_offloading under PP: its training_step wrap would never engage."""
-    if getattr(training_args, "activation_offloading", False):
-        raise ValueError(
-            "activation_offloading is not supported under pipeline parallelism: TRL applies it "
-            "by wrapping training_step, which the PP mixin's schedule-driven step bypasses — it "
-            "would silently never engage."
-        )
-
-
-def reject_pp_named_optimizer(training_args, parallelism_config) -> None:
-    """Reject a toolkit-named optimizer (``NAMED_OPTIMIZER_BUILDERS``) under PP, where none is validated."""
-    optim = optim_name(getattr(training_args, "optim", None))
-    if parallelism_config.is_pp_mode and optim in NAMED_OPTIMIZER_BUILDERS:
-        raise ValueError(
-            f"optim={optim!r} is not supported under pipeline parallelism: the stage-local optimizer "
-            f"build and the per-stage optimizer shards a resume restores are validated only with the "
-            f"AdamW family. Use an AdamW optimizer under pipeline parallelism, or run {optim} without it."
-        )
+# The FSDP2 shaping knobs only the trainer's own wrap implements; each one's "not requested" value is its
+# ParallelismConfig default.
+FSDP_SHAPING_KNOBS = ("use_hsdp", "fsdp_reshard_after_forward", "fsdp_reshard_after_backward", "fsdp_defer_grad_sync")
+# Why the router aux loss is inert on a trainer whose loss is not built by ``*ForCausalLM.forward`` from labels.
+INERT_AUX_LOSS_DETAIL = (
+    "{trainer} computes its loss from the model's outputs (no ``labels`` forward), so the HuggingFace router aux "
+    "loss is never added: expert load is left unbalanced and the run still materializes a [B*S, num_experts] "
+    "router-logit tensor per MoE layer per forward."
+)
 
 
 def reject_cp_trainer_args(
@@ -146,16 +29,8 @@ def reject_cp_trainer_args(
     compute_metrics=None,
     preprocess_logits_for_metrics=None,
 ) -> None:
-    """Reject trainer settings whose loss/metric path needs full-sequence logits.
-
-    A CP rank's forward returns logits for its own chunk only, and
-    :class:`~src.distributed.context_parallel.ulysses_model.UlyssesModel` computes the
-    boundary-aware loss itself. Anything that re-derives the loss or a metric from
-    ``(logits, labels)`` outside the wrapper pairs a chunk of logits with the full-length labels.
-
-    Raises:
-        CPConfigError: If a rejected setting is active.
-    """
+    """Refuse, with ``CPConfigError``, trainer settings that re-derive the loss or a metric from ``(logits, labels)``
+    outside the CP wrapper, pairing this rank's chunk of logits with the full-length labels."""
     if getattr(training_args, "label_smoothing_factor", 0.0):
         raise CPConfigError(
             "label_smoothing_factor > 0 is not supported with Context Parallelism: the Trainer pops "
@@ -182,3 +57,216 @@ def reject_cp_trainer_args(
             "against the full-length labels, so the two are misaligned. Drop them (eval_loss still "
             "reports), or evaluate from a saved checkpoint without CP."
         )
+
+
+def reject_conflicting_optimizer_choice(bf16_optimizer: bool, training_args) -> None:
+    """Refuse ``bf16_optimizer=True`` beside a toolkit-named ``optim``, which the bf16 path would silently discard."""
+    requested_optim = optim_name(training_args.optim if training_args is not None else None)
+    if bf16_optimizer and requested_optim in NAMED_OPTIMIZER_BUILDERS:
+        raise ValueError(
+            f"bf16_optimizer=True and optim={requested_optim!r} both select an optimizer, and "
+            f"the bf16 path wins — {requested_optim} would be silently discarded with nothing "
+            f"in the log to say so. Pick one: drop bf16_optimizer to run {requested_optim}, or "
+            f"drop optim to run AdamWBF16."
+        )
+
+
+def reject_stock_adamw_on_mixed_params(optim: str, config, model_config) -> None:
+    """Refuse the stock fused/foreach AdamW where plain expert tensors coexist with FSDP2 DTensor peers.
+
+    ``aten._fused_adamw_`` raises 'mixed torch.Tensor and DTensor' at the first step over that set. Read off
+    the config so every PP stage agrees (a module walk would refuse on MoE stages while dense stages walked into
+    the collective); ep1 experts FSDP2 shards, and a MoE family with no EP wrapper class, are uniformly DTensor.
+    """
+    if optim not in STOCK_ADAMW_OPTIMIZERS:
+        return  # named/per-parameter optimizers carry their own gates
+    if not (
+        config.ep_group_size > 1
+        or (
+            wraps_experts(model_config, wrappers_requested=config.needs_ep_wrappers)
+            and not config.experts_fsdp_managed
+        )
+    ):
+        return
+    raise ValueError(
+        f"optim={optim!r} cannot mix the plain-tensor expert FFN params (EP rank-local experts, "
+        f"or the grouped-GEMM gate_proj_gmm/up_proj_gmm split at expert_parallel_size=1) with the "
+        f"FSDP2 DTensor non-expert params: aten._fused_adamw_ raises 'mixed torch.Tensor and DTensor' "
+        f"at the first step. Use AdamWBF16 (bf16=true, the production default, or "
+        f"bf16_optimizer=true — its per-parameter path is DTensor-aware), or "
+        f"fp32_non_ep_params=true for fp32 masters on the non-expert params only (experts stay "
+        f"bf16). The stock AdamW runs where the parameters are uniform (dense models, and "
+        f"expert_parallel_size=1 MoE without expert TP at the default fsdp_shard_ep1_experts), over "
+        f"the parameters at the run's dtype: bf16 masters under bf16=true, not fp32."
+    )
+
+
+def reject_trainer_router_aux_loss_coef(training_args) -> None:
+    """Refuse a ``router_aux_loss_coef`` on the trainer config: the balancing mode owns the term."""
+    if training_args.router_aux_loss_coef is not None:
+        raise ValueError(
+            f"router_aux_loss_coef={training_args.router_aux_loss_coef} is set on the trainer config, but the "
+            "router aux loss is owned by moe_balancing and the model config's own router_aux_loss_coef "
+            "(model_init_kwargs). Unset it here."
+        )
+
+
+def reject_ep_wrappers_under_accelerate(ep_layers) -> None:
+    """Refuse grouped-GEMM/EP expert wrappers on an ``accelerate launch``: they need the mixin-managed FSDP2 path."""
+    if ep_layers:
+        raise ValueError(
+            "The model carries grouped-GEMM/EP expert wrappers but this is an "
+            "'accelerate launch' run: the wrappers require the mixin-managed FSDP2 path "
+            "(torchrun). Launch with torchrun, or load the model with "
+            "use_grouped_gemm=false to train it under accelerate."
+        )
+
+
+def reject_sync_ref_model_on_sharded_policy(training_args, *, sharded: bool) -> None:
+    """Refuse TRL's ``sync_ref_model`` on an FSDP2/EP/TP policy: its callback zips policy and reference params
+    with plain ``.data`` ops, which crash on a DTensor/EP policy."""
+    if sharded and getattr(training_args, "sync_ref_model", False):
+        raise ValueError(
+            "sync_ref_model is not supported under FSDP2/EP/TP: TRL's SyncRefModelCallback "
+            "assumes an unwrapped policy. Disable sync_ref_model (use PEFT with ref_model=None, "
+            "or precompute_ref_log_probs where available)."
+        )
+
+
+def reject_fsdp_knobs_under_qlora(config) -> None:
+    """Refuse the FSDP-shaping knobs under QLoRA, which skips FSDP2 (``fully_shard`` cannot wrap bnb's
+    ``Params4bit``): a multi-node ``use_hsdp`` would otherwise run a flat replicated all-reduce."""
+    set_knobs = [name for name in FSDP_SHAPING_KNOBS if differs_from_default(config, name)]
+    if set_knobs:
+        raise ValueError(
+            f"{', '.join(set_knobs)} cannot take effect under QLoRA: quantized 4-bit base "
+            f"weights skip FSDP2 entirely (fully_shard cannot wrap bnb Params4bit), so the run "
+            f"would silently use plain replicated gradient sync instead of the sharding the "
+            f"config names. Remove the flag(s), or use plain LoRA / full fine-tuning."
+        )
+
+
+def reject_cp_packed_collator(collator, *, is_cp_mode: bool) -> None:
+    """Refuse a packing / padding-free collator handed to a trainer under CP: Ulysses drops ``attention_mask``
+    and calls flash-attn with no ``cu_seqlens``, so packed documents attend across each other. The collator
+    factory applies the same rule; the two roots cover the completion-only variants."""
+    if is_cp_mode and isinstance(collator, DataCollatorWithPacking | DataCollatorWithFlattening):
+        raise ValueError(
+            f"{type(collator).__name__} is incompatible with context parallelism: the Ulysses "
+            f"path has no per-document boundaries, so packed sequences attend across each other. "
+            f"Use a padding collator (padding_free/packing off) under CP."
+        )
+
+
+def reject_compressed_kv_collator(collator, model_config) -> None:
+    """Refuse a packing / padding-free collator handed to a trainer for a model with compressed-KV layers
+    (:func:`~src.models.segment_markers.reject_compressed_kv_rows`, which the collator factory runs too)."""
+    if isinstance(collator, DataCollatorWithPacking):
+        reject_compressed_kv_rows(model_config, "packing")
+    elif isinstance(collator, DataCollatorWithFlattening):
+        reject_compressed_kv_rows(model_config, "padding_free")
+
+
+def reject_reference_sinks_mismatch(model, ref_model, alternatives: str) -> None:
+    """Refuse a reference whose attention sinks differ from the policy's: the pair compute different log-probs
+    for identical tokens, which biases the KL under every sharding. ``alternatives`` names the trainer's way
+    around holding a reference."""
+    if model is None or has_live_attention_sinks(model) == has_live_attention_sinks(ref_model):
+        return
+    policy_sinks, reference_sinks = (
+        "live" if has_live_attention_sinks(side) else "not live" for side in (model, ref_model)
+    )
+    raise ValueError(
+        f"The reference model and the policy disagree on attention sinks (policy: {policy_sinks}, "
+        f"reference: {reference_sinks}), so they compute different log-probs for identical tokens and "
+        "the KL term is biased on every token. Load the reference through load_frozen_reference_model "
+        "with the policy's reset_sinks, as the training scripts do; a reference TRL builds itself keeps "
+        f"the pretrained sinks live. Or hold none: {alternatives}"
+    )
+
+
+def reject_inert_aux_loss_balancing(trainer_name: str, moe_balancing: str) -> None:
+    """Refuse ``moe_balancing='aux_loss'`` on a trainer whose loss never adds the router aux term, for a model
+    whose forward would compute one."""
+    if moe_balancing == "aux_loss":
+        raise ValueError(
+            f"moe_balancing='aux_loss' balances nothing on this trainer. "
+            f"{INERT_AUX_LOSS_DETAIL.format(trainer=trainer_name)} Use "
+            f"moe_balancing='bias_update' (aux-loss-free DeepSeek-V3 bias update, on families "
+            f"whose EP wrappers support it) or moe_balancing='none'."
+        )
+
+
+def reject_unreloadable_best_model(training_args, config, model) -> None:
+    """Refuse ``load_best_model_at_end`` on a full fine-tune whose end-of-run reload the checkpoint loader refuses.
+
+    Decidable only once PEFT is applied (adapter-only runs reload in place). Under EP/CP base weights load only
+    at construction; FSDP2 over TP stacks a 2-D placement ``distribute_tensor`` does not invert for packed
+    projections, while pure TP reloads into the live DTensor placements.
+    """
+    if not training_args.load_best_model_at_end:
+        return
+    # merge_expert_lora_on_save folds the adapter into a full base checkpoint, which the loader refuses.
+    adapter_only = find_peft_model(model) is not None or config.expert_lora is not None
+    if adapter_only and not config.merge_expert_lora_on_save:
+        return
+    is_moe = has_routed_experts(getattr(model, "config", None))
+    if config.cp_size > 1 or (is_moe and config.needs_ep_wrappers):
+        raise ValueError(
+            "load_best_model_at_end is unsupported for this shape as a full fine-tune: under "
+            "EP/CP base weights only load at construction, so the end-of-run best-model reload "
+            "would be refused after the whole run, and the export would otherwise carry the "
+            "LAST weights. Drop load_best_model_at_end and export the best checkpoint directly."
+        )
+    if config.tp_size > 1 and config.data_parallel_size > 1:
+        raise ValueError(
+            "load_best_model_at_end is unsupported under TP+DP as a full fine-tune: the best-model "
+            "reload distributes each checkpoint tensor into the live DTensor placements, and FSDP2 "
+            "over TP stacks a strided dp shard on the tp shard — a 2-D placement distribute_tensor "
+            "does not invert for packed projections (right shape, wrong rows), so the end-of-run "
+            "reload is refused. Drop load_best_model_at_end and export the best checkpoint "
+            "directly, or run pure TP (tensor_parallel_size == world size), where the reload is "
+            "supported."
+        )
+
+
+def reject_ep_gradient_checkpointing(ep_layers) -> None:
+    """Reject gradient checkpointing over EP layers whose family declares it unsupported."""
+    unsupported = sorted(
+        {type(module).__name__ for module in ep_layers if not module.FAMILY.supports_gradient_checkpointing}
+    )
+    if unsupported:
+        raise ValueError(
+            f"gradient_checkpointing=True is not supported with Expert Parallelism for "
+            f"{', '.join(unsupported)}: the family declares supports_gradient_checkpointing="
+            f"False (see the EP layer class docstring for the mechanism — e.g. Zaya's EDA/CCA "
+            f"cross-layer state makes checkpoint recompute recurse polynomially). Disable "
+            f"gradient_checkpointing for this model."
+        )
+
+
+def reject_batch_rebalance_on_dp_sharded_loader(training_args) -> None:
+    """Refuse HF's ``batch_rebalance`` sampler on the DP-sharded loader: it shards batches over every
+    process, not over data-parallel replicas."""
+    if training_args.train_sampling_strategy != "batch_rebalance":
+        return
+    raise ValueError(
+        "train_sampling_strategy='batch_rebalance' shards batches across every process, while this "
+        "run's loader shards across data-parallel replicas (TP/CP/ETP/PP, or a pre-sharded "
+        "dataset): ranks sharing a batch would draw different rows. Use 'random', 'sequential' "
+        "or 'group_by_length'."
+    )
+
+
+def reject_dispatch_batches(dispatch_batches: bool | None, data_parallel_size: int, world_size: int) -> None:
+    """Refuse accelerate's dispatching loader on a loader sharded fewer ways than the world: it slices
+    rank 0's batches by global rank."""
+    if not dispatch_batches or data_parallel_size == world_size:
+        return
+    raise ValueError(
+        f"accelerator_config.dispatch_batches: true slices rank 0's batches by global rank, but "
+        f"this loader is sharded {data_parallel_size} ways over {world_size} ranks "
+        f"(TP/CP/ETP siblings and pipeline peers share a data-parallel shard; a pre-sharded "
+        f"dataset is each rank's own), so ranks would get the wrong rows. Set "
+        f"accelerator_config.dispatch_batches: false."
+    )

@@ -3,7 +3,7 @@
 
 1. Column pruning: ``seq_lengths`` is a collator input, not a model-forward parameter, so HF's
    signature-based pruning drops it unless the trainer's signature set names it. TRL's SFT trainer
-   happens to hard-code it; every other base does not. ``DataParallelDataLoaderMixin`` unions the
+   happens to hard-code it; every other base does not. ``DataParallelLoaderMixin`` unions the
    collator's declared ``required_dataset_columns`` so the pin cannot drift from the collator.
 2. The CP × packing rejection must see a collator passed POSITIONALLY (at TRL's own data_collator
    slot), not only via keyword — a packed collator slipping past the gate under CP attends across
@@ -25,7 +25,7 @@ from transformers.models.deepseek_v4 import DeepseekV4Config
 from trl import SFTTrainer
 
 from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
-from src.trainers.mixins.dataloader import DataParallelDataLoaderMixin
+from src.trainers.dataloaders import DataParallelLoaderMixin
 from src.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
 from tests.common.models import TINY_DSV4_CONFIG
 
@@ -44,7 +44,7 @@ class _Base:
             self._signature_columns = ["input_ids", "labels"]
 
 
-class _Trainer(DataParallelDataLoaderMixin, _Base):
+class _Trainer(DataParallelLoaderMixin, _Base):
     pass
 
 
@@ -74,7 +74,7 @@ def test_union_override_wins_over_trl_base():
     collator's declaration silently stops reaching the pruning set."""
     assert (
         DistributedSFTTrainer._set_signature_columns_if_needed
-        is DataParallelDataLoaderMixin._set_signature_columns_if_needed
+        is DataParallelLoaderMixin._set_signature_columns_if_needed
     )
 
 
@@ -92,7 +92,7 @@ def _construct_sft(*, cp: bool, model=None, collator=None) -> None:
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", _init_cfg),
         mock.patch.object(SFTTrainer, "__init__", return_value=None),
-        mock.patch.object(DistributedSFTTrainer, "_setup_distributed_modes", return_value=None),
+        mock.patch.object(DistributedSFTTrainer, "_configure_distributed_modes", return_value=None),
     ):
         DistributedSFTTrainer(*ctor_args)
 

@@ -37,7 +37,7 @@ import torch.nn as nn
 import src.checkpoint.parallel.optimizer as optimizer_mod
 from src.checkpoint.parallel.optimizer import OptimizerShardStore
 from src.runtime.filesystem import fs_aware_makedirs
-from src.trainers.mixins.checkpointing import CheckpointingMixin
+from src.trainers.checkpointing import CheckpointingMixin
 from tests.common.checkpoint_io import (
     OPTIMIZER_SHARD_FILE,
     SHARD_ROUND_TRIP_LR,
@@ -345,7 +345,7 @@ class _CheckpointingHost(CheckpointingMixin, _TrainerBase):
         self.optimizer = None
         self.lr_scheduler = None
         self.parallelism_config = make_parallelism_config(world_size=1, gpus_per_node=1)
-        self._has_ep_layers = False
+        self._ep_layers = list
         self._fsdp_wrapped = True
         self._accelerate_manages_fsdp = False
 

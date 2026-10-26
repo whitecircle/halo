@@ -35,8 +35,8 @@ EP, contiguous under cross-node EP), so partners sharing a dispatch rank process
 
 ## How the DataLoader is built
 
-`DataParallelDataLoaderMixin` (`src/trainers/mixins/dataloader.py`, composed into
-`DistributedTrainerMixin`) takes the custom path when `needs_dp_sharded_loader` sees
+`DataParallelLoaderMixin` (`src/trainers/dataloaders.py`, composed into
+`DistributedTrainerMixin`) takes the custom path when `uses_dp_sharded_loader` sees
 `non_dp_replication_factor > 1` (more than one rank sees each batch: TP, CP or ETP) or a
 pre-sharded dataset; otherwise (DDP / EP-only / HSDP, not presharded) it uses the base Trainer flow.
 
@@ -176,7 +176,7 @@ the store joins and the never-nest rule are on
 
 - **Double-sharding:** a sampler that already shards DP (e.g. `MultiGroupSampler`) must pass
   `num_processes=1, process_index=0` to `_prepare_dataloader`, not let it resolve DP itself.
-- **Global rank instead of DP rank:** use `get_data_parallel_rank()` / `get_data_parallel_size()` for
+- **Global rank instead of DP rank:** use `parallelism_config.get_data_parallel_rank()` / `.data_parallel_size` for
   samplers under TP/CP/ETP, not `accelerator.process_index` / world_size.
 - **Treating EP like TP:** EP does not reduce DP. `dp_size = world_size` for EP-only.
 - **Expecting a dataset list to shard:** `load_datasets` deliberately does not pass DP rank/size for

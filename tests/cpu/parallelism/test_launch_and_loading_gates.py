@@ -4,7 +4,7 @@
 EP/CP/TP require torchrun; the gates must reject EVERY ``accelerate launch`` distributed_type —
 including MULTI_GPU/DDP, which sets ``ACCELERATE_MIXED_PRECISION`` but not ``ACCELERATE_USE_FSDP``
 (rejecting only the FSDP launch lets DDP fall through into custom parallelism). Also pins
-``_should_accelerate_manage_ddp`` semantics over the ``src.env`` helpers, and the ``reset_sinks``
+``accelerate_manages_ddp`` semantics over the ``src.env`` helpers, and the ``reset_sinks``
 default parity between the two model-loading entry points.
 
 Three more refusals raised from the same package are pinned here, each of which replaces a failure
@@ -43,6 +43,7 @@ from transformers.models.qwen3_vl import Qwen3VLConfig
 from src.configs.script_arguments import ModelLoadArguments
 from src.distributed.mesh import MeshDim
 from src.distributed.parallelism_config import ParallelismConfig
+from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.distributed.tensor_parallel.hf_plan import plan_shards_param
 from src.kernels.lowp.spec import LowpSpec
 from src.model_loading.dtype import resolve_load_dtype
@@ -60,8 +61,7 @@ from src.model_loading.parallel.pp import _load_stage_lazy
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 from src.models.attention.selection import resolve_attn_implementation
 from src.models.moe.family_specs import GEMMA4, MoEFamilySpec
-from src.trainers.mixins.base import DistributedTrainerMixin
-from src.trainers.mixins.validation import ParallelismValidationMixin
+from src.trainers.accelerator import accelerate_manages_ddp
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.parallelism import make_parallelism_config
 
@@ -89,13 +89,6 @@ def _pc(**kwargs) -> ParallelismConfig:
     return make_parallelism_config(world_size=2, gpus_per_node=2, **kwargs)
 
 
-class _Validating(ParallelismValidationMixin):
-    SUPPORTS_CP = True
-
-    def __init__(self, pc: ParallelismConfig):
-        self.parallelism_config = pc
-
-
 @pytest.mark.parametrize("launch_env", [_MULTI_GPU_ENV, _FSDP_ENV])
 def test_loader_gate_rejects_ep_under_any_accelerate_launch(launch_env):
     with patch.dict(os.environ, _env(launch_env), clear=True):
@@ -114,12 +107,12 @@ def test_loader_gate_passes_under_torchrun_and_for_plain_dp():
 def test_trainer_gate_rejects_ep_under_any_accelerate_launch(launch_env):
     with patch.dict(os.environ, _env(launch_env), clear=True):
         with pytest.raises(ValueError, match="accelerate launch"):
-            _Validating(_pc(ep_size=2))._validate_parallelism_modes()
+            reject_accelerate_launch(_pc(ep_size=2))
 
 
 def test_trainer_gate_passes_under_torchrun():
     with patch.dict(os.environ, _env({}), clear=True):
-        _Validating(_pc(ep_size=2))._validate_parallelism_modes()
+        reject_accelerate_launch(_pc(ep_size=2))
 
 
 def test_pure_etp_is_not_swept_up_by_the_fp32_refusal():
@@ -560,15 +553,14 @@ def test_scratch_and_lowp_pass_where_each_is_supported():
     )
 
 
-def test_should_accelerate_manage_ddp_semantics():
-    trainer = SimpleNamespace(parallelism_config=SimpleNamespace(has_custom_parallelism=False))
-    manage_ddp = DistributedTrainerMixin._should_accelerate_manage_ddp
+def test_accelerate_manages_ddp_semantics():
+    config = SimpleNamespace(has_custom_parallelism=False)
     with patch.dict(os.environ, _env(_MULTI_GPU_ENV), clear=True):
-        assert manage_ddp(trainer) is True
+        assert accelerate_manages_ddp(config) is True
     with patch.dict(os.environ, _env(_FSDP_ENV), clear=True):
-        assert manage_ddp(trainer) is False  # FSDP launch is not DDP
+        assert accelerate_manages_ddp(config) is False  # FSDP launch is not DDP
     with patch.dict(os.environ, _env({}), clear=True):
-        assert manage_ddp(trainer) is False  # torchrun
+        assert accelerate_manages_ddp(config) is False  # torchrun
 
 
 # ── the run dtype crosses into transformers under transformers' own key ──

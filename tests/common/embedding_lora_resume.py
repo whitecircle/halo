@@ -333,7 +333,7 @@ def _mode_checks(ctx, mode: str, lora: str, trainer: EmbeddingTrainer) -> dict[s
             and any(isinstance(param.data, DTensor) for param in trainable)
         )
     elif mode == "ep":
-        checks["mode_is_ep"] = trainer.parallelism_config.has_ep_group and trainer._has_ep_layers
+        checks["mode_is_ep"] = trainer.parallelism_config.has_ep_group and bool(trainer._ep_layers())
     else:
         checks["mode_is_fsdp2_with_dtensor_params"] = trainer._fsdp_wrapped and all(
             isinstance(param.data, DTensor) for param in trainable

@@ -307,12 +307,12 @@ the model's forward and never pass `labels`, so an applied FLCE (explicit, or a 
 numerically neutral yet saves nothing.
 
 The load-time patch site cannot know the trainer and a construction-time re-apply would not unpatch
-`lce_forward`, so trainers declaring `_loss_outside_model_forward` warn at construction, pointing at
+`lce_forward`, so trainers declaring `POLICY_GRADIENT_LOSS` warn at construction, pointing at
 `use_chunked_grpo_logprobs`, the lever that removes the plane there
 ([Online GRPO](../training-methods/grpo/online.md#chunked-log-probs),
 [Offline GRPO](../training-methods/grpo/offline.md#memory-chunked-log-probs)).
 
-Liger is applied twice: at model load, and again by `DistributedTrainerMixin` (`src/trainers/mixins/base.py`),
+Liger is applied twice: at model load, and again by `DistributedTrainerMixin` (`src/trainers/distributed_trainer.py`),
 which re-sanitizes the train-time `liger_kernel_config` before HF Trainer can re-apply it on the wrapped
 model. A filter present at only one site would be undone by whichever runs second, so both call one
 sanitizer, `sanitize_liger_config`.

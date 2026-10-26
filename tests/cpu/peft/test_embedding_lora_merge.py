@@ -1,4 +1,4 @@
-"""CPU test for the embedding save's LoRA fold (``_folded_backbone_items``).
+"""CPU test for the embedding save's LoRA fold (``folded_backbone_items``).
 
 The embedding script injects LoRA in place (the model stays a SentenceTransformer, not a PeftModel),
 so the save must fold the adapters into the base weights — otherwise the checkpoint carries
@@ -18,7 +18,7 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, inject_adapter_in_model
 
-from src.trainers.embedding.trainer import _folded_backbone_items
+from src.trainers.embedding.injected_lora import folded_backbone_items
 from tests.common.peft_helpers import merged_lora_targets, randomize_adapters
 
 VOCAB = 11
@@ -62,7 +62,7 @@ def test_the_save_writes_peft_merge_under_the_plain_names(lora):
     expected = {name.replace(".base_layer", ""): value for name, value in live_before.items() if "lora_" not in name}
     expected.update(merged_targets)
 
-    folded = dict(_folded_backbone_items(model))
+    folded = dict(folded_backbone_items(model))
 
     assert set(folded) == set(_Encoder().state_dict()), f"not the plain module's keys: {sorted(folded)}"
     unequal = [name for name, value in expected.items() if not torch.equal(folded[name], value)]
@@ -81,7 +81,7 @@ def test_the_folded_embedding_looks_tokens_up_as_the_adapted_one_does():
     tokens = torch.tensor([[0, 3, 10, 7]])
 
     plain = nn.Embedding(VOCAB, HIDDEN)
-    plain.load_state_dict({"weight": dict(_folded_backbone_items(model))["embed.weight"]})
+    plain.load_state_dict({"weight": dict(folded_backbone_items(model))["embed.weight"]})
 
     assert torch.allclose(plain(tokens), model.embed(tokens).detach(), atol=1e-5)
 

@@ -16,7 +16,7 @@ is designed for. Each mode covers a shape no other GPU test exercises:
                   the deferred-FSDP stage branch (non-expert params sharded over the EP group),
                   the expert replica-SUM/÷world sweep leg, and the ÷R clip aggregation.
   ep1_dp4       — pp2 × ep1 grouped-GEMM × dp4: stage-mesh DTensor experts at width 4
-                  (fsdp_shard_ep1_experts), plain ``_pp_clip_grad_norm``.
+                  (fsdp_shard_ep1_experts), plain ``pp_clip_grad_norm``.
 
 The MoE modes drive the real DistributedSFTTrainer with the fp32-reference + bf16-twin
 methodology of test_pp_ep_vs_unsplit (shared blocks in tests/common/pp_equivalence.py): loss vs
@@ -44,7 +44,7 @@ from src.distributed.pipeline_parallel.groups import build_pipeline_group
 from src.distributed.pipeline_parallel.runner import PipelineRunner
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
 from src.distributed.pipeline_parallel.stage_losses import TokenLoss
-from src.trainers.mixins.pipeline import PipelineTrainerMixin
+from src.trainers.parallelism.grad_clipping import pp_clip_grad_norm
 from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -373,9 +373,7 @@ def run_ep1_dp4(ctx):
         isinstance(p, DTensor) and p.device_mesh.size() == config.stage_world_size for p in expert_params
     )
     checks["no_grad_sync_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
-    checks["clip_is_pp_clip"] = (
-        getattr(trainer.accelerator.clip_grad_norm_, "__func__", None) is PipelineTrainerMixin._pp_clip_grad_norm
-    )
+    checks["clip_is_pp_clip"] = trainer.accelerator.clip_grad_norm_ is pp_clip_grad_norm
     checks["no_deferred_sync"] = not trainer._ep_config.defer_grad_sync
 
     dp_rank = config.get_data_parallel_rank()

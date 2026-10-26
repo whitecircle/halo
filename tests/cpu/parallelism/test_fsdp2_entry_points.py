@@ -26,7 +26,7 @@ import torch.nn as nn
 
 import src.distributed.fsdp as fsdp
 from src.distributed.mesh import MeshDim
-from src.trainers.mixins.grad_sync import GradientSyncMixin
+from src.trainers.parallelism.mode_setup import ModeSetupMixin
 
 _BF16 = {"compute_dtype": torch.bfloat16, "fp32_reduce": False}
 _FP32 = {"compute_dtype": torch.float32, "fp32_reduce": False}
@@ -178,7 +178,7 @@ class _Fp32ResidualLayer(nn.Linear):
     _fp32_interlayer_residual = True
 
 
-class _EPTPHost(GradientSyncMixin):
+class _EPTPHost(ModeSetupMixin):
     """What the EP+TP wrap reads: the config, the args, the model and the FSDP exclusions."""
 
     def __init__(self, model, excluded):
@@ -219,7 +219,7 @@ def test_the_ep_tp_wrap_runs_the_shared_body_with_its_ep_modules_left_out():
         patch.object(fsdp, "fully_shard", side_effect=fake_fully_shard),
         patch.object(fsdp, "build_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
     ):
-        _EPTPHost(model, [expert])._setup_ep_tp_gradient_sync()
+        _EPTPHost(model, [expert])._apply_ep_tp_fsdp2()
 
     assert calls, "the EP+TP wrap sharded nothing"
     assert {policy.cast_forward_inputs for _, policy, _ in calls} == {False}, (
@@ -235,7 +235,7 @@ def test_the_ep_tp_wrap_refuses_a_model_spread_over_two_devices():
     model.lm_head.to("meta")
 
     with _fake_world(), patch.object(fsdp, "fully_shard"), pytest.raises(RuntimeError, match="single-device"):
-        _EPTPHost(model, [])._setup_ep_tp_gradient_sync()
+        _EPTPHost(model, [])._apply_ep_tp_fsdp2()
 
 
 def test_neither_entry_point_wraps_a_single_rank_dp_group():
