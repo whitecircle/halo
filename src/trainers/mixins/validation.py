@@ -14,7 +14,7 @@ import torch.nn as nn
 from accelerate.logging import get_logger
 from peft import PeftModel
 
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.log import KEY_PREVIEW_COUNT
@@ -25,10 +25,8 @@ from src.model_loading.parallel.frozen_models import (
 )
 from src.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from src.models.config_access import config_sources, set_config_field_run_scoped
-from src.models.moe_balancing import (
-    config_has_experts,
-    mark_router_logits_forced_off,
-)
+from src.models.moe.config_fields import has_routed_experts
+from src.models.moe.router_logits import mark_router_logits_forced_off
 from src.models.peft_adapters import tuner_adapter_param_ids
 from src.models.unwrapping import find_peft_model
 from src.trainers.parallelism.trainer_rules import reject_pp_named_optimizer
@@ -274,7 +272,7 @@ class ParallelismValidationMixin:
         a setting that reached only the attention half would leave two adapters under one recipe.
         """
         spec = self.parallelism_config.expert_lora
-        if spec is None or not has_ep_lora(self._top_level_model()):
+        if spec is None or not model_has_expert_lora(self._top_level_model()):
             return
         peft_model = find_peft_model(self.model)
         if peft_model is None:
@@ -333,7 +331,7 @@ class ParallelismValidationMixin:
         if spec is None:
             return
         model = self._top_level_model()
-        if not has_ep_lora(model):
+        if not model_has_expert_lora(model):
             raise ValueError(
                 "lora_target_modules contained expert projections that were routed to native EP "
                 "grouped-LoRA (split_expert_lora_targets), but no EP/grouped MoE layer built the "
@@ -411,7 +409,7 @@ class ParallelismValidationMixin:
         adapter_only = find_peft_model(self.model) is not None or config.expert_lora is not None
         if adapter_only and not config.merge_expert_lora_on_save:
             return
-        is_moe = config_has_experts(getattr(self.model, "config", None))
+        is_moe = has_routed_experts(getattr(self.model, "config", None))
         if config.cp_size > 1 or (is_moe and config.needs_ep_wrappers):
             raise ValueError(
                 "load_best_model_at_end is unsupported for this shape as a full fine-tune: under "
@@ -445,7 +443,7 @@ class ParallelismValidationMixin:
         expert-only LoRA under EP+TP would otherwise reach no gate.
         """
         model = self._top_level_model()
-        if has_ep_lora(model):
+        if model_has_expert_lora(model):
             raise ValueError(
                 "Native EP expert LoRA is not supported with Tensor Parallelism (tensor_parallel_size > 1).\n"
                 "The expert adapters live on the EP-distributed expert weights, so every TP gate "

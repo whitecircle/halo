@@ -21,7 +21,7 @@ from transformers.models.zaya.modeling_zaya import ZayaForCausalLM
 
 from src.model_loading import model_preparation
 from src.model_loading.remote_code import apply_remote_code_compat_shims
-from src.models.moe_balancing import resolve_balancing_mode
+from src.models.moe.balancing import resolve_balancing_mode
 from src.models.zaya import (
     patch_zaya_flash_packed_position_ids,
     patch_zaya_gradient_checkpointing_refusal,

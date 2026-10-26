@@ -6,7 +6,7 @@ spelled differently from its hub checkpoint (Laguna: ``mlp.gate.e_score_correcti
 ``mlp.shared_experts.*``) loses precisely those tensors from every sync — the served policy keeps its
 initial router correction bias and shared expert while the trainer moves on, with no error anywhere.
 
-``gather_ep_layer_weights`` already applies the family's ``_EXPORT_KEY_RENAMES``; the sync path builds
+``gather_layer_state_dict`` already applies the family's ``export_key_renames``; the sync path builds
 its keys itself, so the pin here is EQUIVALENCE — the sync's key set must equal what a gathered
 checkpoint of the same module would contain (plus the non-EP params, which no rename touches). That is
 what keeps the two paths from drifting.
@@ -20,9 +20,9 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
-from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.models.moe.family_specs import MoEFamilySpec
 from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 
 LAYER_PATH = "mlp"
@@ -39,8 +39,7 @@ class _LagunaEPLayerStub(EPMoELayerBase):
     asserts key spelling, and the real per-family gathers are covered by the checkpoint tests.
     """
 
-    _EXPORT_KEY_RENAMES = EPLagunaMoELayer._EXPORT_KEY_RENAMES
-    _PER_EXPERT_UNFUSED_KEYS = None  # this stub does its own (trivial) gather
+    FAMILY = MoEFamilySpec(model_types=(), export_key_renames=EPLagunaMoELayer.FAMILY.export_key_renames)
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -65,15 +64,11 @@ class _LagunaEPLayerStub(EPMoELayerBase):
             "experts.down_proj": self.down_proj.detach(),
         }
 
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
-
 
 class _PlainEPLayerStub(_LagunaEPLayerStub):
     """The same layer for a family whose hub and module spellings agree (every family but Laguna)."""
 
-    _EXPORT_KEY_RENAMES = ()
+    FAMILY = MoEFamilySpec(model_types=())
 
 
 class _Model(nn.Module):
@@ -114,7 +109,7 @@ def test_sync_keys_equal_the_gathered_checkpoint_keys():
     layer = _LagunaEPLayerStub()
     sender, _model = _sync(layer)
 
-    gathered = set(gather_ep_layer_weights(LAYER_PATH, layer, retain=True))
+    gathered = set(layer.gather_layer_state_dict(LAYER_PATH, retain=True))
     # The sync also forwards params outside the EP layer; no rename applies to those.
     assert set(sender.sent) == gathered | {"embed.weight"}, (
         f"sync keys drifted from the gather: only-sync={sorted(set(sender.sent) - gathered - {'embed.weight'})}, "
@@ -152,7 +147,7 @@ def test_a_family_without_renames_is_untouched():
     layer = _PlainEPLayerStub()
     sender, _model = _sync(layer)
 
-    assert set(sender.sent) == set(gather_ep_layer_weights(LAYER_PATH, layer, retain=True)) | {"embed.weight"}
+    assert set(sender.sent) == set(layer.gather_layer_state_dict(LAYER_PATH, retain=True)) | {"embed.weight"}
     assert f"{LAYER_PATH}.gate.e_score_correction_bias" in sender.sent
     assert f"{LAYER_PATH}.shared_experts.weight" in sender.sent
 

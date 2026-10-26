@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The engine rosters spell shared facts once: the Step-3 spellings come off the family's EP layer class,
+"""The engine rosters spell shared facts once: the Step-3 spellings come off the family spec,
 the two Bailing loader gaps off one table both clients quote, and the release off each client's
 ``ENGINE_RELEASE``, the dropped-balancing-bias roster included.
 
@@ -8,26 +8,25 @@ the two Bailing loader gaps off one table both clients quote, and the release of
 
 import pytest
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.models.moe.family_specs import BAILING, STEP3P7
 from src.weight_sync.clients.base import unregistered_bailing_model_types
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
+from tests.common.rosters import ep_layer_class_by_model_type
 
 _CLIENTS = (VLLMWeightSyncClient, SGLangWeightSyncClient)
 
 
 def test_sglang_refuses_every_step3_spelling_the_trainer_knows_with_one_fact():
-    """A spelling added to the class must be refused too, or the gate admits it into a dead sync."""
-    facts = {SGLangWeightSyncClient.UNSERVABLE_MODEL_TYPES[mt] for mt in EPStep3p7MoELayer.HF_MODEL_TYPES}
+    """A spelling added to the spec must be refused too, or the gate admits it into a dead sync."""
+    facts = {SGLangWeightSyncClient.UNSERVABLE_MODEL_TYPES[mt] for mt in STEP3P7.model_types}
     assert len(facts) == 1 and "step3p5 loader" in next(iter(facts))
 
 
 def test_both_clients_quote_the_shared_bailing_gaps_for_their_own_release():
     shared = set(unregistered_bailing_model_types("x"))
     assert shared == {"bailing_hybrid", "bailing_moe_linear"}
-    assert shared < set(EPBailingMoELayer.HF_MODEL_TYPES), "the gaps are spellings the toolkit trains"
+    assert shared < set(BAILING.model_types), "the gaps are spellings the toolkit trains"
     for client in _CLIENTS:
         quoted = unregistered_bailing_model_types(client.ENGINE_RELEASE)
         for model_type in shared:

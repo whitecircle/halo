@@ -7,7 +7,7 @@ from accelerate.logging import get_logger
 from transformers import DistributedConfig, PreTrainedModel
 
 from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, finish_hf_tp_load
@@ -112,7 +112,7 @@ def load_tp_moe_model(
     _apply_attention_only_tp(model, rank, tp_size, dp_size)
 
     if wraps_experts:
-        model = patch_moe_model_for_ep(model, ep_config)
+        model = apply_ep_layers(model, ep_config)
         logger.info("Applied grouped GEMM wrappers to MoE layers")
 
     logger.info(f"Model loaded with TP on MoE (tp={tp_size}, dp={dp_size})")
@@ -168,7 +168,7 @@ def load_ep_tp_model(
                 **from_pretrained_kwargs,
             )
         _apply_attention_only_tp(model, rank, pc.tp_size, pc.data_parallel_size)
-        return model if use_lazy else patch_moe_model_for_ep(model, ep_config)
+        return model if use_lazy else apply_ep_layers(model, ep_config)
 
     model = timed_global_load("EP+TP", "ep_tp_lazy" if use_lazy else "ep_tp_huggingface", load)
     logger.info(f"Model loaded with EP+TP (tp={pc.tp_size}, ep={pc.ep_size}, dp={pc.data_parallel_size})")

@@ -59,7 +59,8 @@ embedding are text-only.
 
 ## Adding a family
 
-A family that trains under plain FSDP2 needs no code. Expert or context
-parallelism takes one wrapper file that registers itself.
+A family that trains under plain FSDP2 needs no code. Context parallelism takes
+one wrapper file that registers itself; expert parallelism takes one wrapper
+file, the family's spec and a roster import.
 [Model integration cost](model-integration-cost.md) shows what a wrapper costs,
 and [Adding a Model](../agent-docs/models/adding-a-model.md) ↗ is the procedure.

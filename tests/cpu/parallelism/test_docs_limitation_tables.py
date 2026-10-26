@@ -4,8 +4,8 @@
 ``agent-docs/parallelism/*`` and ``agent-docs/reference/trainer-architecture.md`` publish three matrices a
 reader configures a run from: which axis combinations may run, which trainer supports which axis,
 and which MoE family restricts an EP capability. All three are *derived* in the code — from
-:data:`SUPPORTED_AXIS_SETS`, from the per-class ``SUPPORTS_CP`` / ``PP_REFUSAL``, and from the EP layer
-classes' capability flags — so a published table is a second copy, free to drift from the gate it
+:data:`SUPPORTED_AXIS_SETS`, from the per-class ``SUPPORTS_CP`` / ``PP_REFUSAL``, and from the family specs'
+and EP layers' capability declarations — so a published table is a second copy, free to drift from the gate it
 describes. Drift here is expensive: a wrong row sends a reader into a config-time raise, or promises
 a mode the trainer refuses, after the GPUs are allocated.
 
@@ -17,14 +17,17 @@ Run: ``pytest -m cpu tests/cpu/parallelism/test_docs_limitation_tables.py``
 
 from __future__ import annotations
 
+import dataclasses
+import operator
 import re
 from pathlib import Path
 
 import pytest
 
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.parallelism_rules import AXES, SUPPORTED_AXIS_SETS
+from src.models.moe.family_specs import MoEFamilySpec
 from tests.common.repo import REPO_ROOT
 from tests.common.rosters import distributed_trainer_classes
 
@@ -36,18 +39,25 @@ _TRAINER_ARCHITECTURE = REPO_ROOT / "agent-docs" / "reference" / "trainer-archit
 # trainer, so the matrix carries the two axes a trainer declares.
 _TRAINER_AXIS_SUPPORT = {"CP": lambda cls: cls.SUPPORTS_CP, "PP": lambda cls: cls.PP_REFUSAL is None}
 
-# EP capability flags that default True on EPMoELayerBase, so a False IS the documented restriction.
-# DERIVED from the base class, never listed: a flag restated here is a second copy of the class's own
-# declaration, and the one it forgets is unpinnable — the restriction table can then omit that
-# family's row and still pass. Over the whole MRO, since the base is composed of mixins (the base layer
-# and the balancing mixin) that each declare part of the capability surface.
+# EP capabilities a family may switch off: its spec's ``supports_*`` fields (default True) and
+# ``*_refusal`` fields (default None), and the EP layer's own ``_supports_*`` flags that default True
+# over the whole MRO (the base is composed of mixins that each declare part of the surface). DERIVED,
+# never listed: a capability restated here is a second copy of the declaration, and the one it forgets
+# is unpinnable — the restriction table can then omit that family's row and still pass.
 _EP_RESTRICTABLE_FLAGS = tuple(
     sorted(
         {
-            name
-            for klass in EPMoELayerBase.__mro__
-            for name, value in vars(klass).items()
-            if name.startswith("_supports_") and value is True
+            *(
+                f"FAMILY.{spec_field.name}"
+                for spec_field in dataclasses.fields(MoEFamilySpec)
+                if spec_field.name.startswith("supports_") or spec_field.name.endswith("_refusal")
+            ),
+            *(
+                name
+                for klass in EPMoELayerBase.__mro__
+                for name, value in vars(klass).items()
+                if name.startswith("_supports_") and value is True
+            ),
         }
     )
 )
@@ -57,7 +67,7 @@ _CATCH_ALL_ROW = "anything else"
 
 # The restriction table's preamble states how many flags a family may switch off. Spelled out, so the
 # count is checked against the derivation rather than left to rot beside a table that grew.
-_EP_FLAG_COUNT_SENTENCE = re.compile(r"declares (\w+) capability flags")
+_EP_FLAG_COUNT_SENTENCE = re.compile(r"declares (\w+) capabilities")
 _NUMBER_WORDS = {word: n for n, word in enumerate(("four", "five", "six", "seven", "eight", "nine"), start=4)}
 
 
@@ -206,17 +216,22 @@ def test_ep_supported_models_table_lists_every_registered_wrapper():
     )
 
 
+def _restricts(cls: type, declaration: str) -> bool:
+    """Whether ``cls`` switches off the capability ``declaration`` names."""
+    value = operator.attrgetter(declaration)(cls)
+    return value is not None if declaration.endswith("_refusal") else not value
+
+
 def test_ep_restriction_table_matches_the_layer_capability_flags():
     """The per-family EP restriction table must be exactly the set of ``False`` capability flags.
 
-    Each flag defaults ``True`` on ``EPMoELayerBase``, so a family turning one off is the whole
-    limitation. A stale row promises a restriction that no longer exists; a missing row hides one
-    that does (Zaya under gradient checkpointing, Inkling under weight sync).
+    Each capability is on by default, so a family turning one off is the whole limitation. A stale row
+    promises a restriction that no longer exists; a missing row hides one that does (Zaya under gradient checkpointing, Inkling under weight sync).
     """
     by_wrapper = {_ep_wrapper_class_name(row): _plain(row["Model"]) for row in _ep_model_rows()}
     documented = set()
-    for row in _table_with_headers(_EXPERT_PARALLELISM, "Family", "Restricted capability", "Class attribute"):
-        family, attr = _plain(row["Family"]), _plain(row["Class attribute"])
+    for row in _table_with_headers(_EXPERT_PARALLELISM, "Family", "Restricted capability", "Declaration"):
+        family, attr = _plain(row["Family"]), _plain(row["Declaration"])
         assert family in by_wrapper.values(), (
             f"EP restriction row {family!r} names no family in the supported-models table above it"
         )
@@ -227,7 +242,7 @@ def test_ep_restriction_table_matches_the_layer_capability_flags():
         (by_wrapper[cls.__name__], attr)
         for cls in MOE_LAYER_MAP.values()
         for attr in _EP_RESTRICTABLE_FLAGS
-        if not getattr(cls, attr)
+        if _restricts(cls, attr)
     }
     assert documented == enforced, (
         f"restrictions enforced in code but undocumented: {sorted(enforced - documented)}; "
@@ -236,15 +251,15 @@ def test_ep_restriction_table_matches_the_layer_capability_flags():
 
 
 def test_the_restriction_preamble_counts_the_flags_it_derives_from():
-    """The prose above the table must state the number of flags the base actually declares.
+    """The prose above the table must state the number of capabilities a family can switch off.
 
-    A capability flag added to ``EPMoELayerBase`` that no family switches off yet leaves the table
-    itself correct and the sentence introducing it wrong, so nothing else here would notice.
+    A capability added that no family switches off yet leaves the table itself correct and the
+    sentence introducing it wrong, so nothing else here would notice.
     """
     match = _EP_FLAG_COUNT_SENTENCE.search(_EXPERT_PARALLELISM.read_text(encoding="utf-8"))
     assert match, (
-        f"{_EXPERT_PARALLELISM.name} no longer states how many capability flags EPMoELayerBase "
-        f"declares; the restriction table's preamble is the reader's map into them"
+        f"{_EXPERT_PARALLELISM.name} no longer states how many capabilities a family declares; the "
+        f"restriction table's preamble is the reader's map into them"
     )
     documented = _documented_count(match.group(1))
     assert documented is not None, (
@@ -252,8 +267,8 @@ def test_the_restriction_preamble_counts_the_flags_it_derives_from():
         f"digit nor a number word this pin can read — spell it out or use a digit"
     )
     assert documented == len(_EP_RESTRICTABLE_FLAGS), (
-        f"{_EXPERT_PARALLELISM.name} says EPMoELayerBase declares {match.group(1)!r} capability "
-        f"flags; it declares {len(_EP_RESTRICTABLE_FLAGS)}: {list(_EP_RESTRICTABLE_FLAGS)}"
+        f"{_EXPERT_PARALLELISM.name} says a family declares {match.group(1)!r} capabilities; it "
+        f"declares {len(_EP_RESTRICTABLE_FLAGS)}: {list(_EP_RESTRICTABLE_FLAGS)}"
     )
 
 
@@ -270,7 +285,7 @@ def test_every_capability_a_family_switches_off_is_a_restrictable_flag():
         f"attribute sweep lost its target: {_EP_RESTRICTABLE_FLAGS}"
     )
     # Own declarations below the base only: the base's own ``False`` defaults are opt-IN capabilities
-    # (``_supports_bias_balancing``), not restrictions.
+    # (``SUPPORTS_BIAS_BALANCING``), not restrictions.
     switched_off = {
         (cls.__name__, name)
         for cls in MOE_LAYER_MAP.values()

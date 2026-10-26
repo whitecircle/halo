@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
+from typing import ClassVar
 
 import torch
 import torch.nn as nn
@@ -17,31 +18,23 @@ from torch.distributed.tensor import DTensor
 
 from src.kernels.histogram import accumulate_bincount
 from src.models.gradient_checkpointing import counts_toward_expert_load
-from src.models.moe_balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR, resolve_balancing_slot
+from src.models.moe.balancing import BALANCING_BIASES_ATTR, NATIVE_BALANCING_BIAS_ADOPTED_ATTR, resolve_balancing_slot
+from src.models.moe.family_specs import MoEFamilySpec
 from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
 
 class EPBalancingBiasMixin:
-    """Bias-update balancing state, mixed into :class:`EPMoELayerBase`. A family declares where its bias lives
-    and whether a transient one would be read at all; :class:`EPRoutingMixin` applies it."""
+    """Bias-update balancing state, mixed into :class:`EPMoELayerBase`. The family's spec declares where its bias
+    lives, the class whether a transient one would be read at all; :class:`EPRoutingMixin` applies it."""
 
+    FAMILY: ClassVar[MoEFamilySpec]
     num_experts: int
     _resident_device: Callable[[], torch.device]
 
     # True when the EP wrapper selects routing itself (bias before top-k); False = aux-loss balancing.
-    _supports_bias_balancing: bool = False
-
-    # Dotted path to a checkpoint-persistent bias the family's own selection already applies. Adopted as
-    # the bias-update state so it exports with checkpoints; ``_balancing_bias`` then returns None (a
-    # second application would double-bias selection).
-    _NATIVE_BALANCING_BIAS_ATTR: str | None = None
-
-    # Config field that tells serving engines to load and apply the native slot, flipped to True when a
-    # materialized slot would otherwise stay dormant at inference (LFM-2 ``use_expert_bias``). None for
-    # families whose slot is unconditional in the architecture.
-    _NATIVE_BALANCING_CONFIG_FLAG: str | None = None
+    SUPPORTS_BIAS_BALANCING: bool = False
 
     # False when selection happens entirely inside the hub gate (Bailing), where a transient
     # side-buffer could never shift routing: ``_create_balancing_bias`` raises instead of falling
@@ -50,7 +43,15 @@ class EPBalancingBiasMixin:
 
     # True when the EP wrapper bypasses the HF router module, severing the aux-loss path;
     # ``moe_balancing: auto`` then resolves the family to ``bias_update``.
-    _ep_severs_aux_loss: bool = False
+    SEVERS_AUX_LOSS: bool = False
+
+    @property
+    def _native_balancing_attr(self) -> str | None:
+        """The live path of ``FAMILY.balancing_slot``, a checkpoint-persistent bias the family's own selection
+        already applies: adopted as the bias-update state so it exports, after which ``_balancing_bias`` returns
+        None (a second application would double-bias selection)."""
+        slot = self.FAMILY.balancing_slot
+        return slot.attrs[0] if slot else None
 
     def _native_slot_absence_is_legal(self) -> bool:
         """Whether this instance may lack its declared native slot. Default False: an absent slot is an
@@ -59,7 +60,7 @@ class EPBalancingBiasMixin:
 
     def enable_bias_balancing(self) -> bool:
         """Create bias-update balancing state, or no-op (returning False) for aux-loss families."""
-        if not self._supports_bias_balancing:
+        if not self.SUPPORTS_BIAS_BALANCING:
             return False
         self._create_balancing_bias()
         return True
@@ -68,7 +69,7 @@ class EPBalancingBiasMixin:
         """Whether bias-update balancing here lands in checkpoint-exported state: the declared native slot
         exists or can be materialized. False leaves only the side-buffer, which strict ``bias_update`` rejects.
         """
-        if not self._supports_bias_balancing or not self._NATIVE_BALANCING_BIAS_ATTR:
+        if not self.SUPPORTS_BIAS_BALANCING or not self._native_balancing_attr:
             return False
         return self._native_balancing_target() is not None or self._can_materialize_native_balancing_slot()
 
@@ -88,7 +89,7 @@ class EPBalancingBiasMixin:
     def _native_balancing_target(self) -> tuple[nn.Module, str] | None:
         """``(owner_module, attr_name)`` of the declared native slot, None where it is undeclared or this
         instance lacks it."""
-        return resolve_balancing_slot(self, self._NATIVE_BALANCING_BIAS_ATTR)
+        return resolve_balancing_slot(self, self._native_balancing_attr)
 
     @staticmethod
     def _set_native_balancing_tensor(owner: nn.Module, name: str, value: torch.Tensor) -> None:
@@ -102,21 +103,21 @@ class EPBalancingBiasMixin:
     def _create_balancing_bias(self) -> None:
         """Attach the bias-update state once: the native slot re-registered as an fp32 persistent buffer (out of
         grad and FSDP2 sharding), else a plain fp32 side-buffer that never exports (the sidecar restores it)."""
-        if getattr(self, "balancing_biases", None) is not None:
+        if getattr(self, BALANCING_BIASES_ATTR, None) is not None:
             return
         target = self._native_balancing_target()
-        if target is None and self._NATIVE_BALANCING_BIAS_ATTR and self._materialize_native_balancing_slot():
+        if target is None and self._native_balancing_attr and self._materialize_native_balancing_slot():
             target = self._native_balancing_target()
-        if target is None and self._NATIVE_BALANCING_BIAS_ATTR and self._supports_transient_balancing_bias:
+        if target is None and self._native_balancing_attr and self._supports_transient_balancing_bias:
             # Declared but absent and not materializable, typically an upstream rename. The
             # fallback stops exporting the trained bias, which strict ``bias_update`` rejects at the
             # strategy layer.
             logger.warning(
-                f"{type(self).__name__}: declares '{self._NATIVE_BALANCING_BIAS_ATTR}' as its native "
+                f"{type(self).__name__}: declares '{self._native_balancing_attr}' as its native "
                 f"balancing slot, but this instance has no such tensor — falling back to the "
                 f"transient side-buffer, so the trained bias will NOT export with checkpoints. If "
                 f"the family did not disable its bias, the upstream slot was renamed: update "
-                f"_NATIVE_BALANCING_BIAS_ATTR."
+                f"its spec's balancing_slot."
             )
         if target is not None:
             owner, name = target
@@ -124,7 +125,7 @@ class EPBalancingBiasMixin:
             if native.is_meta:
                 raise RuntimeError(
                     f"{type(self).__name__}: native balancing tensor "
-                    f"'{self._NATIVE_BALANCING_BIAS_ATTR}' is still on meta — the loader never "
+                    f"'{self._native_balancing_attr}' is still on meta — the loader never "
                     f"materialized it, so bias updates would be lost. Fix the load path; do not "
                     f"silently fall back to a zero bias."
                 )
@@ -132,7 +133,7 @@ class EPBalancingBiasMixin:
                 if self._supports_transient_balancing_bias:
                     logger.warning(
                         f"{type(self).__name__}: native balancing tensor "
-                        f"'{self._NATIVE_BALANCING_BIAS_ATTR}' is already FSDP-sharded (DTensor); "
+                        f"'{self._native_balancing_attr}' is already FSDP-sharded (DTensor); "
                         f"falling back to the transient side-buffer — the trained bias will NOT export "
                         f"with checkpoints. Enable balancing before FSDP sharding to adopt the native slot."
                     )
@@ -148,14 +149,14 @@ class EPBalancingBiasMixin:
                 if is_global_main_process():
                     logger.info(
                         f"{type(self).__name__}: bias-update balancing via native "
-                        f"'{self._NATIVE_BALANCING_BIAS_ATTR}' (exports with every checkpoint)"
+                        f"'{self._native_balancing_attr}' (exports with every checkpoint)"
                     )
                 return
         if not self._supports_transient_balancing_bias:
             raise RuntimeError(
                 f"{type(self).__name__}: routing happens entirely inside the hub gate, so a transient "
                 f"side-buffer could never shift expert selection — bias-update balancing requires the "
-                f"native '{self._NATIVE_BALANCING_BIAS_ATTR}' slot, which is unavailable here (renamed "
+                f"native '{self._native_balancing_attr}' slot, which is unavailable here (renamed "
                 f"upstream, or already FSDP-sharded because balancing was enabled after fully_shard). "
                 f"Fix the slot or the enable ordering; a sign-updated buffer selection never reads is "
                 f"not a fallback."
@@ -174,21 +175,21 @@ class EPBalancingBiasMixin:
         if self.__dict__.get(NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False):
             target = self._native_balancing_target()
             if target is None:  # the slot was externally deregistered — absent, not a crash
-                raise AttributeError("balancing_biases")
+                raise AttributeError(BALANCING_BIASES_ATTR)
             return getattr(*target)
-        if "balancing_biases" in self.__dict__:
-            return self.__dict__["balancing_biases"]
-        raise AttributeError("balancing_biases")
+        if BALANCING_BIASES_ATTR in self.__dict__:
+            return self.__dict__[BALANCING_BIASES_ATTR]
+        raise AttributeError(BALANCING_BIASES_ATTR)
 
     @balancing_biases.setter
     def balancing_biases(self, value: torch.Tensor) -> None:
         if self.__dict__.get(NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False):
             target = self._native_balancing_target()
             if target is None:
-                raise AttributeError("balancing_biases")
+                raise AttributeError(BALANCING_BIASES_ATTR)
             self._set_native_balancing_tensor(*target, value)
         else:
-            self.__dict__["balancing_biases"] = value
+            self.__dict__[BALANCING_BIASES_ATTR] = value
 
     def _balancing_bias(self, ref: torch.Tensor):
         """The side-buffer on ``ref``'s device (moved once: ``module.to()`` skips a plain attribute), None when
@@ -196,7 +197,7 @@ class EPBalancingBiasMixin:
         if self.__dict__.get(NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False):
             return None
         # getattr, not a __dict__ probe: hand-built stubs may carry the buffer as a class attribute.
-        bias = getattr(self, "balancing_biases", None)
+        bias = getattr(self, BALANCING_BIASES_ATTR, None)
         if bias is None:
             return None
         if bias.device != ref.device:
@@ -207,7 +208,7 @@ class EPBalancingBiasMixin:
     def _record_expert_load(self, indices: torch.Tensor) -> None:
         """Accumulate per-expert selection counts while training, once per microbatch in every checkpoint
         mode (:func:`counts_toward_expert_load`)."""
-        if getattr(self, "balancing_biases", None) is None or not self.training or not counts_toward_expert_load():
+        if getattr(self, BALANCING_BIASES_ATTR, None) is None or not self.training or not counts_toward_expert_load():
             return
         with torch.no_grad():
             self.expert_load_counter = accumulate_bincount(self.expert_load_counter, indices, self.num_experts)

@@ -59,9 +59,8 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
 import src.models.peft_adapters as peft_adapters
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, ep_layer_classes, has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
@@ -80,6 +79,7 @@ from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import shared_output_dir, world_all
 from tests.common.models import QWEN3_0_6B
 from tests.common.peft_helpers import load_peft_model, mixed_targets, mixer_linear_leaves
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
@@ -126,15 +126,14 @@ REPRESENTATIVE_FAMILIES = ("qwen3", "qwen3_moe")
 
 def syncable_ep_classes() -> set[type]:
     """Every EP family class some rollout engine takes an online update for: declared syncable, and
-    its own ``model_type`` spelling (``HF_MODEL_TYPES[0]``) left unrefused by at least one client; the
+    its own ``model_type`` spelling (``FAMILY.model_types[0]``) left unrefused by at least one client; the
     composite wrappers and sibling spellings behind it are refused under their own entries."""
     clients = [resolve_weight_sync_client(backend) for backend in rollout_backends()]
     return {
         cls
-        for cls in ep_layer_classes()
-        if cls.HF_MODEL_TYPES
-        and cls._supports_weight_sync
-        and any(cls.HF_MODEL_TYPES[0] not in client.UNSERVABLE_MODEL_TYPES for client in clients)
+        for cls in set(ep_layer_class_by_model_type().values())
+        if cls.FAMILY.weight_sync_refusal is None
+        and any(cls.FAMILY.model_types[0] not in client.UNSERVABLE_MODEL_TYPES for client in clients)
     }
 
 
@@ -177,7 +176,7 @@ def _expert_bases_and_merges(peft_model) -> tuple[dict[str, torch.Tensor], dict[
     bases, merges = {}, {}
     for layer_name, layer in named_ep_layers(peft_model):
         for merge, out in ((False, bases), (True, merges)):
-            for key, tensor in layer.gather_expert_state_dict("cuda", merge_lora=merge).items():
+            for key, tensor in layer.gather_expert_state_dict(device="cuda", merge_lora=merge).items():
                 out[f"{layer_name}.{key}"] = tensor.detach().clone()
     return bases, merges
 
@@ -331,7 +330,7 @@ def _layout_checks(family: str, mode: str, adapters: str, unwrapped, peft_model)
         or (bool(layers) and all(type(m) is ep_layer_class_by_model_type()[model_type] for m in layers.values())),
         "experts_dtensor_iff_ep1": model_type is None
         or (bool(experts) and all(isinstance(p.data, DTensor) == (mode == "ep1") for p in experts)),
-        "native_expert_lora_iff_mixed": has_ep_lora(unwrapped) == (adapters == "mixed"),
+        "native_expert_lora_iff_mixed": model_has_expert_lora(unwrapped) == (adapters == "mixed"),
     }
     log(
         f"  layout: {layout} ({len(lora_bases)} PEFT-LoRA'd weights, {len(experts)} expert tensors, "

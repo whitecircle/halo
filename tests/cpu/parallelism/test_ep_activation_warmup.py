@@ -25,13 +25,28 @@ import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
-from src.distributed.expert_parallel.layers import gpt_oss as gpt_oss_layer
+from src.distributed.expert_parallel.families import gpt_oss as gpt_oss_layer
 from src.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from src.kernels import fused_glu, moe_permute
 from src.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.ep_stubs import StubEPLayerBase
 
 HIDDEN, INTER, LOCAL_EXPERTS = 6, 4, 2
+
+
+class _RecordingDispatcher:
+    """Identity dispatch and combine that log into the layer's event list."""
+
+    def __init__(self, events: list):
+        self.events = events
+
+    def dispatch(self, flat, experts, weights, *, owner):
+        self.events.append(("dispatch",))
+        return flat, experts, weights, None
+
+    def combine(self, output, recv_topk_weights, handle, *, owner):
+        self.events.append(("combine",))
+        return output
 
 
 class _RecordingLayer(StubEPLayerBase):
@@ -49,6 +64,7 @@ class _RecordingLayer(StubEPLayerBase):
         self.gate_up_proj = nn.Parameter(torch.randn(LOCAL_EXPERTS, HIDDEN, 2 * INTER))
         self.down_proj = nn.Parameter(torch.randn(LOCAL_EXPERTS, INTER, HIDDEN))
         self.events: list[tuple] = []
+        self.dispatcher = _RecordingDispatcher(self.events)
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         self.events.append(("warm", tuple(gate_up.shape), torch.is_grad_enabled()))
@@ -61,17 +77,9 @@ class _RecordingLayer(StubEPLayerBase):
     def _glu_combine(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         return gate * up
 
-    def _gc_dispatch(self, flat, experts, weights):
-        self.events.append(("dispatch",))
-        return flat, experts, weights, None
-
     def _compute_experts(self, tokens, experts, weights, output_dtype):
         self.events.append(("compute",))
         return tokens.to(output_dtype)
-
-    def _gc_combine(self, output, recv_topk_weights, handle):
-        self.events.append(("combine",))
-        return output
 
 
 def _run_forward(layer: _RecordingLayer, tokens: int = 3) -> None:
@@ -223,12 +231,21 @@ def test_a_first_forward_under_inference_mode_warms_every_kernel(monkeypatch):
     assert [event[0] for event in layer.events] == ["dispatch", "compute", "combine"]
 
 
-class _ScopeCachingLayer(_RecordingLayer):
-    """A layer whose dispatch takes a replay slot, the way ``EPMoELayerBase._gc_dispatch`` does."""
+class _ScopeCachingDispatcher(_RecordingDispatcher):
+    """A dispatch that takes its owner's replay slot, the way ``DeepEPDispatcher.dispatch`` does in a recompute
+    scope."""
 
-    def _gc_dispatch(self, flat, experts, weights):
-        active_recompute_scope().slot(self, "dispatch").setdefault("flat", flat.detach())
-        return super()._gc_dispatch(flat, experts, weights)
+    def dispatch(self, flat, experts, weights, *, owner):
+        active_recompute_scope().slot(owner, "dispatch").setdefault("flat", flat.detach())
+        return super().dispatch(flat, experts, weights, owner=owner)
+
+
+class _ScopeCachingLayer(_RecordingLayer):
+    """A layer whose dispatcher takes a replay slot."""
+
+    def __init__(self):
+        super().__init__()
+        self.dispatcher = _ScopeCachingDispatcher(self.events)
 
     def _compute_experts(self, tokens, experts, weights, output_dtype):
         # Saves its own output, so the non-reentrant checkpoint really has something to unpack —

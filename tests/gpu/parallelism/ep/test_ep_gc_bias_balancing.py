@@ -43,7 +43,9 @@ from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
 from src.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import (
+    apply_ep_layers,
+)
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from tests.common.harness import gpu_test_main
@@ -139,7 +141,7 @@ def run(ctx):
 
     parallelism_config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model(ctx.device)
-    patch_moe_model_for_ep(model, parallelism_config.ep_config())
+    apply_ep_layers(model, parallelism_config.ep_config())
 
     ep_layers = [module for module in model.modules() if isinstance(module, EPMoELayerBase)]
     checks["ep_layers_patched"] = len(ep_layers) == NUM_LAYERS

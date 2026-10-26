@@ -19,9 +19,8 @@ import pytest
 import torch
 from transformers.utils import CONFIG_NAME
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  — registers the source-schema families
 from src.checkpoint.config_export import finalize_exported_config
-from src.models.moe_balancing import exports_source_config_schema
+from src.models.moe.family_specs import find_moe_family_spec
 from src.trainers.mixins.checkpointing import CheckpointingMixin
 
 BAILING = "bailing_moe"
@@ -65,8 +64,8 @@ def test_a_family_less_live_config_warns_rather_than_writing_a_wrong_family(tmp_
 def test_the_source_schema_step_engages_only_for_the_families_that_declare_it(tmp_path, caplog):
     """Step-3.x has no config class in the pinned server; without a source to carry, the export is
     unservable and must say so. Every other family must not be touched by that step at all."""
-    assert exports_source_config_schema(SOURCE_SCHEMA_FAMILY), "the family registry moved"
-    assert not exports_source_config_schema("qwen3")
+    assert find_moe_family_spec(SOURCE_SCHEMA_FAMILY).exports_source_config_schema, "the family spec moved"
+    assert find_moe_family_spec("qwen3") is None
     _written_config(tmp_path, {"model_type": SOURCE_SCHEMA_FAMILY})
 
     with caplog.at_level("WARNING"):

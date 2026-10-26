@@ -17,7 +17,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.moe_layer.grad_sync import (
     build_expert_grad_hook,
     build_router_grad_hook,

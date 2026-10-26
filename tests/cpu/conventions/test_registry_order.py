@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-import src.distributed.expert_parallel.expert_weights as expert_weights
+import src.distributed.expert_parallel.families.roster as ep_roster
 from tests.common.equivalence.revisions import probe_in_tree
 from tests.common.goldens.registry_order import GOLDEN_PATH, render
 from tests.common.repo import REPO_ROOT
@@ -29,9 +29,9 @@ def test_every_registry_holds_entries():
 
 def test_a_reversed_subclass_walk_reorders_the_ep_roster(monkeypatch):
     """The EP roster is read off the subclass walk; walked backwards it holds every class in another order."""
-    walk = expert_weights.iter_subclasses
+    walk = ep_roster.iter_subclasses
     roster = json.loads(render())["ep layer classes"]
-    monkeypatch.setattr(expert_weights, "iter_subclasses", lambda base: walk(base)[::-1])
+    monkeypatch.setattr(ep_roster, "iter_subclasses", lambda base: walk(base)[::-1])
 
     reordered = json.loads(render())["ep layer classes"]
 

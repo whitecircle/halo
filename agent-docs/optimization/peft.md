@@ -228,7 +228,7 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 | CP | Yes | Yes* | None | CP shards the sequence, not the weights — adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. *QLoRA only on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
 | TP | **No** | No | — | Rejected — adapters are plain tensors outside the TP DTensor graph |
 | EP+CP | Yes | No | Attention + experts | Both active |
-| EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `has_ep_lora` arm |
+| EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `model_has_expert_lora` arm |
 | ETP | Yes | No | Attention only | Expert adapters rejected at config time by `ParallelismConfig` (`expert_tp_size > 1` gives the replicated adapter half a partial, never-synced gradient) |
 
 **EP.** The expert names [above](#moe-models--expert-targets-and-full-trained-modules) route to **native grouped
@@ -247,7 +247,7 @@ rank-inconsistent and will not reload onto a non-TP model. Use FSDP/DP, CP, or p
 
 The gate is `_validate_lora_tp_compatibility` (`src/trainers/mixins/validation.py`) and it refuses both
 adapter kinds: a `PeftModel` or any PEFT tuner layer injected in place (read off the tuner layers, so a
-backbone's own `lora_*` weights stay base weights), and — checked first, via `has_ep_lora` — the native
+backbone's own `lora_*` weights stay base weights), and — checked first, via `model_has_expert_lora` — the native
 grouped expert adapters, which are no tuner layer and which the TP replicated-grad sweep skips by param
 identity. `expert_tp_size > 1` rejects expert LoRA earlier still, at config time in `ParallelismConfig`,
 before the checkpoint downloads.
@@ -493,7 +493,7 @@ base, so the run continues from its trained adapters rather than the fold
 It needs native grouped expert adapters to exist: `lora_target_modules` must name at least one expert
 projection, or `_validate_merge_expert_lora_save` raises.
 
-Both halves are folded: expert deltas inside each family's `gather_expert_state_dict`, PEFT (attention)
+Both halves are folded: expert deltas inside each layer's `gather_expert_state_dict`, PEFT (attention)
 deltas out of place into each tensor as it is written, with the weight sync's fold
 ([above](#online-rl--rollout-server-weight-sync)). The frozen base is never written, so training continues
 unchanged. The fold happens

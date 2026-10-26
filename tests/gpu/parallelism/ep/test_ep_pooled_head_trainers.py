@@ -37,7 +37,7 @@ from trl import RewardConfig
 
 from src.configs.classification import ClassificationConfig
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from src.trainers.reward.classification import ClassificationTrainer
@@ -178,7 +178,7 @@ def run(ctx):
     num_labels = 1 if kind == "reward" else NUM_LABELS
     config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model(num_labels).to(ctx.device)
-    patch_moe_model_for_ep(model, config.ep_config())
+    apply_ep_layers(model, config.ep_config())
 
     # ── EP is structurally live: a dense run wearing an EP config would pass every loss check
     # below (the dense reference IS the unsharded path), so the sharding itself is asserted.

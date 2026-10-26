@@ -9,10 +9,10 @@ import pytest
 import torch
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.moe_layer import grad_sync
 from src.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.models.moe.family_specs import find_moe_family_spec
 from tests.common.equivalence import ep_bitwise
 from tests.common.equivalence.ep_bitwise import (
     CONSTRUCTION_VARIANTS,
@@ -91,7 +91,7 @@ def test_every_forwarding_case_records_its_loss_logits_and_gradients(roster):
         gradients = [name for name in tensors if name.startswith(GRADIENT_PREFIX)]
         if not {"loss", "logits"} <= tensors.keys() or not gradients or not torch.isfinite(tensors["loss"]):
             missing.append(record_path)
-        replayable = ep_layer_class_by_model_type()[family]._supports_routing_replay
+        replayable = find_moe_family_spec(family).supports_routing_replay
         if replayable and tensors.get("routing", torch.empty(0)).shape[:2] != (2, SEQ["cpu"]):
             missing.append(f"{record_path}: routing")
     assert missing == []

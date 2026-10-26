@@ -1,6 +1,4 @@
-"""Model patching for Expert Parallelism with DeepEP: wrap each supported HuggingFace MoE block with its
-``EP*MoELayer`` wrapper (:data:`MOE_LAYER_MAP`).
-"""
+"""Install each family's ``EP*MoELayer`` over the HuggingFace MoE blocks the EP family roster claims."""
 
 import logging
 
@@ -8,48 +6,25 @@ import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.runtime.ranks import is_global_main_process
-from src.subclass_registry import build_class_claim_map, swap_registered_modules
-
-# Registers every EP wrapper as an ``EPMoELayerBase`` subclass for ``build_moe_layer_map()`` to discover.
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  isort:skip
+from src.subclass_registry import swap_registered_modules
 
 logger = logging.getLogger(__name__)
 
 
-def build_moe_layer_map() -> dict[str, type[EPMoELayerBase]]:
-    """HF MoE class name → EP wrapper class, derived from every registered wrapper's
-    :attr:`~EPMoELayerBase.HF_MODULE_NAMES`.
-
-    Walks the ``EPMoELayerBase`` subclass tree (concrete wrappers may sit under intermediate bases) so a
-    new family self-registers on import. Raises on a duplicate HF name.
-    """
-    return build_class_claim_map(EPMoELayerBase, "HF MoE class name")
-
-
-MOE_LAYER_MAP = build_moe_layer_map()
-
-
 def ep_claimed_blocks(model: nn.Module) -> list[tuple[str, nn.Module]]:
-    """``(path, block)`` for every MoE block :func:`patch_moe_model_for_ep` wraps, on a model not yet
-    patched: the modules whose parameters become EP parameters."""
+    """``(path, block)`` for every MoE block :func:`apply_ep_layers` wraps, on a model not yet wrapped: the
+    modules whose parameters become EP parameters."""
     return [(path, module) for path, module in model.named_modules() if type(module).__name__ in MOE_LAYER_MAP]
 
 
-def patch_moe_model_for_ep(
-    model: nn.Module,
-    ep_config: EPConfig,
-    weights_already_sharded: bool = False,
-) -> nn.Module:
-    """Patch MoE model for Expert Parallelism with DeepEP.
+def apply_ep_layers(model: nn.Module, ep_config: EPConfig, weights_already_sharded: bool = False) -> nn.Module:
+    """Replace every claimed MoE block of ``model`` with its family's EP layer, in place.
 
-    Args:
-        model: The model to patch.
-        ep_config: Expert parallelism configuration.
-        weights_already_sharded: If True, expert weights are already sliced to this rank's local
-            expert range (e.g. by the lazy loader), so wrapper ``__init__`` adopts existing
-            parameters instead of slicing from the full expert tensors.
+    ``weights_already_sharded``: the expert tensors already hold this rank's expert range (the lazy loader), so
+    each layer adopts them instead of slicing the full tensors.
     """
     expert_tp_info = f", expert_tp_size={ep_config.expert_tp_size}" if ep_config.expert_tp_size > 1 else ""
     logger.info(f"Patching model for EP with DeepEP (ep_size={ep_config.ep_size}{expert_tp_info})")

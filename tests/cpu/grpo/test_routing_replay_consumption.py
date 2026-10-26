@@ -21,6 +21,7 @@ from torch import nn
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.models.gradient_checkpointing import RecomputeScope
+from src.models.moe.family_specs import MoEFamilySpec
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
 
 ROWS, SEQ, K, E = 2, 4, 2, 8
@@ -29,6 +30,8 @@ ROWS, SEQ, K, E = 2, 4, 2, 8
 class _StubEPLayer(EPMoELayerBase):
     """Minimal concrete layer exposing the REAL ``_maybe_replace_selection`` consumption logic —
     bypasses the EP/DeepEP ``__init__`` and sets only the plain attributes the replay path reads."""
+
+    FAMILY = MoEFamilySpec(model_types=())
 
     def __init__(self):
         nn.Module.__init__(self)

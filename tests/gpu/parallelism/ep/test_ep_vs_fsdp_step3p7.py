@@ -30,10 +30,10 @@ import torch.nn.functional as F
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration, Step3p7MLP
 
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe_balancing import resolve_balancing_mode
+from src.models.moe.balancing import resolve_balancing_mode
 from tests.common.distributed import world_spread
 from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
@@ -99,7 +99,7 @@ def run(ctx):
     # ── EP=2: same weights, same batch ────────────────────────────────────────
     model = _build_model(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
-    model = patch_moe_model_for_ep(model, pc.ep_config())
+    model = apply_ep_layers(model, pc.ep_config())
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPStep3p7MoELayer)]
     text_layers = model.model.language_model.layers

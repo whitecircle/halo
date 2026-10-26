@@ -37,14 +37,9 @@ from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_
 from src.models.attention.selection import is_fa4_backward_nan_prone, resolve_attn_implementation
 from src.models.config_access import get_config_field
 from src.models.modality import config_declares_multimodality, is_vlm_model
-from src.models.moe_balancing import (
-    ROUTER_EXPERT_COUNT_FIELDS,
-    ROUTER_LOGITS_FORCED_OFF_ATTR,
-    get_first_router_field,
-    resolve_balancing_mode,
-    resolve_expert_ffn_shard_width,
-    resolve_router_topk,
-)
+from src.models.moe.balancing import resolve_balancing_mode
+from src.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
+from src.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
 from tests.common.distributed import fake_process_group_mesh
 
 PartialState()  # the attention resolver and balancing strategy log through accelerate's logger
@@ -223,12 +218,12 @@ def test_balancing_registries_resolve_on_the_real_config():
     assert Step3p7TextConfig.attribute_map.get("moe_top_k") == "num_experts_per_tok"
     for config in (Step3p7TextConfig(), Step3p7Config()):
         assert resolve_router_topk(config) == 8
-        assert get_first_router_field(config, ROUTER_EXPERT_COUNT_FIELDS) == 288
-        assert resolve_expert_ffn_shard_width(config) == 1280
+        assert resolve_expert_count(config) == 288
+        assert resolve_expert_ffn_width(config) == 1280
     for config in (_tiny_text_config(), _composite_config()):
         assert resolve_router_topk(config) == 2
-        assert get_first_router_field(config, ROUTER_EXPERT_COUNT_FIELDS) == 4
-        assert resolve_expert_ffn_shard_width(config) == 16
+        assert resolve_expert_count(config) == 4
+        assert resolve_expert_ffn_width(config) == 16
 
 
 def test_balancing_auto_resolves_none_and_an_explicit_aux_loss_warns_and_stays_off():

@@ -41,7 +41,7 @@ The checkpoint is a composite VLM with **no text-only CausalLM sibling** in tran
 
 ## EP wrapper
 
-`EPGlm5NextMoELayer` (`src/distributed/expert_parallel/layers/glm5_next.py`) replaces `Glm5NextTextMoE`.
+`EPGlm5NextMoELayer` (`src/distributed/expert_parallel/families/glm5_next.py`) replaces `Glm5NextTextMoE`.
 
 - Routing: sigmoid scores plus the fp32 `gate.e_score_correction_bias` on **selection only** (the routed weight comes from the unbiased scores), top-8, `norm_topk_prob`, then `routed_scaling_factor` — fp32 top-k weights, expert load recorded for balancing.
 - Experts: fused `Glm5NextTextExperts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. The hub spells them per-expert (`experts.{i}.gate_proj/up_proj/down_proj`); transformers' weight converter restores the fused layout on load and, on a wrapper-less `save_pretrained`, the per-expert spelling on save.
@@ -53,11 +53,11 @@ The checkpoint is a composite VLM with **no text-only CausalLM sibling** in tran
 
 ETP uses the shared fused-GLU helper: at `expert_tp_size > 1` the gate/up halves store as separate shards ([ETP](../parallelism/expert-tensor-parallelism.md#limitations)).
 
-EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (hc tensors, the KDA `forget_gate` family, a three-source `q/k/v_conv1d → conv1d` merge, per-expert projections), and the lazy loaders replay transformers' `glm5_next` conversion per key (`_HUB_CONVERSION_KEYS`) while fusing only this rank's experts, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py`).
+EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (hc tensors, the KDA `forget_gate` family, a three-source `q/k/v_conv1d → conv1d` merge, per-expert projections), and the lazy loaders replay transformers' `glm5_next` conversion per key (`hub_conversion_keys`) while fusing only this rank's experts, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py`).
 
 There is no full-model host residency at 321B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~628 GB of page cache node-wide at ep8 (the bf16 conversion minus the MTP tail, shared by the 8 ranks), up to ~95 GB of file-backed RSS per rank while its shard handles are open. The per-expert gate+up fusion's 2× transient (~1.2 GB per layer) is on the GPU.
 
-RL weight sync is off (`_supports_weight_sync`): no pinned rollout engine loads `glm5_next`.
+RL weight sync is off (the spec's `weight_sync_refusal`): no pinned rollout engine loads `glm5_next`.
 
 ## Router balancing
 

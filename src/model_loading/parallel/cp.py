@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.ep import load_ep_model
 from src.model_loading.parallel.model_source import ModelSource
@@ -55,7 +55,7 @@ def load_cp_model(
         **kwargs,
     )
     if wraps_experts:
-        model = patch_moe_model_for_ep(model, ep_config)
+        model = apply_ep_layers(model, ep_config)
 
     model = UlyssesModel(model, cp_config)
     logger.info(f"[Rank {rank}] ✓ Model loaded with CP")

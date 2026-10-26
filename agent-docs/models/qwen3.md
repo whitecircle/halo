@@ -37,7 +37,7 @@ The per-method canonical examples (DPO, SMPO, KTO, reward, classification, disti
 
 ## Qwen3 MoE
 
-`EPQwen3MoELayer` (`src/distributed/expert_parallel/layers/qwen3.py`) replaces `Qwen3MoeSparseMoeBlock`.
+`EPQwen3MoELayer` (`src/distributed/expert_parallel/families/qwen3.py`) replaces `Qwen3MoeSparseMoeBlock`.
 
 - Routing: the gate returns `(logits, weights, experts)`; softmax + top-k.
 - Activation: `act(gate(x)) * up(x)` → `down`, where `act` is read off `Qwen3MoeExperts.act_fn` (the resolved `hidden_act`, SiLU on every released checkpoint) rather than assumed.

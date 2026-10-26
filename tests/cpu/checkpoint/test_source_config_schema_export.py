@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """A source-schema-exporting family's ``config.json`` must be the SOURCE repo's schema, not transformers'.
 
-``_EXPORTS_SOURCE_CONFIG_SCHEMA`` (Step-3.7 Flash) marks a family whose serving engines have no
+``exports_source_config_schema`` (Step-3.7 Flash) marks a family whose serving engines have no
 config class of their own and read it only through the source repo's ``auto_map`` modules. Those
 modules spell the config in the vendor's own keys, which transformers 5.16 ABSORBS at load
 (``Step3p7TextConfig.attribute_map`` plus the ``kwargs.pop`` derivations in ``__post_init__``) and
@@ -33,9 +33,9 @@ from src.checkpoint import config_export
 from src.checkpoint.config_export import save_model_config
 from src.checkpoint.offline_export import save_full_checkpoint
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
+from tests.common.rosters import ep_layer_class_by_model_type
 
 # The tiny stand-in for ``stepfun-ai/Step-3.7-Flash``'s own ``config.json``: the release's key
 # spellings at the roster's geometry. Every MoE/attention field is the vendor's, not transformers' —
@@ -140,10 +140,12 @@ def _exported(tmp_path, cls, mutate=None) -> tuple[dict, str, object]:
 
 
 def test_every_declaring_family_has_a_source_schema_fixture():
-    declaring = {cls for cls in ep_layer_classes() if cls._EXPORTS_SOURCE_CONFIG_SCHEMA}
+    declaring = {
+        cls for cls in set(ep_layer_class_by_model_type().values()) if cls.FAMILY.exports_source_config_schema
+    }
     assert declaring == set(FIXTURES), (
         f"{sorted(c.__name__ for c in declaring ^ set(FIXTURES))}: a family declaring "
-        f"_EXPORTS_SOURCE_CONFIG_SCHEMA must pin its carried export schema here"
+        f"exports_source_config_schema must pin its carried export schema here"
     )
 
 

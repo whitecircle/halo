@@ -22,7 +22,6 @@ from src.distributed.group_layout import (
 from src.env import nccl_timeout
 from src.hardware import supports_grouped_mm
 from src.models.moe.expert_lora_spec import ExpertLoraSpec, reject_expert_lora_with_expert_tp
-from src.models.moe_balancing import ROUTER_EXPERT_COUNT_FIELDS, get_first_router_field
 from src.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -496,20 +495,3 @@ class EPConfig:
             logger.info(f"  - {self.stage_world_size} ranks total, {self.num_ep_groups} EP groups")
             logger.info(f"  - Each EP group has {self.ep_group_size} ranks, {self.ep_size}-way expert distribution")
             logger.info(f"  - All {self.stage_world_size} ranks participate in gradient sync (DP)")
-
-
-def get_num_experts(model_config) -> int:
-    """Routed-expert count from a HuggingFace model config, via the shared field registry.
-
-    Uses the same :func:`get_first_router_field` probe over ``ROUTER_EXPERT_COUNT_FIELDS``, with the
-    same ``text_config`` descent, as MoE detection, the load metrics and ``ParallelismConfig``'s
-    expert-divisibility gate, so a family cannot be MoE for one consumer and dense for another.
-    Raises when the count cannot be read.
-    """
-    num_experts = get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
-    if not num_experts:
-        raise ValueError(
-            f"Could not determine the routed-expert count from {type(model_config).__name__}: none of "
-            f"{ROUTER_EXPERT_COUNT_FIELDS} is set on it or on its text config."
-        )
-    return num_experts

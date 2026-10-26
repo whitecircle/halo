@@ -70,7 +70,7 @@ It emits nothing in three cases:
 - Under pipeline parallelism, where it is not wired: the stage forwards return bare tensors without `router_logits`, so `bias_update` is the route to load metrics there.
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
-Two live paths bypass the hooks even when wired: a wrapper routing without the HF router module (`_ep_severs_aux_loss` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
+Two live paths bypass the hooks even when wired: a wrapper routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.
 
 ### BalancingBiasCallback
 
@@ -135,7 +135,7 @@ The resolved mode is reconciled world-wide with precedence `bias_update > bias_u
 
 Every MoE run with gradient checkpointing is reentrant, and a reentrant checkpoint runs a layer's original forward under `no_grad`. transformers collects `router_logits` in that pass, so on its own a checkpointed layer's aux term reaches the loss with no graph and adds no router gradient.
 
-`aux_loss` therefore installs `install_router_aux_gradient` (`src/models/moe_aux_loss.py`) on the module collecting the logits, the innermost one declaring `router_logits` in `_can_record_outputs`. Each tensor collected under a checkpoint's `no_grad` pass becomes a carrier whose backward keeps the gradient the loss hands it. In the layer's recompute, an identity node on the output of the block owning the router passes that gradient to the router's recomputed logits.
+`aux_loss` therefore installs `install_router_aux_gradient` (`src/models/moe/router_aux_gradient.py`) on the module collecting the logits, the innermost one declaring `router_logits` in `_can_record_outputs`. Each tensor collected under a checkpoint's `no_grad` pass becomes a carrier whose backward keeps the gradient the loss hands it. In the layer's recompute, an identity node on the output of the block owning the router passes that gradient to the router's recomputed logits.
 
 The gradient is the family's own `load_balancing_loss_func`, differentiated by autograd: the load pooled over all layers, the attention mask, `router_aux_loss_coef` and the trainer's loss scaling apply exactly as without checkpointing, whichever consumer adds the term (the model forward, a fused-loss forward, the CP wrapper, TRL's KTO). The coefficient stays as configured, so the logged `loss` and `aux_loss` read as they do without checkpointing. Collected logits that carry a graph (no checkpointing, the layers `every_n_layers` leaves unchecked) keep the native path, so no term counts twice. EP needs no collective: each rank computes its aux loss from its own tokens, as HF does.
 

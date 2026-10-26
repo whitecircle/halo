@@ -4,7 +4,7 @@
 ``save_pretrained`` on transformers >= 5.14 writes the composite class in Thinking Machines'
 original namespace (``model.llm.*``, ``attn.wq_du``, interleaved ``experts.w13_weight``) — the same
 layout the hub ships. The lazy loaders translate it through the family's declared conversion entry
-(``_HUB_CONVERSION_KEYS`` → ``conversion_selection.py``), so this gate proves, against a ``from_pretrained``
+(``hub_conversion_keys`` → ``conversion_selection.py``), so this gate proves, against a ``from_pretrained``
 reference on the same checkpoint:
 
   1. **EP=2 composite** — every expert shard equals the reference's slice bitwise, attention/backbone
@@ -32,7 +32,7 @@ from transformers.models.inkling.configuration_inkling import (
 )
 from transformers.models.inkling.modeling_inkling import InklingForCausalLM, InklingForConditionalGeneration
 
-from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
+from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.ep import load_ep_model_lazy

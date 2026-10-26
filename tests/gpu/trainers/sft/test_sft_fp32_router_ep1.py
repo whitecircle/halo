@@ -36,7 +36,6 @@ from trl import SFTConfig
 
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.checkpoint.reading import load_full_state_dict
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
@@ -54,6 +53,7 @@ from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.peft_helpers import load_peft_model_from_config, peft_model_config, unwrap
 from tests.common.pinned_params import RUN_DTYPE, SEED, load_row_model, tiny_family_checkpoint
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tolerances import TOL
 from tests.common.utils import finish_phase, log, resumed_loss_deltas, step_losses, training_run_checks
 

@@ -350,7 +350,7 @@ def checkpoint(tmp_path_factory) -> str:
 
 @pytest.fixture
 def _stub_ep_patching(monkeypatch):
-    monkeypatch.setattr(ep_lazy_loader, "patch_moe_model_for_ep", lambda model, *args, **kwargs: model)
+    monkeypatch.setattr(ep_lazy_loader, "apply_ep_layers", lambda model, *args, **kwargs: model)
 
 
 @pytest.fixture

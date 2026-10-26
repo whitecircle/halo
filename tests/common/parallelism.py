@@ -124,7 +124,7 @@ def single_process_ep_config(num_experts: int | None = None, **overrides) -> EPC
     comparison stays in-process. ``use_grouped_gemm=False`` keeps the eager expert loop (the
     grouped-GEMM kernel needs SM90+; a GPU caller overrides it). A layer built directly reads
     ``expert_start_idx``/``expert_end_idx`` at construction, so ``num_experts`` finalizes the expert
-    assignment here; :func:`patch_moe_model_for_ep` finalizes it off the model when it is left unset.
+    assignment here; :func:`apply_ep_layers` finalizes it off the model when it is left unset.
     """
     config = EPConfig(
         **{

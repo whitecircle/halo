@@ -397,3 +397,19 @@ def resolve_fused_glu_mul(act_fn: object) -> GluCombine | None:
     if is_gelu_tanh_activation(act_fn):
         return GluCombine.gelu_tanh()
     return None
+
+
+def resolve_clamped_glu_mul(
+    act_fn: object, limit: float, *, clamp_activated: bool
+) -> Callable[[torch.Tensor, torch.Tensor], torch.Tensor]:
+    """The clamped-SwiGLU combine: the gate clamped to ``limit`` before ``act_fn`` (DeepSeek-V4, GLM-5 Next) or,
+    under ``clamp_activated``, after it (Step-3.7), and the up half to ``±limit``. Fused for a SiLU gate; any
+    other activation runs the same clamps eagerly."""
+    if is_silu_activation(act_fn):
+        return GluCombine.clamped_silu(limit, clamp_activated=clamp_activated)
+
+    def clamped_glu_mul_eager(gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
+        activated = act_fn(gate).clamp(max=limit) if clamp_activated else act_fn(gate.clamp(max=limit))
+        return activated * up.clamp(min=-limit, max=limit)
+
+    return clamped_glu_mul_eager

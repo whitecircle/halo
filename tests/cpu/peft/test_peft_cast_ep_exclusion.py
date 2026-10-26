@@ -25,7 +25,7 @@ import torch.nn.functional as F
 from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.parallelism import single_process_ep_config
 

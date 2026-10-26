@@ -136,7 +136,7 @@ def is_expert_bank_merge(entry) -> bool:
     every source carries a per-index wildcard, which in transformers' mappings is only ever an expert list.
 
     That layout is owned at both ends by the expert code, never by a generic conversion replay: the lazy
-    loaders' ``ExpertFuser`` reads it, each family's ``gather_expert_state_dict`` writes it.
+    loaders' ``ExpertFuser`` reads it, each family's ``ExpertLayout`` writes it.
     """
     return isinstance(entry, WeightConverter) and all(_PER_INDEX_SOURCE.search(p) for p in entry.source_patterns)
 

@@ -20,7 +20,7 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 
 from src.configs.preference import SmoothMarginPOConfig
-from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -66,7 +66,7 @@ def run(ctx) -> dict:
     freeze_base_keep_expert_adapters(model)
     log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")
 
-    checks = {"has_expert_lora": has_ep_lora(model)}
+    checks = {"has_expert_lora": model_has_expert_lora(model)}
     non_adapter_trainable = []
     for module in ep_layers(model):
         native = {f"{a}_lora_{w}" for a in module._expert_lora_attrs for w in ("A", "B")}
@@ -74,7 +74,7 @@ def run(ctx) -> dict:
     checks["only_adapters_trainable_in_ep"] = not non_adapter_trainable
 
     base_before = {k: v.clone() for k, v in ep_layers(model)[0].gather_expert_state_dict().items()}
-    adapters_before = gather_ep_lora_adapters(model)
+    adapters_before = gather_expert_lora_adapters(model)
 
     config = SmoothMarginPOConfig(
         output_dir=ctx.output_dir,
@@ -113,7 +113,7 @@ def run(ctx) -> dict:
     base_after = ep_layers(unwrapped)[0].gather_expert_state_dict()
     checks["base_frozen"] = all(torch.equal(base_before[k].cpu(), base_after[k].cpu()) for k in base_before)
 
-    adapters_after = gather_ep_lora_adapters(unwrapped)
+    adapters_after = gather_expert_lora_adapters(unwrapped)
     b_moved = any(
         k.endswith(".lora_B") and not torch.equal(adapters_before[k].cpu(), adapters_after[k].cpu())
         for k in adapters_before

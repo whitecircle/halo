@@ -150,7 +150,7 @@ hit. Narrow `--include`/`--exclude` to the text backbone, or export without a wi
 
 This writes a compressed-tensors checkpoint for MLP/expert weights, copying attention/norm/embed/bias unchanged.
 
-Which names those are is **derived** from the two rosters that decide what QAT quantized — `MLP_PROJECTIONS` (the dense projections `apply_lowp_compute` converts) and the EP layer classes' declared expert layouts, fused (`_HF_FUSED_EXPERT_KEYS`, the same declaration the sharded merge and the un-fuse tool read) and per-expert un-fused (`gate_proj`/`up_proj`/`down_proj`, `w1`/`w3`/`w2`) — so the export cannot quantize a weight the training forward left in bf16.
+Which names those are is **derived** from the two rosters that decide what QAT quantized — `MLP_PROJECTIONS` (the dense projections `apply_lowp_compute` converts) and the family specs' declared expert layouts, fused (`HF_FUSED_EXPERT_KEYS`, the same names the sharded merge and the un-fuse tool read) and per-expert un-fused (`gate_proj`/`up_proj`/`down_proj`, `w1`/`w3`/`w2`) — so the export cannot quantize a weight the training forward left in bf16.
 
 A dense projection spelled like a per-expert roster name but outside an expert container (LFM-2's dense `feed_forward.w1`) is left in bf16, as training left it. `--no-lowp_apply_moe_experts` declares the experts out of scope when training left them in bf16.
 

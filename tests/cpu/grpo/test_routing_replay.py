@@ -15,10 +15,11 @@ from transformers import PretrainedConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
 
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from src.models.gradient_checkpointing import RecomputeScope
+from src.models.moe.family_specs import MoEFamilySpec
 from src.trainers.grpo.rollout.routing_replay import (
     RoutingReplayInjector,
     assemble_rollout_masks,
@@ -412,8 +413,7 @@ def test_injector_flip_rate_drains_counters():
 def test_injector_rejects_unsupported_family_and_empty():
     with pytest.raises(ValueError, match="at least one EP MoE layer"):
         _injector([])
-    unsupported = _BareLayer()
-    unsupported._supports_routing_replay = False
+    unsupported = _BareLayer(FAMILY=MoEFamilySpec(model_types=(), supports_routing_replay=False))
     with pytest.raises(NotImplementedError, match="_BareLayer"):
         _injector([unsupported])
 

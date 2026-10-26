@@ -39,7 +39,7 @@ its one-step staleness, sync cadence, trajectory-length knobs) stay on the
 | IS-reference logprobs (the sampling distribution's) | `--logprobs-mode processed_logprobs` (server flag; the default `raw_logprobs` is pre-temperature and refused at any `rollout_temperature` ≠ 1) | default (post-temperature, pre-nucleus; keep `SGLANG_RETURN_ORIGINAL_LOGPROB` unset) |
 | [R3 routing replay](../training-methods/async-grpo/objective.md#routing-replay) | `--enable-return-routed-experts` + `--moe-backend triton` | `--enable-return-routed-experts` + `--moe-runner-backend triton` |
 | Thinking budget (`rollout_max_thinking_tokens`) | enforced engine-side with a reasoning parser and `VLLM_USE_V2_MODEL_RUNNER=0`; harmony-disabled gpt-oss arms it off the toolkit plugin's marker ([GPT-OSS](../models/gpt-oss.md#serving-for-grpo-vllm)) | rejected at config time |
-| Expert layout on sync | the layout the family's own `gather_expert_state_dict` emits, per-expert or fused; 0.26.0's expert loader reads both. A load that renamed or converted names (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks, a SigLIP tower's `vision_model` level) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families they cannot update are listed under [Which families each engine serves](#which-families-each-engine-serves) |
+| Expert layout on sync | the layout the family's `ExpertLayout` writes, per-expert or fused; 0.26.0's expert loader reads both. A load that renamed or converted names (Step-3.7's per-layer `moe.gate_proj`/`up_proj` stacks, a SigLIP tower's `vision_model` level) is re-spelled through transformers' save-side revert, so the engine receives its hub keys | the same layouts, read by 0.5.17's per-family loaders; the families they cannot update are listed under [Which families each engine serves](#which-families-each-engine-serves) |
 | Trainer expert distribution ([EP/ETP](../reference/glossary.md#parallelism)) | supported | supported |
 
 Both engines fill a sampling field a request omits from the model's `generation_config.json` (vLLM
@@ -248,7 +248,7 @@ Checkpoint layout and expert un-fuse rules live in
 
 Which families each backend accepts for RL is gated trainer-side at construction
 (`reject_unsyncable_model`, `src/trainers/grpo/rollout/weight_push.py`). Inkling, GLM-5 Next
-and Cohere2 MoE declare `_supports_weight_sync = False` and are refused on both engines; every other
+and Cohere2 MoE carry a `weight_sync_refusal` on their family spec and are refused on both engines; every other
 refusal is an engine fact on that engine's client
 ([Which families each engine serves](#which-families-each-engine-serves)).
 
@@ -262,14 +262,14 @@ run has none; `use_grouped_gemm: true` (the torchrun default) installs the wrapp
 
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry. Where
 the live module tree and the hub checkpoint differ, the rewrite is derived, not tabulated: Laguna's
-`_EXPORT_KEY_RENAMES` pairs, then transformers' own save-side revert of what the load converted
+`export_key_renames` pairs, then transformers' own save-side revert of what the load converted
 outside the per-expert merges (`export_conversions` in `src/checkpoint/hub_layout.py`, the list the gathered save inverts).
 
 One-to-one renames stream tensor by tensor. A tensor a reverse converter claims (a fused
 `gate_up_proj` the hub stores split, a vision tower's q/k/v the hub stores fused) is held until its
 sources are complete, since the engine loads one tensor at a time.
 
-`_supports_weight_sync` stays off for GLM-5 Next, which neither engine registers, and for Inkling,
+The `weight_sync_refusal` stays on GLM-5 Next, which neither engine registers, and for Inkling,
 whose sync no engine run has validated. Per-family server flags:
 [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
 
@@ -288,14 +288,15 @@ or transient, which the parameter-only payload never pushes. The shipped GRPO sc
 
 ### Which families each engine serves
 
-Both engines' loaders read a family's experts in the layout its own `gather_expert_state_dict`
-emits: per-expert tensors for Qwen3 MoE, GLM-4 MoE Lite, Laguna, Bailing and LFM-2, the fused pair
+Both engines' loaders read a family's experts in the layout its `ExpertLayout`
+writes: per-expert tensors for Qwen3 MoE, GLM-4 MoE Lite, Laguna, Bailing and LFM-2, the fused pair
 for Qwen3.5/3.6 and Gemma 4, GptOss's interleaved pair. The sync carries one layout per family on
 either engine.
 
 What differs per engine is which families its pinned release can take an online update for at all.
 Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), quoted by the
-[construction gate](#construction-gates).
+[construction gate](#construction-gates); SGLang's Step-3.7 entries spread `STEP3P7.model_types` from the
+family spec, so every spelling the trainer knows is refused with one fact.
 
 | Family (`model_type`) | vLLM 0.26.0 | SGLang 0.5.17 | Loader fact |
 |---|:--:|:--:|---|
@@ -309,8 +310,8 @@ Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), quot
 
 The families not in that table sync on both engines, expert distribution included ([CI](ci.md) has
 the per-family pass): dense families, GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4,
-Ling 2.0, LFM-2 MoE. Inkling, GLM-5 Next and Cohere2 MoE are the exception — they declare
-`_supports_weight_sync = False` and are refused on both ([Construction gates](#construction-gates)).
+Ling 2.0, LFM-2 MoE. Inkling, GLM-5 Next and Cohere2 MoE are the exception — their specs carry
+a `weight_sync_refusal` and they are refused on both ([Construction gates](#construction-gates)).
 
 Three SGLang 0.5.17 loader facts shape its image and its client.
 

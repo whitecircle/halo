@@ -1,19 +1,8 @@
 """The router aux-loss gradient of reentrant-checkpointed MoE layers.
 
-transformers computes a MoE family's router aux loss from ``outputs.router_logits``, which forward
-hooks on the declared router collect while the backbone runs. A reentrant checkpoint runs a layer's
-original forward under ``no_grad`` and re-runs it in backward where nothing collects, so every
-checkpointed layer hands the aux loss a tensor with no graph behind it: the term reaches the logged
-loss and adds no router gradient.
-
-:func:`install_router_aux_gradient` restores that gradient in two hops without re-deriving the loss.
-At the backbone output, each collected tensor that a checkpoint's ``no_grad`` pass produced is
-swapped for a carrier holding the same values, whose backward keeps the gradient the loss hands it:
-the exact per-layer gradient of the family's own aux loss, with the pooled load, the attention mask,
-the coefficient and the trainer's loss scaling all applied, whichever consumer added the term. In the
-recompute, an identity node on the output of the block owning the router hands the kept gradient to
-the router's live logits. A tensor collected with a graph (no checkpoint, a non-reentrant one, a
-layer ``every_n_layers`` leaves unchecked) keeps its native path, so no layer's term counts twice.
+A reentrant checkpoint runs a layer under ``no_grad`` and recomputes it uncollected, so the aux loss on
+``outputs.router_logits`` adds no router gradient. :func:`install_router_aux_gradient` keeps the gradient each such
+tensor receives and injects it into the router's live logits in the recompute; graph-carrying tensors keep their own.
 """
 
 from __future__ import annotations
@@ -26,7 +15,7 @@ import torch.nn as nn
 from peft.utils.other import AuxiliaryTrainingWrapper
 
 from src.models.gradient_checkpointing import current_graph_task
-from src.models.moe_balancing import ROUTER_LOGITS_KEY, declared_routers, declares_router_logits
+from src.models.moe.router_logits import ROUTER_LOGITS_KEY, declared_routers, declares_router_logits
 
 # The attribute marking a backbone as already carrying the hooks, so a second install is a no-op.
 _INSTALLED_ATTR = "_router_aux_gradient"

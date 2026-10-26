@@ -31,7 +31,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.hub_layout import revert_to_load_layout
 from src.checkpoint.reading import read_checkpoint_index
-from src.models.moe_balancing import balancing_param_keys, is_balancing_state_key
+from src.models.moe.balancing import balancing_param_keys, is_balancing_state_key
 from src.models.param_roles import fp32_pinned_names, norm_param_keys
 from src.models.unwrapping import strip_peft_adapter_segment
 

@@ -1,4 +1,5 @@
-"""The DeepEP token dispatcher an EP MoE layer routes through, and its dispatch/combine autograd functions."""
+"""The DeepEP token dispatcher an EP MoE layer routes through, its dispatch/combine autograd functions and their
+checkpoint-recompute replay."""
 
 from __future__ import annotations
 
@@ -8,6 +9,7 @@ import sys
 import weakref
 
 import torch
+import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep.backends import (
@@ -18,6 +20,7 @@ from src.distributed.expert_parallel.deepep.backends import (
     free_all_ep_buffers,
 )
 from src.distributed.expert_parallel.deepep.capacity import capacity_scope
+from src.models.gradient_checkpointing import active_recompute_scope, in_backward_pass
 from src.runtime.collectives import barrier
 from src.runtime.ranks import is_global_main_process
 
@@ -180,12 +183,49 @@ class DeepEPDispatcher:
             )
         self.backend = build_ep_backend(self, ep_config.ep_buffer_backend)
 
-    def dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor):
-        """Dispatch tokens to their experts' ranks; the identity in no-op mode, where the indices are local."""
+    def dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, *, owner: nn.Module):
+        """Dispatch tokens to their experts' ranks; the identity in no-op mode, where the indices are local.
+
+        Inside a recompute scope the original pass caches its results under ``owner`` and the recompute replays
+        them: a second DeepEP dispatch invalidates the handle the original backward holds and silently corrupts
+        every gradient.
+        """
         if self._noop:
             return x, topk_idx, topk_weights, None
+        scope = active_recompute_scope()
+        if scope is None and owner.training and in_backward_pass():
+            raise RuntimeError(
+                f"{type(owner).__name__}: training forward inside backward with no EP checkpoint "
+                f"scope — gradient checkpointing was re-enabled without install_recompute_scopes "
+                f"(TRL's disable_gradient_checkpointing context manager re-installs a bare "
+                f"checkpoint on exit). A second DeepEP dispatch here corrupts every gradient."
+            )
+        slot = scope.slot(owner, "dispatch") if scope is not None else None
+        if scope is not None and scope.is_recompute:
+            return ReplayDispatchFunction.apply(
+                x,
+                topk_idx,
+                topk_weights,
+                self,
+                slot["recv_x"],
+                slot["recv_topk_idx"],
+                slot["recv_topk_weights"],
+                slot["handle"],
+            )
         self._ensure_buffer(x.shape[0], topk_idx.shape[1])
-        return DeepEPDispatchFunction.apply(x, topk_idx, topk_weights, self)
+        recv_x, recv_topk_idx, recv_topk_weights, handle = DeepEPDispatchFunction.apply(
+            x, topk_idx, topk_weights, self
+        )
+        if slot is not None:
+            # Detached aliases, not clones: DeepEP's copy epilogue lands every result in an allocator-owned
+            # tensor (never a view of the shared arena) and nothing downstream writes into them in place.
+            slot.update(
+                recv_x=recv_x.detach(),
+                recv_topk_idx=recv_topk_idx.detach() if recv_topk_idx is not None else None,
+                recv_topk_weights=recv_topk_weights.detach() if recv_topk_weights is not None else None,
+                handle=handle,
+            )
+        return recv_x, recv_topk_idx, recv_topk_weights, handle
 
     def _ensure_buffer(self, num_tokens: int, num_topk: int) -> None:
         """COLLECTIVE over the EP group. Build or grow the buffer to hold ``num_tokens`` per rank."""
@@ -195,11 +235,22 @@ class DeepEPDispatcher:
             _live_dispatchers[id(self)] = self
             self._live = True
 
-    def combine(self, x: torch.Tensor, topk_weights: torch.Tensor, handle: object) -> torch.Tensor:
-        """Combine expert outputs back to their tokens' positions; the identity in no-op mode."""
+    def combine(
+        self, x: torch.Tensor, topk_weights: torch.Tensor, handle: object, *, owner: nn.Module
+    ) -> torch.Tensor:
+        """Combine expert outputs back to their tokens' positions; the identity in no-op mode. Replayed under
+        ``owner`` in a recompute like :meth:`dispatch`, since the combine writes the same shared buffer."""
         if self._noop:
             return x
-        return DeepEPCombineFunction.apply(x, topk_weights, handle, self)
+        scope = active_recompute_scope()
+        if scope is None:
+            return DeepEPCombineFunction.apply(x, topk_weights, handle, self)
+        slot = scope.slot(owner, "combine")
+        if scope.is_recompute:
+            return ReplayCombineFunction.apply(x, topk_weights, handle, self, slot["combined"])
+        combined = DeepEPCombineFunction.apply(x, topk_weights, handle, self)
+        slot["combined"] = combined.detach()
+        return combined
 
     def destroy(self, *, free_buffer: bool = True) -> None:
         """Drop this layer's claim on its buffer (idempotent); a later dispatch claims one again.

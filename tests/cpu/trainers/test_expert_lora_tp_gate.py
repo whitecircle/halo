@@ -54,7 +54,7 @@ def test_native_expert_lora_is_rejected_under_tp(monkeypatch):
     # Premise: this is exactly the shape both existing predicates wave through.
     assert not isinstance(model, PeftModel)
     assert not tuner_adapter_param_ids(model)
-    monkeypatch.setattr(validation_mod, "has_ep_lora", lambda m: True)
+    monkeypatch.setattr(validation_mod, "model_has_expert_lora", lambda m: True)
 
     with pytest.raises(ValueError, match="expert LoRA is not supported with Tensor Parallelism"):
         _validate(_fake_self(model))
@@ -62,7 +62,7 @@ def test_native_expert_lora_is_rejected_under_tp(monkeypatch):
 
 def test_a_full_finetune_under_tp_is_not_refused(monkeypatch):
     """No adapters of either kind: the gate must stay silent, or every EP+TP full fine-tune dies."""
-    monkeypatch.setattr(validation_mod, "has_ep_lora", lambda m: False)
+    monkeypatch.setattr(validation_mod, "model_has_expert_lora", lambda m: False)
 
     assert _validate(_fake_self(_TinyLM())) is None
 
@@ -70,7 +70,7 @@ def test_a_full_finetune_under_tp_is_not_refused(monkeypatch):
 def test_attention_lora_under_tp_still_names_its_own_mechanism(monkeypatch):
     """A PEFT-wrapped run is rejected for the DTensor-graph reason, not swallowed by the expert-LoRA
     branch."""
-    monkeypatch.setattr(validation_mod, "has_ep_lora", lambda m: False)
+    monkeypatch.setattr(validation_mod, "model_has_expert_lora", lambda m: False)
     peft_model = get_peft_model(_TinyLM(), LoraConfig(r=4, target_modules=["q_proj"]))
 
     with pytest.raises(ValueError, match="LoRA/PEFT adapters are not supported with Tensor Parallelism"):
@@ -79,7 +79,7 @@ def test_attention_lora_under_tp_still_names_its_own_mechanism(monkeypatch):
 
 def test_a_backbones_own_lora_named_weights_are_not_adapters(monkeypatch):
     """A TP full fine-tune of a backbone carrying native ``lora_*`` parameters is not a LoRA run."""
-    monkeypatch.setattr(validation_mod, "has_ep_lora", lambda m: False)
+    monkeypatch.setattr(validation_mod, "model_has_expert_lora", lambda m: False)
     model = _NativeLoraBackbone()
     assert any("lora_" in name for name, _param in model.named_parameters()), "premise: adapter-like names"
 
@@ -94,7 +94,7 @@ def test_a_backbones_own_lora_named_weights_are_not_adapters(monkeypatch):
 def test_adapters_injected_in_place_are_refused_under_tp(monkeypatch, config):
     """The embedding path injects adapters without a PeftModel; their tuner layers still count, whatever
     their parameters are named ((IA)3's ``ia3_l`` carries no ``lora_``)."""
-    monkeypatch.setattr(validation_mod, "has_ep_lora", lambda m: False)
+    monkeypatch.setattr(validation_mod, "model_has_expert_lora", lambda m: False)
     model = inject_adapter_in_model(config, _TinyLM())
     assert not isinstance(model, PeftModel), "premise: injected in place, not wrapped"
 

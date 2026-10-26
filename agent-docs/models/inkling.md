@@ -16,7 +16,7 @@ Transformers ships `transformers.models.inkling` natively (the image pins 5.16.1
 
 ## EP wrapper
 
-`EPInklingMoELayer` (`src/distributed/expert_parallel/layers/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged.
+`EPInklingMoELayer` (`src/distributed/expert_parallel/families/inkling.py`) claims `InklingMoE` / `model_type: inkling_mm_model`, `inkling_text`. Fused `gate_up_proj`/`down_proj` routed experts in the GLM-4 layout, so the base fused-GLU storage, gather, and sharded merge apply unchanged.
 
 That includes ETP, whose split-shard path and token-space partial-sum reduce are validated by `tests/gpu/parallelism/combined/test_ep_etp_inkling.py` (registered as EP+ETP on 4 GPUs; launched by hand at `--nproc_per_node=2` it runs pure ETP; the 2 shared experts stay replicated on every ETP rank). Two family quirks force a standalone wrapper rather than a GLM-4 subclass:
 
@@ -28,7 +28,7 @@ That includes ETP, whose split-shard path and token-space partial-sum reduce are
 
     The causal-LM loss never reads `router_logits`, so there is no aux-loss path and `moe_balancing: auto` resolves to `bias_update`.
 
-One contract fails closed: `_supports_weight_sync = False` refuses online/async GRPO — no sync into either pinned engine's Inkling loader has been validated. An EP-gathered save of the composite writes the hub's own namespace (`model.llm.*`, the interleaved fused `w13_weight`) ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)).
+One contract fails closed: the spec's `weight_sync_refusal` refuses online/async GRPO — no sync into either pinned engine's Inkling loader has been validated. An EP-gathered save of the composite writes the hub's own namespace (`model.llm.*`, the interleaved fused `w13_weight`) ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)).
 
 ## Loading
 
@@ -36,7 +36,7 @@ The hub checkpoint stores the expert width as `intermediate_size: 2048`, but tra
 
 The checkpoint ships Thinking Machines' original namespace (`model.llm.*`, `attn.wq_du`, interleaved `experts.w13_weight`), which transformers converts inside `from_pretrained` (`transformers/conversion_mapping.py`, keyed `inkling_mm_model`).
 
-The lazy loaders read the same declarative entries through the family's `_HUB_CONVERSION_KEYS` declaration, scoped and translated by `src/model_loading/lazy_safetensors/conversion_selection.py`: renames plus a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`.
+The lazy loaders read the same declarative entries through the family spec's `hub_conversion_keys`, scoped and translated by `src/model_loading/lazy_safetensors/conversion_selection.py`: renames plus a closed op vocabulary (de-interleave, chunk) applied at materialization, after the ranged per-expert read. The default lazy path therefore loads the hub checkpoint directly, each rank reading only its expert slice, pinned bitwise against `from_pretrained` by `tests/gpu/parallelism/ep/test_lazy_load_inkling.py`.
 
 The `from_pretrained` fallback still works but materializes the full checkpoint per concurrently-loading rank: 532 GB for Inkling-Small, so `max_concurrent_loading: 4` ≈ 2.1 TB peak host RAM.
 

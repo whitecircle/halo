@@ -79,7 +79,7 @@ def test_every_weight_sync_family_has_a_fixture(generate):
     assert generate.weight_sync_families(), "premise: the EP registry admits at least one family"
     assert generate.uncovered_families() == [], (
         f"{generate.uncovered_families()}: the weight sync admits these families but no parity "
-        f"fixture covers them — add one, or refuse the family (_supports_weight_sync = False, or the vLLM "
+        f"fixture covers them — add one, or refuse the family (a weight_sync_refusal on its spec, or the vLLM "
         f"client's UNSERVABLE_MODEL_TYPES)"
     )
 
@@ -106,7 +106,7 @@ def test_only_a_source_schema_carry_is_pinned_to_a_release(generate):
     a tiny roster config could express — including a family transformers ships no class for, which
     builds through the vendor config module the fixture already carries."""
     for fixture in _pinned_fixtures(generate):
-        assert generate.exports_source_config_schema(fixture.model_type), (
+        assert generate.find_moe_family_spec(fixture.model_type).exports_source_config_schema, (
             f"{fixture.name} is pinned to a release revision but its export carries no source "
             f"schema — build it from a tiny roster config so this suite can re-render it"
         )

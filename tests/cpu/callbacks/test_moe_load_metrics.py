@@ -29,7 +29,7 @@ from src.callbacks.moe_metrics import (
     _extract_router_logits,
     compute_moe_load_metrics,
 )
-from src.models.moe_balancing import detect_moe_experts_topk
+from src.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 
 
 def _approx(a: float, b: float, tol: float = 1e-6) -> bool:
@@ -451,7 +451,7 @@ def test_detect_moe_reads_composite_text_config() -> None:
     silently. No family name is involved: any composite config must work.
     """
     model = type("M", (), {"config": _CompositeCfg(num_experts=256, num_experts_per_tok=8)})()
-    assert detect_moe_experts_topk(model) == (256, 8)
+    assert (resolve_expert_count(model.config), resolve_router_topk(model.config)) == (256, 8)
 
 
 def test_detect_moe_still_reads_flat_config() -> None:
@@ -465,7 +465,7 @@ def test_detect_moe_still_reads_flat_config() -> None:
             return self
 
     model = type("M", (), {"config": _FlatCfg()})()
-    assert detect_moe_experts_topk(model) == (128, 4)
+    assert (resolve_expert_count(model.config), resolve_router_topk(model.config)) == (128, 4)
 
 
 def test_detect_moe_dense_model_reports_zero() -> None:
@@ -478,7 +478,7 @@ def test_detect_moe_dense_model_reports_zero() -> None:
             return self
 
     model = type("M", (), {"config": _DenseCfg()})()
-    assert detect_moe_experts_topk(model) == (0, 0)
+    assert (resolve_expert_count(model.config), resolve_router_topk(model.config)) == (0, 0)
 
 
 if __name__ == "__main__":

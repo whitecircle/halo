@@ -31,12 +31,12 @@ from transformers import CONFIG_MAPPING
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.load_rules import _divisors_up_to, reject_unsupported_model
 from src.models.attention.gpt_oss_sinks import SinksPolicy
-from src.models.moe_balancing import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_shard_width
+from src.models.moe.config_fields import EXPERT_FFN_WIDTH_FIELDS, resolve_expert_ffn_width
 from src.trainers.mixins.base import DistributedTrainerMixin, FsdpExclusions
 from tests.common.parallelism import make_parallelism_config
 
 _MOD = "src.distributed.parallelism_config"
-# Enough to make every gate below see a MoE model; the field is one of ROUTER_EXPERT_COUNT_FIELDS.
+# Enough to make every gate below see a MoE model; the field is an expert-count spelling.
 _MOE = {"num_experts": 8}
 
 
@@ -134,15 +134,15 @@ def test_every_width_spelling_resolves_to_the_declared_per_expert_width():
     """Each registered spelling names the per-expert dimension directly, and an unknown one is not
     guessed at — the gate must stay silent rather than judge a width it did not read."""
     for field in EXPERT_FFN_WIDTH_FIELDS:
-        assert resolve_expert_ffn_shard_width(_Cfg(**{field: 1024})) == 1024
-    assert resolve_expert_ffn_shard_width(_Cfg(ffn_hidden_size=1024)) is None
+        assert resolve_expert_ffn_width(_Cfg(**{field: 1024})) == 1024
+    assert resolve_expert_ffn_width(_Cfg(ffn_hidden_size=1024)) is None
 
 
 def test_the_moe_width_wins_over_the_dense_one_on_a_hybrid_config():
     """A hybrid dense+MoE config carries both spellings and only the MoE one is what ETP shards, so
     reading ``intermediate_size`` there would gate on the dense FFN and let a ragged expert split
     through. Registry ORDER is what enforces that."""
-    assert resolve_expert_ffn_shard_width(_Cfg(intermediate_size=4096, moe_intermediate_size=512)) == 512
+    assert resolve_expert_ffn_width(_Cfg(intermediate_size=4096, moe_intermediate_size=512)) == 512
 
 
 # fp32_non_ep_params + FSDP-managed ep1 experts — the mixed-dtype shard group

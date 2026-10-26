@@ -34,7 +34,7 @@ run.
 
 ## EP wrapper
 
-`EPCohere2MoELayer` (`src/distributed/expert_parallel/layers/cohere2_moe.py`) replaces
+`EPCohere2MoELayer` (`src/distributed/expert_parallel/families/cohere2_moe.py`) replaces
 `Cohere2MoeSparseMoeBlock`. Layers whose `mlp_layer_types` entry is `dense` instantiate a plain MLP
 and are never wrapped.
 
@@ -92,7 +92,7 @@ memory-validated shape.
 
 ## Loading and serving
 
-- Lazy loading is off (`_supports_lazy_loading = False`): no lazy load of the Command A+ checkpoint
+- Lazy loading is off (`supports_lazy_loading=False` on its spec): no lazy load of the Command A+ checkpoint
   has been checked against `from_pretrained`, so every load routes through `from_pretrained`.
 - A gathered save writes the hub namespace
   ([Checkpoints](../reference/checkpoints.md#serving-on-vllm--sglang)): the SigLIP tower under
@@ -110,7 +110,7 @@ memory-validated shape.
 
     Both verdicts come from the pinned engines' loaders; no export of this family has been served end
     to end.
-- RL weight sync is refused at construction (`_supports_weight_sync = False`): no end-to-end sync
+- RL weight sync is refused at construction (the spec's `weight_sync_refusal`): no end-to-end sync
   has been validated on either pinned engine
   ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 - Liger covers the fused SwiGLU (`Cohere2MoeMLP`, i.e. the dense and shared-expert path), cross-entropy,

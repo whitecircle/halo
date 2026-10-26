@@ -6,7 +6,7 @@ import torch
 import torch.nn as nn
 
 from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
-from src.hardware import current_device
+from src.models.moe.family_specs import LFM2
 
 
 class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
@@ -18,25 +18,14 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     """
 
     HF_MODULE_NAMES = ("Lfm2MoeSparseMoeBlock",)
-    # Both spellings, like every composite family: ``Lfm2VlConfig.model_type = "lfm2_vl"`` wraps an
-    # lfm2_moe text tower, and the model-type-keyed consumers (sharded-EP save, merge_ep_shards,
-    # unfuse/quantize) resolve the top-level type, so without the wrapper spelling they reject a
-    # checkpoint the toolkit itself trained.
-    HF_MODEL_TYPES = ("lfm2_moe", "lfm2_vl")
+    FAMILY = LFM2
 
-    _supports_bias_balancing = True
-    # ``route_tokens_to_experts`` adds this wrapper-level buffer (re-registered off the hub block, so
-    # it exports at the block's own key) to the selection score. When ``use_expert_bias`` is false the
-    # slot is materialized at enable time instead (same sigmoid-score space, zero-initialized, a
-    # no-op at creation) and the config flag below flips so serving engines load and apply it.
-    _NATIVE_BALANCING_BIAS_ATTR = "expert_bias"
-    _NATIVE_BALANCING_CONFIG_FLAG = "use_expert_bias"
-    # Hub checkpoint layout: ``experts.{i}.w{1,3,2}.weight`` (Llama-style names).
-    _PER_EXPERT_UNFUSED_KEYS = ("w1", "w3", "w2")  # w1 = gate, w3 = up, w2 = down
+    SUPPORTS_BIAS_BALANCING = True
+
+    # ``Lfm2MoeTopKRouter``'s renormalization floor.
+    _TOPK_WEIGHT_NORM_EPS = 1e-6
 
     _NUM_EXPERTS_ATTR_PATHS = ("experts.num_experts", "gate.num_experts")
-
-    _SHARED_EXPERT_ATTRS = ("shared_experts",)
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the sigmoid-routing knobs, read off ``Lfm2MoeTopKRouter`` (the gate) rather than
@@ -81,16 +70,12 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
     def _materialize_native_balancing_slot(self) -> bool:
         """Create the architecture's own ``expert_bias`` on a ``use_expert_bias: false`` checkpoint.
 
-        The slot is config-gated, not structural: the zero-initialized buffer is a no-op at creation
-        and lives in the same sigmoid-score space the transient side-buffer would use, so
-        materializing it only makes the trained bias exportable. ``use_expert_bias`` flips here for
-        the wrapper's own routing; the strategy layer mirrors it into ``model.config``
-        (``_NATIVE_BALANCING_CONFIG_FLAG``) so engines load and apply the tensor.
+        Zero-initialized, a no-op at creation, so materializing it only makes the trained bias exportable;
+        the strategy layer mirrors ``use_expert_bias`` into ``model.config``.
         """
-        device = next((p.device for p in self.parameters()), None)
-        if device is None or device.type == "meta":
-            device = current_device()
-        self.register_buffer("expert_bias", torch.zeros(self.num_experts, dtype=torch.float32, device=device))
+        self.register_buffer(
+            "expert_bias", torch.zeros(self.num_experts, dtype=torch.float32, device=self._resident_device())
+        )
         self.use_expert_bias = True
         return True
 
@@ -98,8 +83,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
         """Bare linear over the router's weight. ``Lfm2MoeTopKRouter.forward`` cannot be called here:
         it requires the block's ``expert_bias`` and runs its own top-k, while selection must stay
         with the wrapper (balancing bias and routing replay recompute it)."""
-        with torch.amp.autocast("cuda", enabled=False):
-            return nn.functional.linear(flat.float() if self._fp32_router_input else flat, self.gate.weight)
+        return self._linear_router_logits(flat)
 
     def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """LFM2 routing with sigmoid activation and optional expert bias."""
@@ -123,8 +107,7 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
             topk_weights = torch.gather(routing_weights, dim=1, index=selected_experts)
 
         if self.norm_topk_prob:
-            denominator = topk_weights.sum(dim=-1, keepdim=True) + 1e-6
-            topk_weights = topk_weights / denominator
+            topk_weights = self._renormalize_topk_weights(topk_weights)
 
         topk_weights = topk_weights * self.routed_scaling_factor
 

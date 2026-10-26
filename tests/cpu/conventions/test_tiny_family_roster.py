@@ -4,7 +4,7 @@
 The merge-on-save, precompute-resume, LoRA sync-exactness and EP determinism GPU suites take their
 ``--family`` names from ``tests/common/tiny_models.py``'s ``TINY_MOE_FAMILIES`` (the sync-exactness
 suites their dense ones from ``TINY_DENSE_FAMILIES``) and their rows from ``tests/gpu/manifest.py``. A family registered
-in ``src/distributed/expert_parallel/layers`` with no tiny model, or one the rows skip for an adapter
+in ``src/distributed/expert_parallel/families`` with no tiny model, or one the rows skip for an adapter
 shape or a layout, would leave its path untested with nothing failing; the roster is therefore held to
 the EP registry, and the rows to the roster (for the sync-exactness suites, the part of it some
 rollout engine takes an online update for).
@@ -16,13 +16,12 @@ import shlex
 
 import pytest
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  (registers every EP family)
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from tests.common import ep_determinism
 from tests.common.lora_sync_exactness import REPRESENTATIVE_FAMILIES, parse_row, row_families, syncable_moe_families
 from tests.common.merged_resume_e2e import ADAPTER_MODES, LAYOUTS, merged_resume_parser
 from tests.common.preference_precompute_e2e import DENSE, precompute_resume_parser
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
 from tests.gpu.manifest import MANIFEST
 

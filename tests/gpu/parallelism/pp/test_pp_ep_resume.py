@@ -34,7 +34,7 @@ from src.callbacks.balancing import configure_moe_balancing
 from src.callbacks.factory import build_run_callbacks
 from src.configs.script_arguments import CommonScriptArguments
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.unwrapping import unwrap_toolkit_wrappers
 from src.trainers.sft import DistributedSFTTrainer
@@ -106,7 +106,7 @@ def run(ctx):
 
     def make_trainer(subdir: str, max_steps: int, save_steps: int | None = None, from_ckpt: str | None = None):
         model = build_model(from_ckpt)
-        patch_moe_model_for_ep(model, config.ep_config())
+        apply_ep_layers(model, config.ep_config())
         args = build_args(os.path.join(root, subdir), max_steps, save_steps)
         script_args = CommonScriptArguments(moe_balancing="bias_update")
         mode = configure_moe_balancing(script_args, model, config)

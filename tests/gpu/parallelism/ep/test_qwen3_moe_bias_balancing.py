@@ -82,7 +82,7 @@ def run(ctx) -> dict:
     layers = ep_layers(model)
     assert layers, "no EP layers built — this model should be EP-wrapped"
     # Without the declaration both bias modes raise.
-    checks["supports_bias_balancing"] = bool(type(layers[0])._supports_bias_balancing)
+    checks["supports_bias_balancing"] = bool(type(layers[0]).SUPPORTS_BIAS_BALANCING)
     log(f"EP layers: {len(layers)}  ({type(layers[0]).__name__})")
     log(f"norm_topk_prob = {layers[0].gate.norm_topk_prob}")
 

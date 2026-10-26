@@ -17,6 +17,8 @@ LORA_PROJECTION_COVERAGE: dict[str, frozenset[str]] = {
 EXPERT_PROJECTIONS: frozenset[str] = frozenset().union(*LORA_PROJECTION_COVERAGE.values())
 # ``lora_target_modules`` aliases naming the module that holds the experts: they stand for the whole FFN.
 EXPERT_CONTAINER_TARGETS: frozenset[str] = frozenset({"experts", "mlp.experts"})
+# What an adapted expert weight's two adapters append to its name.
+EXPERT_LORA_SUFFIXES: tuple[str, str] = ("_lora_A", "_lora_B")
 
 
 @dataclass(frozen=True)

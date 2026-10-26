@@ -19,12 +19,11 @@ from accelerate import PartialState
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401 — the EP predicates read a filled registry
 from src.model_loading.liger import dispatch
 from src.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
 from src.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from src.models.moe_balancing import has_ep_wrapper_class
+from src.models.moe.family_specs import find_moe_family_spec_for_config
 
 PartialState()  # dispatch's logger needs accelerate state initialized
 
@@ -295,7 +294,7 @@ def test_ep_swiglu_force_off_requires_an_ep_wrapper_class_for_the_family(monkeyp
 def test_ep_does_not_strip_a_toolkit_appliers_dense_and_shared_expert_glu(monkeypatch):
     """The EP force-off must key on WHAT the applier swaps, not merely on the family being wrapped.
 
-    Upstream's MoE appliers set the ROUTED-experts class, which ``patch_moe_model_for_ep`` replaces —
+    Upstream's MoE appliers set the ROUTED-experts class, which ``apply_ep_layers`` replaces —
     inert under EP, hence the force-off. A toolkit spec names the dense and shared-expert MLPs, and
     every EP wrapper adopts the shared expert unchanged, so the same force-off would delete a fusion
     that still runs on every token of every layer — in exactly the EP configuration these families
@@ -319,19 +318,15 @@ def test_ep_does_not_strip_a_toolkit_appliers_dense_and_shared_expert_glu(monkey
     assert dispatch.liger_ep_disables_fused_glu(True, delegating) is False
 
 
-def test_has_ep_wrapper_class_reads_the_registry_including_the_text_config():
-    """Derived from the EP layer registry, and resolved through a composite wrapper's text sub-config.
-
-    Imported from its home in the EP package rather than through Liger dispatch: the
-    predicate answers "does this family have an EP wrapper class", which the registry owns.
-    """
-    assert has_ep_wrapper_class(types.SimpleNamespace(model_type="qwen3_5_moe")) is True
-    assert has_ep_wrapper_class(types.SimpleNamespace(model_type="qwen3_next")) is False
+def test_the_family_spec_lookup_resolves_through_the_text_config():
+    """A family has an EP layer exactly when a spec claims its ``model_type``, at either config level."""
+    assert find_moe_family_spec_for_config(types.SimpleNamespace(model_type="qwen3_5_moe")) is not None
+    assert find_moe_family_spec_for_config(types.SimpleNamespace(model_type="qwen3_next")) is None
     composite = types.SimpleNamespace(
         model_type="some_multimodal_wrapper",
         get_text_config=lambda: types.SimpleNamespace(model_type="qwen3_5_moe_text"),
     )
-    assert has_ep_wrapper_class(composite) is True
+    assert find_moe_family_spec_for_config(composite) is not None
 
 
 def test_user_requested_flce_yields_the_defaulted_cross_entropy(monkeypatch):
@@ -446,12 +441,12 @@ def test_the_ep_swiglu_force_off_is_not_read_as_a_user_request(monkeypatch):
     even with no user dict. Reading THAT as an explicit request would turn every uncovered family
     into a hard failure the moment EP is enabled.
 
-    ``ep_wraps_experts`` is forced True because an uncovered family has no EP wrapper class either,
+    ``wraps_experts`` is forced True because an uncovered family has no EP wrapper class either,
     so the real predicate answers False and the fold would never run — the test would then pass on a
     config nothing was folded into, which is exactly the vacuity it is written to avoid.
     """
     monkeypatch.setattr(dispatch, "_TOOLKIT_LIGER_APPLIERS", {})
-    monkeypatch.setattr(dispatch, "ep_wraps_experts", lambda *a, **k: True)
+    monkeypatch.setattr(dispatch, "wraps_experts", lambda *a, **k: True)
     config = types.SimpleNamespace(model_type="model_type_without_any_applier", text_config=None, num_experts=8)
 
     # Premise: the fold really does write swiglu/geglu False for this call.

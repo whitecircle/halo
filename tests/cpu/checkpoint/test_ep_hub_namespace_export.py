@@ -47,17 +47,11 @@ from src.checkpoint.parallel.ep import (
     save_ep_gathered_checkpoint,
 )
 from src.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
-from src.distributed.expert_parallel.expert_weights import (
-    ep_layer_classes,
-    experts_container_attrs,
-    gather_ep_layer_weights,
-    is_expert_weight_attr,
-    to_hub_layer_key,
-)
 from src.distributed.expert_parallel.lazy_plan import family_key_mapping
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.model_loading.lazy_safetensors.conversion import Concat
+from src.models.moe.family_specs import experts_container_attrs, is_expert_weight_attr, moe_model_types
 from src.models.param_roles import persistent_buffers
 from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.checkpoint_io import loading_problems, save_context
@@ -114,7 +108,7 @@ def _loaded(name: str, tmp_path) -> _Loaded:
     _write_hub_checkpoint(family, hub_dir)
     model = _load(family, hub_dir)
     source = {key: tensor.clone() for key, tensor in model.state_dict().items()}
-    patch_moe_model_for_ep(model, single_process_ep_config())
+    apply_ep_layers(model, single_process_ep_config())
     ep_layers = {path: module for path, module in model.named_modules() if isinstance(module, EPMoELayerBase)}
     assert ep_layers, f"{name}: the EP patch wrapped nothing, so no assertion here would reach a gather"
     save_ep_gathered_checkpoint(save_context(model), ep_dir)
@@ -229,7 +223,7 @@ def _gather_on_cpu(layer: EPMoELayerBase):
     is under test."""
 
     def gather(device, **kwargs):
-        return type(layer).gather_expert_state_dict(layer, "cpu", **kwargs)
+        return type(layer).gather_expert_state_dict(layer, **{**kwargs, "device": "cpu"})
 
     return gather
 
@@ -256,23 +250,23 @@ def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_sharded_save_refused_exactly_where_the_merge_cannot_reproduce_it(name, tmp_path, monkeypatch):
-    """``merge_ep_shards.py`` writes the live names through the family's ``_EXPORT_KEY_RENAMES`` alone,
+    """``merge_ep_shards.py`` writes the live names through the family's ``export_key_renames`` alone,
     plus each layer's gather: where that is not what the gathered save writes, the sharded save must
     be refused, and only there."""
     loaded = _loaded(name, tmp_path)
     layer_cls = type(next(iter(loaded.ep_layers.values())))
     live = (key for key, _ in itertools.chain(loaded.model.named_parameters(), persistent_buffers(loaded.model)))
     merged = {
-        to_hub_layer_key(key, layer_cls)
+        layer_cls.FAMILY.to_hub_key(key)
         for key in live
         if not any(key.startswith(f"{path}.") for path in loaded.ep_layers)
     }
     for path, layer in loaded.ep_layers.items():
-        merged |= set(gather_ep_layer_weights(path, layer))
+        merged |= set(layer.gather_layer_state_dict(path))
 
     reproducible = merged == set(loaded.saved)
     # The family the live layers name, whatever the config's model_type resolves to.
-    monkeypatch.setattr(ep_save, "resolve_ep_merge_layer_class", lambda model_type: layer_cls)
+    monkeypatch.setattr(ep_save, "find_moe_family_spec", lambda model_type: layer_cls.FAMILY)
     try:
         reject_unmergeable_ep_sharded_save(loaded.model, world_size=1)
         refused = False
@@ -367,7 +361,7 @@ def test_a_dequantizing_load_record_is_not_reverted_as_a_hub_layout(tmp_path):
             for proj in ("gate_up_proj", "down_proj")
         ),
     ]
-    patch_moe_model_for_ep(model, single_process_ep_config())
+    apply_ep_layers(model, single_process_ep_config())
 
     save_ep_gathered_checkpoint(save_context(model), ep_dir)
 
@@ -381,7 +375,7 @@ def test_a_failing_revert_fails_the_save(tmp_path, monkeypatch):
     hub_dir, ep_dir = str(tmp_path / "hub"), str(tmp_path / "ep")
     _write_hub_checkpoint(family, hub_dir)
     model = _load(family, hub_dir)
-    patch_moe_model_for_ep(model, single_process_ep_config())
+    apply_ep_layers(model, single_process_ep_config())
 
     def failing_revert(*args, **kwargs):
         raise ValueError("no reverse for this chunk")
@@ -425,8 +419,7 @@ def test_step3p7_writes_the_release_spelling(tmp_path):
 
 
 def test_the_rosters_cover_every_multimodal_model_type_the_ep_registry_claims():
-    claimed = {model_type for cls in ep_layer_classes() for model_type in cls.HF_MODEL_TYPES}
-    multimodal = claimed & set(MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES)
+    multimodal = moe_model_types() & set(MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES)
     assert multimodal, "premise: the registry claims multimodal wrappers"
     assert multimodal <= set(FAMILIES), f"no tiny model for {sorted(multimodal - set(FAMILIES))}"
 

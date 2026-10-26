@@ -2,43 +2,49 @@
 
 from __future__ import annotations
 
+from functools import partial
+
 import torch
 import torch.nn as nn
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.moe_layer.routing import TOPK_WEIGHT_NORM_EPS
 
 
 class EPSharedExpertsMoELayerBase(EPMoELayerBase):
-    """EP MoE layer whose ``forward`` is the standard fp32 router -> route -> routed + shared experts path.
+    """EP MoE layer whose ``forward`` is the routed template: route the flattened tokens, then the routed experts
+    plus the shared expert, which reads the layer input rather than the routed output.
 
-    A subclass supplies ``route_tokens_to_experts`` and overrides ``_router_logits`` where its router cannot
-    be called bare (LFM-2), or ``forward`` where its combine scales the result (Cohere2).
+    A subclass supplies ``route_tokens_to_experts`` over the fp32 router logits, or overrides
+    :meth:`_route_hidden_states` where its router routes the tokens itself; :meth:`_router_logits` where its
+    router cannot be called bare (LFM-2), :meth:`_shared_expert_output` where the shared leg is gated (Qwen3.5).
     """
+
+    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
+        orig_shape = hidden_states.shape
+        flat = hidden_states.view(-1, orig_shape[-1])
+        topk_indices, topk_weights = self._route_hidden_states(flat, **kwargs)
+        shared = getattr(self, self._shared_expert_attr, None) is not None
+        shared_fn = partial(self._shared_expert_output, hidden_states) if shared else None
+        return self._dispatch_compute_combine_shared(
+            flat, topk_indices.long(), topk_weights.float(), hidden_states.dtype, orig_shape, shared_fn
+        )
+
+    def _route_hidden_states(self, flat: torch.Tensor, **kwargs) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(topk_indices, topk_weights)`` for the flattened tokens: ``route_tokens_to_experts`` over the fp32
+        router logits."""
+        return self.route_tokens_to_experts(self._router_logits(flat).float())
 
     def _router_logits(self, flat: torch.Tensor) -> torch.Tensor:
         """The gate's logits for the flattened tokens; of a ``(logits, weights, indices)`` router output only the
         family-native logits are kept, since routing replay and balancing re-derive the rest."""
         # Disable autocast so the gate matmul runs at the input dtype (upcast when fp32_router).
         with torch.amp.autocast("cuda", enabled=False):
-            router_output = self.gate(flat.float() if self._fp32_router_input else flat)
+            router_output = self.gate(self._router_input(flat))
         return router_output[0] if isinstance(router_output, tuple) else router_output
 
-    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
-        orig_shape = hidden_states.shape
-        _B, _S, H = orig_shape
-        input_dtype = hidden_states.dtype
-
-        residuals = hidden_states  # shared experts read the layer input, not the routed output
-        flat = hidden_states.view(-1, H)
-
-        topk_indices, topk_weights = self.route_tokens_to_experts(self._router_logits(flat).float())
-
-        shared_expert = getattr(self, self._shared_expert_attr, None)
-        shared_fn = (lambda: shared_expert(residuals)) if shared_expert is not None else None
-        return self._dispatch_compute_combine_shared(
-            flat, topk_indices.long(), topk_weights.float(), input_dtype, orig_shape, shared_fn
-        )
+    def _shared_expert_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """The shared expert on the layer input."""
+        return getattr(self, self._shared_expert_attr)(hidden_states)
 
 
 class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
@@ -52,9 +58,6 @@ class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
     # Fallback when neither the block, its router nor its config declares ``norm_topk_prob`` — GLM-4
     # MoE Lite leaves the gate weights un-normalized, the others normalize.
     _NORM_TOPK_PROB_DEFAULT: bool = True
-
-    # The floor the weight renormalization adds to the sum; 0.0 in a family whose router adds none.
-    _TOPK_WEIGHT_NORM_EPS: float = TOPK_WEIGHT_NORM_EPS
 
     # Routing knobs (any spelling) this family's block, router and config genuinely do not declare —
     # Laguna and Step-3.7 carry no group limiting and no ``norm_topk_prob``. Every other knob is
@@ -130,6 +133,6 @@ class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
         topk_indices = self._maybe_replace_selection(topk_indices)
         topk_weights = gate_scores.gather(1, topk_indices)
         if self.norm_topk_prob:
-            topk_weights = topk_weights / (topk_weights.sum(dim=-1, keepdim=True) + self._TOPK_WEIGHT_NORM_EPS)
+            topk_weights = self._renormalize_topk_weights(topk_weights)
         topk_weights = topk_weights * self.routed_scaling_factor
         return topk_indices, topk_weights

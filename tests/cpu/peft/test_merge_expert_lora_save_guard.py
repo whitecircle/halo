@@ -80,7 +80,7 @@ def test_merge_flag_with_attention_peft_passes():
     """A MIXED run is the flag's headline case: the gathered EP save folds the expert deltas in the
     family gather and the attention deltas via merge_adapter, so it must NOT be rejected."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
-    with patch.object(mixin_mod, "has_ep_lora", return_value=True):
+    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
         trainer._validate_merge_expert_lora_save()
 
 
@@ -88,7 +88,7 @@ def test_merge_flag_without_expert_adapters_raises():
     """Nothing to fold: dense runs, MoE runs naming no expert projection, and expert_tp_size > 1
     (where EPConfig rejects expert LoRA) all land here, and the flag would be silently ignored."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
-    with patch.object(mixin_mod, "has_ep_lora", return_value=False):
+    with patch.object(mixin_mod, "model_has_expert_lora", return_value=False):
         with pytest.raises(ValueError, match="no native grouped expert"):
             trainer._validate_merge_expert_lora_save()
 
@@ -97,7 +97,7 @@ def test_merge_flag_under_accelerate_fsdp_raises():
     """Flat-param shards: the base Trainer owns that save, so the merged gather would write shard views."""
     trainer = _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=True)
     trainer._accelerate_manages_fsdp = True
-    with patch.object(mixin_mod, "has_ep_lora", return_value=True):
+    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
         with pytest.raises(ValueError, match="accelerate-managed FSDP"):
             trainer._validate_merge_expert_lora_save()
 
@@ -127,20 +127,20 @@ def test_merge_flag_with_a_layer_the_fold_cannot_reproduce_raises(config):
     """The merged save folds the attention half out of place and would raise on these at the first
     checkpoint, after the run has trained; construction refuses them instead."""
     trainer = _StubTrainer(get_peft_model(_UnfoldableLM(), LoraConfig(**config)), merge_expert_lora_on_save=True)
-    with patch.object(mixin_mod, "has_ep_lora", return_value=True):
+    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
         with pytest.raises(ValueError, match="cannot be folded out of place"):
             trainer._validate_merge_expert_lora_save()
 
 
 def test_merge_flag_expert_only_run_passes():
     """Expert-only native EP grouped-LoRA has no PeftModel wrapper — the merged-save path works."""
-    with patch.object(mixin_mod, "has_ep_lora", return_value=True):
+    with patch.object(mixin_mod, "model_has_expert_lora", return_value=True):
         _StubTrainer(_TinyLM(), merge_expert_lora_on_save=True)._validate_merge_expert_lora_save()
 
 
 def test_no_merge_flag_skips_every_check():
     """Flag off: adapter-only saves, so neither gate applies even with no expert adapters at all."""
-    with patch.object(mixin_mod, "has_ep_lora", return_value=False):
+    with patch.object(mixin_mod, "model_has_expert_lora", return_value=False):
         _StubTrainer(_attention_peft_model(), merge_expert_lora_on_save=False)._validate_merge_expert_lora_save()
 
 
@@ -214,7 +214,7 @@ def _run_save(trainer):
 
     adapter_saver = MagicMock()
     with (
-        patch.object(context_mod, "has_ep_lora", return_value=True),
+        patch.object(context_mod, "model_has_expert_lora", return_value=True),
         patch.object(save_mod, "save_peft_adapters", adapter_saver),
         patch.object(save_mod, "save_ep_gathered_checkpoint", _recorded_ep_save),
     ):

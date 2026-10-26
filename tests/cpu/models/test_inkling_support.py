@@ -19,11 +19,11 @@ from transformers.models.inkling.configuration_inkling import InklingTextConfig
 from transformers.models.inkling.modeling_inkling import InklingTopkRouter
 
 from src.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
-from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
+from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
 from src.distributed.pipeline_parallel.families import PP_SPEC_MAP
-from src.models.moe_balancing import ROUTER_EXPERT_COUNT_FIELDS, get_first_router_field
+from src.models.moe.config_fields import resolve_expert_count
 
 SEED = 1234
 N_ROUTED = 8
@@ -40,9 +40,9 @@ def test_registration():
     assert MOE_LAYER_MAP["InklingMoE"] is EPInklingMoELayer
     # The composite hub config spells its model_type "inkling_mm_model" (there is no bare
     # "inkling"); the text config spells "inkling_text". Both feed every model_type-keyed consumer.
-    assert EPInklingMoELayer.HF_MODEL_TYPES == ("inkling_text", "inkling_mm_model")
-    assert EPInklingMoELayer._supports_bias_balancing
-    assert EPInklingMoELayer._ep_severs_aux_loss
+    assert EPInklingMoELayer.FAMILY.model_types == ("inkling_text", "inkling_mm_model")
+    assert EPInklingMoELayer.SUPPORTS_BIAS_BALANCING
+    assert EPInklingMoELayer.SEVERS_AUX_LOSS
     # gate.weight is [n_routed + n_shared, hidden]; inferring the expert count from it over-counts.
     assert "gate.weight" not in EPInklingMoELayer._NUM_EXPERTS_ATTR_PATHS
 
@@ -51,9 +51,9 @@ def test_capability_contracts():
     """The hub checkpoint keeps Thinking Machines' namespace (model.llm.*, wq_du/wk_dv, interleaved
     w13_weight). The lazy loaders translate it through the declared conversion entry; the RL weight
     sync stays refused (no sync into either pinned engine's Inkling loader has been validated)."""
-    assert EPInklingMoELayer._HUB_CONVERSION_KEYS == ("inkling_mm_model",)
-    assert EPInklingMoELayer._supports_lazy_loading is True
-    assert EPInklingMoELayer._supports_weight_sync is False
+    assert EPInklingMoELayer.FAMILY.hub_conversion_keys == ("inkling_mm_model",)
+    assert EPInklingMoELayer.FAMILY.supports_lazy_loading is True
+    assert EPInklingMoELayer.FAMILY.weight_sync_refusal is not None
     # PP: refused until a schedule, end-to-end and save/resume row cover it, yet declared in full: its
     # spec keeps ``embed_norm`` on stage 0 with the embedding it normalizes for the loader rows.
     spec = PP_SPEC_MAP["InklingTextModel"]
@@ -125,7 +125,7 @@ def test_expert_count_resolves_from_config():
     """Config-side consumers (loader dispatch, EP divisibility validation, MoE metrics) probe
     `num_local_experts`, which InklingTextConfig must alias to `n_routed_experts`."""
     config = InklingTextConfig(n_routed_experts=N_ROUTED, n_shared_experts=N_SHARED)
-    assert get_first_router_field(config, ROUTER_EXPERT_COUNT_FIELDS) == N_ROUTED
+    assert resolve_expert_count(config) == N_ROUTED
 
 
 def test_route_matches_hf_router():
@@ -138,7 +138,7 @@ def test_route_matches_hf_router():
 
     layer = _bare_ep_layer(router)
     router_logits = torch.nn.functional.linear(hidden, router.weight)
-    indices, weights, gammas = layer._route(router_logits.float())
+    indices, weights, gammas = layer._route_joint(router_logits.float())
 
     assert torch.equal(indices, hf_indices)
     assert torch.allclose(weights, hf_weights.float(), atol=1e-6)
@@ -154,7 +154,7 @@ def test_shared_gammas_come_from_joint_normalisation():
     layer = _bare_ep_layer(router)
 
     router_logits = torch.nn.functional.linear(hidden, router.weight)
-    _indices, weights, gammas = layer._route(router_logits.float())
+    _indices, weights, gammas = layer._route_joint(router_logits.float())
 
     total = weights.sum(dim=-1) + gammas.sum(dim=-1)
     expected = ROUTE_SCALE * router.global_scale.item()
@@ -173,7 +173,7 @@ def test_balancing_bias_steers_selection_only():
     biases = torch.zeros(N_ROUTED)
     biases[3] = 100.0
     biased = _bare_ep_layer(router, balancing_biases=biases)
-    indices, weights, gammas = biased._route(router_logits)
+    indices, weights, gammas = biased._route_joint(router_logits)
 
     assert (indices == 3).any(dim=-1).all(), "balancing bias must steer selection"
     expected = _joint_normalisation(router, router_logits, indices)

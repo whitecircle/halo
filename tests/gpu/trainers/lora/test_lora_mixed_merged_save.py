@@ -46,7 +46,7 @@ from safetensors import safe_open
 from trl import SFTConfig
 
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str
@@ -250,8 +250,8 @@ def run(ctx) -> dict:
     unwrapped = extract_model_from_parallel(trainer.model, recursive=True)
     peft_model = find_peft_model(unwrapped)
     # 1. Both adapter kinds must exist, or every assertion below is about a run that is not mixed.
-    checks["run_is_mixed"] = peft_model is not None and has_ep_lora(unwrapped)
-    log(f"  peft_model={peft_model is not None}, native expert adapters={has_ep_lora(unwrapped)}")
+    checks["run_is_mixed"] = peft_model is not None and model_has_expert_lora(unwrapped)
+    log(f"  peft_model={peft_model is not None}, native expert adapters={model_has_expert_lora(unwrapped)}")
 
     log(f"\n[2/5] Training {MAX_STEPS} steps...")
     trainer.train()

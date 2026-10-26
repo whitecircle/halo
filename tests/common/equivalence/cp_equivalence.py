@@ -26,7 +26,7 @@ from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
 from src.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
 from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from tests.common.distributed import init_distributed, teardown_distributed
@@ -245,7 +245,7 @@ def _attention_case(name: str, cp_config, *, tier: str, device, perturb: bool) -
 def _model_case(name: str, cp_config, *, tier: str, device, perturb: bool) -> tuple[Tensors, Orders]:
     model = _tiny_model(name, tier, device)
     if FAMILIES[name].moe:
-        patch_moe_model_for_ep(model, single_process_ep_config(use_grouped_gemm=tier == "gpu"))
+        apply_ep_layers(model, single_process_ep_config(use_grouped_gemm=tier == "gpu"))
     wrapper = UlyssesModel(model, cp_config).train()
     if perturb:
         _nudge(_first_attention(wrapper))

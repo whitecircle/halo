@@ -35,7 +35,7 @@ import src.model_loading.parallel.pp as pp_lazy_loader
 from src.checkpoint.reading import resolve_checkpoint_weights
 from src.configs.embedding import EmbeddingConfig
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.patching import ep_claimed_blocks
+from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, StageLayout
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import cast_parameters_to_run_dtype
@@ -367,7 +367,7 @@ def _load_with(
         model = resolve_trainer_model(path, args, model_class=tiny.load_class, keep_fp32_non_ep=keep_fp32)
         return model
     for module in (ep_lazy_loader, pp_lazy_loader):
-        monkeypatch.setattr(module, "patch_moe_model_for_ep", lambda model, *args, **kwargs: model)
+        monkeypatch.setattr(module, "apply_ep_layers", lambda model, *args, **kwargs: model)
         if loader.endswith("config_shell"):
             monkeypatch.setattr(module, "instantiate_on_meta", _config_built_shell)
     ep_config = EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True)

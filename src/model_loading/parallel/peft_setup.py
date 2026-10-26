@@ -14,14 +14,14 @@ from torch.distributed.tensor import DTensor
 from transformers import PreTrainedModel
 from trl import ModelConfig, get_peft_config
 
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.model_loading.dtype import is_kbit_quantized
 from src.model_loading.parallel.freeze_patterns import freeze_modules_by_patterns, unfreeze_modules_by_patterns
 from src.model_loading.parallel.model_source import fetch_checkpoint_config
 from src.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
+from src.models.moe.config_fields import has_routed_experts
 from src.models.moe.expert_lora_spec import ExpertLoraSpec, expert_target_projections
-from src.models.moe_balancing import config_has_experts
 from src.models.param_roles import EMBEDDING_HEAD_MARKERS, is_normalization_module
 from src.runtime.consensus import reject_across_ranks, reject_divergent_settings
 
@@ -51,7 +51,7 @@ def split_expert_lora_targets(model_config: ModelConfig) -> ExpertLoraSpec | Non
 
     # Dense gate/up/down_proj are plain nn.Linear stock PEFT wraps; peeling them drops the MLP adapters.
     config = fetch_checkpoint_config(model_config, tag="expert_lora_probe")
-    if not config_has_experts(config):
+    if not has_routed_experts(config):
         return None
 
     projections: set[str] = set()
@@ -209,7 +209,7 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
         # Native grouped expert adapters, when present, would train on without any attention adapter.
         consequence = (
             "The native expert adapters would train alone, with no attention adapter at all"
-            if has_ep_lora(model)
+            if model_has_expert_lora(model)
             else "The run would train nothing"
         )
         reason = (
@@ -274,7 +274,7 @@ def configure_adapter_training(
             "projections in lora_target_modules instead (gate_proj/up_proj/down_proj/gate_up_proj/experts) "
             "— they route to native grouped LoRA, which is EP-sharded and synced with the experts."
         )
-    expert_lora_active = has_ep_lora(model)
+    expert_lora_active = model_has_expert_lora(model)
     attention_peft = wraps_in_peft_model(model_config)
 
     if not attention_peft and not expert_lora_active:

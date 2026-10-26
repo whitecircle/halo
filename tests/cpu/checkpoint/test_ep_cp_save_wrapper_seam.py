@@ -65,10 +65,6 @@ class _StubEPLayer(StubEPLayerBase):
             "experts.down_proj": torch.zeros(NUM_EXPERTS, HIDDEN, INTER),
         }
 
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
-
 
 class _StubUlyssesAttention(UlyssesAttention):
     """CP-patched attention marker (skips base init — only the isinstance matters here)."""

@@ -10,7 +10,7 @@ import torch
 
 from src.checkpoint.format import ROUTER_BALANCING_BIASES_FILE, SCHEDULER_STATE_FILE
 from src.checkpoint.parallel.reading import consensus_read
-from src.models.moe_balancing import BALANCING_BIASES_ATTR
+from src.models.moe.balancing import BALANCING_BIASES_ATTR
 from src.runtime.collectives import barrier_on_exit, combine_across_ranks
 from src.runtime.consensus import rank_consensus
 from src.runtime.filesystem import is_fs_save_rank

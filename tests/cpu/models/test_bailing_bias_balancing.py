@@ -20,8 +20,8 @@ import torch
 import torch.nn as nn
 
 from src.callbacks.balancing import BalancingBiasCallback
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.models.moe_balancing import resolve_balancing_mode
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.models.moe.balancing import resolve_balancing_mode
 
 NUM_EXPERTS = 8
 # The hub slot's dtype: adoption has to upcast it, so a fp32 fixture would hide that step.
@@ -52,10 +52,10 @@ class _Shell(nn.Module):
 
 
 def test_class_declarations():
-    assert EPBailingMoELayer._supports_bias_balancing
+    assert EPBailingMoELayer.SUPPORTS_BIAS_BALANCING
     # The wrapper returns a bare tensor where the hub block returns (hidden, router_logits), so
     # router logits never reach the outputs — what lets `auto` resolve the family to bias_update.
-    assert EPBailingMoELayer._ep_severs_aux_loss
+    assert EPBailingMoELayer.SEVERS_AUX_LOSS
 
 
 def test_the_expert_load_hook_is_a_no_op_until_balancing_is_enabled():

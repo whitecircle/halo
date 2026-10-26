@@ -41,12 +41,12 @@ Three consequences for a training config:
 
 ## EP wrapper
 
-`EPBailingMoELayer` (`src/distributed/expert_parallel/layers/bailing.py`) replaces `BailingMoeV2SparseMoeBlock`.
+`EPBailingMoELayer` (`src/distributed/expert_parallel/families/bailing.py`) replaces `BailingMoeV2SparseMoeBlock`.
 
 - Routing: `BailingMoeV2Gate` — sigmoid scoring, group-limited top-k, expert bias, normalization.
 - Routed experts: per-expert `BailingMoeV2MLP` modules stacked into 3D tensors at init and transposed to matmul convention (`gate_proj [E, H, M]`, `up_proj [E, H, M]`, `down_proj [E, M, H]`). Compute via 3-call Grouped GEMM.
 - Shared experts: replicated per rank and added after DeepEP combine (dispatch overlap is the opt-in `HALO_EP_SHARED_OVERLAP` side stream).
-- Checkpoint round-trip: the lazy loader materializes only this rank's expert range and `_adopt_expert_params` stacks it into a 3D slice. On save, `gather_expert_state_dict` (via `_gather_individual_glu_state_dict`) gathers, transposes back to `F.linear` convention, and re-splits to per-expert `experts.{i}.{gate,up,down}_proj.weight`.
+- Checkpoint round-trip: the lazy loader materializes only this rank's expert range and `_adopt_expert_params` stacks it into a 3D slice. On save, the family's `SEPARATE_GLU` expert layout gathers, transposes back to `F.linear` convention, and re-splits to per-expert `experts.{i}.{gate,up,down}_proj.weight`.
 
 ## CP wrapper
 

@@ -25,15 +25,10 @@ from src.checkpoint.writing import (
     write_merged_index,
 )
 from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
-from src.distributed.expert_parallel.expert_weights import (
-    gather_ep_layer_weights,
-    has_ep_lora,
-    resolve_ep_merge_layer_class,
-    supported_ep_merge_model_types,
-    to_hub_layer_key,
-)
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
+from src.models.moe.family_specs import find_moe_family_spec, moe_model_types
 from src.models.param_roles import persistent_buffers
 from src.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from src.models.unwrapping import (
@@ -118,7 +113,7 @@ def _ep_gathered_chunks(
     yield state
     del state
     for path, layer in ep_layers:
-        yield gather_ep_layer_weights(path, layer, merge_lora=merge_lora, retain=retain)
+        yield layer.gather_layer_state_dict(path, merge_lora=merge_lora, retain=retain)
 
 
 def _ep_chunk_normalizer(
@@ -194,7 +189,7 @@ def reject_unmergeable_ep_sharded_save(
     model with EP layers.
     Sharded EP keys each shard by global rank and the merge needs every shard co-located; it streams key
     by key with no model behind it, picking the HF-layout transform through the same resolver and
-    applying only the family's ``_EXPORT_KEY_RENAMES`` (:func:`to_hub_layer_key`).
+    applying only the family's ``export_key_renames`` (``MoEFamilySpec.to_hub_key``).
     """
     if merge_expert_lora_on_save:
         raise ValueError(
@@ -223,7 +218,7 @@ def reject_unmergeable_ep_sharded_save(
             "(gathered) — it remaps CP attention keys on save."
         )
 
-    if has_ep_lora(model):
+    if model_has_expert_lora(model):
         raise ValueError(
             "Sharded EP save (save_sharded_ep=True) is not supported with native expert LoRA: the "
             "shard key set comes from expert_named_params(), so the grouped '<attr>_lora_A/_lora_B' "
@@ -234,14 +229,14 @@ def reject_unmergeable_ep_sharded_save(
         )
 
     model_type = getattr(getattr(model, "config", None), "model_type", "") or ""
-    layer_cls = resolve_ep_merge_layer_class(model_type)
-    if layer_cls is None:
+    spec = find_moe_family_spec(model_type)
+    if spec is None:
         raise ValueError(
             f"Sharded EP save (save_sharded_ep=True) is not supported for model_type "
-            f"{model_type!r}: no registered EP layer class claims it, so "
+            f"{model_type!r}: no MoE family spec claims it, so "
             f"scripts/after_training/merge_ep_shards.py cannot resolve an HF-layout transform and the "
             f"per-rank shards could never be merged into a loadable checkpoint. Supported model types: "
-            f"{', '.join(supported_ep_merge_model_types())}. Use save_sharded_ep=False (gathered) instead."
+            f"{', '.join(sorted(moe_model_types()))}. Use save_sharded_ep=False (gathered) instead."
         )
     # A load that also renamed the namespace (a SigLIP tower's ``vision_model`` level, a vendor
     # namespace) or converted a tensor outside the per-expert merges would merge into a layout no hub or
@@ -252,7 +247,7 @@ def reject_unmergeable_ep_sharded_save(
     stuck = []
     if renamings or converters:
         for name, _ in itertools.chain(base.named_parameters(), persistent_buffers(base)):
-            merged = to_hub_layer_key(name, layer_cls)
+            merged = spec.to_hub_key(name)
             hub, converted_by = rename_source_key(merged, renamings, converters, reverse=True)
             if converted_by is not None or hub != merged:
                 stuck.append(merged)

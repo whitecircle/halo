@@ -39,9 +39,9 @@ from src.checkpoint.parallel.context import CheckpointContext
 from src.checkpoint.parallel.reading import consensus_read
 from src.checkpoint.sidecars import write_training_provenance
 from src.checkpoint.writing import adapter_save_dtype_caster, cast_to_save_dtype
-from src.distributed.expert_parallel.expert_weights import (
-    apply_ep_lora_adapters,
-    gather_ep_lora_adapters,
+from src.distributed.expert_parallel.moe_layer.expert_lora import (
+    gather_expert_lora_adapters,
+    load_expert_lora_adapters,
 )
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.fsdp import reshard_fsdp2_modules
@@ -161,7 +161,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
         # unwrap_toolkit_wrappers stops at the PeftModel, so under CP the expert keys keep the wrapper's
         # 'model.' level; resume applies them through the same unwrap of the same root shape
         # (restore_adapters), so the keys round-trip.
-        expert_state = gather_ep_lora_adapters(unwrap_toolkit_wrappers(ctx.model), retain=ctx.is_save_rank)
+        expert_state = gather_expert_lora_adapters(unwrap_toolkit_wrappers(ctx.model), retain=ctx.is_save_rank)
         saved = (
             f"PEFT + EP expert adapters to {output_dir} ({len(state)} attention + {len(expert_state)} expert tensors)"
         )
@@ -196,7 +196,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
 
 def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     """COLLECTIVE: gather the native EP grouped-LoRA adapters and write them as a standalone adapter
-    checkpoint, without the frozen base, which a reload pairs them with (:func:`apply_ep_lora_adapters`).
+    checkpoint, without the frozen base, which a reload pairs them with (:func:`load_expert_lora_adapters`).
 
     The adapters go to the save dtype, or keep their live one in a training checkpoint, whose fp32
     adapters must resume unrounded.
@@ -205,7 +205,7 @@ def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     fs_aware_makedirs(output_dir)
     # Collective on every rank; only the writer keeps the result (else one host holds
     # local_ranks copies of the whole adapter set).
-    adapters = gather_ep_lora_adapters(model, retain=ctx.is_save_rank)
+    adapters = gather_expert_lora_adapters(model, retain=ctx.is_save_rank)
     spec = getattr(ctx.parallelism_config, "expert_lora", None)
     base_name = getattr(ctx.model.config, "_name_or_path", None)
     adapter_config = None if spec is None else expert_lora_adapter_config(spec, base_name)
@@ -260,7 +260,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
 
     EP/CP rebuild the model with zero-init adapters, so trained weights must reload here or resume
     continues from the untrained adapter. Handles native EP expert adapters (sliced per rank by
-    :func:`apply_ep_lora_adapters`) and PEFT attention adapters. Refuses, on every rank, an adapter
+    :func:`load_expert_lora_adapters`) and PEFT attention adapters. Refuses, on every rank, an adapter
     whose recorded LoRA scaling differs from the live run's (:func:`lora_scaling_mismatch`). Returns
     the adapter file restored from, or ``None`` when ``checkpoint`` holds none on any rank (a no-op);
     rank-uniform either way.
@@ -281,7 +281,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
     expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
     # Unconditional: the apply is collective at ep_size==1 and decides "nothing to load" rank-uniformly.
     # Inner model, matching the saver: the CP wrapper's extra 'model.' level makes keys miss.
-    apply_ep_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
+    load_expert_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
 
     attn_state = {k: v for k, v in state.items() if k not in expert_state}
     if attn_state:

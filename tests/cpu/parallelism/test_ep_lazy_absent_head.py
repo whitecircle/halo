@@ -52,7 +52,7 @@ def checkpoint(tmp_path_factory) -> str:
 @pytest.fixture(autouse=True)
 def _stub_ep_patching(monkeypatch):
     """EP patching needs DeepEP + process groups; the load itself does not."""
-    monkeypatch.setattr(ep_lazy_loader, "patch_moe_model_for_ep", lambda model, *a, **k: model)
+    monkeypatch.setattr(ep_lazy_loader, "apply_ep_layers", lambda model, *a, **k: model)
 
 
 def _load_seq_cls(path: str, run_dtype: torch.dtype, seed: int = SEED):

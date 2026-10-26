@@ -9,7 +9,7 @@ from src.distributed.pipeline_parallel.model_rules import require_backbone
 from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from src.models.config_access import get_config_field, text_config
 from src.models.module_tree import backbone_with_layers, decoder_layers
-from src.models.moe_balancing import config_has_experts, resolve_router_topk
+from src.models.moe.config_fields import has_routed_experts, resolve_router_topk
 
 
 def layer_types_shift_invariant(layer_types, shift: int) -> bool:
@@ -143,7 +143,7 @@ def head_cost_layer_equivalents(config) -> float:
         return 0.0
     # Gated on the model being MoE: the ``top_k`` spelling doubles as a legacy generation parameter a
     # dense config may carry.
-    ffn_mult = (resolve_router_topk(config) or 1) if config_has_experts(config) else 1
+    ffn_mult = (resolve_router_topk(config) or 1) if has_routed_experts(config) else 1
     mlp = ffn_mult * 3 * hidden * intermediate
     return (hidden * vocab) / (attn + mlp)
 

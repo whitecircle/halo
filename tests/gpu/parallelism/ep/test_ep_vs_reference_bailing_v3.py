@@ -32,14 +32,15 @@ import torch.nn as nn
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, patch_moe_model_for_ep
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.remote_code import apply_remote_code_compat_shims
 from tests.common.ep_reference import score_ep_grad_pairs
 from tests.common.harness import gpu_test_main
 from tests.common.models import BAILING_LING_3_TINY
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.utils import cos_sim, log
 
 SEED = 42
@@ -110,7 +111,7 @@ def run(ctx):
     container = nn.Module()  # patching walks a module tree; the block alone is the tree here
     container.mlp = _build_block(config, device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
-    patch_moe_model_for_ep(container, pc.ep_config())
+    apply_ep_layers(container, pc.ep_config())
 
     ep_layer = container.mlp
     checks["block_patched"] = isinstance(ep_layer, EPBailingMoELayer)

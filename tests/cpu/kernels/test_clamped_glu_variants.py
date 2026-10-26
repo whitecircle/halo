@@ -26,7 +26,13 @@ import torch
 import torch.nn.functional as F
 
 from src.kernels import fused_glu
-from src.kernels.fused_glu import GluCombine, clamped_silu_mul_eager, gptoss_glu_eager, silu_then_clamp_mul_eager
+from src.kernels.fused_glu import (
+    GluCombine,
+    clamped_silu_mul_eager,
+    gptoss_glu_eager,
+    resolve_clamped_glu_mul,
+    silu_then_clamp_mul_eager,
+)
 
 ALPHA = 1.702  # GptOss's; the only variant whose sigmoid is scaled
 
@@ -230,6 +236,21 @@ def test_kernel_body_under_that_tuple_reproduces_the_variants_reference_and_subg
     torch.testing.assert_close(out, eager_out.detach(), rtol=0, atol=1e-13)
     torch.testing.assert_close(dgate, eager_gate.grad, rtol=0, atol=1e-13)
     torch.testing.assert_close(dup, eager_up.grad, rtol=0, atol=1e-13)
+
+
+@pytest.mark.parametrize("clamp_activated", [False, True], ids=["clamp-then-act", "act-then-clamp"])
+@pytest.mark.parametrize("limit", LIMITS)
+def test_the_family_resolver_fuses_a_silu_gate_and_keeps_the_clamps_on_any_other(clamp_activated, limit):
+    """A SiLU gate binds the kernel of its clamp placement; any other gate runs those same clamps eagerly."""
+    gate, up = _grid(limit)
+    fused = resolve_clamped_glu_mul(F.silu, limit, clamp_activated=clamp_activated)
+    reference = silu_then_clamp_mul_eager if clamp_activated else clamped_silu_mul_eager
+    assert fused == GluCombine.clamped_silu(limit, clamp_activated=clamp_activated)
+    torch.testing.assert_close(fused(gate, up), reference(gate, up, limit), rtol=0, atol=0)
+
+    eager = resolve_clamped_glu_mul(F.gelu, limit, clamp_activated=clamp_activated)
+    activated = F.gelu(gate).clamp(max=limit) if clamp_activated else F.gelu(gate.clamp(max=limit))
+    torch.testing.assert_close(eager(gate, up), activated * up.clamp(-limit, limit), rtol=0, atol=0)
 
 
 if __name__ == "__main__":

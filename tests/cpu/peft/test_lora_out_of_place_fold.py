@@ -78,10 +78,6 @@ class _EPExperts(StubEPLayerBase):
     def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
         return {"gate_up_proj": self.gate_up_proj.detach()}
 
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
-
 
 class _EPMoeNet(nn.Module):
     """An EP expert bank beside a dense layer the push would send."""

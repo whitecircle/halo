@@ -30,7 +30,7 @@ import torch.nn as nn
 from transformers.models.zaya.modeling_zaya import ZayaRouter
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
@@ -95,7 +95,7 @@ def build_model(device, ep_size: int):
     torch.manual_seed(SEED)
     model = tiny_family_model(TINY_MOE_FAMILIES["zaya"])
     spread_routing(model)
-    model = patch_moe_model_for_ep(model.to(device, torch.bfloat16), ParallelismConfig(ep_size=ep_size).ep_config())
+    model = apply_ep_layers(model.to(device, torch.bfloat16), ParallelismConfig(ep_size=ep_size).ep_config())
     return model
 
 

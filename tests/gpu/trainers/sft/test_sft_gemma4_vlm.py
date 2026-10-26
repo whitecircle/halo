@@ -25,7 +25,7 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor
 
-from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
+from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.model_loading.parallel.loader import load_distributed_model

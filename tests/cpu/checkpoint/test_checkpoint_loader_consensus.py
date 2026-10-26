@@ -506,13 +506,13 @@ def test_adapter_attn_state_without_peft_model_raises(tmp_path):
 
 def test_adapter_expert_only_state_without_peft_model_ok(tmp_path, monkeypatch):
     """Expert-LoRA-only checkpoints (native EP grouped adapters, no PeftModel) must keep working:
-    the expert state is applied via apply_ep_lora_adapters and nothing raises."""
+    the expert state is applied via load_expert_lora_adapters and nothing raises."""
     save_file(
         {"model.layers.0.mlp.experts.gate_up_proj.lora_A": torch.zeros(2, 4)},
         os.path.join(tmp_path, "adapter_model.safetensors"),
     )
     applied = _Recorder()
-    monkeypatch.setattr(peft_mod, "apply_ep_lora_adapters", applied)
+    monkeypatch.setattr(peft_mod, "load_expert_lora_adapters", applied)
 
     restore_adapters(str(tmp_path), _TinyModel(), is_cp_mode=False)  # must not raise
 

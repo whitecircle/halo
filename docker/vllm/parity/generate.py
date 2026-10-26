@@ -11,8 +11,8 @@ schema names. ``unparseable/`` holds the same configs without the rewrites: the 
 exists to avoid, which the server's transformers must still refuse. ``check.py`` asserts all of them
 against the server image at build time.
 
-The roster is derived rather than listed: every EP family whose layer class admits weight sync
-(``_supports_weight_sync``) needs a fixture here, because the server has to parse that family's
+The roster is derived rather than listed: every MoE family whose spec admits weight sync
+(``weight_sync_refusal is None``) needs a fixture here, because the server has to parse that family's
 checkpoint before a tensor can be synced into it.
 ``tests/cpu/checkpoint/test_vllm_parity_fixtures.py`` fails when the roster or the rendered fixtures
 drift. Regenerate in the training image (the hub fixtures need Hub access):
@@ -32,15 +32,12 @@ from transformers import CONFIG_MAPPING, AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.utils import CONFIG_NAME
 
-# The export rewrites read their families off the EP roster.
-import src.distributed.expert_parallel.layers.roster  # noqa: F401
 from src.checkpoint.config_export import (
     export_legacy_per_layer_config,
     export_source_config_schema,
     restore_model_type,
 )
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.models.moe_balancing import exports_source_config_schema, legacy_per_layer_config_keys
+from src.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, find_moe_family_spec
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from tests.common.models import (
     TINY_BAILING_MOE_CONFIG,
@@ -160,37 +157,35 @@ FIXTURES = (
     ),
     HubFixture("step3p7", "step3p7", "stepfun-ai/Step-3.7-Flash", "5f6244077ac62e04eec3f320501ff8c2b293373a"),
 )
-# The negative control is every fixture an export rewrite acts on, read off the registries the
+# The negative control is every fixture an export rewrite acts on, read off the spec fields the
 # rewrites themselves read, so a family that starts declaring either one gets its control without an
 # edit here.
 UNPARSEABLE = tuple(
     fixture
     for fixture in FIXTURES
-    if legacy_per_layer_config_keys(fixture.model_type) or exports_source_config_schema(fixture.model_type)
+    if (spec := find_moe_family_spec(fixture.model_type))
+    and (spec.served_flat_config_keys or spec.exports_source_config_schema)
 )
 
 
-def weight_sync_families() -> set[type]:
-    """EP layer classes the weight sync admits: every family that needs a fixture here.
+def weight_sync_families() -> list[MoEFamilySpec]:
+    """Family specs the weight sync admits: every family that needs a fixture here.
 
-    A refused family (``_supports_weight_sync = False``, or its own ``model_type`` on the vLLM client's
+    A refused family (a ``weight_sync_refusal``, or its own ``model_type`` on the vLLM client's
     ``UNSERVABLE_MODEL_TYPES``) is excluded: nothing syncs into it, so no server parses its export.
-    A class claiming no spelling is an intermediate base, not a family.
     """
     unservable = set(VLLMWeightSyncClient.UNSERVABLE_MODEL_TYPES)
-    # Judged on the family's own spelling — the first claimed (``base_layer.HF_MODEL_TYPES``); the
-    # composite wrappers and sibling spellings behind it are refused under their own entries.
-    return {
-        cls
-        for cls in ep_layer_classes()
-        if cls.HF_MODEL_TYPES and cls._supports_weight_sync and cls.HF_MODEL_TYPES[0] not in unservable
-    }
+    # Judged on the family's own spelling, the first claimed; the composite wrappers and sibling
+    # spellings behind it are refused under their own entries.
+    return [
+        spec for spec in MOE_FAMILY_SPECS if spec.weight_sync_refusal is None and spec.model_types[0] not in unservable
+    ]
 
 
 def uncovered_families() -> list[str]:
-    """Names of the admitted families no fixture covers; this list is expected to be empty."""
+    """Own spellings of the admitted families no fixture covers; this list is expected to be empty."""
     covered = {fixture.model_type for fixture in FIXTURES}
-    return sorted(cls.__name__ for cls in weight_sync_families() if not covered & set(cls.HF_MODEL_TYPES))
+    return sorted(spec.model_types[0] for spec in weight_sync_families() if not covered & set(spec.model_types))
 
 
 def render(fixture, *, rewrite: bool) -> dict:
@@ -251,7 +246,7 @@ def write_all() -> None:
         raise SystemExit(
             f"{uncovered}: the weight sync admits these families but no fixture covers them — the "
             f"gate would certify a roster the server was never checked against. Add a fixture, or "
-            f"refuse the family (_supports_weight_sync = False, or the vLLM client's UNSERVABLE_MODEL_TYPES)."
+            f"refuse the family (a weight_sync_refusal on its spec, or the vLLM client's UNSERVABLE_MODEL_TYPES)."
         )
     for role, fixtures, rewrite in (("fixtures", FIXTURES, True), ("unparseable", UNPARSEABLE, False)):
         for fixture in fixtures:

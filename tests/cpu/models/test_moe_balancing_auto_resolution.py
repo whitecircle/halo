@@ -24,9 +24,9 @@ from transformers import PretrainedConfig
 
 from src.callbacks.balancing import apply_balancing_mode
 from src.model_loading.liger.cross_entropy import build_lce_forward
-from src.models.moe_balancing import _WARNED_UNSERVABLE_AUTO, resolve_balancing_mode
+from src.models.moe.balancing import _warned_unservable_auto, resolve_balancing_mode
 
-_RESOLVER_LOGGER = "src.models.moe_balancing"
+_RESOLVER_LOGGER = "src.models.moe.balancing"
 
 
 class _MoEProbeConfig(PretrainedConfig):
@@ -61,7 +61,7 @@ class _HonorsRouterLogitFlag(_NoRouterLogitFlag):
 
 
 def _resolve(model):
-    _WARNED_UNSERVABLE_AUTO.discard(type(model).__name__)  # warn-once state is keyed per model class
+    _warned_unservable_auto.discard(type(model).__name__)  # warn-once state is keyed per model class
     return resolve_balancing_mode("auto", model, is_moe=True)
 
 

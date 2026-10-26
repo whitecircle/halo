@@ -28,20 +28,19 @@ file-touch list, the traps and the commands; read it before editing.
 
 1. **Dense or MoE?** Dense `AutoModelForCausalLM` / multimodal `AutoModelForImageTextToText`
    needs **no EP work** — plain FSDP works as is. Only MoE families need an EP wrapper.
-2. **MoE → add an EP wrapper.** Create `src/distributed/expert_parallel/layers/<name>.py`
-   subclassing `EPMoELayerBase` (`moe_layer/layer.py`) — or `EPSharedExpertsMoELayerBase`,
-   `EPSeparateGluMoELayerBase`, `EPGroupLimitedMoELayerBase` where the family fits one. The base
+2. **MoE → add an EP wrapper.** Create `src/distributed/expert_parallel/families/<name>.py`
+   subclassing `EPMoELayerBase` (`moe_layer/layer.py`) — or `EPSharedExpertsMoELayerBase` (the routed
+   forward template), `EPGroupLimitedMoELayerBase` where the family fits one. The base
    owns `__init__` and calls one hook per construction step (`_detect_hidden_dim`, `_adopt_routing`,
    `_adopt_shared_experts`, `_adopt_expert_compute`, `_adopt_expert_params`); the wrapper supplies
-   `forward` and overrides only the hooks that differ. Dropping the file into `layers/` is the whole
-   registration — `layers/roster.py` imports every module in the package. Set **both** class attrs: `HF_MODULE_NAMES` (the HF block class name(s) — `build_moe_layer_map()` in
-   `patching.py` walks the subclass tree, so there is no map to edit) and
-   `HF_MODEL_TYPES` (the checkpoint `model_type`(s) — without it sharded EP save is rejected
-   and the offline merge resolver finds nothing). `EPExpertGatherMixin.__init_subclass__`
-   (`expert_gather.py`) enforces a paired-override contract, each breach a `TypeError` at import:
-   `gather_expert_state_dict` and `merge_shards_to_hf` are inverses — override both or neither; declaring
-   `_PER_EXPERT_UNFUSED_KEYS` while overriding the gather, or resolving both it and
-   `_HUB_PER_EXPERT_KEYS`, is refused.
+   `forward` and overrides only the hooks that differ. The family's facts go into one frozen
+   `MoEFamilySpec` constant in `src/models/moe/family_specs.py` (listed in `MOE_FAMILY_SPECS`; its
+   `model_types` are the checkpoint `model_type`(s) every offline resolver reads), the class points at
+   it with `FAMILY = <SPEC>` and declares `HF_MODULE_NAMES` (the HF block class name(s)), and one import
+   line in `families/roster.py` registers it (`MOE_LAYER_MAP` is built from the imported classes). The
+   spec's `expert_layout` (`src/models/moe/expert_layout.py`) is the family's one checkpoint layout:
+   the EP gather, the RL weight sync and `merge_ep_shards.py` all write it, so no wrapper overrides
+   the export.
    Reuse an existing wrapper if the expert-weight layout matches (layout→wrapper table in the guide).
 3. **Liger coverage.** Add one `LigerFamilySpec` to `LIGER_FAMILY_SPECS` in
    `src/model_loading/liger/family_specs.py` — there is no per-family applier module; `src/model_loading/liger/applier.py`
@@ -68,7 +67,7 @@ prefix); see `CLAUDE.md`.
 ## Sources of truth
 
 `agent-docs/models/adding-a-model.md` + `checklist.md` are the guide. The code is the **ultimate** authority:
-`src/distributed/expert_parallel/` (`moe_layer/`, `patching.py`, the existing `layers/*.py`),
+`src/models/moe/family_specs.py`, `src/distributed/expert_parallel/` (`moe_layer/`, `parallelize.py`, the existing `families/*.py`),
 `src/model_loading/liger/family_specs.py`, and the HF `modeling_*.py` you are wrapping are what actually
 behave — when a doc, this skill, or memory disagrees, or you are unsure, read the real file before
 editing. (`CLAUDE.md`: docs-first, the code wins.) Related skill: `checkpoints` (the save/export format

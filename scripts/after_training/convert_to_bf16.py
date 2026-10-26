@@ -24,7 +24,6 @@ from peft import PeftConfig, PeftModel
 from safetensors import safe_open
 from transformers import AutoModel, AutoModelForSequenceClassification, AutoTokenizer
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_device_map_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter, merge_adapter_into_base
 from src.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE

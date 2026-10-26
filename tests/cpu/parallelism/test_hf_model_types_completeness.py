@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """Every EP family must claim EVERY ``model_type`` spelling its checkpoints ship under.
 
-``ep_layer_class_by_model_type`` is how an off-line consumer — the sharded-expert merge, the export
-tooling, the save-time gate — resolves a ``config.json`` back to the class that produced its layout.
+``find_moe_family_spec`` is how an off-line consumer — the sharded-expert merge, the export
+tooling, the save-time gate — resolves a ``config.json`` back to the family that produced its layout.
 A family that declares only one of its spellings does not fail loudly: the composite/VLM wrapper
 config simply resolves to ``None`` and the caller reports the family as unsupported, so a checkpoint
 that trained fine cannot be merged or exported. That is the failure mode this pins, and it is exactly
@@ -20,11 +20,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.distributed.expert_parallel.expert_weights import (
-    ep_layer_class_by_model_type,
-    ep_layer_classes,
-    resolve_ep_merge_layer_class,
-)
+from src.distributed.expert_parallel.families.roster import ep_layer_classes
+from src.models.moe.family_specs import find_moe_family_spec
+from tests.common.rosters import ep_layer_class_by_model_type
 
 # class name -> the ``model_type`` spellings the class declares ITSELF, in declaration order.
 # Multi-spelling entries are the composite families: a text tower plus the wrapper config a
@@ -56,8 +54,9 @@ assert len(_EXPECTED_MAPPING) == sum(len(s) for s in _EXPECTED_CLAIMS.values()),
 
 
 def _own_model_types(cls) -> tuple[str, ...]:
-    """What the registry reads: the class's OWN declaration, never an inherited tuple."""
-    return tuple(vars(cls).get("HF_MODEL_TYPES", ()))
+    """What the registry reads: the class's OWN spec, never an inherited one."""
+    family = vars(cls).get("FAMILY")
+    return family.model_types if family else ()
 
 
 def _declaring_classes() -> dict[str, type]:
@@ -74,7 +73,7 @@ def test_the_roster_of_declaring_families_is_exactly_the_pinned_one():
 def test_each_family_claims_every_spelling_it_ships_under(cls_name):
     cls = _declaring_classes()[cls_name]
     assert _own_model_types(cls) == _EXPECTED_CLAIMS[cls_name], (
-        f"{cls_name} now declares HF_MODEL_TYPES={_own_model_types(cls)}; a dropped spelling makes "
+        f"{cls_name} now declares FAMILY.model_types={_own_model_types(cls)}; a dropped spelling makes "
         f"every checkpoint written under it unresolvable for merge/export"
     )
 
@@ -91,13 +90,12 @@ assert _COMPOSITE, "no composite family in the table — the both-towers check b
 
 @pytest.mark.parametrize("cls_name", sorted(_COMPOSITE), ids=sorted(_COMPOSITE))
 def test_composite_families_resolve_from_every_tower(cls_name):
-    """The user-facing consequence: each spelling must reach the SAME class through the public
+    """The user-facing consequence: each spelling must reach the SAME family through the public
     resolver, so a top-level wrapper config and its text tower export identically."""
-    resolved = {spelling: resolve_ep_merge_layer_class(spelling) for spelling in _COMPOSITE[cls_name]}
-    assert all(cls is not None for cls in resolved.values()), (
-        f"{cls_name}: {[s for s, c in resolved.items() if c is None]} resolve to no EP layer class"
+    resolved = {spelling: find_moe_family_spec(spelling) for spelling in _COMPOSITE[cls_name]}
+    assert all(spec is _declaring_classes()[cls_name].FAMILY for spec in resolved.values()), (
+        f"{cls_name}: {[s for s, spec in resolved.items() if spec is None]} resolve to no family spec"
     )
-    assert {cls.__name__ for cls in resolved.values()} == {cls_name}
 
 
 if __name__ == "__main__":

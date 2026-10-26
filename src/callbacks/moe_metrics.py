@@ -21,11 +21,7 @@ from src.models.config_access import (
     get_config_field,
     set_config_field_run_scoped,
 )
-from src.models.moe_balancing import (
-    DeclaredRouter,
-    declared_routers,
-    router_logits_forced_off,
-)
+from src.models.moe.router_logits import DeclaredRouter, declared_routers, router_logits_forced_off
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)

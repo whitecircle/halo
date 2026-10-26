@@ -36,7 +36,9 @@ import torch.distributed as dist
 from accelerate.state import GradientState
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import (
+    apply_ep_layers,
+)
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -109,8 +111,8 @@ def build_models(family: str, device):
     spec = ExpertLoraSpec(r=LORA_R, alpha=LORA_ALPHA)
     ep_pc, ref_pc = ParallelismConfig(ep_size=EP_SIZE), ParallelismConfig(ep_size=1)
     ep_pc.expert_lora = ref_pc.expert_lora = spec
-    model = patch_moe_model_for_ep(base.to(device), ep_pc.ep_config())
-    reference = patch_moe_model_for_ep(reference.to(device), ref_pc.ep_config())
+    model = apply_ep_layers(base.to(device), ep_pc.ep_config())
+    reference = apply_ep_layers(reference.to(device), ref_pc.ep_config())
 
     generator = torch.Generator().manual_seed(SEED)
     for index, (layer, ref_layer) in enumerate(zip(ep_layers(model), ep_layers(reference), strict=True)):
@@ -201,7 +203,7 @@ def run(ctx):
             # Every MoE layer's dispatch and combine join the graph, the first one's included.
             checks[f"{name}_every_layer_in_graph"] = signature == [1, n_layers, n_layers]
 
-    if all(layer._supports_gradient_checkpointing for layer in layers):
+    if all(layer.FAMILY.supports_gradient_checkpointing for layer in layers):
         enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
         run_scenario(ctx, model, reference, batches, "gc", set(range(n_layers)), checks, metrics)
     return {"checks": checks, "metrics": metrics}

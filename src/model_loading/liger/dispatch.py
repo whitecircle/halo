@@ -18,7 +18,8 @@ from src.model_loading.liger.applier import LigerApplier, build_liger_appliers
 from src.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from src.models.config_access import set_config_field_run_scoped, text_config
-from src.models.moe_balancing import config_has_experts, ep_wraps_experts
+from src.models.moe.config_fields import has_routed_experts
+from src.models.moe.family_specs import wraps_experts
 
 logger = get_logger(__name__)
 
@@ -106,7 +107,7 @@ def liger_ep_disables_fused_glu(needs_ep_wrappers: bool, model_config) -> bool:
     MoE appliers swap the routed-experts class the wrapper replaces wholesale, while a toolkit spec names
     the dense and shared-expert MLPs every wrapper adopts unchanged.
     """
-    if not ep_wraps_experts(needs_ep_wrappers, model_config):
+    if not wraps_experts(model_config, wrappers_requested=needs_ep_wrappers):
         return False
     return not any(candidate in _TOOLKIT_GLU_SURVIVES_EP for candidate in _liger_model_types(model_config))
 
@@ -118,7 +119,7 @@ def liger_routed_expert_overrides(needs_ep_wrappers: bool, model_config) -> dict
     the pinned liger-kernel computes wrong on Blackwell. The rule keys on the config having experts, and
     the flag goes whole: any dense, shared-expert or vision SwiGLU upstream fuses under it runs eager too.
     """
-    if not config_has_experts(model_config) or ep_wraps_experts(needs_ep_wrappers, model_config):
+    if not has_routed_experts(model_config) or wraps_experts(model_config, wrappers_requested=needs_ep_wrappers):
         return {}
     model_type, applier = _resolve_applier(*_liger_model_types(model_config))
     if applier is None:

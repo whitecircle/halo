@@ -15,7 +15,7 @@ import torch
 
 from src.callbacks.balancing import apply_balancing_mode
 from src.callbacks.moe_metrics import MoEMetricsCallback
-from src.models.moe_balancing import mark_router_logits_forced_off, router_logits_forced_off
+from src.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
 
 
 class _Cfg:
@@ -40,8 +40,11 @@ class _Model(torch.nn.Module):
 class _SeveredEPLayer(torch.nn.Module):
     """EP-layer stand-in whose class severs the HF aux-loss path (DeepSeek-V4-like)."""
 
-    _ep_severs_aux_loss = True
-    _supports_bias_balancing = True
+    SEVERS_AUX_LOSS = True
+    SUPPORTS_BIAS_BALANCING = True
+
+    def can_adopt_native_balancing(self):
+        return False
 
 
 class _AdoptedBiasEPLayer(torch.nn.Module):

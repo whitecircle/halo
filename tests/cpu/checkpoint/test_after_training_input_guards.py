@@ -52,7 +52,7 @@ from src.checkpoint.reading import (
     reject_partial_checkpoint,
 )
 from src.checkpoint.writing import save_sharded_state_dict
-from src.distributed.expert_parallel.expert_weights import per_expert_hub_model_types
+from src.models.moe.family_specs import per_expert_hub_model_types
 from tests.common.repo import REPO_ROOT
 
 
@@ -316,7 +316,7 @@ def test_unfuse_moe_experts_refuses_an_unregistered_model_type(tmp_path):
     src = _write_gathered_checkpoint(
         tmp_path / "unknown", _fused_moe_tensors(), model_type="some_future_moe", config_extra=_FUSED_MOE_CONFIG
     )
-    with pytest.raises(ValueError, match="no registered EP family claims"):
+    with pytest.raises(ValueError, match="no MoE family spec claims"):
         unfuse_checkpoint(str(src), str(tmp_path / "out"))
 
 

@@ -43,7 +43,7 @@ These layers need no CP for memory: the recurrent state is independent of `S`, p
 
 ## Model loading
 
-Qwen3.5/3.6 ship as multimodal: `model_type` `qwen3_5_moe` (or `qwen3_5` dense), top-level class `Qwen3_5MoeForConditionalGeneration`, registered under `AutoModelForImageTextToText`. `resolve_auto_model_class()` keeps the vision tower intact, and the config detection routes the **load** through `load_distributed_model`, adding the processor on top (`src/entrypoints/model_setup.py`). The MoE VLM therefore gets the same EP/TP support as a standalone causal LM — `config_has_experts` finds the experts on the nested `text_config`.
+Qwen3.5/3.6 ship as multimodal: `model_type` `qwen3_5_moe` (or `qwen3_5` dense), top-level class `Qwen3_5MoeForConditionalGeneration`, registered under `AutoModelForImageTextToText`. `resolve_auto_model_class()` keeps the vision tower intact, and the config detection routes the **load** through `load_distributed_model`, adding the processor on top (`src/entrypoints/model_setup.py`). The MoE VLM therefore gets the same EP/TP support as a standalone causal LM — `has_routed_experts` finds the experts on the nested `text_config`.
 
 That verdict does not decide the data path: a text-only dataset on these checkpoints is a text run, which is what lets the text SFT recipes below use `packing` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
@@ -51,7 +51,7 @@ The resolver keys on `model_type` alone, not `architectures`. A `*-patched` chec
 
 ## EP wrapper
 
-`EPQwen3_5MoELayer` (`src/distributed/expert_parallel/layers/qwen3_5.py`) replaces `Qwen3_5MoeSparseMoeBlock`. Softmax top-k routing via `Qwen3_5MoeTopKRouter`. The shared expert (`Qwen3_5MoeMLP`, sigmoid-gated output) stays local on every rank and is combined with routed-expert output after DeepEP combine. Routed experts use the fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]` layout, sharded along the expert dimension, SwiGLU, grouped GEMM on SM90+.
+`EPQwen3_5MoELayer` (`src/distributed/expert_parallel/families/qwen3_5.py`) replaces `Qwen3_5MoeSparseMoeBlock`. Softmax top-k routing via `Qwen3_5MoeTopKRouter`. The shared expert (`Qwen3_5MoeMLP`, sigmoid-gated output) stays local on every rank and is combined with routed-expert output after DeepEP combine. Routed experts use the fused `gate_up_proj [E, 2M, H]` + `down_proj [E, H, M]` layout, sharded along the expert dimension, SwiGLU, grouped GEMM on SM90+.
 
 The wrapper re-derives selection from the router's own logits — top-k on the bias-adjusted probabilities, gate weights from the unbiased renormalized softmax, which makes a zero bias a no-op.
 

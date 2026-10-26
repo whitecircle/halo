@@ -5,8 +5,8 @@ transformers 5.16 folds Gemma 4's full-attention geometry (``global_head_dim``,
 ``num_global_key_value_heads``) into ``per_layer_config`` and serializes only that folded form. The
 pinned vLLM server parses checkpoints with the transformers 5.14 line, which refuses a config that
 carries ``per_layer_config`` at all (``AmbiguousGlobalPerLayerAttributeError`` at parse) and reads
-the two flat keys instead. The family declares the mapping on its EP layer class
-(``_LEGACY_PER_LAYER_CONFIG_KEYS``) and every config writer the toolkit owns flattens through it —
+the two flat keys instead. The family declares the mapping on its spec
+(``served_flat_config_keys``) and every config writer the toolkit owns flattens through it —
 ``save_model_config`` (the parallel saves), ``save_full_checkpoint`` (the after-training tools, the
 PEFT merge output) and the EP gathered save on top of them.
 
@@ -38,7 +38,7 @@ from src.checkpoint.config_export import (
 )
 from src.checkpoint.offline_export import save_full_checkpoint
 from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from tests.common.checkpoint_io import save_context
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
@@ -122,7 +122,7 @@ def test_save_full_checkpoint_writes_the_flat_form(tmp_path):
 def test_the_ep_gathered_save_writes_the_flat_form(tmp_path):
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(Gemma4TextConfig(**TINY_GEMMA4_MOE_CONFIG)).to(torch.bfloat16)
-    patch_moe_model_for_ep(model, single_process_ep_config())
+    apply_ep_layers(model, single_process_ep_config())
     save_ep_gathered_checkpoint(save_context(model), str(tmp_path))
     _assert_flat_form(_config_json(str(tmp_path)))
 

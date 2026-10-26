@@ -75,7 +75,7 @@ class EPExpertComputeMixin:
         """Store this rank's fused-GLU experts in matmul convention ``[E, K, N]``: ``gate_up_proj`` +
         ``down_proj``, or under ETP gate and up apart, since sharding the fused halves misaligns them."""
         self._require_fused_experts(experts)
-        start, end = (0, self.experts_per_rank) if weights_already_sharded else (self.expert_start, self.expert_end)
+        start, end = self._local_expert_range(weights_already_sharded)
         gate_up = experts.gate_up_proj.data[start:end]  # [E, 2M, H], dim 1 = [gate(M) | up(M)]
         down = experts.down_proj.data[start:end]  # [E, H, M]
         if self.expert_tp_size > 1:
@@ -83,6 +83,10 @@ class EPExpertComputeMixin:
         else:
             self.gate_up_proj = nn.Parameter(gate_up.transpose(1, 2).contiguous())
             self.down_proj = nn.Parameter(down.transpose(1, 2).contiguous())
+
+    def _local_expert_range(self, weights_already_sharded: bool) -> tuple[int, int]:
+        """This rank's ``[start, end)`` in the HF expert container: all of it once the lazy loader sliced it."""
+        return (0, self.experts_per_rank) if weights_already_sharded else (self.expert_start, self.expert_end)
 
     @staticmethod
     def _require_fused_experts(experts: nn.Module) -> nn.Module:
@@ -170,7 +174,7 @@ class EPExpertComputeMixin:
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """The expert activation over a synthetic ``[T, 2M]``, in the operand layout the compute path hands
         it: Triton specializes a launch on its row strides."""
-        if hasattr(self, "gate_up_proj"):
+        if self._stores_fused_glu:
             return self._glu_combine_packed(gate_up)
         gate, up = gate_up.chunk(2, dim=-1)
         return self._glu_combine(gate.contiguous(), up.contiguous())
@@ -191,10 +195,10 @@ class EPExpertComputeMixin:
     def _compute_experts_gmm(
         self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype
     ) -> torch.Tensor:
-        """Grouped-GEMM GLU experts on either :meth:`_glu_expert` layout."""
+        """Grouped-GEMM GLU experts on either :meth:`_glu_ffn` layout."""
 
         def compute(sorted_tokens, offs, _eids):
-            return self._glu_expert(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
+            return self._glu_ffn(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
 
         return self._compute_experts_with_grouped_mm(tokens, experts, weights, output_dtype, compute)
 
@@ -313,12 +317,16 @@ class EPExpertComputeMixin:
 
     def _expert_forward(self, idx: int, x: torch.Tensor) -> torch.Tensor:
         """One local expert's GLU forward for the loop."""
-        return self._glu_expert(x, lambda t, attr: self._expert_proj_single(idx, t, attr))
+        return self._glu_ffn(x, lambda t, attr: self._expert_proj_single(idx, t, attr))
 
-    def _glu_expert(self, x: torch.Tensor, proj: Callable[[torch.Tensor, str], torch.Tensor]) -> torch.Tensor:
-        """The GLU expert through ``proj(x, weight_attr)``: fused ``gate_up_proj``, or ``gate_proj`` and
-        ``up_proj`` stored apart (Qwen3, Bailing, every family under ETP)."""
-        if hasattr(self, "gate_up_proj"):
+    @property
+    def _stores_fused_glu(self) -> bool:
+        """Whether the GLU halves are stored fused as ``gate_up_proj``, not apart (Qwen3, Bailing, any ETP run)."""
+        return hasattr(self, "gate_up_proj")
+
+    def _glu_ffn(self, x: torch.Tensor, proj: Callable[[torch.Tensor, str], torch.Tensor]) -> torch.Tensor:
+        """The GLU FFN through ``proj(x, weight_attr)`` on either stored layout, for the loop and grouped paths."""
+        if self._stores_fused_glu:
             return proj(self._glu_combine_packed(proj(x, "gate_up_proj")), "down_proj")
         return proj(self._glu_combine(proj(x, "gate_proj"), proj(x, "up_proj")), "down_proj")
 

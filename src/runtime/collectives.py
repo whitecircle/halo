@@ -109,3 +109,24 @@ def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined]
     if combined is None:
         raise RuntimeError(f"the merge of {what} never reached this rank: rank 0 broadcast no verdict.")
     return combined
+
+
+def all_gather_cat(tensor: torch.Tensor, dim: int, group, world_size: int) -> torch.Tensor:
+    """COLLECTIVE over ``group``: every rank's equal-shaped ``tensor`` concatenated along ``dim`` in rank order;
+    ``tensor`` itself when ``world_size <= 1``.
+
+    ``dim == 0`` receives into one preallocated output: a shard list plus a ``cat`` would hold the gathered tensor
+    twice, and an expert-axis gather carries most of a fine-grained MoE's parameters.
+    """
+    if world_size <= 1:
+        return tensor
+    tensor = tensor.contiguous()
+    if dim == 0:
+        gathered = torch.empty(
+            (tensor.shape[0] * world_size, *tensor.shape[1:]), dtype=tensor.dtype, device=tensor.device
+        )
+        dist.all_gather_into_tensor(gathered, tensor, group=group)
+        return gathered
+    shards = [torch.empty_like(tensor) for _ in range(world_size)]
+    dist.all_gather(shards, tensor, group=group)
+    return torch.cat(shards, dim=dim)

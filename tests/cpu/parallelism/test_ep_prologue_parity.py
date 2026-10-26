@@ -7,7 +7,7 @@ family's own declarations, then hands each step to a hook the family may overrid
 ``_adopt_expert_params``). What a family declares is therefore the ONLY thing standing between the
 wrapper and the HF block it replaces, and every way of getting a declaration wrong is silent: a
 ``_ROUTER_ATTR`` pointing at the wrong module hooks and upcasts something the forward never calls; a
-missing ``_SHARED_EXPERT_ATTRS`` drops the shared FFN from every token's output; an
+missing ``shared_expert_attrs`` drops the shared FFN from every token's output; an
 ``_adopt_routing`` override that stops consulting the router leaves ``routed_scaling_factor`` /
 ``norm_topk_prob`` / the group knobs at their neutral defaults; a restated activation or a mis-read
 clamp bound trains the experts on a different function. None of those changes a shape, a dtype or a
@@ -45,6 +45,7 @@ Run: ``python tests/cpu/parallelism/test_ep_prologue_parity.py`` (or ``pytest -m
 
 from __future__ import annotations
 
+import dataclasses
 import gc
 
 import pytest
@@ -53,11 +54,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
-from src.models.moe_balancing import ROUTER_TOPK_FIELDS, resolve_balancing_slot
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.families.roster import ep_layer_classes
+from src.models.moe.balancing import resolve_balancing_slot
+from src.models.moe.config_fields import ROUTER_TOPK_FIELDS
 from tests.common.parallelism import single_process_ep_config
 
 # The real transformers blocks, built once per family and already parameterized with NON-neutral
@@ -202,14 +204,14 @@ def _parity_failures(block: nn.Module, layer, wrapper) -> list[str]:
         failures.append("act_fn is not the expert container's own activation")
 
     # 5. The adopted native balancing slot must carry the block's tensor, at the same dotted path.
-    if wrapper._NATIVE_BALANCING_BIAS_ATTR:
-        target = resolve_balancing_slot(layer, wrapper._NATIVE_BALANCING_BIAS_ATTR)
-        expected = _resolve(block, wrapper._NATIVE_BALANCING_BIAS_ATTR)
+    if slot_attr := layer._native_balancing_attr:
+        target = resolve_balancing_slot(layer, slot_attr)
+        expected = _resolve(block, slot_attr)
         if expected is not None:
             if target is None:
-                failures.append(f"native balancing slot '{wrapper._NATIVE_BALANCING_BIAS_ATTR}' is absent")
+                failures.append(f"native balancing slot '{slot_attr}' is absent")
             elif not torch.equal(getattr(*target).float(), expected.float()):
-                failures.append(f"native balancing slot '{wrapper._NATIVE_BALANCING_BIAS_ATTR}' is not the block's")
+                failures.append(f"native balancing slot '{slot_attr}' is not the block's")
 
     # 6. Expert weights exist and cover this rank's whole expert range — a layout probe that skipped
     #    a renamed tensor would leave the layer silently empty.
@@ -428,7 +430,11 @@ def test_the_parity_check_is_sensitive_to_a_dropped_declaration():
     # A family that stops declaring its shared expert: the block still builds one, the wrapper drops
     # it from every token's output, and nothing else in the toolkit notices.
     glm4_wrapper, glm4_factory = families["glm4_moe_lite"]
-    forgot_shared = type("_ForgotSharedExpert", (glm4_wrapper,), {"_SHARED_EXPERT_ATTRS": ()})
+    forgot_shared = type(
+        "_ForgotSharedExpert",
+        (glm4_wrapper,),
+        {"FAMILY": dataclasses.replace(glm4_wrapper.FAMILY, model_types=(), shared_expert_attrs=())},
+    )
     block, layer = _build(glm4_factory, forgot_shared)
     assert any("shared" in failure for failure in _parity_failures(block, layer, forgot_shared)), (
         "a wrapper that adopted no shared expert passed the parity check"

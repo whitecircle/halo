@@ -30,7 +30,7 @@ from trl import SFTConfig
 from src.callbacks.balancing import BalancingBiasCallback, configure_moe_balancing
 from src.callbacks.factory import build_run_callbacks
 from src.configs.script_arguments import CommonScriptArguments
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
@@ -93,7 +93,7 @@ def run(ctx):
         world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE, ep_size=EP_SIZE
     )
     model = build_model()
-    patch_moe_model_for_ep(model, config.ep_config())
+    apply_ep_layers(model, config.ep_config())
 
     # The production balancing seam: configure_moe_balancing applies the bias_update side effects
     # (creates balancing_biases + expert_load_counter on the EP layers), build_run_callbacks the callback.

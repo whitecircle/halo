@@ -152,11 +152,11 @@ class RoutingReplayInjector:
             )
         self._engine_layers = engine_layers
         self._layer_indices = layer_indices
-        unsupported = sorted({type(m).__name__ for m in ep_layers if not m._supports_routing_replay})
+        unsupported = sorted({type(m).__name__ for m in ep_layers if not m.FAMILY.supports_routing_replay})
         if unsupported:
             raise NotImplementedError(
                 f"routing replay is not supported for {unsupported}: these families cannot re-derive "
-                f"gate weights at a forced selection (see _supports_routing_replay on each class)."
+                f"gate weights at a forced selection (see FAMILY.supports_routing_replay on each class)."
             )
         missing_top_k = sorted({type(m).__name__ for m in ep_layers if not hasattr(m, "top_k")})
         if missing_top_k:

@@ -38,8 +38,10 @@ from trl import SFTConfig
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.moe_layer import compute
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.expert_layout import to_hub_expert_tensors
+from src.runtime.dtensor import materialize_dtensor
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import world_spread
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
@@ -76,8 +78,8 @@ class UnsplitReference:
     ``expert_grads`` / ``router_grads`` / ``expert_param_names`` are populated only when the
     reference model carries EP wrappers: expert parameters have no sharding-independent name (ETP
     splits the fused ``gate_up_proj``, grouped-GEMM splits it again), so they are compared through
-    :meth:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase.gather_expert_grads` — the
-    same canonical layout on either side — and excluded from the name-keyed comparison.
+    :func:`gather_expert_grads` — the same canonical layout on either side — and excluded from the
+    name-keyed comparison.
     """
 
     grads: dict[str, torch.Tensor]
@@ -127,7 +129,7 @@ def build_moe_model(dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
 def build_patched_moe_model(config: ParallelismConfig, dtype: torch.dtype = torch.bfloat16) -> GptOssForCausalLM:
     """The MoE model carrying the config's EP wrappers + prepared (non-collective) EP buffers."""
     model = build_moe_model(dtype)
-    patch_moe_model_for_ep(model, config.ep_config())
+    apply_ep_layers(model, config.ep_config())
     return model
 
 
@@ -153,6 +155,20 @@ def token_ce_sums(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         shift_logits.reshape(-1, shift_logits.size(-1)), shift_labels.reshape(-1), ignore_index=-100, reduction="none"
     )
     return ce.view(shift_labels.shape).sum(dim=1)
+
+
+def gather_expert_grads(layer: EPMoELayerBase, device="cpu") -> dict[str, torch.Tensor]:
+    """COLLECTIVE (the layer's expert gather). ``layer``'s expert gradients in its family's hub layout, whatever it
+    stores locally, so two runs compare in one layout. Raises on a missing gradient: gathering zeros for an expert
+    the backward never reached would make the comparison vacuous."""
+    grads = {}
+    for name, param in layer.expert_named_params():
+        if param.grad is None:
+            raise RuntimeError(
+                f"{type(layer).__name__}.{name} has no gradient: the backward did not reach this expert parameter."
+            )
+        grads[name] = materialize_dtensor(param.grad)
+    return to_hub_expert_tensors(layer.FAMILY.expert_layout, layer.gather_expert_tensors(grads), device=device)
 
 
 def rel_err(test: torch.Tensor, ref: torch.Tensor) -> float:
@@ -200,7 +216,7 @@ def run_unsplit_reference(model, rows: torch.Tensor, labels: torch.Tensor, devic
     total_norm = float(torch.sqrt(sum(g.float().norm() ** 2 for g in grads.values())))
 
     ep_modules = [(name, m) for name, m in model.named_modules() if isinstance(m, EPMoELayerBase)]
-    expert_grads = {name: m.gather_expert_grads(device=device) for name, m in ep_modules}
+    expert_grads = {name: gather_expert_grads(m, device=device) for name, m in ep_modules}
     router_grads = {
         name: torch.cat(
             [grads[f"{name}.router.{p}"].float().flatten() for p in sorted(n for n, _ in m.router.named_parameters())]
@@ -237,7 +253,7 @@ def ep1_reference(
     over plain torch ops, so no kernel is asked to run outside the dtype it supports.
     """
     model = build_moe_model(dtype)
-    patch_moe_model_for_ep(model, inert_ep1_config(rank, use_grouped_gemm))
+    apply_ep_layers(model, inert_ep1_config(rank, use_grouped_gemm))
     return run_unsplit_reference(model.to(device), rows, labels, device, dp_size)
 
 
@@ -415,7 +431,7 @@ def check_expert_grads_vs_reference(
     for local_name, module in ep_modules:
         global_name = stage.global_parameter_name(local_name)
         ref_grads = reference.expert_grads[global_name]
-        for key, full_grad in module.gather_expert_grads(device=ctx.device).items():
+        for key, full_grad in gather_expert_grads(module, device=ctx.device).items():
             ref = ref_grads[key]
             if full_grad.shape != ref.shape:
                 log(f"[rank {ctx.rank}] shape mismatch {global_name}.{key}: {full_grad.shape} vs {ref.shape}")

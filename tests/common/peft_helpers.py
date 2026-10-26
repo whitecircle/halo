@@ -40,7 +40,7 @@ from src.checkpoint.adapters import has_adapter_weight_file
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE, SAFETENSORS_INDEX_FILE
 from src.checkpoint.reading import read_checkpoint_index
 from src.checkpoint.writing import cast_to_save_dtype
-from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.parallel.loader import load_distributed_model
@@ -335,7 +335,7 @@ def snapshot_adapters(model, *, expert_lora: bool) -> dict[str, torch.Tensor]:
     call this). Attention PEFT adapters are replicated or local, so a local clone suffices.
     """
     if expert_lora:
-        return {k: _materialize(v) for k, v in gather_ep_lora_adapters(model).items()}
+        return {k: _materialize(v) for k, v in gather_expert_lora_adapters(model).items()}
     return {n: _materialize(p) for n, p in adapter_param_items(model) if p.requires_grad}
 
 
@@ -537,7 +537,7 @@ def unwrap(trainer_model):
 
 
 def is_expert_lora_active(model) -> bool:
-    return has_ep_lora(model)
+    return model_has_expert_lora(model)
 
 
 def merged_lora_targets(model: torch.nn.Module) -> dict[str, torch.Tensor]:

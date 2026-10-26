@@ -16,10 +16,11 @@ from torch.distributed.tensor import DTensor, Shard
 from torch.distributed.tensor.placement_types import _StridedShard
 
 from src.checkpoint.reading import StreamingCheckpointReader, resolve_checkpoint_weights
-from src.distributed.expert_parallel.config import EPConfig, get_num_experts
+from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_fuser import ExpertFuser
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.expert_parallel.lazy_plan import ExpertKeyLayout, WeightPlanner, loaded_key_mapping
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
+from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from src.distributed.mesh import MeshDim
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import is_packed_4bit_parameter, reject_fp8_tensor
@@ -28,6 +29,7 @@ from src.model_loading.lazy_safetensors.materialization import (
     materialize_weight_plan,
     verify_loaded_shape,
 )
+from src.models.moe.config_fields import require_expert_count
 
 
 def fp32_master_param_keys(
@@ -175,7 +177,7 @@ def restore_fp32_master_parameters(
     tasks = []
     fuser = None
     if ExpertKeyLayout.detect(weight_map) == ExpertKeyLayout.PER_EXPERT:
-        fuser = ExpertFuser(0, get_num_experts(model.config))
+        fuser = ExpertFuser(0, require_expert_count(model.config))
         tasks = [
             task for task in fuser.detect_tasks(weight_map, disk_to_model, set(state)) if task.model_key in masters
         ]

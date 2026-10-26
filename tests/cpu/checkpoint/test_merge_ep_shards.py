@@ -13,7 +13,6 @@ import json
 import os
 import tempfile
 from collections import defaultdict
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -34,31 +33,41 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.parallel.resume_source import classify_resume_weights
 from src.checkpoint.writing import StreamingShardWriter
-from src.distributed.expert_parallel.expert_weights import expert_weight_roots, resolve_ep_merge_layer_class
-
-# The transform lives ON the EP layer class (inverse of that class's own gather).
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
-from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.glm5_next import EPGlm5NextMoELayer
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from src.models.moe.expert_layout import to_hub_expert_tensors
+from src.models.moe.family_specs import expert_weight_roots, find_moe_family_spec
 
 # The whole-dict oracle the streamed merge is pinned against (test-only; see its module docstring).
 from tests.common.ep_merge_oracle import post_process_merged_weights
+from tests.common.ep_stubs import bare_ep_layer
 
-_transform_gptoss = EPGptOssMoELayer.merge_shards_to_hf
-_transform_qwen3 = EPQwen3MoELayer.merge_shards_to_hf
-_transform_individual = EPBailingMoELayer.merge_shards_to_hf
-_transform_fused_glu_experts = EPQwen3_5MoELayer.merge_shards_to_hf
+
+def _merge_transform(layer_cls):
+    """The merge's per-layer transform for ``layer_cls``'s family: its ``ExpertLayout`` under the layer prefix."""
+
+    def transform(prefix, params):
+        hub = to_hub_expert_tensors(layer_cls.FAMILY.expert_layout, params, device="cpu")
+        return {f"{prefix}.{key}": tensor for key, tensor in hub.items()}
+
+    return transform
+
+
+_transform_gptoss = _merge_transform(EPGptOssMoELayer)
+_transform_qwen3 = _merge_transform(EPQwen3MoELayer)
+_transform_individual = _merge_transform(EPBailingMoELayer)
+_transform_fused_glu_experts = _merge_transform(EPQwen3_5MoELayer)
 
 E, H, M = 8, 64, 32  # num_experts, hidden_size, intermediate_size
 PREFIX = "model.layers.0"
@@ -351,7 +360,7 @@ def test_post_process_lfm2_feed_forward_container():
     """LFM2 MoE: experts live under ``feed_forward`` (a merge requiring ``.mlp.``
     would pass LFM2 experts through unmerged → dropped on reload) and the hub layout is per-expert
     Llama-style names ``experts.{i}.w{1,3,2}.weight`` (w1 = gate, w3 = up, w2 = down) — the split
-    order must match the class-declared _PER_EXPERT_UNFUSED_KEYS exactly (a swap has identical
+    order must match the spec's ``expert_layout.per_expert_keys`` exactly (a swap has identical
     shapes and corrupts the SwiGLU silently)."""
     gate_up = torch.randn(E, H, 2 * M)
     down = torch.randn(E, M, H)
@@ -444,16 +453,15 @@ def test_post_process_unknown_type_with_experts_raises():
         _merge_via_tool(weights, "mistral4_moe")
 
 
-def test_model_type_resolves_to_the_transform_of_its_layer_class():
-    """The merge picks a transform by resolving model_type -> EP layer class -> that class's
-    ``merge_shards_to_hf``, so every spelling a class claims is mergeable — including Laguna, whose
-    own wrapper inherits GLM-4's transform unchanged."""
-    assert resolve_ep_merge_layer_class("glm4_moe_lite") is EPGlm4MoELayer
-    assert resolve_ep_merge_layer_class("laguna") is EPLagunaMoELayer
-    assert EPLagunaMoELayer.merge_shards_to_hf.__func__ is EPGlm4MoELayer.merge_shards_to_hf.__func__
-    assert resolve_ep_merge_layer_class("bailing_moe_linear") is resolve_ep_merge_layer_class("bailing_moe")
+def test_model_type_resolves_to_its_family_layout():
+    """The merge resolves model_type -> family spec -> its ``ExpertLayout``, so every spelling a spec
+    claims is mergeable — including Laguna, which declares GLM-4's layout."""
+    assert find_moe_family_spec("glm4_moe_lite") is EPGlm4MoELayer.FAMILY
+    assert find_moe_family_spec("laguna") is EPLagunaMoELayer.FAMILY
+    assert EPLagunaMoELayer.FAMILY.expert_layout == EPGlm4MoELayer.FAMILY.expert_layout
+    assert find_moe_family_spec("bailing_moe_linear") is find_moe_family_spec("bailing_moe")
     # No spelling heuristic: an unclaimed model_type is rejected, never guessed onto a layout.
-    assert resolve_ep_merge_layer_class("my_glm4_moe_variant") is None
+    assert find_moe_family_spec("my_glm4_moe_variant") is None
 
 
 def _write_ep_checkpoint(input_dir, model_type, shards, ep_size):
@@ -646,14 +654,11 @@ def test_the_merged_directory_is_the_resume_source_the_shards_are_not():
                 assert f.read() == name.encode(), f"{name} changed on its way through the merge"
 
 
-def _gathered_reference(layer_cls, fused_flinear):
-    """What the GATHERED save of the same weights emits: the family's ``gather_expert_state_dict``
-    with the base fused gather stubbed to the F.linear-convention full tensors (no GPU/EP state
-    needed). This is the invariant target for the sharded merge — vLLM's per-expert loaders and the
-    hub conversion consume exactly this layout."""
-    instance = object.__new__(layer_cls)
-    with patch.object(EPMoELayerBase, "_gather_fused_expert_state_dict", return_value=dict(fused_flinear)):
-        return layer_cls.gather_expert_state_dict(instance, device="cpu")
+def _gathered_reference(layer_cls, gate_up, down):
+    """What the GATHERED save of the same weights emits: the family's real gather on one process. This is
+    the invariant target for the sharded merge — vLLM's per-expert loaders and the hub conversion consume
+    exactly this layout."""
+    return bare_ep_layer(layer_cls, gate_up_proj=gate_up, down_proj=down).gather_expert_state_dict()
 
 
 def _roundtrip_vs_gathered(layer_cls, model_type, container):
@@ -682,14 +687,7 @@ def _roundtrip_vs_gathered(layer_cls, model_type, container):
         merged = _load_merged(output_dir)
 
     reference = {
-        f"{PREFIX}.{container}.{key}": tensor
-        for key, tensor in _gathered_reference(
-            layer_cls,
-            {
-                "experts.gate_up_proj": gate_up.transpose(1, 2).contiguous(),
-                "experts.down_proj": down.transpose(1, 2).contiguous(),
-            },
-        ).items()
+        f"{PREFIX}.{container}.{key}": tensor for key, tensor in _gathered_reference(layer_cls, gate_up, down).items()
     }
     expert_keys = set(merged) - {f"{PREFIX}.{container}.gate.weight"}
     assert expert_keys == set(reference), (
@@ -708,32 +706,31 @@ def _roundtrip_vs_gathered(layer_cls, model_type, container):
 @pytest.mark.parametrize(
     ("layer_cls", "model_type", "container"),
     [
-        # Per-expert hub layouts, split by the class-declared _PER_EXPERT_UNFUSED_KEYS.
+        # Per-expert hub layouts (FUSED_SPLIT_PER_EXPERT).
         (EPGlm4MoELayer, "glm4_moe_lite", "mlp"),
         (EPLagunaMoELayer, "laguna", "mlp"),
         (EPLfm2MoELayer, "lfm2_moe", "feed_forward"),
-        # Fused hub layouts: the base merge is the exact inverse of the base gather.
+        # Fused hub layouts.
         (EPCohere2MoELayer, "cohere2_moe", "mlp"),
         (EPQwen3_5MoELayer, "qwen3_5_moe", "mlp"),
         (EPGlm5NextMoELayer, "glm5_next", "mlp"),
         (EPDeepseekV4MoELayer, "deepseek_v4", "mlp"),
         (EPMistral4MoELayer, "mistral4", "mlp"),
         (EPZayaMoELayer, "zaya", "mlp"),
-        # Overriding families: the merge override must track the gather override key for key.
+        # Bare keys: the layer replaces the expert container itself.
         (EPGemma4MoELayer, "gemma4", "mlp.experts"),
     ],
 )
 def test_full_merge_matches_gathered_save(layer_cls, model_type, container):
     """merged-from-sharded == gathered, key and tensor, for every family with fused expert storage.
 
-    This is the invariant that lets the transform live on the class: a family is merge-supported
-    because its ``merge_shards_to_hf`` is the inverse of its own ``gather_expert_state_dict``, and
-    this asserts exactly that end to end through the real merge script."""
+    Both apply the family's one ``ExpertLayout``; this asserts it end to end through the real merge
+    script and the real gather."""
     _roundtrip_vs_gathered(layer_cls, model_type, container)
 
 
 def test_merge_renames_module_spellings_to_hub_spellings():
-    """Laguna is the roster's rename-bearing family (``_EXPORT_KEY_RENAMES``): the merge must
+    """Laguna is the roster's rename-bearing family (``export_key_renames``): the merge must
     re-spell ALL output keys — non-expert included — to the hub layout, exactly as the gathered
     save does. A dropped rename ships ``gate.e_score_correction_bias`` / ``shared_experts.*``,
     which from_pretrained treats as unexpected+missing: the served model silently routes on the
@@ -907,7 +904,7 @@ def test_delete_input_shards_after_successful_merge():
 
 
 def test_expert_suffixes_cover_every_class_declared_root():
-    """Every expert-weight root any EP family declares (_EXPERT_WEIGHT_ATTR_ROOTS union) must be
+    """Every expert-weight root any EP family declares (the ``expert_weight_roots`` union) must be
     captured by the merge pattern — a missed root passes expert shards through as 'non-expert'
     weights and silently corrupts the merged checkpoint. A hand list misses roots such as the
     GptOss ETP-layout biases (gate_proj_bias/up_proj_bias)."""

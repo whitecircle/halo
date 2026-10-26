@@ -24,10 +24,12 @@ from transformers import GptOssConfig, GptOssForCausalLM, Qwen3MoeConfig, Qwen3M
 
 from src.callbacks.balancing import apply_balancing_mode
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import (
+    apply_ep_layers,
+)
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.models.moe_balancing import declared_routers
+from src.models.moe.router_logits import declared_routers
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.utils import log
@@ -69,7 +71,7 @@ def run(ctx):
     family = parser.parse_args().family
     checks, metrics = {}, {}
     model = build_model(family, ctx.device)
-    patch_moe_model_for_ep(model, ParallelismConfig(ep_size=EP_SIZE).ep_config())
+    apply_ep_layers(model, ParallelismConfig(ep_size=EP_SIZE).ep_config())
     apply_balancing_mode(model, "aux_loss", is_moe=True)
     model.train()
     ep_layers = [module for module in model.modules() if isinstance(module, EPMoELayerBase)]

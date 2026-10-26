@@ -1,7 +1,7 @@
 """Planning a lazy EP load: the expert-key vocabulary, the lazy gate, the per-key weight plan and the prologue
 the EP and PP lazy loaders share.
 
-The vocabulary is derived from the EP layer classes' declarations; a fused-3D checkpoint is planned as
+The vocabulary is derived from the family specs; a fused-3D checkpoint is planned as
 ranged expert slices, a per-expert one as this rank's keys for :mod:`.expert_fuser` to stack.
 """
 
@@ -17,31 +17,27 @@ import torch
 import torch.nn as nn
 
 from src.checkpoint.reading import read_checkpoint_config, resolve_checkpoint_weights
-from src.distributed.expert_parallel.config import EPConfig, get_num_experts
-from src.distributed.expert_parallel.expert_weights import (
-    ep_layer_class_by_model_type,
-    experts_container_attrs,
-    hf_fused_expert_keys,
-    hub_to_module_key_renames,
-    per_expert_fusion_map,
-)
+from src.distributed.expert_parallel.config import EPConfig
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import resolve_load_dtype
 from src.model_loading.lazy_safetensors.conversion import Concat, ConvertTargets, build_key_mapping
 from src.model_loading.lazy_safetensors.conversion_selection import replay_loaded_conversions, resolve_conversion_steps
 from src.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from src.models.config_access import text_config
+from src.models.moe.config_fields import require_expert_count
+from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
+from src.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_fusion_map
 from src.runtime.filesystem import fs_aware_main_first
 from src.runtime.ranks import get_global_rank
 
 logger = logging.getLogger(__name__)
 
-# Derived from the layer classes' container attrs, never restated: a hand-written alternation that omitted
+# Derived from the family specs' container attrs, never restated: a hand-written alternation that omitted
 # a family's container silently mis-planned every one of its expert keys.
 _CONTAINER_ALT = "|".join(re.escape(a) for a in experts_container_attrs())
 # A fused 3D expert tensor, expert index on dim 0: GptOss ``[E,H,2M]``, Qwen3/GLM4/LFM2 ``[E,2M,H]``.
 FUSED_EXPERT_KEY_PATTERN = re.compile(
-    rf"\.(?:{_CONTAINER_ALT})\.({'|'.join(re.escape(k) for k in hf_fused_expert_keys())})$"
+    rf"\.(?:{_CONTAINER_ALT})\.({'|'.join(re.escape(k) for k in HF_FUSED_EXPERT_KEYS)})$"
 )
 # One expert's tensor (``…mlp.experts.N.gate_proj.weight``): (1) the container attribute, (2) the expert index.
 PER_EXPERT_KEY_PATTERN = re.compile(rf"\.({_CONTAINER_ALT})\.(\d+)\.")
@@ -71,7 +67,7 @@ def is_lazy_loadable(model_path: str) -> bool:
     """Whether the lazy loaders can materialize this checkpoint; the caller routes a refusal to
     ``from_pretrained``.
 
-    The family's ``_supports_lazy_loading`` decides, read off ``config.model_type``; a checkpoint-native
+    The family spec's ``supports_lazy_loading`` decides, read off ``config.model_type``; a checkpoint-native
     quantization is refused (its scale tensors map to nothing live, so the experts would load as garbage
     unseen); a nested expert index is the structural backstop for a ``model_type`` no family claims.
     Best-effort: ``True`` when neither the config nor the index can be read.
@@ -80,8 +76,8 @@ def is_lazy_loadable(model_path: str) -> bool:
         config = read_checkpoint_config(model_path, missing_ok=True) or {}
     except (OSError, ValueError):
         config = {}
-    layer_cls = ep_layer_class_by_model_type().get(config.get("model_type", "") or "")
-    if layer_cls is not None and not layer_cls._supports_lazy_loading:
+    spec = find_moe_family_spec(config.get("model_type"))
+    if spec is not None and not spec.supports_lazy_loading:
         return False
     if config.get("quantization_config"):
         return False
@@ -94,14 +90,15 @@ def is_lazy_loadable(model_path: str) -> bool:
 
 def family_key_mapping(model: nn.Module, disk_keys: list[str]) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
     """:func:`~src.model_loading.lazy_safetensors.conversion.build_key_mapping` under the conversions and hub
-    renames the family's EP layer class declares.
+    renames the family spec declares.
 
     The family is read through ``text_config``: a composite config keeps ``model_type`` on its text
     sub-config, and a wrapper-only read would return no renames, a whole module absent from the load.
     """
     model_type = getattr(text_config(model.config), "model_type", "")
-    steps = resolve_conversion_steps(model, ep_layer_class_by_model_type().get(model_type))
-    return build_key_mapping(model, disk_keys, steps=steps, hub_renames=hub_to_module_key_renames(model_type))
+    steps = resolve_conversion_steps(model, model_type)
+    spec = find_moe_family_spec(model_type)
+    return build_key_mapping(model, disk_keys, steps=steps, hub_renames=spec.hub_to_module_renames() if spec else ())
 
 
 def loaded_key_mapping(model: nn.Module, disk_keys: list[str]) -> tuple[dict[str, str], dict[str, ConvertTargets]]:
@@ -109,7 +106,8 @@ def loaded_key_mapping(model: nn.Module, disk_keys: list[str]) -> tuple[dict[str
     load of ``model`` recorded, with the family's hub renames."""
     model_type = getattr(text_config(model.config), "model_type", "")
     steps = replay_loaded_conversions(model)
-    return build_key_mapping(model, disk_keys, steps=steps, hub_renames=hub_to_module_key_renames(model_type))
+    spec = find_moe_family_spec(model_type)
+    return build_key_mapping(model, disk_keys, steps=steps, hub_renames=spec.hub_to_module_renames() if spec else ())
 
 
 class WeightPlanner:
@@ -267,7 +265,7 @@ def lazy_load_prologue(
     rank = get_global_rank()
     dtype = resolve_load_dtype(dtype, config)
     if ep_config is not None and ep_config.num_experts is None:
-        ep_config.finalize_expert_assignment(get_num_experts(config))
+        ep_config.finalize_expert_assignment(require_expert_count(config))
 
     checkpoint = resolve_checkpoint_weights(model_path).require_safetensors("checkpoint")
     weight_map, shard_files = checkpoint.weight_map, list(checkpoint.shard_files)

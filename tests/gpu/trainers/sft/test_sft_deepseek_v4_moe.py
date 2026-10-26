@@ -19,7 +19,7 @@ Run with 2 GPUs:
 
 import torch
 
-from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
+from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
 from tests.common.ep_sft_roundtrip import EPSftRoundTrip
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_DSV4_CONFIG

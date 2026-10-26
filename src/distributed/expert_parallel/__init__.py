@@ -4,6 +4,6 @@ Deliberately re-exports nothing. The subpackage spans the DeepEP dispatcher and 
 wrapper, so an eager ``__init__`` would make importing *any* ``src.distributed`` symbol — a dense/DDP
 job reading :class:`~src.distributed.parallelism_config.ParallelismConfig`, a callback reading a
 class-declared contract — pull the whole tree. Import from the owning module
-(``...expert_parallel.moe_layer.layer``, ``.config``, ``.expert_weights``, ``.layers``, ``.lazy_plan``, …);
+(``...expert_parallel.moe_layer.layer``, ``.config``, ``.families``, ``.lazy_plan``, …);
 the EP saver is :mod:`src.checkpoint.parallel.ep`.
 """

@@ -65,21 +65,21 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7SparseMoeBlock
 from transformers.models.zaya.configuration_zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaSparseMoeBlock
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
-from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.glm5_next import EPGlm5NextMoELayer
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
-from src.models.moe_balancing import resolve_balancing_slot
+from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.families.roster import ep_layer_classes
+from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
+from src.models.moe.balancing import resolve_balancing_slot
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 8, 16, 32, 3  # experts, hidden, moe intermediate, top_k
@@ -303,9 +303,9 @@ _FIELDS = ("family", "wrapper", "factory", "inputs")
 _IDS = [family[0] for family in FAMILIES]
 _DTYPE_IDS = {torch.float32: "fp32", torch.float64: "fp64"}
 
-# The families whose router carries a selection bias the wrapper must read — their own declaration,
-# so the roster follows the class hierarchy rather than a second list to maintain.
-_BIASED_FAMILIES = [family for family in FAMILIES if family[1]._NATIVE_BALANCING_BIAS_ATTR]
+# The families whose router carries a selection bias the wrapper must read — their spec's own slot, so the
+# roster follows the declarations rather than a second list to maintain.
+_BIASED_FAMILIES = [family for family in FAMILIES if family[1].FAMILY.balancing_slot]
 _BIASED_IDS = [family[0] for family in _BIASED_FAMILIES]
 
 # Multiplier applied to a wrapper's own selection bias in the mutation control below: large enough to
@@ -433,11 +433,11 @@ def test_the_wrapper_reads_its_own_selection_bias(family, wrapper, factory, inpu
     for). Verified by severing ``_selection_scores``: this assertion fails, that one already did.
     """
     _reference, layer = _build(factory, wrapper, torch.float64)
-    slot = resolve_balancing_slot(layer, wrapper._NATIVE_BALANCING_BIAS_ATTR)
+    slot = resolve_balancing_slot(layer, layer._native_balancing_attr)
     # A declared slot that does not resolve is the upstream rename the declaration exists to catch,
     # not a reason to skip: the wrapper would then route unbiased against a block that does not.
     assert slot is not None, (
-        f"{family} declares _NATIVE_BALANCING_BIAS_ATTR='{wrapper._NATIVE_BALANCING_BIAS_ATTR}' "
+        f"{family} declares the balancing slot '{layer._native_balancing_attr}' "
         f"but the built layer carries no such tensor"
     )
     assert getattr(*slot).abs().max().item() > 1e-3, f"{family}: the fixture's selection bias is ~zero"
@@ -450,7 +450,7 @@ def test_the_wrapper_reads_its_own_selection_bias(family, wrapper, factory, inpu
 
     difference = (after - before).abs().max().item()
     assert difference > _band(before), (
-        f"{family}: scaling '{wrapper._NATIVE_BALANCING_BIAS_ATTR}' by {_BIAS_PERTURBATION} moved this "
+        f"{family}: scaling '{layer._native_balancing_attr}' by {_BIAS_PERTURBATION} moved this "
         f"wrapper's own output by only {difference:.3e} (band {_band(before):.3e}) — its forward does "
         f"not read the selection bias its family declares"
     )

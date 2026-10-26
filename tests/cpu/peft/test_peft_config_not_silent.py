@@ -32,7 +32,7 @@ def _as_moe(is_moe: bool = True):
     """The peel loads the model's AutoConfig to gate on MoE — stub it so these stay pure-logic."""
     with (
         patch.object(model_source.AutoConfig, "from_pretrained", return_value=object()),
-        patch.object(model_info, "config_has_experts", return_value=is_moe),
+        patch.object(model_info, "has_routed_experts", return_value=is_moe),
     ):
         yield
 
@@ -46,7 +46,7 @@ def _args():
 
 
 class _Dense(nn.Module):
-    """A model with no EP layers, so ``has_ep_lora`` is False."""
+    """A model with no EP layers, so ``model_has_expert_lora`` is False."""
 
     def __init__(self):
         super().__init__()
@@ -176,7 +176,7 @@ def test_expert_only_run_rejects_modules_to_save():
     model = _Dense()
 
     with (
-        patch.object(model_info, "has_ep_lora", return_value=True),
+        patch.object(model_info, "model_has_expert_lora", return_value=True),
         pytest.raises(ValueError, match="lora_modules_to_save"),
     ):
         configure_adapter_training(_args(), model, config)
@@ -186,7 +186,7 @@ def test_expert_only_run_without_modules_to_save_is_fine():
     config = _model_config(lora_target_modules=[])
     model = _Dense()
 
-    with patch.object(model_info, "has_ep_lora", return_value=True):
+    with patch.object(model_info, "model_has_expert_lora", return_value=True):
         assert configure_adapter_training(_args(), model, config) is None
     assert not any(p.requires_grad for p in model.parameters()), "the base must be frozen"
 

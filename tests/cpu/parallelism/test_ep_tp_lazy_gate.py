@@ -65,7 +65,7 @@ def _run_dispatch(monkeypatch, model_dir: str) -> dict:
         lambda *a, **k: calls.__setitem__("sequential", calls["sequential"] + 1) or sentinel,
     )
     monkeypatch.setattr(tp_loading, "_apply_attention_only_tp", lambda *a, **k: None)
-    monkeypatch.setattr(tp_loading, "patch_moe_model_for_ep", lambda model, ep_config: model)
+    monkeypatch.setattr(tp_loading, "apply_ep_layers", lambda model, ep_config: model)
     monkeypatch.setattr(tp_loading, "timed_global_load", lambda tag, method, load_fn: load_fn())
 
     model = tp_loading.load_ep_tp_model(

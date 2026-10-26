@@ -7,7 +7,7 @@ expert FFNs themselves — grouped A/B tensors built inside the EP layers, appli
 compute, and gradient-synced/checkpointed via the existing EP machinery. Checks, each of which FAILS
 when a piece of the wiring breaks:
 
-  1. Adapters exist (has_ep_lora) and only ``*_lora_A``/``*_lora_B`` are trainable inside EP layers.
+  1. Adapters exist (model_has_expert_lora) and only ``*_lora_A``/``*_lora_B`` are trainable inside EP layers.
   2. Init delta == 0: a forward with adapters present is bit-identical to one with them disabled
      (B initialized to zeros), proving _expert_proj adds exactly the LoRA delta and nothing else.
   3. After 3 steps: the frozen base experts are byte-unchanged while the adapters moved (B left zero
@@ -32,8 +32,12 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.expert_weights import apply_ep_lora_adapters, gather_ep_lora_adapters, has_ep_lora
-from src.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
+from src.distributed.expert_parallel.moe_layer.expert_lora import (
+    disable_expert_adapters,
+    gather_expert_lora_adapters,
+    load_expert_lora_adapters,
+    model_has_expert_lora,
+)
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
@@ -118,10 +122,10 @@ def run(ctx) -> dict:
 
     # --- Check 1: adapters present; only adapters trainable inside EP layers ---
     log("\n[4/8] Checking adapter presence + trainability...")
-    checks["has_expert_lora"] = has_ep_lora(model)
+    checks["has_expert_lora"] = model_has_expert_lora(model)
     adapters = _adapter_param_pairs(model)
     checks["adapters_built"] = len(adapters) > 0
-    log(f"  has_ep_lora={checks['has_expert_lora']}, adapter params={len(adapters)}")
+    log(f"  model_has_expert_lora={checks['has_expert_lora']}, adapter params={len(adapters)}")
 
     non_adapter_trainable = []
     for module in ep_layers(model):
@@ -198,7 +202,7 @@ def run(ctx) -> dict:
     log("\n[6/8] Snapshotting gathered base + adapters...")
     sample_layer = ep_layers(model)[0]
     base_before = {k: v.clone() for k, v in sample_layer.gather_expert_state_dict().items()}
-    adapters_before = gather_ep_lora_adapters(model)
+    adapters_before = gather_expert_lora_adapters(model)
 
     # --- Train ---
     log("\n[7/8] Training (3 steps)...")
@@ -243,7 +247,7 @@ def run(ctx) -> dict:
     checks["base_frozen"] = base_unchanged
     log(f"  base experts unchanged: {base_unchanged}")
 
-    adapters_after = gather_ep_lora_adapters(unwrapped)
+    adapters_after = gather_expert_lora_adapters(unwrapped)
     moved = sum(1 for k in adapters_before if not torch.equal(adapters_before[k].cpu(), adapters_after[k].cpu()))
     # B started at zero, so the B tensors in particular must have moved.
     b_moved = any(
@@ -255,18 +259,18 @@ def run(ctx) -> dict:
 
     # --- Check 4: gather -> zero -> apply round-trip restores adapters exactly ---
     log("\n[8/8] Save/reload (gather->load) round-trip...")
-    gathered = gather_ep_lora_adapters(unwrapped)
+    gathered = gather_expert_lora_adapters(unwrapped)
     for _, p in _adapter_param_pairs(unwrapped):
         p.data.zero_()
-    apply_ep_lora_adapters(unwrapped, gathered)
-    restored = gather_ep_lora_adapters(unwrapped)
+    load_expert_lora_adapters(unwrapped, gathered)
+    restored = gather_expert_lora_adapters(unwrapped)
     roundtrip_ok = all(torch.equal(gathered[k].cpu(), restored[k].cpu()) for k in gathered)
     checks["roundtrip_restores_adapters"] = roundtrip_ok
     log(f"  gather/load round-trip exact: {roundtrip_ok}")
 
     # --- Check 5: trainer.save_model() writes a standalone adapter file (save_expert_lora_adapters) ---
     log("\n[+] trainer.save_model() adapter-only write...")
-    apply_ep_lora_adapters(unwrapped, gathered)  # restore the trained adapters (zeroed above)
+    load_expert_lora_adapters(unwrapped, gathered)  # restore the trained adapters (zeroed above)
     save_dir = os.path.join(ctx.output_dir, "adapter")
     trainer.save_model(save_dir)  # collective: every rank participates in the gather
     barrier()

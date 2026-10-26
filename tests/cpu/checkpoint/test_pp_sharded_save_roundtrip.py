@@ -52,9 +52,8 @@ from src.checkpoint.reading import checkpoint_shard_files, is_ep_sharded_checkpo
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.writing import save_dtype_caster
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
 from src.model_loading.parallel.pp import _load_stage_lazy
@@ -395,10 +394,6 @@ class _StubEPLayer(StubEPLayerBase):
             "experts.down_proj": torch.ones(NUM_EXPERTS, HIDDEN, INTER, device=device),
         }
 
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
-
 
 class _MoEBackbone(nn.Module):
     """Fake decoder backbone whose every layer carries an EP MoE block."""
@@ -674,7 +669,7 @@ def _pp_family_model(name: str, *, ep_wrapped: bool = True):
     torch.manual_seed(SEED)
     model = tiny_family_model(PP_FAMILIES[name], overrides=PP_FAMILY_OVERRIDES.get(name))
     if ep_wrapped:
-        patch_moe_model_for_ep(model, EPConfig(**SINGLE_RANK_EP_CONFIG))
+        apply_ep_layers(model, EPConfig(**SINGLE_RANK_EP_CONFIG))
     return model
 
 
@@ -724,7 +719,7 @@ def _stage_tensors(stage: PipelineStageModule) -> dict[str, torch.Tensor]:
     state = stage.state_dict()
     tensors = {name: state[local] for name, local in stage.checkpoint_name_map().items()}
     for layer_name, module in named_ep_layers(stage):
-        for key, tensor in gather_ep_layer_weights(layer_name, module, merge_lora=False, retain=True).items():
+        for key, tensor in module.gather_layer_state_dict(layer_name, merge_lora=False, retain=True).items():
             tensors[stage.global_parameter_name(key)] = tensor
     return tensors
 

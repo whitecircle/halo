@@ -9,7 +9,7 @@ from src.config_validation import ValidatedConfig, present, require_finite, requ
 from src.configs.parser import is_null_string
 from src.env import torch_trace_dir
 from src.model_loading.tokenizer_backend import TokenizerBackend
-from src.models.moe_balancing import BalancingMode
+from src.models.moe.balancing import BalancingMode
 
 _DEFAULT_PROJECT = "default-project"
 

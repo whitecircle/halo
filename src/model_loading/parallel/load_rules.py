@@ -14,7 +14,6 @@ from src.distributed.expert_parallel.deepep.capacity import (
     padded_wire_hidden,
     reject_oversized_dispatch,
 )
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.parallelism_rules import reject_accelerate_launch
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
@@ -22,12 +21,13 @@ from src.env import is_accelerate_launch
 from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from src.models.config_access import text_config
 from src.models.context_window import context_window_from_config
-from src.models.moe_balancing import (
-    ROUTER_EXPERT_COUNT_FIELDS,
-    get_first_router_field,
-    resolve_expert_ffn_shard_width,
+from src.models.moe.config_fields import (
+    has_routed_experts,
+    resolve_expert_count,
+    resolve_expert_ffn_width,
     resolve_router_topk,
 )
+from src.models.moe.family_specs import find_moe_family_spec_for_config
 
 
 def _divisors_up_to(value: int, ceiling: int) -> list[int]:
@@ -111,7 +111,7 @@ def reject_unsupported_model(
     ``wraps_experts`` is whether the load swaps in the EP MoE wrappers (``needs_ep_wrappers`` on a MoE).
     """
     if pc.ep_size > 1:
-        num_experts = get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
+        num_experts = resolve_expert_count(model_config)
         if num_experts and num_experts % pc.ep_size != 0:
             raise ValueError(
                 f"expert_parallel_size={pc.ep_size} does not divide this model's {num_experts} "
@@ -123,18 +123,14 @@ def reject_unsupported_model(
                 f"domain width)."
             )
     if pc.expert_tp_size > 1:
-        width = resolve_expert_ffn_shard_width(model_config)
+        width = resolve_expert_ffn_width(model_config)
         if width and width % pc.expert_tp_size != 0:
             raise ValueError(
                 f"expert_tensor_parallel_size={pc.expert_tp_size} does not divide this model's "
                 f"expert FFN width ({width}): expert-TP shards that dimension, so the shards would "
                 f"be ragged. Use an expert_tensor_parallel_size dividing {width}."
             )
-    if (
-        pc.fp32_non_ep_params
-        and pc.experts_fsdp_managed
-        and get_first_router_field(model_config, ROUTER_EXPERT_COUNT_FIELDS)
-    ):
+    if pc.fp32_non_ep_params and pc.experts_fsdp_managed and has_routed_experts(model_config):
         # Config-time and rank-symmetric on purpose: under PP a hybrid stack can give one stage
         # no MoE layer, so the equivalent check on the trainer's per-rank module walk would
         # raise on MoE stages while dense stages walked into the wrap and hung the job.
@@ -178,15 +174,15 @@ def reject_unsupported_model(
             "the Ulysses attention kernels never receive the sink column, so live sinks would give a wrong "
             "softmax normalization in every layer."
         )
-    # Class-declared (``_supports_fp32_non_ep_params``); otherwise DeepEP's raw C++ assert fires at the first dispatch.
-    if pc.fp32_non_ep_params and pc.ep_size > 1:
-        for layer_cls in ep_layer_classes_for_config(model_config):
-            if not layer_cls._supports_fp32_non_ep_params:
-                family = "/".join(layer_cls.HF_MODEL_TYPES)
-                raise ValueError(
-                    f"fp32_non_ep_params=True is not supported for {family} under Expert Parallelism "
-                    f"(expert_parallel_size={pc.ep_size}): the combination is unvalidated for this family "
-                    f"and documented to fail at the first dispatch (see its model page). Train it "
-                    f"experts-distributed in plain bf16 — AdamWBF16's stochastic rounding is the supported "
-                    f"precision floor there."
-                )
+    # Declared on the family spec (``supports_fp32_non_ep_params``); otherwise DeepEP's raw C++ assert fires at
+    # the first dispatch.
+    spec = find_moe_family_spec_for_config(model_config)
+    if pc.fp32_non_ep_params and pc.ep_size > 1 and spec is not None and not spec.supports_fp32_non_ep_params:
+        family = "/".join(spec.model_types)
+        raise ValueError(
+            f"fp32_non_ep_params=True is not supported for {family} under Expert Parallelism "
+            f"(expert_parallel_size={pc.ep_size}): the combination is unvalidated for this family "
+            f"and documented to fail at the first dispatch (see its model page). Train it "
+            f"experts-distributed in plain bf16 — AdamWBF16's stochastic rounding is the supported "
+            f"precision floor there."
+        )

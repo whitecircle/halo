@@ -7,6 +7,7 @@ import numpy as np
 from torch import nn
 
 from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
+from src.models.moe.family_specs import MoEFamilySpec
 
 
 class BareEPLayer(EPGroupLimitedMoELayerBase):
@@ -16,6 +17,8 @@ class BareEPLayer(EPGroupLimitedMoELayerBase):
     Rooted at the class that OWNS the group-limited routing, so the helpers exercised are the ones the
     families inherit rather than a copy the base happens to also carry.
     """
+
+    FAMILY = MoEFamilySpec(model_types=())
 
     def __init__(self, *, top_k: int, num_experts: int, **attrs):  # noqa: D107 — test double
         nn.Module.__init__(self)

@@ -35,13 +35,13 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from liger_kernel.transformers.rope import liger_rotary_pos_emb
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.model_loading.liger.cross_entropy import build_lce_forward
 from src.model_loading.liger.dispatch import resolve_liger_applier
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from src.model_loading.liger.fused_modules import _bridge_gated_norm
 from src.models.head_transform import resolve_head_transform_spec
-from src.models.moe_balancing import honors_output_router_logits_config
+from src.models.moe.family_specs import moe_model_types
+from src.models.moe.router_logits import honors_router_logits_flag
 from tests.common.repo import probe_findings
 
 PartialState()  # dispatch logs through accelerate's rank-aware logger
@@ -90,7 +90,7 @@ CANONICAL_GLU_ATTRIBUTES = {"down_proj", "act_fn", "gate_proj", "up_proj"}
 
 def _roster_model_types() -> set[str]:
     """Every ``model_type`` the toolkit's EP layer registry claims — the MoE half of the roster."""
-    return {model_type for cls in ep_layer_classes() for model_type in cls.HF_MODEL_TYPES}
+    return set(moe_model_types())
 
 
 def _self_attributes(node: ast.AST) -> set[str]:
@@ -450,7 +450,7 @@ def test_declared_remote_heads_do_nothing_the_fused_loss_would_drop(spec):
 def test_the_fused_head_does_not_declare_output_router_logits():
     """Declaring it would silently disable router balancing on families whose own head lacks it.
 
-    ``honors_output_router_logits_config`` decides whether a family's aux loss can reach the loss by
+    ``honors_router_logits_flag`` decides whether a family's aux loss can reach the loss by
     looking for that parameter on ``type(model).forward``. Liger patches the forward at model load,
     balancing resolves later — so a declared parameter makes the resolver believe a family that
     never consults the flag honors it. For GLM-4.7-Flash (fused head on by default) that signal is
@@ -476,8 +476,8 @@ def test_the_router_logits_probe_really_keys_on_that_parameter_name():
         def forward(self, **kwargs):
             """A head that does not."""
 
-    assert honors_output_router_logits_config(_Declares()) is True
-    assert honors_output_router_logits_config(_DoesNot()) is False
+    assert honors_router_logits_flag(_Declares()) is True
+    assert honors_router_logits_flag(_DoesNot()) is False
 
 
 def test_the_head_check_rejects_inklings_rescaled_head():

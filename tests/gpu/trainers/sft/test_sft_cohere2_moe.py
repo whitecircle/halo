@@ -4,7 +4,7 @@
 The shared round trip (``tests/common/ep_sft_roundtrip.py``) on the registry's tiny Cohere2 MoE:
 
   1. Load it through ``load_distributed_model`` with EP=2 — the family declares
-     ``_supports_lazy_loading = False``, so this exercises the ``from_pretrained`` route (including
+     ``supports_lazy_loading=False``, so this exercises the ``from_pretrained`` route (including
      the per-expert→fused checkpoint conversion) plus the generic inv_freq recompute.
   2. Run a short DistributedSFTTrainer run (forward + backward + optimizer under FSDP2 + EP, tied
      embeddings, parallel-residual blocks, interleaved sliding/NoPE attention).
@@ -16,7 +16,7 @@ Run with 2 GPUs:
         tests/gpu/trainers/sft/test_sft_cohere2_moe.py
 """
 
-from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
+from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
 from tests.common.ep_sft_roundtrip import EPSftRoundTrip
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_COHERE2_MOE_CONFIG

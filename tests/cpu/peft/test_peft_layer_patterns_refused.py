@@ -22,7 +22,7 @@ _PATTERN_ARGS = ("unfreeze_layers_patterns", "freeze_layers_patterns")
 
 
 class _Dense(nn.Module):
-    """No EP layers, so ``has_ep_lora`` is False unless a test patches it."""
+    """No EP layers, so ``model_has_expert_lora`` is False unless a test patches it."""
 
     def __init__(self):
         super().__init__()
@@ -49,7 +49,7 @@ def test_expert_only_lora_refuses_layer_patterns(pattern_arg):
     config = ModelConfig(model_name_or_path="dummy/moe", use_peft=True, lora_target_modules=[])
 
     with (
-        patch.object(peft_setup, "has_ep_lora", return_value=True),
+        patch.object(peft_setup, "model_has_expert_lora", return_value=True),
         pytest.raises(ValueError, match=f"{pattern_arg} cannot combine with adapters"),
     ):
         configure_adapter_training(_args(**{pattern_arg: ["q_proj*"]}), _Dense(), config)

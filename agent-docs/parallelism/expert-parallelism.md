@@ -19,9 +19,11 @@ Every family wrapper subclasses `EPMoELayerBase` (`src/distributed/expert_parall
 construction, the dispatch → expert compute → combine forward and the expert-parameter views. Each other
 concern is one mixin in `moe_layer/` — expert compute (`compute.py`), routing and routing replay
 (`routing.py`), gradient-sync hooks (`grad_sync.py`), native expert LoRA (`expert_lora.py`), the balancing
-bias (`balancing_bias.py`) — plus the checkpoint gather (`expert_parallel/expert_gather.py`);
-`shared_experts_layer.py` holds the standard shared-expert forward and the DeepSeek-V3 group-limited router.
-`compute`, `routing`, `grad_sync` and `balancing_bias` are imported only inside `expert_parallel/`: callers
+bias (`balancing_bias.py`), the collective half of the checkpoint export (`gather.py`);
+`shared_experts_layer.py` holds the routed forward template and the DeepSeek-V3 group-limited router. The
+export's layout half is model-side: each family's `MoEFamilySpec.expert_layout`, applied by
+`to_hub_expert_tensors` (`src/models/moe/expert_layout.py`) in the gather and in `merge_ep_shards.py` alike.
+`compute`, `routing`, `grad_sync`, `gather` and `balancing_bias` are imported only inside `expert_parallel/`: callers
 reach that behavior through the layers `named_ep_layers(model)` walks.
 
 ![EP token routing: each rank routes its own batch's tokens by router top-k, DeepEP's dispatch all-to-all sends every token to the rank that owns its expert, a grouped GEMM runs the local experts, and the combine all-to-all returns each token to its origin rank](../assets/diagrams/ep_token_routing.png)
@@ -46,8 +48,8 @@ reach that behavior through the layers `named_ep_layers(model)` walks.
 | GLM-5 Next | `Glm5NextTextMoE` | `EPGlm5NextMoELayer` | [glm5-next.md](../models/glm5-next.md) |
 | Step-3.7 Flash | `Step3p7SparseMoeBlock` | `EPStep3p7MoELayer` | [step3p7.md](../models/step3p7.md) |
 
-Source of truth: `MOE_LAYER_MAP` in `src/distributed/expert_parallel/patching.py`, derived from the
-`EPMoELayerBase` subclass tree.
+Source of truth: `MOE_LAYER_MAP` in `src/distributed/expert_parallel/families/roster.py`, built from its
+explicit import of every family class.
 
 - **Bailing / Ling** need `trust_remote_code=True` and have no aux router loss; under EP they balance
   through the gate's native `expert_bias` (`moe_balancing: auto` resolves to `bias_update`), so the
@@ -64,22 +66,22 @@ Source of truth: `MOE_LAYER_MAP` in `src/distributed/expert_parallel/patching.py
 
 ### Per-family EP restrictions
 
-`EPMoELayerBase` declares six capability flags, all defaulting to `True`; a family turning one off
-is the whole restriction. Every family absent from the table inherits the defaults and runs the full
-EP surface. The table is pinned against the classes by
+A family declares six capabilities, five on its `MoEFamilySpec` and one on its EP layer, all on by
+default; a family turning one off is the whole restriction. Every family absent from the table inherits the defaults and runs the full
+EP surface. The table is pinned against the specs and classes by
 `tests/cpu/parallelism/test_docs_limitation_tables.py`.
 
-| Family | Restricted capability | Class attribute |
+| Family | Restricted capability | Declaration |
 |---|---|---|
 | Bailing MoE / Ling | transient balancing bias — routing runs entirely inside the hub gate, so bias-update balancing requires the native `expert_bias` slot and raises rather than falling back to a trainer-only side-buffer ([MoE balancing modes](../training-methods/callbacks.md#moe-balancing-modes)) | `_supports_transient_balancing_bias` |
-| Gemma 4 MoE | routing replay | `_supports_routing_replay` |
-| Gemma 4 MoE | `fp32_non_ep_params` — refused at load ([Precision control](#precision-control)) | `_supports_fp32_non_ep_params` |
-| Inkling | RL weight sync — no sync into either pinned engine's Inkling loader validated | `_supports_weight_sync` |
-| Zaya | gradient checkpointing | `_supports_gradient_checkpointing` |
-| Zaya | routing replay | `_supports_routing_replay` |
-| Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `_supports_weight_sync` |
-| Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `_supports_lazy_loading` |
-| GLM-5 Next | RL weight sync — neither pinned rollout engine registers `glm5_next` | `_supports_weight_sync` |
+| Gemma 4 MoE | routing replay | `FAMILY.supports_routing_replay` |
+| Gemma 4 MoE | `fp32_non_ep_params` — refused at load ([Precision control](#precision-control)) | `FAMILY.supports_fp32_non_ep_params` |
+| Inkling | RL weight sync — no sync into either pinned engine's Inkling loader validated | `FAMILY.weight_sync_refusal` |
+| Zaya | gradient checkpointing | `FAMILY.supports_gradient_checkpointing` |
+| Zaya | routing replay | `FAMILY.supports_routing_replay` |
+| Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `FAMILY.weight_sync_refusal` |
+| Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `FAMILY.supports_lazy_loading` |
+| GLM-5 Next | RL weight sync — neither pinned rollout engine registers `glm5_next` | `FAMILY.weight_sync_refusal` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for
@@ -223,8 +225,8 @@ selector (`src/model_loading/parallel/fp32_masters.py`): [Load precision](../mod
 keeps its router inside the EP wrapper, which that upcast skips, so the implication keeps every
 non-expert weight an FP32 master.
 
-**Gemma 4: `fp32_non_ep_params` under EP is refused at load**, off the family's
-`_supports_fp32_non_ep_params = False` and before the model is built. Its router (`Gemma4TextRouter`)
+**Gemma 4: `fp32_non_ep_params` under EP is refused at load**, off the family spec's
+`supports_fp32_non_ep_params=False` and before the model is built. Its router (`Gemma4TextRouter`)
 lives in the parent decoder layer and its norms re-emit activations at weight dtype, so the upcast
 would feed fp32 tokens into DeepEP's 2-byte transport.
 
@@ -362,8 +364,8 @@ A checkpointed layer runs its body twice, and the second run must NOT touch Deep
 reuses the same `ElasticBuffer` and invalidates the handle the original forward's backward node
 still holds, which corrupts every gradient in the model and raises nothing.
 
-So the first pass caches detached dispatch/combine results and the recompute replays them through
-`ReplayDispatchFunction` / `ReplayCombineFunction`. Only the expert compute is recomputed, and
+So `DeepEPDispatcher.dispatch` / `combine` cache detached results under their `owner` layer on the first
+pass, and the recompute replays them through `ReplayDispatchFunction` / `ReplayCombineFunction`. Only the expert compute is recomputed, and
 backward still calls `buffer.combine()` / `buffer.dispatch()` for the gradient comm.
 
 That cache lives on a `RecomputeScope` (`src/models/gradient_checkpointing.py`) created
@@ -489,7 +491,7 @@ next collective.
 **Gathered:** experts are `all_gather`ed (every rank must enter) but only the **save rank** keeps
 the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise.
 
-`retain` reaches inside the family gather, so a non-writing rank joins every collective and returns
+`retain` reaches inside the expert gather, so a non-writing rank joins every collective and returns
 `{}` without running the layout assembly (per-expert split, re-interleave, transpose + `contiguous`,
 host copy) that follows it. The expert-axis gather itself receives into one preallocated buffer
 rather than a shard list plus a `cat`. Both bound the *transient* on every rank that keeps nothing.
@@ -521,7 +523,7 @@ the save) whenever any of these holds:
 
 - `ep_group_size != world_size`, `expert_tp_size > 1`, or CP;
 - native expert LoRA or `merge_expert_lora_on_save`;
-- a `model_type` no EP layer class claims, or a load that converted names the gathered save reverts
+- a `model_type` no family spec claims, or a load that converted names the gathered save reverts
   through transformers' save-side revert (Step-3.7 Flash, a SigLIP tower, a vendor namespace; the
   merge streams key by key and cannot apply it);
 - a non-shared multi-node filesystem;
@@ -554,8 +556,8 @@ replicas from rank 0. All ranks must enter the collectives even though only one 
 ## Limitations
 
 **Trainers.** Every trainer supports EP, and the `ep_size == 1` grouped-GEMM wrappers with it.
-The families whose EP layer declares
-`_supports_weight_sync = False` narrow this — online and async GRPO raise at construction for
+The families whose spec declares a
+`weight_sync_refusal` narrow this — online and async GRPO raise at construction for
 each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
@@ -585,8 +587,8 @@ and EP+CP on anything but a node-local EP group filling the NVLink domain.
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/loader.py` |
 | `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `ParallelismValidationMixin` |
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
-| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`. `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family declaring `_supports_gradient_checkpointing = False` | `_setup_ep_gradient_checkpointing` |
-| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`_supports_lazy_loading = False`); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`src/model_loading/parallel/ep.py`) |
+| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`. `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_setup_ep_gradient_checkpointing` |
+| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP). Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`src/model_loading/parallel/ep.py`) |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the wrappers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `src/model_loading/liger/dispatch.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP wrapper severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |

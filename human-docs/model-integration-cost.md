@@ -11,20 +11,21 @@ in only for parallelism:
 ```txt
 HuggingFace model load
   -> thin EP/TP/CP wrapper (subclass a base layer)
-  -> self-registers by naming the HF class it claims
+  -> registers by naming the HF class it claims
   -> existing FSDP / EP / ETP / checkpoint paths
 ```
 
 ## What a wrapper costs
 
-Each MoE family adds one file under `src/distributed/expert_parallel/layers/`. The
-file registers itself by naming the HF MoE class it claims and the config
-`model_type`.
+Each MoE family adds one file under `src/distributed/expert_parallel/families/`
+naming the HF MoE class it claims, one frozen `MoEFamilySpec` holding its config
+`model_type` spellings and capabilities (`src/models/moe/family_specs.py`), and
+one import line in the family roster.
 
 - Wrappers subclass a shared base. A family whose expert-weight layout matches
-  an existing one subclasses that instead: Laguna reuses GLM-4's in 39 lines.
+  an existing one subclasses that instead: Laguna reuses GLM-4's in about 30 lines.
 - Most wrappers stay under 140 lines.
-- GPT-OSS is the outlier at about 360, because of its interleaved gate/up
+- GPT-OSS is the outlier at about 350, because of its interleaved gate/up
   weights and attention sinks.
 
 Context parallelism works the same way: one `UlyssesAttention` subclass in

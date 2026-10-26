@@ -29,7 +29,7 @@ from src.checkpoint.parallel.adapters import save_resume_adapter
 from src.checkpoint.parallel.optimizer import OptimizerShardStore
 from src.checkpoint.parallel.save import save_checkpoint
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
 from src.model_loading.dtype import cast_parameters_to_run_dtype
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -169,7 +169,7 @@ def _save_case(case: ArtifactCase, directory: Path, mesh: DeviceMesh) -> None:
     else:
         expert_lora = ExpertLoraSpec(r=8, alpha=16.0) if case.mode in EXPERT_LORA_MODES else None
         ep_config = single_process_ep_config(expert_lora=expert_lora, fp32_router=dtype != torch.float32)
-        patch_moe_model_for_ep(model, ep_config)
+        apply_ep_layers(model, ep_config)
         if expert_lora is not None:
             torch.manual_seed(ADAPTER_SEED)
             randomize_adapters(model)

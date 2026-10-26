@@ -66,7 +66,7 @@ before acting. Authoritative doc: `agent-docs/reference/checkpoints.md`.
 | LoRA / QLoRA (any mode) | adapter-only dir | — | **`merge_peft_adapters.py`** (`--task classification` for reward/clf); it refuses a native EP expert-LoRA adapter — train with `merge_expert_lora_on_save: true` instead |
 | Embedding LoRA (in-place injected) | loadable, adapters folded in | — | use directly (`SentenceTransformer(path)`) |
 | TP-only | loadable | — (no per-rank TP save) | use directly |
-| EP — every family (each layer class in `src/distributed/expert_parallel/layers/` declares its own `HF_MODEL_TYPES`; read them there, and `supported_ep_merge_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
+| EP — every family (each family's `MoEFamilySpec.model_types` in `src/models/moe/family_specs.py`; read them there, and `moe_model_types()` for the resolved set) | loadable | `save_sharded_ep` → `ep_sharded` | **`merge_ep_shards.py`** |
 | CP / EP+CP | loadable | **rejected** — `save_sharded_ep` raises under Ulysses attention | use gathered directly |
 | ETP (`expert_tp_size > 1`), **any** multi-EP-group topology (`ep_group_size != world_size` — plain `ep2` on 8, or EP+TP with `ep_size < world_size`), native expert LoRA, `merge_expert_lora_on_save`, a run with no EP MoE layers (dense, or MoE at `use_grouped_gemm: false`), a load that converted names the merge cannot respell (Step-3.7 Flash, a vendor namespace, a SigLIP tower), PP, multi-node non-shared output FS | loadable | **rejected at construction** (`reject_unmergeable_ep_sharded_save`, re-checked at save; PP by the pipeline gate) | use gathered directly |
 | PP | per-stage parts + merged index under the hub's names, loadable and servable as the EP-gathered save | per-node output FS: each node holds its own stages' parts | use directly; per-node directories **`merge_pp_stages.py`** first |
@@ -122,7 +122,7 @@ checkpoint, which weights), `optimizer.py` / `optimizer_meta.py` (the per-rank o
 topology gate), `sidecars.py` (LR scheduler, router balancing biases), `completeness.py` (completion
 markers), `reading.py` (the rank consensus reads shared by the resume paths).
 Per-mode mechanics:
-`src/distributed/expert_parallel/expert_weights.py`, `src/checkpoint/` (`format.py` the shared on-disk names, `reading.py` the
+`src/models/moe/expert_layout.py`, `src/checkpoint/` (`format.py` the shared on-disk names, `reading.py` the
 layout cascade and raw reads, `hub_layout.py` the hub's tensor names on save, `config_export.py` the config
 contract, `adapters.py` the saved-PEFT shape, `adapter_merge.py` the shared `merge_adapter_into_base`,
 `sidecars.py` the training sidecars, `offline_export.py` the tool-side model directory, `atomic.py` the staged,

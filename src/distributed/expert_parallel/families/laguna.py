@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.models.moe.family_specs import LAGUNA
 
 
 class EPLagunaMoELayer(EPGlm4MoELayer):
@@ -17,7 +18,7 @@ class EPLagunaMoELayer(EPGlm4MoELayer):
     """
 
     HF_MODULE_NAMES = ("LagunaSparseMoeBlock",)
-    HF_MODEL_TYPES = ("laguna",)
+    FAMILY = LAGUNA
 
     _NORM_TOPK_PROB_DEFAULT = True
     # ``LagunaSparseMoeBlock`` declares only ``routed_scaling_factor`` (which stays required): no
@@ -29,11 +30,3 @@ class EPLagunaMoELayer(EPGlm4MoELayer):
     # routes as trained. Declared on the class so the balancing enable path surfaces it as a run
     # warning; agent-docs/models/laguna.md has the detail.
     _SERVED_BALANCING_BIAS_DROPPED_BY = "vLLM 0.26.0"
-
-    # Laguna's hub spelling differs from its module spelling; the two pairs mirror transformers'
-    # ``laguna`` ``WeightRenaming`` entries (pinned by
-    # ``tests/cpu/parallelism/test_laguna_export_key_renames.py``).
-    _EXPORT_KEY_RENAMES = (
-        ("gate.e_score_correction_bias", "experts.e_score_correction_bias"),
-        ("shared_experts.", "shared_expert."),
-    )

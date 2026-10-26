@@ -26,7 +26,7 @@ import pytest
 import yaml
 
 from src.configs.parallelism_arguments import parallelism_config_from_args
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
+from src.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
 from src.environments.episode import resolve_reasoning_end_ids
 from src.model_loading.parallel.load_rules import reject_unsupported_model
 from src.model_loading.parallel.peft_setup import split_expert_lora_targets
@@ -34,7 +34,8 @@ from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from src.models.attention.selection import validate_attn_implementation
 from src.models.config_access import text_config
 from src.models.context_window import is_bounded_length
-from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, native_balancing_bias_attrs
+from src.models.moe.balancing import BIAS_UPDATE_MODES
+from src.models.moe.config_fields import has_routed_experts
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
@@ -357,7 +358,7 @@ def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
         return
     parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
     model_config = try_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
-    if (raw.get("expert_parallel_size") or 1) <= 1 and not config_has_experts(model_config):
+    if (raw.get("expert_parallel_size") or 1) <= 1 and not has_routed_experts(model_config):
         return
     declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
     assert declared is not False, (
@@ -417,9 +418,8 @@ def test_some_example_model_is_cached():
 def test_example_balancing_mode_matches_the_family_export_contract(config):
     """``bias_update`` only where the family's bias EXPORTS; ``bias_update_transient`` only where it does not.
 
-    Both directions raise at run start. The verdict is the EP layer class's declared native slot
-    (``_NATIVE_BALANCING_BIAS_ATTR``, read through ``native_balancing_bias_attrs`` so a hub
-    respelling counts), resolved off the checkpoint's own ``model_type`` — never a family name.
+    Both directions raise at run start. The verdict is the family spec's ``balancing_slot``, resolved
+    off the checkpoint's own ``model_type`` — never a family name.
     The remaining run-start raise, for a model whose routers carry no bias at all, needs the loaded
     modules and stays with the callback.
     """
@@ -429,7 +429,7 @@ def test_example_balancing_mode_matches_the_family_export_contract(config):
         return
     layer_classes = ep_layer_classes_for_config(model_config_for(config, parsed))
     transient = sorted(
-        cls.__name__ for cls in layer_classes if cls._supports_bias_balancing and not native_balancing_bias_attrs(cls)
+        cls.__name__ for cls in layer_classes if cls.SUPPORTS_BIAS_BALANCING and not cls.FAMILY.balancing_slot
     )
     if mode == "bias_update":
         assert not transient, (

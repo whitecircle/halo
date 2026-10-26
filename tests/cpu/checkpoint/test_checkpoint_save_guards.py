@@ -10,17 +10,16 @@ per-node local disks scatters the shards where the merge never sees a complete s
 from types import SimpleNamespace
 
 import pytest
-import torch
 import torch.nn as nn
 
 import src.checkpoint.parallel.ep as ep_saving_mod
 from src.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
-from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.models.moe.family_specs import find_moe_family_spec
 from src.runtime import filesystem
 
 
@@ -109,7 +108,7 @@ def test_ep_sharded_allowed_with_ep_layers(monkeypatch):
 @pytest.mark.parametrize("model_type", ["gemma4_moe", ""])
 def test_ep_sharded_rejects_unclaimed_model_type(model_type):
     """A model_type no EP layer class claims would train into unmergeable shards — must raise."""
-    with pytest.raises(ValueError, match="no registered EP layer class"):
+    with pytest.raises(ValueError, match="no MoE family spec claims"):
         reject_unmergeable_ep_sharded_save(_fake_ep_model(model_type))
 
 
@@ -125,47 +124,36 @@ def test_ep_sharded_family_gate_runs_on_a_valid_topology(monkeypatch):
     """The family gate is not shadowed by the topology checks: an unclaimed family on a valid
     single-group topology is refused, and a supported one on the same topology passes."""
     monkeypatch.setenv("DIST_SHARED_FILESYSTEM", "1")
-    with pytest.raises(ValueError, match="no registered EP layer class"):
+    with pytest.raises(ValueError, match="no MoE family spec claims"):
         reject_unmergeable_ep_sharded_save(_fake_ep_model("nope", world_size=8), world_size=8)
     reject_unmergeable_ep_sharded_save(_fake_ep_model("gpt_oss", world_size=8), world_size=8)
 
 
-def test_model_type_resolves_to_the_declaring_layer_class():
-    assert resolve_ep_merge_layer_class("glm4_moe_lite") is EPGlm4MoELayer
-    assert resolve_ep_merge_layer_class("bailing_moe_linear") is EPBailingMoELayer
-    assert resolve_ep_merge_layer_class("bailing_moe") is EPBailingMoELayer
+def test_model_type_resolves_to_the_declaring_family_spec():
+    assert find_moe_family_spec("glm4_moe_lite") is EPGlm4MoELayer.FAMILY
+    assert find_moe_family_spec("bailing_moe_linear") is EPBailingMoELayer.FAMILY
+    assert find_moe_family_spec("bailing_moe") is EPBailingMoELayer.FAMILY
     # Qwen3.6 resolves through the 3.5 types it actually ships under, not a 3.6 spelling.
-    assert resolve_ep_merge_layer_class("qwen3_5_moe") is EPQwen3_5MoELayer
-    assert resolve_ep_merge_layer_class("qwen3_5_moe_text") is EPQwen3_5MoELayer
-    assert resolve_ep_merge_layer_class("zaya") is EPZayaMoELayer
+    assert find_moe_family_spec("qwen3_5_moe") is EPQwen3_5MoELayer.FAMILY
+    assert find_moe_family_spec("qwen3_5_moe_text") is EPQwen3_5MoELayer.FAMILY
+    assert find_moe_family_spec("zaya") is EPZayaMoELayer.FAMILY
 
 
-def test_laguna_inherits_the_glm4_transform_and_is_merge_supported():
+def test_laguna_shares_the_glm4_layout_and_is_merge_supported():
     """Laguna has its OWN wrapper (its router normalizes the top-k weights, GLM-4's does not) but the
-    identical expert layout, so it must inherit GLM-4's gather/merge rather than restate it — and
-    keying the merge on the class must still make save_sharded_ep=True valid for it."""
-    laguna_cls = resolve_ep_merge_layer_class("laguna")
-    assert issubclass(laguna_cls, EPGlm4MoELayer) and laguna_cls is not EPGlm4MoELayer
-    # Inherited, not overridden: the transform pair and the layout declaration are GLM-4's objects.
-    assert laguna_cls.merge_shards_to_hf.__func__ is EPGlm4MoELayer.merge_shards_to_hf.__func__
-    assert laguna_cls.gather_expert_state_dict is EPGlm4MoELayer.gather_expert_state_dict
-    assert laguna_cls._PER_EXPERT_UNFUSED_KEYS == EPGlm4MoELayer._PER_EXPERT_UNFUSED_KEYS
-
-    params = {"gate_up_proj": torch.randn(4, 8, 10), "down_proj": torch.randn(4, 5, 8)}
-    laguna_merged = laguna_cls.merge_shards_to_hf("model.layers.0.mlp", params)
-    glm4_merged = EPGlm4MoELayer.merge_shards_to_hf("model.layers.0.mlp", params)
-    assert set(laguna_merged) == set(glm4_merged)
-    for key, tensor in glm4_merged.items():
-        assert torch.equal(laguna_merged[key], tensor), key
-
+    identical expert layout, so its spec declares GLM-4's ``ExpertLayout`` and save_sharded_ep=True is
+    valid for it."""
+    laguna = find_moe_family_spec("laguna")
+    assert laguna is not EPGlm4MoELayer.FAMILY
+    assert laguna.expert_layout == EPGlm4MoELayer.FAMILY.expert_layout
     reject_unmergeable_ep_sharded_save(_fake_ep_model("laguna"))
 
 
 def test_unclaimed_model_type_is_rejected_not_guessed():
     """No spelling heuristic: an unclaimed model_type must fail the gate rather than be routed onto
     some other family's expert layout."""
-    assert resolve_ep_merge_layer_class("qwen3_next_moe") is None
-    with pytest.raises(ValueError, match="no registered EP layer class"):
+    assert find_moe_family_spec("qwen3_next_moe") is None
+    with pytest.raises(ValueError, match="no MoE family spec claims"):
         reject_unmergeable_ep_sharded_save(_fake_ep_model("qwen3_next_moe"))
 
 

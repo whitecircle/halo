@@ -7,8 +7,8 @@ Run: python tests/cpu/parallelism/test_mistral4_registries.py
 import pytest
 
 from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, Mistral4UlyssesAttention
-from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
+from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 
 

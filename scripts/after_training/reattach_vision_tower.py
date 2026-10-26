@@ -29,7 +29,6 @@ import shutil
 
 from transformers import AutoConfig
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, PROCESSOR_FILES

@@ -10,7 +10,7 @@ import torch
 from src.checkpoint.format import EXPORT_SIDECAR_FILES, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
 from src.checkpoint.reading import checkpoint_shard_files, iter_checkpoint_tensors
 from src.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
-from src.models.moe_balancing import apply_router_balancing_sidecar, is_balancing_state_key
+from src.models.moe.balancing import apply_balancing_bias_sidecar, is_balancing_state_key
 
 # The provenance key recording the GptOss sink policy an adapter trained under.
 PROVENANCE_GPT_OSS_SINKS = "gpt_oss_attention_sinks"
@@ -101,7 +101,7 @@ def apply_training_sidecars(model, source_dir: str) -> list[str]:
     if ships_weights or not os.path.isfile(sidecar_path):
         return actions
     sidecar = torch.load(sidecar_path, map_location="cpu", weights_only=True)
-    applied, skipped = apply_router_balancing_sidecar(model, sidecar)
+    applied, skipped = apply_balancing_bias_sidecar(model, sidecar)
     if applied:
         actions.append(f"Applied trained router balancing biases into {len(applied)} native slots.")
     if skipped:

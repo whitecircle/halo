@@ -39,7 +39,7 @@ import torch.distributed as dist
 from datasets import Dataset, load_from_disk
 from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForCausalLM
 
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
@@ -176,7 +176,7 @@ def run(ctx):
 
     config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model().to(ctx.device)
-    patch_moe_model_for_ep(model, config.ep_config())
+    apply_ep_layers(model, config.ep_config())
 
     trainer = trainer_cls(
         model=model,

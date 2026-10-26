@@ -33,7 +33,7 @@ from transformers.utils.output_capturing import OutputRecorder
 
 import src.callbacks.moe_metrics as moe_metrics
 from src.callbacks.moe_metrics import MoEMetricsCallback
-from src.models.moe_balancing import declared_routers
+from src.models.moe.router_logits import declared_routers
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GPTOSS_CONFIG
 
 NUM_EXPERTS = TINY_GLM5_CONFIG["n_routed_experts"]

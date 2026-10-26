@@ -63,10 +63,6 @@ class _StubEPLayer(StubEPLayerBase):
     def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False) -> dict:
         return {}
 
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
-
 
 def _stub_model() -> nn.Module:
     model = nn.Module()

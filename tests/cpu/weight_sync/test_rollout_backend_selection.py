@@ -15,7 +15,6 @@ import pytest
 
 import src.environments.engine_wire as engine_wire
 from src.configs.grpo_environmental import AsyncTrainingConfig
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.environments.engine_wire import capture_generation_tokens
 from src.environments.ray_actors import EnvironmentActor
 from src.environments.rollout_config import RolloutConfig
@@ -23,6 +22,7 @@ from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from src.weight_sync.clients.sglang import SGLangWeightSyncClient
 from src.weight_sync.clients.vllm import VLLMWeightSyncClient
 from src.weight_sync.registry import resolve_weight_sync_client, rollout_backends
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.weight_sync import StockModel, offline_client
 
 # --- Registry — derived from the client hierarchy, not a hand-maintained table ---

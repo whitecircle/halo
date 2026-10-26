@@ -170,7 +170,7 @@ def test_modules_to_save_copy_of_an_unadaptable_module_still_trains():
 def test_rejection_names_the_expert_adapters_that_would_train_alone(monkeypatch):
     """With native expert adapters live, an all-excluded attention list does not mean the run trains
     nothing — the message must say what would train, or the user fixes the wrong half."""
-    monkeypatch.setattr(peft_setup, "has_ep_lora", lambda model: True)
+    monkeypatch.setattr(peft_setup, "model_has_expert_lora", lambda model: True)
     model = _ClippableAttention()
 
     with pytest.raises(ValueError, match="native expert adapters would train alone"):

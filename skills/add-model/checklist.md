@@ -12,8 +12,8 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 
 | Concern | File(s) |
 |---|---|
-| EP wrapper | `src/distributed/expert_parallel/layers/<name>.py` — `layers/roster.py` imports the whole package, so the file's existence *is* the registration |
-| EP base / hooks | `src/distributed/expert_parallel/moe_layer/layer.py` (gather in `expert_gather.py`, balancing in `moe_layer/balancing_bias.py`) |
+| EP family | a `MoEFamilySpec` constant in `src/models/moe/family_specs.py` (+ `MOE_FAMILY_SPECS`), the wrapper `src/distributed/expert_parallel/families/<name>.py` with `FAMILY = <SPEC>`, and its import in `families/roster.py` |
+| EP base / hooks | `src/distributed/expert_parallel/moe_layer/layer.py` (gather in `moe_layer/gather.py`, balancing in `moe_layer/balancing_bias.py`) |
 | Expert-LoRA coverage | `src/models/moe/expert_lora_spec.py` (`LORA_PROJECTION_COVERAGE`) |
 | Non-persistent buffers | `src/model_loading/buffer_repair.py` — add a fixer to the `_NON_PERSISTENT_FIXERS` / `_ROTARY_FIXERS` chains; `finalize_loaded_model` is the seam every load path calls, and a buffer no fixer covers stays on meta and is rejected at device placement |
 | Liger coverage | `src/model_loading/liger/family_specs.py` (`LIGER_FAMILY_SPECS`) |
@@ -25,12 +25,13 @@ run. Paths are relative to the repo root; anything that executes runs **inside t
 | Vendoring | `src/models/<name>/` + a side-effect import in `src/model_loading/model_preparation.py` |
 | Configs | `examples/sft/<family>/` |
 | Tests | `tests/gpu/parallelism/ep/`, `tests/gpu/trainers/sft/`, `tests/cpu/models/`, `tests/gpu/manifest.py` |
-| Docs | the per-family page and every family roster listed in step 7 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` — agent-docs, human-docs and `CLAUDE.md` |
+| Docs | the per-family page and every family roster listed in step 8 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` — agent-docs, human-docs and `CLAUDE.md` |
 
-There is no registry file to edit. `MOE_LAYER_MAP` (`patching.py`) is built by walking the
-`EPMoELayerBase` subclass tree, and the CP map the same way — a duplicate HF class name raises at
-import. Templates worth cribbing: `layers/qwen3.py` (separate-GLU), `layers/gpt_oss.py` (in-layer
-routing, interleaved weights), `layers/deepseek_v4.py` (most class attributes in one place).
+`MOE_LAYER_MAP` (`families/roster.py`) is built from the roster's imported classes, and the CP map by
+walking its subclass tree — a duplicate HF class name raises at import; a `model_type` two specs claim
+raises at import of `family_specs`. Templates worth cribbing: `families/qwen3.py` (separate-GLU),
+`families/gpt_oss.py` (in-layer routing, interleaved weights), `families/deepseek_v4.py` (most class
+attributes in one place).
 
 ---
 
@@ -38,13 +39,13 @@ routing, interleaved weights), `layers/deepseek_v4.py` (most class attributes in
 
 The field is `Literal["auto", "none", "aux_loss", "bias_update", "bias_update_transient"]`, default
 `auto` (`src/configs/script_arguments.py`); `resolve_balancing_mode`
-(`src/models/moe_balancing.py`) resolves it against the live model and
+(`src/models/moe/balancing.py`) resolves it against the live model and
 `apply_balancing_mode` (`src/callbacks/balancing.py`) applies it.
 Leave the YAML at `auto` and make the family resolvable:
 
 - **Selection inside the HF gate** and the loaded class's forward declares
   `output_router_logits` → `aux_loss`. Declare nothing.
-- **The wrapper selects** → `_supports_bias_balancing = True` and select through the shared
+- **The wrapper selects** → `SUPPORTS_BIAS_BALANCING = True` and select through the shared
   helpers, not a hand-added `self._balancing_bias(...)` (it is `None` when balancing is off and in
   native-adoption mode): top-k over `self._selection_scores(scores)` for score-routed layers
   (group-limited base, DeepSeek-V4, Inkling, LFM-2), `self._biased_topk(logits)` or
@@ -52,9 +53,9 @@ Leave the YAML at `auto` and make the family resolvable:
   MoE, GPT-OSS). Gate weights come from the *unbiased* scores; call
   `self._record_expert_load(indices)` on the selected indices yourself, or the bias never moves. A
   layer can refuse per-instance by overriding `enable_bias_balancing`.
-- **`bias_update` ships only if the bias exports** — declare `_NATIVE_BALANCING_BIAS_ATTR` (plus
-  `_NATIVE_BALANCING_CONFIG_FLAG` and the `_materialize_native_balancing_slot` hook for a
-  config-gated slot). Without one, `_enforce_bias_export_contract` refuses `bias_update` and the
+- **`bias_update` ships only if the bias exports** — declare the spec's `balancing_slot` (live path
+  first, plus its `config_flag` and the `_materialize_native_balancing_slot` hook for a config-gated
+  slot). Without one, `_enforce_bias_export_contract` refuses `bias_update` and the
   user must opt into `bias_update_transient`, which no export or weight-sync carries.
 
 Which mode `auto` picks per family is published in `agent-docs/training-methods/callbacks.md` — read the
@@ -86,9 +87,9 @@ One detail that bites and is not in the guide: seed
 `HARDCODED_CONFIG_FOR_MODELS["<name>"]` (`transformers.utils.auto_docstring`) **before** importing
 the modeling module, or `@auto_docstring` raises "Config not found". A vendored family whose hub
 checkpoint stores experts per-expert while the module fuses them gets no entry in transformers'
-own conversion mapping, so the layout must be declared on the EP wrapper
-(`_PER_EXPERT_UNFUSED_KEYS` / `_HUB_PER_EXPERT_KEYS`) instead — the gather and the lazy loader read
-that, not `from_pretrained`'s converter.
+own conversion mapping, so the layout must be declared on the spec (`expert_layout` with its
+`per_expert_keys`) instead — the gather and the lazy loader read that, not `from_pretrained`'s
+converter.
 
 ---
 
@@ -101,7 +102,7 @@ allocates one per run.
 make lint
 python tests/cpu/models/test_<name>_support.py            # registration, gather/merge, balancing
 python tests/cpu/model_loading/test_liger_family_coverage.py    # every spec class exists and is exact
-python tests/cpu/checkpoint/test_merge_ep_shards.py       # only if you overrode the gather
+python tests/cpu/checkpoint/test_merge_ep_shards.py       # merged-from-shards == gathered for the family
 torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_vs_fsdp_<name>.py
 ```
 

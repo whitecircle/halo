@@ -265,12 +265,12 @@ with no `skip_logits` parameter.
 ## EP / CP / TP behavior
 
 **SwiGLU / GeGLU on MoE under EP wrappers.** Liger's MoE appliers set a class-level fused expert FFN (e.g.
-`Qwen3MoeExperts = LigerExperts`) holding every expert on one rank, while `patch_moe_model_for_ep`
-(`src/distributed/expert_parallel/patching.py`) swaps each layer's sparse-MoE block for an `EPMoELayerBase`
+`Qwen3MoeExperts = LigerExperts`) holding every expert on one rank, while `apply_ep_layers`
+(`src/distributed/expert_parallel/parallelize.py`) swaps each layer's sparse-MoE block for an `EPMoELayerBase`
 subclass holding only the local shard.
 
 The dispatch therefore sets `swiglu=False` / `geglu=False` when all four of
-`ParallelismConfig.needs_ep_wrappers`, `config_has_experts(model_config)`, a registered EP wrapper class for
+`ParallelismConfig.needs_ep_wrappers`, `has_routed_experts(model_config)`, a registered EP wrapper class for
 the family, and the GLU patch being **upstream's** hold.
 
 Each conjunct is load-bearing. `needs_ep_wrappers` is `ep_group_size > 1 or use_grouped_gemm` and

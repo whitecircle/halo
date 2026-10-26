@@ -27,7 +27,7 @@ from src.models.attention import selection as attention_mod
 from src.models.attention.gpt_oss_sinks import SinksPolicy
 
 # Every ``model_type`` transformers actually registers for an FA4-NaN attention stack. Listed
-# literally, NOT splatted from the EP wrappers' ``HF_MODEL_TYPES``: those declare which MoE block a
+# literally, NOT splatted from the family specs' ``model_types``: those declare which MoE block a
 # wrapper handles for checkpoint merging, which is a different question from which attention stack
 # NaNs, and the two sets are in no subset relation (qwen3_next and dense qwen3_5 NaN with no EP
 # wrapper; ten wrapped families must keep FA4). Qwen3.6 ships under the 3.5 types — Qwen/Qwen3.6-35B-A3B

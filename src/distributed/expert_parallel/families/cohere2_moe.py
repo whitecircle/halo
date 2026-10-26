@@ -7,6 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
+from src.models.moe.family_specs import COHERE2_MOE
 
 
 class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
@@ -21,38 +22,16 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
     """
 
     HF_MODULE_NAMES = ("Cohere2MoeSparseMoeBlock",)
-    # The text backbone's spelling plus the composite VLM spelling in the Command A+ checkpoint's
-    # config.json; checkpoint-keyed tooling (sharded merge, unfuse, lazy-load routing) resolves
-    # either config to this class.
-    HF_MODEL_TYPES = ("cohere2_moe", "cohere2_vision")
+    FAMILY = COHERE2_MOE
 
-    # The wrapper re-derives selection from the router's logits, so it can bias top-k itself. With no
-    # aux-loss wiring and no exported bias slot, ``moe_balancing: auto`` resolves to ``none`` and
-    # ``bias_update_transient`` is the opt-in for a trainer-only side-buffer.
-    _supports_bias_balancing = True
+    # No exported bias slot: ``moe_balancing: auto`` resolves to ``none``, ``bias_update_transient`` opts in.
+    SUPPORTS_BIAS_BALANCING = True
 
-    # No end-to-end sync has been validated on either pinned rollout engine, including layerwise-reload
-    # skip coverage for its FusedMoE experts.
-    _supports_weight_sync = False
-    _WEIGHT_SYNC_REFUSAL_REASON = (
-        "no end-to-end weight sync has been validated for the Cohere2 MoE family on either pinned "
-        "rollout engine (agent-docs/models/cohere2-moe.md)"
-    )
-
-    # The lazy loader maps the SigLIP tower's ``vision_model`` level the Command A+ index keeps, but no
-    # lazy load of this checkpoint has been checked against ``from_pretrained`` (the GPU lazy-load
-    # parity suite has no Cohere2 row), so every load routes through ``from_pretrained``.
-    _supports_lazy_loading = False
-
-    # Hub layout: ``experts.{i}.{gate,up,down}_proj.weight`` per expert; transformers fuses those
-    # into ``experts.gate_up_proj`` on load and reverts on save. The gather writes the fused tensor,
-    # so ``unfuse_moe_experts`` repairs a save that bypassed the revert under these names.
-    _HUB_PER_EXPERT_KEYS = ("gate_proj", "up_proj", "down_proj")
+    # The sigmoid top-k renorm adds no floor.
+    _TOPK_WEIGHT_NORM_EPS = 0.0
 
     # ``gate.weight`` is ``[num_experts, hidden]``, so its length is the expert count.
     _NUM_EXPERTS_ATTR_PATHS = ("num_experts", "experts.num_experts", "experts", "gate.weight")
-
-    _SHARED_EXPERT_ATTRS = ("shared_experts",)
 
     def _adopt_routing(self, original_layer: nn.Module) -> None:
         """Top-k plus the router's activation choice: ``Cohere2MoeTopKRouter`` activates only the
@@ -84,10 +63,6 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
             f"output_scale={self._output_scale}",
         )
 
-    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
-        output = super().forward(hidden_states, **kwargs)
-        return output if self._output_scale == 1.0 else output * self._output_scale
-
     def route_tokens_to_experts(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Top-k on the raw logits (bias-perturbable), gate weights from the unbiased selected scores.
 
@@ -107,6 +82,8 @@ class EPCohere2MoELayer(EPSharedExpertsMoELayerBase):
         if self.expert_selection_fn == "softmax":
             return F.softmax(scores, dim=-1, dtype=torch.float)
         weights = torch.sigmoid(scores)
-        if self.norm_topk_prob:
-            weights = weights / weights.sum(dim=-1, keepdim=True)
-        return weights
+        return self._renormalize_topk_weights(weights) if self.norm_topk_prob else weights
+
+    def forward(self, hidden_states: torch.Tensor, **kwargs) -> torch.Tensor:
+        output = super().forward(hidden_states, **kwargs)
+        return output if self._output_scale == 1.0 else output * self._output_scale

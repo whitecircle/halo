@@ -1,5 +1,5 @@
 """Run-level MoE balancing: configure the run's ``moe_balancing`` mode (resolve it with
-:func:`~src.models.moe_balancing.resolve_balancing_mode`, agree it across ranks, apply the config writes,
+:func:`~src.models.moe.balancing.resolve_balancing_mode`, agree it across ranks, apply the config writes,
 the bias-state enable and the ``bias_update`` export contract) and step the bias every optimizer step.
 """
 
@@ -15,23 +15,22 @@ from src.models.config_access import (
     set_config_field,
     set_config_field_run_scoped,
 )
-from src.models.moe.balancing import BALANCING_MODE_PRECEDENCE
-from src.models.moe.config_fields import resolve_moe_routing
-from src.models.moe_aux_loss import install_router_aux_gradient
-from src.models.moe_balancing import (
+from src.models.moe.balancing import (
+    BALANCING_MODE_PRECEDENCE,
     BIAS_UPDATE_MODES,
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     BalancingMode,
     accepts_bias_balancing,
-    ep_severs_aux_loss,
     has_balancing_routers,
-    honors_output_router_logits_config,
     is_transient_balancing_router,
     iter_balancing_routers,
-    mark_router_logits_forced_off,
-    native_balancing_hub_model_types,
     resolve_balancing_mode,
+    severs_aux_loss,
 )
+from src.models.moe.config_fields import resolve_moe_routing
+from src.models.moe.family_specs import MOE_FAMILY_SPECS
+from src.models.moe.router_aux_gradient import install_router_aux_gradient
+from src.models.moe.router_logits import honors_router_logits_flag, mark_router_logits_forced_off
 from src.runtime.consensus import rank_consensus, reject_across_ranks
 from src.runtime.ranks import get_global_world_size, is_global_main_process
 
@@ -54,7 +53,7 @@ def _enforce_bias_export_contract(model, mode: BalancingMode, is_moe: bool) -> N
     """
     transient = sorted({type(m).__name__ for m in iter_balancing_routers(model) if is_transient_balancing_router(m)})
     if mode == "bias_update":
-        native_types = native_balancing_hub_model_types()
+        native_types = sorted(mt for spec in MOE_FAMILY_SPECS if spec.balancing_slot for mt in spec.model_types)
         reason = (
             (
                 f"moe_balancing=bias_update would train a routing bias that NO EXPORT CARRIES on "
@@ -97,7 +96,7 @@ def _nothing_balanced_detail(hook_layers: list[str], is_moe: bool) -> str:
     if hook_layers:
         return (
             f"its EP MoE layers {hook_layers} do not support bias-update balancing "
-            "(_supports_bias_balancing=False — routing happens inside the HF gate or outside the "
+            "(SUPPORTS_BIAS_BALANCING=False — routing happens inside the HF gate or outside the "
             "EP wrapper)"
         )
     if is_moe:
@@ -169,8 +168,8 @@ def _apply_bias_update(model, cfg, mode: BalancingMode, is_moe: bool) -> None:
     flags = {
         flag
         for module in model.modules()
-        if getattr(module, NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False)
-        and (flag := getattr(type(module), "_NATIVE_BALANCING_CONFIG_FLAG", None))
+        if vars(module).get(NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False)
+        and (flag := type(module).FAMILY.balancing_slot.config_flag)
     }
     for flag in sorted(flags):
         if not get_config_field(cfg, flag, False):
@@ -196,7 +195,7 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
             "moe_balancing=none to silence this."
         )
         return
-    if ep_severs_aux_loss(model):
+    if severs_aux_loss(model):
         # Enabling output_router_logits would index the never-populated tuple: a crash, not balancing.
         mark_router_logits_forced_off(cfg)
         logger.warning(
@@ -220,7 +219,7 @@ def _apply_aux_loss(model, cfg, policy_gradient_loss: bool) -> None:
             "already declares the field — where it is absent the override is rejected at load."
         )
         return
-    if not honors_output_router_logits_config(model):
+    if not honors_router_logits_flag(model):
         # bias_update is a remedy only where something would accept the bias; without an
         # acceptor it raises in turn, so name the knobs that create one instead.
         if accepts_bias_balancing(model) or has_balancing_routers(model):

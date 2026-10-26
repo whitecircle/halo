@@ -1,8 +1,7 @@
 #!/usr/bin/env python
 """CPU tests for the EP expert-axis all-gather transport.
 
-``EPMoELayerBase._all_gather_cat`` is the collective behind every gathered save, shard merge and vLLM
-weight sync. On the expert axis (``dim=0``) it must receive into ONE preallocated output: an
+``all_gather_cat`` is the collective behind every gathered EP save and rollout weight sync. On the expert axis (``dim=0``) it must receive into ONE preallocated output: an
 ``all_gather`` shard list plus a ``cat`` holds the whole gathered tensor TWICE on every rank of the
 group, and the expert axis is where a fine-grained MoE keeps essentially all of its parameters (tens
 of GB per layer at 397B/ep64). Expert-TP gathers split the intermediate dim, which has no
@@ -18,8 +17,8 @@ Run: pytest tests/cpu/parallelism/test_ep_all_gather_cat.py
 import pytest
 import torch
 
-from src.distributed.expert_parallel import expert_gather
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.runtime import collectives as runtime_collectives
+from src.runtime.collectives import all_gather_cat
 
 WORLD = 4
 GROUP = "fake-ep-group"
@@ -73,8 +72,8 @@ def collectives(monkeypatch):
         counts["widest_alloc"] = max(counts["widest_alloc"], out.numel())
         return out
 
-    monkeypatch.setattr(expert_gather.dist, "all_gather_into_tensor", fake_all_gather_into_tensor)
-    monkeypatch.setattr(expert_gather.dist, "all_gather", fake_all_gather)
+    monkeypatch.setattr(runtime_collectives.dist, "all_gather_into_tensor", fake_all_gather_into_tensor)
+    monkeypatch.setattr(runtime_collectives.dist, "all_gather", fake_all_gather)
     monkeypatch.setattr(torch, "empty", counting_empty)
     monkeypatch.setattr(torch, "empty_like", counting_empty_like)
     monkeypatch.setattr(torch, "cat", counting_cat)
@@ -84,7 +83,7 @@ def collectives(monkeypatch):
 def test_expert_axis_gather_matches_the_shard_list_and_concat(collectives):
     """Same values as ``all_gather`` + ``cat`` — the layout the merge and every loader expect."""
     local = torch.randn(2, 3, 5)
-    gathered = EPMoELayerBase._all_gather_cat(local, 0, GROUP, WORLD)
+    gathered = all_gather_cat(local, 0, GROUP, WORLD)
     assert gathered.shape == (2 * WORLD, 3, 5)
     torch.testing.assert_close(gathered, _expected(local, 0))
 
@@ -92,7 +91,7 @@ def test_expert_axis_gather_matches_the_shard_list_and_concat(collectives):
 def test_expert_axis_gather_allocates_one_full_buffer(collectives):
     """The peak is one gathered tensor, not a shard list plus its concatenation."""
     local = torch.randn(2, 3, 5)
-    EPMoELayerBase._all_gather_cat(local, 0, GROUP, WORLD)
+    all_gather_cat(local, 0, GROUP, WORLD)
     assert collectives["into_tensor"] == 1
     assert collectives["list"] == 0
     assert collectives["empty"] == 1, "one preallocated receive buffer"
@@ -105,7 +104,7 @@ def test_intermediate_axis_gather_keeps_the_concat_path(collectives):
     """Expert-TP splits the intermediate dim, where a single receive buffer would interleave the
     peers' columns; the list + concat stays, and stays correct."""
     local = torch.randn(2, 3, 5)
-    gathered = EPMoELayerBase._all_gather_cat(local, 2, GROUP, WORLD)
+    gathered = all_gather_cat(local, 2, GROUP, WORLD)
     during = dict(collectives)  # the reference below concatenates too, through the same counters
     assert gathered.shape == (2, 3, 5 * WORLD)
     torch.testing.assert_close(gathered, _expected(local, 2))
@@ -118,7 +117,7 @@ def test_intermediate_axis_gather_keeps_the_concat_path(collectives):
 def test_single_rank_group_is_identity(collectives, dim):
     """No group to gather across: neither collective may be entered (an ep1 save must not issue one)."""
     local = torch.randn(2, 3, 5)
-    assert EPMoELayerBase._all_gather_cat(local, dim, GROUP, 1) is local
+    assert all_gather_cat(local, dim, GROUP, 1) is local
     assert collectives["into_tensor"] == 0
     assert collectives["list"] == 0
 
@@ -128,7 +127,7 @@ def test_non_contiguous_input_is_gathered_by_value(collectives):
     strides of whatever storage they aliased."""
     local = torch.randn(3, 2, 5).transpose(0, 1)
     assert not local.is_contiguous()
-    gathered = EPMoELayerBase._all_gather_cat(local, 0, GROUP, WORLD)
+    gathered = all_gather_cat(local, 0, GROUP, WORLD)
     torch.testing.assert_close(gathered, _expected(local.contiguous(), 0))
 
 

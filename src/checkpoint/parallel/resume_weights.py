@@ -36,7 +36,7 @@ from src.checkpoint.reading import (
     resolve_checkpoint_weights,
 )
 from src.checkpoint.weights_source import built_from_checkpoint, describe_weights_source, weights_read_from
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.tensor_parallel.plain_params import hand_sliced_dims
 from src.log import KEY_PREVIEW_COUNT
@@ -163,7 +163,7 @@ def _resume_onto_constructed_model(
             )
         restored = restore_adapters(checkpoint, model, is_cp_mode=ctx.parallelism_config.is_cp_mode)
         unwrapped = unwrap_framework_wrappers(model)
-        trains_adapters = find_peft_model(unwrapped) is not None or has_ep_lora(unwrapped)
+        trains_adapters = find_peft_model(unwrapped) is not None or model_has_expert_lora(unwrapped)
         if ships_base_weights and restored is None and trains_adapters:
             # Only a merged save ships base weights from an adapter run.
             raise ValueError(unmarked_merged_checkpoint_reason(checkpoint))

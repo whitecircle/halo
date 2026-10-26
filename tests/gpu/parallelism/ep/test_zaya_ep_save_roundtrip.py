@@ -32,7 +32,7 @@ from safetensors import safe_open
 
 from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from src.checkpoint.parallel.save import save_tokenizer
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.model_loading.parallel.loader import load_distributed_model

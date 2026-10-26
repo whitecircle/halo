@@ -29,25 +29,27 @@ from types import SimpleNamespace
 import pytest
 import torch
 from accelerate import PartialState
+from peft.utils import ModulesToSaveWrapper
 from transformers.models.zaya import modeling_zaya
 
 import src.callbacks.balancing as balancing
 import src.callbacks.factory as factory
-import src.models.moe_balancing as moe_balancing
+import src.models.moe.balancing as moe_balancing
 from src.callbacks.balancing import apply_balancing_mode
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )
-from src.models.moe.config_fields import resolve_moe_routing
-from src.models.moe_balancing import (
-    _WARNED_TRANSIENT_ONLY_AUTO,
+from src.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
-    ROUTER_LOGITS_FORCED_OFF_ATTR,
+    _warned_transient_only_auto,
     is_transient_balancing_router,
 )
+from src.models.moe.config_fields import resolve_moe_routing
+from src.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
+from src.models.moe.router_logits import ROUTER_LOGITS_FORCED_OFF_ATTR
 from src.models.zaya import patch_zaya_router_load_recording
+from tests.common.rosters import ep_layer_class_by_model_type
 
 
 class _Cfg:
@@ -63,7 +65,7 @@ class _Model(torch.nn.Module):
     """Minimal model stand-in: a config plus configurable ``modules()`` (default: no EP layers).
 
     ``forward`` takes ``output_router_logits`` because that parameter is how the toolkit detects that
-    a class honours the config flag at all (``honors_output_router_logits_config``). A stand-in
+    a class honours the config flag at all (``honors_router_logits_flag``). A stand-in
     without it stands in for a multimodal wrapper, not for the causal-LM families these tests cover.
     """
 
@@ -112,11 +114,20 @@ class _NativeBiasRouter(torch.nn.Module):
         self.expert_load_counter = None
 
 
-class _TransientEPLayer:
+class _BiasRouterStandIn:
+    """The :class:`BiasBalancingRouter` surface the balancing resolution reads, for a layer that selects its
+    experts but has no exported slot."""
+
+    SUPPORTS_BIAS_BALANCING = True
+    SEVERS_AUX_LOSS = False
+
+    def can_adopt_native_balancing(self):
+        return False
+
+
+class _TransientEPLayer(_BiasRouterStandIn):
     """EP-layer stand-in whose enable attaches the transient side-buffer (Qwen3/Mistral4-like):
     a plain instance attribute no ``state_dict()``, export, or weight-sync ever carries."""
-
-    _supports_bias_balancing = True
 
     def enable_bias_balancing(self):
         self.balancing_biases = torch.zeros(4)
@@ -124,11 +135,10 @@ class _TransientEPLayer:
         return True
 
 
-class _NativeAdoptingEPLayer(torch.nn.Module):
+class _NativeAdoptingEPLayer(_BiasRouterStandIn, torch.nn.Module):
     """EP-layer stand-in that adopts a checkpoint-exported native slot (GptOss/GLM4-like)."""
 
-    _supports_bias_balancing = True
-    _NATIVE_BALANCING_CONFIG_FLAG = None
+    FAMILY = MoEFamilySpec(model_types=(), balancing_slot=NativeBalancingSlot(("balancing_biases",)))
 
     def can_adopt_native_balancing(self):
         return True
@@ -143,7 +153,9 @@ class _NativeAdoptingEPLayer(torch.nn.Module):
 class _ConfigGatedNativeEPLayer(_NativeAdoptingEPLayer):
     """LFM-2-like: the materialized slot is dormant at serving until the config flag flips."""
 
-    _NATIVE_BALANCING_CONFIG_FLAG = "use_expert_bias"
+    FAMILY = MoEFamilySpec(
+        model_types=(), balancing_slot=NativeBalancingSlot(("balancing_biases",), config_flag="use_expert_bias")
+    )
 
 
 def _capture_warnings(fn):
@@ -292,10 +304,18 @@ def test_native_config_flag_mirrors_into_model_config() -> None:
     assert cfg.use_expert_bias is True
 
 
-class _BiasCapableEPLayer:
-    """EP-layer stand-in declaring the class contract ``accepts_bias_balancing`` reads."""
+def test_native_config_flag_mirrors_through_a_modules_to_save_wrapper() -> None:
+    """A PEFT ModulesToSaveWrapper forwards attribute reads to the layer it holds: the flag comes from the
+    wrapped layers, and the wrapper itself (no family spec) is skipped instead of raising."""
+    cfg = _Cfg(use_expert_bias=False)
+    wrapper = ModulesToSaveWrapper(_ConfigGatedNativeEPLayer(), "default")
+    model = _Model(cfg, submodules=list(wrapper.modules()))
+    apply_balancing_mode(model, "bias_update", policy_gradient_loss=False, is_moe=True)
+    assert cfg.use_expert_bias is True
 
-    _supports_bias_balancing = True
+
+class _BiasCapableEPLayer(_BiasRouterStandIn):
+    """EP-layer stand-in declaring the class contract ``accepts_bias_balancing`` reads."""
 
     def enable_bias_balancing(self):
         return True
@@ -549,7 +569,7 @@ def test_auto_resolves_to_none_where_only_a_transient_bias_is_possible() -> None
     the explicit opt-in."""
     cfg = _Cfg(router_aux_loss_coef=0.001, num_experts=8, num_experts_per_tok=2)
     model = _MultimodalModel(cfg, submodules=[_BiasCapableEPLayer()])
-    _WARNED_TRANSIENT_ONLY_AUTO.discard(type(model).__name__)  # warn-once state is keyed per model class
+    _warned_transient_only_auto.discard(type(model).__name__)  # warn-once state is keyed per model class
     warnings = _capture_resolver_warnings(lambda: _build_and_start("auto", model))
     assert any("bias_update_transient" in w for w in warnings), warnings
     assert cfg.output_router_logits is False

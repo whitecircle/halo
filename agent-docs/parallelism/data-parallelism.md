@@ -221,7 +221,7 @@ All four cells work for both SFT and online/async GRPO. At `ep_group_size==1` th
 still EP-wrapped (grouped-GEMM path) while `has_ep_group` is `False`, so the GRPO weight-sync gather
 keys the EP expert reshape on the model's live EP layers, not on `has_ep_group`.
 
-The family's `gather_expert_state_dict` materializes the FSDP-sharded experts (`materialize_dtensor`)
+The layer's `gather_expert_state_dict` materializes the FSDP-sharded experts (`materialize_dtensor`)
 before reshaping them to the hub checkpoint layout the rollout engine loads. Without that the experts
 reach the server in the EP-internal layout, the server rejects them, and the weight-sync NCCL
 broadcast hangs.

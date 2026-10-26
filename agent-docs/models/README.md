@@ -4,7 +4,7 @@
 
 The **TP column** tracks the Halo-side path: pure TP for dense models, and *selective* TP (attention only; embeddings and `lm_head` replicated; MoE left to EP) for MoE models in EP+TP mode. Most modern HF models also support native TP via `base_model_tp_plan`; GPT-OSS ships a `base_model_ep_plan` and no `base_model_tp_plan`, so its TP runs through the Halo path. **No** means no working selective-TP path.
 
-The registries behind the matrix: EP wrappers under `src/distributed/expert_parallel/layers/`, CP wrappers (which the CP accept-list is derived from) in `src/distributed/context_parallel/families.py`, TP accept-list in `src/distributed/tensor_parallel/parallelize_attention.py`.
+The registries behind the matrix: EP wrappers under `src/distributed/expert_parallel/families/`, CP wrappers (which the CP accept-list is derived from) in `src/distributed/context_parallel/families.py`, TP accept-list in `src/distributed/tensor_parallel/parallelize_attention.py`.
 
 ## Compatibility matrix
 
@@ -73,7 +73,7 @@ Every MoE family shares three settings:
 
 Every expert / router config field — the expert count, the top-k spelling, `router_aux_loss_coef`, `output_router_logits` — lives on the **text** sub-config for a composite (multimodal) family (Qwen3.5/3.6-MoE, Gemma 4, Mistral-4 under its VLM wrapper). `PreTrainedConfig` does not delegate attribute reads, so the toolkit resolves these through `get_config_field` / `set_config_field` over `config` **and** `config.get_text_config()`. Read one field off the wrapper alone and balancing plus `moe/*` metrics silently disappear.
 
-Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `ROUTER_EXPERT_COUNT_FIELDS` and `ROUTER_TOPK_FIELDS` in `src/models/moe_balancing.py` are the one registry every consumer reads — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP the wrapper's own `_NUM_EXPERTS_ATTR_PATHS` resolves the count off the live module instead.
+Families spell the count and the width differently (`num_experts`, `num_local_experts`, `num_routed_experts`, `num_moe_experts`, `moe_num_experts`; `num_experts_per_tok`, `top_k_experts`, `moe_router_topk`, …). `resolve_expert_count` and `resolve_router_topk` in `src/models/moe/config_fields.py` are the one reader every consumer calls — the "is this MoE?" loader gate, the load metrics, and the pipeline split's FFN cost model. Under EP the wrapper's own `_NUM_EXPERTS_ATTR_PATHS` resolves the count off the live module instead.
 
 [MoEMetricsCallback](../training-methods/callbacks.md#moemetricscallback) logs per-layer expert load by default (`enable_moe_metrics`).
 

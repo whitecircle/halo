@@ -15,8 +15,6 @@ dispatcher):
   frozen through the fp32 rebuild) and SKIPS the upcast in the FSDP-managed ep1 state
   (``fsdp_shard_ep1_experts`` at ``ep_group_size==1``), where FSDP2's bf16 policy would silently
   degrade it anyway;
-* ``EPExpertGatherMixin.__init_subclass__`` rejects a family declaring BOTH ``_PER_EXPERT_UNFUSED_KEYS``
-  and its own ``gather_expert_state_dict`` (the attribute would be silently ignored);
 * LFM2 is a :class:`EPSharedExpertsMoELayerBase` with ``shared_experts=None`` and empty
   ``replicated_named_params`` — its forward (the shared base path) matches a dense reference;
 * dispatcher construction logs on the main process only — every layer builds its own dispatcher, so
@@ -36,12 +34,11 @@ import torch.nn.functional as F
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.deepep import dispatcher as dispatcher_mod
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
 from src.trainers.grpo.rollout.routing_replay import RoutingReplayInjector
 
@@ -220,7 +217,7 @@ def test_replay_capable_families_set_top_k_at_construction():
     """Qwen3 / Qwen3.5 / Bailing / LFM2 must set self.top_k in __init__ — Bailing reads it in
     _gate_weights_at on the first replayed forward, and the injector sizes the mask from it."""
     for layer in _build_all():
-        assert layer._supports_routing_replay, f"{type(layer).__name__} unexpectedly opted out of replay"
+        assert layer.FAMILY.supports_routing_replay, f"{type(layer).__name__} unexpectedly opted out of replay"
         assert hasattr(layer, "top_k"), f"{type(layer).__name__} never set top_k"
         assert int(layer.top_k) == K
 
@@ -282,63 +279,6 @@ def test_expert_fp32_upcast_skipped_when_fsdp_manages_ep1_experts():
     layer._upcast_experts_to_fp32()
     assert layer.down_proj.dtype == torch.bfloat16, "ep1 FSDP-managed experts must not be upcast"
     assert layer.down_proj.requires_grad is False
-
-
-def test_init_subclass_rejects_unfused_keys_with_gather_override():
-    with pytest.raises(TypeError, match="_PER_EXPERT_UNFUSED_KEYS"):
-
-        class _Bad(EPMoELayerBase):  # noqa: F841 — definition itself must raise
-            _PER_EXPERT_UNFUSED_KEYS = ("gate_proj", "up_proj", "down_proj")
-
-            def gather_expert_state_dict(self, device="cpu", merge_lora=False):
-                return {}
-
-            def forward(self, hidden_states, **kwargs):
-                return hidden_states
-
-
-def test_init_subclass_allows_each_alone():
-    class _KeysOnly(EPMoELayerBase):
-        _PER_EXPERT_UNFUSED_KEYS = ("gate_proj", "up_proj", "down_proj")
-
-        def forward(self, hidden_states, **kwargs):
-            return hidden_states
-
-    class _GatherOnly(EPMoELayerBase):
-        def gather_expert_state_dict(self, device="cpu", merge_lora=False):
-            return {}
-
-        @classmethod
-        def merge_shards_to_hf(cls, prefix, params):
-            return {}
-
-        def forward(self, hidden_states, **kwargs):
-            return hidden_states
-
-    assert _KeysOnly is not None and _GatherOnly is not None
-
-
-def test_init_subclass_requires_gather_and_merge_to_be_overridden_together():
-    """The merge is the inverse of the gather: a custom gather with the BASE merge would write a
-    sharded checkpoint whose expert layout silently differs from the family's own gathered save."""
-    with pytest.raises(TypeError, match="merge_shards_to_hf"):
-
-        class _GatherWithoutMerge(EPMoELayerBase):  # noqa: F841 — definition itself must raise
-            def gather_expert_state_dict(self, device="cpu", merge_lora=False):
-                return {}
-
-            def forward(self, hidden_states, **kwargs):
-                return hidden_states
-
-    with pytest.raises(TypeError, match="gather_expert_state_dict"):
-
-        class _MergeWithoutGather(EPMoELayerBase):  # noqa: F841 — definition itself must raise
-            @classmethod
-            def merge_shards_to_hf(cls, prefix, params):
-                return {}
-
-            def forward(self, hidden_states, **kwargs):
-                return hidden_states
 
 
 def test_lfm2_is_shared_experts_base_with_none_shared():

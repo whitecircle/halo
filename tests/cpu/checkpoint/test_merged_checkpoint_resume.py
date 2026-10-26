@@ -178,7 +178,7 @@ def _built_from(model: nn.Module, source: str) -> nn.Module:
 
 def test_expert_only_resume_adapter_is_the_standalone_adapter_save(tmp_path, monkeypatch):
     """Expert-only runs have no PeftModel: the resume adapter is ``save_expert_lora_adapters``' artifact."""
-    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_expert_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
 
     save_resume_adapter(_save_context(_ExpertOnlyModel()), checkpoint)
@@ -203,7 +203,7 @@ def test_a_failed_adapter_write_leaves_no_marker(tmp_path, monkeypatch):
     """The marker is the resume's verdict, so it must never outrun its adapter: a checkpoint whose
     adapter write failed has to stay unmarked, where the loader refuses it as a merged checkpoint
     without its adapter, rather than marked and missing the file it promises."""
-    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_expert_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
 
     def full_disk(*args, **kwargs):
         raise OSError(28, "No space left on device")
@@ -241,7 +241,7 @@ class _RunTrainer(DistributedTrainerMixin, BaseTrainerSave):
 
 def _abandoned_merged_step(run_dir: str, monkeypatch) -> str:
     """checkpoint-3 as a completed merge-on-save of a trajectory a resume then abandoned."""
-    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_expert_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     _RunTrainer(run_dir, "abandoned")._save_checkpoint(model=None, trial=None)
     checkpoint = os.path.join(run_dir, "checkpoint-3")
     assert classify_resume_weights(checkpoint) == "merged_adapter", "premise: the first save completed"
@@ -296,7 +296,7 @@ def test_a_resave_by_a_run_that_writes_no_marker_removes_the_old_one(tmp_path, m
 def test_mixed_resume_adapter_round_trips_through_the_adapter_restore(tmp_path, monkeypatch):
     """A mixed run's resume adapter is ``save_peft_adapters``' mixed artifact, and the restore reads it
     back bit-equal onto fresh adapters."""
-    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_expert_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     trained = _tiny_peft_model(seed=1)
     randomize_adapters(trained, dtype=torch.bfloat16)  # on the bf16 grid, so the adapter file's cast is exact
     tokenizer = _TokenizerSpy()
@@ -315,7 +315,7 @@ def test_mixed_resume_adapter_round_trips_through_the_adapter_restore(tmp_path, 
 
     fresh = _tiny_peft_model(seed=2)
     applied = _Recorder()
-    monkeypatch.setattr(peft_mod, "apply_ep_lora_adapters", applied)
+    monkeypatch.setattr(peft_mod, "load_expert_lora_adapters", applied)
     assert restore_adapters(adapter_dir, fresh, is_cp_mode=False) is not None
 
     live = {name: param for name, param in trained.named_parameters() if ".lora_" in name}
@@ -349,9 +349,9 @@ class _ExpertLoraModel(_ExpertOnlyModel):
 
 
 def test_the_adapter_restore_refuses_another_expert_lora_scaling(tmp_path, monkeypatch):
-    monkeypatch.setattr(peft_mod, "gather_ep_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
+    monkeypatch.setattr(peft_mod, "gather_expert_lora_adapters", lambda model, retain: dict(EXPERT_STATE))
     applied = _Recorder()
-    monkeypatch.setattr(peft_mod, "apply_ep_lora_adapters", applied)
+    monkeypatch.setattr(peft_mod, "load_expert_lora_adapters", applied)
     checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
     save_resume_adapter(_save_context(_ExpertOnlyModel()), checkpoint)
     adapter_dir = resume_adapter_dir(checkpoint)

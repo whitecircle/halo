@@ -20,7 +20,7 @@ import torch.nn as nn
 
 import src.checkpoint.parallel.reading as coordination
 from src.checkpoint.parallel.sidecars import restore_balancing_biases, save_balancing_biases
-from src.models.moe_balancing import apply_router_balancing_sidecar
+from src.models.moe.balancing import apply_balancing_bias_sidecar
 from src.runtime.consensus import RankConsensus
 
 
@@ -161,7 +161,7 @@ def test_restore_raises_on_a_broadcastable_shape_mismatch():
         )
 
 
-# apply_router_balancing_sidecar: an offline PEFT merge starts from BASE weights, so the trained
+# apply_balancing_bias_sidecar: an offline PEFT merge starts from BASE weights, so the trained
 # bias must be copied from the sidecar into the merged HUB model's native slots.
 
 
@@ -192,7 +192,7 @@ def test_sidecar_applies_into_native_slots_with_peft_prefix():
         "base_model.model.layers.0": torch.full((4,), 0.25),
         "base_model.model.layers.1": torch.full((4,), -0.5),
     }
-    applied, skipped = apply_router_balancing_sidecar(model, sidecar)
+    applied, skipped = apply_balancing_bias_sidecar(model, sidecar)
     assert applied == ["layers.0", "layers.1"] and not skipped
     assert torch.equal(model.layers[0].router.bias.data, torch.full((4,), 0.25))
     assert torch.equal(model.layers[1].router.bias.data, torch.full((4,), -0.5))
@@ -219,7 +219,7 @@ def test_sidecar_applies_under_peft_plus_context_parallelism():
         "base_model.model.model.model.layers.0": torch.full((4,), 0.25),
         "base_model.model.model.model.layers.1": torch.full((4,), -0.5),
     }
-    applied, skipped = apply_router_balancing_sidecar(model, sidecar)
+    applied, skipped = apply_balancing_bias_sidecar(model, sidecar)
     assert applied == ["model.layers.0", "model.layers.1"] and not skipped
     assert torch.equal(model.model.layers[0].router.bias.data, torch.full((4,), 0.25))
     assert torch.equal(model.model.layers[1].router.bias.data, torch.full((4,), -0.5))
@@ -228,7 +228,7 @@ def test_sidecar_applies_under_peft_plus_context_parallelism():
 def test_sidecar_applies_under_context_parallelism_without_peft():
     """CP alone adds the same extra ``model.`` level."""
     model = _HubGptOssCausalLM()
-    applied, _ = apply_router_balancing_sidecar(model, {"model.model.layers.0": torch.full((4,), 1.5)})
+    applied, _ = apply_balancing_bias_sidecar(model, {"model.model.layers.0": torch.full((4,), 1.5)})
     assert applied == ["model.layers.0"]
     assert torch.equal(model.model.layers[0].router.bias.data, torch.full((4,), 1.5))
 
@@ -239,7 +239,7 @@ def test_sidecar_applies_into_hub_native_buffer_without_ep_class():
     model = nn.Module()
     model.config = type("Cfg", (), {"model_type": "not_registered"})()
     model.router = router
-    applied, skipped = apply_router_balancing_sidecar(model, {"router": torch.full((4,), 2.0)})
+    applied, skipped = apply_balancing_bias_sidecar(model, {"router": torch.full((4,), 2.0)})
     assert applied == ["router"] and not skipped
     assert torch.equal(router.balancing_biases, torch.full((4,), 2.0))
 
@@ -273,7 +273,7 @@ def test_sidecar_materializes_config_gated_slot_on_flagless_base():
     architecture for having no slot."""
     model = _HubLfm2Model()
     bias = torch.full((4,), 0.75)
-    applied, skipped = apply_router_balancing_sidecar(model, {"base_model.model.layers.0": bias})
+    applied, skipped = apply_balancing_bias_sidecar(model, {"base_model.model.layers.0": bias})
     assert applied == ["layers.0"] and not skipped
     block = model.layers[0]
     assert torch.equal(block.expert_bias, bias)
@@ -289,20 +289,20 @@ def test_sidecar_skips_transient_only_modules():
     model = nn.Module()
     model.config = type("Cfg", (), {"model_type": "qwen3_moe"})()
     model.block = nn.Linear(2, 2)
-    applied, skipped = apply_router_balancing_sidecar(model, {"block": torch.zeros(4)})
+    applied, skipped = apply_balancing_bias_sidecar(model, {"block": torch.zeros(4)})
     assert not applied and skipped == ["block"]
 
 
 def test_sidecar_shape_mismatch_raises():
     model = _HubGptOssModel()
     with pytest.raises(ValueError, match="shape"):
-        apply_router_balancing_sidecar(model, {"layers.0": torch.zeros(8)})
+        apply_balancing_bias_sidecar(model, {"layers.0": torch.zeros(8)})
 
 
 def test_sidecar_unknown_module_raises():
     model = _HubGptOssModel()
     with pytest.raises(KeyError, match="different model tree"):
-        apply_router_balancing_sidecar(model, {"layers.7": torch.zeros(4)})
+        apply_balancing_bias_sidecar(model, {"layers.7": torch.zeros(4)})
 
 
 class _StageModel(_MoEModel):

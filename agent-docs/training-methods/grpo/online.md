@@ -160,7 +160,7 @@ Weights are pushed before the **next** generation, not at the optimizer step; a 
 - QLoRA (`load_in_4bit` / `load_in_8bit`).
 - A PEFT layer the sync cannot fold, or an adapter on a tensor the dense push does not send, such as EP expert weights ([PEFT](../../optimization/peft.md#online-rl--rollout-server-weight-sync)).
 - GptOss sinks removed by the `flash_attention_2` `reset_sinks` reset, and `train_sinks: true`.
-- Model types in the client's `UNSERVABLE_MODEL_TYPES`, families with `_supports_weight_sync = False`, and an MoE with no live EP wrapper (`expert_parallel_size: 1` with `use_grouped_gemm: false`) ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)).
+- Model types in the client's `UNSERVABLE_MODEL_TYPES`, families whose spec carries a `weight_sync_refusal`, and an MoE with no live EP wrapper (`expert_parallel_size: 1` with `use_grouped_gemm: false`) ([construction gates](../../infrastructure/rollout-servers.md#construction-gates)).
 - Live `bias_update` balancing state.
 
 ### Multi-homed nodes (`VLLM_GROUP_HOST`)

@@ -329,11 +329,10 @@ dispatch backward is a combine and the combine backward is a dispatch that reuse
 `handle`.
 
 ```python
-# Inside an EP MoE layer (EPMoELayerBase._dispatch_compute_combine); _gc_dispatch / _gc_combine are
-# the checkpoint-replay wrappers around the dispatcher calls.
-recv_x, recv_topk_idx, recv_topk_weights, handle = self._gc_dispatch(flat, experts, weights)
+# Inside an EP MoE layer (EPMoELayerBase._dispatch_compute_combine); owner= keys the checkpoint-replay cache.
+recv_x, recv_topk_idx, recv_topk_weights, handle = self.dispatcher.dispatch(flat, experts, weights, owner=self)
 output = self._compute_experts(recv_x, recv_topk_idx, recv_topk_weights, input_dtype)
-combined = self._gc_combine(output, recv_topk_weights, handle)
+combined = self.dispatcher.combine(output, recv_topk_weights, handle, owner=self)
 ```
 
 Per-expert received token counts (for grouped GEMM) come from `recv_topk_idx` by a stable sort on the
@@ -356,7 +355,7 @@ Padding is confined to the elastic backend's own wire buffers; the MoE layer and
 real hidden. The send side is one strided copy into the padded buffer plus a fill of the pad columns; the
 receive side hands back a row-strided `[tokens, hidden]` view of the padded result, with no copy (every
 consumer reads the row stride directly, the weighted unpermute's backward included). That view keeps its
-padded buffer alive, so the GC replay cache (`_gc_dispatch` / `_gc_combine`) pins the received tensors at
+padded buffer alive, so the GC replay cache (`DeepEPDispatcher.dispatch` / `combine`) pins the received tensors at
 the padded width, `padded/hidden − 1` more (≈6.7% on GPT-OSS): ≈+0.5 GiB peak on gpt-oss-20b EP8
 (2880 → 3072), proportionally more on Gemma 4 (2816 → 3072). It is a no-op for conforming models (Qwen3
 MoE, hidden 4096/2048). Cost is ~`padded/hidden − 1` extra transport bandwidth. The legacy backend needs

@@ -33,7 +33,7 @@ Run:
 import torch
 from transformers import AutoConfig
 
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_str
 from src.model_loading.parallel.loader import load_distributed_model

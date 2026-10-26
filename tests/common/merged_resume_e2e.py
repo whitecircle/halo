@@ -60,7 +60,7 @@ from src.checkpoint.format import (
 )
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from src.distributed.context_parallel.config import CPConfigError
-from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
+from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
@@ -129,7 +129,7 @@ def _adapter_snapshot(model) -> dict[str, torch.Tensor]:
     FSDP2. Collective."""
     unwrapped = unwrap(model)
     peft_adapters = {name: value for name, value in snapshot_trainable(unwrapped).items() if ".lora_" in name}
-    return {**gather_ep_lora_adapters(unwrapped), **peft_adapters}
+    return {**gather_expert_lora_adapters(unwrapped), **peft_adapters}
 
 
 def _parallelism_config(ep_size: int, cp_size: int, fp32_masters: bool) -> ParallelismConfig:

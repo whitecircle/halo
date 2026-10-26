@@ -1,8 +1,79 @@
-"""MoE config spellings and the routing shape a run measures and balances."""
+"""MoE config-field readers: each concept's spellings across the roster, read over a composite config's levels.
+
+One registry per concept, so the "is this MoE?" gate, the load metrics, the EP layers and the pipeline split's cost
+model cannot classify one checkpoint differently.
+"""
+
+from __future__ import annotations
 
 from typing import NamedTuple
 
-from src.models.moe_balancing import detect_moe_experts_topk, has_discard_expert_slot
+from src.models.config_access import get_config_field
+from src.models.moe.router_logits import has_discard_expert_slot
+
+# First non-zero wins, so the unambiguous fields precede bare ``top_k``, which is also the generation sampling
+# parameter.
+ROUTER_TOPK_FIELDS: tuple[str, ...] = (
+    "num_experts_per_tok",
+    "top_k_experts",
+    "moe_router_topk",
+    "num_active_experts",
+    "top_k",
+)
+_ROUTER_EXPERT_COUNT_FIELDS = (
+    "num_experts",
+    "num_local_experts",
+    "num_routed_experts",
+    "num_moe_experts",
+    "moe_num_experts",
+)
+# The per-expert FFN width expert-TP shards. The MoE-specific spellings come first: a hybrid dense+MoE config
+# carries both, and only the MoE one is sharded.
+EXPERT_FFN_WIDTH_FIELDS: tuple[str, ...] = (
+    "moe_intermediate_size",
+    "expert_intermediate_size",
+    "moe_ffn_hidden_size",
+    "intermediate_size",  # GptOss: the expert FFN is the only FFN, so this is the expert width
+)
+
+
+def _first_router_field(cfg, fields: tuple[str, ...], default=None):
+    """First set value among ``fields``, searched over every config level."""
+    for field in fields:
+        if value := get_config_field(cfg, field):
+            return value
+    return default
+
+
+def resolve_router_topk(cfg) -> int:
+    """Experts routed per token, ``0`` when no spelling is set."""
+    return int(_first_router_field(cfg, ROUTER_TOPK_FIELDS, 0))
+
+
+def resolve_expert_count(cfg) -> int:
+    """Routed experts per MoE layer, ``0`` when no spelling is set (a dense model)."""
+    return int(_first_router_field(cfg, _ROUTER_EXPERT_COUNT_FIELDS, 0))
+
+
+def require_expert_count(cfg) -> int:
+    """:func:`resolve_expert_count` for a caller that cannot proceed without one."""
+    if num_experts := resolve_expert_count(cfg):
+        return num_experts
+    raise ValueError(
+        f"Could not determine the routed-expert count from {type(cfg).__name__}: none of "
+        f"{_ROUTER_EXPERT_COUNT_FIELDS} is set on it or on its text config."
+    )
+
+
+def resolve_expert_ffn_width(cfg) -> int | None:
+    """The per-expert intermediate dimension expert-TP splits, ``None`` when no spelling is set."""
+    value = _first_router_field(cfg, EXPERT_FFN_WIDTH_FIELDS)
+    return int(value) if value else None
+
+
+def has_routed_experts(cfg) -> bool:
+    """Whether the config describes a MoE model, at either level of a composite config."""
+    return resolve_expert_count(cfg) > 0
 
 
 class MoERouting(NamedTuple):
@@ -17,7 +88,7 @@ class MoERouting(NamedTuple):
 def resolve_moe_routing(model) -> MoERouting:
     """``model``'s routing off its config and router classes; ``MoERouting(False, 1, False)`` when it
     declares at most one expert."""
-    num_experts, top_k = detect_moe_experts_topk(model)
-    if num_experts <= 1:
+    config = getattr(model, "config", None)
+    if resolve_expert_count(config) <= 1:
         return MoERouting(False, 1, False)
-    return MoERouting(True, top_k or 1, has_discard_expert_slot(model))
+    return MoERouting(True, resolve_router_topk(config) or 1, has_discard_expert_slot(model))

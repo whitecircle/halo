@@ -16,7 +16,7 @@ import src.distributed.expert_parallel.moe_layer.layer as layer_module
 from src.distributed.expert_parallel import config as ep_config_mod
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config, stubbed_process_groups
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
@@ -34,7 +34,7 @@ def _pp_stage_config(*, experts_fsdp_managed: bool) -> EPConfig:
 def _hooked_layers(ep_config: EPConfig) -> list[bool]:
     """Whether each EP layer of a tiny model patched on ``ep_config`` registered in-backward grad hooks."""
     model = tiny_family_model(TINY_MOE_FAMILIES[_FAMILY])
-    patch_moe_model_for_ep(model, ep_config)
+    apply_ep_layers(model, ep_config)
     return [bool(layer._grad_sync_hooks) for _, layer in named_ep_layers(model)]
 
 
@@ -69,7 +69,7 @@ def test_grouped_gemm_runs_where_requested_and_supported(monkeypatch, requested,
     monkeypatch.setattr(layer_module, "supports_grouped_mm", lambda: hardware)
     config = single_process_ep_config(use_grouped_gemm=requested)
     model = tiny_family_model(TINY_MOE_FAMILIES[_FAMILY])
-    patch_moe_model_for_ep(model, config)
+    apply_ep_layers(model, config)
     assert config.grouped_gemm_enabled is (requested and hardware)
     assert {layer._use_grouped_mm for _, layer in named_ep_layers(model)} == {config.grouped_gemm_enabled}
 

@@ -4,7 +4,7 @@
 The hub checkpoints (``deepseek-ai/DeepSeek-V4-Flash[-Base]``) ship fine-grained FP8 dense
 weights (e4m3, 128x128 blocks, ue8m0 scales) with FP4-packed routed experts
 (``config.expert_dtype = "fp4"``: two e2m1 nibbles per int8 byte, [1, 32] scale grid). EP
-training needs plain BF16 expert tensors (``patch_moe_model_for_ep`` rejects non-float expert
+training needs plain BF16 expert tensors (``apply_ep_layers`` rejects non-float expert
 storage), so this script routes the checkpoint through transformers' dequantizing loader
 (``FineGrainedFP8Config(dequantize=True)`` attaches ``Fp8Dequantize`` to the V4 weight-conversion
 chain, verified exact against a manual e2m1 LUT dequant) and re-saves it sharded in BF16.
@@ -32,7 +32,6 @@ import os
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, FineGrainedFP8Config
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.offline_export import (
     preflight_resource_warning,

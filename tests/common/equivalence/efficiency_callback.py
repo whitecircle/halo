@@ -28,7 +28,7 @@ from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from src.callbacks.efficiency import EfficiencyCallback
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
 from src.distributed.mesh import create_dp_tp_mesh, get_tp_submesh
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
@@ -299,7 +299,7 @@ def _model(case: EfficiencyCase, scenario: Scenario, parallelism) -> torch.nn.Mo
     if parallelism.tp_size > 1:
         _apply_tensor_parallelism(model, case.family, parallelism)
     if case.family in MOE_FAMILIES and parallelism.needs_ep_wrappers:
-        patch_moe_model_for_ep(model, parallelism.ep_config())
+        apply_ep_layers(model, parallelism.ep_config())
     if parallelism.pp_size > 1:
         # The FLOPs accounting is family-agnostic; Qwen3-MoE is not registered for pipeline parallelism.
         with registered_pp_backbones("Qwen3MoeModel"):

@@ -18,7 +18,7 @@ Run (2 GPUs, EP=2):
 import torch
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str
 from src.model_loading.parallel.loader import load_distributed_model

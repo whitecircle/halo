@@ -10,11 +10,11 @@ from dataclasses import dataclass
 from transformers.utils import logging as hf_logging
 
 from src.callbacks.parameter_stats import count_model_parameters
-from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.attention.layout import AttentionLayout, attention_layout
 from src.models.config_access import get_config_field, text_config
-from src.models.moe_balancing import detect_moe_experts_topk
+from src.models.moe.config_fields import resolve_expert_count, resolve_router_topk
+from src.models.moe.family_specs import expert_weight_roots, experts_container_attrs
 from src.runtime.dtensor import local_numel
 
 logger = hf_logging.get_logger(__name__)
@@ -138,7 +138,8 @@ def estimate_rank_flops(
     params_ratio = full_params / float(local_params) if has_full_baseline else 1.0
 
     # The shared router probe, so the balancing setup and the MoE load metrics classify a family alike.
-    num_experts, top_k = detect_moe_experts_topk(model)
+    config = getattr(model, "config", None)
+    num_experts, top_k = resolve_expert_count(config), resolve_router_topk(config)
     sparsity, expert_params, trainable_expert_params, frozen_expert_params = _moe_param_split(
         model, num_experts, top_k
     )

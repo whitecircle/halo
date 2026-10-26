@@ -43,7 +43,7 @@ from trl.models.utils import disable_gradient_checkpointing
 from trl.trainer.utils import use_adapter
 
 from src.configs.preference import DPOScriptArguments
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
@@ -186,7 +186,7 @@ def run(ctx) -> dict:
     checks = {
         "run_is_mixed": isinstance(peft_model, PeftModel)
         and "ref" not in peft_model.peft_config
-        and has_ep_lora(peft_model),
+        and model_has_expert_lora(peft_model),
         "loader_leaves_the_reference_to_the_policy": ref_model is None,
     }
 

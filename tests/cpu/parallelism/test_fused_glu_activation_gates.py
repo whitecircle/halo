@@ -23,9 +23,9 @@ from transformers.models.gemma4.modeling_gemma4 import Gemma4TextExperts
 from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import Mistral4Experts
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.expert_parallel.layers.gemma4 import EPGemma4MoELayer
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.families.gemma4 import EPGemma4MoELayer
+from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.families.roster import ep_layer_classes
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPSharedExpertsMoELayerBase
 from src.kernels import fused_glu

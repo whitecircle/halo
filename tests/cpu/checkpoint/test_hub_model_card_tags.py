@@ -37,7 +37,6 @@ from trl.trainer import base_trainer as trl_base_trainer
 from trl.trainer.utils import generate_model_card
 
 import src.checkpoint.parallel.adapters as peft_saver
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
 from scripts.after_training import merge_models as merge_models_script
 from scripts.after_training.convert_to_bf16 import convert_to_bf16
 from scripts.after_training.reset_sinks import reset_sinks

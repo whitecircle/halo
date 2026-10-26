@@ -1,13 +1,11 @@
 #!/usr/bin/env python
 """CPU guards on how the FLOPs estimator learns which params are sparse (routed) MoE experts.
 
-The estimator must read the EP layer classes' declared
-:attr:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase._EXPERT_WEIGHT_ATTR_ROOTS` and
-:attr:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase._EXPERTS_CONTAINER_ATTRS` — not a
-copy of them. A copy drifts silently: a family adding an expert-weight root or container spelling
-the callback does not know is classified as a DENSE parameter, so its params count as always-active
-and S-MFU (sparsity = top_k/num_experts applies only to expert params) is over-reported for that
-model.
+The estimator must read the family specs' declared ``expert_weight_roots`` and ``experts_container_attrs``
+(:class:`~src.models.moe.family_specs.MoEFamilySpec`) — not a copy of them. A copy drifts silently: a
+family adding an expert-weight root or container spelling the callback does not know is classified as a
+DENSE parameter, so its params count as always-active and S-MFU (sparsity = top_k/num_experts applies
+only to expert params) is over-reported for that model.
 
 Reading the declaration only stays affordable while the EP import chain is free of ``deep_ep``, whose
 import loads a CUDA extension and runs ``cuInit`` (latching ``CUDA_DEVICE_MAX_CONNECTIONS``) — the
@@ -18,7 +16,6 @@ Run: ``python tests/cpu/callbacks/test_efficiency_expert_roots.py`` (or ``pytest
 
 from __future__ import annotations
 
-import gc
 import importlib.util
 import subprocess
 import sys
@@ -26,8 +23,8 @@ import sys
 import pytest
 
 from src.callbacks.model_flops import _is_expert_param
-from src.distributed.expert_parallel.expert_weights import expert_weight_roots, experts_container_attrs
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.models.moe import family_specs
+from src.models.moe.family_specs import MOE_FAMILY_SPECS, MoEFamilySpec, expert_weight_roots, experts_container_attrs
 from tests.common.repo import REPO_ROOT
 
 
@@ -61,45 +58,27 @@ def test_container_exclusions_still_hold():
     assert not _is_expert_param("model.layers.0.mlp.dense_proj.weight")
 
 
-def test_a_new_family_container_attr_needs_no_callback_edit():
-    """Registering a family with a novel container spelling must make the callback classify it —
-    the anti-duplication assertion for ``_EXPERTS_CONTAINER_ATTRS``."""
-
-    class _ProbeContainerEPLayer(EPMoELayerBase):
-        _EXPERTS_CONTAINER_ATTRS = (*EPMoELayerBase._EXPERTS_CONTAINER_ATTRS, "probe_experts")
-
+@pytest.mark.parametrize(
+    ("declared", "param"),
+    [
+        ({"experts_container_attrs": ("probe_experts",)}, "model.layers.0.mlp.probe_experts.0.up_proj.weight"),
+        ({"expert_weight_roots": ("probe_gate_proj",)}, "model.layers.0.mlp.probe_gate_proj"),
+    ],
+    ids=["container", "root"],
+)
+def test_a_new_family_spelling_needs_no_callback_edit(monkeypatch, declared, param):
+    """A family spec declaring a novel expert spelling makes the callback classify it: a hand-maintained
+    copy inside the callback could not know it and would count those params as dense."""
+    probe = MoEFamilySpec(model_types=("probe_moe",), **declared)
+    monkeypatch.setattr(family_specs, "MOE_FAMILY_SPECS", (*MOE_FAMILY_SPECS, probe))
+    expert_weight_roots.cache_clear()
     experts_container_attrs.cache_clear()
     try:
-        assert _is_expert_param("model.layers.0.mlp.probe_experts.0.up_proj.weight"), (
-            "The FLOPs estimator did not pick up a newly registered EP family's declared expert "
-            "container — it is not deriving from EPMoELayerBase._EXPERTS_CONTAINER_ATTRS."
-        )
+        assert _is_expert_param(param), f"the FLOPs estimator ignores a newly declared {next(iter(declared))}"
     finally:
-        del _ProbeContainerEPLayer
-        experts_container_attrs.cache_clear()
-        gc.collect()  # drop the probe from EPMoELayerBase.__subclasses__ before other tests re-derive
-
-
-def test_a_new_family_root_needs_no_callback_edit():
-    """Registering a family with a novel expert-weight root must make the callback classify it.
-
-    This is the anti-duplication assertion: a hand-maintained copy of the roots inside the callback
-    cannot know ``probe_gate_proj`` and would count those params as dense.
-    """
-
-    class _ProbeEPLayer(EPMoELayerBase):
-        _EXPERT_WEIGHT_ATTR_ROOTS = ("probe_gate_proj",)
-
-    expert_weight_roots.cache_clear()
-    try:
-        assert _is_expert_param("model.layers.0.mlp.probe_gate_proj"), (
-            "The FLOPs estimator did not pick up a newly registered EP family's declared expert-weight "
-            "root — it is not deriving from EPMoELayerBase._EXPERT_WEIGHT_ATTR_ROOTS."
-        )
-    finally:
-        del _ProbeEPLayer
+        monkeypatch.undo()
         expert_weight_roots.cache_clear()
-        gc.collect()  # drop the probe from EPMoELayerBase.__subclasses__ before other tests re-derive
+        experts_container_attrs.cache_clear()
 
 
 def test_importing_the_callback_does_not_import_deep_ep():

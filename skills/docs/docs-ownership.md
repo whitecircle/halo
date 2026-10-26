@@ -38,9 +38,10 @@ changes.
 | `src/` area | Owning doc page(s) |
 |---|---|
 | `src/distributed/parallelism_config.py` (ParallelismConfig), `parallelism_rules.py` (axis allowlist, refusals) | `agent-docs/parallelism/*` (all; the combination table in `agent-docs/parallelism/README.md#supported-combinations`), `agent-docs/reference/configuration-reference.md`, the parallelism matrix in `CLAUDE.md` |
-| `src/distributed/expert_parallel/` (EP topology, per-family layers; `moe_layer/`: `EPMoELayerBase` and its compute, routing, grad-sync, expert-LoRA and balancing-bias mixins, `named_ep_layers`) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md`, `agent-docs/models/adding-a-model.md` (the `_adopt_*` construction hooks), `agent-docs/reference/architecture.md` |
+| `src/distributed/expert_parallel/` (EP topology, per-family layers; `moe_layer/`: `EPMoELayerBase` and its compute, routing, grad-sync, expert-LoRA (with the adapter gather/load), checkpoint-gather and balancing-bias mixins, `named_ep_layers`) | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/expert-tensor-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/infrastructure/deepep.md`, `agent-docs/models/adding-a-model.md` (the `_adopt_*` construction hooks), `agent-docs/reference/architecture.md` |
 | `src/distributed/expert_parallel/deepep/` (DeepEP knobs, buffer sizing and the capacity scope, buffer backends, dispatcher), `src/distributed/rank_uniform_env.py` (the job-wide env agreement) | `agent-docs/infrastructure/deepep.md`, `agent-docs/reference/configuration-reference.md` (DeepEP environment variables) |
 | `src/models/moe/expert_lora_spec.py` (native expert-LoRA vocabulary) | `agent-docs/optimization/peft.md`, `agent-docs/models/adding-a-model.md` |
+| `src/models/moe/expert_layout.py` (each family's runtime-to-hub expert layout, shared by the EP gather and `merge_ep_shards.py`) | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/models/adding-a-model.md` |
 | `src/distributed/context_parallel/` (Ulysses: `config`, `sequence_chunks`, `all_to_all`, `ulysses_attention`, `families`, `model_rules`, `ulysses_model`), `src/model_loading/parallel/cp.py` (CP loads) | `agent-docs/parallelism/context-parallelism.md` |
 | `src/distributed/tensor_parallel/` (DTensor: `hf_plan`, `parallelize_attention`, `plain_params`), `src/model_loading/parallel/tp.py` (TP loads) | `agent-docs/parallelism/tensor-parallelism.md` |
 | `src/distributed/pipeline_parallel/` (families — `PP_FAMILY_SPECS`, the registered and refused families — model_rules, partition, stage, stage_losses, groups, the `PipelineRunner` schedule engine in runner) | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` (stage shards) |
@@ -109,8 +110,8 @@ changes.
 
 | `src/` area | Owning doc page(s) |
 |---|---|
-| EP layer wrappers `src/distributed/expert_parallel/layers/<family>.py` | the per-family page under `agent-docs/models/` + `agent-docs/parallelism/expert-parallelism.md` (supported-models table) + `agent-docs/optimization/grouped-gemm.md` (supported-models table) |
-| `src/distributed/expert_parallel/layers/zaya.py`, `src/models/zaya.py` | `agent-docs/models/zaya.md` |
+| EP layer wrappers `src/distributed/expert_parallel/families/<family>.py` + `roster.py`, the family specs `src/models/moe/family_specs.py` | the per-family page under `agent-docs/models/` + `agent-docs/parallelism/expert-parallelism.md` (supported-models table) + `agent-docs/optimization/grouped-gemm.md` (supported-models table) |
+| `src/distributed/expert_parallel/families/zaya.py`, `src/models/zaya.py` | `agent-docs/models/zaya.md` |
 | `src/model_loading/parallel/loader.py`, `src/model_loading/parallel/load_rules.py`, `src/model_loading/parallel/whole_model.py`, `src/model_loading/model_preparation.py` (`apply_family_patches`, `apply_run_model_policies`), `src/model_loading/remote_code.py` (remote-class funnel, v4 shims, whole-file module-cache copies, the list-tie refusal) | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page; `agent-docs/optimization/flash-attention.md` (the FA4 and flex warm-up) |
 | `src/models/seq_cls_heads.py` (Gemma 4 + MoE Qwen3.5/3.6 seq-cls heads, registered by an import in `src/model_loading/model_preparation.py`, and the multimodal seq-cls roster) | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/preference/reward-modeling.md` |
 | `src/model_loading/tokenizer_setup.py` (processing class, chat template, special tokens, the `model_max_length` pin, `resolve_peft_processing_class`), `src/models/context_window.py` (the context window `max_length: null` resolves to, `is_bounded_length`, `bounded_row_length`) | `agent-docs/getting-started/configuration.md`, `agent-docs/reference/configuration-reference.md` |
@@ -122,7 +123,7 @@ changes.
 | `src/models/modality.py` (pure multimodal verdict off a config or a name) | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
 | `src/models/attention/layout.py` (head-dim and KV-head resolution across composite/per-layer configs, and the per-layer attention cost rules off `layer_types` — the MFU attention term), `src/callbacks/model_flops.py` (`RankFlopsModel`, `estimate_rank_flops`: the per-rank training FLOPs behind MFU / S-MFU) | `agent-docs/models/README.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `src/models/segment_markers.py` (per-family conv / linear-attention segment markers, the GatedDeltaNet kernel refusal) | `agent-docs/data/collators.md` (Document isolation under packing), `agent-docs/optimization/padding-free-collator.md`, `agent-docs/training-methods/preference/smpo.md` |
-| new model support | new `agent-docs/models/<family>.md` + every family roster listed in step 7 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` |
+| new model support | new `agent-docs/models/<family>.md` + every family roster listed in step 8 (*Wire the docs*) of `agent-docs/models/adding-a-model.md` |
 
 ## Collators & data
 
@@ -164,7 +165,7 @@ changes.
 |---|---|
 | `src/callbacks/` (ParameterStatsCallback, GenerateExamplesCallback, EfficiencyCallback, MoEMetricsCallback, BalancingBiasCallback, VariableSchedulerCallback, TorchProfilerCallback) | `agent-docs/training-methods/callbacks.md` |
 | `src/callbacks/factory.py` (`build_run_callbacks`, the roster order, `reorder_integration_callbacks_last`) | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
-| `src/models/moe_balancing.py` (`resolve_balancing_mode`, the router field registries), `src/models/moe_aux_loss.py` (the aux-loss gradient under reentrant checkpointing) and `src/callbacks/balancing.py` (`configure_moe_balancing`, `apply_balancing_mode`, the export contract, `BalancingBiasCallback`) | `agent-docs/training-methods/callbacks.md` (MoE balancing modes), `agent-docs/models/README.md` |
+| `src/models/moe/balancing.py` (`resolve_balancing_mode`, the export slot contract), `src/models/moe/config_fields.py` (expert-count / top-k / FFN-width spellings), `src/models/moe/router_logits.py` (declared routers), `src/models/moe/router_aux_gradient.py` (the aux-loss gradient under reentrant checkpointing) and `src/callbacks/balancing.py` (`configure_moe_balancing`, `apply_balancing_mode`, the export contract, `BalancingBiasCallback`) | `agent-docs/training-methods/callbacks.md` (MoE balancing modes), `agent-docs/models/README.md` |
 | `src/hardware.py` (this rank's device, architecture predicates, `supports_grouped_mm`, GPU model detection, peak-FLOPS registry, host-RAM probe) | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/optimization/grouped-gemm.md` (Detection and disabling) |
 
 ## Environments (Async GRPO with Environments)
@@ -267,7 +268,7 @@ what a user sets, runs or can combine there, update the page with its owner. A n
 | `human-docs/performance.md` | `src/kernels/`, `src/optimizers/`; `agent-docs/optimization/` (the numbers from `throughput-benchmarks.md`) |
 | `human-docs/rollout-servers.md` | `src/weight_sync/`, `Dockerfile.vllm` / `Dockerfile.sglang` + their compose files; `agent-docs/infrastructure/rollout-servers.md` |
 | `human-docs/troubleshooting.md` | a new user-facing failure mode; `agent-docs/reference/{troubleshooting,debugging}.md` |
-| `human-docs/models.md`, `human-docs/model-integration-cost.md` | the family roster, `src/distributed/expert_parallel/layers/`; `agent-docs/models/` |
+| `human-docs/models.md`, `human-docs/model-integration-cost.md` | the family roster, `src/distributed/expert_parallel/families/`; `agent-docs/models/` |
 | `human-docs/cookbooks/*.md` | the family's `examples/` recipes; its `agent-docs/models/` page |
 | `human-docs/installation.md`, `human-docs/quickstart.md` | `Dockerfile*`, the image tags, `examples/`; `agent-docs/infrastructure/docker.md`, `agent-docs/getting-started/` |
 | `human-docs/choosing-a-method.md`, `human-docs/training-methods/*.md` | `src/trainers/`, `scripts/training/**`; the method's `agent-docs/training-methods/` page |

@@ -2,8 +2,8 @@
 """The vLLM weight sync must run under expert TP for a plain full fine-tune, and reassemble the shards.
 
 ``_send_ep_expert_weights`` gathers with ``merge_lora=True`` unconditionally — it cannot know which
-layers hold native grouped adapters, and the fold is a no-op on an adapter-less weight. A
-``_reject_merge_lora_under_expert_tp`` keyed on that flag ALONE kills every vLLM-syncing GRPO run at
+layers hold native grouped adapters, and the fold is a no-op on an adapter-less weight. A merge_lora
+refusal keyed on that flag ALONE kills every vLLM-syncing GRPO run at
 ``expert_tp_size > 1``, PEFT or not. The other registered weight-sync tests all run at
 ``expert_tp_size == 1``, where neither the guard nor the ETP gather is reached.
 
@@ -27,7 +27,7 @@ import sys
 import torch
 from transformers import GptOssConfig, GptOssForCausalLM
 
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from tests.common.harness import gpu_test_main
@@ -52,7 +52,7 @@ def run(ctx):
     checks, metrics = {}, {}
     config = ParallelismConfig(ep_size=1, expert_tp_size=ETP_SIZE)
     model = build_model().to(ctx.device)
-    patch_moe_model_for_ep(model, config.ep_config())
+    apply_ep_layers(model, config.ep_config())
 
     etp_layers = [m for m in model.modules() if getattr(m, "expert_tp_size", 1) > 1]
     checks["layers_really_expert_tp_sharded"] = len(etp_layers) == N_LAYERS

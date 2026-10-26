@@ -36,7 +36,7 @@ from src.distributed.pipeline_parallel.partition import (
 )
 from src.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
-from src.models.moe_balancing import ROUTER_TOPK_FIELDS
+from src.models.moe.config_fields import ROUTER_TOPK_FIELDS
 from src.models.param_roles import persistent_buffers
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_INKLING_PP_OVERRIDES, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
 from tests.common.pp_fakes import registered_pp_backbones

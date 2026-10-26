@@ -26,7 +26,7 @@ from transformers.core_model_loading import revert_weight_conversion
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from src.models.param_roles import persistent_buffers
 from src.trainers.grpo.rollout import weight_push
 from src.trainers.grpo.rollout.weight_push import gather_and_send_weights

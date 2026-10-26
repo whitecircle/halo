@@ -13,7 +13,7 @@ from src.callbacks.efficiency import EfficiencyCallback, MFUMetrics, StepTimeMet
 from src.callbacks.model_flops import RankFlopsModel, _is_expert_param, estimate_rank_flops
 from src.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
 from src.kernels.lowp.spec import LowpSpec
-from src.models.moe_balancing import detect_moe_experts_topk
+from src.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from tests.common.parallelism import make_parallelism_config
 
 # Single-process topology: a test that exercises no parallel axis still owes the callback a real
@@ -297,7 +297,7 @@ def test_is_expert_param():
 def test_detect_moe_config_num_local_experts():
     config = MockConfig(num_local_experts=32, num_experts_per_tok=4)
     model = MockModel(config=config)
-    ne, tk = detect_moe_experts_topk(model)
+    ne, tk = (resolve_expert_count(model.config), resolve_router_topk(model.config))
     assert ne == 32, f"Expected num_experts=32, got {ne}"
     assert tk == 4, f"Expected top_k=4, got {tk}"
 
@@ -305,7 +305,7 @@ def test_detect_moe_config_num_local_experts():
 def test_detect_moe_config_num_experts():
     config = MockConfig(num_experts=16, top_k=2)
     model = MockModel(config=config)
-    ne, tk = detect_moe_experts_topk(model)
+    ne, tk = (resolve_expert_count(model.config), resolve_router_topk(model.config))
     assert ne == 16, f"Expected num_experts=16, got {ne}"
     assert tk == 2, f"Expected top_k=2, got {tk}"
 
@@ -313,14 +313,14 @@ def test_detect_moe_config_num_experts():
 def test_detect_moe_config_no_moe():
     config = MockConfig(hidden_size=4096)  # no MoE attrs
     model = MockModel(config=config)
-    ne, tk = detect_moe_experts_topk(model)
+    ne, tk = (resolve_expert_count(model.config), resolve_router_topk(model.config))
     assert ne == 0 and tk == 0, f"Expected (0, 0), got ({ne}, {tk})"
 
 
 def test_detect_moe_config_no_config():
     model = MockModel()  # no config attribute at all
     model.config = None
-    ne, tk = detect_moe_experts_topk(model)
+    ne, tk = (resolve_expert_count(model.config), resolve_router_topk(model.config))
     assert ne == 0 and tk == 0, f"Expected (0, 0), got ({ne}, {tk})"
 
 

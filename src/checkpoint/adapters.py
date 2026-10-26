@@ -270,3 +270,8 @@ def assert_no_expert_lora_adapter(adapter_dir: str) -> None:
         f"merge_expert_lora_on_save=True: the gathered EP save folds {folds}, producing a merged "
         "servable HF checkpoint."
     )
+
+
+def expert_lora_checkpoint_keys(attr: str) -> tuple[str, str]:
+    """The saved keys of expert weight ``attr``'s two native adapters, relative to its EP layer."""
+    return f"experts.{attr}.lora_A", f"experts.{attr}.lora_B"

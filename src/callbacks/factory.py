@@ -12,8 +12,8 @@ from src.callbacks.moe_metrics import MoEMetricsCallback
 from src.callbacks.parameter_stats import ParameterStatsCallback
 from src.callbacks.torch_profiler import TorchProfilerCallback
 from src.distributed.parallelism_config import ParallelismConfig
+from src.models.moe.balancing import BIAS_UPDATE_MODES, BalancingMode
 from src.models.moe.config_fields import resolve_moe_routing
-from src.models.moe_balancing import BIAS_UPDATE_MODES, BalancingMode
 from src.runtime.ranks import get_global_world_size
 
 logger = logging.getLogger(__name__)

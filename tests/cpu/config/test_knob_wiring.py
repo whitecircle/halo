@@ -107,7 +107,7 @@ def _mixed_precision_stub(
 
 def _moe_model_kwargs():
     """Ctor kwargs whose model reads as a REGISTERED MoE family. The refusal resolves the family
-    through the EP-wrapper registry (``ep_wraps_experts``), so a config without a registered
+    through the EP-wrapper registry (``wraps_experts``), so a config without a registered
     ``model_type`` never has plain expert tensors and would pin nothing."""
     return {"model": SimpleNamespace(config=SimpleNamespace(num_local_experts=8, model_type="qwen3_moe"))}
 

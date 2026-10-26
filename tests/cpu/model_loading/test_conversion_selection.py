@@ -11,6 +11,7 @@ each declaring family's real mapping is pinned bitwise against ``from_pretrained
     python tests/cpu/model_loading/test_conversion_selection.py
 """
 
+import dataclasses
 import json
 from functools import cache
 from types import SimpleNamespace
@@ -32,7 +33,6 @@ from transformers.core_model_loading import (
 
 import src.model_loading.lazy_safetensors.conversion_selection as conversion_selection
 from src.checkpoint.reading import resolve_checkpoint_weights
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.lazy_plan import WeightPlanner, family_key_mapping, loaded_key_mapping
 from src.model_loading.lazy_safetensors.conversion import (
     Concat,
@@ -55,6 +55,9 @@ from src.model_loading.lazy_safetensors.materialization import (
     WeightPlan,
 )
 from src.model_loading.model_preparation import resolve_auto_model_class
+from src.models.moe.expert_layout import ExpertLayoutKind
+from src.models.moe.family_specs import STEP3P7
+from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tiny_models import module_with_weight_keys
 
 E, M, H = 4, 6, 8
@@ -409,11 +412,9 @@ def _shell(model_type: str):
 
 def test_resolution_is_declaration_gated():
     """Families that declare no conversion keys resolve to None — the pass cannot perturb them."""
-    assert resolve_conversion_steps(_shell("qwen3_moe"), ep_layer_class_by_model_type().get("qwen3_moe")) is None
-    assert resolve_conversion_steps(torch.nn.Module(), None) is None
-    assert (
-        resolve_conversion_steps(_shell("glm4_moe_lite"), ep_layer_class_by_model_type().get("glm4_moe_lite")) is None
-    )
+    assert resolve_conversion_steps(_shell("qwen3_moe"), "qwen3_moe") is None
+    assert resolve_conversion_steps(torch.nn.Module(), "llama") is None
+    assert resolve_conversion_steps(_shell("glm4_moe_lite"), "glm4_moe_lite") is None
 
 
 def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
@@ -423,15 +424,13 @@ def test_a_declared_key_that_resolves_to_nothing_raises(monkeypatch):
     meta-device init values with no error anywhere."""
     monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
     with pytest.raises(ValueError, match="declares hub-conversion key"):
-        resolve_conversion_steps(_shell("inkling_mm_model"), ep_layer_class_by_model_type().get("inkling_mm_model"))
+        resolve_conversion_steps(_shell("inkling_mm_model"), "inkling_mm_model")
 
 
 def test_a_resolvable_key_still_returns_its_steps(monkeypatch):
     """Anti-vacuity: the raise is about an EMPTY resolution, not about declaring a key at all."""
     monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: [_ENTRIES[0]])
-    steps = resolve_conversion_steps(
-        _shell("inkling_mm_model"), ep_layer_class_by_model_type().get("inkling_mm_model")
-    )
+    steps = resolve_conversion_steps(_shell("inkling_mm_model"), "inkling_mm_model")
     # The entry must come back TRANSLATED, not merely counted: a resolution of the right arity that
     # dropped the rename would load the vendor namespace unconverted just the same.
     (step,) = steps
@@ -444,7 +443,7 @@ def test_a_non_declaring_family_is_untouched_by_an_absent_mapping(monkeypatch):
     """Anti-vacuity: the raise keys on the family's declaration, not on the mapping lookup — a family
     that declares nothing never looks one up."""
     monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda key: None)
-    assert resolve_conversion_steps(_shell("qwen3_moe"), ep_layer_class_by_model_type().get("qwen3_moe")) is None
+    assert resolve_conversion_steps(_shell("qwen3_moe"), "qwen3_moe") is None
 
 
 def test_a_sub_model_key_is_scoped_under_its_module_path(monkeypatch):
@@ -467,10 +466,11 @@ def test_a_sub_model_key_is_scoped_under_its_module_path(monkeypatch):
         ],
     }
     monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", entries.get)
-    monkeypatch.setattr(ep_layer_class_by_model_type()["step3p7"], "_HUB_CONVERSION_KEYS", tuple(entries))
+    declared = dataclasses.replace(STEP3P7, hub_conversion_keys=tuple(entries))
+    monkeypatch.setattr(conversion_selection, "find_moe_family_spec", lambda _model_type: declared)
     shell = _shell("step3p7")
 
-    root, attn, in_proj = resolve_conversion_steps(shell, ep_layer_class_by_model_type().get("step3p7"))
+    root, attn, in_proj = resolve_conversion_steps(shell, "step3p7")
     assert (root.scope, attn.scope, in_proj.scope) == ("", "vision_model", "vision_model")
     heads = shell.config.vision_config.num_attention_heads
     assert dict(in_proj.targets)["attn.q_proj.weight"] == (TakeChunk(0, 0, 3), PermuteRope(heads))
@@ -479,7 +479,7 @@ def test_a_sub_model_key_is_scoped_under_its_module_path(monkeypatch):
 def _declaring_model_types() -> list[str]:
     """Every model_type whose EP layer class declares hub-conversion keys — read off the classes, so
     a family that grows a declaration is covered without touching this file."""
-    return sorted(mt for mt, cls in ep_layer_class_by_model_type().items() if cls._HUB_CONVERSION_KEYS)
+    return sorted(mt for mt, cls in ep_layer_class_by_model_type().items() if cls.FAMILY.hub_conversion_keys)
 
 
 @cache
@@ -500,14 +500,15 @@ def test_canonical_checkpoint_keys_resume_untouched(model_type):
     applies before accepting a rename — and this test drives the full mapping seam the loaders use.
     """
     layer_cls = ep_layer_class_by_model_type()[model_type]
-    assert layer_cls._PER_EXPERT_UNFUSED_KEYS is None and not layer_cls._EXPORT_KEY_RENAMES, (
+    layout = layer_cls.FAMILY.expert_layout
+    assert layout.kind is ExpertLayoutKind.FUSED and not layer_cls.FAMILY.export_key_renames, (
         f"{layer_cls.__name__} exports expert/replicated keys under names the live state dict does "
         f"not carry, so the state dict is no longer the checkpoint key space this test checks — "
         f"extend the oracle with the family's gathered-save layout."
     )
     model = _shell(model_type)
-    steps = resolve_conversion_steps(model, ep_layer_class_by_model_type().get(model_type))
-    assert steps, f"{model_type} declares {layer_cls._HUB_CONVERSION_KEYS} but resolved no steps"
+    steps = resolve_conversion_steps(model, model_type)
+    assert steps, f"{model_type} declares {layer_cls.FAMILY.hub_conversion_keys} but resolved no steps"
 
     keys = list(_canonical_checkpoint_keys(model_type))
     disk_to_model, fanout = family_key_mapping(model, keys)
@@ -597,12 +598,12 @@ def test_eager_replay_refuses_renames_it_cannot_reproduce_without_silent_loss(en
 def test_unsupported_declared_conversion_names_its_original_mapping_key(monkeypatch):
     model = module_with_weight_keys(["norm.weight"])
     model.config = SimpleNamespace(model_type="step3p7")
-    layer = ep_layer_class_by_model_type()["step3p7"]
-    monkeypatch.setattr(layer, "_HUB_CONVERSION_KEYS", ("vendor_bad_entry",))
+    declared = dataclasses.replace(STEP3P7, hub_conversion_keys=("vendor_bad_entry",))
+    monkeypatch.setattr(conversion_selection, "find_moe_family_spec", lambda _model_type: declared)
     bad = WeightConverter(source_patterns=["a", "b"], target_patterns="c", operations=[Chunk(dim=0)])
     monkeypatch.setattr(conversion_selection, "get_checkpoint_conversion_mapping", lambda _key: [bad])
     with pytest.raises(ValueError, match="multi-source.*vendor_bad_entry"):
-        resolve_conversion_steps(model, ep_layer_class_by_model_type().get("step3p7"))
+        resolve_conversion_steps(model, "step3p7")
 
 
 if __name__ == "__main__":

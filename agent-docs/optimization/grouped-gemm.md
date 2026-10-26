@@ -164,7 +164,7 @@ All EP MoE layers store expert weights in matmul convention `[E, K, N]` (so `A @
 - **Fused-GLU families** (everything but Qwen3, Bailing and GptOss): transpose from `F.linear` convention (`gate_up_proj → [E, H, 2M]`, `down_proj → [E, M, H]`) in `_init_fused_glu_params`.
 - **GptOss**: matmul convention natively; the interleaved `gate_up_proj [E, H, 2M]` (`[g0,u0,g1,u1,…]`) is de-interleaved at init into `gate_proj_gmm`/`up_proj_gmm [E, H, M]` (even/odd cols), avoiding stride-2 slicing on `grouped_mm` output.
 
-Each family's `gather_expert_state_dict` reverses its conversion on save, so checkpoints stay compatible with the original architecture and non-EP inference. See [Checkpoints](../reference/checkpoints.md).
+Each family's `ExpertLayout` reverses its conversion on save, so checkpoints stay compatible with the original architecture and non-EP inference. See [Checkpoints](../reference/checkpoints.md).
 
 ## Running benchmarks
 

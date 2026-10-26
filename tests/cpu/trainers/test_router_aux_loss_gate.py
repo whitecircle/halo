@@ -17,7 +17,7 @@ import pytest
 import torch.nn as nn
 
 import src.trainers.mixins.validation as validation_module
-from src.models.moe_balancing import router_logits_forced_off
+from src.models.moe.router_logits import router_logits_forced_off
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from src.trainers.grpo.offline import OfflineGRPOTrainer

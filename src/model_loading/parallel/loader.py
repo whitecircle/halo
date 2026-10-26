@@ -8,7 +8,7 @@ from accelerate.logging import get_logger
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.rank_uniform_env import agree_rank_uniform_env
 from src.hardware import is_blackwell_gpu
@@ -33,7 +33,7 @@ from src.models.attention.backend_setup import patch_flex_attention_compile
 from src.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from src.models.attention.selection import resolve_attn_implementation, validate_attn_implementation
 from src.models.config_access import apply_config_overrides
-from src.models.moe_balancing import config_has_experts
+from src.models.moe.config_fields import has_routed_experts
 from src.runtime.consensus import reject_across_ranks
 from src.runtime.load_coordination import joined_node_load
 from src.runtime.ranks import get_local_rank
@@ -149,7 +149,7 @@ def _load_undistributed_model(
             **from_pretrained_kwargs,
         )
     if wraps_experts:
-        model = patch_moe_model_for_ep(model, ep_config)
+        model = apply_ep_layers(model, ep_config)
     mode = "Grouped GEMM wrappers (no EP distribution)" if wraps_experts else "standard DDP"
     logger.info(f"Model loaded with {mode}")
     return model
@@ -178,7 +178,7 @@ def _dispatch_model_loading(
         return model
     if pc.has_ep_group and pc.is_tp_mode:
         return load_ep_tp_model(*rung, preserve_checkpoint_precision=preserve_checkpoint_precision)
-    if pc.is_tp_mode and config_has_experts(from_pretrained_kwargs["config"]):
+    if pc.is_tp_mode and has_routed_experts(from_pretrained_kwargs["config"]):
         return load_tp_moe_model(
             *rung, preserve_checkpoint_precision=preserve_checkpoint_precision, wraps_experts=wraps_experts
         )
@@ -254,7 +254,7 @@ def load_distributed_model(
         model_name_or_path, trust_remote_code=trust_remote_code, revision=source.revision
     )
     apply_config_overrides(model_config, model_config_overrides)
-    wraps_experts = parallelism_config.needs_ep_wrappers and config_has_experts(model_config)
+    wraps_experts = parallelism_config.needs_ep_wrappers and has_routed_experts(model_config)
     # Before the process groups and the meta shell: config.json is all the sharding arithmetic needs,
     # so failing here costs a second instead of minutes.
     reject_unsupported_model(parallelism_config, model_config, sinks_policy=sinks_policy, wraps_experts=wraps_experts)

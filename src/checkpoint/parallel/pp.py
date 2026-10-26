@@ -24,7 +24,6 @@ from src.checkpoint.weights_source import (
     weights_read_from,
 )
 from src.checkpoint.writing import StreamingShardWriter, merge_shard_index, save_dtype_caster, write_merged_index
-from src.distributed.expert_parallel.expert_weights import gather_ep_layer_weights
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.log import KEY_PREVIEW_COUNT
@@ -110,7 +109,7 @@ def _write_stage_tensors(
         guard.run(partial(_write_hub_group, writer, stage, hub))
     for layer_name, module in named_ep_layers(stage):
         # One gathered layer at a time bounds the writer's peak to a layer, not the whole stage.
-        ep_weights = gather_ep_layer_weights(layer_name, module, merge_lora=False, retain=is_writer)
+        ep_weights = module.gather_layer_state_dict(layer_name, retain=is_writer)
         hub = ((stage.global_parameter_name(key), cast(key, tensor)) for key, tensor in ep_weights.items())
         guard.run(partial(_write_hub_group, writer, stage, hub))
         del ep_weights

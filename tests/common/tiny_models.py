@@ -273,7 +273,7 @@ def _tiny_bailing(overrides: dict) -> PreTrainedModel:
     return AutoModelForCausalLM.from_config(config, trust_remote_code=True)
 
 
-# One entry per EP MoE family (``src/distributed/expert_parallel/layers``), keyed by the ``model_type``
+# One entry per EP MoE family (``src/distributed/expert_parallel/families``), keyed by the ``model_type``
 # its tiny model carries, which the GPU suites take as ``--family``.
 # ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the keys to the EP registry, so a new
 # family without a tiny model fails there.

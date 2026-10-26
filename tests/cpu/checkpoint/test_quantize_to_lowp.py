@@ -20,16 +20,16 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from src.distributed.expert_parallel.expert_weights import hf_fused_expert_keys, per_expert_layouts
 from src.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
 from src.kernels.lowp.spec import MLP_PROJECTIONS
+from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
+from src.models.moe.family_specs import per_expert_layouts
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
 
 _quantize_to_lowp = load_script_module("scripts/after_training/quantize_to_lowp.py")
 _DEFAULT_EXCLUDE = _quantize_to_lowp._DEFAULT_EXCLUDE
 _DEFAULT_INCLUDE = _quantize_to_lowp._DEFAULT_INCLUDE
-_FUSED_EXPERT_SUFFIXES = _quantize_to_lowp._FUSED_EXPERT_SUFFIXES
 _QUANTIZABLE_WEIGHT_NAMES = _quantize_to_lowp._QUANTIZABLE_WEIGHT_NAMES
 _fused_expert_axis = _quantize_to_lowp._fused_expert_axis
 _should_quantize = _quantize_to_lowp._should_quantize
@@ -379,7 +379,7 @@ def test_fused_expert_axis_missing_config(tmp_path):
 
 def test_unknown_family_fused_expert_raises():
     """A 3-D expert whose family declares no axis must fail loud, never quantize on a guessed axis."""
-    with pytest.raises(ValueError, match="matches no EP layer class"):
+    with pytest.raises(ValueError, match="matches no MoE family spec"):
         _quantize_one_expert("not_a_registered_family", (4, 64, 64))
 
 
@@ -404,7 +404,7 @@ def test_an_expert_bank_under_an_undeclared_fused_name_is_refused_before_any_wri
     with open(src / "config.json", "w") as f:
         json.dump({"model_type": "step3p7"}, f)
 
-    with pytest.raises(ValueError, match="no EP layer class declares its name as a fused expert key"):
+    with pytest.raises(ValueError, match="its name is not a fused expert key"):
         quantize_checkpoint(str(src), str(out), "mxfp8")
     assert not out.exists(), "a refused conversion must not create its output directory"
 
@@ -471,23 +471,19 @@ def test_the_quantizable_name_set_is_derived_from_the_two_rosters():
     (``fc1``/``fc2``, a bare ``mlp``/``feed_forward``), and a new family's per-expert layout has to
     be remembered a second time to be covered at all.
     """
-    declared = set(MLP_PROJECTIONS) | set(hf_fused_expert_keys()) | {k for keys in per_expert_layouts() for k in keys}
+    declared = set(MLP_PROJECTIONS) | set(HF_FUSED_EXPERT_KEYS) | {k for keys in per_expert_layouts() for k in keys}
     assert set(_QUANTIZABLE_WEIGHT_NAMES) == declared
     assert {"gate_proj", "up_proj", "down_proj", "gate_up_proj", "w1", "w2", "w3"} <= declared
     for never_converted in ("fc1", "fc2", "mlp", "feed_forward", "experts"):
         assert never_converted not in _QUANTIZABLE_WEIGHT_NAMES
 
 
-def test_fused_expert_suffixes_are_the_class_declared_union():
-    """The fused-expert names must come from the EP layer classes' ``_HF_FUSED_EXPERT_KEYS``, not a
-    hand-kept list: a hardcoded list drifts from the roster (both by missing a new family's fused
-    tensor and by naming projections — w1/w2/w3, fc1/fc2 — that no family stores fused, which
-    invites quantizing the wrong tensor on a guessed axis)."""
-    assert set(_FUSED_EXPERT_SUFFIXES) == set(hf_fused_expert_keys())
-    # Anchored against the declarations so a same-source comparison alone cannot pass vacuously.
-    assert {"gate_up_proj", "down_proj"} <= set(_FUSED_EXPERT_SUFFIXES)
+def test_fused_expert_names_name_no_per_expert_projection():
+    """``HF_FUSED_EXPERT_KEYS`` names fused banks only: a per-expert projection (w1/w2/w3, fc1/fc2) among
+    them invites quantizing the wrong tensor on a guessed axis."""
+    assert {"gate_up_proj", "down_proj"} <= set(HF_FUSED_EXPERT_KEYS)
     for never_fused in ("w1", "w2", "w3", "fc1", "fc2"):
-        assert never_fused not in _FUSED_EXPERT_SUFFIXES
+        assert never_fused not in HF_FUSED_EXPERT_KEYS
 
 
 @pytest.mark.parametrize("poison", [float("nan")])

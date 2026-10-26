@@ -26,18 +26,19 @@ from transformers.models.cohere2_moe.modeling_cohere2_moe import (
 )
 
 from src.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, Cohere2MoeUlyssesAttention
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.distributed.expert_parallel.layers.cohere2_moe import EPCohere2MoELayer
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
+from src.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from src.model_loading.buffer_repair import finalize_loaded_model
-from src.models.moe_balancing import (
+from src.models.moe.balancing import (
     accepts_native_balancing_bias,
     is_transient_balancing_router,
     resolve_balancing_mode,
 )
+from src.models.moe.expert_layout import ExpertLayout
 from tests.common.models import TINY_COHERE2_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
+from tests.common.rosters import ep_layer_class_by_model_type
 
 E = TINY_COHERE2_MOE_CONFIG["num_experts"]
 NOISE_BOUND = 1e-5  # packed-isolation drift ceiling; leaks read ~1e-1, four orders above
@@ -65,16 +66,18 @@ def test_registrations():
     assert ULYSSES_ATTENTION_MAP["Cohere2MoeAttention"] is Cohere2MoeUlyssesAttention
     assert "Cohere2MoeAttention" in TP_SHARDABLE_ATTENTION_CLASSES
 
-    assert EPCohere2MoELayer._PER_EXPERT_UNFUSED_KEYS is None  # base gather emits the fused pair
-    assert EPCohere2MoELayer.hub_per_expert_keys() == ("gate_proj", "up_proj", "down_proj")
-    assert EPCohere2MoELayer._supports_bias_balancing
+    # The gather emits the fused pair; the per-expert spelling is what unfuse_moe_experts writes.
+    assert EPCohere2MoELayer.FAMILY.expert_layout == ExpertLayout(
+        per_expert_keys=("gate_proj", "up_proj", "down_proj")
+    )
+    assert EPCohere2MoELayer.SUPPORTS_BIAS_BALANCING
     assert EPCohere2MoELayer._supports_transient_balancing_bias
-    assert EPCohere2MoELayer._NATIVE_BALANCING_BIAS_ATTR is None  # no exported slot in the family
-    assert not EPCohere2MoELayer._ep_severs_aux_loss  # the wrapper calls the real gate module
-    assert EPCohere2MoELayer._supports_routing_replay
-    assert EPCohere2MoELayer._supports_gradient_checkpointing
-    assert not EPCohere2MoELayer._supports_weight_sync
-    assert not EPCohere2MoELayer._supports_lazy_loading
+    assert EPCohere2MoELayer.FAMILY.balancing_slot is None  # no exported slot in the family
+    assert not EPCohere2MoELayer.SEVERS_AUX_LOSS  # the wrapper calls the real gate module
+    assert EPCohere2MoELayer.FAMILY.supports_routing_replay
+    assert EPCohere2MoELayer.FAMILY.supports_gradient_checkpointing
+    assert EPCohere2MoELayer.FAMILY.weight_sync_refusal is not None
+    assert not EPCohere2MoELayer.FAMILY.supports_lazy_loading
 
 
 def test_model_type_registry_resolves_both_spellings():
@@ -200,7 +203,7 @@ def test_tiny_save_load_roundtrip(tmp_path):
     with safe_open(tmp_path / "model.safetensors", framework="pt") as shard:
         saved = set(shard.keys())
     assert "model.layers.0.mlp.experts.0.gate_proj.weight" in saved, (
-        "the save-side per-expert revert is gone — hub_per_expert_keys and unfuse_moe_experts "
+        "the save-side per-expert revert is gone — the spec's per_expert_keys and unfuse_moe_experts "
         "no longer describe this family's checkpoints"
     )
     assert not any(key.endswith("experts.gate_up_proj") for key in saved)

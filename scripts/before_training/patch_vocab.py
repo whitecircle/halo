@@ -30,7 +30,6 @@ import torch
 from accelerate import PartialState
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import (
     add_device_map_arg,
     add_dtype_arg,

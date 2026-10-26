@@ -83,20 +83,20 @@ already applied `save_dtype_caster` (`src/checkpoint/writing.py` — BF16 except
 module-tree keep-sets: norms, balancing tensors, the family's fp32 pins; a training checkpoint keeps
 every tensor at its live dtype), so the stored dtype is what the merge writes. The index metadata is HF's own — there is no `merged_from_*` marker.
 
-- **Family support is class-owned, not a table.** `resolve_ep_merge_layer_class` /
-  `supported_ep_merge_model_types` (`expert_weights.py`, which also owns `expert_weight_roots` and
-  `to_hub_layer_key`) map a checkpoint's `model_type` to the EP layer class via each class's
-  `HF_MODEL_TYPES`; the transform itself is that class's `merge_shards_to_hf` (`expert_gather.py`,
-  overridden where the layout differs). Construction and save time gate on
+- **Family support is the spec's, not a table.** `find_moe_family_spec` maps a checkpoint's
+  `model_type` to its `MoEFamilySpec` (`src/models/moe/family_specs.py`, which also owns
+  `expert_weight_roots`); the merge writes the spec's `expert_layout` through `to_hub_expert_tensors`
+  (`src/models/moe/expert_layout.py`), the transform the gathered save applies, then `spec.to_hub_key`.
+  Construction and save time gate on
   `reject_unmergeable_ep_sharded_save` (`src/checkpoint/parallel/ep.py`), which among its refusals
-  covers two family cases: a `model_type` no EP layer class claims, and a model whose load converted
+  covers two family cases: a `model_type` no family spec claims, and a model whose load converted
   names the merge cannot respell (the gathered save reverts them through transformers' save-side
   conversion, which a key-by-key merge stream cannot apply) — Step-3.7 Flash, Inkling, DeepSeek-V4 and GLM-5 Next hubs, a SigLIP tower
   (Command A+, LFM2-VL), a legacy Mistral 3 checkpoint. Laguna's renames are the merge's own
-  (`to_hub_layer_key`), so it merges, as do the families whose loads convert only the experts.
+  (`MoEFamilySpec.to_hub_key`), so it merges, as do the families whose loads convert only the experts.
 - GptOss gate/up are de-interleaved for grouped-GEMM training and re-interleaved on merge; the expert
   key set (incl. the 2-D `gate_up_proj_bias`/`down_proj_bias`) is derived from `expert_weight_roots()`
-  in `src/distributed/expert_parallel/expert_weights.py`, not hand-listed.
+  in `src/models/moe/family_specs.py`, not hand-listed.
 
 ### `merge_peft_adapters.py`
 
@@ -138,7 +138,7 @@ trained dtype. Applies `apply_training_sidecars` to the loaded model (see below)
 Post-training quantize bf16/fp32 → block-scaled **mxfp8 / mxfp4 / nvfp4** (compressed-tensors triples +
 a manifest). Pairs with the QAT training path (`lowp_precision: …`). Flags: `--input_dir`, `--output_dir`,
 `--format {mxfp8,mxfp4,nvfp4}`, `--contraction_axis` (default -1; **2-D `*.weight` matrices only** —
-a fused 3-D expert tensor uses the `HF_FUSED_EXPERT_CONTRACTION_AXIS` its EP layer class declares and
+a fused 3-D expert tensor uses the `fused_contraction_axis` its family spec declares and
 ignores the flag, and an unresolvable family raises rather than guessing), `--include`/`--exclude`
 (regex), `--verify`, and the four training-scope flags the checkpoint does not carry:
 `--lowp_apply_dense_mlp` / `--lowp_apply_moe_experts` (both default on) and
@@ -164,9 +164,9 @@ Rewrite a gathered checkpoint's fused expert tensors (`experts.gate_up_proj` `[E
 `experts.down_proj`) into the per-expert hub keys `experts.{i}.{gate,up,down}_proj.weight` for
 engines that only read those (vLLM's `glm4_moe_lite`). Flags: `--input_dir`, `--output_dir`, plus
 `--max_shard_size`. Weights are unchanged — key layout and the gate/up split only. Projection names
-come from the family's EP layer class (`EPMoELayerBase.hub_per_expert_keys`) —
+come from the family's spec (`MoEFamilySpec.expert_layout.per_expert_keys`) —
 `gate_proj`/`up_proj`/`down_proj` for most families, `w1`/`w3`/`w2` for LFM-2 and DeepSeek-V4. A
-family whose class declares no per-expert keys is **refused**: its checkpoints never store one
+family whose spec declares no per-expert keys is **refused**: its checkpoints never store one
 tensor per expert (fused-native, or already interleaved as engines expect), so every name emitted
 would be one nothing reads. A checkpoint with no fused expert keys is copied through.
 
@@ -205,8 +205,8 @@ policy) hold training state the weights cannot. `apply_training_sidecars(model, 
 (`src/checkpoint/sidecars.py`) is the single seam that re-applies both to an assembled model:
 it restores the balancing tensors **at their trained precision** (a bf16 round trip quantizes away
 the ~1e-3 sign steps), then, only where the source ships no weights of its own (a PEFT adapter
-dir), fills the native slots from the sidecar via `apply_router_balancing_sidecar`
-(`src/models/moe_balancing.py`, off the slot registry the EP layer classes register into) and **warns**
+dir), fills the native slots from the sidecar via `apply_balancing_bias_sidecar`
+(`src/models/moe/balancing.py`, off the family spec's `balancing_slot`) and **warns**
 about routers whose bias was transient — those exports serve without it. `merge_peft_adapters.py`
 and `convert_to_bf16.py` call it and print the returned actions; `copy_training_sidecars` moves
 `EXPORT_SIDECAR_FILES` into an output dir a full save did not write them to.
@@ -221,9 +221,9 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   DTensor probe sees plain tensors, takes the rank-0 `save_pretrained` branch, and PEFT's
   shared-tensor scan raises on the first param that branch cannot address. Any new save path must
   reshard first.
-- **GptOss EP-save biases** — `EPGptOssMoELayer.gather_expert_state_dict`
-  (`src/distributed/expert_parallel/layers/gpt_oss.py`) carries the 2-D `gate_up_proj_bias` /
-  `down_proj_bias` alongside the 3-D expert weights, so the gathered checkpoint reloads cleanly.
+- **GptOss EP-save biases** — the `INTERLEAVED_GLU` expert layout (`src/models/moe/expert_layout.py`)
+  carries the 2-D `gate_up_proj_bias` / `down_proj_bias` alongside the 3-D expert weights, so the
+  gathered checkpoint reloads cleanly.
 - **CP-only state_dict drops dense MLP only on sparse layers** — `UlyssesModel.state_dict`
   (`src/distributed/context_parallel/ulysses_model.py`) filters duplicate dense `.mlp.{gate,up,down}_proj`
   keys per layer, gated on layers that actually carry routed experts. A model-global filter would drop
@@ -238,8 +238,8 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   export resolves only through vLLM's transformers backend, generation quality unverified here), and
   SGLang 0.5.17's loader reads the pre-transformers-5.14 per-expert layout, not the native fused one
   the trainer holds. RL weight sync is refused at construction for both, off the engine client's
-  `UNSERVABLE_MODEL_TYPES` (`src/weight_sync/clients/`) — **not** off the layer class, whose
-  `_supports_weight_sync = False` covers glm5_next, inkling and cohere2_moe instead. Zaya's gathered
+  `UNSERVABLE_MODEL_TYPES` (`src/weight_sync/clients/`) — **not** off the family spec, whose
+  `weight_sync_refusal` covers glm5_next, inkling and cohere2_moe instead. Zaya's gathered
   save is the native fused layout (`experts.gate_up_proj` / `down_proj`), which `from_pretrained`
   reads back directly.
 - **VLM re-save must persist the processor** — `merge_peft_adapters` / `convert_to_bf16` /

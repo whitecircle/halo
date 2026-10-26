@@ -11,7 +11,7 @@ from accelerate.logging import get_logger
 from transformers import PreTrainedModel
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.patching import ep_claimed_blocks
+from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from src.hardware import current_device
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.checkpoint_coverage import from_pretrained_verified

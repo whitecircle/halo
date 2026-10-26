@@ -25,11 +25,12 @@ from transformers.models.glm4_moe_lite import Glm4MoeLiteConfig
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteMoE
 from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.families.roster import ep_layer_classes
+from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from src.distributed.expert_parallel.moe_layer.shared_experts_layer import EPGroupLimitedMoELayerBase
+from src.models.moe.family_specs import MoEFamilySpec
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -277,7 +278,7 @@ def test_a_knob_can_be_opted_out_under_either_of_its_spellings():
         # Claims nothing: a test-local subclass that inherited GLM-4's registrations would shadow the
         # real family in every registry walked by module name or model_type.
         HF_MODULE_NAMES = ()
-        HF_MODEL_TYPES = ()
+        FAMILY = MoEFamilySpec(model_types=())
         _OPTIONAL_ROUTING_KNOBS = ("num_group", "topk_group")
 
     torch.manual_seed(0)

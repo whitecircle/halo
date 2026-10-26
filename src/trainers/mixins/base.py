@@ -25,8 +25,10 @@ from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorW
 from src.distributed.context_parallel.ulysses_model import UlyssesModel, find_ulysses_model
 from src.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
 from src.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
-from src.distributed.expert_parallel.moe_layer.expert_lora import install_ep_aware_disable_adapter
+from src.distributed.expert_parallel.moe_layer.expert_lora import (
+    install_ep_aware_disable_adapter,
+    model_has_expert_lora,
+)
 from src.distributed.fsdp import (
     IdentityParamSet,
     make_disable_adapter_fsdp2_safe,
@@ -51,7 +53,7 @@ from src.model_loading.liger.dispatch import (
 )
 from src.models.attention.sdpa_flex_sliding import reject_full_determinism_after_warmup
 from src.models.config_access import config_sources, snapshot_special_token_ids
-from src.models.moe_balancing import ep_wraps_experts
+from src.models.moe.family_specs import wraps_experts
 from src.models.peft_adapters import lora_fold_targets
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.models.unwrapping import find_peft_model, unwrap_framework_wrappers
@@ -607,7 +609,7 @@ class DistributedTrainerMixin(
         # adapters too, so they see a frozen base, and restore trainability on the sharded params.
         peft_model = find_peft_model(self.model)
         if peft_model is not None:
-            if has_ep_lora(self.model):
+            if model_has_expert_lora(self.model):
                 install_ep_aware_disable_adapter(peft_model)
             make_disable_adapter_fsdp2_safe(peft_model, self.model)
 
@@ -726,7 +728,7 @@ class DistributedTrainerMixin(
         """
         if not self.parallelism_config.merge_expert_lora_on_save:
             return
-        if not has_ep_lora(self.model):
+        if not model_has_expert_lora(self.model):
             raise ValueError(
                 "merge_expert_lora_on_save=True but this model built no native grouped expert "
                 "adapters, so there is nothing to fold and the flag would be silently ignored. It "
@@ -854,7 +856,7 @@ class DistributedTrainerMixin(
             else:
                 remedy = (
                     "The EP family wrapper must declare every trainable weight it owns: expert shards in "
-                    "expert_named_params() (via _EXPERT_WEIGHT_ATTR_ROOTS) and replicated submodules in "
+                    "expert_named_params() (via FAMILY.expert_weight_roots) and replicated submodules in "
                     "replicated_named_params(), so the layer's grad-sync hooks cover it."
                 )
             reason = (
@@ -1534,7 +1536,7 @@ class DistributedTrainerMixin(
         if not (
             config.ep_group_size > 1
             or (
-                ep_wraps_experts(config.needs_ep_wrappers, getattr(self.model, "config", None))
+                wraps_experts(getattr(self.model, "config", None), wrappers_requested=config.needs_ep_wrappers)
                 and not config.experts_fsdp_managed
             )
         ):

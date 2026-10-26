@@ -29,7 +29,7 @@ from accelerate.utils import extract_model_from_parallel
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -96,7 +96,7 @@ def run(ctx) -> dict:
     freeze_base_keep_expert_adapters(model)
 
     checks = {"experts_fsdp_managed": parallelism_config.ep_config().experts_fsdp_managed}
-    checks["has_expert_lora"] = has_ep_lora(model)
+    checks["has_expert_lora"] = model_has_expert_lora(model)
     adapted = sorted({a for m in ep_layers(model) for a in m._expert_lora_attrs})
     checks["multiple_adapted_attrs"] = len(adapted) >= 2  # else ordering cannot differ
     log(f"  adapted attrs={adapted}, experts_fsdp_managed={checks['experts_fsdp_managed']}")
@@ -140,12 +140,12 @@ def run(ctx) -> dict:
         for m in ep_layers(unwrapped)
         for a in m._expert_lora_attrs
     )
-    adapters_saved = {k: v.clone() for k, v in gather_ep_lora_adapters(unwrapped).items()}
+    adapters_saved = {k: v.clone() for k, v in gather_expert_lora_adapters(unwrapped).items()}
     log(f"  checkpoint={os.path.isdir(checkpoint)}, adapters={len(adapters_saved)}")
 
     log("\n[3/4] Zeroing adapters and skewing the per-rank attr order...")
     _zero_live_adapters(unwrapped)
-    corrupted = gather_ep_lora_adapters(unwrapped)
+    corrupted = gather_expert_lora_adapters(unwrapped)
     checks["corrupt_zeroed_adapters"] = any(
         not torch.equal(adapters_saved[k].cpu(), corrupted[k].cpu()) for k in adapters_saved
     )
@@ -153,7 +153,7 @@ def run(ctx) -> dict:
 
     log("\n[4/4] Restoring through the trainer's resume hooks (collective per adapter)...")
     trainer._load_from_checkpoint(checkpoint)
-    restored = gather_ep_lora_adapters(unwrapped)
+    restored = gather_expert_lora_adapters(unwrapped)
 
     checks["all_adapters_restored_nonzero"] = all(v.abs().sum().item() > 0 for v in restored.values())
     checks["adapters_close_to_trained"] = all(

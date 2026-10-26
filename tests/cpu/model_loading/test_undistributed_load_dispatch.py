@@ -23,7 +23,7 @@ from transformers import CONFIG_MAPPING
 import src.model_loading.parallel.loader as model_loading
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.model_source import ModelSource
-from src.models.moe_balancing import config_has_experts
+from src.models.moe.config_fields import has_routed_experts
 from tests.common.parallelism import make_parallelism_config
 
 PartialState()  # the loader's accelerate logger needs accelerate state initialized
@@ -46,7 +46,7 @@ def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
     with (
         patch.object(model_loading, "get_local_rank", return_value=0),
         patch.object(model_loading, "load_whole_model", return_value=loaded),
-        patch.object(model_loading, "patch_moe_model_for_ep", side_effect=lambda m, cfg: wrapped.append(cfg) or m),
+        patch.object(model_loading, "apply_ep_layers", side_effect=lambda m, cfg: wrapped.append(cfg) or m),
     ):
         model = model_loading._dispatch_model_loading(
             ModelSource("stub/checkpoint", None, "stub/checkpoint"),
@@ -54,7 +54,7 @@ def _dispatch(pc: ParallelismConfig, model_type: str) -> list:
             SimpleNamespace(),
             {"config": config},
             preserve_checkpoint_precision=False,
-            wraps_experts=pc.needs_ep_wrappers and config_has_experts(config),
+            wraps_experts=pc.needs_ep_wrappers and has_routed_experts(config),
             init_from_scratch=False,
         )
 
@@ -77,7 +77,7 @@ def test_a_moe_gets_the_expert_wrappers_without_any_expert_distribution():
 
 def test_a_dense_model_is_never_wrapped_even_with_grouped_gemm_requested():
     """``use_grouped_gemm`` is a default, not a declaration that the model has experts: a dense model
-    reaching ``patch_moe_model_for_ep`` patches zero MoE layers and raises."""
+    reaching ``apply_ep_layers`` patches zero MoE layers and raises."""
     assert _dispatch(_pc(use_grouped_gemm=True), "llama") == []
 
 

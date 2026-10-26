@@ -21,7 +21,7 @@ block-scaled convention:
     multiplier (dropping it rescales the weight).
 
 Which weights those are is derived from the rosters that decide what QAT quantized (the trainer's
-dense ``MLP_PROJECTIONS`` plus the EP layer classes' expert layouts), so the export cannot quantize a
+dense ``MLP_PROJECTIONS`` plus the family specs' expert layouts), so the export cannot quantize a
 weight the training forward left in bf16. Every other tensor (attention, embeddings, norms, lm_head,
 biases, and a VLM's vision tower / projector) is copied unchanged in its original dtype. The four
 ``lowp_*`` scope knobs the run trained with must be passed back in (``--lowp_apply_dense_mlp`` /
@@ -64,32 +64,24 @@ from src.checkpoint.reading import (
     read_checkpoint_config,
 )
 from src.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
-from src.distributed.expert_parallel.expert_weights import (
-    ep_layer_class_by_model_type,
-    experts_container_attrs,
-    hf_fused_expert_keys,
-    per_expert_layouts,
-)
 from src.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
 from src.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, kept_block_indices
 from src.log import configure_cli_logging
 from src.models.module_tree import decoder_layer_index, decoder_layer_stack_prefix
+from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
+from src.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_layouts
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
 
-# Fused MoE experts are bare nn.Parameters (3-D [num_experts, in, out], no .weight suffix). The names
-# come from the EP layer classes' _HF_FUSED_EXPERT_KEYS, so a new fused family needs no second list.
-_FUSED_EXPERT_SUFFIXES = hf_fused_expert_keys()
-
 # What low precision covers, derived from the two rosters that decide it: the dense MLP projections
 # the trainer converts (``MLP_PROJECTIONS``, which the QAT forward quantizes and nothing else) and the
-# expert-FFN weight names the EP layer classes declare, fused (3-D) and per-expert un-fused alike. A
+# expert-FFN weight names the family specs declare, fused (3-D) and per-expert un-fused alike. A
 # hand-written pattern would quantize weights the QAT forward left in bf16 (any `fc1`/`fc2` or bare
 # `mlp` match).
 _QUANTIZABLE_WEIGHT_NAMES = tuple(
     dict.fromkeys(
-        (*MLP_PROJECTIONS, *_FUSED_EXPERT_SUFFIXES, *(key for layout in per_expert_layouts() for key in layout))
+        (*MLP_PROJECTIONS, *HF_FUSED_EXPERT_KEYS, *(key for layout in per_expert_layouts() for key in layout))
     )
 )
 _DEFAULT_INCLUDE = rf"\b({'|'.join(_QUANTIZABLE_WEIGHT_NAMES)})\b"
@@ -106,7 +98,7 @@ _DEFAULT_EXCLUDE = (
 _VERIFY_RELERR_TOL = {"mxfp8": 0.08, "nvfp4": 0.25, "mxfp4": 0.35}
 # Per-expert un-fused hub layout (``...experts.3.gate_proj.weight``): expert weights other than the
 # 3-D fused tensor, told apart from a dense MLP projection by this segment alone. The container
-# spellings are the EP layer classes' own (``routed_experts`` beside ``experts``).
+# spellings are the family specs' own (``routed_experts`` beside ``experts``).
 _PER_EXPERT_SEGMENT = re.compile(rf"\b({'|'.join(experts_container_attrs())})\.\d+\.")
 # The dense projections the trainer converts (``MLP_PROJECTIONS``), by name: a per-expert roster
 # spelling outside an expert segment (LFM-2's dense ``feed_forward.w1``) trains in bf16 and stays so.
@@ -119,7 +111,7 @@ def _is_expert_weight(name: str, ndim: int) -> bool:
     This is the seam ``--lowp_apply_moe_experts`` turns on, so it is the complement of "dense MLP
     projection" under the same include roster.
     """
-    if ndim == 3 and name.endswith(_FUSED_EXPERT_SUFFIXES):
+    if ndim == 3 and name.endswith(HF_FUSED_EXPERT_KEYS):
         return True
     return _PER_EXPERT_SEGMENT.search(name) is not None
 
@@ -145,7 +137,7 @@ def _should_quantize(
     """
     if include.search(name) is None or exclude.search(name) is not None or tensor.dim() < 2:
         return False
-    if not (name.endswith(".weight") or (tensor.dim() == 3 and name.endswith(_FUSED_EXPERT_SUFFIXES))):
+    if not (name.endswith(".weight") or (tensor.dim() == 3 and name.endswith(HF_FUSED_EXPERT_KEYS))):
         return False
     if decoder_layer_index(name) in kept_blocks:
         return False
@@ -186,21 +178,21 @@ def _reject_unexportable_experts(
         ndim = len(header.get_shape())
         if header.get_dtype() not in SAFETENSORS_FLOAT_DTYPES:
             continue
-        if ndim == 3 and not name.endswith(_FUSED_EXPERT_SUFFIXES):
+        if ndim == 3 and not name.endswith(HF_FUSED_EXPERT_KEYS):
             raise ValueError(
-                f"{name!r} is a 3-D floating expert tensor in the low-precision scope, but no EP layer "
-                f"class declares its name as a fused expert key ({', '.join(_FUSED_EXPERT_SUFFIXES)}), so "
+                f"{name!r} is a 3-D floating expert tensor in the low-precision scope, but its name is not a "
+                f"fused expert key ({', '.join(HF_FUSED_EXPERT_KEYS)}), so "
                 f"it would be copied through unquantized beside its quantized siblings — an export that "
-                f"does not reproduce the QAT forward. Declare the family's hub fused-expert keys on its "
-                f"EP layer class (_HF_FUSED_EXPERT_KEYS), or pass --exclude to leave this bank out."
+                f"does not reproduce the QAT forward. Add the family's hub fused-expert keys to "
+                f"HF_FUSED_EXPERT_KEYS, or pass --exclude to leave this bank out."
             )
         expert_matches += _is_expert_weight(name, ndim)
     if moe_family and expert_matches == 0:
         raise ValueError(
             f"{input_dir} is a MoE checkpoint (model_type {detect_model_types(input_dir)}), but no expert "
-            f"weight is in the low-precision scope: its expert spelling is none the EP layer roster "
-            f"declares, so every expert would be copied through in bf16 under a quantization_config "
-            f"that claims QAT parity. Declare the family's hub expert keys on its EP layer class, or "
+            f"weight is in the low-precision scope: its expert spelling is none the family specs "
+            f"declare, so every expert would be copied through in bf16 under a quantization_config "
+            f"that claims QAT parity. Declare the family's hub expert keys on its MoE family spec, or "
             f"export with --no-lowp_apply_moe_experts if training left the experts in bf16."
         )
 
@@ -208,17 +200,13 @@ def _reject_unexportable_experts(
 def _fused_expert_axis(input_dir: str) -> int | None:
     """Contraction axis for this checkpoint's fused 3-D expert tensors, or ``None`` if unresolvable.
 
-    Resolved through the EP layer class that owns the family's checkpoint layout
-    (:attr:`~src.distributed.expert_parallel.moe_layer.layer.EPMoELayerBase.HF_FUSED_EXPERT_CONTRACTION_AXIS`),
-    so a new MoE family gets the right axis by declaring it once on its layer class. ``None`` means the
-    ``model_type`` matches no registered family; the caller then raises if a fused expert shows up
-    rather than guessing an axis, which would corrupt every dequantized expert.
+    Resolved through the family spec (``MoEFamilySpec.fused_contraction_axis``). ``None`` means the
+    ``model_type`` matches no family; the caller then raises if a fused expert shows up rather than
+    guessing an axis, which would corrupt every dequantized expert.
     """
-    by_model_type = ep_layer_class_by_model_type()
     for model_type in detect_model_types(input_dir):
-        layer_cls = by_model_type.get(model_type)
-        if layer_cls is not None:
-            return layer_cls.HF_FUSED_EXPERT_CONTRACTION_AXIS
+        if spec := find_moe_family_spec(model_type):
+            return spec.fused_contraction_axis
     return None
 
 
@@ -337,10 +325,10 @@ def quantize_checkpoint(
                 if fused_expert_axis is None:
                     raise ValueError(
                         f"{name!r} is a fused 3-D expert tensor, but this checkpoint's model_type "
-                        f"{detect_model_types(input_dir) or ['<missing>']} matches no EP layer class, so its "
+                        f"{detect_model_types(input_dir) or ['<missing>']} matches no MoE family spec, so its "
                         f"contraction axis is unknown. Block-scaling the wrong axis corrupts every "
-                        f"dequantized expert. Register the family (HF_MODEL_TYPES and "
-                        f"HF_FUSED_EXPERT_CONTRACTION_AXIS on its EP layer class), or pass --exclude to skip "
+                        f"dequantized expert. Declare the family's MoEFamilySpec (model_types and "
+                        f"fused_contraction_axis), or pass --exclude to skip "
                         f"these weights."
                     )
                 axis = fused_expert_axis
@@ -478,7 +466,7 @@ def parse_args():
         type=int,
         default=-1,
         help="Reduction axis to block along, for 2-D `*.weight` matrices only (default -1 = in_features "
-        "for [out,in] Linear weights). Fused 3-D expert tensors use the axis their EP layer class "
+        "for [out,in] Linear weights). Fused 3-D expert tensors use the axis their family spec "
         "declares and ignore this flag.",
     )
     p.add_argument(

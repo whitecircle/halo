@@ -52,12 +52,11 @@ import tempfile
 import torch
 from safetensors.torch import save_file
 
-from src.distributed.expert_parallel.config import get_num_experts
-from src.distributed.expert_parallel.layers import roster  # noqa: F401  (registers the EP families)
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.model_loading.liger.dispatch import apply_liger_kernel
 from src.models.config_access import text_config
+from src.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.parallelism import single_process_ep_config
@@ -125,7 +124,7 @@ def _stack_model(model_cls: type, config, state: dict, dtype: torch.dtype):
     """The model as the production loader assembles it: the applier's class swaps (already applied),
     the reference weights, the EP wrapper."""
     model = _stock_model(model_cls, config, state, dtype)
-    patch_moe_model_for_ep(model, single_process_ep_config(get_num_experts(config), use_grouped_gemm=True))
+    apply_ep_layers(model, single_process_ep_config(require_expert_count(config), use_grouped_gemm=True))
     return model
 
 

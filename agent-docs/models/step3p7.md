@@ -37,7 +37,7 @@ The `config.json` beside those weights is the **source checkpoint's own**, not t
 
 transformers 5.16 absorbs those at load (`Step3p7TextConfig.attribute_map` plus the `kwargs.pop` derivations in `__post_init__`) and re-emits only the native ones, so its own serialization is unservable and nothing on the save side can invert it.
 
-The family therefore declares `_EXPORTS_SOURCE_CONFIG_SCHEMA`, and every toolkit config write carries the source's config and remote-code modules forward with this run's changed values applied under the source's spellings, a `patch_vocab.py` `vocab_size` included ([Checkpoints](../reference/checkpoints.md#what-gets-saved)). Training is unaffected: this transformers accepts those spellings, so the export reloads to exactly the config that was trained.
+The family spec therefore declares `exports_source_config_schema`, and every toolkit config write carries the source's config and remote-code modules forward with this run's changed values applied under the source's spellings, a `patch_vocab.py` `vocab_size` included ([Checkpoints](../reference/checkpoints.md#what-gets-saved)). Training is unaffected: this transformers accepts those spellings, so the export reloads to exactly the config that was trained.
 
 A source that itself declares no `auto_map` (a synthetic checkpoint) has no schema to hand on; the export says so and keeps the native one.
 
@@ -56,7 +56,7 @@ Two tokenizer facts to hold:
 
 ## EP wrapper
 
-`EPStep3p7MoELayer` (`src/distributed/expert_parallel/layers/step3p7.py`) replaces `Step3p7SparseMoeBlock`.
+`EPStep3p7MoELayer` (`src/distributed/expert_parallel/families/step3p7.py`) replaces `Step3p7SparseMoeBlock`.
 
 - Routing: fp32 sigmoid scores plus `gate.e_score_correction_bias` on **selection only**, plain top-8 (no group limiting); the combine weights are the unbiased scores renormalized, with the block's `routed_scaling_factor` folded into them (equivalent — the combine is linear in the expert outputs).
 - Experts: fused `Step3p7Experts.gate_up_proj [E, 2M, H]` / `down_proj [E, H, M]` in-module. Unclamped layers take the base fused-SiLU combine.
@@ -69,7 +69,7 @@ ETP uses the shared fused-GLU helper: at `expert_tp_size > 1` the gate/up halves
 
 EP loads take the lazy safetensors path. The hub checkpoint keeps a vendor namespace (the top-level prefix renames, `moe.*` → `mlp.*`, the two-source `moe.gate_proj + moe.up_proj → gate_up_proj` concatenate, the Step-3.5 vision tower's own chunked, RoPE-permuted `in_proj`).
 
-The lazy loaders replay transformers' `step3p7` and `step3p5_vision` conversions per key (`_HUB_CONVERSION_KEYS`; the vision entries scoped under the tower's module path, as transformers scopes them) while reading only this rank's expert slice through both fan-in sources, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py --family step3p7`).
+The lazy loaders replay transformers' `step3p7` and `step3p5_vision` conversions per key (`hub_conversion_keys`; the vision entries scoped under the tower's module path, as transformers scopes them) while reading only this rank's expert slice through both fan-in sources, bit-exact against `from_pretrained` (`tests/gpu/parallelism/ep/test_lazy_load_converted.py --family step3p7`).
 
 There is no full-model host residency at 198B ([host RAM under the lazy path](../parallelism/large-scale-scenarios.md#other-300b-class-checkpoints)): ~398 GB of page cache node-wide at ep8 (the checkpoint minus the MTP tail, shared by the 8 ranks), up to ~65 GB of file-backed RSS per rank while its shard handles are open. The fan-in's 2× transient (~0.8 GB per layer) is on the GPU.
 

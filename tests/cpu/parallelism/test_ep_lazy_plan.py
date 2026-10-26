@@ -257,7 +257,7 @@ def test_load_ep_model_lazy_raises_on_unmapped_fused_experts(monkeypatch):
         lambda path: CheckpointWeights(path, ("s.safetensors",), index={"weight_map": wm}),
     )
     monkeypatch.setattr(ep_loading, "instantiate_on_meta", lambda *a, **k: _MockModel(["unrelated.weight"]))
-    # num_experts must be real: get_num_experts fails loud rather than guessing.
+    # num_experts must be real: require_expert_count fails loud rather than guessing.
     config = SimpleNamespace(dtype=torch.bfloat16, num_experts=MockEPConfig().num_experts)
     with pytest.raises(RuntimeError, match="none map"):
         ep_loading.load_ep_model_lazy("/nonexistent", MockEPConfig(), config=config)

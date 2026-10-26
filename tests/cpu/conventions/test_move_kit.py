@@ -513,7 +513,7 @@ def _moved_paths(old: str, new: str) -> dict[str, str]:
     [
         pytest.param("$pkg/env.py", "$pkg/process/environment.py", id="a module"),
         pytest.param(
-            "$pkg/distributed/expert_parallel/layers", "$pkg/distributed/expert_parallel/families", id="a package"
+            "$pkg/distributed/expert_parallel/families", "$pkg/distributed/expert_parallel/layers", id="a package"
         ),
     ],
 )

@@ -20,11 +20,12 @@ from types import SimpleNamespace
 import torch
 from transformers import TrainerCallback
 
-import src.models.moe_balancing as moe_balancing
+import src.models.moe.balancing as moe_balancing
 from src.callbacks.balancing import configure_moe_balancing
 from src.callbacks.factory import build_run_callbacks
 from src.callbacks.moe_metrics import MoELoadMetricsCallback
-from src.models.moe_balancing import router_logits_forced_off
+from src.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
+from src.models.moe.router_logits import router_logits_forced_off
 from tests.common.collective_recorder import CollectiveTrace, recording_rank
 from tests.common.goldens import regen_main
 from tests.common.parallelism import make_parallelism_config
@@ -72,7 +73,8 @@ class _Model(torch.nn.Module):
 class _NativeAdoptingLayer(torch.nn.Module):
     """An EP layer whose bias adopts a checkpoint-exported slot (GPT-OSS, GLM-4)."""
 
-    _supports_bias_balancing = True
+    FAMILY = MoEFamilySpec(model_types=(), balancing_slot=NativeBalancingSlot(("balancing_biases",)))
+    SUPPORTS_BIAS_BALANCING = True
 
     def can_adopt_native_balancing(self):
         return True
@@ -87,7 +89,7 @@ class _NativeAdoptingLayer(torch.nn.Module):
 class _TransientLayer:
     """An EP layer whose bias lives in a transient side-buffer (Qwen3, Mistral4)."""
 
-    _supports_bias_balancing = True
+    SUPPORTS_BIAS_BALANCING = True
 
     def enable_bias_balancing(self):
         self.balancing_biases = torch.zeros(4)
@@ -179,8 +181,8 @@ def case_key(model: str, mode: str, policy_gradient_loss: bool, syncs: bool) -> 
 
 def trace_case(model_name: str, mode: str, policy_gradient_loss: bool, syncs: bool) -> list[str]:
     """What configuring balancing and building the roster issue for one case, as rank 0."""
-    moe_balancing._WARNED_TRANSIENT_ONLY_AUTO.clear()
-    moe_balancing._WARNED_UNSERVABLE_AUTO.clear()
+    moe_balancing._warned_transient_only_auto.clear()
+    moe_balancing._warned_unservable_auto.clear()
     parallelism_config = make_parallelism_config(world_size=WORLD_SIZE, gpus_per_node=WORLD_SIZE)
     model = MODELS[model_name]()
     training_config = SimpleNamespace(logging_steps=LOGGING_STEPS, gradient_accumulation_steps=1)

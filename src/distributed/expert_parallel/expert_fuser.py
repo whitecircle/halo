@@ -16,11 +16,11 @@ import torch.nn as nn
 from safetensors import safe_open
 
 from src.checkpoint.reading import StreamingCheckpointReader
-from src.distributed.expert_parallel.expert_weights import per_expert_fusion_map
 from src.distributed.expert_parallel.lazy_plan import PER_EXPERT_KEY_PATTERN
 from src.log import KEY_PREVIEW_COUNT
 from src.model_loading.dtype import reject_fp8_tensor
 from src.model_loading.lazy_safetensors.materialization import assign_tensor_to_model, verify_loaded_shape
+from src.models.moe.family_specs import per_expert_fusion_map
 
 logger = logging.getLogger(__name__)
 

@@ -13,7 +13,7 @@ For plain FSDP, no work is needed — any `AutoModelForCausalLM` works.
 
 Pipeline parallelism is an allowlist: a new backbone splits under PP only once its class is in a `validated=True` `PPFamilySpec` in `PP_FAMILY_SPECS` (`src/distributed/pipeline_parallel/families.py`; `STOCK_FORWARD_PP` when the upstream forward splits as-is), added after its PP GPU rows pass. Until then `reject_unsupported_pp_structure` refuses it by name.
 
-Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`src/model_loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`config_has_experts` finds the experts on the nested `text_config`). No EP-wrapper work is VLM-specific.
+Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`src/model_loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`has_routed_experts` finds the experts on the nested `text_config`). No EP-wrapper work is VLM-specific.
 
 ## Attention backend
 
@@ -33,9 +33,15 @@ The declaration is verified, never trusted: `verify_head_transform` runs the fam
 
 ## Add EP support
 
-EP mechanics are in the [Expert Parallelism guide](../parallelism/expert-parallelism.md). A new family is **one wrapper class** under `src/distributed/expert_parallel/layers/` — there is no registry file to edit. `MOE_LAYER_MAP` is built by walking the `EPMoELayerBase` subclass tree, and `layers/roster.py` imports every module in the package, so the wrapper registers by existing (a duplicate HF class name raises at import).
+EP mechanics are in the [Expert Parallelism guide](../parallelism/expert-parallelism.md). A new family is three pieces:
 
-**1. Write the wrapper.** Subclass `EPMoELayerBase` — or `EPSharedExpertsMoELayerBase` when the forward is the standard fp32-router → route → shared-experts shape (LFM-2, Cohere2 MoE), `EPGroupLimitedMoELayerBase` on top of it when routing also carries the six DeepSeek-V3 group-limited knobs (GLM-4, Laguna, Mistral4, GLM-5 Next, Step-3.7), or `EPSeparateGluMoELayerBase` when the experts are stored as separate gate/up/down tensors and exported per expert (Qwen3, Bailing). Crib the closest layout:
+- a frozen `MoEFamilySpec` constant in `src/models/moe/family_specs.py`, listed in `MOE_FAMILY_SPECS` — the family's facts, which offline tools, config writers, weight sync and the loaders read by `config.model_type` without importing EP;
+- one wrapper class in `src/distributed/expert_parallel/families/<name>.py` declaring `FAMILY = <SPEC>`;
+- one import line in `families/roster.py`, which builds `MOE_LAYER_MAP` from the imported classes' `HF_MODULE_NAMES` (a duplicate HF class name raises at import).
+
+`tests/cpu/models/test_moe_family_specs.py` holds every spec to exactly one family class, and the spec index refuses a `model_type` two specs claim.
+
+**1. Write the wrapper.** Subclass `EPSharedExpertsMoELayerBase` when the forward is the routed template — route the flattened tokens, then routed plus shared experts — and supply `route_tokens_to_experts` over the fp32 router logits (LFM-2, Cohere2 MoE) or override `_route_hidden_states` where the router routes itself (Qwen3, Qwen3.5, Bailing, DeepSeek-V4's hash layers). `EPGroupLimitedMoELayerBase` sits on top of it when routing carries the six DeepSeek-V3 group-limited knobs (GLM-4, Laguna, Mistral4, GLM-5 Next, Step-3.7). Subclass `EPMoELayerBase` directly only for a forward of another shape (GPT-OSS, Gemma4, Inkling, Zaya). Crib the closest layout:
 
 | Layout | Closest wrapper |
 |---|---|
@@ -59,7 +65,7 @@ The base (`moe_layer/layer.py`, with its compute, routing, grad-sync, expert-LoR
 |---|---|---|
 | `_detect_hidden_dim(router, experts)` | the router projection's input width, else `gate_up_proj`'s | nothing — Gemma4 and Zaya reach the fallback by having no bare router projection |
 | `_adopt_routing(block)` | `self.top_k = self._find_top_k(block)` | every family with more knobs: a selection function, a correction-bias buffer. Group-limited families inherit `EPGroupLimitedMoELayerBase`, whose `_adopt_routing` resolves the six DeepSeek-V3 knobs off block → gate → config |
-| `_adopt_shared_experts(block)` | adopt `_SHARED_EXPERT_ATTRS` | Cohere2 (combination strategy), Qwen3.5/3.6 (a second gate module) |
+| `_adopt_shared_experts(block)` | adopt `FAMILY.shared_expert_attrs` | Cohere2 (combination strategy), Qwen3.5/3.6 (a second gate module) |
 | `_adopt_expert_compute(block, experts)` | `_resolve_activation` off the container | families owning their combine: GptOss (`alpha`/`limit`), DeepSeek-V4, GLM-5, Step-3.7 (clamp bounds), Bailing (activation on the per-expert module) |
 | `_adopt_expert_params(experts, weights_already_sharded)` | `_init_fused_glu_params` | Qwen3 (split), Bailing (stack), GptOss (interleave) |
 | `_init_summary_extras(block)` | `()` | any family with a field worth printing at construction |
@@ -68,57 +74,53 @@ A hook may read only the wrapped module and the `EPConfig`. **No hook may issue 
 
 No hook may allocate state sized by `world_size` either — invisible at 8 GPUs, an OOM at 512. Both rules are pinned per family in `tests/cpu/parallelism/test_ep_prologue_parity.py`.
 
-**2. Declare the contract.** These class attributes are what the machinery reads — `EPDeepseekV4MoELayer` exercises most of them.
+**2. Declare the spec.** The `MoEFamilySpec` fields every family-keyed reader consults; a field left out takes the default most families share.
+
+- `model_types` — every `config.model_type` its checkpoints carry, the family's own first, then the composite wrappers, text towers and remote-code spellings. That union resolves a checkpoint back to its family offline (sharded merge, lazy load, quantize, unfuse, config export).
+- `expert_weight_roots` — every attribute the family may store as a direct expert `nn.Parameter`, across **all** config branches (fused vs separate/ETP); the default `GLU_PROJECTIONS` covers `gate_up_proj`/`gate_proj`/`up_proj`/`down_proj`, GptOss extends it.
+
+    Highest blast radius: it feeds `expert_named_params()` (grad-sync hooks, FP32 upcast, checkpoint skip-set) and the name-only weight-sync classifier. An undeclared root leaves a trainable param with no gradient sync — the construction-time scan in `src/trainers/mixins/base.py` raises on it.
+
+- `experts_container_attrs` / `fused_contraction_axis` — the attribute the block holds its experts under (default `experts`; declare every spelling across revisions, as GLM-4's `routed_experts`), and which axis of the fused 3D tensors contracts (the base export's `F.linear` `[E, N, K]`; only GptOss says `1`). The wrong axis block-scales the output dim on a low-precision export and corrupts every dequantized expert.
+- `shared_expert_attrs` — the attribute name(s) the block may hold its shared expert under, tried in order; the first the block carries becomes `_shared_expert_attr`, the *export* key. Declare every spelling across revisions (GLM-4 serves `shared_experts` and `shared_expert`).
+- `export_key_renames` — `(module spelling, hub spelling)` pairs for a family whose in-library module names differ from its checkpoint's inside an EP layer. The gathered save and the RL weight sync revert transformers' own `WeightRenaming` entries off the load's record, but the key-by-key paths with no model behind them — the lazy loader and `merge_ep_shards.py` — read only these pairs. Undeclared, the lazy loader leaves that submodule randomly initialized (Laguna's `shared_expert` ↔ `shared_experts`).
+- `balancing_slot` — the checkpoint-exported routing-bias slot, every spelling (live first, then the hub respelling) plus the config flag that gates it (LFM-2 `use_expert_bias`). Strict `bias_update` refuses a family without one.
+- `hub_conversion_keys` — transformers' conversion-mapping keys for a vendor-namespace hub checkpoint, which the lazy loaders replay per key.
+- `served_flat_config_keys` / `exports_source_config_schema` — config rewrites every export applies for the pinned rollout servers ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
+- `supports_lazy_loading` / `supports_gradient_checkpointing` / `supports_routing_replay` / `supports_fp32_non_ep_params` — all default `True`; set one `False` and the owning gate rejects loudly instead of corrupting silently. `weight_sync_refusal` — `None`, or the reason no end-to-end weight sync into the family's served model is validated. Which family switches off which is published, pinned against the specs, in [Per-family EP restrictions](../parallelism/expert-parallelism.md#per-family-ep-restrictions).
+
+**3. Declare the class contract.** These class attributes are what the layer machinery reads — `EPDeepseekV4MoELayer` exercises most of them.
 
 - `HF_MODULE_NAMES` — the HF MoE block class name(s) this wrapper replaces. The sole registration point.
 - `_NUM_EXPERTS_ATTR_PATHS` — the family's expert-count attribute paths on the live HF module, resolved in order by the base `detect_num_experts()` before its generic container probe. Every wrapper declares or inherits one (Laguna takes GLM-4's).
 
-    The config-level spellings are separate and central: `ROUTER_EXPERT_COUNT_FIELDS` / `ROUTER_TOPK_FIELDS` in `src/models/moe_balancing.py`. A family whose config invents another name extends the registry there rather than teaching one consumer about it.
+    The config-level spellings are separate and central: `resolve_expert_count` / `resolve_router_topk` in `src/models/moe/config_fields.py`. A family whose config invents another name extends the spellings there rather than teaching one consumer about it.
 
-- `_EXPERTS_CONTAINER_ATTRS` / `_HF_FUSED_EXPERT_KEYS` / `HF_FUSED_EXPERT_CONTRACTION_AXIS` — the attribute the block holds its experts under, the fused 3D tensor names as the *checkpoint* spells them, and which axis of those tensors contracts.
+- `MoEFamilySpec.expert_layout` — the family's one `ExpertLayout` (`src/models/moe/expert_layout.py`), which the EP gather, the RL weight sync and `merge_ep_shards.py` all apply through `to_hub_expert_tensors`:
 
-    `_EXPERTS_CONTAINER_ATTRS` defaults to the single `experts` every current HF block uses; declare every spelling your family accepts if it differs across revisions (GLM-4 also serves `routed_experts`). `_HF_FUSED_EXPERT_KEYS` defaults to the common fused names. The axis defaults to the base export's `F.linear` convention `[E, N, K]`, and only GptOss overrides it.
+    | Kind | Hub layout | Families |
+    |---|---|---|
+    | `FUSED` (default) | fused `experts.gate_up_proj` / `down_proj`, `F.linear` convention; `key_prefix=""` drops `experts.` where the wrapper replaces the container itself | Cohere2 MoE, DeepSeek-V4, GLM-5 Next, Qwen3.5/3.6, Mistral4, Inkling, Step-3.7, Zaya; Gemma4 bare |
+    | `FUSED_SPLIT_PER_EXPERT` | the fused bank split into `experts.{i}.<gate\|up\|down>.weight` | GLM-4, Laguna, LFM-2 (`w1`/`w3`/`w2`) |
+    | `SEPARATE_GLU` | gate/up/down stored apart, written per expert | Qwen3, Bailing |
+    | `INTERLEAVED_GLU` | GPT-OSS's interleaved `[g0, u0, ...]` pair with biases, matmul convention | GPT-OSS |
 
-    Getting the axis wrong block-scales the output dim on a low-precision export and corrupts every dequantized expert.
+    `per_expert_keys` names the `(gate, up, down)` per-expert spelling. A `FUSED` family declares it where transformers also loads that spelling — its hub's for DeepSeek-V4, Cohere2 MoE and GLM-5 Next, the one `unfuse_moe_experts.py` writes for Qwen3.5/3.6; a family without one is what that tool refuses. A runtime tensor a layout has no branch for raises rather than dropping out of the export.
 
-- `_EXPERT_WEIGHT_ATTR_ROOTS` — every attribute the family may store as a direct expert `nn.Parameter`, across **all** config branches (fused vs separate/ETP). The base default covers `gate_up_proj`/`gate_proj`/`up_proj`/`down_proj`; extend it when names differ (GptOss).
-
-    Highest blast radius: it feeds `expert_named_params()` (grad-sync hooks, FP32 upcast, checkpoint skip-set) and the name-only weight-sync classifier. An undeclared root leaves a trainable param with no gradient sync — the construction-time scan in `src/trainers/mixins/base.py` raises on it.
-
-- `_PER_EXPERT_UNFUSED_KEYS` **or** a `gather_expert_state_dict` override — when the hub checkpoint or vLLM loader stores one tensor per expert, declare the `(gate, up, down)` key names and the base gather splits the fused export automatically (GLM4, LFM2). Declaring both raises in `__init_subclass__`.
-
-    Genuinely distinct layouts override the gather instead: GptOss re-interleaves gate/up, Gemma4 strips the `experts.` prefix.
-
-- `_HUB_PER_EXPERT_KEYS` — the same triple, for a family with a per-expert spelling its gather does *not* split into. That is exactly the pairing `__init_subclass__` forbids with `_PER_EXPERT_UNFUSED_KEYS`.
-
-    Two cases: families storing gate/up/down separately, which subclass `EPSeparateGluMoELayerBase` for the `_gather_individual_glu_state_dict` / `_merge_individual_glu_shards` pair (Bailing, Qwen3); and families whose gather writes the fused tensor while transformers also loads the per-expert spelling — their hub's for DeepSeek-V4, Cohere2 MoE and GLM-5 Next, and for Qwen3.5/3.6, whose hub ships the fused tensor, the one `unfuse_moe_experts.py` writes.
-
-    `EPMoELayerBase.hub_per_expert_keys()` unions the two. A family answering `None` there is one `unfuse_moe_experts.py` refuses.
-
-- **Rollout-engine support is not a family declaration.** Both pinned engines read the layout `gather_expert_state_dict` already emits, so nothing here is per engine.
+- **Rollout-engine support is not a family declaration.** Both pinned engines read the layout the family's `ExpertLayout` writes, so nothing here is per engine.
 
     Which families an engine can take an *online* update for lives on its weight-sync client (`UNSERVABLE_MODEL_TYPES` in `src/weight_sync/clients/`), one loader fact per `model_type`. Add an entry there when the engine's loader cannot take the chunked update; `reject_unsyncable_model` then refuses the pair at trainer construction quoting it ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-- `_EXPORT_KEY_RENAMES` — `(module spelling, hub spelling)` pairs for a family whose in-library module names differ from its checkpoint's inside an EP layer. The gathered save and the RL weight sync revert transformers' own `WeightRenaming` entries off the load's record, but the key-by-key paths with no model behind them — the lazy loader and `merge_ep_shards.py` — read only these pairs.
-
-    Undeclared, the lazy loader leaves that submodule randomly initialized and the sharded EP save is refused (Laguna's `shared_expert` ↔ `shared_experts`).
-
-- `_supports_weight_sync` / `_supports_gradient_checkpointing` / `_supports_lazy_loading` — all default `True`. Set one `False` and the owning gate rejects loudly instead of corrupting silently. Which family switches off which flag is published, pinned against the classes, in [Per-family EP restrictions](../parallelism/expert-parallelism.md#per-family-ep-restrictions).
-- `_supports_bias_balancing` — `True` when routing *selection* happens in-layer. Select through the shared helpers, not a hand-added `self._balancing_bias(...)`, which is `None` when balancing is off and in native-adoption mode (the adopted slot already sits in the selection): score-routed layers take top-k over `self._selection_scores(scores)` (the group-limited base, DeepSeek-V4, Inkling, LFM-2); logit-routed ones use `self._biased_topk(logits)` (Qwen3, Cohere2 MoE) or `_deepseek_biased_route`, which also returns the unbiased gate (GPT-OSS, Qwen3.5). Gate weights come from the **unbiased** scores, and the caller records the load with `self._record_expert_load(indices)`.
+- `SUPPORTS_BIAS_BALANCING` — `True` when routing *selection* happens in-layer. Select through the shared helpers, not a hand-added `self._balancing_bias(...)`, which is `None` when balancing is off and in native-adoption mode (the adopted slot already sits in the selection): score-routed layers take top-k over `self._selection_scores(scores)` (the group-limited base, DeepSeek-V4, Inkling, LFM-2); logit-routed ones use `self._biased_topk(logits)` (Qwen3, Cohere2 MoE) or `_deepseek_biased_route`, which also returns the unbiased gate (GPT-OSS, Qwen3.5). Gate weights come from the **unbiased** scores, and the caller records the load with `self._record_expert_load(indices)`.
 
     A layer can refuse per-instance by overriding `enable_bias_balancing` (DeepSeek-V4 hash layers). Leave `False` when the router sits outside the wrapper (Gemma4) or the family's own gate owns a native balancing buffer (Zaya). An explicit `bias_update` on a model where no layer accepts the bias raises.
 
     Declaring support is also one of the three signals `moe_balancing: auto` reads — [`auto` resolution per family](../training-methods/callbacks.md#auto-resolution-per-family).
 
-- `_NATIVE_BALANCING_BIAS_ATTR` — dotted path to the checkpoint-persistent tensor the family's own selection consults, so the sign-updates land in exported state.
+- `MoEFamilySpec.balancing_slot` — the family's exported balancing slot: its first spelling is the live-tree path the layer adopts, so the sign-updates land in exported state (`bias_update_transient` is the user's explicit opt-in where there is none), and its `config_flag` the field flipped for a slot the config gates. A config-gated slot also implements the `_materialize_native_balancing_slot` hook (LFM-2).
 
-    Strict `bias_update` refuses a family without one, since the export would silently serve without the trained bias (`bias_update_transient` is the user's explicit opt-in). A config-gated slot pairs the declaration with `_NATIVE_BALANCING_CONFIG_FLAG` + the `_materialize_native_balancing_slot` hook (LFM-2).
-
-- `_ep_severs_aux_loss` — `True` when the wrapper bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `src/models/moe_balancing.py`, applied by `src/callbacks/balancing.py`).
-- `_supports_routing_replay` — defaults `True`; set `False` where the layer cannot re-derive gate weights at a forced selection (Gemma4's sibling router, Zaya's EDA cross-layer state). The replay injector also rejects any layer that never set `self.top_k`.
-- `_SHARED_EXPERT_ATTRS` / `_SHARED_EXPERT_REQUIRED` — the attribute name(s) the block may hold its shared expert under, tried in order. The first the block carries is adopted and becomes `_shared_expert_attr`, which is the *export* key.
-
-    Declare every spelling the family accepts across revisions (GLM-4 serves both `shared_experts` and the singular `shared_expert`). A family whose block always builds one sets `_SHARED_EXPERT_REQUIRED = True`, so a rename raises instead of dropping the FFN from every output.
+- `SEVERS_AUX_LOSS` — `True` when the wrapper bypasses the HF router *module* entirely, so `outputs.router_logits` never populates and the HF aux-loss path is dead under EP. `moe_balancing: auto` then resolves the family to `bias_update` (`resolve_balancing_mode` in `src/models/moe/balancing.py`, applied by `src/callbacks/balancing.py`).
+- `_SHARED_EXPERT_REQUIRED` — `True` for a family whose block always builds its shared expert, so a rename raises instead of dropping the FFN from every output.
 
     `replicated_named_params()` is derived from the adopted name, so a family with the ordinary single shared expert writes no override. Replicated submodules are FSDP-ignored and DP-averaged by the router hook, and an undeclared one trips the same construction-time scan. Override `replicated_named_params()` only when the replicated set is a different *shape* — Qwen3.5/3.6, whose gate is a second module.
 
@@ -130,7 +132,7 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
 - `_fused_glu_mul` — the single seam for the GLU combine. `_resolve_activation` latches it from the resolved activation.
 
-    A family with a non-standard combine (DeepSeek-V4 and GLM-5 Next's clamped SwiGLU, Step-3.7's post-activation clamp) rebinds it in `_adopt_expert_compute`: a `functools.partial` over the kernel with the family's bound, or a bound method for a gate no kernel implements.
+    A family with a clamped SwiGLU (DeepSeek-V4 and GLM-5 Next clamp before the activation, Step-3.7 after it) rebinds it in `_adopt_expert_compute` to `resolve_clamped_glu_mul` (`src/kernels/fused_glu.py`): the fused kernel for a SiLU gate, the same clamps eagerly for any other.
 
     Latch it rather than overriding `_glu_combine`. The construction summary names the latched callable, so an override makes the reported combine and the running one two declarations that can disagree, and the fused `[gate | up]` path runs a latch's packed form without calling `_glu_combine` at all.
 
@@ -138,17 +140,15 @@ No hook may allocate state sized by `world_size` either — invisible at 8 GPUs,
 
     Everything else is required — an upstream rename raises instead of silently under-scaling every routed weight. Laguna and Step-3.7 carry no group limiting and no `norm_topk_prob`; no family opts out of `routed_scaling_factor`.
 
-**3. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`src/models/moe/expert_lora_spec.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
+**4. Expert LoRA.** A new stored weight root needs a `LORA_PROJECTION_COVERAGE` entry (`src/models/moe/expert_lora_spec.py`) mapping it to the logical `gate`/`up`/`down` projection — without it `expert_lora` silently never adapts that weight (`tests/cpu/peft/test_expert_lora_projection_coverage.py` fails on any registered root missing an entry).
 
-**4. Sharded-save merge.** `save_sharded_ep=True` needs the class to declare `HF_MODEL_TYPES` — every `config.model_type` spelling its checkpoints carry, including text-tower and remote-code variants. That union is what resolves a checkpoint back to its layer class (`resolve_ep_merge_layer_class`, `src/distributed/expert_parallel/expert_weights.py`); a `model_type` no registered family claims **raises** at trainer construction (`reject_unmergeable_ep_sharded_save`). Drop `save_sharded_ep` and take the gathered save, which needs no transform.
+**5. Sharded-save merge.** `merge_ep_shards.py` resolves a checkpoint to its spec through `find_moe_family_spec(model_type)` and writes the spec's `ExpertLayout`, the same transform the gathered save applies, so a family needs nothing more; a `model_type` no spec claims **raises** at trainer construction under `save_sharded_ep=True` (`reject_unmergeable_ep_sharded_save`). Add the family to `test_full_merge_matches_gathered_save` in `tests/cpu/checkpoint/test_merge_ep_shards.py`.
 
-The merge itself is `merge_shards_to_hf` on the class. The base fused-GLU implementation covers families that keep the base gather; a family with a distinct layout overrides it **alongside** `gather_expert_state_dict`, since they are inverses and `__init_subclass__` raises if only one is overridden. Add a roundtrip test in `tests/cpu/checkpoint/test_merge_ep_shards.py`.
+**6. Buffers.** `finalize_loaded_model()` (`src/model_loading/buffer_repair.py`) is the post-load repair every load path runs: it walks two fixer chains — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — and re-ties shared weights. transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
 
-**5. Buffers.** `finalize_loaded_model()` (`src/model_loading/buffer_repair.py`) is the post-load repair every load path runs: it walks two fixer chains — `_ROTARY_FIXERS` for `inv_freq`, `_NON_PERSISTENT_FIXERS` for the rest — and re-ties shared weights. transformers 5 re-materializes every non-persistent buffer as `torch.empty_like`, so add a fixer to the matching chain for any the family carries; an uncovered one reaches device placement still on meta, where the trainer raises rather than training on uninitialized memory.
+**7. Tests.** The DeepSeek-V4 trio is the template: an EP-vs-FSDP equivalence test (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`, a thin subclass of `EPSftRoundTrip` in `tests/common/ep_sft_roundtrip.py` — copy it and override only the family hooks), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`). The family's tiny model also goes into `TINY_MOE_FAMILIES` (`tests/common/tiny_models.py`), keyed by its `model_type`, and its name into `_TINY_MOE_FAMILIES` in the manifest: the merge-on-save and precompute-resume sweeps run every entry, and `tests/cpu/conventions/test_tiny_family_roster.py` fails on a registered EP family missing from either. `tests/cpu/parallelism/test_ep_family_instantiation.py` builds every registered family's EP layer on its tiny model, and `tests/cpu/parallelism/test_ep_gc_replay.py` replays its dispatch under gradient checkpointing for every family whose layer supports it.
 
-**6. Tests.** The DeepSeek-V4 trio is the template: an EP-vs-FSDP equivalence test (`tests/gpu/parallelism/ep/test_ep_vs_fsdp_deepseek_v4.py`), a trainer test that saves via the gathered EP path and reloads the checkpoint as a plain HF model (`tests/gpu/trainers/sft/test_sft_deepseek_v4_moe.py`, a thin subclass of `EPSftRoundTrip` in `tests/common/ep_sft_roundtrip.py` — copy it and override only the family hooks), both registered in `tests/gpu/manifest.py`, plus a CPU test covering registration, gather/merge layout, and balancing resolution (`tests/cpu/models/test_deepseek_v4_support.py`). The family's tiny model also goes into `TINY_MOE_FAMILIES` (`tests/common/tiny_models.py`), keyed by its `model_type`, and its name into `_TINY_MOE_FAMILIES` in the manifest: the merge-on-save and precompute-resume sweeps run every entry, and `tests/cpu/conventions/test_tiny_family_roster.py` fails on a registered EP family missing from either. `tests/cpu/parallelism/test_ep_family_instantiation.py` builds every registered family's EP layer on its tiny model, and `tests/cpu/parallelism/test_ep_gc_replay.py` replays its dispatch under gradient checkpointing for every family whose layer supports it.
-
-**7. Wire the docs.** A supported family gets `agent-docs/models/<name>.md`, an `examples/sft/<family>/` config, and a row in every family roster: the compatibility matrix and per-family list in [Supported Models](README.md), the supported-models tables in [Expert Parallelism](../parallelism/expert-parallelism.md) and [Grouped GEMM](../optimization/grouped-gemm.md), the wrapped-families list in [Parallelism](../parallelism/README.md), the human guide's [Supported Models](../../human-docs/models.md) and [Supported Matrix](../../human-docs/supported-matrix.md#model-families) tables, and the `CLAUDE.md` family list and Models index.
+**8. Wire the docs.** A supported family gets `agent-docs/models/<name>.md`, an `examples/sft/<family>/` config, and a row in every family roster: the compatibility matrix and per-family list in [Supported Models](README.md), the supported-models tables in [Expert Parallelism](../parallelism/expert-parallelism.md) and [Grouped GEMM](../optimization/grouped-gemm.md), the wrapped-families list in [Parallelism](../parallelism/README.md), the human guide's [Supported Models](../../human-docs/models.md) and [Supported Matrix](../../human-docs/supported-matrix.md#model-families) tables, and the `CLAUDE.md` family list and Models index.
 
 ## Add CP support
 

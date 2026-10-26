@@ -33,7 +33,7 @@ from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.model_loading.liger.dispatch import resolve_liger_applier
 from src.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from tests.common.ep_reference import compare_grad, ep_layers
@@ -342,7 +342,7 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     torch.manual_seed(SEED)
     reference = AutoModelForCausalLM.from_config(config).to(device=device, dtype=torch.bfloat16)
     weights = {name: tensor.clone() for name, tensor in reference.state_dict().items()}
-    patch_moe_model_for_ep(reference, ep_config)
+    apply_ep_layers(reference, ep_config)
     reference_loss, reference_grads = _loss_and_grads(reference, input_ids)
 
     applier(**_flags(applier, swiglu=True, geglu=True))
@@ -356,7 +356,7 @@ def _check_ep_shared_expert(model_type, tiny, stock, device) -> None:
     torch.manual_seed(SEED)
     fused = AutoModelForCausalLM.from_config(config).to(device=device, dtype=torch.bfloat16)
     fused.load_state_dict(weights)
-    patch_moe_model_for_ep(fused, ep_config)
+    apply_ep_layers(fused, ep_config)
 
     wrapped = ep_layers(fused)
     assert wrapped, "no MoE layer was EP-wrapped — the check would prove nothing about the wrapper"

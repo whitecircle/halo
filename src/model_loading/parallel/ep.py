@@ -11,7 +11,7 @@ import torch.nn as nn
 from transformers import AutoModelForCausalLM
 
 from src.checkpoint.reading import has_whole_model_weight_file
-from src.distributed.expert_parallel.config import EPConfig, get_num_experts
+from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_fuser import ExpertFuser
 from src.distributed.expert_parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
@@ -19,7 +19,7 @@ from src.distributed.expert_parallel.lazy_plan import (
     is_lazy_loadable,
     lazy_load_prologue,
 )
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.model_loading.dtype import resolve_load_dtype
@@ -29,6 +29,7 @@ from src.model_loading.parallel.fp32_masters import capture_fp32_masters, verify
 from src.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
 from src.model_loading.parallel.whole_model import load_whole_model
 from src.models.attention.selection import revalidate_attn_kwarg
+from src.models.moe.config_fields import require_expert_count
 from src.runtime.consensus import DeferredRankFailure
 from src.runtime.load_coordination import timed_global_load
 from src.runtime.ranks import get_global_rank, get_local_rank, is_global_main_process
@@ -148,7 +149,7 @@ def load_ep_model_lazy(
     logger.info(f"[Rank {rank}] Applying EP patching...")
     # Derived, never asserted: a checkpoint whose expert keys match no pattern is planned REPLICATE, and
     # claiming "already sharded" there would give every rank global experts 0..E_local-1.
-    model = patch_moe_model_for_ep(model, ep_config, weights_already_sharded=bool(fused_keys) or n_shard > 0)
+    model = apply_ep_layers(model, ep_config, weights_already_sharded=bool(fused_keys) or n_shard > 0)
     finalize_loaded_model(model)
     logger.info(f"[Rank {rank}] EP lazy loading complete")
     return model
@@ -171,7 +172,7 @@ def _load_ep_model_huggingface(
     """
     kwargs = dict(from_pretrained_kwargs)
     config = kwargs["config"]
-    num_experts = get_num_experts(config)
+    num_experts = require_expert_count(config)
     if is_global_main_process():
         logger.info(f"[Rank 0] Loading model for EP: {source.name}")
         logger.info(f"[Rank 0] Model has {num_experts} experts")
@@ -189,7 +190,7 @@ def _load_ep_model_huggingface(
         keep_fp32_non_ep=pc.fp32_non_ep_params,
         ep_wrapped=True,
         preserve_checkpoint_precision=preserve_checkpoint_precision,
-        before_move=partial(patch_moe_model_for_ep, ep_config=ep_config),
+        before_move=partial(apply_ep_layers, ep_config=ep_config),
         **kwargs,
     )
     if is_global_main_process():

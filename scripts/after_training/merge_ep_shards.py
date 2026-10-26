@@ -3,8 +3,8 @@
 
 Required for sharded EP saves (``save_sharded_ep: true``): each rank writes its own expert slices
 under ``.shard_N`` suffixes for fast parallel I/O, a layout no loader reads (the EP loader refuses it
-with these merge instructions). Per-family expert layout comes from the owning EP layer class's
-``gather_expert_state_dict``, so every MoE family in the roster merges through the same seam.
+with these merge instructions). The merge writes each family's ``ExpertLayout`` through the same
+``to_hub_expert_tensors`` the gathered save applies, so merged-from-sharded equals gathered.
 A gathered save (``save_sharded_ep: false``) needs no merge; it is slower to write but directly
 loadable.
 
@@ -41,21 +41,21 @@ from src.checkpoint.offline_export import (
 )
 from src.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
 from src.checkpoint.writing import StreamingShardWriter
-from src.distributed.expert_parallel.expert_weights import (
-    expert_weight_roots,
-    resolve_ep_merge_layer_class,
-    shared_expert_attrs,
-    supported_ep_merge_model_types,
-    to_hub_layer_key,
-)
 from src.log import configure_cli_logging
+from src.models.moe.expert_layout import to_hub_expert_tensors
+from src.models.moe.family_specs import (
+    MoEFamilySpec,
+    expert_weight_roots,
+    find_moe_family_spec,
+    moe_model_types,
+    shared_expert_attrs,
+)
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
 
-# Union of every EP family's class-declared expert-weight roots
-# (EPMoELayerBase._EXPERT_WEIGHT_ATTR_ROOTS), derived rather than hand-listed so a new family's
-# expert shards cannot pass through as non-expert weights.
+# Union of every family's expert-weight roots (MoEFamilySpec.expert_weight_roots), derived rather than
+# hand-listed so a new family's expert shards cannot pass through as non-expert weights.
 _EP_EXPERT_SUFFIXES = sorted(expert_weight_roots(), key=lambda s: (-len(s), s))
 
 # Expert keys are ...{container}.{suffix}. The container is captured verbatim (mlp, feed_forward, or
@@ -69,7 +69,7 @@ def _group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
 
     Values pass through untouched, so this classifies tensors and read plans alike (the streaming
     merge groups keys before any tensor is materialized). A declared shared-expert container
-    (:func:`~src.distributed.expert_parallel.expert_weights.shared_expert_attrs`) is not an expert group,
+    (:func:`~src.models.moe.family_specs.shared_expert_attrs`) is not an expert group,
     whatever its parameters are called.
 
     Returns:
@@ -95,11 +95,11 @@ def _group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
 
 def _resolve_merge_transform(
     model_type: str, has_expert_groups: bool, had_expert_shards: bool, total_tensors: int, verbose: bool
-):
-    """The EP layer class owning this checkpoint's HF-layout transform, or ``None`` for pass-through.
+) -> MoEFamilySpec | None:
+    """The family spec whose ``expert_layout`` this checkpoint merges into, or ``None`` for pass-through.
 
     Raises the two dead ends instead of writing an unloadable checkpoint: merged shards that match
-    no declared expert attribute, and a ``model_type`` no registered EP family claims.
+    no declared expert attribute, and a ``model_type`` no family spec claims.
     """
     if not has_expert_groups:
         # Only expert params are sharded, so merged shards matching nothing means the suffix union
@@ -109,22 +109,22 @@ def _resolve_merge_transform(
                 f"Merged {total_tensors} tensors from per-rank expert shards, but none matched an "
                 f"EP expert attribute ({', '.join(_EP_EXPERT_SUFFIXES)}). The merged checkpoint would "
                 f"carry EP-internal names that from_pretrained cannot load. This family's expert "
-                f"attributes are missing from its layer class's _EXPERT_WEIGHT_ATTR_ROOTS."
+                f"attributes are missing from its spec's expert_weight_roots."
             )
         if verbose:
             logger.info("No EP expert weights detected, skipping post-processing")
         return None
 
-    layer_cls = resolve_ep_merge_layer_class(model_type)
-    if layer_cls is None:
+    spec = find_moe_family_spec(model_type)
+    if spec is None:
         raise ValueError(
-            f"merge_ep_shards cannot resolve model_type '{model_type}' to an EP layer class, so it has "
+            f"merge_ep_shards cannot resolve model_type '{model_type}' to a MoE family spec, so it has "
             f"no HF-layout transform; merging would produce an unloadable checkpoint. Supported: "
-            f"{', '.join(supported_ep_merge_model_types())}. Save with save_sharded_ep: false (gathered, "
+            f"{', '.join(sorted(moe_model_types()))}. Save with save_sharded_ep: false (gathered, "
             "the default) — that writes a directly loadable checkpoint via each layer's "
-            "gather_expert_state_dict()."
+            "gather_layer_state_dict()."
         )
-    return layer_cls
+    return spec
 
 
 def merge_ep_shards(
@@ -220,9 +220,7 @@ def merge_ep_shards(
         logical = dict.fromkeys(passthrough)
         logical.update(dict.fromkeys(shard_groups))
         expert_groups, non_expert = _group_expert_weights(logical)
-        layer_cls = _resolve_merge_transform(
-            model_type, bool(expert_groups), bool(shard_groups), len(logical), verbose
-        )
+        spec = _resolve_merge_transform(model_type, bool(expert_groups), bool(shard_groups), len(logical), verbose)
 
         def input_keys(name: str) -> tuple[str, ...]:
             if name in shard_groups:
@@ -277,8 +275,8 @@ def merge_ep_shards(
             ``A_log``/``dt_bias``, Inkling's short convolutions, DeepSeek-V4's ``attn_hc``), so
             merged-from-sharded would no longer match a gathered save.
             """
-            if layer_cls is not None:
-                state = {to_hub_layer_key(key, layer_cls): tensor for key, tensor in state.items()}
+            if spec is not None:
+                state = {spec.to_hub_key(key): tensor for key, tensor in state.items()}
             for key, tensor in state.items():
                 writer.add(key, tensor)
 
@@ -290,7 +288,10 @@ def merge_ep_shards(
         total_tensors = len(non_expert)
         for prefix, params in sorted(expert_groups.items()):
             merged_params = {suffix: read_merged(f"{prefix}.{suffix}") for suffix in params}
-            transformed = layer_cls.merge_shards_to_hf(prefix, merged_params)
+            transformed = {
+                f"{prefix}.{key}": tensor
+                for key, tensor in to_hub_expert_tensors(spec.expert_layout, merged_params, device="cpu").items()
+            }
             del merged_params
             if verbose:
                 for new_key, new_tensor in sorted(transformed.items()):

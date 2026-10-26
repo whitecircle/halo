@@ -14,7 +14,7 @@ Transformers ships `transformers.models.laguna` natively, and the released check
 
 ## EP wrapper
 
-`EPLagunaMoELayer` (`src/distributed/expert_parallel/layers/laguna.py`) subclasses GLM-4 MoE Lite's `EPGlm4MoELayer` and claims `LagunaSparseMoeBlock` / `model_type: laguna`. The two families share the whole contract (sigmoid routing, fused `gate_up_proj`/`down_proj` 3D storage, a shared expert on every token, and the per-expert hub checkpoint layout), so the gather and the sharded merge are inherited unchanged.
+`EPLagunaMoELayer` (`src/distributed/expert_parallel/families/laguna.py`) subclasses GLM-4 MoE Lite's `EPGlm4MoELayer` and claims `LagunaSparseMoeBlock` / `model_type: laguna`. The two families share the whole contract (sigmoid routing, fused `gate_up_proj`/`down_proj` 3D storage, a shared expert on every token, and the per-expert hub checkpoint layout), so the gather and the sharded merge are inherited unchanged.
 
 `EPLagunaMoELayer` declares four deltas of its own: the top-k weight default, the optional-routing-knob opt-out, the served-bias warning, and the hub↔module key renames. Those, plus the two inherited GLM-4 behaviors that decide a Laguna load:
 
@@ -31,19 +31,19 @@ Transformers ships `transformers.models.laguna` natively, and the released check
     `EPGroupLimitedMoELayerBase._adopt_routing` resolves each knob off the block, then the gate, then the config, accepting both the `n_group` and `num_group` spellings. An explicit declaration always wins over the family default, and with no group knob at all group-limited selection degenerates to a plain top-k. Both families list exactly the knobs they lack in `_OPTIONAL_ROUTING_KNOBS`; any other missing knob raises.
 
 - **A missing router bias** (inherited). A checkpoint without `e_score_correction_bias` would leave it on meta under lazy loading; the wrapper materializes it at zero (a no-op additive bias) instead of letting the first routing matmul fault. The released Laguna checkpoints carry it.
-- **Hub vs module key spelling.** Laguna is the only family declaring `_EXPORT_KEY_RENAMES`: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.
+- **Hub vs module key spelling.** Laguna is the only family whose spec declares `export_key_renames`: module `mlp.shared_experts.` is hub `mlp.shared_expert.`, and module `mlp.gate.e_score_correction_bias` is hub `mlp.experts.e_score_correction_bias`.
 
-    Transformers declares both as `WeightRenaming` entries and applies them only inside `from_pretrained`, so `EPLagunaMoELayer._EXPORT_KEY_RENAMES` mirrors them for the three paths that bypass it: the gather, the RL weight sync, and the lazy loader (which applies the inverse on read). Without them the export writes keys vLLM silently skips and the loader leaves that submodule randomly initialized.
+    Transformers declares both as `WeightRenaming` entries and applies them only inside `from_pretrained`, so `LAGUNA.export_key_renames` mirrors them for the three paths that bypass it: the gather, the RL weight sync, and the lazy loader (which applies the inverse on read). Without them the export writes keys vLLM silently skips and the loader leaves that submodule randomly initialized.
 
     The pairs fire only when the live name actually differs, so a remote-code revision already spelling `shared_expert` is untouched. See [Checkpoints](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp).
 
 Routing is otherwise unchanged: sigmoid the logits, add the correction bias (and any `moe_balancing: bias_update` bias) for *selection* only, and gate with the unbiased scores. `LagunaTopKRouter.forward` returns `(logits, weights, indices)`; the wrapper keeps only the logits and recomputes weights and indices itself, since the cached pair predates routing replay and balancing.
 
-Gathered saves restore the hub layout `experts.{i}.{gate,up,down}_proj.weight` through `_PER_EXPERT_UNFUSED_KEYS`.
+Gathered saves restore the hub layout `experts.{i}.{gate,up,down}_proj.weight` through the spec's `FUSED_SPLIT_PER_EXPERT` `ExpertLayout`.
 
 Balancing is where the two families diverge. `LagunaForCausalLM.forward` declares `output_router_logits`, so `moe_balancing: auto` resolves to `aux_loss` — GLM-4 MoE Lite, which does not, lands on `bias_update`. The released checkpoints set `router_aux_loss_coef: 0.0`, so that term stays off, with a warning, unless the run sets a coefficient through `model_init_kwargs`. That term is transformers' shared switch-style aux loss: it softmaxes the raw router logits and counts their top-k, so it balances the unbiased routing, not the selection `e_score_correction_bias` shifts.
 
-The inherited `_supports_bias_balancing` still accepts an explicit `bias_update` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)). Under it the sign-updates land in the gate's own `e_score_correction_bias` (the inherited native-slot adoption), so the trained bias is part of the checkpoint and a transformers reload routes exactly as training did.
+The inherited `SUPPORTS_BIAS_BALANCING` still accepts an explicit `bias_update` ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)). Under it the sign-updates land in the gate's own `e_score_correction_bias` (the inherited native-slot adoption), so the trained bias is part of the checkpoint and a transformers reload routes exactly as training did.
 
 vLLM 0.26.0 does not: its Laguna loader registers that tensor under a different internal name and drops the exported `mlp.experts.e_score_correction_bias` key silently, so a served copy routes on the pretrained bias. The balancing enable path warns about this at run start.
 

@@ -8,9 +8,9 @@ layout ``…experts.{i}.{gate_proj,up_proj,down_proj}.weight``. This script rewr
 checkpoint to the per-expert layout so those engines can load it. Weights are unchanged: only the key
 layout and the gate/up split, with no transpose and no re-quantization.
 
-The projection names are the checkpoint family's own, read from its EP layer class
-(``EPMoELayerBase.hub_per_expert_keys``: ``gate_proj``/``up_proj``/``down_proj`` or
-``w1``/``w3``/``w2`` depending on the family). A ``model_type`` whose EP class declares no per-expert
+The projection names are the checkpoint family's own, read from its spec
+(``MoEFamilySpec.expert_layout.per_expert_keys``: ``gate_proj``/``up_proj``/``down_proj`` or
+``w1``/``w3``/``w2`` depending on the family). A ``model_type`` whose spec declares no per-expert
 hub layout is refused, since every name emitted for it would be one nothing reads: a family serving
 from the fused halves, GptOss's interleaved ``[E, H, 2M]`` ``gate_up_proj`` (already the layout
 serving engines expect), or Inkling's interleaved TM ``w13_weight``. The refusal message names the
@@ -48,14 +48,14 @@ from src.checkpoint.reading import (
     read_checkpoint_config,
 )
 from src.checkpoint.writing import StreamingShardWriter
-from src.distributed.expert_parallel.expert_weights import (
+from src.log import configure_cli_logging
+from src.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, iter_per_expert_split
+from src.models.moe.family_specs import (
     experts_container_attrs,
-    hf_fused_expert_keys,
+    find_moe_family_spec,
     per_expert_hub_model_types,
     per_expert_layouts,
-    resolve_ep_merge_layer_class,
 )
-from src.log import configure_cli_logging
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)
@@ -64,8 +64,8 @@ logger = logging.getLogger(__name__)
 def resolve_per_expert_layout(ckpt_dir: str) -> tuple[str, str, str]:
     """The ``(gate, up, down)`` per-expert projection names ``ckpt_dir``'s family stores experts under.
 
-    The family is resolved the way the sharded merge resolves it, through the class-declared
-    ``HF_MODEL_TYPES`` union rather than a key-spelling heuristic: the fused keys this script rewrites
+    The family is resolved the way the sharded merge resolves it, through the specs' declared
+    ``model_types`` rather than a key-spelling heuristic: the fused keys this script rewrites
     are shared across the roster at identical shapes, so an unmatched checkpoint would split and be
     written under names its own loader never reads, and transformers would then re-initialize the
     whole expert bank with a warning rather than an error.
@@ -76,17 +76,17 @@ def resolve_per_expert_layout(ckpt_dir: str) -> tuple[str, str, str]:
             f"names its loader reads — cannot be resolved. Convert a complete checkpoint directory."
         )
     model_type = detect_model_type(ckpt_dir)
-    layer_cls = resolve_ep_merge_layer_class(model_type)
+    spec = find_moe_family_spec(model_type)
     supported = ", ".join(per_expert_hub_model_types())
-    if layer_cls is None:
+    if spec is None:
         raise ValueError(
-            f"{ckpt_dir} has model_type {model_type!r}, which no registered EP family claims, so the "
+            f"{ckpt_dir} has model_type {model_type!r}, which no MoE family spec claims, so the "
             f"per-expert names its loader reads are unknown. Convertible model_types: {supported}."
         )
-    layout = layer_cls.hub_per_expert_keys()
+    layout = spec.expert_layout.per_expert_keys
     if layout is None:
         raise ValueError(
-            f"{ckpt_dir} has model_type {model_type!r} ({layer_cls.__name__}), whose checkpoint does not "
+            f"{ckpt_dir} has model_type {model_type!r}, whose checkpoint does not "
             f"store one tensor per expert at all: this script can only rewrite experts to "
             f"'experts.{{i}}.<gate|up|down>.weight', and that family keeps them in a layout no such "
             f"triple names (contiguous fused halves, interleaved fused, or a module nested per expert). "
@@ -124,9 +124,9 @@ def _fused_key_kinds() -> tuple[tuple[str, str, bool, bool], ...]:
     Cached: the roster is class-declared and fixed for the process, while ``_split_fused_key`` asks
     for it once per tensor key in the checkpoint.
 
-    Names come from the EP layer classes' ``_HF_FUSED_EXPERT_KEYS`` (the same tuple the sharded merge
-    accepts), so a family adding a fused tensor needs no second list here. A fused key that also names
-    a per-expert projection (``hub_per_expert_keys``) is the down matrix, since a fused gate+up name
+    Names come from ``HF_FUSED_EXPERT_KEYS`` (the same tuple the sharded merge accepts), so a family
+    adding a fused tensor needs no second list here. A fused key that also names a per-expert
+    projection (a spec's ``per_expert_keys``) is the down matrix, since a fused gate+up name
     never appears per-expert; everything else is split in half. Each suffix is matched at the end of a
     key, so a ``…_bias`` entry and the weight sharing its prefix cannot shadow each other and the
     generation order does not matter.
@@ -136,7 +136,7 @@ def _fused_key_kinds() -> tuple[tuple[str, str, bool, bool], ...]:
     # Every declared container spelling, not just ``experts``: a family nesting them under
     # ``routed_experts`` would match nothing and be reported as already per-expert.
     for container in experts_container_attrs():
-        for name in hf_fused_expert_keys():
+        for name in HF_FUSED_EXPERT_KEYS:
             is_bias = name.endswith("_bias")
             stem = name.removesuffix("_bias")
             kinds.append((f".{container}.{name}", container, stem not in per_expert_names, is_bias))
@@ -146,7 +146,7 @@ def _fused_key_kinds() -> tuple[tuple[str, str, bool, bool], ...]:
         raise RuntimeError(
             f"No fused expert key {[k for k, _c, _s, _b in kinds]} matches a declared per-expert projection "
             f"{sorted(per_expert_names)}, so none can be identified as the single down matrix. "
-            f"_HF_FUSED_EXPERT_KEYS and hub_per_expert_keys() have drifted apart."
+            f"HF_FUSED_EXPERT_KEYS and the specs' per_expert_keys have drifted apart."
         )
     return tuple(kinds)
 
@@ -234,18 +234,13 @@ def _iter_unfused(in_dir: str, layout: tuple[str, str, str] | None):
             yield key, tensor
             continue
         prefix, splits_gate_up, is_bias = parsed
-        num_experts = tensor.shape[0]  # expert axis is dim 0 in every fused variant
         param = "bias" if is_bias else "weight"
-        if splits_gate_up:  # weight [E, 2I, H] -> gate/up [I, H]; bias [E, 2I] -> [I]
-            if not is_bias:
-                fused_layers += 1
-            half = tensor.shape[1] // 2
-            for e in range(num_experts):
-                yield f"{prefix}.{e}.{gate_name}.{param}", tensor[e, :half]
-                yield f"{prefix}.{e}.{up_name}.{param}", tensor[e, half:]
-        else:  # weight [E, H, I] -> down [H, I]; bias [E, H] -> [H]
-            for e in range(num_experts):
-                yield f"{prefix}.{e}.{down_name}.{param}", tensor[e]
+        if splits_gate_up and not is_bias:
+            fused_layers += 1
+        # gate/up halves of weight [E, 2I, H] or bias [E, 2I]; the down weight [E, H, I] or bias [E, H] whole.
+        names = (gate_name, up_name) if splits_gate_up else (down_name,)
+        for expert_key, part in iter_per_expert_split([(tensor, names)]):
+            yield f"{prefix}.{expert_key}.{param}", part
 
     logger.info(f"Un-fused {fused_layers} MoE layer(s) into per-expert tensors.")
 
@@ -253,8 +248,8 @@ def _iter_unfused(in_dir: str, layout: tuple[str, str, str] | None):
 def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_MAX_SHARD_SIZE) -> None:
     """Split fused expert tensors into per-expert keys under the family's own (gate, up, down) names.
 
-    The names come from the checkpoint's own EP layer class (:meth:`hub_per_expert_keys`), the same
-    triple its gathered save emits, so this script never spells a projection name itself.
+    The names come from the checkpoint's own family spec (``expert_layout.per_expert_keys``), so this
+    script never spells a projection name itself.
     """
     reject_in_place_conversion(in_dir, out_dir)
 

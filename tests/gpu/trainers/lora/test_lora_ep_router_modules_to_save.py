@@ -17,7 +17,7 @@ which FAILS when a piece of the wiring breaks:
   3. NEGATIVE control: remove the EP grad-sync hooks, redo the same rank-distinct backward, and confirm
      the router copy's grad now DIFFERS across ranks — proving the sync in check 2 came from the hook,
      not from some incidental averaging.
-  4. Expert adapters coexist: native grouped expert-LoRA is still present (has_ep_lora), so the router
+  4. Expert adapters coexist: native grouped expert-LoRA is still present (model_has_expert_lora), so the router
      path does not disturb expert-LoRA.
 
 Usage:
@@ -35,7 +35,7 @@ import torch.distributed as dist
 from transformers import AutoTokenizer
 from trl import ModelConfig, SFTConfig
 
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_int, env_str
 from src.model_loading.parallel.loader import load_distributed_model
@@ -168,7 +168,7 @@ def run(ctx) -> dict:
     tmodel = trainer.model
     router_copies = _router_copy_params(tmodel)
     checks["router_copy_trainable"] = len(router_copies) > 0
-    checks["expert_lora_present"] = has_ep_lora(tmodel)
+    checks["expert_lora_present"] = model_has_expert_lora(tmodel)
     log(f"  router modules_to_save copies: {len(router_copies)}, expert-LoRA present: {checks['expert_lora_present']}")
     if not router_copies:
         raise RuntimeError("no trainable modules_to_save router copy found — modules_to_save did not wrap it")

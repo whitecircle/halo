@@ -8,7 +8,7 @@ plus the vendor-namespace KDA/hyper-connection keys (``hc_attn_fn``, ``self_attn
 ``q/k/v_conv1d``). Then all ranks:
 
   1. Load it through ``load_distributed_model`` with EP=2 — the lazy loader route, which replays
-     the family's hub conversion per key (``_HUB_CONVERSION_KEYS``: the vendor-namespace renames,
+     the family's hub conversion per key (``hub_conversion_keys``: the vendor-namespace renames,
      the three-source ``q/k/v_conv1d → conv1d`` fan-in) and fuses the per-expert projections
      locally; its bit-exactness against ``from_pretrained`` is pinned by
      ``tests/gpu/parallelism/ep/test_lazy_load_converted.py``.
@@ -24,7 +24,7 @@ Run with 2 GPUs:
         tests/gpu/trainers/sft/test_sft_glm5_next.py
 """
 
-from src.distributed.expert_parallel.layers.glm5_next import EPGlm5NextMoELayer
+from src.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
 from tests.common.ep_sft_roundtrip import EPSftRoundTrip
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GLM5_CONFIG

@@ -177,14 +177,15 @@ expert layout (`src/distributed/expert_parallel/moe_layer/compute.py` + `layers/
 ## Checkpoints
 
 Save formats, resume paths, and merge scripts: [Checkpoints](../reference/checkpoints.md). The
-ETP-unique step is that a gathered save all-gathers the TP shards within `expert_tp_group` and
-re-assembles full expert weights, keyed on layout:
+ETP-unique step is that a gathered save all-gathers each expert attribute's TP shards within
+`expert_tp_group` (`EPGatherMixin.EXPERT_TP_SHARD_DIMS`) before the dispatch-EP gather, giving the full
+runtime tensors; the family's `ExpertLayout` then writes them as it would without ETP:
 
 - GptOss re-interleaves.
-- Contiguous-halves families concatenate along dim 2 and transpose back from matmul convention (the
-  base `gather_expert_state_dict`).
-- GLM4/LFM2 declare `_PER_EXPERT_UNFUSED_KEYS` and the base splits to per-expert names.
-- Qwen3/Bailing write per-expert `experts.{i}.{gate,up,down}_proj.weight`.
+- Contiguous-halves families concatenate gate and up along dim 2 and transpose back from matmul
+  convention.
+- GLM4/LFM2 (`FUSED_SPLIT_PER_EXPERT`) split that to per-expert names.
+- Qwen3/Bailing (`SEPARATE_GLU`) write per-expert `experts.{i}.{gate,up,down}_proj.weight`.
 
 The result is a standard HuggingFace checkpoint; ETP sharding is re-applied automatically at model
 patching when `expert_tp_size > 1`. Per-rank sharded EP save is rejected — see below.
@@ -203,7 +204,7 @@ is an error.
 
 `expert_tp_size` must divide each expert's intermediate size, else the top units of every expert
 would be dropped silently. `reject_unsupported_model` checks it off
-`config.json` at the top of the model load, through `resolve_expert_ffn_shard_width`.
+`config.json` at the top of the model load, through `resolve_expert_ffn_width`.
 
 That helper is the one home for "what does ETP actually shard", so the config-time gate and the
 layer that does the split cannot disagree on which config spelling carries the per-expert width.

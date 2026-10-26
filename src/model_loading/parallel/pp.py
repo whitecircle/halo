@@ -23,7 +23,7 @@ from src.distributed.expert_parallel.lazy_plan import (
     is_lazy_loadable,
     lazy_load_prologue,
 )
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_structure
 from src.distributed.pipeline_parallel.partition import resolve_layer_partition, validate_partition
@@ -252,7 +252,7 @@ def _ep_patch_reason(
     """Why EP patching failed on this stage, or ``None``: any exception, since the wrappers run over this
     stage's layers alone, so every failure is stage-local and must reach the peers through the join."""
     try:
-        patch_moe_model_for_ep(model, ep_config, weights_already_sharded=weights_already_sharded)
+        apply_ep_layers(model, ep_config, weights_already_sharded=weights_already_sharded)
     except Exception as e:  # a stage-local verdict, joined by the caller
         return f"EP patching failed on pipeline stage {pp_rank}: {type(e).__name__}: {e}"
     return None
@@ -383,7 +383,7 @@ def load_pp_stage_model(
             f"but {source.name!r} has none. Falling back to a whole-model load would make "
             f"every rank hold all pipeline_parallel_size={pc.pp_size} stages — the ceiling PP "
             f"exists to remove. Either the checkpoint is not safetensors (convert it), or this "
-            f"family's EP layer declares _supports_lazy_loading=False / nests its expert index "
+            f"family's spec declares supports_lazy_loading=False / nests its expert index "
             f"under an extra module (pre-5.14 Zaya checkpoints), in which case the model cannot "
             f"use PP at all (see agent-docs/parallelism/pipeline-parallelism.md)."
         )

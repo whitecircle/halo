@@ -12,7 +12,7 @@ from accelerate.logging import get_logger
 
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.models.moe_balancing import config_has_experts
+from src.models.moe.config_fields import has_routed_experts
 from src.runtime.ranks import is_global_main_process
 
 logger = get_logger(__name__, log_level="info")
@@ -30,7 +30,7 @@ def forces_reentrant_checkpointing(parallelism_config, model_config) -> bool:
     """
     if parallelism_config.is_pp_mode:
         return False
-    return parallelism_config.has_ep_group or parallelism_config.is_cp_mode or config_has_experts(model_config)
+    return parallelism_config.has_ep_group or parallelism_config.is_cp_mode or has_routed_experts(model_config)
 
 
 def require_ep_config(ep_config):
@@ -187,18 +187,17 @@ class EpIntrospectionMixin:
         if not gc_enabled:
             return
 
-        # Class-declared contract; a class that does not set the flag is treated as supported.
         unsupported = sorted(
             {
                 type(module).__name__
                 for module in self._find_ep_modules()
-                if not module._supports_gradient_checkpointing
+                if not module.FAMILY.supports_gradient_checkpointing
             }
         )
         if unsupported:
             raise ValueError(
                 f"gradient_checkpointing=True is not supported with Expert Parallelism for "
-                f"{', '.join(unsupported)}: the family declares _supports_gradient_checkpointing="
+                f"{', '.join(unsupported)}: the family declares supports_gradient_checkpointing="
                 f"False (see the EP layer class docstring for the mechanism — e.g. Zaya's EDA/CCA "
                 f"cross-layer state makes checkpoint recompute recurse polynomially). Disable "
                 f"gradient_checkpointing for this model."

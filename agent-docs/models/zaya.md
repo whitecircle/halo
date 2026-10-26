@@ -20,7 +20,7 @@ Hub `Zyphra/ZAYA1-8B` `main` is the native format: 40 layers, fused `model.layer
 
 ## EP wrapper
 
-`EPZayaMoELayer` (`src/distributed/expert_parallel/layers/zaya.py`) wraps `ZayaSparseMoeBlock` (router + experts).
+`EPZayaMoELayer` (`src/distributed/expert_parallel/families/zaya.py`) wraps `ZayaSparseMoeBlock` (router + experts).
 
 - Routing: `ZayaRouter` with cross-layer EDA state — layer N's router output feeds layer N+1's. The forward returns `(expert_output, prev_router_hidden_states)` with the EDA state **attached**, as `ZayaSparseMoeBlock` does.
 
@@ -30,7 +30,7 @@ Hub `Zyphra/ZAYA1-8B` `main` is the native format: 40 layers, fused `model.layer
 - Topology: top-1 only, enforced by the config.
 - Storage: fused `gate_up_proj [E, H, 2M]` and `down_proj [E, M, H]` in matmul convention (the checkpoint is `[E, 2M, H]` / `[E, H, M]`, transposed on load). SwiGLU, Grouped GEMM compute.
 - Loading and saving both use the base fused path: lazy safetensors loading is supported (each rank reads only its expert slice), and the gathered save emits the two native fused tensors per layer, which `from_pretrained` reads back. The loader's structural probe declines a per-expert checkpoint in the `-legacy` layout.
-- Routing replay is unsupported (`_supports_routing_replay = False`) — the EDA state makes a replayed forward non-reproducible.
+- Routing replay is unsupported (`supports_routing_replay=False` on `ZAYA`) — the EDA state makes a replayed forward non-reproducible.
 
 vLLM 0.26.0 ships no **native** Zaya implementation. An exported checkpoint still resolves through vLLM's transformers backend, whose generation quality for this family the toolkit does not validate.
 
@@ -40,7 +40,7 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 **Gradient checkpointing** is unavailable in every mode. Upstream declares support, but `patch_zaya_gradient_checkpointing_refusal` (`src/models/zaya.py`) clears `ZayaPreTrainedModel.supports_gradient_checkpointing`, so `gradient_checkpointing_enable` raises rather than failing deep in the first backward. The underlying fault is environmental: on the CUDA 13.2 image, backward recompute through CCA's `nn.Conv1d` pair (`conv_qk_depthwise`, `conv_qk_grouped`) hits `cuDNN error: CUDNN_STATUS_INTERNAL_ERROR`.
 
-**EP + per-layer GC** is refused separately, by `EPZayaMoELayer._supports_gradient_checkpointing = False`: the cross-layer `prev_router_hidden_states` plus a per-layer checkpoint re-wrap produce a polynomial backward recompute cascade.
+**EP + per-layer GC** is refused separately, by `ZAYA.supports_gradient_checkpointing=False`: the cross-layer `prev_router_hidden_states` plus a per-layer checkpoint re-wrap produce a polynomial backward recompute cascade.
 
 **TP** — two blockers: `num_key_value_heads=2` means only `tp_size=2` divides evenly, and CCA replaces QKV with `q_proj` / `k_proj` / `v_proj_current` / `v_proj_delayed` plus the `nn.Conv1d` stack, which has no DTensor sharding primitive. Upstream ships no `base_model_tp_plan` at all, so the toolkit's raise is the only clear rejection. EP already gives 16× scaling on the dominant expert parameters, so there is no TP wrapper.
 

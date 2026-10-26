@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """The lazy loaders reproduce ``from_pretrained`` bitwise on every hub-converted family — on CPU.
 
-A family whose hub checkpoint needs transformers' conversion mapping declares its key(s) on the EP
-layer class (``_HUB_CONVERSION_KEYS``) and the lazy loaders replay that mapping per key. This drives
+A family whose hub checkpoint needs transformers' conversion mapping declares its key(s) on the family
+spec (``hub_conversion_keys``) and the lazy loaders replay that mapping per key. This drives
 the REAL :func:`~src.model_loading.parallel.ep.load_ep_model_lazy` (EP patching
 stubbed — it needs DeepEP and process groups) on a tiny checkpoint each family writes through its
 own ``save_pretrained`` (the hub layout: vendor namespaces, split or per-expert projections, the
@@ -35,9 +35,9 @@ import src.distributed.expert_parallel.lazy_plan as lazy_plan
 import src.model_loading.parallel.ep as ep_lazy_loader
 from src.checkpoint.reading import resolve_checkpoint_weights
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, is_expert_weight_attr
 from src.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from src.model_loading.parallel.ep import load_ep_model_lazy
+from src.models.moe.family_specs import is_expert_weight_attr
 from tests.common.models import (
     TINY_DSV4_CONFIG,
     TINY_GLM5_CONFIG,
@@ -45,6 +45,7 @@ from tests.common.models import (
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
+from tests.common.rosters import ep_layer_class_by_model_type
 
 RUN_DTYPE = torch.bfloat16
 
@@ -72,7 +73,9 @@ def _lazy_converted_families() -> list[str]:
     return sorted(
         mt
         for mt in _BUILDERS
-        if (cls := registry.get(mt)) is not None and cls._HUB_CONVERSION_KEYS and cls._supports_lazy_loading
+        if (cls := registry.get(mt)) is not None
+        and cls.FAMILY.hub_conversion_keys
+        and cls.FAMILY.supports_lazy_loading
     )
 
 
@@ -82,10 +85,12 @@ _GPU_PINNED_MODEL_TYPES = frozenset({"inkling_mm_model"})
 
 
 def test_every_lazy_converted_family_is_pinned_here_or_on_gpu():
-    """The parametrization reads its builders, so a family that declares ``_HUB_CONVERSION_KEYS``
+    """The parametrization reads its builders, so a family that declares ``hub_conversion_keys``
     without a tiny builder would silently drop out of the resume oracle."""
     registry = ep_layer_class_by_model_type()
-    declaring = {cls for cls in registry.values() if cls._HUB_CONVERSION_KEYS and cls._supports_lazy_loading}
+    declaring = {
+        cls for cls in registry.values() if cls.FAMILY.hub_conversion_keys and cls.FAMILY.supports_lazy_loading
+    }
     pinned = {registry[mt] for mt in (*_BUILDERS, *_GPU_PINNED_MODEL_TYPES)}
     assert declaring <= pinned, sorted(cls.__name__ for cls in declaring - pinned)
 
@@ -103,7 +108,7 @@ def family(request, tmp_path_factory):
 @pytest.fixture(autouse=True)
 def _stub_ep_patching(monkeypatch):
     """EP patching needs DeepEP + process groups; the load itself does not."""
-    monkeypatch.setattr(ep_lazy_loader, "patch_moe_model_for_ep", lambda model, *a, **k: model)
+    monkeypatch.setattr(ep_lazy_loader, "apply_ep_layers", lambda model, *a, **k: model)
 
 
 def _lazy(model_class, path: str, ep_size: int):

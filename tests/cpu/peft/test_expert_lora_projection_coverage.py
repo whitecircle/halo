@@ -4,7 +4,7 @@
 
 ``ExpertLoraSpec.adapts`` resolves ``lora_target_modules`` projections against
 :data:`~src.models.moe.expert_lora_spec.LORA_PROJECTION_COVERAGE`; a family adding a new
-expert-weight root (``_EXPERT_WEIGHT_ATTR_ROOTS``) without a coverage entry would make expert-LoRA
+expert-weight root (``expert_weight_roots``) without a coverage entry would make expert-LoRA
 on that weight a SILENT no-op (``adapts`` returns False, no adapter built, no error). This test
 fails the moment such a root appears. Bias roots (``*_bias``) are 2-D and never adapted —
 ``_init_expert_lora`` only adapts 3-D weights — so they are exempt.
@@ -16,9 +16,8 @@ from __future__ import annotations
 
 import pytest
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers every EP family subclass
-from src.distributed.expert_parallel.expert_weights import expert_weight_roots
 from src.models.moe.expert_lora_spec import LORA_PROJECTION_COVERAGE
+from src.models.moe.family_specs import expert_weight_roots
 
 
 def test_every_non_bias_expert_root_has_lora_coverage():

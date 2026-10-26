@@ -12,7 +12,7 @@
   ``mlp.shared_expert.*`` matches no live key and is dropped — the shared expert loads as random
   weights (the shipped ``examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml`` is that shape).
 
-``EPMoELayerBase._EXPORT_KEY_RENAMES``-driven rewriting closes both, and
+``MoEFamilySpec.export_key_renames``-driven rewriting closes both, and
 ``test_declaration_matches_transformers`` keeps the declaration honest.
 
     python tests/cpu/parallelism/test_laguna_export_key_renames.py
@@ -27,14 +27,10 @@ from transformers import AutoConfig, AutoModelForCausalLM
 from transformers.conversion_mapping import get_checkpoint_conversion_mapping
 from transformers.core_model_loading import WeightRenaming
 
-from src.distributed.expert_parallel.expert_weights import (
-    gather_ep_layer_weights,
-    hub_to_module_key_renames,
-    to_hub_layer_key,
-)
-from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
 from src.distributed.expert_parallel.lazy_plan import family_key_mapping
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.models.moe.family_specs import MoEFamilySpec, find_moe_family_spec
 
 LAGUNA_MOE_LAYER = 1  # layer 0 is dense (first_k_dense_replace)
 
@@ -67,8 +63,7 @@ class _StubLagunaLayer(EPMoELayerBase):
     live EP process groups; the renames under test are read off the class attribute either way.
     """
 
-    _EXPORT_KEY_RENAMES = EPLagunaMoELayer._EXPORT_KEY_RENAMES
-    _PER_EXPERT_UNFUSED_KEYS = None  # this stub does its own (trivial) gather
+    FAMILY = MoEFamilySpec(model_types=(), export_key_renames=EPLagunaMoELayer.FAMILY.export_key_renames)
 
     def __init__(self):
         nn.Module.__init__(self)
@@ -87,15 +82,11 @@ class _StubLagunaLayer(EPMoELayerBase):
     def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
         return {"experts.gate_up_proj": torch.zeros(4, 4, 6, device=device)} if retain else {}
 
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:  # pragma: no cover - paired override
-        return {}
-
 
 def test_declaration_matches_transformers():
     """The class declaration is a mirror of transformers' ``laguna`` renamings — drift here silently
     reopens both gaps."""
-    declared = {hub: module for module, hub in EPLagunaMoELayer._EXPORT_KEY_RENAMES}
+    declared = {hub: module for module, hub in EPLagunaMoELayer.FAMILY.export_key_renames}
     upstream = {
         entry.source_patterns[0].split("mlp.", 1)[-1]: entry.target_patterns[0].split("mlp.", 1)[-1]
         for entry in get_checkpoint_conversion_mapping("laguna")
@@ -116,7 +107,7 @@ def test_the_two_spellings_really_differ():
 
 def test_gather_emits_hub_spelling():
     """The export side: vLLM and ``from_pretrained`` both key on the hub names."""
-    gathered = set(gather_ep_layer_weights("model.layers.1.mlp", _StubLagunaLayer(), retain=True))
+    gathered = set(_StubLagunaLayer().gather_layer_state_dict("model.layers.1.mlp", retain=True))
     assert "model.layers.1.mlp.experts.e_score_correction_bias" in gathered, gathered
     assert "model.layers.1.mlp.shared_expert.weight" in gathered, gathered
     assert "model.layers.1.mlp.gate.e_score_correction_bias" not in gathered
@@ -129,13 +120,13 @@ def test_a_family_without_renames_is_untouched():
     """Anti-over-rejection: every other family's gather keys must be byte-identical to before."""
 
     class _Plain(_StubLagunaLayer):
-        _EXPORT_KEY_RENAMES = ()
+        FAMILY = MoEFamilySpec(model_types=())
 
-    gathered = set(gather_ep_layer_weights("model.layers.1.mlp", _Plain(), retain=True))
+    gathered = set(_Plain().gather_layer_state_dict("model.layers.1.mlp", retain=True))
     assert "model.layers.1.mlp.gate.e_score_correction_bias" in gathered
     assert "model.layers.1.mlp.shared_experts.weight" in gathered
-    assert hub_to_module_key_renames("qwen3_moe") == ()
-    assert hub_to_module_key_renames("gpt_oss") == ()
+    assert find_moe_family_spec("qwen3_moe").hub_to_module_renames() == ()
+    assert find_moe_family_spec("gpt_oss").hub_to_module_renames() == ()
 
 
 def test_lazy_loader_maps_hub_keys_onto_the_live_module():
@@ -161,10 +152,10 @@ def test_lazy_loader_maps_hub_keys_onto_the_live_module():
 
 
 def test_export_and_load_renames_are_inverses():
-    for module_spelling, hub_spelling in EPLagunaMoELayer._EXPORT_KEY_RENAMES:
-        assert to_hub_layer_key(f"{module_spelling}x", EPLagunaMoELayer) == f"{hub_spelling}x"
-    assert dict(hub_to_module_key_renames("laguna")) == {
-        hub: module for module, hub in EPLagunaMoELayer._EXPORT_KEY_RENAMES
+    for module_spelling, hub_spelling in EPLagunaMoELayer.FAMILY.export_key_renames:
+        assert EPLagunaMoELayer.FAMILY.to_hub_key(f"{module_spelling}x") == f"{hub_spelling}x"
+    assert dict(find_moe_family_spec("laguna").hub_to_module_renames()) == {
+        hub: module for module, hub in EPLagunaMoELayer.FAMILY.export_key_renames
     }
 
 

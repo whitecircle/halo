@@ -116,18 +116,10 @@ _PACKAGE_INTERNAL = {
 _PENDING_MOVES = {
     "distributed.nccl": "weight_sync.transport",
     "distributed.nccl._nccl_wrapper": "weight_sync.transport.nccl_library",
-    "distributed.expert_parallel.expert_gather": "distributed.expert_parallel.moe_layer.gather",
-    "distributed.expert_parallel.expert_weights": "distributed.expert_parallel.families.roster",
-    "distributed.expert_parallel.layers": "distributed.expert_parallel.families",
-    "distributed.expert_parallel.patching": "distributed.expert_parallel.parallelize",
 }
 # The breaks today's tree still makes, as (rule, importer, imported) on final paths. The move or split that fixes
 # one drops its entry; any other break fails.
-_KNOWN_LAYER_BREAKS = frozenset(
-    {
-        ("layer order", "weight_sync.clients.sglang", "distributed.expert_parallel.families.step3p7"),
-    }
-)
+_KNOWN_LAYER_BREAKS: frozenset[tuple[str, str, str]] = frozenset()
 
 
 class _Import(NamedTuple):

@@ -470,7 +470,7 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # Hub-layout composites the lazy loaders convert per key (fan-in Concatenate, scoped vision
     # tower). Markers are the union across the matrix; a family joins it when it declares
-    # ``_HUB_CONVERSION_KEYS`` and drops ``_supports_lazy_loading = False``.
+    # ``hub_conversion_keys`` and drops ``supports_lazy_loading=False``.
     "parallelism/ep/test_lazy_load_converted.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "ep", "moe", "glm5", "step3p7"),

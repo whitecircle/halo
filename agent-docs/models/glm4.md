@@ -12,7 +12,7 @@ Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAtt
 
 ## EP wrapper
 
-`EPGlm4MoELayer` (`src/distributed/expert_parallel/layers/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this wrapper — see [Laguna](laguna.md).
+`EPGlm4MoELayer` (`src/distributed/expert_parallel/families/glm4.py`) replaces `Glm4MoeLiteMoE`. Laguna shares the shape and subclasses this wrapper — see [Laguna](laguna.md).
 
 - Routing: sigmoid + group mask + top-k. `topk_group` selects eligible expert *groups*, then `top_k` (=4) experts are chosen across them. `route_tokens_to_experts()` runs this before DeepEP dispatch.
 - Routed experts: `Glm4MoeLiteExperts`, fused `gate_up_proj` and `down_proj` 3D tensors.
@@ -84,7 +84,7 @@ Pair them with `assistant_message_template: "<|assistant|>"` — the role token 
 
 GLM-4.7-Flash (47 layers, 64 routed experts, top-k=4) trains under EP=8 at ~30K max length: `examples/sft/glm4/glm-4.7-flash-ultrachat-ep.yaml`.
 
-Gathered EP saves and EP-shard merges (`merge_ep_shards.py`) both write the per-expert hub layout both pinned engines read directly — GLM-4 declares `_PER_EXPERT_UNFUSED_KEYS`, so the merge is the structural inverse of the gather. A checkpoint that bypassed the EP save path entirely (`merge_peft_adapters.py` over a plain `from_pretrained` load of the stock hub checkpoint, say) stays in the transformers-native fused layout and needs `scripts/after_training/unfuse_moe_experts.py` first.
+Gathered EP saves and EP-shard merges (`merge_ep_shards.py`) both write the per-expert hub layout both pinned engines read directly — GLM-4's spec declares a `FUSED_SPLIT_PER_EXPERT` `ExpertLayout`, which the gather and the merge both apply. A checkpoint that bypassed the EP save path entirely (`merge_peft_adapters.py` over a plain `from_pretrained` load of the stock hub checkpoint, say) stays in the transformers-native fused layout and needs `scripts/after_training/unfuse_moe_experts.py` first.
 
 MLA on Blackwell needs vLLM `--attention-backend CUTLASS_MLA` or SGLang `--attention-backend triton`. See [Serving on vLLM / SGLang](../reference/checkpoints.md#serving-on-vllm--sglang).
 

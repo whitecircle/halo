@@ -12,7 +12,7 @@ is silently or loudly wrong for those families unless it goes through the nested
     only, while transformers' own sequence-classification pooling reads
     ``config.get_text_config().pad_token_id`` — leaving it ``None`` (batch > 1 then raises) or stale
     at the checkpoint's value (pooling silently picks the wrong last token).
-  * ``config_has_experts`` — the single "is this MoE?" gate — must see the nested expert counts.
+  * ``has_routed_experts`` — the single "is this MoE?" gate — must see the nested expert counts.
   * ``ties_word_embeddings`` gates the TP load's tied embedding/head handling; the flag lives on the
     wrapper and/or the decoder, and a verdict missing a tying level halves the tied gradient.
 
@@ -28,10 +28,10 @@ from transformers import CONFIG_MAPPING, Qwen3_5MoeForCausalLM, Qwen3_5MoeForCon
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 
 from src.callbacks.balancing import apply_balancing_mode
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.model_loading.tokenizer_setup import sync_special_token_id
-from src.models import config_access, moe_balancing
+from src.models import config_access
 from src.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from src.models.config_access import (
     apply_config_overrides,
@@ -40,12 +40,9 @@ from src.models.config_access import (
     set_config_field,
     ties_word_embeddings,
 )
-from src.models.moe_balancing import (
-    ROUTER_EXPERT_COUNT_FIELDS,
-    config_has_experts,
-    get_first_router_field,
-    honors_output_router_logits_config,
-)
+from src.models.moe import balancing
+from src.models.moe.config_fields import has_routed_experts
+from src.models.moe.router_logits import honors_router_logits_flag
 
 PartialState()  # the loader's logger needs accelerate state initialized
 
@@ -107,8 +104,8 @@ def test_set_config_field_plants_a_toolkit_flag_on_every_level():
 def test_config_access_stays_the_leaf_both_writers_folded_into():
     """One writer over one enumeration: the generic leaf must not reach back into the MoE module (a
     cycle), and no second unconditional writer may reappear beside it."""
-    assert "moe_balancing" not in Path(config_access.__file__).read_text()
-    assert not hasattr(moe_balancing, "set_router_field")
+    assert "models.moe" not in Path(config_access.__file__).read_text()
+    assert not hasattr(balancing, "set_router_field")
 
 
 # model_init_kwargs / model_config_overrides
@@ -177,7 +174,7 @@ def test_sync_tolerates_no_model():
     sync_special_token_id(None, "pad_token_id", 1)  # scripts call it with model=None
 
 
-# config_has_experts — the MoE gate every loader branch keys on
+# has_routed_experts — the MoE gate every loader branch keys on
 
 
 @pytest.mark.parametrize(
@@ -191,25 +188,12 @@ def test_sync_tolerates_no_model():
         ("llama", False),
     ],
 )
-def test_config_has_experts_sees_both_levels(model_type, is_moe):
-    assert config_has_experts(_config(model_type)) is is_moe
+def test_has_routed_experts_sees_both_levels(model_type, is_moe):
+    assert has_routed_experts(_config(model_type)) is is_moe
 
 
-def test_config_has_experts_tolerates_none():
-    assert config_has_experts(None) is False
-
-
-@pytest.mark.parametrize(
-    "model_type", ["qwen3_5_moe", "qwen3_moe", "gpt_oss", "deepseek_v4", "gemma4", "qwen3_5", "llama"]
-)
-def test_the_loader_gate_and_the_config_gate_answer_is_this_moe_identically(model_type):
-    """``ParallelismConfig`` asks the same question through ``get_first_router_field``. Two spellings
-    of one predicate can disagree on a family that declares an expert count at one level only — and
-    the two answers gate different halves of the same run (the loader's EP wrappers vs the
-    config-time axis validation), so a split verdict is a run wrapped for EP that was never validated
-    for it."""
-    config = _config(model_type)
-    assert config_has_experts(config) is bool(get_first_router_field(config, ROUTER_EXPERT_COUNT_FIELDS))
+def test_has_routed_experts_tolerates_none():
+    assert has_routed_experts(None) is False
 
 
 # Does config.output_router_logits actually reach the aux loss?
@@ -231,8 +215,8 @@ def test_multimodal_wrapper_does_not_honor_the_router_logits_config_flag():
     class _TextOnly(torch.nn.Module):
         forward = Qwen3_5MoeForCausalLM.forward
 
-    assert honors_output_router_logits_config(_TextOnly()) is True
-    assert honors_output_router_logits_config(_Model()) is False
+    assert honors_router_logits_flag(_TextOnly()) is True
+    assert honors_router_logits_flag(_Model()) is False
 
 
 def test_aux_loss_balancing_refuses_a_model_it_cannot_reach():
@@ -257,11 +241,11 @@ def test_aux_loss_balancing_refuses_a_model_it_cannot_reach():
 def test_qwen3_5_ep_layer_declares_the_bias_update_contract():
     """``bias_update`` is the only balancing a pipelined Qwen3.5 can get.
 
-    ``_ep_severs_aux_loss`` must stay False — flipping it would resolve ``auto`` to ``bias_update``
+    ``SEVERS_AUX_LOSS`` must stay False — flipping it would resolve ``auto`` to ``bias_update``
     for every non-PP Qwen3.5 run too, whose HF aux-loss recorder is live on the text-only sibling.
     """
-    assert EPQwen3_5MoELayer._supports_bias_balancing is True
-    assert EPQwen3_5MoELayer._ep_severs_aux_loss is False
+    assert EPQwen3_5MoELayer.SUPPORTS_BIAS_BALANCING is True
+    assert EPQwen3_5MoELayer.SEVERS_AUX_LOSS is False
 
 
 def test_zero_bias_routing_matches_the_stock_qwen3_5_router():

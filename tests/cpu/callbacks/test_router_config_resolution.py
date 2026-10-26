@@ -16,11 +16,8 @@ import torch.nn as nn
 
 from src.callbacks.balancing import apply_balancing_mode
 from src.models.config_access import get_config_field, set_config_field
-from src.models.moe_balancing import (
-    detect_moe_experts_topk,
-    mark_router_logits_forced_off,
-    router_logits_forced_off,
-)
+from src.models.moe.config_fields import resolve_expert_count, resolve_router_topk
+from src.models.moe.router_logits import mark_router_logits_forced_off, router_logits_forced_off
 
 
 class _TextConfig:
@@ -159,7 +156,7 @@ def test_gemma4_style_top_k_experts_is_detected():
     """
     model = _Model(_TextConfig(num_experts=128, top_k_experts=4))
 
-    num_experts, top_k = detect_moe_experts_topk(model)
+    num_experts, top_k = (resolve_expert_count(model.config), resolve_router_topk(model.config))
 
     assert (num_experts, top_k) == (128, 4)
 
@@ -167,7 +164,7 @@ def test_gemma4_style_top_k_experts_is_detected():
 def test_composite_expert_fields_are_detected():
     model = _composite(num_experts=512, num_experts_per_tok=10)
 
-    assert detect_moe_experts_topk(model) == (512, 10)
+    assert (resolve_expert_count(model.config), resolve_router_topk(model.config)) == (512, 10)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Base-class contracts of native bias-update adoption (``_NATIVE_BALANCING_BIAS_ATTR``).
+"""Base-class contracts of native bias-update adoption (the spec's ``balancing_slot``).
 
 Families whose selection math already consults a checkpoint-persistent tensor adopt that tensor as
 the balancing state, so the trained bias exports with every gathered save instead of dying with the
@@ -18,20 +18,20 @@ import pytest
 import torch
 import torch.nn as nn
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.glm5_next import EPGlm5NextMoELayer
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
-from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.families.inkling import EPInklingMoELayer
+from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.families.roster import ep_layer_classes
+from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from src.distributed.expert_parallel.moe_layer.balancing_bias import EPBalancingBiasMixin
-from src.models.moe_balancing import is_transient_balancing_router, iter_balancing_routers
+from src.models.moe.balancing import is_transient_balancing_router, iter_balancing_routers
 
 NUM_EXPERTS = 8
 # Hub slots are bf16 everywhere; the adoption's fp32 upcast is load-bearing (1e-3 steps round away).
@@ -101,7 +101,7 @@ def test_every_family_with_a_native_slot_is_covered_here():
     declaring = {
         cls.__name__
         for cls in ep_layer_classes()
-        if cls._NATIVE_BALANCING_BIAS_ATTR and cls.__module__.startswith("src.")
+        if (family := getattr(cls, "FAMILY", None)) and family.balancing_slot and cls.__module__.startswith("src.")
     }
     assert declaring == _COVERED
 

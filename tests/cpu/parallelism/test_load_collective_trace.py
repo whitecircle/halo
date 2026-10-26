@@ -13,7 +13,8 @@ import pytest
 from transformers import AutoConfig
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe_balancing import config_has_experts, has_ep_wrapper_class
+from src.models.moe.config_fields import has_routed_experts
+from src.models.moe.family_specs import find_moe_family_spec_for_config
 from tests.common.goldens.load_collective_trace import (
     GOLDEN_PATH,
     LOAD_CASES,
@@ -46,7 +47,7 @@ def test_a_case_loads_a_moe_family_no_ep_layer_class_wraps(checkpoints):
     configs = [
         AutoConfig.from_pretrained(checkpoints.root / name) for name in {case.checkpoint for case in LOAD_CASES}
     ]
-    assert any(config_has_experts(config) and not has_ep_wrapper_class(config) for config in configs)
+    assert any(has_routed_experts(config) and find_moe_family_spec_for_config(config) is None for config in configs)
 
 
 @pytest.mark.parametrize(

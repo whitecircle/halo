@@ -2,14 +2,14 @@
 """``merge_ep_shards.py`` on a REAL per-rank EP save must reproduce the gathered save bit for bit.
 
 The sharded EP layout (``save_sharded_ep: true``) is loadable only through the merge, and the CPU
-suite pins that merge against synthetic shard dicts and a stubbed class-level gather oracle. This
+suite pins that merge against synthetic shard dicts and a single-process gather. This
 is the end-to-end pin: on 2 GPUs, each family's tiny model is EP-patched at ``ep_size=2``, saved
 BOTH ways (``save_ep_gathered_checkpoint`` / ``save_ep_sharded_checkpoint``), the per-rank shards
 are merged by the real script, and the merged directory must be key-and-tensor identical to the
-gathered one — and load back through the toolkit's verified ``from_pretrained``. Any drift between a
-family's ``merge_shards_to_hf`` and its ``gather_expert_state_dict`` (a transpose, a lost
-re-interleave, a hub rename applied on one side only, a balancing tensor cast on one side only)
-shows up as a tensor diff here. A model whose names the gathered save reverts to a namespace the
+gathered one — and load back through the toolkit's verified ``from_pretrained``. Any drift between the
+merge and the gather around the family's one ``ExpertLayout`` (a transpose, a lost re-interleave, a
+hub rename applied on one side only, a balancing tensor cast on one side only) shows up as a tensor
+diff here. A model whose names the gathered save reverts to a namespace the
 key-by-key merge cannot respell must have its sharded save refused instead, on every rank.
 
 Hermetic: tiny random-init models, no download, and no DeepEP — the transport buffer is built at
@@ -30,7 +30,7 @@ import torch.distributed as dist
 from scripts.after_training.merge_ep_shards import merge_ep_shards
 from src.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.model_loading.model_preparation import auto_load_model
 from tests.common.checkpoint_io import save_context
 from tests.common.distributed import shared_scratch_dir
@@ -58,7 +58,7 @@ def _ep_patched(family: str, device: torch.device) -> torch.nn.Module:
     config = EPConfig(
         ep_size=EP_SIZE, stage_world_size=EP_SIZE, nvlink_domain_size=EP_SIZE, experts_fsdp_managed=False
     )
-    return patch_moe_model_for_ep(model, config)
+    return apply_ep_layers(model, config)
 
 
 def _compare(merged_dir: str, gathered_dir: str) -> list[str]:

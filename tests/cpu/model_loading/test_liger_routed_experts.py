@@ -33,7 +33,6 @@ from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401 — the EP predicates read a filled registry
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.liger import dispatch
 from src.trainers.mixins.base import DistributedTrainerMixin
@@ -105,7 +104,6 @@ from liger_kernel.transformers.swiglu import LigerExperts
 from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
-import src.distributed.expert_parallel.layers.roster
 from src.model_loading.liger import dispatch
 
 model_type, overrides, needs_ep_wrappers, toolkit_glu = json.loads(PAYLOAD)
@@ -162,7 +160,7 @@ from liger_kernel.transformers.swiglu import LigerExperts
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from src.model_loading.liger import dispatch
-from src.models.moe_balancing import config_has_experts
+from src.models.moe.config_fields import has_routed_experts
 
 
 def liger_experts_bindings():
@@ -181,7 +179,7 @@ for model_type in sorted({*MODEL_TYPE_TO_APPLY_LIGER_FN, *dispatch._TOOLKIT_LIGE
     if model_type not in CONFIG_MAPPING:
         continue
     config = CONFIG_MAPPING[model_type]()
-    if not config_has_experts(config):
+    if not has_routed_experts(config):
         continue
     dispatch.apply_liger_kernel(config, None, needs_ep_wrappers=False)
     swept.append(model_type)

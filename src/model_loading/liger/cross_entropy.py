@@ -123,7 +123,7 @@ def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
         **kwargs,
     ) -> LigerMoeCausalLMOutputWithPast:
         shift_labels = kwargs.pop("shift_labels", None)
-        # Taken from kwargs rather than declared: `honors_output_router_logits_config` looks for this
+        # Taken from kwargs rather than declared: `honors_router_logits_flag` looks for this
         # parameter on the forward the model runs, and declaring it would report that a family whose own
         # head lacks it honors the flag, moving its router balancing off `bias_update`.
         explicit_router_logits = kwargs.pop("output_router_logits", None)

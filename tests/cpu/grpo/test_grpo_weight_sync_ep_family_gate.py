@@ -3,7 +3,7 @@
 not at the first sync.
 
 ``sync_weights_to_client`` feeds the engine's ``model.load_weights`` directly, so a family declaring
-``_supports_weight_sync = False`` (no engine registers it, or no end-to-end sync has been validated
+a spec ``weight_sync_refusal`` (no engine registers it, or no end-to-end sync has been validated
 into the one that does) would otherwise fail, or land nowhere, mid-run.
 ``reject_unsyncable_model`` is the construction gate.
 
@@ -15,8 +15,9 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
+from src.models.moe.family_specs import MoEFamilySpec
 from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 
 # Families refused on every engine; each reason is stated at the class declaration. What one engine
@@ -34,6 +35,8 @@ class _EPModuleStub(EPMoELayerBase):
     takes the family flag from its type, exactly as a real wrapper does; the base ``__init__`` needs
     a live process group, so only the ``nn.Module`` half is initialized."""
 
+    FAMILY = MoEFamilySpec(model_types=())
+
     def __init__(self):
         nn.Module.__init__(self)
         self.ep_config = object()
@@ -43,7 +46,7 @@ class _EPModuleStub(EPMoELayerBase):
 
 
 class _UnsupportedEPModuleStub(_EPModuleStub):
-    _supports_weight_sync = False
+    FAMILY = MoEFamilySpec(model_types=(), weight_sync_refusal="no sync into this stub family is validated")
 
 
 class _PeftStyleWrapper(nn.Module):
@@ -66,7 +69,7 @@ def test_unsupported_family_roster_is_pinned():
     """Read off the EP wrapper registry, not a hand-maintained list: a new family that cannot sync,
     or a flag cleared on an existing one, must be a deliberate edit here with the evidence in the
     declaring class."""
-    unsupported = {cls.__name__ for cls in set(MOE_LAYER_MAP.values()) if cls._supports_weight_sync is False}
+    unsupported = {cls.__name__ for cls in set(MOE_LAYER_MAP.values()) if cls.FAMILY.weight_sync_refusal is not None}
     assert unsupported == EXPECTED_UNSUPPORTED
 
 
@@ -98,7 +101,7 @@ def test_gate_ignores_non_ep_modules_declaring_the_flag():
     gate."""
     model = nn.Module()
     model.dense = nn.Linear(4, 4)
-    model.dense._supports_weight_sync = False
+    model.dense.FAMILY = _UnsupportedEPModuleStub.FAMILY
     reject_unsyncable_model(model, "vllm")  # must not raise
 
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """CPU tests for class-declared EP-layer contracts.
 
-* ``_supports_gradient_checkpointing``: Zaya declares ``False`` (EDA/CCA recompute recursion) and
+* ``FAMILY.supports_gradient_checkpointing``: Zaya declares ``False`` (EDA/CCA recompute recursion) and
   ``EpIntrospectionMixin._setup_ep_gradient_checkpointing`` must RAISE when GC is enabled on a
   declaring layer instead of silently corrupting backward; supporting families pass through.
 * GptOss activation constants: ``EPGptOssMoELayer`` must read ``alpha``/``limit`` from the wrapped
   experts (1.702 / swiglu_limit) — a missing attribute is an ``AttributeError``, never a silently
   substituted wrong constant.
-* ``_ROUTER_ATTR`` / ``_EXPERTS_CONTAINER_ATTRS``: the router and expert-container probes must read
+* ``_ROUTER_ATTR`` / ``FAMILY.experts_container_attrs``: the router and expert-container probes must read
   the family's own declaration, not guess from a global name ladder, and the per-layer construction
   INFO must be rank-gated.
 * The ``moe_layer`` mixins: none defines ``__init__``, and ``EPExpertLoraMixin`` is mixed only into
@@ -29,15 +29,16 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 from transformers import Qwen3MoeConfig
 
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.zaya import EPZayaMoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from src.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraMixin
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.fused_glu import GluCombine
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from src.models.moe.family_specs import MoEFamilySpec
 from src.trainers.mixins.ep_introspection import EpIntrospectionMixin
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
@@ -58,11 +59,10 @@ class _EPStub(EPMoELayerBase):
     ``EPMoELayerBase.__init__`` needs a wrapped HF layer + DeepEP, so it is bypassed deliberately.
     """
 
-    def __init__(self, supports_gc: bool | None):
+    def __init__(self, supports_gc: bool = True):
         nn.Module.__init__(self)
         self.ep_config = SimpleNamespace(is_deferred_dp=False)
-        if supports_gc is not None:
-            self._supports_gradient_checkpointing = supports_gc
+        self.FAMILY = MoEFamilySpec(model_types=(), supports_gradient_checkpointing=supports_gc)
 
     def forward(self, hidden_states):  # abstract on the base; never called by these tests
         raise NotImplementedError
@@ -100,14 +100,13 @@ class _Trainer(EpIntrospectionMixin):
 
 
 def test_zaya_declares_gc_unsupported_and_base_default_is_supported():
-    assert EPZayaMoELayer._supports_gradient_checkpointing is False
-    # Absent declaration = supported (base contract default).
-    assert getattr(EPGptOssMoELayer, "_supports_gradient_checkpointing", True) is True
+    assert EPZayaMoELayer.FAMILY.supports_gradient_checkpointing is False
+    assert EPGptOssMoELayer.FAMILY.supports_gradient_checkpointing is True
 
 
 def test_gc_on_declaring_false_layer_raises():
     trainer = _Trainer(_EPStub(supports_gc=False), gradient_checkpointing=True)
-    with pytest.raises(ValueError, match="_supports_gradient_checkpointing"):
+    with pytest.raises(ValueError, match="supports_gradient_checkpointing=False"):
         trainer._setup_ep_gradient_checkpointing()
 
 
@@ -117,7 +116,7 @@ def test_gc_disabled_skips_the_contract_check():
 
 
 def test_gc_on_supporting_layer_passes():
-    trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True)
+    trainer = _Trainer(_EPStub(), gradient_checkpointing=True)
     with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
         trainer._setup_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": True})
@@ -128,7 +127,7 @@ def test_gc_on_supporting_layer_passes():
 def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
     """No EP/CP axis (ep_size=1 grouped-GEMM wrappers): the MoE verdict comes from the backbone's
     config alone, and a router re-run in non-reentrant recompute can flip a near-tie pick."""
-    trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True)
+    trainer = _Trainer(_EPStub(), gradient_checkpointing=True)
     trainer.parallelism_config = make_parallelism_config(world_size=2, gpus_per_node=2)
     trainer.model.config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
     assert not trainer.parallelism_config.has_ep_group, "fixture must leave only the config to decide"
@@ -139,7 +138,7 @@ def test_gc_on_grouped_gemm_only_moe_stays_reentrant():
 
 def test_gc_under_pp_is_non_reentrant():
     # PP needs non-reentrant GC: a reentrant forward runs under no_grad, so FSDP2 registers no pre-backward hooks.
-    trainer = _Trainer(_EPStub(supports_gc=None), gradient_checkpointing=True, world=4, gpus_per_node=2, pp_size=2)
+    trainer = _Trainer(_EPStub(), gradient_checkpointing=True, world=4, gpus_per_node=2, pp_size=2)
     with patch("src.trainers.mixins.ep_introspection.enable_scoped_gradient_checkpointing") as enable:
         trainer._setup_ep_gradient_checkpointing()
     enable.assert_called_once_with(trainer.model, gradient_checkpointing_kwargs={"use_reentrant": False})
@@ -150,9 +149,7 @@ def test_every_n_layers_is_lifted_out_of_the_checkpoint_kwargs():
     """``every_n_layers`` is ``gradient_checkpointing_enable``'s own keyword (which decoder layers
     checkpoint); left inside the kwargs dict it reaches ``torch.utils.checkpoint``. The EP enable
     lifts it, and so does the re-enable seam TRL drives with the raw args dict after generation."""
-    trainer = _Trainer(
-        _EPStub(supports_gc=None), gradient_checkpointing=True, gradient_checkpointing_kwargs={"every_n_layers": 2}
-    )
+    trainer = _Trainer(_EPStub(), gradient_checkpointing=True, gradient_checkpointing_kwargs={"every_n_layers": 2})
     trainer._setup_ep_gradient_checkpointing()
     model = trainer.model
     assert (model.gc_kwargs, model.every_n_layers) == ({"use_reentrant": True}, 2)
@@ -170,9 +167,7 @@ def test_gc_enable_requires_a_real_checkpoint_function():
             pass
 
     with pytest.raises(RuntimeError, match="installed no checkpoint function"):
-        enable_scoped_gradient_checkpointing(
-            _Silent(_EPStub(supports_gc=None)), gradient_checkpointing_kwargs={"use_reentrant": True}
-        )
+        enable_scoped_gradient_checkpointing(_Silent(_EPStub()), gradient_checkpointing_kwargs={"use_reentrant": True})
 
 
 def test_repeated_gc_reenables_neither_stack_nor_lose_the_scope():
@@ -183,7 +178,7 @@ def test_repeated_gc_reenables_neither_stack_nor_lose_the_scope():
     checkpoint function, and an EP layer entering backward without a scope raises rather than issue
     the second DeepEP dispatch that would corrupt every gradient.
     """
-    model = _GCSequential(_EPStub(supports_gc=None))
+    model = _GCSequential(_EPStub())
     enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     wrapper = model.gradient_checkpointing_enable
 
@@ -199,7 +194,7 @@ def test_a_second_full_enable_is_idempotent_not_a_raise():
     already wrapped the fresh install by then, so ``install_recompute_scopes`` finds only
     already-scoped functions — which must read as "scopes in place", never as the no-checkpoint
     RuntimeError."""
-    model = _GCSequential(_EPStub(supports_gc=None))
+    model = _GCSequential(_EPStub())
     enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": False})
     assert getattr(model._gradient_checkpointing_func, "_ep_scoped", False)
@@ -356,7 +351,7 @@ def test_top_k_probe_reads_the_declared_router_not_a_name_ladder():
     assert EPMoELayerBase._find_top_k(both) == 2, "the default declaration is 'gate'"
 
 
-# expert-container resolution (_EXPERTS_CONTAINER_ATTRS)
+# expert-container resolution (FAMILY.experts_container_attrs)
 
 
 def test_expert_container_probe_reads_the_family_declaration_in_its_own_order():
@@ -369,7 +364,7 @@ def test_expert_container_probe_reads_the_family_declaration_in_its_own_order():
     both = SimpleNamespace(experts=nn.Linear(2, 2), routed_experts=nn.Linear(2, 2))
 
     assert EPGlm4MoELayer._find_experts_container(both) is both.experts
-    assert EPMoELayerBase._find_experts_container(both) is both.experts, "the default declaration is 'experts'"
+    assert EPQwen3MoELayer._find_experts_container(both) is both.experts, "the default declaration is 'experts'"
 
 
 def test_expert_container_probe_accepts_only_the_spellings_the_family_declares():
@@ -381,7 +376,7 @@ def test_expert_container_probe_accepts_only_the_spellings_the_family_declares()
     routed_only = SimpleNamespace(routed_experts=nn.Linear(2, 2))
     assert EPGlm4MoELayer._find_experts_container(routed_only) is routed_only.routed_experts
 
-    with pytest.raises(AttributeError, match="_EXPERTS_CONTAINER_ATTRS"):
+    with pytest.raises(AttributeError, match="experts_container_attrs"):
         EPQwen3MoELayer._find_experts_container(routed_only)
 
 

@@ -38,7 +38,7 @@ def _as_moe(is_moe: bool = True):
     the config load and the MoE check so these pure-logic tests need no real model."""
     with (
         patch.object(model_source.AutoConfig, "from_pretrained", return_value=object()),
-        patch.object(model_info, "config_has_experts", return_value=is_moe),
+        patch.object(model_info, "has_routed_experts", return_value=is_moe),
     ):
         yield
 

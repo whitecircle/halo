@@ -12,7 +12,7 @@ Two sizes: 20B and 120B. MoE with **attention sinks** (per-head learnable scalar
 
 ## EP wrapper
 
-`EPGptOssMoELayer` (`src/distributed/expert_parallel/layers/gpt_oss.py`) replaces `GptOssMLP`.
+`EPGptOssMoELayer` (`src/distributed/expert_parallel/families/gpt_oss.py`) replaces `GptOssMLP`.
 
 - Routing: custom router returning `(logits, weights, experts)`; softmax top-k with FP32 weights for DeepEP.
 - Storage: interleaved `gate_up_proj [E, H, 2M]` (`[g0, u0, g1, u1, …]`), `down_proj [E, M, H]`, plus the optional expert biases `gate_up_proj_bias [E, 2M]` (interleaved the same way) and `down_proj_bias [E, H]`.

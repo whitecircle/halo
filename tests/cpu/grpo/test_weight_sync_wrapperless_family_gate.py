@@ -16,11 +16,11 @@ under module names, which the engine's loader drops with no error.
 import pytest
 import torch.nn as nn
 
-from src.distributed.expert_parallel.layers.bailing import EPBailingMoELayer
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
-from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
+from src.distributed.expert_parallel.families.bailing import EPBailingMoELayer
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
+from src.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from src.trainers.grpo.rollout.weight_push import reject_unsyncable_model
 from tests.common.weight_sync import StockModel

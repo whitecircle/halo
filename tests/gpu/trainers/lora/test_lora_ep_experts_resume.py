@@ -29,7 +29,7 @@ from safetensors.torch import load_file
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters
+from src.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters
 from src.distributed.parallelism_config import ParallelismConfig
 from src.model_loading.parallel.loader import load_distributed_model
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
@@ -117,19 +117,19 @@ def run(ctx) -> dict:
     log(f"\n[1/2] Training {SAVE_AT_STEP} steps + checkpointing...")
     trainer.train()
     unwrapped = extract_model_from_parallel(trainer.model, recursive=True)
-    adapters_saved = {k: v.clone() for k, v in gather_ep_lora_adapters(unwrapped).items()}
+    adapters_saved = {k: v.clone() for k, v in gather_expert_lora_adapters(unwrapped).items()}
     sched_saved = trainer.lr_scheduler.last_epoch
     log(f"  checkpoint={os.path.isdir(checkpoint)}, adapters={len(adapters_saved)}, sched.last_epoch={sched_saved}")
 
     log("\n[2/2] Corrupting live state, then restoring via the trainer's resume hooks...")
     _zero_live_adapters(unwrapped)
     trainer.lr_scheduler.last_epoch = 0
-    corrupted = gather_ep_lora_adapters(unwrapped)
+    corrupted = gather_expert_lora_adapters(unwrapped)
     corrupt_differs = any(not torch.equal(adapters_saved[k].cpu(), corrupted[k].cpu()) for k in adapters_saved)
 
     trainer._load_from_checkpoint(checkpoint)  # load_resume_weights -> restore_adapters
     trainer._load_optimizer_and_scheduler(checkpoint)
-    restored = gather_ep_lora_adapters(unwrapped)
+    restored = gather_expert_lora_adapters(unwrapped)
 
     # Resume's source of truth is the checkpoint FILE; comparing to the post-train gather instead
     # would conflate the save's bf16 cast (~1e-2 at these magnitudes) with the restore.

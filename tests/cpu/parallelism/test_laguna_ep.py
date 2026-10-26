@@ -19,10 +19,10 @@ import torch.nn.functional as F
 from transformers.models.laguna.configuration_laguna import LagunaConfig
 from transformers.models.laguna.modeling_laguna import LagunaSparseMoeBlock
 
-from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
-from src.distributed.expert_parallel.patching import build_moe_layer_map
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.laguna import EPLagunaMoELayer
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from src.models.moe.family_specs import find_moe_family_spec
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 8, 16, 32, 3
@@ -58,9 +58,9 @@ def _library_block() -> LagunaSparseMoeBlock:
 def test_laguna_owns_its_wrapper_by_module_name_and_model_type():
     """Both registries must land on the Laguna class, not on GLM-4's — they differ in the routing
     default below, so resolving to the parent silently changes every routed weight."""
-    assert build_moe_layer_map()["LagunaSparseMoeBlock"] is EPLagunaMoELayer
-    assert resolve_ep_merge_layer_class("laguna") is EPLagunaMoELayer
-    assert resolve_ep_merge_layer_class("glm4_moe_lite") is EPGlm4MoELayer
+    assert MOE_LAYER_MAP["LagunaSparseMoeBlock"] is EPLagunaMoELayer
+    assert find_moe_family_spec("laguna") is EPLagunaMoELayer.FAMILY
+    assert find_moe_family_spec("glm4_moe_lite") is EPGlm4MoELayer.FAMILY
     assert issubclass(EPLagunaMoELayer, EPGlm4MoELayer)
 
 

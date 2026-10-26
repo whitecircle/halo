@@ -32,7 +32,7 @@ PartialState()  # the trainer logs through accelerate's logger, which refuses an
 
 from src.distributed.expert_parallel.deepep.capacity import capacity_scope
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.models import TINY_GEMMA4_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config, single_process_ep_config
@@ -52,7 +52,7 @@ def _ep_patched_model() -> Gemma4ForCausalLM:
     """A tiny MoE model carrying EP wrappers — and the generation hook EP patching registers with them."""
     torch.manual_seed(0)
     model = Gemma4ForCausalLM(Gemma4TextConfig(**TINY_GEMMA4_MOE_CONFIG))
-    patch_moe_model_for_ep(model, single_process_ep_config(TINY_GEMMA4_MOE_CONFIG["num_experts"]))
+    apply_ep_layers(model, single_process_ep_config(TINY_GEMMA4_MOE_CONFIG["num_experts"]))
     # Anti-vacuity: a zero-patch is only a warning at ep_group_size 1, and nothing below would notice.
     assert [name for name, module in model.named_modules() if isinstance(module, EPMoELayerBase)]
     return model

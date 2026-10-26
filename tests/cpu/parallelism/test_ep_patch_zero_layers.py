@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for the zero-patched-layers outcome of ``patch_moe_model_for_ep``.
+"""CPU tests for the zero-patched-layers outcome of ``apply_ep_layers``.
 
 When EP/ETP distribution is requested but NO MoE block matches a registered wrapper, the run would
 otherwise proceed with replicated, un-synced experts while reporting a data-parallel size that
@@ -18,7 +18,7 @@ import pytest
 import torch.nn as nn
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 
 
 def _model_without_moe() -> nn.Module:
@@ -42,7 +42,7 @@ def test_distributed_ep_with_zero_patched_layers_raises(ep_size, expert_tp_size)
     cfg = _ep_config(ep_size, expert_tp_size)
     assert cfg.ep_group_size > 1
     with pytest.raises(ValueError, match="NO MoE layer was patched"):
-        patch_moe_model_for_ep(_model_without_moe(), cfg)
+        apply_ep_layers(_model_without_moe(), cfg)
 
 
 def test_grouped_gemm_only_with_zero_patched_layers_warns_and_returns(caplog):
@@ -50,7 +50,7 @@ def test_grouped_gemm_only_with_zero_patched_layers_warns_and_returns(caplog):
     assert cfg.ep_group_size == 1
     model = _model_without_moe()
     with caplog.at_level("WARNING"):
-        returned = patch_moe_model_for_ep(model, cfg)
+        returned = apply_ep_layers(model, cfg)
     assert returned is model
     assert any("No MoE layers found" in rec.message for rec in caplog.records)
 

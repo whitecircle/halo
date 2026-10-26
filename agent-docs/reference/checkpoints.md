@@ -45,9 +45,8 @@ Every gather is a collective, so **all** ranks run it. Only the save rank copies
 memory (`materialize_dtensor` on the others, not `full_cpu_tensor`), so a node pays one
 writer's copy instead of `gpus_per_node` × model.
 
-Under EP the same `retain` flag is threaded into each family's `gather_expert_state_dict`. The
-expert all-gathers stay on every rank; the layout assembly after them runs only where the result is
-kept. A family that returns tensors anyway is rejected, not obeyed.
+Under EP the same `retain` flag is threaded into `EPGatherMixin.gather_layer_state_dict`. The expert
+all-gathers stay on every rank; the layout assembly after them runs only where the result is kept.
 
 Every gathered save then **streams** through `stream_gathered_checkpoint`: FSDP2, CP and TP one
 conversion-closed chunk (a decoder layer) at a time, EP its non-expert tensors and then each MoE
@@ -187,7 +186,7 @@ family's per-layer attention geometry only as `per_layer_config`, which the vLLM
 (the 5.14 line, [Config-schema parity](../infrastructure/rollout-servers.md#config-schema-parity)) refuses at
 parse (SGLang's 5.12.1 reads the flat form too).
 
-A family declaring `_LEGACY_PER_LAYER_CONFIG_KEYS` on its EP layer class (Gemma 4:
+A family whose spec declares `served_flat_config_keys` (Gemma 4:
 `global_head_dim`, `num_global_key_value_heads` — the full-attention layers' geometry) has every
 exported `config.json` rewritten to those keys by `export_legacy_per_layer_config`, on every toolkit
 config write (parallel saves, `save_full_checkpoint`, the trainer fallback).
@@ -202,7 +201,7 @@ its `auto_map` names. transformers absorbs those vendor spellings at load (`attr
 per-family `__post_init__` kwargs) and never re-emits them, so nothing on the save side can
 reconstruct them.
 
-A family declaring `_EXPORTS_SOURCE_CONFIG_SCHEMA` on its EP layer class (Step-3.7 Flash) has
+A family whose spec declares `exports_source_config_schema` (Step-3.7 Flash) has
 every exported `config.json` replaced by the **source checkpoint's own**, with this run's changed
 values written back under the source's spellings and the `auto_map` modules copied in transitively
 (`export_source_config_schema`, same three writers). The source is the checkpoint the model was
@@ -364,8 +363,9 @@ only after `reattach_vision_tower.py` ([Qwen3.5/3.6](../models/qwen3_5.md)).
 ### Expert parallelism (EP, EP+TP, EP+CP)
 
 `save_ep_gathered_checkpoint()` (`src/checkpoint/parallel/ep.py`) owns all three, over three param
-classes: EP expert weights, gathered by `gather_ep_layer_weights()` with local → global expert
-re-indexing; DTensor params (EP+TP attention, embeddings, `lm_head`, and FSDP2-sharded params such as
+classes: EP expert weights, gathered by each layer's `gather_layer_state_dict()` (`moe_layer/gather.py`:
+EP- and expert-TP-gathered into the full runtime tensors, then written in the family's `ExpertLayout`
+through `to_hub_expert_tensors`, `src/models/moe/expert_layout.py`); DTensor params (EP+TP attention, embeddings, `lm_head`, and FSDP2-sharded params such as
 the router under ep1 sharding), resolved via `full_tensor()`; and manually TP-sharded plain tensors
 (GptOss `sinks`, sliced plain because forward needs local shapes), all-gathered by
 `gather_hand_sliced_params` (`src/checkpoint/parallel/writing.py`).
@@ -387,11 +387,11 @@ Next, Step-3.7, a SigLIP tower) comes back as the hub spells it
 the tensors it was saved from. The RL weight sync forwards the same names.
 
 Inside an EP layer, a family whose live names differ from its hub's declares the pairs in
-`_EXPORT_KEY_RENAMES` and the gather rewrites them (Laguna is the one such family). The lazy loader
+its spec's `export_key_renames` and the gather rewrites them (Laguna is the one such family). The lazy loader
 applies the inverse on read, and `merge_ep_shards.py` the same rewrite.
 
 Four families declare transformers' load-side conversion for their hub checkpoints
-(`_HUB_CONVERSION_KEYS`), which the lazy loaders replay per key: Inkling, DeepSeek-V4, GLM-5 Next and
+(`hub_conversion_keys`), which the lazy loaders replay per key: Inkling, DeepSeek-V4, GLM-5 Next and
 Step-3.7 Flash. The lazy loaders also replay a sub-model's own prefix change (a SigLIP tower's
 `vision_model` level) for every family.
 
@@ -411,10 +411,9 @@ trainer construction** (and again at the save) on any of:
 - **Context parallelism**: the Ulysses key layout is not what the merge expects.
 - **Multi-node on a non-shared filesystem**: shards scatter across nodes' local disks with the index
   only on node 0, so no directory holds a complete set.
-- **A `model_type` no EP layer class claims.** The merge transform lives on the class
-  (`merge_shards_to_hf`, the inverse of its own gather; `__init_subclass__` requires the two be
-  overridden together), resolved through the class-declared `HF_MODEL_TYPES`; an unclaimed
-  `model_type` has no transform.
+- **A `model_type` no family spec claims.** The merge writes the spec's `ExpertLayout` through the
+  same `to_hub_expert_tensors` the gathered save applies, resolved by `find_moe_family_spec`; an
+  unclaimed `model_type` has no layout.
 - **A load that converted names the merge cannot respell** (Step-3.7 Flash, Inkling, DeepSeek-V4,
   GLM-5 Next, a SigLIP tower, a legacy Mistral 3 checkpoint): the gathered save reverts them through
   transformers' save-side conversion, which the merge's key-by-key stream cannot apply. Decided per

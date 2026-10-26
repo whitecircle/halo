@@ -10,7 +10,7 @@ from torch.distributed.tensor import DTensor
 
 from src.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from src.distributed.mesh import has_tp_dim
-from src.models.moe_balancing import config_has_experts
+from src.models.moe.config_fields import has_routed_experts
 from tests.common.ep_reference import ep_layers
 from tests.common.utils import log
 
@@ -57,7 +57,7 @@ def parallel_shape_checks(model, parallelism_config) -> dict[str, bool]:
     pc = parallelism_config
     checks: dict[str, bool] = {}
     layers = ep_layers(model)
-    if pc.needs_ep_wrappers and config_has_experts(model.config):
+    if pc.needs_ep_wrappers and has_routed_experts(model.config):
         checks["ep_layers_wrapped"] = bool(layers)
         log(f"  EP layers wrapped: {'PASS' if layers else 'FAIL'} ({len(layers)})")
     if pc.ep_size > 1:

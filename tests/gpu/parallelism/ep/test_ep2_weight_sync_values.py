@@ -43,7 +43,7 @@ from torch.distributed.tensor import DTensor
 from transformers import AutoTokenizer, GptOssConfig, GptOssForCausalLM, default_data_collator
 from trl import SFTConfig
 
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.trainers.grpo.rollout.weight_push import gather_and_send_weights
 from src.trainers.sft import DistributedSFTTrainer
@@ -139,7 +139,7 @@ def run(ctx):
     checks, metrics = {}, {}
     config = ParallelismConfig(ep_size=EP_SIZE)
     model = build_model().to(ctx.device)
-    patch_moe_model_for_ep(model, config.ep_config())
+    apply_ep_layers(model, config.ep_config())
 
     # ── The dense ground truth: the same seeded init, never EP-patched, so its grouped expert
     # weights are the reference layout AND the reference expert order.

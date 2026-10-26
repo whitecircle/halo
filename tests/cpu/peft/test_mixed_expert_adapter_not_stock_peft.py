@@ -44,7 +44,7 @@ from src.checkpoint.adapters import (
 from src.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
 
-# Exactly the keys gather_ep_lora_adapters emits under a PeftModel: the layer path it walks is
+# Exactly the keys gather_expert_lora_adapters emits under a PeftModel: the layer path it walks is
 # PEFT-prefixed (unwrap_toolkit_wrappers stops at the PeftModel), and the key ends at lora_A/lora_B because
 # the whole grouped tensor is stored — no tuner suffix. is_expert_lora_key is asserted on them below.
 EXPERT_KEY_A = "base_model.model.model.layers.0.mlp.experts.gate_up_proj.lora_A"

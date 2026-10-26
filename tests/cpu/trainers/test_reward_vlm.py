@@ -375,7 +375,7 @@ def test_the_checkpoint_context_hands_the_processor_to_the_save():
         mock.patch.object(DistributedRewardTrainer, "_get_tp_rank", lambda self: 0),
         mock.patch.object(DistributedRewardTrainer, "_find_cp_wrapper", lambda self: None),
         mock.patch("src.checkpoint.parallel.context.is_fs_save_rank", return_value=True),
-        mock.patch("src.checkpoint.parallel.context.has_ep_lora", return_value=False),
+        mock.patch("src.checkpoint.parallel.context.model_has_expert_lora", return_value=False),
     ):
         ctx = trainer._checkpoint_context()
 

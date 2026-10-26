@@ -230,3 +230,10 @@ def apply_config_overrides(model_config, overrides: dict | None) -> None:
         for target in targets:
             setattr(target, key, value)
         logger.info(f"  Set {key} = {value} on {', '.join(type(t).__name__ for t in targets)}")
+
+
+def config_model_types(cfg) -> tuple[str, ...]:
+    """Every ``model_type`` spelling across :func:`config_sources`, wrapper first, deduplicated; ``()`` for no config."""
+    if cfg is None:
+        return ()
+    return tuple(dict.fromkeys(mt for level in config_sources(cfg) if (mt := getattr(level, "model_type", None))))

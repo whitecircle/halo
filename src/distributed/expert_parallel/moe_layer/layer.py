@@ -10,6 +10,7 @@ import contextlib
 import logging
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from typing import ClassVar
 
 import torch
 import torch.distributed as dist
@@ -17,29 +18,17 @@ import torch.nn as nn
 
 from src.diagnostics.ep_span_timing import get_ep_span_timer
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.deepep.dispatcher import (
-    DeepEPDispatcher,
-    ReplayCombineFunction,
-    ReplayDispatchFunction,
-)
-from src.distributed.expert_parallel.expert_gather import EPExpertGatherMixin
+from src.distributed.expert_parallel.deepep.dispatcher import DeepEPDispatcher
 from src.distributed.expert_parallel.moe_layer.balancing_bias import EPBalancingBiasMixin
 from src.distributed.expert_parallel.moe_layer.compute import EPExpertComputeMixin
 from src.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraMixin
+from src.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from src.distributed.expert_parallel.moe_layer.grad_sync import EPGradSyncMixin
 from src.distributed.expert_parallel.moe_layer.routing import EPRoutingMixin
 from src.distributed.grad_reduce import SumGradAcrossGroup
 from src.env import env_flag
 from src.hardware import current_device, supports_grouped_mm
-from src.models.gradient_checkpointing import active_recompute_scope, in_backward_pass
-from src.models.moe_balancing import (
-    NativeBalancingSlot,
-    native_balancing_bias_attrs,
-    register_ep_wrapped_model_types,
-    register_legacy_per_layer_config_keys,
-    register_native_balancing_slot,
-    register_source_config_schema,
-)
+from src.models.moe.family_specs import MoEFamilySpec
 from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -72,7 +61,7 @@ class EPMoELayerBase(
     EPRoutingMixin,
     EPGradSyncMixin,
     EPExpertLoraMixin,
-    EPExpertGatherMixin,
+    EPGatherMixin,
     EPBalancingBiasMixin,
     nn.Module,
     ABC,
@@ -83,49 +72,18 @@ class EPMoELayerBase(
     ``_adopt_*`` construction hooks and the compute kernels its expert layout needs.
     """
 
-    # False where routing replay is unimplementable: Gemma4 (external router) and Zaya (cross-layer state).
-    _supports_routing_replay: bool = True
+    # The family's facts; every concrete family layer declares its own.
+    FAMILY: ClassVar[MoEFamilySpec]
 
-    # HF class name(s) of the MoE block this wrapper replaces; ``patching.build_moe_layer_map`` walks subclasses.
+    # HF class name(s) of the MoE block this wrapper replaces; ``roster.MOE_LAYER_MAP`` claims them.
     HF_MODULE_NAMES: tuple[str, ...] = ()
-
-    # ``config.model_type`` spelling(s) served — the family's own first (``docker/vllm/parity/generate.py``
-    # reads it), then the composite wrappers and sibling spellings that carry it; unioned so a
-    # checkpoint's config.json resolves back off-line.
-    HF_MODEL_TYPES: tuple[str, ...] = ()
-
-    # Every expert-weight attribute this family may hold across all config branches (fused vs separate/ETP).
-    _EXPERT_WEIGHT_ATTR_ROOTS: tuple[str, ...] = ("gate_up_proj", "gate_proj", "up_proj", "down_proj")
 
     # Per-family dotted paths on the original HF MoE module, probed by :meth:`detect_num_experts` first.
     _NUM_EXPERTS_ATTR_PATHS: tuple[str, ...] = ()
 
-    # ``(live module, hub)`` pairs for renames transformers applies only inside ``from_pretrained``. The
-    # gather rewrites module → hub (the engines ignore unknown names); the lazy loader inverts it.
-    _EXPORT_KEY_RENAMES: tuple[tuple[str, str], ...] = ()
-
-    # ``{flat legacy key: (layer_type, per-layer field)}`` for attention geometry the hub config spells
-    # one flat key per layer type. transformers folds those into ``per_layer_config`` on load and
-    # re-serializes only the folded form, which the pinned rollout server cannot parse, so exported
-    # ``config.json`` files are rewritten back to the flat keys (``export_legacy_per_layer_config``).
-    # Registered per claimed ``model_type`` into the ``moe_balancing`` leaf by ``__init_subclass__``.
-    _LEGACY_PER_LAYER_CONFIG_KEYS: dict[str, tuple[str, str]] = {}
-
-    # Attribute(s) an HF MoE block may hold its expert container under, tried in order. Shared by every
-    # probe (container, expert count, the lazy loader's checkpoint-key regexes). A family whose block
-    # spells it differently across revisions declares every spelling it accepts; an unknown spelling
-    # raises rather than resolving off a name no family claims.
-    _EXPERTS_CONTAINER_ATTRS: tuple[str, ...] = ("experts",)
-
     # Must match the family's checkpoint name — it becomes the export key in ``replicated_named_params``.
-    # Resolved per instance from :attr:`_SHARED_EXPERT_ATTRS` for a family that declares one.
+    # Resolved per instance from ``FAMILY.shared_expert_attrs`` for a family that declares one.
     _shared_expert_attr: str = "shared_experts"
-
-    # Attribute(s) the HF block may hold its shared expert under, tried in order; the first spelling the
-    # block carries becomes :attr:`_shared_expert_attr` and thus the export key. Empty = the family has
-    # no shared expert. A declaring family whose block carries none (LFM-2) registers the slot as
-    # ``None``, so the shared leg is skipped rather than raising on the family's own name.
-    _SHARED_EXPERT_ATTRS: tuple[str, ...] = ()
 
     # True where the architecture always builds the shared expert: an absent or ``None`` slot is then an
     # upstream rename rather than a configuration, and adopting nothing would drop it from every output.
@@ -141,59 +99,6 @@ class EPMoELayerBase(
     # router is external to the wrapper (Gemma4's sibling module): nothing is adopted here, no routing
     # knob is read, and only expert grad-sync hooks register.
     _ROUTER_ATTR: str | None = "gate"
-
-    # Reduction axis of those tensors as this family writes them: -1 = ``F.linear`` ``[E, N, K]``, GptOss
-    # keeps matmul ``[E, K, N]``. The lowp export block-scales along it; the wrong axis corrupts every expert.
-    HF_FUSED_EXPERT_CONTRACTION_AXIS: int = -1
-
-    # False where the lazy loader cannot express this family's on-disk expert layout → from_pretrained + patch.
-    _supports_lazy_loading: bool = True
-
-    # transformers' conversion-mapping key(s) for this hub checkpoint (``conversion_selection.py``); empty = canonical.
-    _HUB_CONVERSION_KEYS: tuple[str, ...] = ()
-
-    # True where transformers' serialization of this config is a schema no pinned serving engine reads:
-    # the engines parse the family only through the source repo's ``auto_map`` modules, whose vendor
-    # spellings transformers absorbs at load (``attribute_map`` plus ``__post_init__`` kwargs) and never
-    # re-emits. Config writes forward the source ``config.json`` and modules instead
-    # (``export_source_config_schema``); registered per claimed ``model_type`` by ``__init_subclass__``.
-    _EXPORTS_SOURCE_CONFIG_SCHEMA: bool = False
-
-    # False makes ``reject_unsyncable_model`` reject online/env GRPO on every engine: no
-    # end-to-end sync into the family's served model has been validated. What one pinned engine
-    # cannot serve is the engine client's ``UNSERVABLE_MODEL_TYPES``.
-    _supports_weight_sync: bool = True
-
-    # Surfaced verbatim in the refusal above; a family overrides it with its own gap.
-    _WEIGHT_SYNC_REFUSAL_REASON: str = (
-        "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
-    )
-
-    # False where GC recompute on top of EP is architecturally broken (Zaya's cross-layer EDA/CCA state).
-    _supports_gradient_checkpointing: bool = True
-
-    # False where fp32 master weights on non-expert params break this family's dispatch; the loader refuses
-    # ``fp32_non_ep_params`` rather than letting DeepEP's C++ assert fire after the whole multi-GPU load.
-    _supports_fp32_non_ep_params: bool = True
-
-    def __init_subclass__(cls, **kwargs):
-        """Register this family's config rewrites and native balancing slot under every ``model_type``
-        it claims.
-
-        They land in the ``moe_balancing`` leaf so the offline consumers (config writers, standalone
-        conversion tools) read them without importing this package, and a wrapper-less run (no EP, no
-        grouped GEMM) exports the same config as a wrapped one.
-        """
-        super().__init_subclass__(**kwargs)
-        if cls._LEGACY_PER_LAYER_CONFIG_KEYS:
-            register_legacy_per_layer_config_keys(cls.HF_MODEL_TYPES, cls._LEGACY_PER_LAYER_CONFIG_KEYS)
-        if cls._EXPORTS_SOURCE_CONFIG_SCHEMA:
-            register_source_config_schema(cls.HF_MODEL_TYPES)
-        if attrs := native_balancing_bias_attrs(cls):
-            register_native_balancing_slot(
-                cls.HF_MODEL_TYPES, NativeBalancingSlot(attrs, cls._NATIVE_BALANCING_CONFIG_FLAG)
-            )
-        register_ep_wrapped_model_types(cls.HF_MODEL_TYPES)
 
     def __init__(self, original_layer: nn.Module, ep_config: EPConfig, weights_already_sharded: bool = False):
         """Wrap ``original_layer``'s MoE compute for expert parallelism.
@@ -219,7 +124,7 @@ class EPMoELayerBase(
     def detect_num_experts(cls, layer: nn.Module) -> int:
         """The routed-expert count of an HF MoE block: the first dotted :attr:`_NUM_EXPERTS_ATTR_PATHS` entry,
         then the expert container, holding an ``int`` or a sized value."""
-        generic = tuple(p for attr in cls._EXPERTS_CONTAINER_ATTRS for p in (attr, f"{attr}.num_experts"))
+        generic = tuple(p for attr in cls.FAMILY.experts_container_attrs for p in (attr, f"{attr}.num_experts"))
         for path in (*cls._NUM_EXPERTS_ATTR_PATHS, *generic):
             value = layer
             for attr in path.split("."):
@@ -234,7 +139,7 @@ class EPMoELayerBase(
         """``(name, param)`` for this rank's expert weights, then its expert LoRA adapters.
 
         Read by grad sync, the fp32 upcast and the checkpoint skip-set. A family's layout is declared in
-        :attr:`_EXPERT_WEIGHT_ATTR_ROOTS`, not overridden here.
+        ``FAMILY.expert_weight_roots``, not overridden here.
         """
         return self._base_expert_named_params() + self.expert_lora_named_params()
 
@@ -252,15 +157,14 @@ class EPMoELayerBase(
 
     @classmethod
     def _find_experts_container(cls, layer: nn.Module) -> nn.Module:
-        """The block's expert container, under the first declared :attr:`_EXPERTS_CONTAINER_ATTRS` it
-        carries."""
-        for attr in cls._EXPERTS_CONTAINER_ATTRS:
+        """The block's expert container, under the first of ``FAMILY.experts_container_attrs`` it carries."""
+        for attr in cls.FAMILY.experts_container_attrs:
             if hasattr(layer, attr):
                 return getattr(layer, attr)
         raise AttributeError(
-            f"{cls.__name__} declares _EXPERTS_CONTAINER_ATTRS={cls._EXPERTS_CONTAINER_ATTRS}, but "
-            f"{type(layer).__name__} carries none of them — the family renamed its expert container "
-            f"upstream. Update _EXPERTS_CONTAINER_ATTRS."
+            f"{cls.__name__} declares FAMILY.experts_container_attrs={cls.FAMILY.experts_container_attrs}, "
+            f"but {type(layer).__name__} carries none of them — the family renamed its expert container "
+            f"upstream. Update the family spec."
         )
 
     @classmethod
@@ -341,9 +245,9 @@ class EPMoELayerBase(
         self.top_k = self._find_top_k(original_layer)
 
     def _adopt_shared_experts(self, original_layer: nn.Module) -> None:
-        """Adopt the shared expert under the first declared :attr:`_SHARED_EXPERT_ATTRS` spelling the block
-        carries, which becomes its export key."""
-        for attr in self._SHARED_EXPERT_ATTRS:
+        """Adopt the shared expert under the first ``FAMILY.shared_expert_attrs`` spelling the block carries,
+        which becomes its export key."""
+        for attr in self.FAMILY.shared_expert_attrs:
             if not hasattr(original_layer, attr):
                 continue
             shared = getattr(original_layer, attr)
@@ -354,14 +258,14 @@ class EPMoELayerBase(
             return
         if self._SHARED_EXPERT_REQUIRED:
             raise AttributeError(
-                f"{type(self).__name__} declares _SHARED_EXPERT_ATTRS={self._SHARED_EXPERT_ATTRS} as "
+                f"{type(self).__name__} declares FAMILY.shared_expert_attrs={self.FAMILY.shared_expert_attrs} as "
                 f"always built, but {type(original_layer).__name__} carries no such module — the "
                 f"family renamed it upstream. A tolerant fallback would silently drop the shared "
                 f"expert from every output."
             )
-        if self._SHARED_EXPERT_ATTRS:
+        if self.FAMILY.shared_expert_attrs:
             # Declared but absent (LFM-2 ships none): register the slot so the shared leg reads None.
-            self._shared_expert_attr = self._SHARED_EXPERT_ATTRS[0]
+            self._shared_expert_attr = self.FAMILY.shared_expert_attrs[0]
             setattr(self, self._shared_expert_attr, None)
 
     def _adopt_expert_compute(self, original_layer: nn.Module, experts: nn.Module) -> None:
@@ -402,7 +306,7 @@ class EPMoELayerBase(
         if not is_global_main_process():
             return
         fields = [f"{self.expert_end - self.expert_start}/{self.num_experts} experts per EP rank"]
-        if self._SHARED_EXPERT_ATTRS:
+        if self.FAMILY.shared_expert_attrs:
             shared = getattr(self, self._shared_expert_attr, None) is not None
             fields.append(f"{self._shared_expert_attr}={'yes' if shared else 'no'}")
         fields += [
@@ -415,8 +319,8 @@ class EPMoELayerBase(
         logger.info(f"{type(self).__name__}: {', '.join(fields)}")
 
     def _base_expert_named_params(self) -> list:
-        """``(name, param)`` for the declared :attr:`_EXPERT_WEIGHT_ATTR_ROOTS` this rank holds."""
-        return [(n, getattr(self, n)) for n in self._EXPERT_WEIGHT_ATTR_ROOTS if hasattr(self, n)]
+        """``(name, param)`` for the ``FAMILY.expert_weight_roots`` this rank holds."""
+        return [(n, getattr(self, n)) for n in self.FAMILY.expert_weight_roots if hasattr(self, n)]
 
     @staticmethod
     def _submodule_named_params(named_modules) -> list:
@@ -481,13 +385,15 @@ class EPMoELayerBase(
         flat = self._rank_uniform_dispatch_input(flat, weights)
 
         with self._perf("ep.dispatch"):
-            recv_x, recv_topk_idx, recv_topk_weights, handle = self._gc_dispatch(flat, experts, weights)
+            recv_x, recv_topk_idx, recv_topk_weights, handle = self.dispatcher.dispatch(
+                flat, experts, weights, owner=self
+            )
 
         with self._perf("ep.expert_compute"):
             output = self._compute_experts(recv_x, recv_topk_idx, recv_topk_weights, input_dtype)
 
         with self._perf("ep.combine"):
-            combined = self._gc_combine(output, recv_topk_weights, handle)
+            combined = self.dispatcher.combine(output, recv_topk_weights, handle, owner=self)
 
         if self.expert_tp_size > 1:
             combined = ReduceFromExpertTP.apply(combined, self.expert_tp_group)
@@ -506,83 +412,6 @@ class EPMoELayerBase(
         if not any(param.requires_grad for _, param in self.expert_named_params()):
             return flat
         return flat.detach().requires_grad_()
-
-    def _gc_dispatch(self, flat, experts, weights):
-        """Dispatch, replaying this checkpoint frame's cached result in the recompute: a second DeepEP
-        dispatch invalidates the handle the original backward holds and silently corrupts every gradient."""
-        if self.dispatcher._noop:  # ep1: no transport, nothing to protect
-            return self.dispatcher.dispatch(flat, experts, weights)
-        scope = active_recompute_scope()
-        if scope is None:
-            if self.training and in_backward_pass():
-                raise RuntimeError(
-                    f"{type(self).__name__}: training forward inside backward with no EP checkpoint "
-                    f"scope — gradient checkpointing was re-enabled without install_recompute_scopes "
-                    f"(TRL's disable_gradient_checkpointing context manager re-installs a bare "
-                    f"checkpoint on exit). A second DeepEP dispatch here corrupts every gradient."
-                )
-            return self.dispatcher.dispatch(flat, experts, weights)
-
-        slot = scope.slot(self, "dispatch")
-        if not scope.is_recompute:
-            recv_x, recv_topk_idx, recv_topk_weights, handle = self.dispatcher.dispatch(flat, experts, weights)
-            # Detached aliases, not clones: DeepEP's copy epilogue lands every result in an
-            # allocator-owned tensor (never a view of the shared arena) and nothing downstream writes
-            # into them in place, so a clone would only add a recv-buffer memcpy per layer.
-            slot.update(
-                recv_x=recv_x.detach(),
-                recv_topk_idx=recv_topk_idx.detach() if recv_topk_idx is not None else None,
-                recv_topk_weights=recv_topk_weights.detach() if recv_topk_weights is not None else None,
-                handle=handle,
-            )
-            return recv_x, recv_topk_idx, recv_topk_weights, handle
-
-        return ReplayDispatchFunction.apply(
-            flat,
-            experts,
-            weights,
-            self.dispatcher,
-            slot["recv_x"],
-            slot["recv_topk_idx"],
-            slot["recv_topk_weights"],
-            slot["handle"],
-        )
-
-    def _gc_combine(self, output, recv_topk_weights, handle):
-        """Combine, replaying this checkpoint frame's cached result in the recompute (the combine writes
-        the same shared buffer as :meth:`_gc_dispatch`)."""
-        scope = active_recompute_scope()
-        if scope is None or self.dispatcher._noop:
-            return self.dispatcher.combine(output, recv_topk_weights, handle)
-
-        slot = scope.slot(self, "combine")
-        if not scope.is_recompute:
-            result = self.dispatcher.combine(output, recv_topk_weights, handle)
-            slot["combined"] = result.detach()  # allocator-owned, read-only downstream (see _gc_dispatch)
-            return result
-
-        return ReplayCombineFunction.apply(output, recv_topk_weights, handle, self.dispatcher, slot["combined"])
-
-
-class EPSeparateGluMoELayerBase(EPMoELayerBase):
-    """EP MoE layer holding its experts as separate gate/up/down 3-D tensors, exported per expert.
-
-    The family's HF checkpoint stores one tensor per expert (:attr:`_HUB_PER_EXPERT_KEYS`) and the
-    wrapper keeps the GLU halves apart — Qwen3 splits the pre-fused pair at init, Bailing stacks a
-    per-expert ``nn.ModuleList`` — so the gather and its shard-merge inverse are the separate-halves
-    pair for both. Declared once here so a fix cannot land in one family and leave the other's gathered
-    save out of step with its sharded merge.
-    """
-
-    def gather_expert_state_dict(self, device: str = "cpu", merge_lora: bool = False, retain: bool = True) -> dict:
-        """These experts are written per-expert (unfused) in the checkpoint."""
-        return self._gather_individual_glu_state_dict(device, merge_lora=merge_lora, retain=retain)
-
-    @classmethod
-    def merge_shards_to_hf(cls, prefix: str, params: dict) -> dict:
-        """Inverse of the gather above: separate 3D shards → per-expert keys (see the base method)."""
-        state = cls._merge_individual_glu_shards(params)
-        return {f"{prefix}.{key}": tensor for key, tensor in state.items()}
 
 
 def named_ep_layers(model: nn.Module) -> list[tuple[str, EPMoELayerBase]]:

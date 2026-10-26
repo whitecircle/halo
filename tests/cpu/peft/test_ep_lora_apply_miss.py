@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""apply_ep_lora_adapters miss detection: full AND partial adapter-key misses must fail loud.
+"""load_expert_lora_adapters miss detection: full AND partial adapter-key misses must fail loud.
 
 A total-consumed check catches only the case where NO saved key matches any EP layer. A PARTIAL
 miss — one layer's adapters unmatched (wrapper-prefixed save path, renamed layer) while other
@@ -16,7 +16,7 @@ import torch
 import torch.nn as nn
 
 from src.checkpoint.adapters import is_expert_lora_key
-from src.distributed.expert_parallel.expert_weights import apply_ep_lora_adapters
+from src.distributed.expert_parallel.moe_layer.expert_lora import load_expert_lora_adapters
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
@@ -75,12 +75,12 @@ def test_expert_keys_with_no_ep_layer_to_receive_them_raise():
         layer.mlp._expert_lora_attrs = frozenset()  # a run that builds no expert adapters
 
     with pytest.raises(RuntimeError, match="no EP layer with expert LoRA"):
-        apply_ep_lora_adapters(model, _adapter_keys(0))
+        load_expert_lora_adapters(model, _adapter_keys(0))
 
 
 def test_all_layers_matched_loads_every_layer():
     model = _model_with_ep_layers()
-    apply_ep_lora_adapters(model, {**_adapter_keys(0), **_adapter_keys(1)})
+    load_expert_lora_adapters(model, {**_adapter_keys(0), **_adapter_keys(1)})
     for layer in model.model.layers:
         assert layer.mlp.loaded_state is not None
         assert set(layer.mlp.loaded_state) == {"experts.gate_up_proj.lora_A", "experts.gate_up_proj.lora_B"}
@@ -91,7 +91,7 @@ def test_full_miss_raises():
     model = _model_with_ep_layers()
     foreign = {f"wrapper.{k}": v for k, v in _adapter_keys(0).items()}
     with pytest.raises(RuntimeError, match="matched none of the"):
-        apply_ep_lora_adapters(model, foreign)
+        load_expert_lora_adapters(model, foreign)
 
 
 def test_partial_miss_raises_naming_missed_layer():
@@ -99,14 +99,14 @@ def test_partial_miss_raises_naming_missed_layer():
     resuming the missed layer's adapters from zero-init — and must not partially load the model."""
     model = _model_with_ep_layers()
     with pytest.raises(RuntimeError, match=r"model\.layers\.1\.mlp"):
-        apply_ep_lora_adapters(model, _adapter_keys(0))  # layer 1 gets zero keys
+        load_expert_lora_adapters(model, _adapter_keys(0))  # layer 1 gets zero keys
     for layer in model.model.layers:
         assert layer.mlp.loaded_state is None, "a miss must not leave the model partially updated"
 
 
 def test_empty_adapter_state_is_a_noop():
     model = _model_with_ep_layers()
-    apply_ep_lora_adapters(model, {})
+    load_expert_lora_adapters(model, {})
     for layer in model.model.layers:
         assert layer.mlp.loaded_state is None
 

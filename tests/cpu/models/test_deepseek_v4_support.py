@@ -17,13 +17,14 @@ from transformers.models.deepseek_v4 import DeepseekV4Config
 from transformers.models.deepseek_v4.modeling_deepseek_v4 import DeepseekV4Experts
 
 from src.data.collators.factory import select_data_collator
-from src.distributed.expert_parallel.expert_weights import resolve_ep_merge_layer_class
-from src.distributed.expert_parallel.layers.deepseek_v4 import EPDeepseekV4MoELayer
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP
-from src.kernels.fused_glu import GluCombine, clamped_silu_mul_eager
+from src.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
+from src.kernels.fused_glu import GluCombine, clamped_silu_mul_eager, resolve_clamped_glu_mul
 from src.model_loading.buffer_repair import finalize_loaded_model
 from src.models.attention.selection import _model_is_deepseek_v4
-from src.models.moe_balancing import resolve_balancing_mode
+from src.models.moe.balancing import resolve_balancing_mode
+from src.models.moe.expert_layout import ExpertLayout
+from src.models.moe.family_specs import find_moe_family_spec
 from src.models.segment_markers import reject_compressed_kv_rows
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.parallelism import single_process_ep_config
@@ -58,14 +59,12 @@ def _bare_ep_layer(**attrs) -> EPDeepseekV4MoELayer:
 
 def test_registrations():
     assert MOE_LAYER_MAP["DeepseekV4SparseMoeBlock"] is EPDeepseekV4MoELayer
-    assert resolve_ep_merge_layer_class("deepseek_v4") is EPDeepseekV4MoELayer
-    # Fused hub layout: the class inherits the base merge, the exact inverse of its base gather.
-    assert "merge_shards_to_hf" not in vars(EPDeepseekV4MoELayer)  # inherits the base merge
-    # Fused hub layout: the base fused gather is already correct, no per-expert split.
-    assert EPDeepseekV4MoELayer._PER_EXPERT_UNFUSED_KEYS is None
-    assert EPDeepseekV4MoELayer._supports_bias_balancing
-    assert EPDeepseekV4MoELayer._supports_routing_replay
-    assert EPDeepseekV4MoELayer._ep_severs_aux_loss
+    assert find_moe_family_spec("deepseek_v4") is EPDeepseekV4MoELayer.FAMILY
+    # Fused hub layout, no per-expert split; w1/w3/w2 is the spelling unfuse_moe_experts writes.
+    assert EPDeepseekV4MoELayer.FAMILY.expert_layout == ExpertLayout(per_expert_keys=("w1", "w3", "w2"))
+    assert EPDeepseekV4MoELayer.SUPPORTS_BIAS_BALANCING
+    assert EPDeepseekV4MoELayer.FAMILY.supports_routing_replay
+    assert EPDeepseekV4MoELayer.SEVERS_AUX_LOSS
 
 
 # Tiny-config save/load roundtrip
@@ -171,13 +170,15 @@ def test_clamped_glu_matches_hf_apply_gate():
     # Un-compiled reference formula.
     assert torch.allclose(clamped_silu_mul_eager(gate, up, config.swiglu_limit), expected, atol=1e-6)
 
-    # The layer seam — the compiled SiLU combine and the generic act_fn fallback, as
+    # The layer seam: the compiled SiLU combine, and the eager fallback a non-SiLU gate takes, as
     # _adopt_expert_compute latches them into _fused_glu_mul.
-    layer = _bare_ep_layer(act_fn=experts.act_fn, limit=config.swiglu_limit)
-    for combine in (GluCombine.clamped_silu(config.swiglu_limit), layer._clamped_swiglu_eager):
-        layer._fused_glu_mul = combine
+    for hidden_act in ("silu", "gelu"):
+        act_experts = DeepseekV4Experts(_tiny_config(hidden_act=hidden_act))
+        layer = _bare_ep_layer(
+            _fused_glu_mul=resolve_clamped_glu_mul(act_experts.act_fn, config.swiglu_limit, clamp_activated=False)
+        )
         out = layer._glu_combine(gate, up)
-        assert torch.allclose(out, expected, atol=1e-6), f"_glu_combine ({layer._glu_combine_name()}) diverged"
+        assert torch.allclose(out, act_experts._apply_gate(gate_up), atol=1e-6), f"{hidden_act} combine diverged"
 
     # The clamp must be load-bearing: dropping it changes the output on these inputs.
     assert not torch.allclose(experts.act_fn(gate) * up, expected)
@@ -234,23 +235,39 @@ def test_the_real_constructor_arms_the_compiled_silu_path(hidden_act, fused, mon
 
 
 def _selection_layer(is_hash: bool, num_experts: int = 8, top_k: int = 2):
+    """A layer whose router logits and scores are its input (identity weight and score function), so a test's
+    scores are what selection sees."""
     gate = nn.Module()
     gate.tid2eid = torch.randint(0, num_experts, (32, top_k))
     gate.e_score_correction_bias = torch.zeros(num_experts)
-    return _bare_ep_layer(gate=gate, is_hash=is_hash, top_k=top_k, num_experts=num_experts)
+    gate.weight = torch.eye(num_experts)
+    return _bare_ep_layer(
+        gate=gate,
+        is_hash=is_hash,
+        top_k=top_k,
+        num_experts=num_experts,
+        fp32_router=False,
+        score_fn=lambda logits: logits,
+        routed_scaling_factor=1.0,
+        _forced_topk_indices=None,
+    )
+
+
+def _select(layer, scores, input_ids=None):
+    return layer._route_hidden_states(scores, input_ids=input_ids)[0]
 
 
 def test_hash_layer_raises_without_input_ids():
     layer = _selection_layer(is_hash=True)
     scores = torch.rand(6, layer.num_experts)
     with pytest.raises(RuntimeError, match="input_ids"):
-        layer._select_experts(scores, None)
+        _select(layer, scores)
 
 
 def test_hash_layer_selects_tid2eid_rows():
     layer = _selection_layer(is_hash=True)
     input_ids = torch.tensor([[3, 7, 11]])
-    indices = layer._select_experts(torch.rand(3, layer.num_experts), input_ids)
+    indices = _select(layer, torch.rand(3, layer.num_experts), input_ids)
     assert torch.equal(indices, layer.gate.tid2eid[input_ids.reshape(-1)])
 
 
@@ -260,7 +277,7 @@ def test_topk_layer_selects_biased_but_gates_unbiased():
     scores = torch.zeros(2, layer.num_experts)
     scores[:, 0] = 1.0  # natural winner: expert 0
     layer.gate.e_score_correction_bias[5] = 10.0  # correction bias promotes expert 5
-    indices = layer._select_experts(scores, None)
+    indices = _select(layer, scores)
     assert (indices == 5).all(), "e_score_correction_bias must steer top-k selection"
 
 

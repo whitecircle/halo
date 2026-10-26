@@ -8,7 +8,7 @@
 
 ## EP wrapper
 
-`EPGemma4MoELayer` (`src/distributed/expert_parallel/layers/gemma4.py`) replaces `Gemma4TextExperts`.
+`EPGemma4MoELayer` (`src/distributed/expert_parallel/families/gemma4.py`) replaces `Gemma4TextExperts`.
 
 - **Router is a sibling**, not a child — `Gemma4TextRouter` lives in `Gemma4TextDecoderLayer` next to the experts. The wrapper only replaces the experts; the router stays FSDP-managed.
 - Routing input: pre-normalized weights from the sibling router (per-expert-scaled, not raw logits).
@@ -26,7 +26,7 @@ The router-outside-wrapper layout changes how the precision flags behave:
 
 - `fp32_router` is a no-op — it controls the EP wrapper's internal router, and Gemma 4's lives outside it. Harmless, but it buys nothing: the shipped configs leave it unset and say why.
 - `fp32_experts: true` upcasts the precision-sensitive expert weights — use it.
-- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`reject_unsupported_model` in `src/model_loading/parallel/load_rules.py`, driven by the EP layer's own `_supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
+- `fp32_non_ep_params: true` is **refused at model load** under EP, off `config.json` and before the process groups (`reject_unsupported_model` in `src/model_loading/parallel/load_rules.py`, driven by the family spec's `supports_fp32_non_ep_params`). Train Gemma 4 experts-distributed in plain bf16.
 
     Gemma 4's norms re-emit activations at weight dtype, so the upcast feeds fp32 tokens into DeepEP's 2-byte transport. Without the gate it surfaces as a raw C++ assert at the first dispatch, after the whole multi-GPU load. See [Precision control](../parallelism/expert-parallelism.md#precision-control).
 
@@ -58,7 +58,7 @@ ETP only shards the expert FFN weights (gate/up/down), leaving attention untouch
 Every exported `config.json` carries the flat `global_head_dim` / `num_global_key_value_heads` keys
 beside the per-layer fields: transformers 5.16 folds the full-attention layers' geometry into
 `per_layer_config`, which the pinned vLLM server's transformers refuses, so the EP layer declares
-the two keys (`_LEGACY_PER_LAYER_CONFIG_KEYS`) and the export rewrites them back
+the two keys (the spec's `served_flat_config_keys`) and the export rewrites them back
 ([Checkpoints](../reference/checkpoints.md#what-gets-saved)).
 
 Both pinned engines read the fused expert pair the gather emits, so RL weight sync runs on either

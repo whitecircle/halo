@@ -18,7 +18,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 from src.distributed.context_parallel.ulysses_attention import _flash_attn_func
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
@@ -73,7 +73,7 @@ def _build_model(device, cp_size):
     pc = ParallelismConfig(
         world_size=8, gpus_per_node=8, nvlink_domain_size=8, ep_size=8, cp_size=cp_size, ep_fp32_router=True
     )
-    patch_moe_model_for_ep(model, pc.ep_config())
+    apply_ep_layers(model, pc.ep_config())
     cp_config = pc.cp_config() if cp_size > 1 else None
     if cp_size > 1:
         model = UlyssesModel(model, cp_config)

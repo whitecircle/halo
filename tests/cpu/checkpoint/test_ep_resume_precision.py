@@ -36,8 +36,9 @@ from src.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, built_from_c
 from src.checkpoint.writing import normalize_gathered_state_dict
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.config import EPConfig
+from src.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
-from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
+from src.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from src.distributed.mesh import create_dp_tp_mesh
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes

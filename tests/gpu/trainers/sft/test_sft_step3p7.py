@@ -8,7 +8,7 @@ fused-but-split ``moe.gate_proj`` / ``moe.up_proj`` / ``moe.down_proj`` tensors,
 ``moe.router_bias``, ``share_expert.*``, the vendor-namespace vision tower. Then all ranks:
 
   1. Load it through ``load_distributed_model`` with EP=2 — the lazy loader route, which replays
-     the family's hub conversion per key (``_HUB_CONVERSION_KEYS``: the prefix renames, the
+     the family's hub conversion per key (``hub_conversion_keys``: the prefix renames, the
      ``moe.*`` → ``mlp.*`` renames, the two-source ``moe.gate_proj + moe.up_proj → gate_up_proj``
      fan-in sliced through both sources, the scoped Step-3.5 vision tower) on a HETEROGENEOUS
      config (per-layer 4-vs-2 attention heads); its bit-exactness against ``from_pretrained`` is
@@ -33,8 +33,8 @@ Run with 2 GPUs:
 
 import torch
 
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.models.moe_balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR
+from src.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from src.models.moe.balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR
 from tests.common.ep_sft_roundtrip import EPSftRoundTrip
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_STEP3P7_CONFIG

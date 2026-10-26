@@ -3,7 +3,7 @@
 
 Every MoE run with gradient checkpointing is forced reentrant, whose original forward runs under
 ``no_grad``. transformers collects ``outputs.router_logits`` in that pass, so without
-:func:`~src.models.moe_aux_loss.install_router_aux_gradient` each checkpointed layer's aux term reaches
+:func:`~src.models.moe.router_aux_gradient.install_router_aux_gradient` each checkpointed layer's aux term reaches
 the loss with no graph and the router gets none of its gradient. The reference throughout is the same
 model with checkpointing off, where the family's own ``load_balancing_loss_func`` backpropagates
 natively: with ``moe_balancing: aux_loss`` applied, a checkpointed backward must land the same router
@@ -13,7 +13,7 @@ Families differ in router: Qwen3-MoE (softmax over bf16-convention logits), GPT-
 ``(hidden, scores)`` block output), Laguna (sigmoid routing on fp32 logits behind a dense first layer)
 and GLM-5 Next (the composite wrapper, whose text tower is the collecting backbone).
 
-Run: python tests/cpu/models/test_moe_aux_loss_checkpointing.py
+Run: python tests/cpu/models/test_router_aux_gradient.py
 """
 
 from __future__ import annotations
@@ -32,11 +32,13 @@ from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.ulysses_model import UlyssesModel
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.models import moe_aux_loss
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.models.config_access import config_export_ready
 from src.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
-from src.models.moe_balancing import declared_routers, detect_moe_experts_topk, resolve_balancing_mode
+from src.models.moe import router_aux_gradient
+from src.models.moe.balancing import resolve_balancing_mode
+from src.models.moe.config_fields import resolve_expert_count
+from src.models.moe.router_logits import declared_routers
 from tests.common.models import (
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
@@ -90,7 +92,7 @@ def _build(family: str, *, balanced: bool, ep: bool = False):
     for router in declared_routers(model):
         torch.nn.init.normal_(router.module.weight, std=0.5)
     if ep:
-        patch_moe_model_for_ep(model, single_process_ep_config(detect_moe_experts_topk(model)[0]))
+        apply_ep_layers(model, single_process_ep_config(resolve_expert_count(model.config)))
     if balanced:
         apply_balancing_mode(model, "aux_loss", is_moe=True)
     else:
@@ -237,14 +239,14 @@ def test_cp_wrapper_resolves_and_routes_through_its_inner_model(tmp_path):
         wrapper = UlyssesModel(inner, CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
         assert resolve_balancing_mode("auto", wrapper, is_moe=True) == "aux_loss"
         apply_balancing_mode(wrapper, "aux_loss", is_moe=True)
-        assert getattr(inner.model, moe_aux_loss._INSTALLED_ATTR, None) is not None
+        assert getattr(inner.model, router_aux_gradient._INSTALLED_ATTR, None) is not None
     finally:
         dist.destroy_process_group()
 
 
 def test_a_gradient_no_recompute_takes_fails_the_backward(monkeypatch):
     """A kept gradient that never reaches its router must stop the step, not vanish silently."""
-    monkeypatch.setattr(moe_aux_loss._RouterAuxGradient, "_on_owner", lambda self, owner, args, output: None)
+    monkeypatch.setattr(router_aux_gradient._RouterAuxGradient, "_on_owner", lambda self, owner, args, output: None)
     model = _build("qwen3_moe", balanced=True)
     _checkpoint(model)
     batch = _batches(model)[0]

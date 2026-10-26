@@ -1,9 +1,10 @@
-"""Routing for EP MoE layers: the router probe and its fp32 input, biased top-k selection, gate weights and
-the routing-replay override."""
+"""Routing for EP MoE layers: the router probe and its fp32 input, biased top-k selection, gate weights and their
+renormalization, and the routing-replay override."""
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import torch
 import torch.nn as nn
@@ -11,14 +12,10 @@ import torch.nn.functional as F
 
 from src.distributed.expert_parallel.config import EPConfig
 from src.models.gradient_checkpointing import active_recompute_scope
-from src.models.moe_balancing import ROUTER_TOPK_FIELDS
+from src.models.moe.config_fields import ROUTER_TOPK_FIELDS
 from src.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
-
-# Floor added to a top-k weight sum before renormalizing by it (DeepSeek-V3's own 1e-20), shared by
-# every family whose upstream router renormalizes with one.
-TOPK_WEIGHT_NORM_EPS = 1e-20
 
 
 class EPRoutingMixin:
@@ -27,12 +24,19 @@ class EPRoutingMixin:
     ep_config: EPConfig
     fp32_router: bool
     top_k: int
+    gate: nn.Module
     _ROUTER_ATTR: str | None
-    _NATIVE_BALANCING_BIAS_ATTR: str | None
+    _native_balancing_attr: str | None
     _forced_topk_indices: torch.Tensor | None
     _forced_cursor: int
     _forced_consumed_total: int
     _replay_flip_counts: torch.Tensor | None
+    # The family router's gate weights at given top-k indices, which routing replay re-derives live.
+    _gate_weights_at: Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+    # The floor the family's router adds to a top-k weight sum before renormalizing by it: DeepSeek-V3's own
+    # 1e-20, 0.0 where the router adds none.
+    _TOPK_WEIGHT_NORM_EPS: float = 1e-20
 
     @classmethod
     def _find_gate_or_router(cls, layer: nn.Module) -> nn.Module | None:
@@ -71,6 +75,16 @@ class EPRoutingMixin:
         router, since FSDP casts a managed weight to bf16 for compute."""
         return self.fp32_router and not self.ep_config.experts_fsdp_managed
 
+    def _router_input(self, hidden: torch.Tensor) -> torch.Tensor:
+        """``hidden`` at the router's dtype (see :attr:`_fp32_router_input`)."""
+        return hidden.float() if self._fp32_router_input else hidden
+
+    def _linear_router_logits(self, flat: torch.Tensor) -> torch.Tensor:
+        """The router's logits as a bare projection over its weight, autocast off so the matmul runs at the input
+        dtype, for a router whose own forward cannot be called because it selects too."""
+        with torch.amp.autocast("cuda", enabled=False):
+            return F.linear(self._router_input(flat), self.gate.weight)
+
     def _upcast_router_to_fp32(self) -> None:
         """Upcast the router (a module or a bare parameter) under ``fp32_router``; an external router stays
         bf16."""
@@ -103,8 +117,26 @@ class EPRoutingMixin:
         probs = F.softmax(router_logits, dtype=torch.float, dim=-1)
         weights = probs.gather(-1, indices)
         if normalize:
-            weights = weights / weights.sum(dim=-1, keepdim=True)
+            weights = self._renormalize_topk_weights(weights)
         return weights.to(router_logits.dtype)
+
+    def _renormalize_topk_weights(self, weights: torch.Tensor) -> torch.Tensor:
+        """``weights`` over their top-k sum plus the family's :attr:`_TOPK_WEIGHT_NORM_EPS`."""
+        return weights / (weights.sum(dim=-1, keepdim=True) + self._TOPK_WEIGHT_NORM_EPS)
+
+    def _replay_router_choice(
+        self, router_logits: torch.Tensor, indices: torch.Tensor, weights: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """The router's own ``(indices, weights)``, or with routing replay armed the forced picks gated by
+        :meth:`_gate_weights_at` on the live logits, which keeps the router's gradient live."""
+        if self._forced_topk_indices is None:
+            return indices, weights
+        indices = self._maybe_replace_selection(indices.long())
+        return indices, self._gate_weights_at(router_logits, indices)
+
+    def _select_topk_on_scores(self, scores: torch.Tensor) -> torch.Tensor:
+        """Top-k indices on :meth:`_selection_scores`, the biased copy of ``scores``; the replay is the caller's."""
+        return torch.topk(self._selection_scores(scores), self.top_k, dim=-1, sorted=False)[1]
 
     def _biased_topk(self, logits: torch.Tensor) -> torch.Tensor:
         """Top-k indices on the softmax probs plus the transient balancing bias: selection only, so a zero
@@ -125,10 +157,10 @@ class EPRoutingMixin:
         """``scores`` plus the declared native correction slot, then the transient balancing bias, as a
         served copy applies them; ``scores`` itself when neither applies. Gate weights stay unbiased."""
         target = self._native_balancing_target()
-        if target is None and self._NATIVE_BALANCING_BIAS_ATTR and not self._native_slot_absence_is_legal():
+        if target is None and self._native_balancing_attr and not self._native_slot_absence_is_legal():
             raise AttributeError(
-                f"{type(self).__name__} declares _NATIVE_BALANCING_BIAS_ATTR="
-                f"'{self._NATIVE_BALANCING_BIAS_ATTR}' as the bias its own selection applies, but this "
+                f"{type(self).__name__} declares the balancing slot "
+                f"'{self._native_balancing_attr}' as the bias its own selection applies, but this "
                 f"instance carries no such tensor — the family renamed it upstream. Routing on would "
                 f"silently drop the pretrained correction bias. Fix the declaration, or override "
                 f"_native_slot_absence_is_legal() to answer True for the configuration that omits it."

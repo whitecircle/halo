@@ -38,13 +38,13 @@ import torch
 from transformers import GptOssConfig, GptOssForCausalLM, TrainerState
 
 from src.callbacks.balancing import BalancingBiasCallback, apply_balancing_mode
-from src.distributed.expert_parallel.layers.glm4 import EPGlm4MoELayer
-from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
-from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
-from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
+from src.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
+from src.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
+from src.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.moe_balancing import iter_balancing_routers, resolve_balancing_mode
+from src.models.moe.balancing import iter_balancing_routers, resolve_balancing_mode
 from tests.common.harness import gpu_test_main
 from tests.common.utils import log
 
@@ -150,7 +150,7 @@ def run(ctx) -> dict:
 
     model = build_tiny_gptoss(device)
     pc = ParallelismConfig(ep_size=ctx.world_size)
-    model = patch_moe_model_for_ep(model, pc.ep_config())
+    model = apply_ep_layers(model, pc.ep_config())
 
     ep_layers = [m for m in model.modules() if isinstance(m, EPGptOssMoELayer)]
     check(checks, "EP layers patched", len(ep_layers) > 0, f"{len(ep_layers)} EPGptOssMoELayer(s)")

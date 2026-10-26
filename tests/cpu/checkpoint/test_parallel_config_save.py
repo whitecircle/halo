@@ -27,7 +27,6 @@ import sys
 import pytest
 from transformers import AutoConfig, AutoModelForCausalLM, LagunaConfig, PretrainedConfig
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers the roster every config writer requires
 from src.checkpoint.config_export import drop_unshipped_auto_map, finalize_exported_config, save_model_config
 from src.checkpoint.weights_source import config_schema_source
 from tests.common.models import TINY_LAGUNA_CONFIG

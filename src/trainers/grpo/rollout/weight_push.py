@@ -15,23 +15,20 @@ from transformers.core_model_loading import rename_source_key
 
 from src.checkpoint.hub_layout import export_conversions, reversed_export_transforms, revert_conversions
 from src.diagnostics.profiling import log_cuda_memory
-from src.distributed.expert_parallel.expert_weights import (
-    config_model_types,
-    ep_layer_classes_for_config,
-    is_expert_weight_attr,
-    to_hub_layer_key,
-)
+from src.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
 from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, iter_hand_sliced_full
 from src.env import env_flag
 from src.model_loading.dtype import has_packed_quantized_params
 from src.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
-from src.models.moe_balancing import (
+from src.models.config_access import config_model_types
+from src.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
     iter_balancing_routers,
 )
+from src.models.moe.family_specs import is_expert_weight_attr
 from src.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
 from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
 from src.runtime.collectives import barrier_on_exit
@@ -96,10 +93,11 @@ def _reject_model_state(model: torch.nn.Module, ep_layers: dict[str, EPMoELayerB
 
 
 def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
-    """Refuse a family the engine cannot serve, one whose layer class has no validated sync, and an EP family
+    """Refuse a family the engine cannot serve, one whose spec carries a ``weight_sync_refusal``, and an EP family
     without the live wrapper whose gather emits the layout the engine loads."""
     client_cls = resolve_weight_sync_client(backend)
-    unservable = sorted(config_model_types(model) & client_cls.UNSERVABLE_MODEL_TYPES.keys())
+    config = getattr(unwrap_framework_wrappers(model), "config", None)
+    unservable = sorted(client_cls.UNSERVABLE_MODEL_TYPES.keys() & config_model_types(config))
     if unservable:
         facts = "; ".join(
             f"{model_type}: {client_cls.UNSERVABLE_MODEL_TYPES[model_type]}" for model_type in unservable
@@ -112,22 +110,21 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
     if ep_layers:
         families = [(name, type(module)) for name, module in ep_layers.items()]
     else:
-        config = getattr(unwrap_framework_wrappers(model), "config", None)
         families = [
             (f"model_type registry for {type(model).__name__}", cls) for cls in ep_layer_classes_for_config(config)
         ]
     for where, cls in families:
-        if not cls._supports_weight_sync:
+        if cls.FAMILY.weight_sync_refusal is not None:
             raise ValueError(
                 f"{cls.__name__} (at {where!r}) does not support weight sync: the sync feeds the "
                 f"engine's model.load_weights directly, but "
-                f"{cls._WEIGHT_SYNC_REFUSAL_REASON}. Online/environmental GRPO with weight sync "
-                f"is unsupported for this model — see {cls.__name__}._supports_weight_sync."
+                f"{cls.FAMILY.weight_sync_refusal}. Online/environmental GRPO with weight sync "
+                f"is unsupported for this model — see {cls.__name__}.FAMILY.weight_sync_refusal."
             )
     if families and not ep_layers:
         raise ValueError(
             f"{', '.join(sorted({cls.__name__ for _where, cls in families}))} resolves for model_type "
-            f"{sorted(config_model_types(model))}, but the model carries no live EP wrapper "
+            f"{sorted(config_model_types(config))}, but the model carries no live EP wrapper "
             f"(expert_parallel_size 1 with use_grouped_gemm: false): weight sync ships experts in the layout "
             f"the family's gather_expert_state_dict emits, and without a wrapper it would forward the stock "
             f"module tree's fused expert tensors under module names, which the engine's loader drops with no "
@@ -224,7 +221,7 @@ class _HubForwarder:
         for layer_name, layer in self._ep_layers.items():
             prefix = f"{layer_name}."
             if name.startswith(prefix):
-                name = prefix + to_hub_layer_key(name[len(prefix) :], type(layer))
+                name = prefix + layer.FAMILY.to_hub_key(name[len(prefix) :])
                 break
         if self._peft_prefix is not None:
             name = plain_peft_param_name(name, self._peft_prefix)
@@ -273,7 +270,7 @@ def _send_ep_expert_weights(
         # Only the forwarding rank needs the assembled layer, and only while it can still send it.
         retain = forwarder is not None and guard.reason is None
         # The native expert LoRA is folded here; the PEFT adapters, never on experts, fold in the dense push.
-        gather = partial(module.gather_expert_state_dict, "cuda", merge_lora=True, retain=retain)
+        gather = partial(module.gather_expert_state_dict, device="cuda", merge_lora=True, retain=retain)
         # Guarded only where it retains: elsewhere a raise is a group-wide failure, not this rank's own.
         gathered = guard.run(gather) if retain else gather()
         if forwarder is not None and gathered:

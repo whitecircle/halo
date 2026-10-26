@@ -30,17 +30,17 @@ import torch
 
 from src.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
 from src.distributed.expert_parallel.deepep.backends import DeepEPBackend
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
+from src.models.moe.family_specs import find_moe_family_spec
 from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 BATCH, SEQ = 2, 8
 CHECKPOINT_MODES = {"reentrant": True, "non_reentrant": False}
 CHECKPOINTED_FAMILIES = tuple(
-    name for name in TINY_MOE_FAMILIES if ep_layer_class_by_model_type()[name]._supports_gradient_checkpointing
+    name for name in TINY_MOE_FAMILIES if find_moe_family_spec(name).supports_gradient_checkpointing
 )
 
 
@@ -87,7 +87,7 @@ def _live_model(name: str, log: list, *, use_reentrant: bool | None) -> torch.nn
     :class:`LoopbackBackend` logging to ``log``, checkpointed in the given mode (``None``: unchecked)."""
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES[name]).train()
-    patch_moe_model_for_ep(model, single_process_ep_config())
+    apply_ep_layers(model, single_process_ep_config())
     layers = named_ep_layers(model)
     assert layers, f"{name}: the EP patch wrapped no MoE block"
     for _, layer in layers:

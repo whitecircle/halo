@@ -112,7 +112,7 @@ def test_an_adapter_directory_gives_the_slot_fp32_storage_for_its_sidecar(tmp_pa
         seen["sidecar"] = loaded
         return ["model.layers.0.mlp.gate"], ["model.layers.9.mlp.gate"]
 
-    monkeypatch.setattr(sidecars, "apply_router_balancing_sidecar", fake_apply)
+    monkeypatch.setattr(sidecars, "apply_balancing_bias_sidecar", fake_apply)
     actions = apply_training_sidecars(model, str(adapter_dir))
 
     assert seen["dtype"] == torch.float32, "the sidecar would have been rounded into the slot's bf16"
@@ -134,7 +134,7 @@ def test_a_source_with_its_own_weights_keeps_its_sidecar_as_a_travelling_copy(tm
     def refuse(*args, **kwargs):
         raise AssertionError("the sidecar must not be re-applied to a source that carries weights")
 
-    monkeypatch.setattr(sidecars, "apply_router_balancing_sidecar", refuse)
+    monkeypatch.setattr(sidecars, "apply_balancing_bias_sidecar", refuse)
     model = _Model()
 
     assert apply_training_sidecars(model, str(source)) == []

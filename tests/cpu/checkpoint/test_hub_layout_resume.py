@@ -43,7 +43,6 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Trainer, TrainingArguments
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  # the config export reads the EP roster
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
 from src.checkpoint.parallel.context import CheckpointLoadContext
 from src.checkpoint.parallel.resume_source import resolve_resume_weights_source

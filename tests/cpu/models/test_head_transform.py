@@ -25,7 +25,6 @@ from transformers.dynamic_module_utils import get_class_from_dynamic_module
 from transformers.models.auto import modeling_auto
 from trl.trainer.utils import selective_log_softmax
 
-from src.distributed.expert_parallel.expert_weights import ep_layer_classes
 from src.model_loading.remote_code import apply_remote_code_compat_shims
 from src.models import head_transform
 from src.models.head_transform import (
@@ -36,6 +35,7 @@ from src.models.head_transform import (
     resolve_head_transform_spec,
     verify_head_transform,
 )
+from src.models.moe.family_specs import moe_model_types
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore
 from tests.common.models import (
     BAILING_MOE_LING_MINI,
@@ -96,7 +96,7 @@ def _causal_lm_class_names(model_type: str) -> set[str]:
 
 
 def _roster_classes() -> list[tuple[str, str]]:
-    model_types = {model_type for cls in ep_layer_classes() for model_type in cls.HF_MODEL_TYPES}
+    model_types = moe_model_types()
     return sorted(
         (model_type, name)
         for model_type in model_types | set(_DENSE_ROSTER)

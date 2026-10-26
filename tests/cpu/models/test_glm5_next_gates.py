@@ -43,12 +43,7 @@ from src.models.attention.selection import (
     resolve_attn_implementation,
     validate_attn_implementation,
 )
-from src.models.moe_balancing import (
-    ROUTER_EXPERT_COUNT_FIELDS,
-    get_first_router_field,
-    resolve_expert_ffn_shard_width,
-    resolve_router_topk,
-)
+from src.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from tests.common.distributed import fake_process_group_mesh
 
 PartialState()  # the collator factory logs through accelerate's logger, which needs the state
@@ -238,8 +233,8 @@ def test_balancing_registries_resolve_on_the_real_config():
     assert Glm5NextTextConfig.attribute_map.get("num_local_experts") == "n_routed_experts"
     for config in (Glm5NextTextConfig(), Glm5NextConfig()):
         assert resolve_router_topk(config) == 8
-        assert get_first_router_field(config, ROUTER_EXPERT_COUNT_FIELDS) == 288
-        assert resolve_expert_ffn_shard_width(config) == 2048
+        assert resolve_expert_count(config) == 288
+        assert resolve_expert_ffn_width(config) == 2048
 
 
 if __name__ == "__main__":

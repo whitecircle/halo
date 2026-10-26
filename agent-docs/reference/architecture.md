@@ -46,6 +46,7 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `src/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `src/model_loading/parallel/model_source.py`) | the loaders, the run-level `is_vlm_run`, the PP gate |
 | `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` | the collator factory, the packing and padding-free collators, and SMPO's padding-free forward |
 | `src/models/attention/layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
+| `src/models/moe/family_specs.py` | every MoE family's facts, one frozen `MoEFamilySpec` each (model types, balancing slot, export renames and config rewrites, expert-weight roots, capability flags), indexed by `model_type` | the EP layers (`FAMILY`), the loaders, the config writers, the weight sync and the offline checkpoint tools — none imports the EP package to read a family fact |
 | `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep (and the PP stage seam), which apply the same verdict |
 | `src/checkpoint/atomic.py` | exclusive staging with ordinary umask permissions, atomic Torch-file publication, directory fsync — no rank coordination | model-card writes, reference sidecars, the optimizer metadata, the async GRPO prefetch sidecar, the trainer-state commit, and checkpoint export filtering |
 | `src/checkpoint/format.py` | every on-disk checkpoint name two modules share, and the builders that spell them — no model | the parallel save and load paths and the standalone `scripts/after_training/` tools |
@@ -164,7 +165,7 @@ ParallelismConfig  ── validate mode, build process groups
    ▼
 load_distributed_model            src/model_loading/parallel/loader.py
    │  • resolve_attn_implementation → FA4 (SM100+) / FA3 (SM90) / FA2; per-model SDPA/eager overrides
-   │  • patch_moe_model_for_ep → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
+   │  • apply_ep_layers → EP wrappers (when ep_group_size > 1 — EP or ETP — or grouped GEMM on an MoE)
    │  • UlyssesModel (when cp_size > 1)
    ▼
 DistributedTrainerMixin._setup_distributed_modes

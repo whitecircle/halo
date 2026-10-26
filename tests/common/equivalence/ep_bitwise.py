@@ -24,11 +24,11 @@ from peft import LoraConfig, get_peft_model
 from transformers.trainer_utils import enable_full_determinism
 
 from src.distributed.expert_parallel.config import EPConfig
-from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
 from src.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
+from src.distributed.expert_parallel.parallelize import apply_ep_layers
 from src.distributed.parallelism_config import ParallelismConfig
 from src.models.moe.expert_lora_spec import ExpertLoraSpec
+from src.models.moe.family_specs import find_moe_family_spec
 from src.optimizers.param_groups import decay_groups
 from src.trainers.grpo.rollout.routing_replay import build_routing_replay_injector
 from tests.common.distributed import init_distributed, teardown_distributed
@@ -116,7 +116,7 @@ KNOWN_RAISING = frozenset(
     f"{launch}/{family}/routing_replay"
     for launch in ("cpu", "grouped")
     for family in FAMILIES
-    if not ep_layer_class_by_model_type()[family]._supports_routing_replay
+    if not find_moe_family_spec(family).supports_routing_replay
 )
 
 
@@ -176,7 +176,7 @@ def _model(family: str, dtype: torch.dtype, device: torch.device | str = "cpu") 
 def _wrap(model: torch.nn.Module, ep_config: EPConfig, *, perturb: bool) -> None:
     """The EP patch, the expert adapters drawn where the config carries native expert LoRA, and under
     ``perturb`` the negative control: every expert bank rotated by one expert."""
-    patch_moe_model_for_ep(model, ep_config)
+    apply_ep_layers(model, ep_config)
     if ep_config.expert_lora is not None:
         torch.manual_seed(ADAPTER_SEED)
         randomize_adapters(model, std=ADAPTER_STD)
@@ -244,7 +244,7 @@ def _forward_backward(model: torch.nn.Module, variant: str, seq: int, device, ba
     replays = variant == "routing_replay"
     injector = (
         build_routing_replay_injector(model)
-        if replays or all(layer._supports_routing_replay for _, layer in layers)
+        if replays or all(layer.FAMILY.supports_routing_replay for _, layer in layers)
         else None
     )
     if replays:

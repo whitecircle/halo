@@ -37,7 +37,6 @@ from transformers import GptOssConfig, GptOssForCausalLM
 
 # Registers the EP export roster the config writer at the end of every gathered save demands —
 # a hand-built model reaches save_tp_checkpoint without the load path that pulls this in.
-import src.distributed.expert_parallel.layers.roster  # noqa: F401
 from src.checkpoint.format import SAFETENSORS_INDEX_FILE
 from src.checkpoint.parallel.save import save_tp_checkpoint
 from src.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only

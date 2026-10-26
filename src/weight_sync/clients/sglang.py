@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import torch
 import torch.distributed as dist
 
-from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
+from src.models.moe.family_specs import STEP3P7
 from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES, describe_chunk
 from src.weight_sync.clients.base import (
     CLEANUP_TIMEOUT_S,
@@ -61,7 +61,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         ),
         # Every Step-3 spelling the trainer knows resolves to the same SGLang model file.
         **dict.fromkeys(
-            EPStep3p7MoELayer.HF_MODEL_TYPES,
+            STEP3P7.model_types,
             f"{ENGINE_RELEASE}'s step3p5 loader asserts full parameter coverage in each load_weights call, so it "
             "refuses the chunked online update",
         ),

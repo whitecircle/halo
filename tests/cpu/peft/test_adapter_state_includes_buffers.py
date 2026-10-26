@@ -15,10 +15,9 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
-import src.distributed.expert_parallel.layers.roster  # noqa: F401  registers every family's balancing slot
 from src.checkpoint.parallel.adapters import resolve_adapter_state
 from src.checkpoint.writing import adapter_save_dtype_caster
-from src.models.moe_balancing import is_balancing_state_key
+from src.models.moe.balancing import is_balancing_state_key
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
 ALL_FAMILIES = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES, **TINY_DENSE_FAMILIES}

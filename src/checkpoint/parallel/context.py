@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any
 import torch.nn as nn
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from src.distributed.expert_parallel.expert_weights import has_ep_lora
+from src.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from src.runtime.filesystem import is_fs_save_rank
 
 if TYPE_CHECKING:
@@ -63,7 +63,7 @@ class CheckpointContext:
             is_save_rank=is_fs_save_rank(),
             max_shard_size=trainer.save_max_shard_size or DEFAULT_MAX_SHARD_SIZE,
             save_sharded_ep=trainer.save_sharded_ep,
-            has_expert_lora=has_ep_lora(model),
+            has_expert_lora=model_has_expert_lora(model),
             cp_wrapper=trainer._find_cp_wrapper(),
             tokenizer=getattr(trainer, "processing_class", None),
             pp_wrapper_state=trainer._pp_wrapper_state,

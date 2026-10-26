@@ -12,7 +12,8 @@ from src.distributed.pipeline_parallel.families import PP_SPEC_MAP, resolve_pp_s
 from src.models.config_access import get_config_field, text_config, ties_word_embeddings
 from src.models.head_transform import resolve_head_transform
 from src.models.module_tree import backbone_with_layers, decoder_layers, embedding_module
-from src.models.moe_balancing import config_has_experts, resolve_balancing_mode
+from src.models.moe.balancing import resolve_balancing_mode
+from src.models.moe.config_fields import has_routed_experts
 
 # Every family spelling of the multi-token-prediction tail-layer count (DeepSeek/Bailing,
 # Qwen3.5/3.6, Inkling).
@@ -63,7 +64,7 @@ def _reject_aux_loss_balancing(model: nn.Module, moe_balancing: str) -> None:
     the router aux loss never runs and the experts collapse with no error.
     """
     config = getattr(model, "config", None)
-    if config is None or not config_has_experts(config):
+    if config is None or not has_routed_experts(config):
         return
     if embedding_module(model, "output") is None:
         return

@@ -63,17 +63,15 @@ class _Combine(torch.autograd.Function):
 class _RecordingTransport:
     """DeepEP's autograd shape: ``received`` rows reach this rank's experts; both backwards log."""
 
-    _noop = False
-
     def __init__(self, name: str, received: int, log: list):
         self.name, self.received, self.log = name, received, log
 
-    def dispatch(self, x, topk_idx, topk_weights):
+    def dispatch(self, x, topk_idx, topk_weights, *, owner):
         self.rows = x.shape[0]
         recv_x, recv_idx, recv_weights = _Dispatch.apply(x, topk_idx, topk_weights, self)
         return recv_x, recv_idx, recv_weights, None
 
-    def combine(self, x, topk_weights, _handle):
+    def combine(self, x, topk_weights, _handle, *, owner):
         return _Combine.apply(x, topk_weights, self, self.rows)
 
 

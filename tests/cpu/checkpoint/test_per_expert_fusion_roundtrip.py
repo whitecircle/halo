@@ -3,8 +3,8 @@
 
 Two halves of one contract, declared in two places and never checked against each other until here:
 
-* SAVE — ``EPMoELayerBase.gather_expert_state_dict`` splits the fused ``experts.gate_up_proj``
-  ``[E, 2M, H]`` into a family's ``_PER_EXPERT_UNFUSED_KEYS`` hub names.
+* SAVE — the EP gather splits the fused ``experts.gate_up_proj`` ``[E, 2M, H]`` into a
+  ``FUSED_SPLIT_PER_EXPERT`` family's ``per_expert_keys`` hub names.
 * LOAD — the lazy loader fuses those names back via ``per_expert_fusion_map()``, resolving the
   gate/up halves by POSITION.
 
@@ -13,26 +13,22 @@ missing keys, no error — a silently corrupted MoE. ``test_gate_up_swap_is_dete
 assertion is sharp enough to see that.
 
 The fusion map is keyed by projection NAME across the WHOLE roster, so a new family reusing a name
-at a different position would silently swap the other family's halves — whichever class the
-``__subclasses__`` walk visits last wins. That conflict must RAISE, matching the sibling registry
-``ep_layer_class_by_model_type``.
+at a different position would silently swap the other family's halves — whichever spec comes last
+wins. That conflict must RAISE.
 
     python tests/cpu/checkpoint/test_per_expert_fusion_roundtrip.py
 """
 
 from __future__ import annotations
 
-import gc
-from unittest.mock import patch
-
 import pytest
 import torch
 
-from src.distributed.expert_parallel.expert_weights import (
-    ep_layer_classes,
-    per_expert_fusion_map,
-)
-from src.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from src.distributed.expert_parallel.families.roster import ep_layer_classes
+from src.models.moe import family_specs
+from src.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
+from src.models.moe.family_specs import MoEFamilySpec, per_expert_fusion_map
+from tests.common.ep_stubs import bare_ep_layer
 
 E, H, M = 3, 8, 16
 
@@ -52,12 +48,13 @@ def _reference():
 
 
 def _split_via_family(cls, fused):
-    """The SAVE side: the family's gather with the fused gather stubbed (no GPU/EP state needed)."""
-    instance = object.__new__(cls)
-    with patch.object(
-        EPMoELayerBase, "_gather_fused_expert_state_dict", return_value={k: v.clone() for k, v in fused.items()}
-    ):
-        return cls.gather_expert_state_dict(instance, device="cpu", merge_lora=False)
+    """The SAVE side: the family's real gather on one process, its experts in the runtime matmul convention."""
+    layer = bare_ep_layer(
+        cls,
+        gate_up_proj=fused["experts.gate_up_proj"].transpose(1, 2).clone(),
+        down_proj=fused["experts.down_proj"].transpose(1, 2).clone(),
+    )
+    return layer.gather_expert_state_dict()
 
 
 def _fuse_via_loader(cls, split):
@@ -67,7 +64,7 @@ def _fuse_via_loader(cls, split):
     gate_up, down = [], []
     for i in range(E):
         by_group: dict[str, dict[int, torch.Tensor]] = {}
-        for name in cls._PER_EXPERT_UNFUSED_KEYS:
+        for name in cls.FAMILY.expert_layout.per_expert_keys:
             key = f"experts.{i}.{name}.weight"
             assert key in split, f"{cls.__name__}: save split produced no '{key}' (got {sorted(split)[:4]})"
             group, position = fusion_map[f"{name}.weight"]
@@ -78,12 +75,16 @@ def _fuse_via_loader(cls, split):
 
 
 def _unfusing_families():
-    return [cls for cls in ep_layer_classes() if cls._PER_EXPERT_UNFUSED_KEYS is not None]
+    return [
+        cls
+        for cls in ep_layer_classes()
+        if "FAMILY" in vars(cls) and cls.FAMILY.expert_layout.kind is ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT
+    ]
 
 
 def test_at_least_one_family_declares_a_per_expert_layout():
     """Anti-vacuity: the round-trip test below would pass trivially on an empty roster."""
-    assert _unfusing_families(), "no EP family declares _PER_EXPERT_UNFUSED_KEYS — round trip untested"
+    assert _unfusing_families(), "no EP family declares a FUSED_SPLIT_PER_EXPERT layout — round trip untested"
 
 
 @pytest.mark.parametrize("cls", _unfusing_families(), ids=lambda c: c.__name__)
@@ -104,7 +105,7 @@ def test_gate_up_swap_is_detected(cls):
     """
     _, _, _, fused = _reference()
     split = _split_via_family(cls, fused)
-    gate_name, up_name, _ = cls._PER_EXPERT_UNFUSED_KEYS
+    gate_name, up_name, _ = cls.FAMILY.expert_layout.per_expert_keys
     for i in range(E):
         gate_key, up_key = f"experts.{i}.{gate_name}.weight", f"experts.{i}.{up_name}.weight"
         split[gate_key], split[up_key] = split[up_key], split[gate_key]
@@ -120,32 +121,25 @@ def test_roster_has_no_conflicting_fusion_claims():
     assert per_expert_fusion_map(), "roster produced an empty per-expert fusion map"
 
 
-def test_conflicting_family_claim_raises():
+def test_conflicting_family_claim_raises(monkeypatch):
     """A family reusing a projection name at a DIFFERENT position must raise, not last-write-win.
 
     Built with plain assignment the map would let the conflicting family overwrite the earlier
     claim, and the loser's experts fuse with gate/up swapped — no error, right shapes.
     """
-    victim = next(
-        (cls for cls in _unfusing_families() if cls._PER_EXPERT_UNFUSED_KEYS[0] != cls._PER_EXPERT_UNFUSED_KEYS[1]),
-        None,
+    gate_name, up_name, down_name = _unfusing_families()[0].FAMILY.expert_layout.per_expert_keys
+    # Swapping gate and up claims the same two names at the opposite positions.
+    conflicting = MoEFamilySpec(
+        model_types=("conflicting_moe",),
+        expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, (up_name, gate_name, down_name)),
     )
-    assert victim is not None, "no family with distinct gate/up names to build a conflict from"
-    gate_name, up_name, down_name = victim._PER_EXPERT_UNFUSED_KEYS
-
+    monkeypatch.setattr(family_specs, "MOE_FAMILY_SPECS", (*family_specs.MOE_FAMILY_SPECS, conflicting))
     per_expert_fusion_map.cache_clear()
     try:
-        # Swapping gate and up claims the same two names at the opposite positions.
-        conflicting = type(
-            "ConflictingFusionClaimLayer",
-            (EPMoELayerBase,),
-            {"_PER_EXPERT_UNFUSED_KEYS": (up_name, gate_name, down_name)},
-        )
         with pytest.raises(ValueError, match="claimed as"):
             per_expert_fusion_map()
     finally:
-        del conflicting
-        gc.collect()  # drop the temp subclass from EPMoELayerBase.__subclasses__()
+        monkeypatch.undo()
         per_expert_fusion_map.cache_clear()
 
     # The roster must be healthy again for every later test/consumer.

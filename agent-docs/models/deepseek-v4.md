@@ -30,7 +30,7 @@ Consequences:
 
 ## EP wrapper
 
-`EPDeepseekV4MoELayer` (`src/distributed/expert_parallel/layers/deepseek_v4.py`) replaces `DeepseekV4SparseMoeBlock`. It subclasses `EPMoELayerBase` directly (not the shared-experts forward base): the routers return tuples and hash layers need `input_ids`, which the decoder layer forwards into the MoE block.
+`EPDeepseekV4MoELayer` (`src/distributed/expert_parallel/families/deepseek_v4.py`) replaces `DeepseekV4SparseMoeBlock`. It subclasses `EPMoELayerBase` directly (not the shared-experts forward base): the routers return tuples and hash layers need `input_ids`, which the decoder layer forwards into the MoE block.
 
 - **Top-k layers**: fp32 scores via `sqrtsoftplus(logits)`, selection on `scores + e_score_correction_bias` (+ the balancing bias when enabled), weights gathered from the unbiased scores, normalized (`+1e-20`), scaled by `routed_scaling_factor` (1.5).
 - **Hash layers** (`is_hash`): selection is `gate.tid2eid[input_ids]`; the forward raises if `input_ids` is absent (an `inputs_embeds`-only call cannot hash-route). The table must hold distinct experts per token id (DeepEP dispatch asserts distinct top-k on device; the wrapper validates at init and raises).
@@ -39,11 +39,11 @@ Consequences:
     The fused form hardcodes SiLU, so it is armed by the same behavioral `is_silu_activation` gate as GLM-4 ([Fused SwiGLU](glm4.md#fused-swiglu)); any other `hidden_act` falls back to the generic clamp.
 
 - **Shared expert**: `DeepseekV4MLP` (same clamp), replicated per rank, DP-averaged via the router grad hook, output added after DeepEP combine.
-- Expert storage is the standard fused contiguous-halves layout (`gate_up_proj [E, 2M, H]`), so the base gather/save, the lazy fused-expert loader, native grouped expert-LoRA, and the shard-merge transform (the base `merge_shards_to_hf`, reached by resolving `model_type` through `resolve_ep_merge_layer_class`) all apply unchanged.
+- Expert storage is the standard fused contiguous-halves layout (`gate_up_proj [E, 2M, H]`), so the base gather/save, the lazy fused-expert loader, native grouped expert-LoRA, and the shard merge (the spec's `FUSED` `ExpertLayout`, reached by resolving `model_type` through `find_moe_family_spec`) all apply unchanged.
 
 ## Router balancing
 
-Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`_ep_severs_aux_loss`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)); an explicit `aux_loss` warns and stays off.
+Under EP the wrapper re-derives routing from `gate.weight`, so the HF router module never fires and `outputs.router_logits` stays empty: the aux-loss path is severed (`SEVERS_AUX_LOSS`). `moe_balancing: auto` therefore resolves to `bias_update` (DeepSeek-V3 sign update via [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)); an explicit `aux_loss` warns and stays off.
 
 The update lands in the gate's own exported `e_score_correction_bias`, so the trained bias ships with every checkpoint. Hash layers refuse the balancing bias (their selection is frozen); only top-k layers receive it.
 

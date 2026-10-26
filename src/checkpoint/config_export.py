@@ -11,6 +11,7 @@ import json
 import os
 import shutil
 import tempfile
+from collections.abc import Mapping
 
 from transformers.dynamic_module_utils import custom_object_save, get_relative_imports
 from transformers.utils import CONFIG_NAME, cached_file
@@ -21,7 +22,7 @@ from src.checkpoint.weights_source import config_schema_source
 from src.log import info_logger
 from src.models.config_access import config_export_ready
 from src.models.model_classes import remote_code_model_class, transformers_model_class
-from src.models.moe_balancing import ep_roster_registered, exports_source_config_schema, legacy_per_layer_config_keys
+from src.models.moe.family_specs import find_moe_family_spec
 
 logger = info_logger(__name__)
 
@@ -65,9 +66,9 @@ def restore_model_type(config, output_dir: str) -> None:
     write_config_json(output_dir, payload)
 
 
-def flatten_per_layer_config(section: dict, legacy_keys: dict[str, tuple[str, str]]) -> bool:
-    """Rewrite one serialized section's ``per_layer_config`` into the family's flat legacy keys, in place;
-    return whether it changed.
+def flatten_per_layer_config(section: dict, legacy_keys: Mapping[str, tuple[str, str]]) -> bool:
+    """Rewrite one serialized section's ``per_layer_config`` into the family's flat legacy keys
+    (``MoEFamilySpec.served_flat_config_keys``), in place; return whether it changed.
 
     Each flat key takes its field's value on the layers of its layer type. ``per_layer_config`` is then
     dropped, since a 5.14-line reader refuses it and a 5.16 reader rebuilds it; a config the flat keys
@@ -105,8 +106,8 @@ def flatten_per_layer_config(section: dict, legacy_keys: dict[str, tuple[str, st
 
 
 def export_legacy_per_layer_config(output_dir: str) -> None:
-    """Flatten ``per_layer_config`` in ``output_dir``'s ``config.json`` for every family declaring legacy
-    per-layer keys, per section, so a composite config's text tower rewrites too.
+    """Flatten ``per_layer_config`` in ``output_dir``'s ``config.json`` for every family declaring
+    ``served_flat_config_keys``, per section, so a composite config's text tower rewrites too.
 
     transformers 5.16 dropped the flat fields the pinned rollout servers (transformers 5.14 line) read.
     """
@@ -116,9 +117,9 @@ def export_legacy_per_layer_config(output_dir: str) -> None:
     sections = [payload, *(v for v in payload.values() if isinstance(v, dict) and "model_type" in v)]
     changed = False
     for section in sections:
-        legacy_keys = legacy_per_layer_config_keys(section.get("model_type") or "")
-        if legacy_keys:
-            changed |= flatten_per_layer_config(section, legacy_keys)
+        spec = find_moe_family_spec(section.get("model_type"))
+        if spec and spec.served_flat_config_keys:
+            changed |= flatten_per_layer_config(section, spec.served_flat_config_keys)
     if changed:
         write_config_json(output_dir, payload)
 
@@ -230,12 +231,13 @@ def _apply_config_changes(source_section: dict, before: dict, after: dict, confi
 
 def export_source_config_schema(config, output_dir: str, *, source: str | None) -> None:
     """Rewrite ``output_dir``'s ``config.json`` into the source checkpoint's own schema, for every family
-    declaring one; a no-op elsewhere.
+    declaring ``exports_source_config_schema``; a no-op elsewhere.
 
     transformers 5.16 absorbs the vendor spellings at load and never re-emits them, so the source
     config is carried over with this run's changes applied, plus the modules its ``auto_map`` names.
     """
-    if not exports_source_config_schema(getattr(config, "model_type", "") or ""):
+    spec = find_moe_family_spec(getattr(config, "model_type", None))
+    if not (spec and spec.exports_source_config_schema):
         return
     exported = read_checkpoint_config(output_dir, missing_ok=True)
     if exported is None:
@@ -312,12 +314,6 @@ def finalize_exported_config(config, output_dir: str, *, source: str | None) -> 
     Each rewrite is a no-op for a family that needs none, so writers run the whole set: a checkpoint
     missing one trains normally and fails only in the merge tools or the rollout server.
     """
-    if not ep_roster_registered():
-        raise RuntimeError(
-            "finalize_exported_config reached with no EP family registered in this process: the "
-            "legacy-key and source-schema rosters are filled by importing "
-            "src.distributed.expert_parallel.layers.roster, and an empty roster would silently export a config its servers cannot load."
-        )
     restore_model_type(config, output_dir)
     export_legacy_per_layer_config(output_dir)
     export_source_config_schema(config, output_dir, source=source)
