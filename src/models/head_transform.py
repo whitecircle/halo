@@ -25,8 +25,9 @@ import torch
 import torch.nn as nn
 from transformers.modeling_outputs import BaseModelOutputWithPast
 
-from src.models.loading.config_levels import get_config_field, text_config
-from src.models.structure import base_transformers_model, transformers_model_class
+from src.models.config_access import get_config_field, text_config
+from src.models.model_classes import transformers_model_class
+from src.models.unwrapping import base_transformers_model
 from src.subclass_registry import build_class_claim_map
 
 # The probe's hidden state is diagonal with log-spaced magnitudes, so its logits span 1e-2..1e3 times

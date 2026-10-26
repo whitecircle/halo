@@ -56,13 +56,13 @@ from src.distributed.runtime import (
     resolve_param_tensor,
 )
 from src.log import KEY_PREVIEW_COUNT
+from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import stamped_sinks_policy
-from src.models.structure import (
+from src.models.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
-    persistent_buffers,
     strip_peft_adapter_segment,
     unwrap_framework_wrappers,
-    unwrap_model,
+    unwrap_toolkit_wrappers,
 )
 
 logger = logging.getLogger(__name__)
@@ -180,10 +180,10 @@ class PeftAdapterSaver:
         if ctx.is_cp_mode:
             attn_state = self._normalize_cp_adapter_keys(attn_state)
 
-        # Collective over the EP/expert-TP groups; every rank. unwrap_model stops at the PeftModel,
+        # Collective over the EP/expert-TP groups; every rank. unwrap_toolkit_wrappers stops at the PeftModel,
         # so under CP the expert keys keep the wrapper's 'model.' level; resume applies them through
         # the same unwrap of the same root shape (restore_adapters), so the keys round-trip.
-        expert_state = gather_ep_lora_adapters(unwrap_model(ctx.model), retain=should_save)
+        expert_state = gather_ep_lora_adapters(unwrap_toolkit_wrappers(ctx.model), retain=should_save)
 
         fs_aware_makedirs(output_dir)
         with barrier_on_exit():
@@ -210,7 +210,7 @@ class PeftAdapterSaver:
         ``base_model_name_or_path: null`` and the adapter loses its base-model pointer. Recover it
         from the inner PreTrainedModel. Local attribute write — rank-uniform, no collectives.
         """
-        name_or_path = getattr(unwrap_model(peft_model.get_base_model()), "name_or_path", None)
+        name_or_path = getattr(unwrap_toolkit_wrappers(peft_model.get_base_model()), "name_or_path", None)
         if not name_or_path:
             return
         for peft_config in peft_model.peft_config.values():
@@ -328,7 +328,7 @@ class PeftAdapterSaver:
         """Strip CP-wrapper key-path artifacts (extra ``model.`` level, ``.original_attention.``) from
         a single adapter key so it loads onto a non-CP model.
 
-        Not ``structure.unwrapped_module_name``: that maps MODULE paths to the plain hub tree and
+        Not ``unwrapping.plain_module_name``: that maps MODULE paths to the plain hub tree and
         drops the PEFT prefix entirely, while adapter keys must KEEP it and additionally carry the
         attention-wrapper artifact and the shallower ``modules_to_save`` lm_head depth handled below.
         """
@@ -414,7 +414,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
     expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
     # Unconditional: the apply is collective at ep_size==1 and decides "nothing to load" rank-uniformly.
     # Inner model, matching the saver: the CP wrapper's extra 'model.' level makes keys miss.
-    apply_ep_lora_adapters(unwrap_model(unwrapped), expert_state)
+    apply_ep_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
 
     attn_state = {k: v for k, v in state.items() if k not in expert_state}
     if attn_state:

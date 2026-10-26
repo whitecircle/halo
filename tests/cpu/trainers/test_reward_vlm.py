@@ -36,8 +36,8 @@ from trl import RewardConfig, RewardTrainer
 from src.data.collators.vlm_preference import DataCollatorForVLMPreference
 from src.distributed.loading import vlm_setup
 from src.distributed.parallelism_config import ParallelismConfig
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.modality import config_declares_multimodality, is_vlm_model
-from src.models.structure import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.repo import load_script_module

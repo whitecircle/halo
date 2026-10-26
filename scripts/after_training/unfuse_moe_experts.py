@@ -34,8 +34,7 @@ import torch
 from transformers.utils import CONFIG_NAME
 
 from scripts._common import add_max_shard_size_arg
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, HF_STREAM_PART_PREFIX, copy_checkpoint_aux_files
-from src.checkpoint.shard_writer import StageShardWriter
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, copy_checkpoint_aux_files
 from src.checkpoint.tool_io import (
     checkpoint_shard_files,
     detect_model_type,
@@ -45,6 +44,7 @@ from src.checkpoint.tool_io import (
     reject_in_place_conversion,
     stored_tensor_nbytes,
 )
+from src.checkpoint.writing import StreamingShardWriter
 from src.distributed.expert_parallel.expert_weights import (
     experts_container_attrs,
     hf_fused_expert_keys,
@@ -273,7 +273,7 @@ def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_M
         (stored_tensor_nbytes(reader, key) for _shard, reader, key in iter_checkpoint_shard_entries(in_dir)),
         default=0,
     )
-    writer = StageShardWriter(out_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
+    writer = StreamingShardWriter(out_dir, max_shard_size, enabled=True)
     preflight_resource_warning(
         "unfuse_moe_experts",
         out_dir,

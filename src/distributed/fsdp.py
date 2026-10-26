@@ -25,15 +25,15 @@ from transformers.modeling_utils import PreTrainedModel
 
 from src.distributed.mesh import MeshDim, create_dp_mesh, create_dp_tp_mesh, mesh_dim_names
 from src.distributed.runtime import is_global_main_process
-from src.models.loading.dtype import resolve_training_dtype
-from src.models.structure import (
+from src.model_loading.dtype import resolve_training_dtype
+from src.models.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
     backbone_with_layers,
-    base_transformers_model,
     decoder_layers,
-    fp32_pinned_param_names,
     input_embedding_backbone,
 )
+from src.models.param_roles import fp32_pinned_param_names
+from src.models.unwrapping import base_transformers_model
 
 logger = logging.getLogger(__name__)
 

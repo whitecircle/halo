@@ -9,7 +9,7 @@ template too. Each entry point that sets the override is driven here on a cached
 the training seam (``setup_model_and_tokenizer`` + ``install_resolved_tokenizer``) through the FSDP2
 saver, ``prepare_dataset --vlm``'s processor setup, and ``patch_vocab.py``'s export.
 
-    python tests/cpu/models/test_vlm_chat_template_override.py
+    python tests/cpu/model_loading/test_vlm_chat_template_override.py
 """
 
 import sys
@@ -24,7 +24,7 @@ from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGene
 from src.args.common_script_args import CommonScriptArguments
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
 from src.training.script_runner import install_resolved_tokenizer
 from tests.common.models import QWEN3_5_9B, TINY_QWEN35_CONFIG
 from tests.common.repo import load_script_module

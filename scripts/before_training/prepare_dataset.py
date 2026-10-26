@@ -34,18 +34,18 @@ from src.checkpoint.tool_io import DISPLACED_SUFFIX, clear_staging_path
 from src.data.pipeline.preprocessed_metadata import PACKING_STRATEGIES, PREPROCESSING_MODES, PreprocessingConfig
 from src.data.pipeline.preprocessing import preprocess_dataset
 from src.data.pipeline.processing import require_render_column, resolve_map_num_proc
-from src.data.pipeline.tokenizer_backend import TOKENIZER_BACKENDS
 from src.data.sources.loading import load_dataset_from_source
 from src.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
 from src.data.sources.s3_client import S3Client
 from src.log import configure_cli_logging
-from src.models.loading.tokenizer_setup import (
+from src.model_loading.tokenizer_backend import TOKENIZER_BACKENDS
+from src.model_loading.tokenizer_setup import (
     adopt_tokenizer_chat_template,
     load_chat_template,
+    resolve_tokenizer,
     set_run_chat_template,
 )
 from src.models.segment_markers import reject_compressed_kv_rows
-from src.models.structure import resolve_tokenizer
 
 # The rank-aware accelerate logger, at INFO: the shared data helpers this tool drives log through it,
 # and ``configure_cli_logging`` in main() attaches the handler those records reach.

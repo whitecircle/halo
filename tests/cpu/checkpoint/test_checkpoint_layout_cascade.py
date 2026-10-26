@@ -25,7 +25,7 @@ from src.checkpoint.format import (
     resolve_checkpoint_weights,
 )
 from src.checkpoint.tool_io import checkpoint_shard_files
-from src.models.loading.lazy_safetensors.weights import has_safetensors_checkpoint, resolve_safetensors_index
+from src.model_loading.lazy_safetensors.weights import has_safetensors_checkpoint, resolve_safetensors_index
 
 
 def _write_sharded(directory, shards: dict[str, dict[str, torch.Tensor]]) -> None:

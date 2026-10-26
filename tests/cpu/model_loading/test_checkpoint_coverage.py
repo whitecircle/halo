@@ -3,7 +3,7 @@
 ``from_pretrained`` re-initializes every key it cannot find and reports it through the transformers
 logger only — which ``setup_logging`` silences on every non-logging rank. A truncated or
 wrong-architecture directory therefore trains half a model of random weights with no exception and no
-output. :mod:`src.models.loading.checkpoint_coverage` turns that into a raise.
+output. :mod:`src.model_loading.checkpoint_coverage` turns that into a raise.
 
 Both directions are pinned here, because a gate that over-rejects is as bad as one that never fires:
 
@@ -12,7 +12,7 @@ Both directions are pinned here, because a gate that over-rejects is as bad as o
 - a sequence-classification head absent from a base checkpoint, a tied ``lm_head``, and a class's own
   ``_keys_to_ignore_on_load_missing`` must still LOAD.
 
-    python tests/cpu/checkpoint/test_checkpoint_coverage.py
+    python tests/cpu/model_loading/test_checkpoint_coverage.py
 """
 
 from __future__ import annotations
@@ -25,13 +25,13 @@ import torch.nn as nn
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification
 
-from src.models.loading.checkpoint_coverage import (
+from src.model_loading.checkpoint_coverage import (
     ALLOW_MISSING_CHECKPOINT_KEYS_ENV,
     from_pretrained_verified,
     unexpected_missing_keys,
     verify_checkpoint_coverage,
 )
-from src.models.loading.model_preparation import auto_load_model
+from src.model_loading.model_preparation import auto_load_model
 
 
 def _tiny_config(tie_word_embeddings: bool = False):

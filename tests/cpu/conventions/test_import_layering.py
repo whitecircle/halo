@@ -1,9 +1,9 @@
 """The import layering of ``src/``, read off the import graph itself.
 
-Enforced: the sharding-agnostic trees (``src/checkpoint/``, ``src/models/loading/``) import no
-``src.distributed`` or ``torch.distributed``; nothing else in ``src/distributed`` imports the loader dispatch
-(``src/distributed/loading/``); the members of ``src/distributed`` import each other acyclically; every toolkit
-env knob is read through ``src/env.py``.
+Enforced: the sharding-agnostic trees (``src/checkpoint/``, ``src/model_loading/``) and
+``src/models/config_access.py`` import no ``src.distributed`` or ``torch.distributed``; nothing else in
+``src/distributed`` imports the loader dispatch (``src/distributed/loading/``); the members of
+``src/distributed`` import each other acyclically; every toolkit env knob is read through ``src/env.py``.
 
 The final layer table (``_LAYERS`` and the rules beside it) is laid over today's tree, each module placed where
 it lands through ``_PENDING_MOVES``: a break outside ``_KNOWN_LAYER_BREAKS`` fails, a known one is reported, and
@@ -30,8 +30,9 @@ from tests.common.sample_tree import write_sample_tree
 _SRC = REPO_ROOT / PACKAGE
 _INDEX = RepoIndex(REPO_ROOT)
 
-# The two sharding-agnostic trees, and what they may not reach.
-_AGNOSTIC_DIRS = ("checkpoint", "models/loading")
+# The two sharding-agnostic trees, the composite-config module both read, and what they may not reach.
+_AGNOSTIC_DIRS = ("checkpoint", "model_loading")
+_AGNOSTIC_EXTRA_FILES = ("models/config_access.py",)
 _FORBIDDEN_ROOTS = (f"{PACKAGE}.distributed", "torch.distributed")
 
 # The package above every parallelism implementation, which nothing else in src/distributed imports.
@@ -116,14 +117,11 @@ _PENDING_MOVES = {
     "training.early_stopping": "callbacks.early_stop",
     "training.parallelism_args": "configs.parallelism_arguments",
     "training.parser": "configs.parser",
-    "data.pipeline.tokenizer_backend": "model_loading.tokenizer_backend",
     "data.probe_consensus": "runtime.consensus",
     "diagnostics.rank_divergence": "runtime.consensus",
     "diagnostics.weight_sync_transport": "weight_sync.transport_check",
     "kernels.liger": "model_loading.liger",
     "kernels.lowp.mixed_precision": "model_loading.parallel.lowp_compute",
-    "models.loading": "model_loading",
-    "models.loading.config_levels": "models.config_access",
     "models.patches.buffer_fixes": "model_loading.buffer_repair",
     "models.patches.kernel_dispatch": "kernels.hub_kernel_dispatch",
     "models.patches.remote_code_compat": "model_loading.remote_code",
@@ -160,9 +158,6 @@ _PENDING_MOVES = {
 # one drops its entry; any other break fails.
 _KNOWN_LAYER_BREAKS = frozenset(
     {
-        ("layer order", "checkpoint.format", "checkpoint.config_export"),
-        ("layer order", "checkpoint.format", "models.moe_balancing"),
-        ("layer order", "checkpoint.format", "models.structure"),
         ("layer order", "checkpoint.parallel.loader", "model_loading.parallel.pp"),
         ("layer order", "configs.parser", "entrypoints.run_logging"),
         ("layer order", "data.collators.self_distill", "configs.mixins"),
@@ -172,6 +167,7 @@ _KNOWN_LAYER_BREAKS = frozenset(
             "model_loading.lazy_safetensors.conversion_selection",
             "distributed.expert_parallel.families.roster",
         ),
+        ("layer order", "model_loading.lazy_safetensors.conversion_selection", "checkpoint.hub_layout"),
         ("layer order", "weight_sync.clients.sglang", "distributed.expert_parallel.families.step3p7"),
         ("module cycle", "distributed.expert_parallel.lazy_plan, model_loading.parallel.fp32_masters", ""),
         (
@@ -276,7 +272,12 @@ def _member(module: str, package: str) -> str | None:
 
 
 _IMPORTS = _package_imports(_INDEX)
-_AGNOSTIC_FILES = sorted(path for directory in _AGNOSTIC_DIRS for path in (_SRC / directory).rglob("*.py"))
+_AGNOSTIC_FILES = sorted(
+    [
+        *(path for directory in _AGNOSTIC_DIRS for path in (_SRC / directory).rglob("*.py")),
+        *(_SRC / file for file in _AGNOSTIC_EXTRA_FILES),
+    ]
+)
 _BELOW_DISPATCH_FILES = [
     path
     for path in _package_files(_INDEX)
@@ -459,11 +460,14 @@ def _report(breaks: Iterable[_Break]) -> str:
     return "\n".join(f"{found.location or found.importer}: {found.rule}: {found.detail}" for found in breaks)
 
 
-def test_the_sweep_sees_both_agnostic_trees():
-    """Anti-vacuity: an empty or shrunken sweep would pass every assertion below."""
+def test_the_sweep_sees_both_agnostic_trees_and_every_extra_file():
+    """Anti-vacuity: an empty or shrunken sweep, or an extra file that moved away, would pass every
+    assertion below."""
     assert len(_AGNOSTIC_FILES) > 10, f"the sharding-agnostic sweep collapsed to {len(_AGNOSTIC_FILES)} files"
     for directory in _AGNOSTIC_DIRS:
         assert any(path.is_relative_to(_SRC / directory) for path in _AGNOSTIC_FILES), directory
+    for file in _AGNOSTIC_EXTRA_FILES:
+        assert (_SRC / file).is_file(), f"src/{file} moved; place its new path in _AGNOSTIC_EXTRA_FILES"
 
 
 @pytest.mark.parametrize("path", _AGNOSTIC_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))

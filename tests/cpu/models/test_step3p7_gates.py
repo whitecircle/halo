@@ -40,7 +40,7 @@ from src.models.attention_geometry import (
     resolve_head_dim,
     resolve_num_key_value_heads,
 )
-from src.models.loading.config_levels import get_config_field
+from src.models.config_access import get_config_field
 from src.models.modality import config_declares_multimodality, is_vlm_model
 from src.models.moe_balancing import (
     ROUTER_EXPERT_COUNT_FIELDS,

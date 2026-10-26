@@ -66,12 +66,13 @@ from src.kernels.liger.orchestrator import (
     warn_if_flce_unreachable,
 )
 from src.log import KEY_PREVIEW_COUNT
-from src.models.loading.config_levels import config_sources, snapshot_special_token_ids
-from src.models.loading.dtype import resolve_training_dtype
+from src.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
+from src.models.config_access import config_sources, snapshot_special_token_ids
 from src.models.moe_balancing import ep_wraps_experts
 from src.models.patches.flex_sliding_attention import reject_full_determinism_after_warmup
 from src.models.segment_markers import reject_compressed_kv_rows
-from src.models.structure import lora_fold_targets, model_has_quantized_params, unwrap_framework_wrappers
+from src.models.structure import lora_fold_targets
+from src.models.unwrapping import unwrap_framework_wrappers
 from src.optimizers.adamw_bf16 import build_bf16_optimizer
 from src.optimizers.param_groups import build_tensor_type_grouped_optimizer
 from src.optimizers.registry import (
@@ -902,7 +903,7 @@ class DistributedTrainerMixin(
         if world_size <= 1:
             return
 
-        if model_has_quantized_params(self.model):
+        if has_packed_quantized_params(self.model):
             self._setup_qlora_sync("data parallel")
             return
 

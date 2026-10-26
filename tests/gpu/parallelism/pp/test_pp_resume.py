@@ -36,7 +36,7 @@ from src.checkpoint.format import StreamingCheckpointReader
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import resolve_param_tensor
-from src.models.structure import unwrap_model
+from src.models.unwrapping import unwrap_toolkit_wrappers
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
@@ -147,7 +147,7 @@ def run(ctx):
     # rank checks its own stage's entry; the MIN all-reduce across ranks covers the whole partition.
     meta = torch.load(os.path.join(ckpt, "optimizer_meta.pt"), map_location="cpu", weights_only=False)
     saved_partition = [tuple(entry) for entry in meta.get("pp_stage_partition", [])]
-    stage_b = unwrap_model(trainer_b.model)
+    stage_b = unwrap_toolkit_wrappers(trainer_b.model)
     partition_ok = len(saved_partition) == PP_SIZE and saved_partition[config.pp_rank] == stage_b.layer_range
     flag = torch.tensor([1.0 if partition_ok else 0.0], device=torch.cuda.current_device())
     dist.all_reduce(flag, op=dist.ReduceOp.MIN)
@@ -156,7 +156,7 @@ def run(ctx):
     # ── bitwise restore checks on a fresh trainer ───────────────────────────────────────────────
     trainer_c = make_trainer("runC", N_STEPS)
     trainer_c._load_from_checkpoint(ckpt)
-    stage = unwrap_model(trainer_c.model)
+    stage = unwrap_toolkit_wrappers(trainer_c.model)
     local_state = stage.state_dict()
     with StreamingCheckpointReader(ckpt, [stage.global_parameter_name(k) for k in local_state]) as reader:
         saved = {key: reader.get(key) for key in reader.available}
@@ -180,7 +180,7 @@ def run(ctx):
     resumed_model, _ = load_distributed_model(
         ckpt, config, dtype=torch.float32, attn_implementation="sdpa", preserve_checkpoint_precision=True
     )
-    stage_e = unwrap_model(make_trainer("runE", N_STEPS, model=resumed_model).model)
+    stage_e = unwrap_toolkit_wrappers(make_trainer("runE", N_STEPS, model=resumed_model).model)
     built_ok, n_built = True, 0
     for local, value in sorted(stage_e.state_dict().items()):
         full = resolve_param_tensor(value).cpu()  # collective inside the stage mesh — sorted order

@@ -18,13 +18,13 @@ from typing import Literal, get_args
 import torch
 
 from src.log import warn_once
-from src.models.loading.config_levels import (
+from src.models.config_access import (
     config_sources,
     get_config_field,
     set_config_field,
     set_config_field_run_scoped,
 )
-from src.models.structure import base_transformers_model, unwrap_framework_wrappers, unwrapped_module_name
+from src.models.unwrapping import base_transformers_model, plain_module_name, unwrap_framework_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,7 @@ _VALID_BALANCING_MODES = get_args(BalancingMode)
 
 # Stamped on model.config when router logits must stay off (EP wrappers that never populate them,
 # aux-loss paths that would crash); checked before enabling them again. Run-scoped, so
-# :func:`~src.models.loading.config_levels.config_export_ready` restores it away before any
+# :func:`~src.models.config_access.config_export_ready` restores it away before any
 # config serialization.
 ROUTER_LOGITS_FORCED_OFF_ATTR = "_toolkit_router_logits_forced_off"
 
@@ -450,7 +450,7 @@ def apply_router_balancing_sidecar(
 
     An offline-assembled artifact (a PEFT merge) starts from base weights, so the bias the run
     trained lives only in the sidecar. Sidecar keys are trainer-tree module names, mapped back to the
-    hub tree by :func:`~src.models.structure.unwrapped_module_name` (PEFT and CP each add a level). A
+    hub tree by :func:`~src.models.unwrapping.plain_module_name` (PEFT and CP each add a level). A
     config-gated slot the base was assembled without is re-materialized (with its config flag
     flipped) before the copy. Entries for families with no native slot at all trained a transient
     bias no artifact can serve, and are returned as skipped.
@@ -459,7 +459,7 @@ def apply_router_balancing_sidecar(
     applied: list[str] = []
     skipped: list[str] = []
     for name, bias in sidecar.items():
-        target_name = unwrapped_module_name(name)
+        target_name = plain_module_name(name)
         try:
             module = model.get_submodule(target_name)
         except AttributeError:

@@ -64,7 +64,7 @@ FROZEN_LOAD_STEP_OWNERS = frozenset(
     {
         "src/models/patches/attention.py",
         "src/models/patches/gpt_oss_sinks.py",
-        "src/models/loading/model_preparation.py",
+        "src/model_loading/model_preparation.py",
         "src/distributed/loading/frozen_models.py",
         "src/distributed/loading/model_loading.py",
         "scripts/training/embedding.py",

@@ -51,7 +51,7 @@ from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.structure import persistent_buffers
+from src.models.param_roles import persistent_buffers
 from src.training.environment import resolve_resume_weights_source
 from tests.common.checkpoint_io import written_keys
 from tests.common.distributed import fake_process_group_mesh

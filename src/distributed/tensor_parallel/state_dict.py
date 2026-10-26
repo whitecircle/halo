@@ -20,7 +20,7 @@ from transformers.distributed.tensor_parallel import (
     _get_parameter_tp_plan,
 )
 
-from src.checkpoint.format import save_dtype_caster
+from src.checkpoint.writing import save_dtype_caster
 from src.distributed.mesh import get_tp_submesh, has_tp_dim
 from src.distributed.runtime import is_global_main_process, materialize_dtensor
 

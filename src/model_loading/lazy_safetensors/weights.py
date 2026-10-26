@@ -23,10 +23,10 @@ from safetensors import safe_open
 
 from src.checkpoint.format import has_whole_model_weight_file, resolve_checkpoint_weights
 from src.log import KEY_PREVIEW_COUNT
-from src.models.loading.checkpoint_coverage import verify_checkpoint_coverage
-from src.models.loading.dtype import reject_fp8_tensor
-from src.models.loading.lazy_safetensors.conversion import Concat, Convert, Rename, convert_disk_keys
-from src.models.structure import fp32_pinned_state_keys
+from src.model_loading.checkpoint_coverage import verify_checkpoint_coverage
+from src.model_loading.dtype import reject_fp8_tensor
+from src.model_loading.lazy_safetensors.conversion import Concat, Convert, Rename, convert_disk_keys
+from src.models.param_roles import fp32_pinned_state_keys
 
 logger = logging.getLogger(__name__)
 

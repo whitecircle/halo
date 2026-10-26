@@ -31,7 +31,7 @@ from src.models.attention_geometry import (
     resolve_head_dim,
     resolve_num_key_value_heads,
 )
-from src.models.loading.config_levels import model_type_matches, set_config_field_run_scoped, text_config
+from src.models.config_access import model_type_matches, set_config_field_run_scoped, text_config
 from src.models.segment_markers import GDN_MODEL_TYPE_PREFIXES
 
 logger = get_logger(__name__)

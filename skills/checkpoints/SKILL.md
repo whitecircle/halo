@@ -121,10 +121,11 @@ incl. PP), `write.py` (the shared streaming writer every gathered save funnels t
 `coordination.py` (the rank consensus shared by the resume paths).
 Per-mode mechanics:
 `src/distributed/checkpoint/ep_save.py`, `src/distributed/expert_parallel/expert_weights.py`,
-`src/distributed/checkpoint/tp_save.py`, `src/checkpoint/` (`format.py` layout + dtype, `config_export.py` the
+`src/distributed/checkpoint/tp_save.py`, `src/checkpoint/` (`format.py` on-disk names + layout, `hub_layout.py` the
+hub's tensor names on save, `config_export.py` the
 config contract, `adapters.py` the saved-PEFT shape and the shared `merge_adapter_into_base`,
 `tool_io.py` the tool-side directory I/O, `atomic.py` the staged, fsynced checkpoint-file publication,
-`shard_writer.py` the incremental parts writer,
+`writing.py` the save dtype and the weight-file writers,
 `fp8_dequant.py` the streaming fp8 → bf16, `model_card.py` the `halo` Hub tag on the model card of
 every checkpoint Halo writes, tool conversions included), and the
 `scripts/after_training/` script you are about to run.

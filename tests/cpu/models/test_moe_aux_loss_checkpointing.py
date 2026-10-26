@@ -34,7 +34,7 @@ from src.distributed.expert_parallel.balancing_strategy import apply_balancing_s
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import enable_ep_gradient_checkpointing, patch_moe_model_for_ep
 from src.models import moe_aux_loss
-from src.models.loading.config_levels import config_export_ready
+from src.models.config_access import config_export_ready
 from src.models.moe_balancing import declared_routers, detect_moe_experts_topk, resolve_balancing_mode
 from tests.common.models import (
     TINY_GLM5_CONFIG,

@@ -27,7 +27,7 @@ import torch
 from accelerate.utils import is_peft_model
 from transformers.core_model_loading import rename_source_key
 
-from src.checkpoint.format import revert_conversions
+from src.checkpoint.hub_layout import reversed_export_transforms, revert_conversions
 from src.diagnostics.profiling import log_cuda_memory
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import (
@@ -36,7 +36,7 @@ from src.distributed.expert_parallel.expert_weights import (
     is_expert_weight_attr,
     to_hub_layer_key,
 )
-from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions, reversed_export_transforms
+from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.runtime import DeferredRankFailure, barrier_on_exit, materialize_dtensor
 from src.distributed.tensor_parallel.state_dict import (
@@ -44,21 +44,15 @@ from src.distributed.tensor_parallel.state_dict import (
     tp_sharded_non_dtensor_suffixes,
 )
 from src.env import env_flag
+from src.model_loading.dtype import has_packed_quantized_params
 from src.models.moe_balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
     iter_balancing_routers,
 )
 from src.models.patches.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
-from src.models.structure import (
-    LoraFolds,
-    base_transformers_model,
-    lora_fold_targets,
-    lora_folded_data,
-    model_has_quantized_params,
-    normalize_peft_param_name,
-    unwrap_framework_wrappers,
-)
+from src.models.structure import LoraFolds, lora_fold_targets, lora_folded_data
+from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_framework_wrappers
 from src.trainers.mixins.ep_introspection import named_ep_layers
 from src.weight_sync.chunking import WEIGHT_SYNC_CHUNK_BYTES
 from src.weight_sync.registry import resolve_weight_sync_client
@@ -107,7 +101,7 @@ def validate_weight_sync_support(model: torch.nn.Module, backend: str) -> None:
       generator. The shipped GRPO scripts downgrade ``moe_balancing`` to ``none`` before any bias
       state exists (``build_perf_callbacks``); this backstop catches hand-built drivers.
     """
-    if model_has_quantized_params(model):
+    if has_packed_quantized_params(model):
         raise ValueError(
             "QLoRA (quantized base weights) is not supported with rollout-engine weight sync: the sync forwards "
             "raw parameter storage under base-weight names, and bnb-packed non-floating-point tensors "
@@ -306,7 +300,7 @@ class _HubForwarder:
         """Forward one tensor, or hold it for :meth:`flush` when a reverse converter claims it."""
         name = _hub_param_name(name, self._ep_layers)
         if self._peft_prefix is not None:
-            name = normalize_peft_param_name(name, self._peft_prefix)
+            name = plain_peft_param_name(name, self._peft_prefix)
             if name is None:
                 return
         if not self._conversions:

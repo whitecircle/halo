@@ -16,7 +16,7 @@ from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.tensor_parallel.state_dict import get_tp_mesh
 from src.kernels.grouped_gemm import GroupedGemmPrecision
 from src.kernels.lowp.linear import PRECISION_TO_FORMAT, LinearPrecision, LowPrecisionLinear
-from src.models.structure import DECODER_LAYER_INDEX, decoder_layer_index
+from src.models.module_tree import DECODER_LAYER_INDEX, decoder_layer_index
 
 logger = logging.getLogger(__name__)
 

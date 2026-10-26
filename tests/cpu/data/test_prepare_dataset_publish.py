@@ -32,7 +32,7 @@ PartialState()
 
 from scripts.before_training import prepare_dataset as mod
 from src.checkpoint import tool_io
-from src.models.loading import tokenizer_setup
+from src.model_loading import tokenizer_setup
 from tests.common.repo import REPO_ROOT
 
 _SCRIPT = REPO_ROOT / "scripts/before_training/prepare_dataset.py"

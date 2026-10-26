@@ -12,8 +12,8 @@ from contextlib import contextmanager
 from torch.distributed.tensor import DTensor
 
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
-from src.models.loading.config_levels import config_ties_word_embeddings, text_config
-from src.models.loading.model_preparation import concrete_model_class
+from src.model_loading.model_preparation import concrete_model_class
+from src.models.config_access import config_ties_word_embeddings, text_config
 
 
 def _tied_module_names(concrete) -> tuple[set[str], set[str]]:

@@ -1,10 +1,8 @@
-"""Run precision: ``dtype`` resolution, the loaded-parameter cast and the process-global fp32 matmul pin.
+"""Run precision: ``dtype`` resolution, quantized-load detection, the loaded-parameter cast and the
+process-global fp32 matmul pin.
 
-Depends on torch and TRL only: the name-to-``torch.dtype`` table every ``--dtype`` flag derives its
-choices from, the ``model_init_kwargs`` normalizer, the run-dtype and quantization resolvers, the
-parameter cast the training loaders apply, and the matmul pin. A CLI or entry point can therefore
-resolve a dtype, or apply the pin, without importing the model-loading stack (which reaches
-``src.args`` and back into ``src.training``).
+Depends on torch, TRL and :mod:`src.env` only, so a CLI or entry point can resolve a dtype or apply the
+matmul pin without importing the loaders.
 """
 
 import warnings
@@ -30,6 +28,10 @@ _VALID_FP32_MATMUL_PRECISION = ("highest", "high", "medium")
 
 # The attribute bnb's ``Params4bit`` carries (``None`` until quantized), read without importing bnb.
 _BNB_4BIT_STATE_ATTR = "quant_state"
+
+# The model-level flags a quantized load sets: bitsandbytes sets the 8/4-bit pair, torchao/quanto only
+# ``is_quantized``.
+_KBIT_QUANTIZED_FLAGS = ("is_loaded_in_8bit", "is_loaded_in_4bit", "is_quantized")
 
 
 def resolve_model_dtype(model_init_kwargs: dict) -> dict:
@@ -88,6 +90,19 @@ def reject_fp8_tensor(name: str, tensor: torch.Tensor, dtype: torch.dtype | None
 def is_packed_4bit_parameter(param: nn.Parameter) -> bool:
     """bnb's storage holds packed codes even when its declared storage dtype is floating point."""
     return hasattr(param, _BNB_4BIT_STATE_ATTR)
+
+
+def has_packed_quantized_params(model: torch.nn.Module) -> bool:
+    """Whether ``model`` carries quantized (non-floating-point) params, i.e. bnb 4/8-bit packed
+    storage (QLoRA). Shared by the FSDP2 routing in the trainer mixin and the GRPO weight-sync
+    construction gate."""
+    return any(not p.dtype.is_floating_point for p in model.parameters())
+
+
+def is_kbit_quantized(model: torch.nn.Module) -> bool:
+    """Whether ``model`` was loaded quantized (any of :data:`_KBIT_QUANTIZED_FLAGS`), the condition
+    ``prepare_peft_model`` runs peft's k-bit preparation on."""
+    return any(getattr(model, flag, False) for flag in _KBIT_QUANTIZED_FLAGS)
 
 
 def cast_parameters_to_run_dtype(

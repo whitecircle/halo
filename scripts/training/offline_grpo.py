@@ -24,7 +24,7 @@ from src.data.sources.loading import reject_image_columns
 from src.distributed.loading.frozen_models import load_frozen_reference_model
 from src.distributed.loading.peft_setup import has_attention_lora_targets, setup_peft_model
 from src.distributed.runtime import barrier
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.model_preparation import log_model_info
 from src.trainers.grpo.mixins.offline_reference import reject_unsupported_reference_input
 from src.trainers.grpo.offline import OfflineGRPOTrainer
 from src.training.environment import run_training

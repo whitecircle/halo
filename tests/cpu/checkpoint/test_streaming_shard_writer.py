@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The pipeline stage writer must bound its own memory, not just split its output.
+"""The streaming shard writer must bound its own memory, not just split its output.
 
 safetensors has no append handle, so honouring ``save_max_shard_size`` and bounding the writer's
 host memory are one requirement: flush a part whenever the pending batch would overflow. A PP save
@@ -10,7 +10,7 @@ the entire model lands in one host's RAM regardless of ``pp_size``.
 The weakref assertion below is the honest one: an implementation that merely splits its OUTPUT but
 still holds every tensor would pass a size check and fail this.
 
-Run: pytest tests/cpu/checkpoint/test_stage_shard_writer.py
+Run: pytest tests/cpu/checkpoint/test_streaming_shard_writer.py
 """
 
 import json
@@ -22,8 +22,8 @@ import pytest
 import torch
 from safetensors.torch import safe_open
 
-from src.checkpoint.format import save_sharded_state_dict, write_merged_index
-from src.checkpoint.shard_writer import StageShardWriter
+from src.checkpoint.format import STREAM_PART_PREFIX
+from src.checkpoint.writing import StreamingShardWriter, save_sharded_state_dict, write_merged_index
 from src.distributed.checkpoint.write import merge_shard_index
 
 PREFIX = "model-pp00000-of-00002"
@@ -40,7 +40,7 @@ def test_writer_releases_each_tensor_once_its_part_is_flushed(tmp_path):
     Every tensor handed in is dropped once the part containing it reaches disk, so the writer never
     holds more than one part's worth. An accumulating writer keeps all 20 alive to the end.
     """
-    writer = StageShardWriter(str(tmp_path), PREFIX, "4MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     refs = []
     for i in range(20):
         tensor = _tensor(1)
@@ -56,7 +56,7 @@ def test_writer_releases_each_tensor_once_its_part_is_flushed(tmp_path):
 
 def test_parts_respect_the_size_limit_and_the_index_names_every_file(tmp_path):
     """Each part stays under the limit, and the returned weight map matches what is on disk."""
-    writer = StageShardWriter(str(tmp_path), PREFIX, "4MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     for i in range(20):
         writer.add(f"w{i}", _tensor(1))
     weight_map, total_bytes = writer.close()
@@ -79,7 +79,7 @@ def test_a_single_oversized_tensor_still_gets_its_own_part(tmp_path):
     Flushing BEFORE appending is what keeps it from dragging unrelated tensors over the limit
     with it.
     """
-    writer = StageShardWriter(str(tmp_path), PREFIX, "2MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "2MB", enabled=True, filename_prefix=PREFIX)
     writer.add("small", _tensor(1))
     writer.add("huge", _tensor(8))
     writer.add("after", _tensor(1))
@@ -92,7 +92,7 @@ def test_a_single_oversized_tensor_still_gets_its_own_part(tmp_path):
 
 def test_disabled_writer_writes_nothing(tmp_path):
     """Non-writer ranks share the call sites; they must produce no files and an empty fragment."""
-    writer = StageShardWriter(str(tmp_path), PREFIX, "4MB", enabled=False)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=False, filename_prefix=PREFIX)
     writer.add("w", _tensor(1))
     assert writer.close() == ({}, 0)
     assert not [p for p in os.listdir(tmp_path) if p.endswith(".safetensors")]
@@ -107,7 +107,7 @@ def test_the_writer_refuses_a_key_staged_twice(tmp_path, flush_between):
     ``total_size`` would count both. The pending batch is refused the same way: silently overwriting
     there would leave the byte count of the dropped tensor in the part's budget.
     """
-    writer = StageShardWriter(str(tmp_path), PREFIX, "4MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     writer.add("w", _tensor(1))
     if flush_between:
         writer._flush()
@@ -177,7 +177,7 @@ def _tensors(path) -> dict[str, torch.Tensor]:
 
 def test_written_parts_round_trip(tmp_path):
     """Values must survive the split unchanged — the point of the writer is where bytes land."""
-    writer = StageShardWriter(str(tmp_path), PREFIX, "4MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
     expected = {f"w{i}": torch.randn(1000) for i in range(10)}
     for key, tensor in expected.items():
         writer.add(key, tensor.clone())
@@ -190,7 +190,7 @@ def test_written_parts_round_trip(tmp_path):
 
 def _stream(dir_path, state_dict, max_shard_size):
     dir_path.mkdir()
-    writer = StageShardWriter(str(dir_path), "model-streaming", max_shard_size, enabled=True)
+    writer = StreamingShardWriter(str(dir_path), max_shard_size, enabled=True)
     for key, tensor in state_dict.items():
         writer.add(key, tensor)
     writer.close_as_hf_checkpoint()
@@ -263,7 +263,7 @@ def test_hf_finalize_writes_one_unsharded_file_and_no_index(tmp_path):
     here would still load — but a later single-file save into the same directory would then be
     shadowed by this run's stale index.
     """
-    writer = StageShardWriter(str(tmp_path), "model-streaming", "100MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "100MB", enabled=True)
     writer.add("w", _tensor(1))
     total = writer.close_as_hf_checkpoint()
 
@@ -282,7 +282,7 @@ def test_hf_finalize_removes_a_leftover_checkpoint_it_did_not_write(tmp_path):
     (tmp_path / "model.safetensors").write_bytes(b"stale")
     (tmp_path / "model-00001-of-00009.safetensors").write_bytes(b"stale from a 9-shard save")
 
-    writer = StageShardWriter(str(tmp_path), "model-streaming", "4MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True)
     for i in range(20):
         writer.add(f"w{i}", _tensor(1))
     writer.close_as_hf_checkpoint()
@@ -294,6 +294,26 @@ def test_hf_finalize_removes_a_leftover_checkpoint_it_did_not_write(tmp_path):
     assert set(index["weight_map"].values()) == {n for n in remaining if n.endswith(".safetensors")}
 
 
+def test_an_abandoned_save_never_passes_for_a_checkpoint_and_the_next_finalize_sweeps_it(tmp_path):
+    """The default prefix is the single writer's in-flight name, so it must stay outside HF's shard
+    names (an interrupted save is never read as a checkpoint) and inside the ``model*`` sweep (the
+    next finalize removes what the interrupted one left)."""
+    abandoned = StreamingShardWriter(str(tmp_path), "4MB", enabled=True)
+    for i in range(6):
+        abandoned.add(f"w{i}", _tensor(1))
+    abandoned._flush()
+    leftovers = os.listdir(tmp_path)
+    assert len(leftovers) > 1, "premise: the interrupted save left several parts behind"
+    assert all(name.startswith(f"{STREAM_PART_PREFIX}-") for name in leftovers)
+    assert not any(re.fullmatch(r"model(-\d{5}-of-\d{5})?\.safetensors", name) for name in leftovers)
+
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True)
+    writer.add("w", _tensor(1))
+    writer.close_as_hf_checkpoint()
+
+    assert os.listdir(tmp_path) == ["model.safetensors"]
+
+
 def test_hf_finalize_refuses_to_replace_a_checkpoint_with_nothing(tmp_path):
     """An enabled writer that staged no tensors must raise, not sweep the directory clean.
 
@@ -302,7 +322,7 @@ def test_hf_finalize_refuses_to_replace_a_checkpoint_with_nothing(tmp_path):
     gather bug into the loss of the last good checkpoint.
     """
     (tmp_path / "model.safetensors").write_bytes(b"the previous save")
-    writer = StageShardWriter(str(tmp_path), "model-streaming", "4MB", enabled=True)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True)
 
     with pytest.raises(RuntimeError, match="empty checkpoint"):
         writer.close_as_hf_checkpoint()
@@ -312,7 +332,7 @@ def test_hf_finalize_refuses_to_replace_a_checkpoint_with_nothing(tmp_path):
 def test_hf_finalize_on_a_disabled_writer_touches_nothing(tmp_path):
     """Non-writer ranks reach the same call site and must not delete the writer rank's output."""
     (tmp_path / "model.safetensors").write_bytes(b"written by the save rank")
-    writer = StageShardWriter(str(tmp_path), "model-streaming", "4MB", enabled=False)
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=False)
     writer.add("w", _tensor(1))
 
     assert writer.close_as_hf_checkpoint() == 0

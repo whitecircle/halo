@@ -24,8 +24,9 @@ from numpy.lib.format import MAGIC_PREFIX as NPY_MAGIC_PREFIX
 from torch import nn
 
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
-from src.models.loading.config_levels import text_config
-from src.models.structure import decoder_layer_index, unwrap_framework_wrappers
+from src.models.config_access import text_config
+from src.models.module_tree import decoder_layer_index
+from src.models.unwrapping import unwrap_framework_wrappers
 from src.trainers.grpo.world_metrics import world_sums
 from src.trainers.mixins.ep_introspection import named_ep_layers
 

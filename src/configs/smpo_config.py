@@ -130,7 +130,7 @@ class SmoothMarginPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, Ra
         without either cut firing.
 
         Callers must resolve a null / non-positive ``max_length`` to the model context window first
-        (:func:`~src.models.loading.tokenizer_setup.resolve_length_to_context`).
+        (:func:`~src.models.context_window.resolve_length_to_context`).
         """
         max_length = self.max_length
         if max_length is None or max_length <= 0:

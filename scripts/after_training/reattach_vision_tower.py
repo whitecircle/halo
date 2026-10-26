@@ -34,10 +34,8 @@ from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_tru
 from src.checkpoint.config_export import finalize_exported_config
 from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
-    HF_STREAM_PART_PREFIX,
     copy_checkpoint_aux_files,
 )
-from src.checkpoint.shard_writer import StageShardWriter
 from src.checkpoint.tool_io import (
     PROCESSOR_FILES,
     checkpoint_shard_files,
@@ -47,6 +45,7 @@ from src.checkpoint.tool_io import (
     reject_in_place_conversion,
     resolve_checkpoint_source,
 )
+from src.checkpoint.writing import StreamingShardWriter
 from src.log import configure_cli_logging
 
 configure_cli_logging()
@@ -161,7 +160,7 @@ def reattach_vision_tower(
         )
     _require_text_tower_keys(input_dir, text_config.model_type, base_text_children)
 
-    writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
+    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
     preflight_resource_warning(
         "reattach_vision_tower",
         output_dir,

@@ -39,8 +39,8 @@ from src.distributed.checkpoint.peft import PeftAdapterSaver, expert_lora_config
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 
 # Exactly the keys gather_ep_lora_adapters emits under a PeftModel: the layer path it walks is
-# PEFT-prefixed (unwrap_model stops at the PeftModel), and the key ends at lora_A/lora_B because the
-# whole grouped tensor is stored — no tuner suffix. is_expert_lora_key is asserted on them below.
+# PEFT-prefixed (unwrap_toolkit_wrappers stops at the PeftModel), and the key ends at lora_A/lora_B because
+# the whole grouped tensor is stored — no tuner suffix. is_expert_lora_key is asserted on them below.
 EXPERT_KEY_A = "base_model.model.model.layers.0.mlp.experts.gate_up_proj.lora_A"
 EXPERT_KEY_B = "base_model.model.model.layers.0.mlp.experts.gate_up_proj.lora_B"
 

@@ -24,7 +24,7 @@ from transformers import AutoConfig
 from src.kernels.liger.builder import LigerApplier, build_liger_appliers
 from src.kernels.liger.cross_entropy import patch_loss_utils_cross_entropy
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
-from src.models.loading.config_levels import set_config_field_run_scoped, text_config
+from src.models.config_access import set_config_field_run_scoped, text_config
 from src.models.moe_balancing import config_has_experts, ep_wraps_experts
 
 logger = get_logger(__name__)

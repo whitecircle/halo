@@ -23,7 +23,7 @@ from src.data.shard_index import (
 )
 from src.data.sources.paths import METADATA_FILE, hub_repo_id, parse_dataset_source
 from src.data.sources.s3_client import read_control_json_with_cache
-from src.models.loading.tokenizer_setup import load_chat_template
+from src.model_loading.tokenizer_setup import load_chat_template
 
 logger = logging.getLogger(__name__)
 

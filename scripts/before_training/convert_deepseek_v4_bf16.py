@@ -45,7 +45,7 @@ from src.checkpoint.tool_io import (
     save_full_checkpoint,
 )
 from src.log import configure_cli_logging
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

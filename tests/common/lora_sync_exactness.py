@@ -66,7 +66,8 @@ from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_mod
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import broadcast_from_rank0
-from src.models.structure import lora_fold_targets, unwrap_framework_wrappers
+from src.models.structure import lora_fold_targets
+from src.models.unwrapping import unwrap_framework_wrappers
 from src.trainers.grpo.rollout.weight_sync import (
     gather_and_send_weights,
     sync_trainer_weights,

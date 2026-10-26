@@ -16,7 +16,7 @@ raise, not be allocated as ``torch.empty``; (4) the ``scripts/`` tool surface, w
 that hands its model to a forward must finalize it and the save-only ones are pinned as such; and
 (5) that no trainer loads a model of its own, since every model it holds arrives from a loader above.
 
-Run: python tests/cpu/models/test_load_finalization.py  (or pytest)
+Run: python tests/cpu/model_loading/test_load_finalization.py  (or pytest)
 """
 
 import functools
@@ -43,6 +43,8 @@ from tests.common.source_sweep import (
 SEAM = finalize_loaded_model.__name__
 
 DISPATCHER = "src/distributed/loading/model_loading.py"
+# The sharding-agnostic model-construction package, swept whole beside src/distributed.
+LOADING_PACKAGE = "src/model_loading"
 
 # The dispatcher's own load surface. Discovered by the sweep below; pinned here as an exact set so a
 # renamed, removed or added ``_load_*`` is a deliberate edit rather than a silently shrunk sweep.
@@ -176,7 +178,7 @@ def _graph_modules() -> list[str]:
     finalizes is in the graph without reaching the seam, so the sweep below fails — the failure
     direction this test exists for.
     """
-    package = (REPO_ROOT / "src/models/loading").rglob("*.py")
+    package = (REPO_ROOT / LOADING_PACKAGE).rglob("*.py")
     distributed = (REPO_ROOT / "src/distributed").rglob("*.py")
     callers = (path for path in (REPO_ROOT / "src").rglob("*.py") if SEAM in path.read_text(encoding="utf-8"))
     return sorted({path.relative_to(REPO_ROOT).as_posix() for path in (*package, *distributed, *callers)})
@@ -210,6 +212,12 @@ def _reaches_seam(root: tuple[str, str], graph: dict[tuple[str, str], frozenset[
             local = (module, callee)
             frontier.extend([local] if local in graph else [key for key in graph if key[1] == callee])
     return False
+
+
+def test_the_sweep_sees_the_loading_package():
+    """Anti-vacuity: a moved package globs to nothing, and the loaders it holds drop out of the sweep."""
+    swept = [path for path in _graph_modules() if path.startswith(f"{LOADING_PACKAGE}/")]
+    assert len(swept) > 5, f"the sweep sees {len(swept)} files under {LOADING_PACKAGE}/"
 
 
 def test_every_dispatched_load_path_reaches_the_seam():

@@ -6,14 +6,14 @@ shell. An absent file keeps the rebuilt defaults (matches ``from_pretrained``). 
 but cannot be read must raise: swallowing it silently drops the checkpoint's EOS set (gpt-oss's
 harmony stop tokens) from every later save — a model that never stops generating.
 
-    python tests/cpu/models/test_lazy_generation_config_restore.py
+    python tests/cpu/model_loading/test_lazy_generation_config_restore.py
 """
 
 import pytest
 import torch.nn as nn
 from transformers import GenerationConfig
 
-from src.models.loading.lazy_safetensors.meta_shell import _restore_checkpoint_generation_config
+from src.model_loading.lazy_safetensors.meta_shell import _restore_checkpoint_generation_config
 
 
 def _raising_from_pretrained(*args, **kwargs):

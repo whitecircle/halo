@@ -51,7 +51,7 @@ from src.distributed.pipeline_parallel.losses import (
     pair_count_normalizer,
     split_pairs,
 )
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.trl_dataset_prep import CoordinatedTRLDatasetPrepMixin
 from src.trainers.mixins.validation import ctor_config, ctor_positions

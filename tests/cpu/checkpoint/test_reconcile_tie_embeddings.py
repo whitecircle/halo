@@ -11,7 +11,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from src.checkpoint.format import reconcile_tie_word_embeddings
+from src.checkpoint.writing import reconcile_tie_word_embeddings
 
 
 def _model(tied=True):

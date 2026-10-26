@@ -1,4 +1,4 @@
-"""revert_load_conversions must not re-add a wrapper prefix the saved model does not have.
+"""revert_to_load_layout must not re-add a wrapper prefix the saved model does not have.
 
 A text-only load of a multimodal checkpoint (``text_only_model``) consumes
 ``PrefixChange(prefix_to_remove="language_model")``; reverting it at save would emit
@@ -15,7 +15,7 @@ import torch
 from torch import nn
 from transformers.core_model_loading import PrefixChange
 
-from src.checkpoint.format import revert_load_conversions
+from src.checkpoint.hub_layout import revert_to_load_layout
 
 
 class _Inner(nn.Module):
@@ -79,7 +79,7 @@ class _WithFlattenedTower(nn.Module):
 def test_text_only_save_keeps_causal_lm_keys():
     model = _TextOnly()
     state = {"model.linear.weight": torch.zeros(2, 2)}
-    out = revert_load_conversions(model, dict(state))
+    out = revert_to_load_layout(model, dict(state))
     assert set(out) == {"model.linear.weight"}, out
     # The model's own conversions list must be restored for later saves.
     assert isinstance(model._weight_conversions[0], PrefixChange)
@@ -88,7 +88,7 @@ def test_text_only_save_keeps_causal_lm_keys():
 def test_wrapper_save_still_reverts_the_prefix():
     model = _Wrapper()
     state = {"model.linear.weight": torch.zeros(2, 2)}
-    out = revert_load_conversions(model, dict(state))
+    out = revert_to_load_layout(model, dict(state))
     assert set(out) == {"model.language_model.linear.weight"}, out
 
 
@@ -97,7 +97,7 @@ def test_a_sub_model_prefix_is_reverted_though_the_tree_has_no_such_child():
     tower's own hub spelling, which vLLM 0.26.0's SigLIP loader requires; the child check guards the
     model-level text-only case only."""
     model = _WithFlattenedTower()
-    out = revert_load_conversions(model, {"model.vision_tower.linear.weight": torch.zeros(2, 2)})
+    out = revert_to_load_layout(model, {"model.vision_tower.linear.weight": torch.zeros(2, 2)})
     assert set(out) == {"model.vision_tower.vision_model.linear.weight"}, out
 
 

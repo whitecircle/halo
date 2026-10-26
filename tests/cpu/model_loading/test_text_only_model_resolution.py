@@ -12,7 +12,7 @@ import pytest
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
 
 from src.distributed.loading import vlm_setup
-from src.models.loading.model_preparation import resolve_auto_model_class
+from src.model_loading.model_preparation import resolve_auto_model_class
 
 
 def test_multimodal_config_defaults_to_image_text_class():

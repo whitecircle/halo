@@ -23,7 +23,7 @@ import src.distributed.expert_parallel.layers.roster  # noqa: F401 — the EP pr
 from src.kernels.liger import orchestrator
 from src.kernels.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
 from src.kernels.liger.families import LIGER_FAMILY_SPECS
-from src.models.loading.model_preparation import finalize_liger_after_direct_load
+from src.model_loading.model_preparation import finalize_liger_after_direct_load
 from src.models.moe_balancing import has_ep_wrapper_class
 
 PartialState()  # the orchestrator's logger needs accelerate state initialized

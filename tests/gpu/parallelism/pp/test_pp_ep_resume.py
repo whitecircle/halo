@@ -35,7 +35,7 @@ from src.callbacks.wiring import build_perf_callbacks
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.patching import create_ep_buffers, patch_moe_model_for_ep
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.structure import unwrap_model
+from src.models.unwrapping import unwrap_toolkit_wrappers
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG
@@ -165,7 +165,7 @@ def run(ctx):
     trainer_b = make_trainer("runB", N_STEPS, from_ckpt=ckpt)
     ctx.on_teardown(trainer_b.cleanup_ep)
     trainer_b._load_from_checkpoint(ckpt)
-    stage = unwrap_model(trainer_b.model)
+    stage = unwrap_toolkit_wrappers(trainer_b.model)
 
     # Balancing biases: restored through the global remap, bitwise equal the file's entries for
     # exactly this stage's layers.

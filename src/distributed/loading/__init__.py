@@ -2,9 +2,8 @@
 
 ``load_distributed_model`` picks the EP / CP / TP / PP loader for a :class:`ParallelismConfig`, so
 this package sits ABOVE every parallelism implementation and reaches into all of them; none of them
-imports it back (``tests/cpu/conventions/test_import_layering.py``). It lives here
-rather than under ``src/models/`` for exactly that reason — the utility side owns only the
-sharding-agnostic leaves (``lazy_safetensors``, checkpoint coverage, model preparation).
+imports it back. It lives here rather than in :mod:`src.model_loading` for exactly that reason: that
+package holds only the sharding-agnostic construction.
 
 Deliberately re-exports nothing: importing the dispatcher pulls the DeepEP dispatcher, every family
 layer wrapper and the CP/PP loaders, which a job that merely needs ``setup_peft_model`` must not pay.

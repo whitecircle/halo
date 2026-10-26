@@ -9,7 +9,7 @@ carries them over from the source before the processing class is saved, so witho
 ``patch_vocab.py --chat_template`` on a base shipping ``chat_template.json`` serves the OLD
 template through ``AutoProcessor``. A processing class that still writes one of those files
 keeps it. And a model whose load dequantized an fp8 source must be reverted through its registry
-conversion mapping (``revert_conversions_for``, the rule every writer shares), not the
+conversion mapping (``conversions_to_revert``, the rule every writer shares), not the
 quantizer-rewritten list the load recorded (which ``save_pretrained`` cannot invert) and not
 ``save_original_format=False`` (the internal layout no loader reads).
 
@@ -27,7 +27,7 @@ import torch
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3MoeForCausalLM
 from transformers.integrations.finegrained_fp8 import Fp8Dequantize
 
-from src.checkpoint.format import revert_conversions_for
+from src.checkpoint.hub_layout import conversions_to_revert
 from src.checkpoint.tool_io import save_full_checkpoint
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.tiny_models import word_level_tokenizer
@@ -86,15 +86,15 @@ def test_a_dequantizing_load_reverts_the_family_registry_mapping():
     record (empty, or ops of the family's own) is reverted as recorded, a consumed ``Fp8Dequantize``
     swaps in the family's registry mapping."""
     model = Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG))
-    registry = revert_conversions_for(model)  # no record: the registry mapping
+    registry = conversions_to_revert(model)  # no record: the registry mapping
     assert registry, "premise: the family registers conversions, so the swap is observable"
 
     model._weight_conversions = []
-    assert revert_conversions_for(model) == []
+    assert conversions_to_revert(model) == []
     model._weight_conversions = [SimpleNamespace(operations=[object()])]
-    assert len(revert_conversions_for(model)) == 1
+    assert len(conversions_to_revert(model)) == 1
     model._weight_conversions = [SimpleNamespace(operations=[Fp8Dequantize(hf_quantizer=None)])]
-    assert [c.source_patterns for c in revert_conversions_for(model)] == [c.source_patterns for c in registry]
+    assert [c.source_patterns for c in conversions_to_revert(model)] == [c.source_patterns for c in registry]
 
 
 def test_a_dequantized_load_is_saved_through_the_registry_mapping(tmp_path, monkeypatch):

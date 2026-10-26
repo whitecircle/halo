@@ -42,7 +42,7 @@ import src.models.moe_balancing as moe_balancing
 from src.callbacks.wiring import _detect_moe
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type
-from src.models.loading.config_levels import (
+from src.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )

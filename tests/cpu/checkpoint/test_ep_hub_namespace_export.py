@@ -42,7 +42,7 @@ PartialState()  # save_ep_model logs through accelerate's logger
 
 import src.distributed.checkpoint.ep_save as ep_save
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
-from src.checkpoint.format import ModuleLayoutView
+from src.checkpoint.hub_layout import ModuleLayoutView
 from src.distributed.checkpoint.ep_save import (
     _check_ep_merge_family_supported,
     _keys_merge_cannot_respell,
@@ -60,8 +60,8 @@ from src.distributed.expert_parallel.expert_weights import (
 )
 from src.distributed.expert_parallel.lazy_loader import build_family_key_mapping
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.models.loading.lazy_safetensors.conversion import Concat
-from src.models.structure import persistent_buffers
+from src.model_loading.lazy_safetensors.conversion import Concat
+from src.models.param_roles import persistent_buffers
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from tests.common.checkpoint_io import loading_problems
 from tests.common.models import TINY_STEP3P7_CONFIG

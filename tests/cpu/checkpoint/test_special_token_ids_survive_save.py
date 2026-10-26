@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.models.loading.config_levels import restore_special_token_ids, snapshot_special_token_ids
+from src.models.config_access import restore_special_token_ids, snapshot_special_token_ids
 
 
 class _Config(SimpleNamespace):

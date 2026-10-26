@@ -314,7 +314,7 @@ model. A filter present at only one site would be undone by whichever runs secon
 sanitizer, `sanitize_liger_config`.
 
 The orchestrator records the **effective** applied config on `model.config`, and
-`finalize_liger_after_direct_load` (`src/models/loading/model_preparation.py`) reads it after a
+`finalize_liger_after_direct_load` (`src/model_loading/model_preparation.py`) reads it after a
 `load_distributed_model` load. With FLCE applied it keeps `use_liger_kernel` on and pins
 `liger_kernel_config` to the applied dict, so TRL's re-application is an identical re-patch and its entropy
 guard knows logits are `None`; otherwise it turns the flag off.

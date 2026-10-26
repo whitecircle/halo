@@ -22,9 +22,10 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Callbacks | Throughput, MoE load, router-bias balancing | `src/callbacks/`, `src/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
 | Diagnostics | Opt-in and off by default: the cross-rank divergence check, py-spy capture, torch-profiler traces, CUDA memory snapshots, the weight-sync transport preflight | `src/diagnostics/` | [Debugging](debugging.md) |
 | Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Liger, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `src/kernels/`, `src/models/patches/attention.py`, `src/models/patches/flex_sliding_attention.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
-| Checkpoints | The per-mode saver ladder, weight resume, per-rank optimizer shards + LR scheduler, PEFT adapters, load-coverage gate — over the sharding-agnostic on-disk layer | `src/distributed/checkpoint/`, `src/checkpoint/`, `src/models/loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
+| Checkpoints | The per-mode saver ladder, weight resume, per-rank optimizer shards + LR scheduler, PEFT adapters, load-coverage gate — over the sharding-agnostic on-disk layer | `src/distributed/checkpoint/`, `src/checkpoint/`, `src/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `src/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
-| Models | The sharding-agnostic model side: module-tree introspection, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, the `Auto*`/tokenizer/dtype preparation, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/models/loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
+| Models | The sharding-agnostic model side: module-tree introspection, composite-config access, the context window, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, and the sequence-classification heads transformers does not ship (`src/models/seq_cls_heads.py`, registered by an import in `src/model_loading/model_preparation.py`) | `src/models/` | [Adding a Model](../models/adding-a-model.md) |
+| Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, and the lazy safetensors core the EP and PP loaders share | `src/model_loading/` | [Models](../models/README.md) |
 | Rewards | Config-parsed reward terms (`terms.py`), the sample and the views a scorer reads (`samples.py`), the scorers behind the external sources (`scorers/`: the contract, the generative judge — scoring or veto — the served reward model, their catalog), the settlement of verdicts into one reward (`composer.py`), the TRL adapters (`functions.py`) and the rule-based graders (`graders/`: RLVR graders, answer matching) | `src/rewards/` | [Reward Terms](../training-methods/grpo/rewards/README.md) |
 | Environments | RL environment registry, Ray rollout actors, tools, sandboxes, eval runner | `src/environments/` | [Environments](../training-methods/async-grpo/environments/README.md) |
 | Weight sync | Trainer-to-rollout-engine weight sync: one client per engine (`VLLMWeightSyncClient`, `SGLangWeightSyncClient`) and the backend registry, the chunking (the chunk budget, the co-load groups, the snapshots on the sync device), and the NCCL transport — the rendezvous listener and the group-address policy, the bounded broadcast waits, the vLLM pynccl communicator and packed broadcast, the SGLang c10d weight-update group, the send-stream buffers | `src/weight_sync/` | [Rollout Servers](../infrastructure/rollout-servers.md) |
@@ -36,12 +37,17 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | Leaf | Holds | Read by |
 |---|---|---|
 | `src/data/spans.py` | turn terminators, completion spans, the one completion-mask implementation and the completion-only label builder over it | the collators, the offline label bake and the PP losses — none imports a collator to reach a span helper |
-| `src/models/structure.py` | module-tree introspection: wrapper peeling, PEFT name normalization, decoder-layer discovery, persistent buffers, norm / fp32-pin classification | FSDP2/TP/PP wraps, the attention patches, every checkpoint writer |
+| `src/models/unwrapping.py` | wrapper peeling (framework, toolkit, PEFT) and the plain hub spelling of a name read off a wrapped tree | the FSDP2 wrap, the CP wrapper, the weight sync, the MoE balancing, every checkpoint writer |
+| `src/models/module_tree.py` | decoder-layer discovery: the layer list, the layer index in a dotted name, the backbone owning the list, the module consuming the input embedding | the FSDP2/TP/PP wraps, the attention patches, the PEFT setup, the low-precision install, the routing replay |
+| `src/models/param_roles.py` | parameter roles: embedding/head markers, normalization modules, persistent buffers, fp32 pins | every checkpoint writer, the FSDP2 wrap and the lazy loaders (fp32 pins), Muon and the PEFT setup |
+| `src/models/structure.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write | the weight sync, the merged EP and FSDP2 saves, the embedding trainer's save, the PEFT validation |
 | `src/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the GatedDeltaNet kernel refusal, and the markers built from a row's `position_ids` | the collator factory, the packing and padding-free collators, and SMPO's padding-free forward |
 | `src/models/attention_layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term | the token-metrics mixin and the efficiency callbacks |
 | `src/models/head_transform.py` | the head-path contract: each family's declared transform around `lm_head` (scale, softcap, vocabulary cut), verified against its own forward on a meta-device shell | the chunked GRPO log-prob sweep (and the PP stage seam), which apply the same verdict |
 | `src/checkpoint/atomic.py` | exclusive staging with ordinary umask permissions, atomic Torch-file publication, directory fsync — no rank coordination | model-card writes, reference sidecars, the optimizer metadata, the async GRPO prefetch sidecar, the trainer-state commit, and checkpoint export filtering |
-| `src/checkpoint/format.py` | the on-disk checkpoint spellings, save-dtype casts, config/state-dict read-write — torch, safetensors, transformers and `huggingface_hub`, no `torch.distributed` | the parallel save paths and the standalone `scripts/after_training/` tools |
+| `src/checkpoint/format.py` | the on-disk checkpoint spellings, the layout cascade and the reads on it — no model, no `torch.distributed` | the parallel save and load paths and the standalone `scripts/after_training/` tools |
+| `src/checkpoint/hub_layout.py` | the transformers load conversions a save reverts to write the hub's tensor names, and `ModuleLayoutView`, which reads a saved layout under the live names | every gathered, TP, PP and EP writer, the RL weight sync and the resume loaders |
+| `src/checkpoint/writing.py` | save-dtype casts, the stale-file sweep, the merged index, the whole-dict and streaming shard writers, the tied-embedding reconcile | the parallel save paths and the standalone `scripts/after_training/` tools |
 | `src/data/sources/paths.py` | S3 / Hub / local classification of a dataset source or destination, pure string rules | the loader, the preprocessing pipeline and the scripts — without a boto3 import |
 | `src/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected | the S3 dataset cache and the per-shard cache of a sharded pre-processed dataset, so their crash and staleness semantics cannot drift |
 | `src/data/sources/s3_client.py` | the boto3 `S3Client`, the s3fs control-file reads and the default-bucket helpers | the loader, the preprocessing pipeline, `ShardedDatasetLoader`, the inference scripts and the `scripts/before_training/s3_datasets.py` CLI |
@@ -107,9 +113,10 @@ wrappers, grouped-GEMM expert compute, gradient-sync hooks, expert gather), `con
 
 A fifth, `loading/`, sits above all four: `load_distributed_model` picks the per-mode loader off a
 `ParallelismConfig`, so it is the one place that reaches into every implementation. That is why it
-lives here and not under `src/models/loading/`. `checkpoint/` sits above them too: its saver ladder
-and the EP and TP savers (`ep_save.py`, `tp_save.py`) gather through each implementation. The
-packages of `src/distributed` import each other acyclically (`tests/cpu/conventions/test_import_layering.py`).
+lives here and not in the sharding-agnostic `src/model_loading/`. `checkpoint/` sits above them
+too: its saver ladder and the EP and TP savers (`ep_save.py`, `tp_save.py`) gather through each
+implementation. The packages of `src/distributed` import each other acyclically
+(`tests/cpu/conventions/test_import_layering.py`).
 
 No parallelism package imports `loading/`, so
 what both sides need sits in the parallelism packages: `expert_parallel/fp32_masters.py` selects
@@ -119,10 +126,10 @@ configured FP32 parameter masters on the pre-wrapper HF tree off the EP layer re
 
 The lazy-loading machinery both the EP and PP loaders share — safetensors index resolution,
 checkpoint-key alignment, per-key weight plans, hub-conversion op math, meta-shell instantiation —
-lives in `src/models/loading/lazy_safetensors/` (`conversion.py`, `weights.py`, `meta_shell.py`) —
-model-loading machinery with no parallelism knowledge, so it sits under `src/models/loading/`, the
-sharding-agnostic half. The EP package keeps only the expert-domain knowledge: key patterns,
-planner, fuser, per-family conversion/rename resolution.
+lives in `src/model_loading/lazy_safetensors/` (`conversion.py`, `weights.py`, `meta_shell.py`):
+model-loading machinery with no parallelism knowledge, on the sharding-agnostic side. The EP
+package keeps only the expert-domain knowledge: key patterns, planner, fuser, per-family
+conversion/rename resolution.
 
 The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`src/distributed/mesh.py`); EP and CP use
 hand-built `dist.new_group` groups whose all-to-all patterns do not map to a mesh. The trainer reads

@@ -10,7 +10,7 @@ tokens), so it is model-agnostic.
 import torch
 from accelerate.logging import get_logger
 
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 
 logger = get_logger(__name__, log_level="INFO")
 

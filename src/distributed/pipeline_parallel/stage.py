@@ -24,7 +24,7 @@ from torch.utils.checkpoint import checkpoint
 from transformers import PretrainedConfig
 
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR, hf_architecture_name
-from src.checkpoint.format import CheckpointNamespace
+from src.checkpoint.hub_layout import CheckpointNamespace
 from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.dispatcher import register_forward_generation_hook
 from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
@@ -36,9 +36,9 @@ from src.distributed.pipeline_parallel.split import (
     resolve_pp_spec,
     validate_model_supports_pp,
 )
+from src.models.config_access import text_config
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
-from src.models.loading.config_levels import text_config
-from src.models.structure import backbone_with_layers, decoder_layers
+from src.models.module_tree import backbone_with_layers, decoder_layers
 
 logger = logging.getLogger(__name__)
 

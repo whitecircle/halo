@@ -35,14 +35,12 @@ from scripts._common import add_max_shard_size_arg
 from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
     EP_SHARD_KEY_RE,
-    HF_STREAM_PART_PREFIX,
     copy_checkpoint_aux_files,
     ep_shard_filename,
     is_ep_shard,
     is_sharded_checkpoint,
     read_checkpoint_index,
 )
-from src.checkpoint.shard_writer import StageShardWriter
 from src.checkpoint.tool_io import (
     detect_model_type,
     preflight_resource_warning,
@@ -50,6 +48,7 @@ from src.checkpoint.tool_io import (
     reject_sibling_adapter,
     stored_tensor_nbytes,
 )
+from src.checkpoint.writing import StreamingShardWriter
 from src.distributed.expert_parallel.expert_weights import (
     expert_weight_roots,
     resolve_ep_merge_layer_class,
@@ -253,7 +252,7 @@ def merge_ep_shards(
         def logical_nbytes(name: str) -> int:
             return sum(stored_tensor_nbytes(key_reader[key], key) for key in input_keys(name))
 
-        writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
+        writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
 
         # Peak RAM is about twice the largest group (the concatenated inputs plus the transform's
         # copies) on top of the writer's pending output shard. On disk the merged artifact is the

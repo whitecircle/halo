@@ -19,7 +19,7 @@ from torch.distributed.checkpoint.state_dict import StateDictOptions, get_optimi
 from torch.distributed.tensor import DTensor
 
 from src.distributed.fsdp import reshard_fsdp2_modules
-from src.models.structure import unwrap_model
+from src.models.unwrapping import unwrap_toolkit_wrappers
 from tests.common.tolerances import TOL
 
 # Where a trained causal-LM loss lands: the floor catches a collapsed or masked-away objective, the ceiling
@@ -267,7 +267,7 @@ def local_optimizer_state(model, optimizer) -> dict:
     """
     reshard_fsdp2_modules(model)
     osd = get_optimizer_state_dict(
-        unwrap_model(model),
+        unwrap_toolkit_wrappers(model),
         optimizer,
         options=StateDictOptions(full_state_dict=False, cpu_offload=True),
     )

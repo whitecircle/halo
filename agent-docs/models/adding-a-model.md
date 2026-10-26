@@ -11,13 +11,13 @@
 
 For plain FSDP, no work is needed — any `AutoModelForCausalLM` works.
 
-Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`src/models/loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`config_has_experts` finds the experts on the nested `text_config`). No EP-wrapper work is VLM-specific.
+Multimodal models work too: the loaders resolve the class through `resolve_auto_model_class()` (`src/model_loading/model_preparation.py`), so any `model_type` in transformers' image-text-to-text mapping loads via `AutoModelForImageTextToText` rather than dropping the vision tower. The training scripts detect a VLM from its config and route the load through `load_distributed_model`, so a MoE VLM gets EP/CP/TP on the multimodal wrapper (`config_has_experts` finds the experts on the nested `text_config`). No EP-wrapper work is VLM-specific.
 
 ## Attention backend
 
 Auto-detection covers a family whose attention the installed kernels already run. It falls short on a head dim no flash kernel accepts, a NaN-prone backward, attention sinks, or position IDs the modeling never forwards.
 
-Two seams handle those. `resolve_attn_implementation` (`src/models/patches/attention.py`) narrows the backend from the family's own capabilities; `apply_family_attention_patches` (`src/models/loading/model_preparation.py`) applies the family's patches, keyed on that backend, to trainable and frozen loads alike, and returns the implementation both loaders build with (the backend, or a variant of it such as Gemma 4's `sdpa_flex_sliding`).
+Two seams handle those. `resolve_attn_implementation` (`src/models/patches/attention.py`) narrows the backend from the family's own capabilities; `apply_family_attention_patches` (`src/model_loading/model_preparation.py`) applies the family's patches, keyed on that backend, to trainable and frozen loads alike, and returns the implementation both loaders build with (the backend, or a variant of it such as Gemma 4's `sdpa_flex_sliding`).
 
 Add the family predicate beside the existing ones and wire it into whichever seam applies. The per-family matrix is in [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
@@ -187,7 +187,7 @@ If a model isn't in transformers yet, or its `trust_remote_code` conflicts with 
     AutoModelForCausalLM.register(YourConfig, YourForCausalLM)
     ```
 
-3. **Trigger registration** by adding a module-level side-effect import of that module to `src/models/loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `src/models/seq_cls_heads.py` register).
+3. **Trigger registration** by adding a module-level side-effect import of that module to `src/model_loading/model_preparation.py`, which every loader imports before it resolves an `Auto*` class (that is how the toolkit's seq-cls heads in `src/models/seq_cls_heads.py` register).
 
     `apply_remote_code_compat_shims()` restores removed transformers APIs (`is_torch_fx_available`, `ROPE_INIT_FUNCTIONS['default']`), binds names remote files call without importing (`DynamicLayer`), and patches every loaded remote module for dispatchless eager attention and legacy tied-weight keys.
 

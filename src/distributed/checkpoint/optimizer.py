@@ -48,7 +48,7 @@ from src.distributed.runtime import (
 )
 from src.hardware import available_host_ram_bytes
 from src.log import KEY_PREVIEW_COUNT
-from src.models.structure import unwrap_model
+from src.models.unwrapping import unwrap_toolkit_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -477,7 +477,7 @@ class OptimizerShardStore:
         different layer split maps moments onto the wrong layers at identical shapes. Each rank
         checks its own range."""
         config = self.ctx.parallelism_config
-        live_range = list(unwrap_model(self.ctx.model).layer_range)
+        live_range = list(unwrap_toolkit_wrappers(self.ctx.model).layer_range)
         saved_entry = None
         saved_partition = saved.pp_stage_partition
         if isinstance(saved_partition, list | tuple) and len(saved_partition) == config.pp_size:
@@ -546,7 +546,7 @@ class OptimizerShardStore:
         resume every expert param at zero moments. Tracked-none is legitimate (frozen base experts
         under expert-LoRA) and merges nothing either.
         """
-        writer_rank, keys = expert_replica_writer(unwrap_model(self.ctx.model))
+        writer_rank, keys = expert_replica_writer(unwrap_toolkit_wrappers(self.ctx.model))
         state = osd.get("state") if isinstance(osd, dict) else None
         if writer_rank == get_global_rank() or not isinstance(state, dict):
             return None
@@ -652,7 +652,7 @@ class OptimizerShardStore:
         if not state_keys:
             return []
         required = {
-            name for name, param in unwrap_model(self.ctx.model).named_parameters() if param.requires_grad
+            name for name, param in unwrap_toolkit_wrappers(self.ctx.model).named_parameters() if param.requires_grad
         } - _tracked_fqns(shard)
         return sorted(required - state_keys)
 
@@ -672,9 +672,9 @@ class OptimizerShardStore:
             {k: v for k, v in group.items() if k != "params"} for group in self.ctx.optimizer.param_groups
         ]
         try:
-            # unwrap_model as on the save side: the shard's FQNs are relative to the inner model.
+            # unwrap_toolkit_wrappers as on the save side: the shard's FQNs are relative to the inner model.
             set_optimizer_state_dict(
-                unwrap_model(self.ctx.model), self.ctx.optimizer, optim_state_dict=osd, options=options
+                unwrap_toolkit_wrappers(self.ctx.model), self.ctx.optimizer, optim_state_dict=osd, options=options
             )
         except BaseException as exc:
             # torch's zero-LR init step leaves every group at lr=0 when it fails; the restore error
@@ -767,7 +767,7 @@ class OptimizerShardStore:
         follower's node: the duplication stands there, warned about rather than turned into a shard
         set that resumes on one node only.
         """
-        writer_rank, keys = expert_replica_writer(unwrap_model(self.ctx.model))
+        writer_rank, keys = expert_replica_writer(unwrap_toolkit_wrappers(self.ctx.model))
         state = osd.get("state") if isinstance(osd, dict) else None
         if not keys or not isinstance(state, dict):
             return
@@ -812,9 +812,9 @@ class OptimizerShardStore:
                 options = StateDictOptions(full_state_dict=False, cpu_offload=True)
                 try:
                     reshard_fsdp2_modules(ctx.model)
-                    # unwrap_model: under CP the FQNs are relative to the inner model, and resolving them
+                    # unwrap_toolkit_wrappers: under CP the FQNs are relative to the inner model, and resolving them
                     # against the wrapper raises.
-                    osd = get_optimizer_state_dict(unwrap_model(ctx.model), ctx.optimizer, options=options)
+                    osd = get_optimizer_state_dict(unwrap_toolkit_wrappers(ctx.model), ctx.optimizer, options=options)
                 except Exception as e:
                     logger.warning(
                         f"[rank {rank}] Failed to get sharded optimizer state dict: "
@@ -850,7 +850,7 @@ class OptimizerShardStore:
             pp_partition = None
             if ctx.is_pp_mode:
                 config = ctx.parallelism_config
-                lo, hi = unwrap_model(ctx.model).layer_range
+                lo, hi = unwrap_toolkit_wrappers(ctx.model).layer_range
                 entries: list[tuple[int, int, int] | None] = [None] * get_global_world_size()
                 dist.all_gather_object(entries, (config.pp_rank, lo, hi))
                 pp_partition = [None] * config.pp_size

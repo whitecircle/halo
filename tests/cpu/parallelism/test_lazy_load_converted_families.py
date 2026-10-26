@@ -35,7 +35,7 @@ import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.expert_weights import ep_layer_class_by_model_type, is_expert_weight_attr
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint, load_ep_model_lazy
-from src.models.loading.lazy_safetensors.weights import resolve_safetensors_index
+from src.model_loading.lazy_safetensors.weights import resolve_safetensors_index
 from tests.common.models import (
     TINY_DSV4_CONFIG,
     TINY_GLM5_CONFIG,

@@ -9,7 +9,7 @@ them otherwise. Both halves are silent when wrong: wrapping a dense model patche
 after the whole model is on the GPU, and skipping the wrappers on a MoE leaves the stock per-expert
 loop while the run pays the Liger force-off that assumes the wrappers are there.
 
-    python tests/cpu/models/test_undistributed_load_dispatch.py
+    python tests/cpu/model_loading/test_undistributed_load_dispatch.py
 """
 
 from types import SimpleNamespace

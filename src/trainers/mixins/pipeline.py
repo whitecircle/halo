@@ -20,7 +20,7 @@ from accelerate.logging import get_logger
 from torch.distributed.tensor import DTensor
 
 from src.callbacks.moe_metrics import MoELoadMetricsCallback
-from src.checkpoint.format import save_dtype_caster
+from src.checkpoint.writing import save_dtype_caster
 from src.data.collators.fixed_shape import FixedShapeCollator
 from src.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking, pad_tail_positions
 from src.data.vlm import VLM_IMAGE_COLUMNS, dataset_image_evidence
@@ -45,8 +45,9 @@ from src.distributed.runtime import (
 )
 from src.env import env_flag
 from src.hardware import current_device
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.modality import is_vlm_model
-from src.models.structure import backbone_with_layers, resolve_tokenizer
+from src.models.module_tree import backbone_with_layers
 from src.trainers.mixins.grad_clip import (
     clip_parameters,
     clipping_enabled,

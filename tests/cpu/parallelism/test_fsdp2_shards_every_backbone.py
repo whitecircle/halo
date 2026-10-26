@@ -29,7 +29,7 @@ from transformers import GenerationMixin, PretrainedConfig, PreTrainedModel
 
 import src.distributed.fsdp as fsdp
 from src.distributed.fsdp import IdentityParamSet
-from src.models.structure import DECODER_LAYER_LIST_ATTRS
+from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
 
 
 class _ProbeConfig(PretrainedConfig):

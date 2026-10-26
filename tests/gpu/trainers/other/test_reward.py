@@ -39,7 +39,7 @@ from trl import RewardConfig
 from src.args.common_script_args import CommonScriptArguments
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.distributed import (
     ensure_model_downloaded,

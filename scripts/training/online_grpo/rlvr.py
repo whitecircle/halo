@@ -28,7 +28,7 @@ from src.distributed.loading.frozen_models import load_reference_model_for_on_po
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.runtime import barrier
 from src.environments.base import resolve_reasoning_effort
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.model_preparation import log_model_info
 from src.rewards.functions import ScorerRewardFunction, reward_functions
 from src.rewards.graders.verifiable import RLVR_GRADERS
 from src.trainers.distillation.sdpg import DistributedSDPGTrainer

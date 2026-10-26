@@ -23,8 +23,8 @@ from torch.distributed.tensor.parallel import (
 from src.distributed.grad_reduce import SumGradAcrossGroup
 from src.distributed.mesh import get_tp_submesh
 from src.distributed.tensor_parallel.module_types import TP_SHARDABLE_ATTENTION_CLASSES
-from src.models.loading.config_levels import get_config_field
-from src.models.structure import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
+from src.models.config_access import get_config_field
+from src.models.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
 
 logger = logging.getLogger(__name__)
 

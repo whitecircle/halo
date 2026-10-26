@@ -11,8 +11,8 @@ from src.config_validation import (
     require_positive,
     require_positive_int,
 )
-from src.data.pipeline.tokenizer_backend import TokenizerBackend
 from src.env import torch_trace_dir
+from src.model_loading.tokenizer_backend import TokenizerBackend
 from src.models.moe_balancing import BalancingMode
 from src.training.parser import is_null_string
 

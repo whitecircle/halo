@@ -25,7 +25,7 @@ from peft import LoraConfig, TaskType, inject_adapter_in_model
 from peft.tuners.lora import LoraLayer
 from sentence_transformers import SentenceTransformer
 
-from src.checkpoint.format import save_dtype_caster
+from src.checkpoint.writing import save_dtype_caster
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.write import gather_saveable_tensors
 from src.distributed.parallelism_config import ParallelismConfig

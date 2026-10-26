@@ -19,7 +19,7 @@ from transformers import AutoConfig, AutoModelForCausalLM, Qwen3_5MoeConfig, Qwe
 import src.distributed.expert_parallel.lazy_loader as ep_lazy_loader
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
-from src.models.loading.lazy_safetensors.weights import resolve_safetensors_index
+from src.model_loading.lazy_safetensors.weights import resolve_safetensors_index
 from tests.common.models import TINY_QWEN35_MOE_CONFIG
 
 RUN_DTYPE = torch.bfloat16

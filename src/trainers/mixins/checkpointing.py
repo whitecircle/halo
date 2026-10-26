@@ -27,8 +27,8 @@ from src.checkpoint.format import (
     OPTIMIZER_STATE_FILES,
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
-    save_pretrained_layout,
 )
+from src.checkpoint.hub_layout import save_pretrained_layout
 from src.checkpoint.model_card import with_halo_tags
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.coordination import consensus_read, resolve_resume_checkpoint
@@ -56,11 +56,11 @@ from src.distributed.runtime import (
     is_global_main_process,
     rank_consensus,
 )
-from src.models.loading.config_levels import config_export_ready, restore_special_token_ids
-from src.models.loading.tokenizer_setup import pristine_model_max_length
+from src.model_loading.tokenizer_setup import pristine_model_max_length
+from src.models.config_access import config_export_ready, restore_special_token_ids
 from src.models.moe_balancing import BALANCING_BIASES_ATTR
 from src.models.patches.gpt_oss_sinks import gpt_oss_sinks_restored
-from src.models.structure import base_transformers_model
+from src.models.unwrapping import base_transformers_model
 
 logger = get_logger(__name__, log_level="info")
 

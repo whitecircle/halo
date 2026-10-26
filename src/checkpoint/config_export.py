@@ -20,13 +20,13 @@ from transformers.utils import CONFIG_NAME, cached_file
 
 from src.checkpoint.model_card import tag_exported_model_card
 from src.log import info_logger
-from src.models.loading.config_levels import config_export_ready
+from src.models.config_access import config_export_ready
+from src.models.model_classes import transformers_model_class
 from src.models.moe_balancing import (
     ep_roster_registered,
     exports_source_config_schema,
     legacy_per_layer_config_keys,
 )
-from src.models.structure import transformers_model_class
 
 logger = info_logger(__name__)
 
@@ -50,7 +50,7 @@ def write_config_json(config_file: str, payload: dict) -> None:
 def hf_architecture_name(model) -> str | None:
     """The class name a checkpoint's ``config.architectures`` should carry, or None.
 
-    The name of :func:`~src.models.structure.transformers_model_class`; None for a non-HF carrier (a
+    The name of :func:`~src.models.model_classes.transformers_model_class`; None for a non-HF carrier (a
     sentence-transformers shell, a PP stage), whose config came from elsewhere and whose caller
     decides.
 

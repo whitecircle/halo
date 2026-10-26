@@ -15,7 +15,7 @@ import torch
 from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss, unpack_cross_entropy_result
 from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutputWithPast
 
-from src.models.loading.config_levels import get_config_field
+from src.models.config_access import get_config_field
 
 
 def build_lce_forward(logit_scale_attr: str | None = None, router_aux_loss_in_head: bool = False) -> Callable:

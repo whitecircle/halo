@@ -87,9 +87,10 @@ from src.distributed.runtime import (
     reject_across_ranks,
 )
 from src.hardware import current_device
-from src.models.loading.dtype import resolve_training_dtype
-from src.models.loading.tokenizer_setup import is_bounded_length
-from src.models.structure import base_transformers_model, resolve_tokenizer
+from src.model_loading.dtype import resolve_training_dtype
+from src.model_loading.tokenizer_setup import resolve_tokenizer
+from src.models.context_window import is_bounded_length
+from src.models.unwrapping import base_transformers_model
 from src.trainers.grpo.mixins.chunked_logprobs import ChunkedLogprobsCore, LogitsWidth
 from src.trainers.grpo.mixins.offline_reference import OfflineGRPOReferenceMixin, reject_unsupported_reference_input
 from src.trainers.grpo.objective.advantages import GROUP_ADVANTAGE_METHODS, compute_group_advantages

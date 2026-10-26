@@ -26,7 +26,7 @@ from src.distributed.tensor_parallel.state_dict import (
     gather_tp_sharded_non_dtensor_params,
     tp_sharded_non_dtensor_suffixes,
 )
-from src.models.structure import unwrap_model
+from src.models.unwrapping import unwrap_toolkit_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ def save_tp_model(
     :func:`~src.distributed.checkpoint.write.stream_gathered_checkpoint`, the writer the FSDP2
     and CP gathered saves share (config reconciliation, save dtype + hub expert layout, HF-standard
     multi-file shards + index). ``keep_live_dtype`` (a training checkpoint) is
-    :func:`~src.checkpoint.format.save_dtype_caster`'s.
+    :func:`~src.checkpoint.writing.save_dtype_caster`'s.
     """
     fs_aware_makedirs(output_dir)
 
@@ -52,7 +52,7 @@ def save_tp_model(
     if is_save_rank:
         logger.info(f"Saving TP model to {output_dir}...")
 
-    model_to_save = unwrap_model(model)
+    model_to_save = unwrap_toolkit_wrappers(model)
 
     with barrier_on_exit():
         stream_gathered_checkpoint(

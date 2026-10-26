@@ -62,7 +62,7 @@ from src.distributed.expert_parallel.lazy_loader import load_ep_model_lazy
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.split import resolve_layer_partition
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, build_pipeline_stage
-from src.models.loading.lazy_safetensors.weights import resolve_safetensors_index
+from src.model_loading.lazy_safetensors.weights import resolve_safetensors_index
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.utils import cleanup_memory, log

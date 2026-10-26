@@ -26,7 +26,7 @@ from trl import RewardConfig
 from src.data.collators.vlm_preference import DataCollatorForVLMPreference
 from src.data.pipeline.preferences import render_vlm_preference_row
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.loading.tokenizer_setup import sync_special_token_id
+from src.model_loading.tokenizer_setup import sync_special_token_id
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.datasets import digit_image
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir

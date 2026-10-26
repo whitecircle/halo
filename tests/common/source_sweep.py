@@ -9,8 +9,8 @@ comment is not a call.
 import ast
 from collections.abc import Callable, Iterable, Iterator
 
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.model_preparation import auto_load_model
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.model_preparation import auto_load_model
 from tests.common.repo import REPO_ROOT
 
 # The toolkit's eager load entry points; a model build is one of them, a SentenceTransformer built from a

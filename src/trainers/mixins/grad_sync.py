@@ -25,7 +25,7 @@ from src.distributed.grad_reduce import agree_grad_presence, reduce_grads_bucket
 from src.distributed.mesh import MeshDim, mesh_dim_names
 from src.distributed.tensor_parallel.state_dict import tp_sharded_non_dtensor_suffixes
 from src.hardware import current_device
-from src.models.structure import model_has_quantized_params
+from src.model_loading.dtype import has_packed_quantized_params
 from src.trainers.mixins.ep_introspection import require_ep_config
 from src.trainers.mixins.grad_clip import (
     bucketed_grad_norm_sq,
@@ -170,7 +170,7 @@ class GradientSyncMixin:
         config = self.parallelism_config
         if config.stage_world_size <= 1:
             return
-        if model_has_quantized_params(self.model):
+        if has_packed_quantized_params(self.model):
             self._setup_qlora_sync("context parallel")
             return
         self._apply_dp_fsdp2(

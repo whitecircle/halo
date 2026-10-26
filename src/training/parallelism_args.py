@@ -4,7 +4,7 @@ from dataclasses import MISSING, fields
 from typing import TYPE_CHECKING
 
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.loading.tokenizer_setup import is_bounded_length
+from src.models.context_window import is_bounded_length
 
 if TYPE_CHECKING:
     from src.distributed.expert_parallel.config import ExpertLoraSpec

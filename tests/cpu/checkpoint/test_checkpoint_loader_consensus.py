@@ -32,7 +32,7 @@ from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
 import src.distributed.checkpoint.loader as loader_mod
 import src.distributed.checkpoint.optimizer as optimizer_mod
 import src.distributed.checkpoint.peft as peft_mod
-from src.checkpoint.format import ModuleLayoutView
+from src.checkpoint.hub_layout import ModuleLayoutView
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.loader import CheckpointLoader
 from src.distributed.checkpoint.optimizer import OptimizerShardStore

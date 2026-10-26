@@ -26,8 +26,8 @@ from src.distributed.context_parallel.key_mapping import strip_cp_attention_pref
 from src.distributed.context_parallel.patching import patch_attention_for_ulysses
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.dispatcher import bump_forward_generation
-from src.models.loading.config_levels import get_config_field
-from src.models.structure import base_transformers_model, unwrap_framework_wrappers
+from src.models.config_access import get_config_field
+from src.models.unwrapping import base_transformers_model, unwrap_framework_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -103,7 +103,8 @@ class UlyssesCPModelWrapper(nn.Module):
     strip the ``original_attention.`` prefix so checkpoints match the unwrapped layout.
     """
 
-    # Toolkit unwrap protocol (src.models.structure.unwrap_model): peel the wrapper without importing this class.
+    # Toolkit unwrap protocol (src.models.unwrapping.unwrap_toolkit_wrappers): peel the wrapper without
+    # importing this class.
     _toolkit_inner_model_attr = "model"
 
     def __init__(

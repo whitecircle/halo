@@ -62,7 +62,7 @@ from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.kernels.liger.orchestrator import apply_liger_kernel
-from src.models.loading.model_preparation import finalize_liger_after_direct_load
+from src.model_loading.model_preparation import finalize_liger_after_direct_load
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import (
     axis_tags,

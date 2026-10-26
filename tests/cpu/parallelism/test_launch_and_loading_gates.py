@@ -58,8 +58,8 @@ from src.distributed.mesh import MeshDim
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
-from src.models.loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.models.loading.lazy_safetensors.weights import resolve_run_dtype
+from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
 from src.models.patches.attention import resolve_attn_implementation
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import ParallelismValidationMixin

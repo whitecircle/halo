@@ -36,7 +36,6 @@ from src.data.pipeline.row_processors import (
     create_text_processor,
     is_valid_example,
 )
-from src.data.pipeline.tokenizer_backend import resolve_processor_backend, resolve_tokenizer_backend
 from src.data.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo
 from src.data.sources.paths import METADATA_FILE, TRAIN_TEST_SPLITS, eval_split_name
 from src.data.spans import (
@@ -56,7 +55,8 @@ from src.data.vlm import (
     run_vlm_processor,
 )
 from src.distributed.runtime import is_local_main_process
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_backend import resolve_processor_backend, resolve_tokenizer_backend
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 
 logger = logging.getLogger(__name__)
 

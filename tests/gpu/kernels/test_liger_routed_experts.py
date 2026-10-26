@@ -21,7 +21,7 @@ from transformers.models.qwen3_moe import modeling_qwen3_moe
 
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.liger.orchestrator import apply_liger_kernel
-from src.models.loading.dtype import configure_float32_matmul_precision
+from src.model_loading.dtype import configure_float32_matmul_precision
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.utils import log
 

@@ -28,7 +28,7 @@ from src.distributed.tensor_parallel.state_dict import tp_plan_shards_params
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from src.models.modality import config_declares_multimodality
 from src.models.patches.attention import effective_attn_implementation
-from src.models.structure import base_transformers_model
+from src.models.unwrapping import base_transformers_model
 from src.trainers.mixins.validation import evaluation_runs
 
 logger = logging.getLogger(__name__)

@@ -71,7 +71,7 @@ Groups are one per decoder layer, one for the module that embeds the input ids, 
 `fully_shard` unshards a group from a forward pre-hook, so `embed_tokens` has to sit in a group whose
 `__call__` runs before the lookup: on a multimodal wrapper that is the composite `model.model`, which
 builds `inputs_embeds` itself before handing them to the decoder backbone below it
-(`input_embedding_backbone`, `src/models/structure.py`). The rule is ancestry — `model.model` is
+(`input_embedding_backbone`, `src/models/module_tree.py`). The rule is ancestry — `model.model` is
 taken whenever the layer backbone sits under it, however the text stack is spelled — and the probe
 reads the plain transformers tree under every wrapper: a `PeftModel`'s attribute forwarding answers
 with the head module, whose `__call__` the adapter's tuner bypasses, and the CP wrapper's `.model` is
@@ -89,7 +89,7 @@ Two setups **raise** rather than wrap:
 
 - A generative decoder whose layer list the backbone probe cannot reach (`DECODER_LAYER_LIST_ATTRS` —
   `.layers`, `.h`); the message names the class. The fix for a decoder is to add its spelling to
-  `DECODER_LAYER_LIST_ATTRS` (`src/models/structure.py`).
+  `DECODER_LAYER_LIST_ATTRS` (`src/models/module_tree.py`).
 
     The alternative is one root shard group all-gathered for the whole forward, the per-rank memory
     ceiling FSDP2 exists to remove, reported as a successful wrap. Models that carry no such list by

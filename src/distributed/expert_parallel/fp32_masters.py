@@ -16,7 +16,7 @@ import torch.nn as nn
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import MOE_LAYER_MAP, ep_claimed_blocks
 from src.log import KEY_PREVIEW_COUNT
-from src.models.loading.dtype import is_packed_4bit_parameter
+from src.model_loading.dtype import is_packed_4bit_parameter
 
 
 def fp32_master_param_keys(

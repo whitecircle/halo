@@ -44,7 +44,7 @@ Under EP the same `retain` flag is threaded into each family's `gather_expert_st
 expert all-gathers stay on every rank; the layout assembly after them runs only where the result is
 kept. A family that returns tensors anyway is rejected, not obeyed.
 
-Every ladder save then **streams** through `StageShardWriter`: FSDP2, CP and TP via
+Every ladder save then **streams** through `StreamingShardWriter`: FSDP2, CP and TP via
 `stream_gathered_checkpoint`, one conversion-closed chunk (a decoder layer) at a time; EP by writing
 each MoE layer out as it is gathered.
 
@@ -286,7 +286,7 @@ load converted. transformers reads several hubs through renames its module tree 
 tower's `vision_model` level (Command A+, LFM2-VL), a vendor namespace (Inkling's `model.llm.*`,
 GLM-5 Next's `hc_attn_*`, Step-3.7's `moe.*`, DeepSeek-V4's `attn`/`ffn` names under the `model.`
 prefix the load added), Mistral 3's legacy llava prefixes. Each writer reverts the conversions the
-load recorded (`revert_conversions_for` in `src/checkpoint/format.py`); a model with no record (built
+load recorded (`conversions_to_revert` in `src/checkpoint/hub_layout.py`); a model with no record (built
 from its config, or by the lazy loader), or whose load dequantized fp8/MXFP4 weights, reverts the
 family's registered mapping. The EP-gathered save and
 the RL weight sync leave out only the per-expert merges (`gathered_export_conversions` in
@@ -340,8 +340,8 @@ config on SM100+ — serve with vLLM `--attention-backend CUTLASS_MLA` or SGLang
 **Text-only exports of a multimodal checkpoint.** A `text_only_model` load (or a merge of its
 adapter) reads the checkpoint through its `*ForCausalLM` sibling, which strips `model.language_model.`
 to `model.`. The gathered and EP writers, the base-Trainer save (single GPU, DDP, accelerate FSDP),
-the weight sync and the tools' `save_full_checkpoint` revert the load's conversions minus that strip (`revert_conversions_for` / `save_pretrained_layout`
-in `src/checkpoint/format.py`), so the export stores `model.*` under its `*_text` config. vLLM reads it
+the weight sync and the tools' `save_full_checkpoint` revert the load's conversions minus that strip (`conversions_to_revert` / `save_pretrained_layout`
+in `src/checkpoint/hub_layout.py`), so the export stores `model.*` under its `*_text` config. vLLM reads it
 only after `reattach_vision_tower.py` ([Qwen3.5/3.6](../models/qwen3_5.md)).
 
 ## Saving by parallelism mode
@@ -591,7 +591,7 @@ weights with no exception and no output.
 
 Every toolkit load path — the per-mode loaders, the lazy EP loader (which bypasses `from_pretrained`
 entirely), and the reference/teacher-model loads — routes its absent set through
-`verify_checkpoint_coverage` (`src/models/loading/checkpoint_coverage.py`) and **raises**. A new
+`verify_checkpoint_coverage` (`src/model_loading/checkpoint_coverage.py`) and **raises**. A new
 loader gets it by calling `from_pretrained_verified` instead of `from_pretrained`.
 
 Legitimate absences are read off the model class, not a key list:
@@ -631,7 +631,7 @@ checkpoint keeps it too — adapter-only, or merge-on-save through its marker �
 the adapter onto the base ([Merge-on-save checkpoints](#merge-on-save-checkpoints)).
 
 Every whole-weight read into an already-built model (Path A, and every best-model load) first maps the
-checkpoint onto the live names through `ModuleLayoutView` (`src/checkpoint/format.py`). It replays the
+checkpoint onto the live names through `ModuleLayoutView` (`src/checkpoint/hub_layout.py`). It replays the
 conversions the save reverted, so a per-expert checkpoint of a family transformers holds fused lands in
 the fused experts instead of leaving them at their construction values. The FSDP2 and TP loaders skip
 the read for a model constructed from the checkpoint.

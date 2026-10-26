@@ -33,7 +33,7 @@ from src.distributed.expert_parallel.base_layer import find_ep_layers
 from src.distributed.expert_parallel.config import ExpertLoraSpec
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, create_mixed_precision_policy_v2
-from src.models.loading.dtype import cast_parameters_to_run_dtype
+from src.model_loading.dtype import cast_parameters_to_run_dtype
 from tests.common.checkpoint_io import shard_store_context
 from tests.common.cp_wrapper import unpatched_cp_wrapper
 from tests.common.equivalence.revisions import (

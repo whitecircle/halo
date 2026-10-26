@@ -20,7 +20,7 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 from src.hardware import current_device
 from src.log import warn_once
 from src.models.attention_geometry import resolve_head_dim
-from src.models.loading.config_levels import text_config
+from src.models.config_access import text_config
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +73,7 @@ def _is_rotary_module(module: nn.Module) -> bool:
     """Whether ``module`` is a rotary-embedding layer, by class identity.
 
     They share no common base, so the ``*RotaryEmbedding`` class name is the remaining signal, the
-    same rule :func:`~src.models.structure.is_normalization_module` applies to norms. Used only to
+    same rule :func:`~src.models.param_roles.is_normalization_module` applies to norms. Used only to
     decide whether an unrecognized layout deserves a warning, never to select a fix.
     """
     return "rotary" in type(module).__name__.lower()

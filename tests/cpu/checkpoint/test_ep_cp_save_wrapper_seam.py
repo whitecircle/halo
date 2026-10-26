@@ -26,7 +26,7 @@ from safetensors import safe_open
 from src.distributed.checkpoint.ep_save import save_ep_model, validate_ep_sharded_save
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
-from src.models.structure import unwrap_model
+from src.models.unwrapping import unwrap_toolkit_wrappers
 from tests.common.ep_stubs import StubEPLayerBase
 
 PartialState()  # save_ep_model's accelerate logger needs accelerate state initialized
@@ -109,8 +109,8 @@ def test_unwrap_model_peels_declared_wrappers():
     descends to the inner model; an undeclared module passes through unchanged."""
     inner = _build_inner()
     wrapper = _wrap(inner)
-    assert unwrap_model(wrapper) is inner
-    assert unwrap_model(inner) is inner
+    assert unwrap_toolkit_wrappers(wrapper) is inner
+    assert unwrap_toolkit_wrappers(inner) is inner
 
 
 def test_gathered_ep_save_unwraps_cp_wrapper(tmp_path):

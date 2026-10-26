@@ -729,7 +729,7 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
     numel = large.numel()
     stored = 3 * numel * 2 + numel * 4
     working = mm._METHODS["ties"].fp32_copies(3) * 4 * numel
-    shard = mm.StageShardWriter(str(tmp_path), "probe", "1MB", enabled=False).max_bytes
+    shard = mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
 
 
@@ -757,7 +757,7 @@ def test_the_ram_preflight_counts_the_costliest_key_when_sizes_tie(tmp_path, mon
     numel = tensor.numel()
     stored = 2 * numel * 2 + numel * 4
     working = mm._METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
-    shard = mm.StageShardWriter(str(tmp_path), "probe", "1MB", enabled=False).max_bytes
+    shard = mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
 
 
@@ -777,7 +777,7 @@ def test_the_merge_loop_releases_each_keys_inputs_before_reading_the_next(tmp_pa
     staged: list[weakref.ref] = []
     held_over: list[tuple[str, str]] = []
     read_tensor = mm._TensorReader.get
-    stage_tensor = mm.StageShardWriter.add
+    stage_tensor = mm.StreamingShardWriter.add
 
     def tracked_get(self, key):
         held_over.extend(
@@ -794,7 +794,7 @@ def test_the_merge_loop_releases_each_keys_inputs_before_reading_the_next(tmp_pa
         return stage_tensor(self, key, tensor)
 
     monkeypatch.setattr(mm._TensorReader, "get", tracked_get)
-    monkeypatch.setattr(mm.StageShardWriter, "add", tracked_add)
+    monkeypatch.setattr(mm.StreamingShardWriter, "add", tracked_add)
     mm.merge_models(
         [str(model) for model in models],
         str(tmp_path / "out"),

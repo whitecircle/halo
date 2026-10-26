@@ -45,16 +45,16 @@ from src.checkpoint.tool_io import (
     save_full_checkpoint,
 )
 from src.log import configure_cli_logging
-from src.models.loading.dtype import DTYPE_BY_NAME
-from src.models.loading.model_preparation import auto_load_model
-from src.models.loading.tokenizer_setup import (
+from src.model_loading.dtype import DTYPE_BY_NAME
+from src.model_loading.model_preparation import auto_load_model
+from src.model_loading.tokenizer_setup import (
     adopt_tokenizer_chat_template,
     load_chat_template,
     load_processing_class,
+    resolve_tokenizer,
     set_run_chat_template,
 )
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy, stamped_sinks_policy
-from src.models.structure import resolve_tokenizer
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

@@ -65,7 +65,7 @@ on any rank (an unreadable shard, a CUDA OOM) raises on every rank unless `allow
 Source: `src/distributed/checkpoint/loader.py` (`CheckpointLoader`, `_load_streamed`, `_load_fsdp2`,
 `_load_pp_stage`), `src/distributed/checkpoint/optimizer.py` (`OptimizerShardStore.load` / `.save` /
 `.restore_lr_scheduler`), `src/distributed/checkpoint/fingerprint.py`,
-`src/checkpoint/format.py` (`load_full_state_dict`, `ModuleLayoutView`).
+`src/checkpoint/format.py` (`load_full_state_dict`), `src/checkpoint/hub_layout.py` (`ModuleLayoutView`).
 `src/trainers/mixins/checkpointing.py::_load_from_checkpoint` is a thin delegate over the loader.
 
 ## Per-script reference (`scripts/after_training/`)
@@ -77,7 +77,7 @@ Read the script's argparse to confirm flags before running — these are the loa
 Merge a `save_sharded_ep` checkpoint (per-rank `.shard_N` expert keys) into HF format; converts
 EP-internal layouts back to each family's HF layout. Flags: `--input_dir`, `--output_dir`, `--quiet`,
 `--max_shard_size` (`5GB`), `--delete_input_shards`. The merge casts nothing: the sharded writer
-already applied `save_dtype_caster` (`src/checkpoint/format.py` — BF16 except the
+already applied `save_dtype_caster` (`src/checkpoint/writing.py` — BF16 except the
 module-tree keep-sets: norms, balancing tensors, the family's fp32 pins; a training checkpoint keeps
 every tensor at its live dtype), so the stored dtype is what the merge writes. The index metadata is HF's own — there is no `merged_from_*` marker.
 
@@ -108,7 +108,7 @@ models), `--num_labels`, `--max_shard_size` (`5GB`), `--attn_implementation`, pl
 `text_only_model` run, whose merge keeps the text-only `model.*` layout. The work happens in the
 shared `merge_adapter_into_base` (`src/checkpoint/adapters.py`), which also refuses a
 per-rank-sharded adapter or base, an in-place output and a native expert-LoRA adapter, and picks the
-processing class through `resolve_peft_processing_class` (`src/models/loading/tokenizer_setup.py`):
+processing class through `resolve_peft_processing_class` (`src/model_loading/tokenizer_setup.py`):
 for a text-only merge the run's tokenizer from the adapter dir (the base's only when the adapter
 saved none) and no processor files; otherwise the adapter dir's when it is a full processor, else the
 **base's** — a tokenizer-only save leaves an unloadable VLM. It applies `apply_training_sidecars` to the
@@ -247,9 +247,9 @@ and `convert_to_bf16.py` call it and print the returned actions; `copy_training_
   fails to reload as a VLM. The exception is an adapter from a `text_only_model` run: merged or
   converted, it ships the run's tokenizer and no processor files, since the class it goes through has
   no vision path (`reattach_vision_tower.py` restores the processor files for serving). The shared `load_processing_class`
-  (`src/models/loading/tokenizer_setup.py`) returns the processor for multimodal models and a
+  (`src/model_loading/tokenizer_setup.py`) returns the processor for multimodal models and a
   plain tokenizer otherwise; all three scripts call it, and `resolve_auto_model_class` /
-  `auto_load_model` (`src/models/loading/model_preparation.py`) load a multimodal config as the
+  `auto_load_model` (`src/model_loading/model_preparation.py`) load a multimodal config as the
   full `*ForImageTextToText` wrapper.
 - **Save retains state on the save-rank only** — `save_ep_model`
   (`src/distributed/checkpoint/ep_save.py`) has all ranks run each gather collective but only the

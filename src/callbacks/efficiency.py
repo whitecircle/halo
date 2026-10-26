@@ -20,8 +20,8 @@ from src.callbacks.parameter_stats import count_model_parameters
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import get_global_world_size, is_global_main_process
 from src.hardware import detect_gpu_model, get_gpu_peak_flops
+from src.model_loading.dtype import resolve_training_dtype
 from src.models.attention_layout import AttentionLayout
-from src.models.loading.dtype import resolve_training_dtype
 from src.models.moe_balancing import detect_moe_experts_topk
 
 logger = logging.get_logger(__name__)

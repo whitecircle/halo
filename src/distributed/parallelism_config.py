@@ -48,8 +48,8 @@ from src.distributed.runtime import (
 )
 from src.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from src.env import is_accelerate_launch
-from src.models.loading.config_levels import text_config
-from src.models.loading.tokenizer_setup import context_window_from_config
+from src.models.config_access import text_config
+from src.models.context_window import context_window_from_config
 from src.models.moe_balancing import (
     ROUTER_EXPERT_COUNT_FIELDS,
     get_first_router_field,

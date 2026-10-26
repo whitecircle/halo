@@ -27,12 +27,7 @@ from safetensors.torch import load_file, save_file
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.atomic import create_staged_file, link_or_copy_file, publish_staged_file
-from src.checkpoint.format import (
-    DEFAULT_MAX_SHARD_SIZE,
-    SAFETENSORS_METADATA,
-    SAFETENSORS_WEIGHTS_FILE,
-    sweep_after_full_save,
-)
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
 from src.checkpoint.model_card import tag_exported_model_card
 from src.checkpoint.tool_io import (
     PUBLISH_STAGING_SUFFIX,
@@ -43,9 +38,10 @@ from src.checkpoint.tool_io import (
     reject_sharded_checkpoint,
     save_full_checkpoint,
 )
+from src.checkpoint.writing import sweep_after_full_save
 from src.log import configure_cli_logging
-from src.models.loading.model_preparation import auto_load_model
-from src.models.loading.tokenizer_setup import load_processing_class
+from src.model_loading.model_preparation import auto_load_model
+from src.model_loading.tokenizer_setup import load_processing_class
 from src.models.patches.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,

@@ -21,14 +21,14 @@ import torch.nn as nn
 
 from src.distributed.pipeline_parallel.stage_adapters import deepseek_v4_stream_forward, glm5_next_stream_forward
 from src.models.attention_geometry import resolve_head_dim, resolve_num_key_value_heads
+from src.models.config_access import get_config_field, text_config
 from src.models.head_transform import resolve_head_transform
-from src.models.loading.config_levels import get_config_field, text_config
+from src.models.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
 from src.models.moe_balancing import (
     config_has_experts,
     resolve_balancing_mode,
     resolve_router_topk,
 )
-from src.models.structure import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
 from src.subclass_registry import build_class_claim_map
 
 # The config field every family spells its input/output embedding tie with.

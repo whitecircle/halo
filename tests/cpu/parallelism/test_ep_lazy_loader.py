@@ -21,7 +21,7 @@ from src.distributed.expert_parallel.lazy_loader import (  # noqa: E402
     build_family_key_mapping,
     lazy_loader_supports_checkpoint,
 )
-from src.models.loading.lazy_safetensors.weights import (  # noqa: E402
+from src.model_loading.lazy_safetensors.weights import (  # noqa: E402
     SafetensorsWeightLoader,
     WeightAction,
     WeightPlan,

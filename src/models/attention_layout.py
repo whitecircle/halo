@@ -16,8 +16,9 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from src.models.loading.config_levels import get_config_field, text_config
-from src.models.structure import backbone_with_layers, decoder_layers, unwrap_model
+from src.models.config_access import get_config_field, text_config
+from src.models.module_tree import backbone_with_layers, decoder_layers
+from src.models.unwrapping import unwrap_toolkit_wrappers
 
 # Score matmul passes per attended key: QK^T and Attn·V forward (2) plus their backward (4). At head
 # width ``heads·(d_qk + d_v)`` this is the PaLM/Megatron ``12·S·H`` (``d_qk = d_v = H / heads``).
@@ -168,7 +169,7 @@ def attention_layout(model: torch.nn.Module) -> AttentionLayout:
     observe (MFU) catch it and report the estimate as unavailable.
     """
     if isinstance(model, torch.nn.Module):
-        model = unwrap_model(model)
+        model = unwrap_toolkit_wrappers(model)
     config = getattr(model, "config", None)
     if config is None:
         raise ValueError("the model exposes no config, so its attention layout cannot be read")

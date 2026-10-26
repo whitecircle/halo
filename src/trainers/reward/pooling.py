@@ -10,7 +10,7 @@ import torch
 
 from src.data.spans import LABEL_IGNORE_INDEX
 from src.distributed.pipeline_parallel.losses import rows_with_labels
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 
 
 def sequence_classification_pad_id(config, tokenizer_pad_id: int | None) -> int:

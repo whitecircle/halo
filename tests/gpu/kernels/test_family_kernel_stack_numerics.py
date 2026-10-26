@@ -57,7 +57,7 @@ from src.distributed.expert_parallel.config import get_num_experts
 from src.distributed.expert_parallel.layers import roster  # noqa: F401  (registers the EP families)
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.kernels.liger.orchestrator import apply_liger_kernel
-from src.models.loading.config_levels import text_config
+from src.models.config_access import text_config
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.parallelism import single_process_ep_config

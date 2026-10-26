@@ -39,7 +39,7 @@ from src.distributed.loading.vlm_setup import (
     require_multimodal_sequence_classification_head,
 )
 from src.distributed.runtime import barrier
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.model_preparation import log_model_info
 from src.trainers.reward.bradley_terry import DistributedRewardTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser

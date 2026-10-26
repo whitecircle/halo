@@ -40,10 +40,10 @@ from src.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     SAFETENSORS_INDEX_FILE,
-    cast_to_save_dtype,
     has_adapter_weight_file,
     read_checkpoint_index,
 )
+from src.checkpoint.writing import cast_to_save_dtype
 from src.distributed.checkpoint.peft import PeftAdapterSaver
 from src.distributed.expert_parallel.expert_weights import gather_ep_lora_adapters, has_ep_lora
 from src.distributed.loading.model_loading import load_distributed_model
@@ -51,7 +51,7 @@ from src.distributed.loading.peft_setup import setup_peft_model, split_expert_lo
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import barrier
 from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.structure import strip_peft_adapter_segment
+from src.models.unwrapping import strip_peft_adapter_segment
 from tests.common.ep_reference import ep_layers
 from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.tolerances import TOL

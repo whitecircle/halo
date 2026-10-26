@@ -55,13 +55,7 @@ from safetensors.torch import save_file
 from transformers.utils import CONFIG_NAME
 
 from src.checkpoint.config_export import write_config_json
-from src.checkpoint.format import (
-    SAFETENSORS_METADATA,
-    SAFETENSORS_WEIGHTS_FILE,
-    copy_checkpoint_aux_files,
-    remove_stale_checkpoint_files,
-    write_merged_index,
-)
+from src.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE, copy_checkpoint_aux_files
 from src.checkpoint.tool_io import (
     SAFETENSORS_FLOAT_DTYPES,
     checkpoint_shard_files,
@@ -69,6 +63,7 @@ from src.checkpoint.tool_io import (
     iter_checkpoint_shard_entries,
     reject_in_place_conversion,
 )
+from src.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_class_by_model_type,
     experts_container_attrs,

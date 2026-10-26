@@ -21,11 +21,11 @@ PartialState()  # save_model_config logs through accelerate's logger
 
 from safetensors import safe_open
 
-import src.checkpoint.shard_writer as shard_writer_mod
+import src.checkpoint.writing as writing_mod
 import src.distributed.checkpoint.tp_save as tp_checkpoint_mod
 import src.distributed.checkpoint.write as checkpoint_write_mod
-from src.checkpoint.format import load_full_state_dict, write_gathered_checkpoint
-from src.checkpoint.shard_writer import StageShardWriter
+from src.checkpoint.format import load_full_state_dict
+from src.checkpoint.writing import StreamingShardWriter, write_gathered_checkpoint
 from src.distributed.checkpoint.tp_save import save_tp_model
 from src.distributed.checkpoint.write import (
     chunked_saveable_tensors,
@@ -116,16 +116,16 @@ def test_writer_never_holds_more_than_one_shard(tmp_path):
     writer's live tensors are bounded by one shard however large the model is."""
     peak_bytes, peak_count = [], []
 
-    class _Recording(StageShardWriter):
+    class _Recording(StreamingShardWriter):
         def add(self, key, tensor):
             super().add(key, tensor)
             peak_bytes.append(sum(t.numel() * t.element_size() for t in self._pending.values()))
             peak_count.append(len(self._pending))
 
-    max_bytes = shard_writer_mod.parse_size_to_int(SHARD_SIZE)
+    max_bytes = writing_mod.parse_size_to_int(SHARD_SIZE)
     model = _tiny_moe()
     with pytest.MonkeyPatch.context() as patcher:
-        patcher.setattr(checkpoint_write_mod, "StageShardWriter", _Recording)
+        patcher.setattr(checkpoint_write_mod, "StreamingShardWriter", _Recording)
         _stream(model, str(tmp_path))
 
     total_keys = len(load_full_state_dict(str(tmp_path)))

@@ -17,7 +17,7 @@ import argparse
 
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.inference.endpoints import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
-from src.models.loading.dtype import DTYPE_BY_NAME
+from src.model_loading.dtype import DTYPE_BY_NAME
 
 # What ``--model_id`` accepts; kept in step with ``resolve_checkpoint_source``.
 HUB_SOURCE_HELP = "Hub repo id or a local checkpoint directory"

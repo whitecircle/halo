@@ -21,14 +21,14 @@ import torch
 from transformers import Gemma4TextConfig
 
 from src.distributed.loading import frozen_models, model_loading
-from src.models.loading import model_preparation
+from src.model_loading import model_preparation
 from src.models.patches.flex_sliding_attention import FLEX_SLIDING
 from tests.common.models import TINY_GEMMA4_WIDE_HEAD_CONFIG
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
 
 VARIANT_RESOLVER = "resolve_flex_sliding_attn_implementation"
-SEAM_MODULE = "src/models/loading/model_preparation.py"
+SEAM_MODULE = "src/model_loading/model_preparation.py"
 
 
 def _wide_gemma4_config() -> Gemma4TextConfig:

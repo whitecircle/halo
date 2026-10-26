@@ -40,7 +40,7 @@ from src.distributed.runtime import (
     reject_across_ranks,
 )
 from src.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME
-from src.models.loading.dtype import configure_float32_matmul_precision
+from src.model_loading.dtype import configure_float32_matmul_precision
 from src.models.patches.attention import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from src.training.parser import is_true_string
 from src.training.run_logging import setup_logging

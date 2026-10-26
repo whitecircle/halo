@@ -18,7 +18,7 @@ from src.environments.engine_wire import VLLM_BACKEND
 from src.environments.episode import RolloutResult
 from src.environments.registry import create_environment
 from src.log import warn_once
-from src.models.loading.tokenizer_setup import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
+from src.models.context_window import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
 from src.trainers.grpo.rollout.trajectory_spans import TemplateSpanError, locate_assistant_spans
 
 logger = logging.getLogger(__name__)

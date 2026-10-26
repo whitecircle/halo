@@ -12,7 +12,7 @@ This module owns the EXPERT-domain knowledge: the checkpoint key patterns derive
 classes, the planner that classifies keys into shard/replicate/ignore, the per-expert fuser, and the
 family resolution (hub renames and conversion steps off the EP layer registry). The generic
 machinery — index resolution, key alignment, ``WeightPlan`` materialization, absent-module init, the
-meta shell — lives in ``src/models/loading/lazy_safetensors/`` and is shared with the pipeline
+meta shell — lives in ``src/model_loading/lazy_safetensors/`` and is shared with the pipeline
 stage loader, which also runs :func:`lazy_load_prologue` (index → meta shell → whole-checkpoint plan)
 and then narrows the plan to its own stage.
 """
@@ -58,11 +58,10 @@ from src.distributed.expert_parallel.patching import (
 from src.distributed.filesystem import fs_aware_main_first
 from src.distributed.runtime import DeferredRankFailure, get_local_rank
 from src.log import KEY_PREVIEW_COUNT
-from src.models.loading.config_levels import text_config
-from src.models.loading.dtype import reject_fp8_tensor
-from src.models.loading.lazy_safetensors.conversion import Concat
-from src.models.loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.models.loading.lazy_safetensors.weights import (
+from src.model_loading.dtype import reject_fp8_tensor
+from src.model_loading.lazy_safetensors.conversion import Concat
+from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from src.model_loading.lazy_safetensors.weights import (
     SafetensorsWeightLoader,
     WeightAction,
     WeightPlan,
@@ -73,6 +72,7 @@ from src.models.loading.lazy_safetensors.weights import (
     resolve_safetensors_index,
     verify_loaded_shape,
 )
+from src.models.config_access import text_config
 from src.models.patches.attention import revalidate_attn_kwarg
 from src.models.patches.buffer_fixes import finalize_loaded_model
 
@@ -164,7 +164,7 @@ def build_family_key_mapping(
     *,
     loaded_conversions: bool = False,
 ) -> tuple[dict[str, str], dict[str, tuple]]:
-    """:func:`~src.models.loading.lazy_safetensors.weights.build_key_mapping` with the family's
+    """:func:`~src.model_loading.lazy_safetensors.weights.build_key_mapping` with the family's
     conversion steps and hub renames resolved off the EP layer registry (see ``hub_conversion``).
 
     The family is read through ``text_config``: a composite (VLM-wrapper) config keeps model_type on

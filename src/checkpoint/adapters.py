@@ -25,7 +25,6 @@ from src.checkpoint.format import (
     ADAPTER_SAFETENSORS_FILE,
     DEFAULT_MAX_SHARD_SIZE,
     adapter_weight_paths,
-    cast_to_save_dtype,
 )
 from src.checkpoint.tool_io import (
     PROCESSOR_FILES,
@@ -36,9 +35,10 @@ from src.checkpoint.tool_io import (
     reject_sharded_checkpoint,
     save_full_checkpoint,
 )
-from src.models.loading.tokenizer_setup import resolve_peft_processing_class
+from src.checkpoint.writing import cast_to_save_dtype
+from src.model_loading.tokenizer_setup import resolve_peft_processing_class
 from src.models.moe_balancing import is_balancing_state_key
-from src.models.structure import PEFT_BASE_MODEL_PREFIX, strip_peft_adapter_segment
+from src.models.unwrapping import PEFT_BASE_MODEL_PREFIX, strip_peft_adapter_segment
 
 logger = get_logger(__name__)
 

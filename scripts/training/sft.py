@@ -39,8 +39,8 @@ from src.data.sources.loading import load_datasets_auto
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier, init_distributed, is_global_main_process
-from src.models.loading.model_preparation import log_model_info
-from src.models.loading.tokenizer_setup import is_bounded_length
+from src.model_loading.model_preparation import log_model_info
+from src.models.context_window import is_bounded_length
 from src.models.modality import probe_checkpoint
 from src.models.segment_markers import reject_compressed_kv_rows
 from src.trainers.sft import DistributedSFTTrainer

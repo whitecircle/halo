@@ -17,16 +17,16 @@ import torch.distributed as dist
 import torch.nn as nn
 
 from src.checkpoint.config_export import save_model_config
-from src.checkpoint.format import (
-    HF_STREAM_PART_PREFIX,
+from src.checkpoint.writing import (
+    StreamingShardWriter,
     is_tie_reconcile_key,
     normalize_gathered_state_dict,
     reconcile_tie_word_embeddings,
 )
-from src.checkpoint.shard_writer import StageShardWriter
 from src.distributed.runtime import DeferredRankFailure, materialize_dtensor, resolve_param_tensor
+from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
+from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
-from src.models.structure import DECODER_LAYER_LIST_ATTRS, persistent_buffers
 
 # One decoder layer is the chunk a streamed save converts as a unit; see :func:`conversion_chunk_key`.
 _LAYER_CHUNK_RE = re.compile(rf"^(.*\.(?:{'|'.join(DECODER_LAYER_LIST_ATTRS)})\.\d+)\.")
@@ -70,7 +70,7 @@ def gather_saveable_tensors(
 def conversion_chunk_key(name: str) -> str:
     """The group ``name`` must be save-converted with: its decoder-layer prefix, else ``""``.
 
-    :func:`~src.checkpoint.format.revert_load_conversions` cannot take one tensor at a time: a reverse
+    :func:`~src.checkpoint.hub_layout.revert_to_load_layout` cannot take one tensor at a time: a reverse
     fusion (a vision tower's q/k/v into ``in_proj``, a per-expert hub split) needs every source key of
     that entry together. Conversion entries are declared per layer and never straddle two, and
     everything outside the layer list shares one chunk, so both chunks stay closed.
@@ -132,16 +132,16 @@ def stream_gathered_checkpoint(
 
     ``chunks`` is the retain-gated gather (:func:`chunked_saveable_tensors`), driven to exhaustion on
     every rank because the gathers inside are collective while only the save rank receives tensors.
-    The artifact matches :func:`~src.checkpoint.format.write_gathered_checkpoint`: same normalization
+    The artifact matches :func:`~src.checkpoint.writing.write_gathered_checkpoint`: same normalization
     (per chunk, which is why the chunks are conversion-closed), tie reconcile, config and index, with
     host RAM bounded by one chunk plus one pending shard. The tied pair is held across the stream
     because the reconcile compares both halves.
 
     A failing write raises through :class:`DeferredRankFailure`, reaching every rank at the collective
     below rather than in the next chunk's gather. ``keep_live_dtype`` (a training checkpoint) is
-    :func:`~src.checkpoint.format.save_dtype_caster`'s.
+    :func:`~src.checkpoint.writing.save_dtype_caster`'s.
     """
-    writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=is_save_rank)
+    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=is_save_rank)
     guard = DeferredRankFailure(f"gathered checkpoint write to {output_dir}")
     # Held across the stream only where the reconcile below can act on them: an untied config makes
     # it a no-op, and these are two of the largest tensors in the checkpoint.

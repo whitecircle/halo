@@ -34,7 +34,7 @@ from src.data.sources.paths import EVAL_SPLIT_NAMES
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import require_multimodal_sequence_classification_head
 from src.distributed.runtime import barrier, get_global_world_size, is_global_main_process, reject_across_ranks
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.model_preparation import log_model_info
 from src.trainers.mixins.validation import evaluation_runs
 from src.trainers.reward.classification import ClassificationTrainer
 from src.training.environment import run_training

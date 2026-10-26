@@ -9,7 +9,7 @@ import json
 import pytest
 
 import src.checkpoint.atomic as checkpoint_atomic
-import src.checkpoint.format as checkpoint_format
+import src.checkpoint.writing as checkpoint_writing
 import src.distributed.checkpoint.ep_save as ep_save
 import src.distributed.checkpoint.optimizer as checkpoint_optimizer
 import src.distributed.checkpoint.save as checkpoint_save
@@ -99,7 +99,7 @@ def test_two_producer_processes_match(tmp_path):
 
 def test_a_norm_weight_cast_on_export_is_a_dtype_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", [DENSE_EXPORT])
-    monkeypatch.setattr(checkpoint_format, "norm_param_keys", lambda model: frozenset())
+    monkeypatch.setattr(checkpoint_writing, "norm_param_keys", lambda model: frozenset())
 
     [delta] = compare_outputs(baseline, _produced(tmp_path / "mutated", [DENSE_EXPORT]))
 
@@ -111,7 +111,7 @@ def test_a_training_checkpoint_upcasting_live_bf16_is_a_dtype_delta_only_at_bf16
     """The fp32 run cannot show it: its live tensors are fp32 already."""
     cases = [DENSE_TRAINING, DENSE_BF16_TRAINING]
     baseline = _produced(tmp_path / "baseline", cases)
-    monkeypatch.setattr(checkpoint_format, "_as_live", lambda name, tensor: tensor.float())
+    monkeypatch.setattr(checkpoint_writing, "_as_live", lambda name, tensor: tensor.float())
 
     [delta] = compare_outputs(baseline, _produced(tmp_path / "mutated", cases))
 
@@ -121,8 +121,8 @@ def test_a_training_checkpoint_upcasting_live_bf16_is_a_dtype_delta_only_at_bf16
 
 def test_a_changed_value_is_a_byte_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", [DENSE_EXPORT])
-    cast = checkpoint_format.cast_to_save_dtype
-    monkeypatch.setattr(checkpoint_format, "cast_to_save_dtype", lambda tensor: cast(tensor * 2))
+    cast = checkpoint_writing.cast_to_save_dtype
+    monkeypatch.setattr(checkpoint_writing, "cast_to_save_dtype", lambda tensor: cast(tensor * 2))
 
     [delta] = compare_outputs(baseline, _produced(tmp_path / "mutated", [DENSE_EXPORT]))
 

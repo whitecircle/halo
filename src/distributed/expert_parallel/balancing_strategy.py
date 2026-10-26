@@ -12,7 +12,7 @@ from typing import get_args
 import torch.distributed as dist
 
 from src.distributed.runtime import get_global_world_size, rank_consensus, reject_across_ranks
-from src.models.loading.config_levels import (
+from src.models.config_access import (
     get_config_field,
     set_config_field,
     set_config_field_run_scoped,

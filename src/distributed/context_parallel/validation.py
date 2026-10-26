@@ -13,7 +13,7 @@ import torch.nn as nn
 
 from src.distributed.context_parallel.base_layer import HUB_FLASH_ATTN2_KERNEL
 from src.distributed.context_parallel.layers.registry import WRAPPER_CLASS_MAP
-from src.models.loading.config_levels import text_config
+from src.models.config_access import text_config
 from src.models.patches.attention import effective_attn_implementation
 
 logger = logging.getLogger(__name__)

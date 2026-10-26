@@ -49,7 +49,7 @@ from src.environments.episode import (
     resolve_reasoning_end_ids,
     resolve_rollout_stop_token_ids,
 )
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.grpo.early_stop import build_early_stop_callback
 from src.trainers.grpo.mixins.chunked_logprobs import (
     ChunkedGRPOLogprobsMixin,

@@ -13,7 +13,7 @@ Both decide something a run then EXPORTS, and both fail quietly when wrong:
     ``model_init_kwargs``. It must also keep accepting the pre-v5 ``torch_dtype`` spelling a user
     config may still carry, while handing transformers only its own ``dtype`` key.
 
-    python tests/cpu/models/test_model_preparation_resolvers.py
+    python tests/cpu/model_loading/test_model_preparation_resolvers.py
 """
 
 from __future__ import annotations
@@ -22,9 +22,9 @@ import pytest
 import torch
 from accelerate import PartialState
 
-from src.models.loading import dtype as dtype_mod
-from src.models.loading import tokenizer_setup
-from src.models.loading.dtype import DTYPE_BY_NAME
+from src.model_loading import dtype as dtype_mod
+from src.model_loading import tokenizer_setup
+from src.model_loading.dtype import DTYPE_BY_NAME
 
 PartialState()  # the loader logs its warning through accelerate's logger
 

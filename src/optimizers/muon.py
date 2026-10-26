@@ -22,7 +22,7 @@ from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
 from src.config_validation import differs_from_default
 from src.distributed.runtime import is_global_main_process, rank_consensus, to_local
-from src.models.structure import EMBEDDING_HEAD_MARKERS
+from src.models.param_roles import EMBEDDING_HEAD_MARKERS
 from src.optimizers.adamw_bf16 import BLOCK_SIZE, AdamWBF16, require_param_names, sr_param_index, sr_seed_pair
 from src.optimizers.param_groups import decay_groups
 

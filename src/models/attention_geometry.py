@@ -4,7 +4,7 @@ Kept separate because the attention patches, the RoPE buffer fixes and the pipel
 model all size something from it and none of them may import the others.
 """
 
-from src.models.loading.config_levels import get_config_field, text_config
+from src.models.config_access import get_config_field, text_config
 
 
 def resolve_head_dim(cfg) -> int:

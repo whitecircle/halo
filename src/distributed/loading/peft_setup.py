@@ -23,14 +23,11 @@ from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.filesystem import hub_metadata_main_first
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from src.distributed.runtime import reject_across_ranks, reject_divergent_settings
+from src.model_loading.dtype import is_kbit_quantized
+from src.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from src.models.moe_balancing import config_has_experts
+from src.models.param_roles import EMBEDDING_HEAD_MARKERS, is_normalization_module
 from src.models.patches.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
-from src.models.structure import (
-    DECODER_LAYER_LIST_ATTRS,
-    EMBEDDING_HEAD_MARKERS,
-    is_kbit_quantized,
-    is_normalization_module,
-)
 
 _TORCH_LAYER_PACKAGE = "torch.nn.modules."
 # The forward-probe verdict cache key: a class can be grouped at one width and plain at another.

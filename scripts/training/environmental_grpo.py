@@ -59,7 +59,7 @@ from src.distributed.runtime import barrier
 from src.environments.base import ANSWER_KEY
 from src.environments.episode import bind_episode_effort
 from src.environments.registry import create_environment
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.model_preparation import log_model_info
 from src.trainers.grpo.environmental import DistributedAsyncEnvironmentalGRPOTrainer
 from src.trainers.grpo.rollout.trajectory_tokenize import rollout_template_kwargs
 from src.trainers.grpo.rollout.weight_sync_clients import (

@@ -22,7 +22,7 @@ from src.distributed.loading.frozen_models import (
     place_and_freeze,
     warn_unparallelized_reference,
 )
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distillation.losses import (
     get_divergence,
     logits_forward_inputs,

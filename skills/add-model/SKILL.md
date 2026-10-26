@@ -53,7 +53,7 @@ file-touch list, the traps and the commands; read it before editing.
 5. **Not in transformers yet → vendor.** Copy `configuration_*.py` + `modeling_*.py` into
    `src/models/<name>/`, register the `Auto*` classes in a module of that package (never its
    `__init__.py` — package inits carry a docstring only), and trigger that module's import as a
-   module-level side effect of `src/models/loading/model_preparation.py` (the module every loader
+   module-level side effect of `src/model_loading/model_preparation.py` (the module every loader
    imports before resolving an `Auto*` class). **Record the removal trigger** —
    the directory goes when upstream ships the family. A `trust_remote_code` model needs no
    vendoring: `apply_remote_code_compat_shims()` (`src/models/patches/remote_code_compat.py`)

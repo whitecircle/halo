@@ -21,7 +21,7 @@ from src.distributed.runtime import (
     reject_across_ranks,
     reject_divergent_settings,
 )
-from src.models.structure import base_transformers_model
+from src.models.unwrapping import base_transformers_model
 from src.trainers.grpo.reference_cache import (
     REFERENCE_BUFFER_VALUES,
     MappedReferenceScores,

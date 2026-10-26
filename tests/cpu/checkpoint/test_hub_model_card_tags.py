@@ -51,7 +51,7 @@ from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.ep_save import save_ep_lora_adapters
 from src.distributed.checkpoint.peft import PeftAdapterSaver
-from src.models.loading.model_preparation import finalize_run_model
+from src.model_loading.model_preparation import finalize_run_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.tiny_models import word_level_tokenizer

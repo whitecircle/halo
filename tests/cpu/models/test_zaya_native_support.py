@@ -19,7 +19,7 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.zaya import ZayaConfig
 from transformers.models.zaya.modeling_zaya import ZayaForCausalLM
 
-from src.models.loading import model_preparation
+from src.model_loading import model_preparation
 from src.models.moe_balancing import resolve_balancing_mode
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from src.models.patches.zaya import (

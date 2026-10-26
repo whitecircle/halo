@@ -18,9 +18,9 @@ from accelerate.logging import get_logger
 from transformers import AutoConfig, PreTrainedModel
 from transformers import modeling_flash_attention_utils as flash_utils
 
-from src.models.loading.config_levels import text_config
+from src.models.config_access import text_config
+from src.models.module_tree import backbone_with_layers
 from src.models.patches.attention import model_has_sinks
-from src.models.structure import backbone_with_layers
 
 logger = get_logger(__name__)
 

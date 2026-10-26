@@ -17,7 +17,7 @@ checkpoint:
 Built on a real ``PreTrainedTokenizerFast`` rather than a stub, because the save format is exactly
 what is under test.
 
-    python tests/cpu/models/test_tokenizer_export_fidelity.py
+    python tests/cpu/model_loading/test_tokenizer_export_fidelity.py
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from transformers import PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
 from src.args.common_script_args import CommonScriptArguments
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import pristine_model_max_length, setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import pristine_model_max_length, setup_model_and_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -247,15 +247,15 @@ def test_every_production_caller_passes_the_sharding_predicate():
     but only once that call runs, behind a whole (often parallel) model load. Source-level so the CPU
     suite names such a call site first.
     """
-    missing = []
+    calls, missing = 0, []
     for path in sorted((*(REPO_ROOT / "src").rglob("*.py"), *(REPO_ROOT / "scripts").rglob("*.py"))):
-        if path == REPO_ROOT / "src/models/loading/tokenizer_setup.py":
-            continue
         tree = ast.parse(path.read_text())
         for node in ast.walk(tree):
-            called = isinstance(node, ast.Call) and getattr(node.func, "id", None) == "setup_model_and_tokenizer"
-            if called and "embeddings_sharded" not in {kw.arg for kw in node.keywords}:
-                missing.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+            if isinstance(node, ast.Call) and getattr(node.func, "id", None) == setup_model_and_tokenizer.__name__:
+                calls += 1
+                if "embeddings_sharded" not in {kw.arg for kw in node.keywords}:
+                    missing.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}")
+    assert calls, f"the sweep found no call to {setup_model_and_tokenizer.__name__}"
     assert not missing, "these call sites lose the TP vocab-grow refusal: " + ", ".join(missing)
 
 

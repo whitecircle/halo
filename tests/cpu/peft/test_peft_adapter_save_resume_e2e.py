@@ -46,8 +46,8 @@ from src.distributed.checkpoint.peft import PeftAdapterSaver, _load_peft_adapter
 from src.distributed.context_parallel.config import CPConfig
 from src.distributed.context_parallel.validation import SUPPORTED_ATTN_IMPLEMENTATIONS
 from src.distributed.context_parallel.wrapper import UlyssesCPModelWrapper
+from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import LIVE_SINKS_ATTR, SinksPolicy
-from src.models.structure import persistent_buffers
 
 _LORA_KWARGS = {"r": 4, "lora_alpha": 8, "target_modules": ["q_proj", "v_proj"], "bias": "none"}
 NUM_EXPERTS = 6

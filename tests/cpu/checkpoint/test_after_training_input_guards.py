@@ -44,8 +44,9 @@ from scripts.after_training.quantize_to_lowp import quantize_checkpoint
 from scripts.after_training.reset_sinks import reset_sinks
 from scripts.after_training.unfuse_moe_experts import unfuse_checkpoint
 from scripts.before_training import convert_deepseek_v4_bf16, convert_glm5_bf16, convert_mistral4_bf16, patch_vocab
-from src.checkpoint.format import SAFETENSORS_INDEX_FILE, is_sharded_checkpoint, save_sharded_state_dict
+from src.checkpoint.format import SAFETENSORS_INDEX_FILE, is_sharded_checkpoint
 from src.checkpoint.tool_io import checkpoint_shard_files, detect_model_type, reject_sharded_checkpoint
+from src.checkpoint.writing import save_sharded_state_dict
 from src.distributed.expert_parallel.expert_weights import per_expert_hub_model_types
 from tests.common.repo import REPO_ROOT
 

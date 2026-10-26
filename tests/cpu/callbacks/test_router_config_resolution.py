@@ -15,7 +15,7 @@ import torch
 import torch.nn as nn
 
 from src.distributed.expert_parallel.balancing_strategy import apply_balancing_strategy
-from src.models.loading.config_levels import get_config_field, set_config_field
+from src.models.config_access import get_config_field, set_config_field
 from src.models.moe_balancing import (
     detect_moe_experts_topk,
     mark_router_logits_forced_off,

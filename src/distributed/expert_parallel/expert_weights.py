@@ -29,9 +29,10 @@ from src.distributed.runtime import (
     materialize_dtensor,
     resolve_param_tensor,
 )
-from src.models.loading.config_levels import config_sources
+from src.models.config_access import config_sources
 from src.models.moe_balancing import apply_export_renames
-from src.models.structure import persistent_buffers, unwrap_framework_wrappers
+from src.models.param_roles import persistent_buffers
+from src.models.unwrapping import unwrap_framework_wrappers
 from src.subclass_registry import build_class_claim_map, iter_subclasses
 
 

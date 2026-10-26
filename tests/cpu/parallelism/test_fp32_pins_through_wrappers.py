@@ -17,9 +17,9 @@ import torch
 import torch.nn as nn
 from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
 
-from src.checkpoint.format import save_dtype_caster
+from src.checkpoint.writing import save_dtype_caster
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage
-from src.models.structure import fp32_pinned_param_names
+from src.models.param_roles import fp32_pinned_param_names
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 

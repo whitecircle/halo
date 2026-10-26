@@ -28,7 +28,7 @@ from src.distributed.loading.frozen_models import (
 )
 from src.distributed.parallelism_config import accelerate_launch_rejection
 from src.log import KEY_PREVIEW_COUNT
-from src.models.loading.config_levels import config_sources, set_config_field_run_scoped
+from src.models.config_access import config_sources, set_config_field_run_scoped
 from src.models.moe_balancing import (
     config_has_experts,
     mark_router_logits_forced_off,
@@ -152,7 +152,7 @@ def evaluation_runs(training_args) -> bool:
 def active_router_aux_loss_coef(model) -> float:
     """The router aux-loss coefficient this model would actually add to its loss, else ``0``.
 
-    Both the outer and the text config are consulted (:func:`~src.models.loading.config_levels.config_sources`): a multimodal
+    Both the outer and the text config are consulted (:func:`~src.models.config_access.config_sources`): a multimodal
     MoE declares the routing fields on the text config, while ``output_router_logits`` may be
     toggled on either.
     """

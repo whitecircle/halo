@@ -23,7 +23,7 @@ from trl import ModelConfig
 from src.distributed.loading.frozen_models import load_reference_model_for_preference
 from src.distributed.parallelism_config import ParallelismConfig
 from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR
-from src.models.loading.config_levels import (
+from src.models.config_access import (
     config_export_ready,
     set_config_field_run_scoped,
 )

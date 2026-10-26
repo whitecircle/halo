@@ -38,7 +38,7 @@ from src.args.common_script_args import CommonScriptArguments
 from src.configs.classification_config import ClassificationConfig
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
 from src.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_any, world_mean
 from tests.common.harness import gpu_test_main

@@ -27,7 +27,7 @@ from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
-from src.models.structure import persistent_buffers
+from src.models.param_roles import persistent_buffers
 from src.trainers.grpo.rollout import weight_sync
 from src.trainers.grpo.rollout.weight_sync import gather_and_send_weights
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG

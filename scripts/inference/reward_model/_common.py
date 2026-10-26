@@ -26,8 +26,8 @@ from src.data.pipeline.conversation import build_base_prompt, reject_image_conte
 from src.data.pipeline.rendered import tokenize_rendered
 from src.inference.openai_client import build_openai_client, chat_completion
 from src.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.dtype import DTYPE_BY_NAME
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.dtype import DTYPE_BY_NAME
 from src.models.patches.buffer_fixes import finalize_loaded_model
 
 # Reply fields a generated turn never carries: the role and content assistant_turn writes, and the

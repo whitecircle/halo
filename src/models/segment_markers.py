@@ -17,7 +17,7 @@ import torch
 from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
 
 from src.models.attention_layout import compressed_layer_types
-from src.models.loading.config_levels import model_type_matches
+from src.models.config_access import model_type_matches
 
 # Families interleaving GatedDeltaNet (linear-attention) layers with softmax attention. Prefixes
 # rather than exact spellings, so text-tower variants (``qwen3_5_moe_text``) match; shared by the

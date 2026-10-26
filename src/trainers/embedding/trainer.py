@@ -54,8 +54,8 @@ from src.checkpoint.format import (
     resume_adapter_dir,
     resume_adapter_on_own_weights_reason,
     unmarked_merged_checkpoint_reason,
-    write_gathered_checkpoint,
 )
+from src.checkpoint.writing import write_gathered_checkpoint
 from src.configs.embedding_config import EmbeddingConfig
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.coordination import consensus_read
@@ -75,13 +75,9 @@ from src.distributed.runtime import (
     reject_across_ranks,
 )
 from src.log import KEY_PREVIEW_COUNT
-from src.models.structure import (
-    lora_fold_targets,
-    lora_folded_data,
-    persistent_buffers,
-    strip_base_layer_segment,
-    tuner_adapter_param_ids,
-)
+from src.models.param_roles import persistent_buffers
+from src.models.structure import lora_fold_targets, lora_folded_data, tuner_adapter_param_ids
+from src.models.unwrapping import strip_base_layer_segment
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.validation import keep_all_dataset_columns
 

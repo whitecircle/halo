@@ -12,7 +12,7 @@ without the flag they load all bf16, and (4) that every model build in
 ``src/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
 new loader that forgets either fails here rather than on its first GPU step.
 
-Run: python tests/cpu/models/test_run_dtype_cast.py  (or pytest)
+Run: python tests/cpu/model_loading/test_run_dtype_cast.py  (or pytest)
 """
 
 import functools
@@ -42,11 +42,11 @@ from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.pipeline_parallel.lazy_loader import PPWeightPlanner, load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, resolve_layer_root
-from src.models.loading.dtype import cast_parameters_to_run_dtype
-from src.models.loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.models.loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.model_loading.dtype import cast_parameters_to_run_dtype
+from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.models.param_roles import fp32_pinned_param_names
 from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.structure import fp32_pinned_param_names
 from tests.common.distributed import fake_process_group_mesh
 from tests.common.models import QWEN3_0_6B
 from tests.common.pinned_params import pins_off_stored, stored_fp32_pins
@@ -63,10 +63,10 @@ CASTS = frozenset({cast_parameters_to_run_dtype.__name__, cast_loaded_parameters
 FINALIZE = finalize_loaded_model.__name__
 
 # Where a training or scoring load lives; every model build there inherits the fp32 pins.
-# ``src/models/loading/`` defines the entry points and is left out: conversion tools load through it
+# ``src/model_loading/`` defines the entry points and is left out: conversion tools load through it
 # too and must keep the pins, so the cast belongs to each training loader rather than to the shared core.
 SWEPT_ROOTS = ("src", "scripts/training")
-LOAD_CORE = "src/models/loading/"
+LOAD_CORE = "src/model_loading/"
 
 # Every function the sweep below finds. Pinned exactly so a renamed or new loader is a deliberate
 # edit rather than a silently shrunk sweep.

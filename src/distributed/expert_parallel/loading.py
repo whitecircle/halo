@@ -39,9 +39,9 @@ from src.distributed.runtime import (
     log_global_load_duration_seconds,
     move_model_to_local_device,
 )
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.dtype import cast_parameters_to_run_dtype
-from src.models.loading.lazy_safetensors.weights import (
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.dtype import cast_parameters_to_run_dtype
+from src.model_loading.lazy_safetensors.weights import (
     has_safetensors_checkpoint,
     resolve_run_dtype,
 )

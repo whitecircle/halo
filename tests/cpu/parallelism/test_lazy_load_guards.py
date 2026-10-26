@@ -34,7 +34,7 @@ import src.distributed.expert_parallel.loading as ep_loading
 import src.distributed.runtime as runtime
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.lazy_loader import EPWeightPlanner, ExpertFuser, load_ep_model_lazy
-from src.models.loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
+from src.model_loading.lazy_safetensors.weights import SafetensorsWeightLoader, WeightAction, WeightPlan
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.repo import REPO_ROOT
 

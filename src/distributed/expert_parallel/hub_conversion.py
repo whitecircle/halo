@@ -11,11 +11,12 @@ consumes, scoped as transformers scopes them: a key naming a sub-model of the sh
 ``step3p5_vision`` tower) applies only under that sub-model's path.
 
 The op vocabulary, the translator and the key walker are family-agnostic and live in
-``src/models/loading/lazy_safetensors/``; this module holds the registry seam — which family
+``src/model_loading/lazy_safetensors/``; this module holds the registry seam — which family
 declares which conversion key, and where in the module tree each key lives.
 
-The save side runs the other way: :func:`gathered_export_conversions` is what an EP export (the
-gathered save, the RL weight sync) inverts so it writes the namespace the load read.
+The save side runs the other way: :func:`gathered_export_conversions` is the part of
+:func:`~src.checkpoint.hub_layout.conversions_to_revert` an EP export inverts, everything but the per-expert
+merges its family's gather writes; the revert and the key-by-key respell are :mod:`src.checkpoint.hub_layout`'s.
 """
 
 from __future__ import annotations
@@ -28,13 +29,13 @@ from transformers.conversion_mapping import get_checkpoint_conversion_mapping, g
 from transformers.core_model_loading import WeightConverter, WeightRenaming
 from transformers.integrations.bitsandbytes import Bnb4bitDeserialize
 
-from src.checkpoint.format import is_sub_model_prefix_change, revert_conversions_for
+from src.checkpoint.hub_layout import conversions_to_revert, is_sub_model_prefix_change
 from src.distributed.expert_parallel.expert_weights import (
     ep_layer_class_by_model_type,
     experts_container_attrs,
 )
-from src.models.loading.dtype import is_packed_4bit_parameter
-from src.models.loading.lazy_safetensors.conversion import Convert, Rename, translate_converter, translate_renaming
+from src.model_loading.dtype import is_packed_4bit_parameter
+from src.model_loading.lazy_safetensors.conversion import Convert, Rename, translate_converter, translate_renaming
 
 # A conversion source addressing one tensor per expert (``…experts.*.w1.weight``): the lazy loaders
 # keep the per-expert on-disk form for ranged reads and fuse locally, so the walker skips these
@@ -52,7 +53,7 @@ def is_per_expert_merge(entry) -> bool:
 
 
 def gathered_export_conversions(model: nn.Module) -> list:
-    """The conversions an EP export inverts: :func:`~src.checkpoint.format.revert_conversions_for`
+    """The conversions an EP export inverts: :func:`~src.checkpoint.hub_layout.conversions_to_revert`
     minus the per-expert merges.
 
     Every other rename and converter the load recorded is reverted, on the non-expert params and the
@@ -62,18 +63,7 @@ def gathered_export_conversions(model: nn.Module) -> list:
     per expert), which ``from_pretrained`` and both engines read either way. Empty, and the export the
     identity, for every load that converted nothing but the experts.
     """
-    return [c for c in revert_conversions_for(model) if not is_per_expert_merge(c)]
-
-
-def reversed_export_transforms(conversions: list) -> tuple[list[WeightRenaming], list[WeightConverter]]:
-    """``conversions`` (:func:`gathered_export_conversions`) reversed in transformers' save-side order
-    and split for a key-by-key respell (``rename_source_key(..., reverse=True)``): a rename maps one
-    key on its own, a key a reverse converter claims needs that converter's other sources beside it."""
-    renamings: list[WeightRenaming] = []
-    converters: list[WeightConverter] = []
-    for transform in (c.reverse_transform() for c in conversions[::-1]):
-        (renamings if isinstance(transform, WeightRenaming) else converters).append(transform)
-    return renamings, converters
+    return [c for c in conversions_to_revert(model) if not is_per_expert_merge(c)]
 
 
 def resolve_conversion_steps(model_type: str, model: nn.Module) -> tuple[Rename | Convert, ...] | None:
@@ -85,7 +75,7 @@ def resolve_conversion_steps(model_type: str, model: nn.Module) -> tuple[Rename 
     weights were written under. Each declared key is scoped by :func:`_conversion_scopes`; ``model``
     is the meta shell, whose config also supplies the head counts a ``PermuteForRope`` entry reads.
     The tree's own sub-model ``PrefixChange`` entries follow
-    (:func:`~src.checkpoint.format.is_sub_model_prefix_change`): a SigLIP tower's hub keys carry a
+    (:func:`~src.checkpoint.hub_layout.is_sub_model_prefix_change`): a SigLIP tower's hub keys carry a
     ``vision_model`` level the module drops, which every save writes back.
 
     A declared key resolving to no entries raises: ``None`` means "this checkpoint is already

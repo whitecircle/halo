@@ -82,7 +82,7 @@ Families spell the count and the width differently (`num_experts`, `num_local_ex
 ## Load precision
 
 The training and scoring loaders cast floating parameters to the run dtype after `from_pretrained`
-and before parallel wrappers (`cast_parameters_to_run_dtype` in `src/models/loading/dtype.py`; lazy
+and before parallel wrappers (`cast_parameters_to_run_dtype` in `src/model_loading/dtype.py`; lazy
 loaders cast per tensor). This overrides transformers' FP32 module pins — DeepSeek-V4's norms and
 hyper-connections, GLM-5 Next's KDA state, Inkling's short convolutions — so FSDP2 sees one dtype
 within each shard group. Persistent buffers have a separate policy: a family-pinned buffer stays

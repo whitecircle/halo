@@ -38,7 +38,7 @@ import scripts.after_training.convert_to_bf16 as convert_to_bf16
 import scripts.after_training.merge_peft_adapters as merge_peft_adapters
 from src.checkpoint import adapters
 from src.distributed.loading import model_loading
-from src.models.loading import model_preparation
+from src.model_loading import model_preparation
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
 from tests.common.utils import imports_name
@@ -282,7 +282,7 @@ def _calls_name(func: ast.FunctionDef, name: str) -> bool:
 # teacher/reference loader are the two that materialize weights themselves; the dispatcher and
 # ``load_model_from_pretrained`` reach the shims through the first.
 LOADER_MODULES = [
-    REPO_ROOT / "src/models/loading/model_preparation.py",
+    REPO_ROOT / "src/model_loading/model_preparation.py",
     REPO_ROOT / "src/distributed/loading/model_loading.py",
     REPO_ROOT / "src/distributed/loading/frozen_models.py",
 ]

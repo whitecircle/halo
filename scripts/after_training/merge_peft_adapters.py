@@ -30,9 +30,9 @@ from scripts._common import add_device_map_arg, add_dtype_arg, add_max_shard_siz
 from src.checkpoint.adapters import merge_adapter_into_base
 from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from src.log import configure_cli_logging
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.dtype import DTYPE_BY_NAME
-from src.models.loading.model_preparation import auto_load_model
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.dtype import DTYPE_BY_NAME
+from src.model_loading.model_preparation import auto_load_model
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

@@ -30,7 +30,7 @@ from src.configs.smpo_config import SmoothMarginPOConfig
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.model_preparation import log_model_info
 from src.trainers.preference.smpo import SmoothMarginPOTrainer
 from src.training.environment import run_training
 from src.training.parser import H4ArgumentParser

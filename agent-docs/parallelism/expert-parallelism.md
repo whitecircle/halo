@@ -484,7 +484,7 @@ the tensors: global rank 0 on a shared FS, each node's local rank 0 otherwise.
 host copy) that follows it. The expert-axis gather itself receives into one preallocated buffer
 rather than a shard list plus a `cat`. Both bound the *transient* on every rank that keeps nothing.
 
-The save streams one EP layer at a time into a `StageShardWriter` and finalizes with
+The save streams one EP layer at a time into a `StreamingShardWriter` and finalizes with
 `close_as_hf_checkpoint()`, so its host RAM peaks at the replicated non-expert params plus one
 gathered layer and one pending shard (`save_max_shard_size`, default `5GB`), not the whole
 checkpoint. At gpt-oss-120b (ep8) that peak is ~11 GB on the writer; at Qwen3.5-397B-A17B (ep64)

@@ -40,11 +40,11 @@ from src.checkpoint.tool_io import (
     save_full_checkpoint,
 )
 from src.log import configure_cli_logging
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.model_preparation import auto_load_model, sanitize_generation_config
-from src.models.loading.tokenizer_setup import load_processing_class, resolve_peft_processing_class
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.model_preparation import auto_load_model, sanitize_generation_config
+from src.model_loading.tokenizer_setup import load_processing_class, resolve_peft_processing_class
+from src.models.param_roles import is_normalization_module
 from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.structure import is_normalization_module
 
 configure_cli_logging()
 logger = logging.getLogger(__name__)

@@ -21,14 +21,14 @@ from src.distributed.loading.warmup import warm_attention_kernels
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
 from src.log import warn_once
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
-from src.models.loading.model_preparation import (
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
+from src.model_loading.model_preparation import (
     apply_family_attention_patches,
     auto_load_model,
     finalize_run_model,
 )
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
 from src.models.patches.attention import resolve_attn_implementation
 from src.models.patches.buffer_fixes import finalize_loaded_model
 from src.models.patches.gpt_oss_sinks import SinksPolicy

@@ -32,12 +32,10 @@ from src.checkpoint.format import (
     OPTIMIZER_META_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
-    revert_conversions,
-    save_dtype_caster,
-    write_merged_index,
     write_resume_adapter_marker,
 )
-from src.checkpoint.shard_writer import StageShardWriter
+from src.checkpoint.hub_layout import revert_conversions
+from src.checkpoint.writing import StreamingShardWriter, save_dtype_caster, write_merged_index
 from src.distributed.checkpoint.context import CheckpointContext
 from src.distributed.checkpoint.ep_save import save_ep_lora_adapters, save_ep_model
 from src.distributed.checkpoint.peft import PeftAdapterSaver, expert_lora_config_fields, find_peft_model
@@ -56,7 +54,8 @@ from src.distributed.runtime import (
     is_local_main_process,
     is_output_shared_filesystem,
 )
-from src.models.structure import lora_fold_targets, unwrap_model
+from src.models.structure import lora_fold_targets
+from src.models.unwrapping import unwrap_toolkit_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -142,7 +141,7 @@ def save_cp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     resolves them, chunk by chunk. The sinks still come off the unwrapped model.
     """
     cp_wrapper = ctx.cp_wrapper
-    inner = unwrap_model(cp_wrapper)
+    inner = unwrap_toolkit_wrappers(cp_wrapper)
     items = cp_wrapper.state_dict().items()
     _save_streamed(ctx, output_dir, inner, chunked_saveable_tensors(inner, retain=ctx.is_save_rank, items=items), "CP")
 
@@ -346,7 +345,9 @@ def is_pp_shard_writer(config, shared_fs: bool) -> bool:
     return is_local_main_process() or config.stage_local_rank == 0
 
 
-def _write_hub_group(writer: StageShardWriter, stage: nn.Module, tensors: Iterable[tuple[str, torch.Tensor]]) -> None:
+def _write_hub_group(
+    writer: StreamingShardWriter, stage: nn.Module, tensors: Iterable[tuple[str, torch.Tensor]]
+) -> None:
     """Write one group of the stage's tensors, named in the unsplit model, under the hub's names.
 
     transformers' save-side revert of the conversions the stage snapshotted from the unsplit model
@@ -392,11 +393,11 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
 
     # One prefix per stage, chosen without coordinating with the other writers: a global HF
     # "k-of-n" counter is not derivable locally once a stage emits a variable number of parts.
-    writer = StageShardWriter(
+    writer = StreamingShardWriter(
         output_dir,
-        f"model-pp{config.pp_rank:05d}-of-{config.pp_size:05d}",
         ctx.max_shard_size,
         enabled=is_writer,
+        filename_prefix=f"model-pp{config.pp_rank:05d}-of-{config.pp_size:05d}",
     )
     # The writer's disk writes are interleaved with the gathers below, so one must not raise here:
     # it would strand every other stage rank in the next collective until the watchdog fires.
@@ -437,7 +438,9 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     # every tensor it plans for. Per-node storage has one save rank per node, so every node's
     # directory carries them.
     if ctx.is_save_rank and ctx.pp_wrapper_state:
-        wrapper_writer = StageShardWriter(output_dir, "model-wrapper", ctx.max_shard_size, enabled=True)
+        wrapper_writer = StreamingShardWriter(
+            output_dir, ctx.max_shard_size, enabled=True, filename_prefix="model-wrapper"
+        )
         guard.run(partial(_write_hub_group, wrapper_writer, stage, ctx.pp_wrapper_state.items()))
         wrapper_map, wrapper_bytes = guard.run(wrapper_writer.close) or ({}, 0)
         stage_weight_map = {**stage_weight_map, **wrapper_map}

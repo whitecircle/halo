@@ -32,7 +32,7 @@ from src.checkpoint.format import (
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
 )
-from src.checkpoint.shard_writer import StageShardWriter
+from src.checkpoint.writing import StreamingShardWriter
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.expert_weights import expert_weight_roots, resolve_ep_merge_layer_class
 
@@ -857,8 +857,8 @@ def _gptoss_shards():
 
 
 def _assert_failed_merge_preserves_inputs(monkeypatch, writer_method, failing):
-    """Inject ``failing`` into one StageShardWriter method and assert every input shard survives."""
-    monkeypatch.setattr(StageShardWriter, writer_method, failing)
+    """Inject ``failing`` into one StreamingShardWriter method and assert every input shard survives."""
+    monkeypatch.setattr(StreamingShardWriter, writer_method, failing)
     with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as output_dir:
         _write_ep_checkpoint(input_dir, "gpt_oss", _gptoss_shards(), 2)
         shard_files = sorted(f for f in os.listdir(input_dir) if f.endswith(".safetensors"))
@@ -1001,7 +1001,7 @@ def test_merge_refuses_a_checkpoint_that_is_not_ep_sharded(metadata):
 
 
 def test_merge_refuses_to_write_into_its_own_input_dir():
-    """``StageShardWriter.close_as_hf_checkpoint`` deletes the ``model*.safetensors`` it did not
+    """``StreamingShardWriter.close_as_hf_checkpoint`` deletes the ``model*.safetensors`` it did not
     write, so an in-place
     merge destroys the source shards — and ``--delete_input_shards`` would then remove the freshly
     written merged ones."""

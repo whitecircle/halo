@@ -47,11 +47,11 @@ from src.checkpoint.format import (
     copy_checkpoint_aux_files,
     is_sharded_checkpoint,
     resolve_checkpoint_weights,
-    save_pretrained_layout,
-    sweep_after_full_save,
 )
+from src.checkpoint.hub_layout import save_pretrained_layout
+from src.checkpoint.writing import sweep_after_full_save
 from src.hardware import available_host_ram_bytes
-from src.models.loading.model_preparation import sanitize_generation_config
+from src.model_loading.model_preparation import sanitize_generation_config
 from src.models.moe_balancing import apply_router_balancing_sidecar, is_balancing_state_key
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 
@@ -114,12 +114,12 @@ def save_full_checkpoint(
 
     The contract is the ORDER: ``source_dir``'s non-weight files are carried over BEFORE the save so
     the live config and tokenizer overwrite the copies; stale weight files are swept only AFTER it,
-    under :func:`~src.checkpoint.format.sweep_after_full_save`'s failure-safe rule; and the legacy
+    under :func:`~src.checkpoint.writing.sweep_after_full_save`'s failure-safe rule; and the legacy
     tokenizer sidecars the copy carried over are dropped unless the fresh processing class rewrote
     them, since each overrides its fresh neighbour on load.
 
     The save writes the layout the saved config declares
-    (:func:`~src.checkpoint.format.save_pretrained_layout`): a multimodal checkpoint loaded as its
+    (:func:`~src.checkpoint.hub_layout.save_pretrained_layout`): a multimodal checkpoint loaded as its
     text-only class keeps its text-only keys, and a load that dequantized an fp8 source reverts its
     family's registry mapping rather than the quantizer rewrites ``save_pretrained`` cannot invert.
     ``source_dir`` doubles as the config schema source when the caller passes one.
@@ -201,9 +201,9 @@ def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:
     """Refuse a conversion whose output directory is its own input.
 
     Every writer behind these tools — :func:`save_full_checkpoint` through
-    :func:`~src.checkpoint.format.sweep_after_full_save`, and
-    :meth:`~src.checkpoint.shard_writer.StageShardWriter.close_as_hf_checkpoint` — ends in
-    :func:`~src.checkpoint.format.remove_stale_checkpoint_files`, which DELETES the
+    :func:`~src.checkpoint.writing.sweep_after_full_save`, and
+    :meth:`~src.checkpoint.writing.StreamingShardWriter.close_as_hf_checkpoint` — ends in
+    :func:`~src.checkpoint.writing.remove_stale_checkpoint_files`, which DELETES the
     ``model*.safetensors`` the write does not own. An in-place run therefore destroys the source
     shards, and every post-write step that still reads them (``merge_ep_shards
     --delete_input_shards``, the aux copy) then reads the output.

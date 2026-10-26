@@ -32,19 +32,18 @@ from src.distributed.expert_parallel.balancing_strategy import apply_balancing_s
 from src.distributed.expert_parallel.base_layer import EPMoELayerBase
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.loading.model_loading import _apply_config_overrides
-from src.models import moe_balancing
+from src.model_loading.tokenizer_setup import sync_special_token_id
+from src.models import config_access, moe_balancing
 from src.models.attention_geometry import (
     resolve_head_dim,
     resolve_num_key_value_heads,
 )
-from src.models.loading import config_levels
-from src.models.loading.config_levels import (
+from src.models.config_access import (
     config_sources,
     config_ties_word_embeddings,
     configs_declaring,
     set_config_field,
 )
-from src.models.loading.tokenizer_setup import sync_special_token_id
 from src.models.moe_balancing import (
     ROUTER_EXPERT_COUNT_FIELDS,
     config_has_experts,
@@ -109,10 +108,10 @@ def test_set_config_field_plants_a_toolkit_flag_on_every_level():
     assert all(level._toolkit_only_flag is True for level in config_sources(config))
 
 
-def test_config_levels_stays_the_leaf_both_writers_folded_into():
+def test_config_access_stays_the_leaf_both_writers_folded_into():
     """One writer over one enumeration: the generic leaf must not reach back into the MoE module (a
     cycle), and no second unconditional writer may reappear beside it."""
-    assert "moe_balancing" not in Path(config_levels.__file__).read_text()
+    assert "moe_balancing" not in Path(config_access.__file__).read_text()
     assert not hasattr(moe_balancing, "set_router_field")
 
 

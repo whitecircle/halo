@@ -25,7 +25,6 @@ from transformers import PreTrainedModel
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
 from src.checkpoint.format import (
     CheckpointWeights,
-    ModuleLayoutView,
     has_adapter_weight_file,
     has_whole_model_weight_file,
     is_sharded_checkpoint,
@@ -37,6 +36,7 @@ from src.checkpoint.format import (
     resume_adapter_on_own_weights_reason,
     unmarked_merged_checkpoint_reason,
 )
+from src.checkpoint.hub_layout import ModuleLayoutView
 from src.distributed.checkpoint.context import CheckpointLoadContext
 from src.distributed.checkpoint.coordination import all_ranks_ok, joined_streaming_reader
 from src.distributed.checkpoint.peft import find_peft_model, restore_adapters
@@ -54,11 +54,8 @@ from src.distributed.runtime import (
     reject_across_ranks,
 )
 from src.log import KEY_PREVIEW_COUNT
-from src.models.structure import (
-    persistent_buffers,
-    unwrap_framework_wrappers,
-    unwrap_model,
-)
+from src.models.param_roles import persistent_buffers
+from src.models.unwrapping import unwrap_framework_wrappers, unwrap_toolkit_wrappers
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +73,7 @@ def weights_read_from(model) -> str | None:
     constructed elsewhere (tests, user code) falls back to ``config._name_or_path``, which for any
     ``from_pretrained`` construction is also where the weights came from.
     """
-    live = unwrap_model(model)
+    live = unwrap_toolkit_wrappers(model)
     if hasattr(live, LOADED_WEIGHTS_FROM_ATTR):
         return getattr(live, LOADED_WEIGHTS_FROM_ATTR)
     return str(getattr(getattr(live, "config", None), "_name_or_path", "")) or None
@@ -246,7 +243,7 @@ class CheckpointLoader:
         - Other (accelerate FSDP, adapter-only, non-transformers models): falls through to base Trainer.
 
         Every whole-weight read maps the checkpoint onto the live names through
-        :class:`~src.checkpoint.format.ModuleLayoutView`, the inverse of the save-side revert.
+        :class:`~src.checkpoint.hub_layout.ModuleLayoutView`, the inverse of the save-side revert.
         """
         ctx = self.ctx
         if ctx.is_pp_mode:
@@ -454,7 +451,7 @@ class CheckpointLoader:
         unwrapped = unwrap_framework_wrappers(model)
         live: dict[str, torch.Tensor] = dict(unwrapped.named_parameters())
         live.update(persistent_buffers(unwrapped))
-        hand_sliced = dict(getattr(unwrap_model(model), "_tp_sharded_non_dtensor", None) or ())
+        hand_sliced = dict(getattr(unwrap_toolkit_wrappers(model), "_tp_sharded_non_dtensor", None) or ())
 
         with joined_streaming_reader(checkpoint, None, what=f"{mode} checkpoint") as reader:
             view = ModuleLayoutView(unwrapped, reader.available)
@@ -530,7 +527,7 @@ class CheckpointLoader:
         changed split.
         """
         ctx = self.ctx
-        stage = unwrap_model(model if model is not None else ctx.model)
+        stage = unwrap_toolkit_wrappers(model if model is not None else ctx.model)
         reject_unhandled_pp_axes(ctx.parallelism_config, "resume")
         self._reject_sharded_resume(checkpoint)
 

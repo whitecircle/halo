@@ -256,7 +256,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 
     The load-only conversion tools do not: `state_dict` omits those buffers, so an unrepaired one
     reaches neither a number nor the written checkpoint.
-    `tests/cpu/models/test_load_finalization.py` pins each new `scripts/` loader into one of the two
+    `tests/cpu/model_loading/test_load_finalization.py` pins each new `scripts/` loader into one of the two
     groups.
 
 - **Shard cap and Hub source.** Two more flags are spelled once each, beside

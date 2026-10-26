@@ -34,8 +34,8 @@ from src.distributed.loading.frozen_models import load_frozen_auxiliary_model
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier, is_global_main_process
-from src.models.loading.dtype import resolve_training_dtype
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.dtype import resolve_training_dtype
+from src.model_loading.model_preparation import log_model_info
 from src.trainers.distillation.losses import shared_vocab_width
 from src.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
 from src.training.environment import run_training

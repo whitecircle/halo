@@ -17,8 +17,8 @@ from accelerate import init_empty_weights
 from transformers import GenerationConfig, PreTrainedModel
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
-from src.models.loading.lazy_safetensors.weights import resolve_run_dtype
-from src.models.structure import params_matching_fp32_pins
+from src.model_loading.lazy_safetensors.weights import resolve_run_dtype
+from src.models.param_roles import params_matching_fp32_pins
 
 logger = logging.getLogger(__name__)
 

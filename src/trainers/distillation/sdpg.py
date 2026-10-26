@@ -18,7 +18,7 @@ import torch
 from src.args.mixins import format_field_names
 from src.data.collators.self_distill import privileged_hint
 from src.log import warn_once
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distillation.losses import global_token_mean, privileged_teacher_pass
 from src.trainers.distillation.opd_term import OPDTermMixin
 from src.trainers.grpo.online import DistributedGRPOTrainer

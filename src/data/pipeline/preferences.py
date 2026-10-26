@@ -17,7 +17,7 @@ from src.data.pipeline.rendered import lacks_emitted_bos
 from src.data.pipeline.row_processors import normalize_vlm_conversation, prepare_generative_row
 from src.data.spans import lacks_terminator
 from src.data.vlm import VLM_RAW_IMAGE_COLUMNS, process_vlm_conversation, render_vlm_text
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 
 __all__ = [
     "MARGIN_COLUMN",

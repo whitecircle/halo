@@ -24,7 +24,7 @@ from src.distributed.loading.frozen_models import place_and_freeze
 from src.distributed.loading.model_loading import load_model_from_pretrained
 from src.distributed.loading.peft_setup import peft_bf16_autocast, prepare_peft_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.structure import resolve_tokenizer
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.trainers.distillation.losses import (
     call_divergence,
     consumes_hard_labels,

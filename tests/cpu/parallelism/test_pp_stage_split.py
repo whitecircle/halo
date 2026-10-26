@@ -40,7 +40,7 @@ from src.distributed.pipeline_parallel.split import (
 from src.distributed.pipeline_parallel.stage import build_pipeline_stage, module_path, reject_layer_type_rebase
 from src.models.head_transform import IDENTITY_HEAD_TRANSFORM
 from src.models.moe_balancing import ROUTER_TOPK_FIELDS
-from src.models.structure import persistent_buffers
+from src.models.param_roles import persistent_buffers
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_INKLING_PP_OVERRIDES, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 

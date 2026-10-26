@@ -21,7 +21,7 @@ from src.callbacks.wiring import build_perf_callbacks
 from src.distributed.expert_parallel.lazy_loader import lazy_loader_supports_checkpoint
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
-from src.models.structure import backbone_with_layers
+from src.models.module_tree import backbone_with_layers
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import fixed_batch_loss
 from tests.common.datasets import create_sft_dataset

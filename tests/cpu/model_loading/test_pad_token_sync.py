@@ -19,7 +19,7 @@ next load:
     ``can_generate()`` is true, so on a pooled head a bare attribute read raises ``AttributeError``
     out of ``nn.Module.__getattr__``.
 
-    python tests/cpu/models/test_pad_token_sync.py
+    python tests/cpu/model_loading/test_pad_token_sync.py
 """
 
 import logging
@@ -32,8 +32,8 @@ from transformers.trainer_utils import align_special_tokens
 
 from src.args.common_script_args import CommonScriptArguments
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading import model_preparation
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer, sync_special_token_id
+from src.model_loading import model_preparation
+from src.model_loading.tokenizer_setup import setup_model_and_tokenizer, sync_special_token_id
 from src.trainers.reward.pooling import sequence_classification_pad_id
 
 PartialState()  # the loader's logger needs accelerate state initialized

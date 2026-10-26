@@ -21,7 +21,7 @@ from accelerate import PartialState
 from datasets import Dataset
 from transformers import Glm5NextConfig, Glm5NextForConditionalGeneration, Qwen3Config, Qwen3ForCausalLM
 
-from src.checkpoint.format import save_dtype_caster
+from src.checkpoint.writing import save_dtype_caster
 from src.distributed.loading.peft_setup import _reject_layer_indexed_patterns_under_pp as guard
 from src.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from src.trainers.mixins.base import DistributedTrainerMixin

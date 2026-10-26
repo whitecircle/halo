@@ -44,8 +44,10 @@ from transformers import AutoConfig, Glm5NextConfig, Glm5NextForConditionalGener
 
 import src.distributed.runtime as runtime
 from src.checkpoint.config_export import LOADED_WEIGHTS_FROM_ATTR
-from src.checkpoint.format import is_sharded_checkpoint, revert_conversions, save_dtype_caster
+from src.checkpoint.format import is_sharded_checkpoint
+from src.checkpoint.hub_layout import revert_conversions
 from src.checkpoint.tool_io import checkpoint_shard_files
+from src.checkpoint.writing import save_dtype_caster
 from src.distributed.checkpoint.context import CheckpointContext, CheckpointLoadContext
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.checkpoint.loader import CheckpointLoader
@@ -60,8 +62,8 @@ from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.pipeline_parallel.lazy_loader import load_pp_stage_model
 from src.distributed.pipeline_parallel.stage import PipelineStageModule, build_pipeline_stage
 from src.distributed.runtime import fs_aware_save_rank
+from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import neutralized_sink_value
-from src.models.structure import persistent_buffers
 from src.trainers.mixins.pipeline import stash_wrapper_state
 from tests.common.ep_stubs import StubEPLayerBase
 from tests.common.gloo import run_gloo_ranks

@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Tests for configure_float32_matmul_precision. Run: python tests/cpu/models/test_matmul_precision.py
+"""Tests for configure_float32_matmul_precision. Run: python tests/cpu/model_loading/test_matmul_precision.py
 
 Guards the long-context RoPE fix: the toolkit pins fp32 matmul precision to 'highest', overriding the
 image's TF32 default (whose 10-bit mantissa collapses RoPE token positions past 2048). Fails if the
@@ -11,7 +11,7 @@ import os
 import pytest
 import torch
 
-from src.models.loading.dtype import configure_float32_matmul_precision
+from src.model_loading.dtype import configure_float32_matmul_precision
 
 
 @pytest.fixture(autouse=True)

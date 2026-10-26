@@ -18,8 +18,7 @@ from safetensors import safe_open
 from transformers.utils import CONFIG_NAME
 
 from src.checkpoint.config_export import write_config_json
-from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, HF_STREAM_PART_PREFIX, copy_checkpoint_aux_files
-from src.checkpoint.shard_writer import StageShardWriter
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, copy_checkpoint_aux_files
 from src.checkpoint.tool_io import (
     FP8_HEADER_DTYPE,
     checkpoint_shard_files,
@@ -30,6 +29,7 @@ from src.checkpoint.tool_io import (
     reject_in_place_conversion,
     resolve_checkpoint_source,
 )
+from src.checkpoint.writing import StreamingShardWriter
 
 logger = logging.getLogger(__name__)
 
@@ -120,7 +120,7 @@ def _stream_dequantized_checkpoint(
     raw. ``output_dir`` must not exist yet. Returns the bytes written.
     """
     os.makedirs(output_dir, exist_ok=False)
-    writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
+    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
     for index, shard_path in enumerate(input_shards, start=1):
         logger.info("Converting input shard %d/%d: %s", index, len(input_shards), os.path.basename(shard_path))
         with safe_open(shard_path, framework="pt", device="cpu") as shard:

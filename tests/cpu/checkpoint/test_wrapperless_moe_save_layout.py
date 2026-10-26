@@ -36,11 +36,9 @@ from transformers import (
 
 PartialState()  # save_model_config logs through accelerate's logger
 
-from src.checkpoint.format import (
-    load_full_state_dict,
-    save_pretrained_layout,
-    write_gathered_checkpoint,
-)
+from src.checkpoint.format import load_full_state_dict
+from src.checkpoint.hub_layout import save_pretrained_layout
+from src.checkpoint.writing import write_gathered_checkpoint
 from src.distributed.checkpoint.save import save_fsdp2_checkpoint
 from src.distributed.checkpoint.tp_save import save_tp_model
 from tests.common.checkpoint_io import written_keys

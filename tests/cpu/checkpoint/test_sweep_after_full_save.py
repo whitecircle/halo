@@ -32,8 +32,8 @@ import pytest
 import torch
 import torch.nn as nn
 
-import src.checkpoint.format as checkpoint_format_mod
-from src.checkpoint.format import sweep_after_full_save, write_gathered_checkpoint
+import src.checkpoint.writing as checkpoint_writing
+from src.checkpoint.writing import sweep_after_full_save, write_gathered_checkpoint
 
 INDEX = "model.safetensors.index.json"
 SINGLE = "model.safetensors"
@@ -202,9 +202,9 @@ def test_save_sharded_state_dict_sweeps_only_after_a_completed_write(tmp_path, m
     def failing_write(*args, **kwargs):
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(checkpoint_format_mod, "_safetensors_save_file", failing_write)
+    monkeypatch.setattr(checkpoint_writing, "save_file", failing_write)
     with pytest.raises(OSError):
-        checkpoint_format_mod.save_sharded_state_dict({"w": torch.ones(2)}, str(out))
+        checkpoint_writing.save_sharded_state_dict({"w": torch.ones(2)}, str(out))
 
     assert _files(out) == before, "a failed save destroyed the directory's previous checkpoint"
 
@@ -215,7 +215,7 @@ def test_save_sharded_state_dict_still_sweeps_stale_files_after_success(tmp_path
     out = tmp_path / "out"
     _plant_previous_sharded_run(out)
 
-    checkpoint_format_mod.save_sharded_state_dict({"w": torch.ones(2)}, str(out))
+    checkpoint_writing.save_sharded_state_dict({"w": torch.ones(2)}, str(out))
 
     assert _files(out) == {SINGLE}
 
@@ -239,8 +239,8 @@ def test_the_bin_fallback_writes_before_it_sweeps(tmp_path, monkeypatch):
     def failing(*args, **kwargs):
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(checkpoint_format_mod, "save_sharded_state_dict", failing)
-    monkeypatch.setattr(checkpoint_format_mod.torch, "save", failing)
+    monkeypatch.setattr(checkpoint_writing, "save_sharded_state_dict", failing)
+    monkeypatch.setattr(checkpoint_writing.torch, "save", failing)
     ctx = SimpleNamespace(max_shard_size="5GB")
     with pytest.raises(OSError):
         write_gathered_checkpoint(_hf_like_model(), {"w": torch.ones(2)}, str(out), ctx.max_shard_size)
@@ -257,7 +257,7 @@ def test_the_bin_fallback_replaces_the_weights_then_sweeps(tmp_path, monkeypatch
     def failing(*args, **kwargs):
         raise OSError("No space left on device")
 
-    monkeypatch.setattr(checkpoint_format_mod, "save_sharded_state_dict", failing)
+    monkeypatch.setattr(checkpoint_writing, "save_sharded_state_dict", failing)
     ctx = SimpleNamespace(max_shard_size="5GB")
     write_gathered_checkpoint(_hf_like_model(), {"w": torch.ones(2)}, str(out), ctx.max_shard_size)
 
@@ -276,10 +276,10 @@ def test_a_failed_sweep_after_the_bin_fallback_is_loud(tmp_path, monkeypatch, ca
     def failing_sweep(*args, **kwargs):
         raise OSError("Operation not permitted")
 
-    monkeypatch.setattr(checkpoint_format_mod, "save_sharded_state_dict", failing)
-    monkeypatch.setattr(checkpoint_format_mod, "remove_stale_checkpoint_files", failing_sweep)
+    monkeypatch.setattr(checkpoint_writing, "save_sharded_state_dict", failing)
+    monkeypatch.setattr(checkpoint_writing, "remove_stale_checkpoint_files", failing_sweep)
     ctx = SimpleNamespace(max_shard_size="5GB")
-    with caplog.at_level("WARNING", logger=checkpoint_format_mod.logger.name):
+    with caplog.at_level("WARNING", logger=checkpoint_writing.logger.name):
         write_gathered_checkpoint(_hf_like_model(), {"w": torch.ones(2)}, str(out), ctx.max_shard_size)
 
     assert "pytorch_model.bin" in _files(out), "the fallback .bin must survive a failed sweep"

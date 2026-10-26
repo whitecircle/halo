@@ -22,7 +22,7 @@ from src.data.pipeline.conversation import (
 )
 from src.data.pipeline.rendered import render_conversation, tokenize_rendered
 from src.data.vlm import process_vlm_conversation
-from src.models.loading.tokenizer_setup import is_bounded_length
+from src.models.context_window import is_bounded_length
 
 # The chat-render knobs a text run's script args carry (``ConversationRenderArguments`` and its
 # mirrors), named as the text renderers take them.

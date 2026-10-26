@@ -37,13 +37,8 @@ from src.distributed.runtime import (
     raise_rank0_failure,
 )
 from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import (
-    adopt_tokenizer_chat_template,
-    get_model_context_window,
-    is_bounded_length,
-    resolve_length_to_context,
-    setup_model_and_tokenizer,
-)
+from src.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, setup_model_and_tokenizer
+from src.models.context_window import get_model_context_window, is_bounded_length, resolve_length_to_context
 from src.training.early_stopping import StopsTrainingEarly
 from src.training.environment import (
     TrainingStoppedEarly,

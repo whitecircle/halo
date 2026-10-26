@@ -48,7 +48,7 @@ from src.distributed.loading.frozen_models import load_frozen_reference_model
 from src.distributed.loading.peft_setup import setup_peft_model
 from src.distributed.loading.vlm_setup import load_model_for_training
 from src.distributed.runtime import barrier, is_global_main_process
-from src.models.loading.model_preparation import log_model_info
+from src.model_loading.model_preparation import log_model_info
 from src.trainers.distillation.losses import require_same_token_ids
 from src.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer
 from src.training.environment import run_training

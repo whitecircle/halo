@@ -28,8 +28,8 @@ from src.distributed.expert_parallel.lazy_loader import (
     build_family_key_mapping,
 )
 from src.distributed.mesh import MeshDim
-from src.models.loading.dtype import reject_fp8_tensor
-from src.models.loading.lazy_safetensors.weights import (
+from src.model_loading.dtype import reject_fp8_tensor
+from src.model_loading.lazy_safetensors.weights import (
     assign_tensor_to_model,
     materialize_weight_plan,
     verify_loaded_shape,

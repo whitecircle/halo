@@ -28,8 +28,8 @@ import yaml
 from src.distributed.expert_parallel.expert_weights import ep_layer_classes_for_config
 from src.distributed.loading.peft_setup import split_expert_lora_targets
 from src.environments.episode import resolve_reasoning_end_ids
-from src.models.loading.config_levels import text_config
-from src.models.loading.tokenizer_setup import is_bounded_length
+from src.models.config_access import text_config
+from src.models.context_window import is_bounded_length
 from src.models.moe_balancing import BIAS_UPDATE_MODES, config_has_experts, native_balancing_bias_attrs
 from src.models.patches.attention import model_has_sinks, validate_attn_implementation
 from src.training.parallelism_args import parallelism_config_from_args

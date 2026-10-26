@@ -29,7 +29,7 @@ from trl import SFTConfig
 PartialState()  # the trainer logs through accelerate's logger, which refuses an uninitialized state
 
 from src.distributed.checkpoint.save import select_checkpoint_saver
-from src.models.loading.model_preparation import auto_load_model
+from src.model_loading.model_preparation import auto_load_model
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import word_level_tokenizer

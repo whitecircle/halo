@@ -1,6 +1,6 @@
-"""Model-side toolkit: module-tree introspection, MoE balancing, load-time patches, the
-sharding-agnostic loaders, and the task heads transformers does not ship.
+"""Model-side toolkit: module-tree introspection, composite-config access, MoE balancing, load-time
+patches, and the task heads transformers does not ship.
 
-Re-exports nothing; import the owning module. The parallelism-aware loaders live in
-:mod:`src.distributed.loading`, above this package.
+Re-exports nothing; import the owning module. Model construction lives in :mod:`src.model_loading`
+and the parallelism-aware loaders in :mod:`src.distributed.loading`, both above this package.
 """

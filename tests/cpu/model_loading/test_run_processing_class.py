@@ -6,7 +6,7 @@ keeps the processor where the checkpoint ships one, since the export of the mult
 served through it, and otherwise takes the tokenizer (Step-3.7 Flash ships no native processor
 config). Whether the checkpoint ships one is a confirmed answer, never an unreachable Hub.
 
-Run: pytest tests/cpu/models/test_run_processing_class.py
+Run: pytest tests/cpu/model_loading/test_run_processing_class.py
 """
 
 from types import SimpleNamespace
@@ -28,7 +28,7 @@ from transformers import (
 )
 
 from src.distributed.loading import vlm_setup
-from src.models.loading.model_preparation import resolve_auto_model_class
+from src.model_loading.model_preparation import resolve_auto_model_class
 from src.training.script_runner import install_resolved_tokenizer
 from tests.common.models import (
     PINNED_REVISIONS,

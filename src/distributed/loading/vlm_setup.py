@@ -26,8 +26,8 @@ from src.distributed.filesystem import hub_metadata_main_first
 from src.distributed.loading.model_loading import load_distributed_model
 from src.distributed.parallelism_config import ParallelismConfig
 from src.distributed.runtime import is_global_main_process, rank_consensus
-from src.models.loading.dtype import resolve_quantization_config, resolve_training_dtype
-from src.models.loading.model_preparation import finalize_liger_after_direct_load
+from src.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
+from src.model_loading.model_preparation import finalize_liger_after_direct_load
 from src.models.modality import config_declares_multimodality, is_vlm_model
 
 logger = get_logger(__name__, log_level="INFO")

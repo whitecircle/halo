@@ -53,16 +53,16 @@ from src.distributed.pipeline_parallel.stage import (
 )
 from src.distributed.runtime import DeferredRankFailure, get_global_rank, get_local_rank, reject_across_ranks
 from src.log import KEY_PREVIEW_COUNT
-from src.models.loading.lazy_safetensors.meta_shell import instantiate_on_meta
-from src.models.loading.lazy_safetensors.weights import (
+from src.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from src.model_loading.lazy_safetensors.weights import (
     SafetensorsWeightLoader,
     WeightAction,
     WeightPlan,
     init_checkpoint_absent_modules,
     materialize_empty_like,
 )
+from src.models.module_tree import backbone_with_layers
 from src.models.patches.buffer_fixes import finalize_loaded_model
-from src.models.structure import backbone_with_layers
 
 logger = logging.getLogger(__name__)
 

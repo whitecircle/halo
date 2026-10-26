@@ -52,14 +52,7 @@ from transformers import AutoConfig
 import src.distributed.expert_parallel.layers.roster  # noqa: F401 — registers the EP export roster the config finalizer requires
 from scripts._common import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 from src.checkpoint.config_export import finalize_exported_config
-from src.checkpoint.format import (
-    DEFAULT_MAX_SHARD_SIZE,
-    HF_STREAM_PART_PREFIX,
-    WEIGHT_FILE_IGNORE_PATTERNS,
-    copy_checkpoint_aux_files,
-    is_tie_reconcile_key,
-)
-from src.checkpoint.shard_writer import StageShardWriter
+from src.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, WEIGHT_FILE_IGNORE_PATTERNS, copy_checkpoint_aux_files
 from src.checkpoint.tool_io import (
     header_numel,
     iter_checkpoint_shard_entries,
@@ -67,10 +60,11 @@ from src.checkpoint.tool_io import (
     reject_in_place_conversion,
     stored_tensor_nbytes,
 )
+from src.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
 from src.log import configure_cli_logging
-from src.models.loading.config_levels import config_ties_word_embeddings
-from src.models.loading.dtype import DTYPE_BY_NAME
-from src.models.loading.model_preparation import concrete_model_class, resolve_auto_model_class
+from src.model_loading.dtype import DTYPE_BY_NAME
+from src.model_loading.model_preparation import concrete_model_class, resolve_auto_model_class
+from src.models.config_access import config_ties_word_embeddings
 from src.models.moe_balancing import is_balancing_state_key
 
 configure_cli_logging()
@@ -432,7 +426,7 @@ def merge_models(
     spec = _METHODS[method]
     op_knobs = {_knob_dest(knob): knob_values[knob] for knob in spec.knobs}
 
-    writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=True)
+    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
 
     # Peak RAM is the costliest key, every contributor's copy as stored plus the method's fp32 working
     # set over it (an integer pass-through key counted as if merged), and the writer's pending output

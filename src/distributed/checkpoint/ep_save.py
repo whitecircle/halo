@@ -25,16 +25,17 @@ from src.checkpoint.format import (
     DEFAULT_MAX_SHARD_SIZE,
     EP_SHARD_KEY_INFIX,
     EP_SHARDED_FORMAT,
-    HF_STREAM_PART_PREFIX,
-    cast_state_dict_to_save_dtype,
     ep_shard_filename,
+)
+from src.checkpoint.hub_layout import reversed_export_transforms, revert_conversions
+from src.checkpoint.model_card import tag_model_card
+from src.checkpoint.writing import (
+    StreamingShardWriter,
+    cast_to_save_dtype,
     reconcile_tie_word_embeddings,
-    revert_conversions,
     save_dtype_caster,
     write_merged_index,
 )
-from src.checkpoint.model_card import tag_model_card
-from src.checkpoint.shard_writer import StageShardWriter
 from src.distributed.checkpoint.write import exchange_shard_index, resolve_retained
 from src.distributed.context_parallel.base_layer import UlyssesAttentionBase
 from src.distributed.context_parallel.key_mapping import strip_cp_attention_prefix
@@ -47,7 +48,7 @@ from src.distributed.expert_parallel.expert_weights import (
     supported_ep_merge_model_types,
     to_hub_layer_key,
 )
-from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions, reversed_export_transforms
+from src.distributed.expert_parallel.hub_conversion import gathered_export_conversions
 from src.distributed.runtime import (
     DeferredRankFailure,
     barrier_on_exit,
@@ -61,15 +62,10 @@ from src.distributed.runtime import (
     resolve_param_tensor,
 )
 from src.distributed.tensor_parallel.state_dict import gather_tp_sharded_non_dtensor_params
+from src.models.param_roles import persistent_buffers
 from src.models.patches.gpt_oss_sinks import neutralized_gpt_oss_sinks
-from src.models.structure import (
-    LoraFolds,
-    base_transformers_model,
-    lora_folded_data,
-    normalize_peft_param_name,
-    persistent_buffers,
-    unwrap_model,
-)
+from src.models.structure import LoraFolds, lora_folded_data
+from src.models.unwrapping import base_transformers_model, plain_peft_param_name, unwrap_toolkit_wrappers
 
 logger = get_logger(__name__)
 
@@ -87,7 +83,7 @@ def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[
 
     def remap(key: str) -> str | None:
         if peft_prefix is not None:
-            normalized = normalize_peft_param_name(key, peft_prefix)
+            normalized = plain_peft_param_name(key, peft_prefix)
             if normalized is None:
                 return None
             key = normalized
@@ -149,9 +145,9 @@ def save_ep_model(
     ``lora_folds`` (:func:`~src.models.structure.lora_fold_targets` of the PeftModel) folds the PEFT
     adapters' deltas into the non-EP base tensors as they are written, out of place; no LoRA layer
     sits inside an EP layer (the trainer's ``_validate_lora_ep_compatibility`` refuses one).
-    ``keep_live_dtype`` (a training checkpoint) is :func:`~src.checkpoint.format.save_dtype_caster`'s.
+    ``keep_live_dtype`` (a training checkpoint) is :func:`~src.checkpoint.writing.save_dtype_caster`'s.
     """
-    model = unwrap_model(model)
+    model = unwrap_toolkit_wrappers(model)
     peft_prefix = None
     if is_peft_model(model):
         if lora_folds is None:
@@ -162,10 +158,10 @@ def save_ep_model(
                 "PeftAdapterSaver."
             )
         peft_prefix = model.prefix
-        # A PeftModel wraps outside the CP wrapper and unwrap_model stops at it, so under EP+CP every
+        # A PeftModel wraps outside the CP wrapper and unwrap_toolkit_wrappers stops at it, so under EP+CP every
         # key would carry an extra `model.` that cp_key_remap does not strip. LoRA layers stay in the
         # tree; peft_prefix normalizes their infixes.
-        model = unwrap_model(model.get_base_model())
+        model = unwrap_toolkit_wrappers(model.get_base_model())
     world_size = get_global_world_size()
     fs_aware_makedirs(output_dir)
 
@@ -265,7 +261,7 @@ def _save_ep_gathered(
         return export({hf_key: tensor for key, tensor in chunk.items() if (hf_key := remap(key)) is not None})
 
     # One writer (this rank), so the parts can be renamed to HF's own names once the count is known.
-    writer = StageShardWriter(output_dir, HF_STREAM_PART_PREFIX, max_shard_size, enabled=is_save_rank)
+    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=is_save_rank)
     # Streaming puts the save rank's disk writes between the per-layer expert gathers below, so a
     # failing write must not raise here: the peers would block in the next layer's all-gather.
     guard = DeferredRankFailure(f"EP checkpoint write to {output_dir}")
@@ -344,7 +340,7 @@ def save_ep_lora_adapters(
     The adapters go to the save dtype, or keep their live one under ``keep_live_dtype`` (a training
     checkpoint, whose fp32 adapters must resume unrounded).
     """
-    model = unwrap_model(model)  # a wrapper walk would prefix every adapter key (see save_ep_model)
+    model = unwrap_toolkit_wrappers(model)  # a wrapper walk would prefix every adapter key (see save_ep_model)
     is_save_rank = fs_aware_save_rank()
     fs_aware_makedirs(output_dir)
     # Collective on every rank; only the writer keeps the result (else one host holds
@@ -352,7 +348,7 @@ def save_ep_lora_adapters(
     adapters = gather_ep_lora_adapters(model, retain=is_save_rank)
     with barrier_on_exit():
         if is_save_rank:
-            state = adapters if keep_live_dtype else cast_state_dict_to_save_dtype(adapters)
+            state = adapters if keep_live_dtype else {key: cast_to_save_dtype(t) for key, t in adapters.items()}
             save_file(state, os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
             if adapter_config is not None:
                 with open(os.path.join(output_dir, ADAPTER_CONFIG_FILE), "w") as f:

@@ -210,15 +210,16 @@ manifest.
   code ([Move kit](#move-kit)).
 
 - **The import layering is read off the import graph.** `tests/cpu/conventions/test_import_layering.py`
-  fails a `src.distributed` or `torch.distributed` import in `src/checkpoint/` or `src/models/loading/`,
-  an import of the loader dispatch from the rest of `src/distributed`, a cycle among the members of
-  `src/distributed` and a raw toolkit env read. It also lays the final layer table (`_LAYERS`: a unit
-  imports only units of lower rows, `cli` imports nothing from the package, the tool-safe units reach no
-  process group, parallelism or rollout sync, the member orders inside `src/distributed`, one lazy
-  `deep_ep` importer, package-internal modules, no module cycle) over today's tree, each module that has
-  not moved yet placed where it lands through `_PENDING_MOVES`. A break outside `_KNOWN_LAYER_BREAKS`
-  (the ones today's tree still makes, reported as one warning) fails, and so do a module the table
-  cannot place and an entry of either table that is out of date. `TYPE_CHECKING` imports are exempt.
+  fails a `src.distributed` or `torch.distributed` import in `src/checkpoint/`, `src/model_loading/` or
+  `src/models/config_access.py`, an import of the loader dispatch from the rest of `src/distributed`, a
+  cycle among the members of `src/distributed` and a raw toolkit env read. It also lays the final layer
+  table (`_LAYERS`: a unit imports only units of lower rows, `cli` imports nothing from the package, the
+  tool-safe units reach no process group, parallelism or rollout sync, the member orders inside
+  `src/distributed`, one lazy `deep_ep` importer, package-internal modules, no module cycle) over today's
+  tree, each module that has not moved yet placed where it lands through `_PENDING_MOVES`. A break outside
+  `_KNOWN_LAYER_BREAKS` (the ones today's tree still makes, reported as one warning) fails, and so do a
+  module the table cannot place and an entry of either table that is out of date. `TYPE_CHECKING` imports
+  are exempt.
 
 - **Convention tests also run on the hosted runner.** The `conventions` job in `.github/workflows/lint.yml`
   runs the files it lists on the standard library and pytest alone, so such a test reads the source

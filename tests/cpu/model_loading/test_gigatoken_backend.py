@@ -12,17 +12,17 @@ import pytest
 from datasets import Dataset
 from PIL import Image
 
-from src.data.pipeline import tokenizer_backend as tb
 from src.data.pipeline.preprocessed_metadata import PreprocessingConfig
 from src.data.pipeline.preprocessing import tokenize_dataset
-from src.data.pipeline.tokenizer_backend import (
+from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
+from src.model_loading import tokenizer_backend as tb
+from src.model_loading.tokenizer_backend import (
     TOKENIZER_BACKENDS,
     GigatokenTokenizerProxy,
     resolve_processor_backend,
     resolve_tokenizer_backend,
 )
-from src.distributed.tensor_parallel.state_dict import input_embeddings_tp_sharded
-from src.models.loading.tokenizer_setup import setup_model_and_tokenizer
+from src.model_loading.tokenizer_setup import setup_model_and_tokenizer
 from tests.common.models import PINNED_REVISIONS, QWEN2_5_VL_3B, QWEN3_0_6B
 from tests.common.tokenizers import load_cached_processor, load_cached_tokenizer
 

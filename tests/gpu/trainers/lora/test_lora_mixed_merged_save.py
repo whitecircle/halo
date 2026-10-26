@@ -51,7 +51,7 @@ from src.distributed.expert_parallel.expert_weights import has_ep_lora
 from src.distributed.fsdp import reshard_fsdp2_modules
 from src.distributed.parallelism_config import ParallelismConfig
 from src.env import env_flag, env_int, env_str
-from src.models.structure import normalize_peft_param_name
+from src.models.unwrapping import plain_peft_param_name
 from src.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import ensure_model_downloaded
@@ -169,12 +169,12 @@ def _sample_merged_weights(model, checkpoint_keys: list[str]) -> dict[str, torch
 
     The live tree spells them with PEFT's ``.base_layer`` infix and, at ep>1, holds them as FSDP2
     DTensor shards — so this resolves both through the very seams the save uses
-    (``normalize_peft_param_name`` + ``full_tensor()``), which is what makes an equality comparison
+    (``plain_peft_param_name`` + ``full_tensor()``), which is what makes an equality comparison
     against the written bytes meaningful rather than a coincidence of naming.
     """
     out: dict[str, torch.Tensor] = {}
     for name, param in model.named_parameters():
-        hf_name = normalize_peft_param_name(name, model.prefix)
+        hf_name = plain_peft_param_name(name, model.prefix)
         if hf_name not in checkpoint_keys:
             continue
         data = param.data
@@ -191,7 +191,7 @@ def _pick_sample_keys(model) -> list[str]:
     on every rank, which is what lets the gather below stay collective-safe.
     """
     picked = [
-        normalize_peft_param_name(name, model.prefix)
+        plain_peft_param_name(name, model.prefix)
         for name, _ in model.named_parameters()
         if ".base_layer.weight" in name
     ]
@@ -282,7 +282,7 @@ def run(ctx) -> dict:
     expected = {
         key: merges[name].to(torch.bfloat16).cpu()
         for name in merges
-        if (key := normalize_peft_param_name(name, peft_model.prefix)) in sample_keys
+        if (key := plain_peft_param_name(name, peft_model.prefix)) in sample_keys
     }
     del merges
     unmerged = _sample_merged_weights(unwrapped, sample_keys)  # the frozen base, for non-vacuity

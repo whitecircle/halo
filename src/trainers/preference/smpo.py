@@ -65,6 +65,8 @@ from src.distributed.pipeline_parallel.losses import (
     split_pairs,
     token_logprobs,
 )
+from src.model_loading.dtype import is_kbit_quantized
+from src.model_loading.tokenizer_setup import resolve_tokenizer
 from src.models.patches.attention import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from src.models.segment_markers import (
     document_ids,
@@ -75,7 +77,6 @@ from src.models.segment_markers import (
     segment_marker_kwargs,
     segment_markers_for,
 )
-from src.models.structure import is_kbit_quantized, resolve_tokenizer
 from src.trainers.mixins.base import DistributedTrainerMixin
 from src.trainers.mixins.dataloader import split_rows_head, split_rows_mean
 from src.trainers.mixins.pp_gates import reject_pp_peft

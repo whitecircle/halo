@@ -31,7 +31,7 @@ from scripts.after_training.merge_ep_shards import merge_ep_shards
 from src.distributed.checkpoint.ep_save import save_ep_model
 from src.distributed.expert_parallel.config import EPConfig
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
-from src.models.loading.model_preparation import auto_load_model
+from src.model_loading.model_preparation import auto_load_model
 from tests.common.distributed import shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model

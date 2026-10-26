@@ -2,8 +2,7 @@
 verified load through it, the per-family attention patches and the implementation a model is built
 with, and the post-load generation-config / Liger fixups.
 
-The rules it builds on live beside it (config levels, dtype, tokenizer setup); the callers that
-place a model on a parallelism live in :mod:`src.distributed.loading`, above it.
+The callers that place a model on a parallelism live in :mod:`src.distributed.loading`, above it.
 """
 
 from accelerate.logging import get_logger
@@ -22,8 +21,8 @@ from transformers.models.auto.modeling_auto import (
 import src.models.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
 from src.checkpoint.model_card import HUB_TAGS
 from src.kernels.liger.orchestrator import LIGER_APPLIED_CONFIG_ATTR, trl_reapplication_config
-from src.models.loading.checkpoint_coverage import from_pretrained_verified
-from src.models.loading.config_levels import model_type_matches
+from src.model_loading.checkpoint_coverage import from_pretrained_verified
+from src.models.config_access import model_type_matches
 from src.models.patches.attention import (
     head_dim_exceeds_flash,
     patch_mistral4_flash_packed_position_ids,
