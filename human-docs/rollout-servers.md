@@ -130,7 +130,7 @@ images built from this repo: a mismatched fabric stack forms the group and then
 hangs on the first collective. Check the transport before training:
 
 ```bash
-halo run weight-sync-transport --server-url http://<server>:8000 --backend vllm --expect efa
+halo run weight-sync-transport --server_url http://<server>:8000 --backend vllm --expect efa
 ```
 
 ## How the trainer finds it

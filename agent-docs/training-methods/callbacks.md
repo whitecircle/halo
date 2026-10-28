@@ -121,7 +121,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when a bias-update mode is a
 | `moe_balancing` | Effect | `router_aux_loss_coef` | `output_router_logits` | Callback |
 |---|---|---|---|---|
 | `bias_update` | Sign update into the family's own checkpoint slot; **raises** on any router left on the side-buffer | **forced 0** | **forced False** | `BalancingBiasCallback` |
-| `bias_update_transient` | The same update in a trainer-only side-buffer; **raises** where every router exports natively | **forced 0** | **forced False** | `BalancingBiasCallback` |
+| `bias_update_transient` | The same update in a trainer-only side-buffer no export carries, so a served copy routes without it (near-tied top-k picks flip); **raises** where every router exports natively | **forced 0** | **forced False** | `BalancingBiasCallback` |
 | `aux_loss` | The model's own switch-style aux loss | preserved | **True** only where the term reaches the loss | none |
 | `none` | No intervention; a self-balancing model keeps doing so | preserved | preserved | none |
 

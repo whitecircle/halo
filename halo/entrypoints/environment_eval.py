@@ -1,6 +1,6 @@
 """The environment evals' training contract and run plumbing: an environmental-GRPO training YAML read the way the
-training run reads it (``--training_config``), the generation contract an eval samples under, the trajectory path
-and the output writer. The eval driver itself is :mod:`halo.environments.eval_runner`."""
+training run reads it (``--training_config``), the generation contract an eval samples under, the default split, the
+trajectory path and the output writer. The episode loop itself is :mod:`halo.environments.eval_runner`."""
 
 import argparse
 import json
@@ -38,6 +38,9 @@ TRAINING_CONTRACT_CLASSES = (EnvironmentConfig, AsyncRolloutConfig, ModelArgumen
 
 # The sampling flags an explicit CLI value lays over the training config, by ``RolloutConfig`` field.
 _SAMPLING_FLAGS = ("temperature", "top_p", "max_tokens", "request_timeout")
+
+# The split an eval reads when --split is omitted, unless its dataset ships a single split of its own.
+DEFAULT_SPLIT = "test"
 
 
 @dataclass(frozen=True)

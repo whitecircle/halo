@@ -437,7 +437,7 @@ def test_every_endpoint_flag_comes_from_the_shared_helper():
     They drive the same served model, so a command line has to carry from one to the next; a CLI that
     declares its own URL or key flag is how one ends up ``--base_url`` and the next ``--model-url``,
     with the key's default and help copied beside each. ``scripts/profiling/`` is out of scope: its
-    ``--server-url`` is the rollout server's root for the weight-sync group, not an OpenAI endpoint.
+    ``--server_url`` is the rollout server's root for the weight-sync group, not an OpenAI endpoint.
     """
     shared = add_openai_endpoint_args(argparse.ArgumentParser())
     shared_flags = {spelling for action in shared._actions for spelling in action.option_strings}

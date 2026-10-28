@@ -144,9 +144,10 @@ are enforced by `tests/cpu/conventions/`.
   and `tests/conftest.py` puts the repo root on the path, so `from halo...` / `from tests.common...` work
   under `pytest` and a standalone `torchrun`. A tool's driver lives in `halo/` and a test imports it from
   there (`from halo.checkpoint.model_merge import merge_models`); `scripts/` is a namespace package, so a
-  test imports what a script owns by dotted path (`from scripts.environments.inference.run_env import
-  build_examples`), and `tests.common.repo.load_script_module` loads a file by path where a test needs its
-  own module object or the file sits outside the packages (`docker/`).
+  test that drives a CLI's own parser imports it by dotted path
+  (`from scripts.environments.inference.run_code_contests import parse_args`), and
+  `tests.common.repo.load_script_module` loads a file by path where a test needs its own module object or
+  the file sits outside the packages (`docker/`).
 - **Every first-party reference resolves without running.**
   `tests/cpu/conventions/test_references_resolve.py` statically resolves each first-party import,
   `patch` / `monkeypatch` target, attribute chain on an imported module or class, dotted name and

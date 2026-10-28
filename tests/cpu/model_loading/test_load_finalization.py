@@ -76,16 +76,16 @@ TERMINAL_LOADERS = (
     ("halo/model_loading/parallel/pp.py", "_load_stage_lazy"),
 )
 
-# Where the standalone tools' drivers live: the CLIs themselves, the offline checkpoint tools and the
-# reward-model scorer they parse for.
-TOOL_DRIVER_ROOTS = ("scripts", "halo/checkpoint", "halo/entrypoints/reward_scoring.py")
+# Where the standalone tools' drivers live: the CLIs themselves, the offline checkpoint tools, the
+# reward-model scorer they parse for and the dedup embeddings.
+TOOL_DRIVER_ROOTS = ("scripts", "halo/checkpoint", "halo/entrypoints/reward_scoring.py", "halo/data/deduplication.py")
 
 # Tool loaders whose model is handed to a FORWARD — reward scores, dedup embeddings, the
 # ``--check_inference`` generation. An uninitialized buffer here becomes numbers the operator acts
 # on, with no other symptom, so each must call the seam directly.
 INFERENCE_TOOL_LOADERS = (
     ("halo/entrypoints/reward_scoring.py", "load_reward_model"),
-    ("scripts/inference/deduplicate_dataset.py", "compute_embeddings"),
+    ("halo/data/deduplication.py", "compute_embeddings"),
     ("halo/checkpoint/bf16_conversion.py", "_load_verified"),
 )
 

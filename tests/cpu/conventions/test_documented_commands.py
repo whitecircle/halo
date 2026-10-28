@@ -78,7 +78,7 @@ def test_a_documented_name_resolves(where, verb, tokens):
     names = [token for token in tokens if not token.startswith("-")]
     if not names or _PLACEHOLDER.search(names[0]) or not _NAME.match(names[0]):
         pytest.skip("no literal method or tool name on this line")
-    argv = [verb, names[0], ANY_CONFIG, "--dry-run"] if verb == "launch" else [verb, names[0], "--dry-run"]
+    argv = [verb, names[0], ANY_CONFIG, "--dry_run"] if verb == "launch" else [verb, names[0], "--dry_run"]
     result = runner.invoke(app, argv)
     assert result.exit_code == 0, f"{where}: `halo {verb} {names[0]}` does not resolve:\n{result.output}"
 

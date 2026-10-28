@@ -1,6 +1,6 @@
 """The low-precision vocabulary stays one closed set: every ``lowp_precision`` mode has a recipe, every
 recipe names a quantization format the kernels implement and a peak the MFU table spells, and
-``LowpSpec.validate`` refuses what the config gate used to.
+``LowpSpec.validate`` refuses an unknown precision, a negative keep window and a scope that applies to nothing.
 
     python tests/cpu/kernels/test_lowp_spec.py
 """

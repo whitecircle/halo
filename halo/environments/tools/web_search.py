@@ -19,6 +19,7 @@ from halo.env import env_flag, env_str
 _SEARCH_TIMEOUT = 15.0
 # Results a search returns when the call names no count.
 DEFAULT_MAX_RESULTS = 5
+_ALLOW_MOCK_SEARCH_FLAG = "HALO_ALLOW_MOCK_SEARCH"
 
 
 def _format_results(results: list[dict[str, Any]], max_results: int) -> str:
@@ -163,9 +164,8 @@ _BACKENDS: dict[str, _SearchBackend] = {
 }
 
 # Fabricated snippets score ``tool_success_reward`` like a real search, so naming this backend
-# requires the flag below (read per call); tests and smoke runs set it.
+# requires ``_ALLOW_MOCK_SEARCH_FLAG`` (read per call); tests and smoke runs set it.
 _MOCK_BACKEND = _SearchBackend(sync=_search_mock, async_=_async_search_mock)
-_ALLOW_MOCK_SEARCH_FLAG = "HALO_ALLOW_MOCK_SEARCH"
 
 
 def _selectable_backends() -> dict[str, _SearchBackend]:

@@ -222,8 +222,7 @@ and `allow_optimizer_warm_restart`, `moe_balancing`, `dataset_presharded`, and `
 Its `_apply_training_args_overrides` step sets `fsdp = ""` on the training args (the mixin owns sharding)
 and, under EP, `ddp_find_unused_parameters = True`, hands TRL its router aux-loss coefficient, and
 reconciles `save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested
-mode and the model (every MoE, EP or CP run goes reentrant, except under PP, which requires
-non-reentrant). It then runs the construction refusals
+mode and the model ([reentrant rule](../optimization/flash-attention.md#usage)). It then runs the construction refusals
 (`reject_undeclared_axes`, `reject_pp_named_optimizer`, `reject_accelerate_launch`, the determinism
 gates) and the PP split.
 `distributed_trainer_kwargs` (`halo/entrypoints/script.py`) is the bundle every entry script

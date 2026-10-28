@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+from halo.entrypoints.code_contests_regrade import submitted_solutions
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.results import SandboxResult
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
@@ -16,7 +17,6 @@ from halo.environments.tasks.coding.code_contests_prompts import (
 )
 from halo.environments.tasks.coding.program_source import normalized_program, strip_comments
 from halo.rewards.samples import REFUSED_CALL_IDS_KEY
-from scripts.environments.inference.regrade_trajectories import submitted_solutions
 from tests.common.code_contests import SINGLE_TEST_ANSWER
 
 WRONG = "n = int(input())\nprint(n)\n"

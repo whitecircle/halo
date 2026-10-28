@@ -97,6 +97,20 @@ it in `tests/common/models.py` so the seed carries it.
    `gpu-tests.yml`.
 5. Create the `run-ci-gpu` label.
 
+## Release validation
+
+The scope Halo 1.2.0 is validated on:
+
+- **GPU:** single 8× B300 nodes: the core and pipeline tiers, both rollout-server tiers (vLLM 0.32.0,
+  SGLang 0.5.22), the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`) and
+  the throughput band (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)).
+- **Hopper:** the image build, the CPU tier inside it and an FA3 import check; no GPU test runs on Hopper.
+- **Multi-node:** a two-node simulation on one host; no 1.2.0 row ran on two machines
+  ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
+- **Upgrades:** checkpoints written by 1.1.0 resume with the optimizer restored exactly, and export and
+  merge: FSDP2 full fine-tuning, LoRA adapters, EP gathered saves, EP sharded saves after
+  `merge_ep_shards.py`, and async GRPO whose prefetched rounds hold plain prompts and answers.
+
 ## Contribution gate
 
 Three workflows implement the issue-first gate [`CONTRIBUTING.md`](../../CONTRIBUTING.md#the-gate-read-first)

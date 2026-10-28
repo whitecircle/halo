@@ -10,14 +10,14 @@ GPUDirect), ``ib`` (NCCL's own InfiniBand transport), ``socket`` (TCP over the h
 libfabric provider and the push rate. With ``--expect`` it is a gate.
 
     # trainer node, server on another node over EFA
-    python scripts/profiling/weight_sync_transport.py --server-url http://10.0.0.7:8000 --expect efa
+    python scripts/profiling/weight_sync_transport.py --server_url http://10.0.0.7:8000 --expect efa
     # same host, SGLang, machine-readable
-    python scripts/profiling/weight_sync_transport.py --server-url http://localhost:30000 \\
+    python scripts/profiling/weight_sync_transport.py --server_url http://localhost:30000 \\
         --backend sglang --expect p2p --json
 
 Run it from the trainer container, launched exactly as the trainer would be (same image, devices
 and NCCL env), on a GPU the server does not own. The checkpoint read here must be the one the
-server loaded (``--model-id`` when the served id is a server-side path or an alias). Exits 1 when
+server loaded (``--model_id`` when the served id is a server-side path or an alias). Exits 1 when
 the transport differs from ``--expect``, when the push altered the served model, or when the group
 fails to form.
 """
@@ -36,19 +36,19 @@ DEFAULT_CONNECTION_TIMEOUT_S = 120.0
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--server-url", required=True, help="rollout server base URL, e.g. http://10.0.0.7:8000")
+    parser.add_argument("--server_url", required=True, help="rollout server base URL, e.g. http://10.0.0.7:8000")
     parser.add_argument("--backend", choices=rollout_backends(), default="vllm", help="rollout engine the server runs")
-    parser.add_argument("--group-port", type=int, default=0, help="rendezvous port on this host (0 = ephemeral)")
-    parser.add_argument("--group-host", default=None, help="address the server dials back to (default: auto)")
+    parser.add_argument("--group_port", type=int, default=0, help="rendezvous port on this host (0 = ephemeral)")
+    parser.add_argument("--group_host", default=None, help="address the server dials back to (default: auto)")
     parser.add_argument("--device", default="cuda:0", help="GPU the group forms on; must not be the server's")
     parser.add_argument("--param", default=None, help="checkpoint parameter to push (default: the input embedding)")
     parser.add_argument(
-        "--model-id", default=None, help="checkpoint id or path the server loaded (default: the id it advertises)"
+        "--model_id", default=None, help="checkpoint id or path the server loaded (default: the id it advertises)"
     )
-    parser.add_argument("--revision", default=None, help="Hub revision of --model-id (default: main)")
+    parser.add_argument("--revision", default=None, help="Hub revision of --model_id (default: main)")
     parser.add_argument("--rounds", type=int, default=3, help="pushes to time after the group formed")
     parser.add_argument(
-        "--connection-timeout", type=float, default=DEFAULT_CONNECTION_TIMEOUT_S, help="seconds to wait for /health"
+        "--connection_timeout", type=float, default=DEFAULT_CONNECTION_TIMEOUT_S, help="seconds to wait for /health"
     )
     parser.add_argument(
         "--expect",

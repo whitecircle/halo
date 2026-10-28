@@ -175,6 +175,7 @@ vLLM must own GPUs **no trainer rank uses**. The compose defaults put the server
 ```bash
 # vLLM on GPU 7 (flags: Rollout Servers)
 make build-vllm   # or set VLLM_IMAGE to the public image
+export HALO_SCRATCH=/path/to/large/volume   # or set it in .env; compose refuses to start without it
 VLLM_MODEL=Qwen/Qwen3-30B-A3B docker compose -f docker-compose.vllm.yml up vllm-server
 
 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 torchrun --nproc_per_node=7 \

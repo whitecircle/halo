@@ -43,6 +43,7 @@ every step ([Reward Terms](../../agent-docs/training-methods/grpo/rewards/README
 ```bash
 # server first, on GPU 7, serving the checkpoint the config trains
 make build-vllm   # or set VLLM_IMAGE to the public image
+export HALO_SCRATCH=/path/to/large/volume   # or set it in .env; compose refuses to start without it
 VLLM_MODEL=Qwen/Qwen3-4B-Instruct-2507 docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 # trainer on GPUs 0-6

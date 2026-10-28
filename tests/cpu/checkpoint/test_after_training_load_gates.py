@@ -33,8 +33,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 
-import halo.checkpoint.bf16_conversion as convert_to_bf16
-from halo.checkpoint import adapter_merge
+from halo.checkpoint import adapter_merge, bf16_conversion
 from halo.model_loading import model_preparation
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG
@@ -172,7 +171,7 @@ def test_a_truncated_source_is_refused_on_every_conversion_path(task, causal_lm_
     random-initialize a checkpoint's missing tensors and write them out as a complete-looking bf16
     model."""
     with pytest.raises(RuntimeError, match="randomly initialized"):
-        convert_to_bf16.load_model(_truncate(causal_lm_checkpoint, tmp_path), task, dtype=torch.float32)
+        bf16_conversion.load_model(_truncate(causal_lm_checkpoint, tmp_path), task, dtype=torch.float32)
 
 
 def test_a_truncated_base_is_refused_under_peft(causal_lm_checkpoint, tmp_path):
@@ -180,13 +179,13 @@ def test_a_truncated_base_is_refused_under_peft(causal_lm_checkpoint, tmp_path):
     the hole for the merge that follows."""
     adapter_dir = _adapter_for(_truncate(causal_lm_checkpoint, tmp_path), tmp_path)
     with pytest.raises(RuntimeError, match="randomly initialized"):
-        convert_to_bf16.load_model(adapter_dir, "causal_lm", is_peft=True, dtype=torch.float32)
+        bf16_conversion.load_model(adapter_dir, "causal_lm", is_peft=True, dtype=torch.float32)
 
 
 def test_an_intact_base_still_loads_under_peft(causal_lm_checkpoint, tmp_path):
     """The gate must not refuse the ordinary adapter: the merge has to keep working."""
     adapter_dir = _adapter_for(causal_lm_checkpoint, tmp_path)
-    model = convert_to_bf16.load_model(adapter_dir, "causal_lm", is_peft=True, dtype=torch.float32)
+    model = bf16_conversion.load_model(adapter_dir, "causal_lm", is_peft=True, dtype=torch.float32)
     assert model.merge_and_unload() is not None
 
 

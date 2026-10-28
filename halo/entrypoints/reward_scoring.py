@@ -434,7 +434,7 @@ async def run_reward_scoring(args) -> None:
     client, rm_tokenizer, rm_model, rm_device = boot_scoring_run(args)
 
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-    output_path = build_output_path(args.output_dir, args.dataset, args.model, "rm_scoring")
+    output_path = build_output_path(args.output_dir, args.dataset, args.model, "reward_scoring")
 
     df = load_prompts_dataframe(args)
 

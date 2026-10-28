@@ -271,6 +271,7 @@ teacher-distillation student included) and every frozen reference or teacher loa
   stay on the Hub. The default
   embedding backbone is the exception: a sentence-transformers pipeline keeps its modules in
   subfolders, so it takes the whole repository, `onnx/` and `openvino/` exports included.
+  Offline (`HF_HUB_OFFLINE`) the fetching rank reads its cache like every other rank, so a pinned revision resolves from a complete cached snapshot.
 - Every rank then resolves the source on its own node: the local directory, or the snapshot in its
   Hub cache (`HF_HUB_CACHE`, under `HF_HOME` by default). The verdicts join over the c10d store, so per-node fetch skew
   waits under `DIST_STORE_TIMEOUT_HOURS`, not the NCCL watchdog.

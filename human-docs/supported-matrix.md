@@ -161,21 +161,12 @@ What each mode writes, and which resumes are exact:
 
 ## Validation
 
-The GPU tests run on single 8× B300 nodes: the core and pipeline tiers, both
-rollout-server tiers, the EP and CP bit-for-bit equivalence gates and the
-throughput band.
-
-- **Hopper:** the image build, the CPU test tier inside it and an FA3 import
-  check. No GPU test runs on Hopper.
-- **Multi-node:** two nodes simulated on one host (two containers, socket NCCL,
-  per-node storage). A Qwen3-8B `pp2` run trains, resumes, merges with
-  `merge-pp-stages` and resumes exactly from the merged directory. Not run on two
-  machines: cross-node EP and EP+ETP, two-node CP, `pp2` × `ep8`, `pp2` × `etp2`
-  and the EFA weight-sync preflight.
-- **Upgrades:** checkpoints written by Halo 1.1.0 resume with the optimizer
-  restored exactly, and export and merge: FSDP2, LoRA, EP gathered and merged
-  sharded saves, and async GRPO whose prefetched rounds hold plain prompts and
-  answers.
+The GPU tests run on single 8× B300 nodes. Hopper gets the image build, the
+CPU tests inside it and an FA3 import check, with no GPU test. Multi-node
+coverage is a two-node simulation on one host: nothing in this release ran on
+two machines. Checkpoints written by Halo 1.1.0 resume exactly and export.
+The full scope: [Release validation](../agent-docs/infrastructure/ci.md#release-validation) ↗
+and [Verified topologies](../agent-docs/parallelism/multi-node.md#verified-topologies) ↗.
 
 ## Limits
 

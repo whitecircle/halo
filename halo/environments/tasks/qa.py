@@ -36,6 +36,13 @@ _MULTIPLE_CHOICE_PATTERNS = [
     )
 ]
 
+_QA_SEARCH_SYSTEM_PROMPT = (
+    "You are a research assistant. Use the available tools to find "
+    "information and answer the question accurately.\n\n"
+    "When you have enough information, provide your final answer "
+    "directly (without tool calls). Be concise -- state just the answer."
+)
+
 
 def render_choices(choices: list[Any]) -> str:
     """One line per choice, each led by the letter :func:`multiple_choice_match` scores it as (an already-labelled
@@ -71,14 +78,6 @@ def multiple_choice_match(predicted: str, expected: str) -> bool:
 
     # No startswith fallback: "Although I'm not sure..." must not score as choice "A".
     return False
-
-
-_QA_SEARCH_SYSTEM_PROMPT = (
-    "You are a research assistant. Use the available tools to find "
-    "information and answer the question accurately.\n\n"
-    "When you have enough information, provide your final answer "
-    "directly (without tool calls). Be concise -- state just the answer."
-)
 
 
 def build_qa_search_environment(

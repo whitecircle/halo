@@ -93,7 +93,8 @@ forwarding rank stages one chunk on its sync GPU, not the model (~800 GB at 400B
 buffered 1 GiB buffers on vLLM, typed 1 GiB chunks on SGLang. A chunk is cut before
 `HALO_WEIGHT_SYNC_CHUNK_MB` (1 GiB) is exceeded, and a larger tensor rides alone. A chunk staged in
 pinned host memory instead crosses PCIe twice before the NIC sees it: 19–24 GB/s against 53–80 GB/s
-staged on the device.
+staged on the device (8× B300 nodes over EFA; the vLLM rate measured on vLLM 0.26.0, the SGLang rate
+measured on SGLang 0.5.17).
 
 The forwarding rank's peak during a sync is the assembled EP layer being sent (~28 GB for one 397B
 layer), the staged chunk, the snapshot of the largest tensor and the engine path's buffers: SGLang's
@@ -537,11 +538,11 @@ Verify the transport before training, from the trainer container launched as the
 on a GPU the server does not own:
 
 ```bash
-python scripts/profiling/weight_sync_transport.py --server-url http://<server>:8000 --backend vllm --expect efa
+python scripts/profiling/weight_sync_transport.py --server_url http://<server>:8000 --backend vllm --expect efa
 ```
 
 It pushes one real parameter of the served checkpoint, unchanged, through the trainer's own sync path
-(`--model-id` when the served id is a server-side path or an alias), and reports the transport NCCL
+(`--model_id` when the served id is a server-side path or an alias), and reports the transport NCCL
 formed on (`NET/Libfabric/…/GDRDMA` is EFA with GPUDirect; `NET/IB`, `NET/Socket`, `P2P/CUMEM`, `SHM`),
 whether the plugin forced the simple protocol, the `aws-ofi-nccl` build, the libfabric provider and
 GB/s. It exits 1 when the group fails to form or the served model changed, and `--expect` adds the
@@ -549,9 +550,9 @@ transport to that gate ([flags](../reference/scripts-reference.md#profiling--ben
 
 On 8× B300 nodes, trainer node → server node, the streamed path syncs at 53 GB/s through the vLLM
 client over EFA (measured on vLLM 0.26.0), 80 GB/s through the SGLang client (measured on SGLang
-0.5.17) and 9.7 GB/s over sockets (NIC line rate ~100 GB/s per GPU). The vLLM client's rate is set by its one HTTP
-round trip per chunk and rises with `HALO_WEIGHT_SYNC_CHUNK_MB` (73 GB/s at 8 GiB); the SGLang
-client's by the fabric.
+0.5.17) and 9.7 GB/s over sockets (NIC line rate ~100 GB/s per GPU). The vLLM client's rate is set by
+its one HTTP round trip per chunk and rises with `HALO_WEIGHT_SYNC_CHUNK_MB`
+(73 GB/s at 8 GiB, measured on vLLM 0.26.0); the SGLang client's by the fabric.
 
 ## Checking a server
 
@@ -641,9 +642,9 @@ Async GRPO against a live server, per trainer parallelism axis:
 | Trainer and server on different nodes over EFA ([above](#servers-on-other-nodes-efa)) | supported; not run on the 0.32.0 image | supported; not run on the 0.5.22 image |
 
 An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`) takes
-the sync for Qwen3 MoE. gpt-oss cannot be served that way: its bf16 fused expert loader narrows only the
-TP dimension and copies the global expert count into local storage (`_load_w2`), so the server fails at
-start under `--ep-size`.
+the sync for Qwen3 MoE. Measured on SGLang 0.5.17 (not re-run on 0.5.22), gpt-oss could not be served
+that way: its bf16 fused expert loader narrowed only the TP dimension and copied the global expert count
+into local storage (`_load_w2`), so the server failed at start under `--ep-size`.
 
 ## Troubleshooting
 

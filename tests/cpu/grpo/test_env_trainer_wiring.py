@@ -9,7 +9,9 @@ built without ``__init__``.
   against the configured backend's client included;
 * ``_resolve_environment_spec`` takes a registry config or a custom environment class, and nothing else;
 * the prefetch worker thread delivers exactly one output per submitted round, a failure marker included, and
-  stops within its join timeout, also while it waits to deliver.
+  stops within its join timeout, also while it waits to deliver;
+* a second ``train()`` stops the worker at its cleanup and starts a new one at train-begin: nothing the stop
+  leaves behind ends the new worker, and a worker still in its round past the join is not revived.
 
 Run: python tests/cpu/grpo/test_env_trainer_wiring.py
 """
@@ -262,6 +264,20 @@ class _RolloutManager:
         return [f"rollout:{prompt}" for prompt in prompts]
 
 
+class _HeldRolloutManager:
+    """Holds every round until :attr:`release` is set: a round still collecting when training ends."""
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    async def collect_rollouts(self, prompts, contexts):
+        self.entered.set()
+        while not self.release.is_set():
+            await asyncio.sleep(0.001)
+        return [f"rollout:{prompt}" for prompt in prompts]
+
+
 @pytest.fixture
 def prefetching(tmp_path, monkeypatch):
     """A trainer whose real async state prefetches over two servers, collecting through :class:`_RolloutManager`,
@@ -334,6 +350,51 @@ def test_a_worker_waiting_to_deliver_abandons_the_round_at_stop(prefetching, cap
     assert "abandoning delivery of a 1-prompt rollout batch" in caplog.text
     assert "did not stop cleanly" not in caplog.text
     assert prefetching._prefetch_queue.empty()
+
+
+@pytest.fixture
+def retraining(prefetching, monkeypatch):
+    """:func:`prefetching` over :class:`_HeldRolloutManager`, generation started as train-begin starts it (the
+    push stubbed), with a round in flight and a join too short for it to finish."""
+    monkeypatch.setattr(async_rollouts, "_PREFETCH_JOIN_TIMEOUT_S", 0.05)
+    prefetching._rollout_manager = _HeldRolloutManager()
+    prefetching.state = SimpleNamespace(global_step=0)
+    prefetching._sync_weights_to_engine_fenced = lambda force=False: True
+    prefetching._start_rollout_generation()
+    prefetching._submit_for_prefetch(["a"], [None])
+    assert prefetching._rollout_manager.entered.wait(_WORKER_WAIT_S)
+    return prefetching
+
+
+def test_a_restarted_worker_runs_the_next_trains_rounds(retraining):
+    """The first run's worker exits on its own stop event; a sentinel queued for it would sit in the input
+    queue and end the next run's worker at its first read."""
+    old_worker = retraining._prefetch_thread
+    retraining._cleanup_async_components()
+    retraining._rollout_manager.release.set()
+    old_worker.join(_WORKER_WAIT_S)
+    assert not old_worker.is_alive()
+    assert retraining._prefetch_input_queue.empty(), "the stop left an item for the next run's worker"
+
+    retraining._start_rollout_generation()
+    retraining._submit_for_prefetch(["b"], [None])
+    assert retraining._wait_for_inflight_prefetch() == ["rollout:b"]
+    assert retraining._batch_errors.reason is None
+
+
+def test_a_worker_still_in_its_round_stays_stopped_across_a_restart(retraining):
+    """Revived by the restart, the first run's worker would deliver its round against the next run's own
+    submission, and keep draining that run's input queue beside the new worker."""
+    old_worker = retraining._prefetch_thread
+    retraining._cleanup_async_components()
+    retraining._start_rollout_generation()
+    retraining._rollout_manager.release.set()
+
+    retraining._submit_for_prefetch(["b"], [None])
+    assert retraining._wait_for_inflight_prefetch() == ["rollout:b"]
+    old_worker.join(_WORKER_WAIT_S)
+    assert not old_worker.is_alive()
+    assert retraining._prefetch_queue.empty() and retraining._prefetch_inflight == 0
 
 
 if __name__ == "__main__":

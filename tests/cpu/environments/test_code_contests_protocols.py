@@ -19,6 +19,16 @@ from types import SimpleNamespace
 import pytest
 
 import halo.environments.eval_runner as eval_runner
+from halo.entrypoints.code_contests_eval import (
+    FLAG_OWNED_ENV_KWARGS,
+    SOLUTION_HEADROOM_TOKENS,
+    contest_meta,
+    default_max_tokens,
+    refuse_flag_owned_env_kwargs,
+    resolve_env_config,
+    resolve_eval_protocol,
+    run_trajectory_path,
+)
 from halo.entrypoints.environment_eval import rollout_config_from_args
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
@@ -35,17 +45,7 @@ from halo.environments.tasks.coding.code_contests_prompts import (
 from halo.environments.tasks.coding.contest_datasets import ContestSelection
 from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
 from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
-from scripts.environments.inference.run_code_contests import (
-    FLAG_OWNED_ENV_KWARGS,
-    SOLUTION_HEADROOM_TOKENS,
-    contest_meta,
-    default_max_tokens,
-    parse_args,
-    refuse_flag_owned_env_kwargs,
-    resolve_env_config,
-    resolve_eval_protocol,
-    run_trajectory_path,
-)
+from scripts.environments.inference.run_code_contests import parse_args
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
     StubSandbox,

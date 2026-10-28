@@ -1,10 +1,10 @@
 #!/usr/bin/env python
 """The embedding metrics read the sentence embeddings the loss forward already computed.
 
-``embed/*`` (logged before each log step and averaged over every eval batch) used to re-encode each text group
-under ``no_grad``, a second forward of every eval batch. The trainer now records the pipeline's own forwards
-inside the loss: sentence-transformers runs the anchor column alone, the candidate columns merged column-major,
-a cached loss chunk by chunk and Matryoshka once at full width, so the rows lie group after group. Driven
+``embed/*`` (logged before each log step and averaged over every eval batch) comes from the pipeline's own
+forwards, recorded inside the loss, rather than from a second ``no_grad`` encode of each text group:
+sentence-transformers runs the anchor column alone, the candidate columns merged column-major, a cached loss
+chunk by chunk and Matryoshka once at full width, so the rows lie group after group. Driven
 through the real loss call of each pattern, against an independent per-group encode, counting the backbone's
 forwards.
 

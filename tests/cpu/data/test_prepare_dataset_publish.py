@@ -32,8 +32,9 @@ from datasets import DatasetDict
 
 from halo.checkpoint import atomic
 from halo.data.pipeline import coordinated_map
+from halo.data.preprocessed import publishing
 from halo.model_loading import tokenizer_setup
-from scripts.before_training import prepare_dataset as mod
+from scripts.before_training import prepare_dataset
 
 
 def _fill(directory) -> str:
@@ -52,7 +53,7 @@ def _staged(tmp_path, name="staged"):
 
 
 def _publish(dest, overwrite: bool) -> None:
-    mod.publish_local_output(_fill(mod.stage_local_output(str(dest), overwrite)), str(dest))
+    publishing.publish_local_output(_fill(publishing.stage_local_output(str(dest), overwrite)), str(dest))
 
 
 # Local publish: bake beside the destination, then swap
@@ -80,13 +81,13 @@ def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
         pack_sequences=False, is_vlm=False, model_name_or_path="model", max_length=8, num_shards=1
     )
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
-    monkeypatch.setattr(mod, "parse_args", lambda: (args, config))
-    monkeypatch.setattr(mod, "PartialState", lambda: types.SimpleNamespace(num_processes=1))
-    monkeypatch.setattr(mod, "setup_tokenizer", lambda config: object())
-    monkeypatch.setattr(mod, "load_input_dataset", lambda args: DatasetDict())
-    monkeypatch.setattr(mod, "require_declared_columns", lambda *a: None)
-    monkeypatch.setattr(mod, "preprocess_dataset", preprocess)
-    monkeypatch.setattr(mod.shutil, "copytree", lambda *a, **k: pytest.fail("the baked output was copied"))
+    monkeypatch.setattr(prepare_dataset, "parse_args", lambda: (args, config))
+    monkeypatch.setattr(publishing, "PartialState", lambda: types.SimpleNamespace(num_processes=1))
+    monkeypatch.setattr(publishing, "setup_tokenizer", lambda config: object())
+    monkeypatch.setattr(publishing, "load_input_dataset", lambda args: DatasetDict())
+    monkeypatch.setattr(publishing, "require_declared_columns", lambda *a: None)
+    monkeypatch.setattr(publishing, "preprocess_dataset", preprocess)
+    monkeypatch.setattr(publishing.shutil, "copytree", lambda *a, **k: pytest.fail("the baked output was copied"))
 
 
 def test_a_local_output_is_baked_beside_its_destination_and_written_once(tmp_path, monkeypatch):
@@ -105,7 +106,7 @@ def test_a_local_output_is_baked_beside_its_destination_and_written_once(tmp_pat
         }
 
     _stub_main(monkeypatch, tmp_path, str(dest), _preprocess)
-    mod.main()
+    prepare_dataset.main()
 
     assert baked_into == [f"{dest}{atomic.PUBLISH_STAGING_SUFFIX}"], (
         "the bake must land on the destination's filesystem"
@@ -129,7 +130,7 @@ def test_a_failed_bake_keeps_the_old_dataset_and_leaves_no_staging(tmp_path, mon
 
     _stub_main(monkeypatch, tmp_path, str(dest), _preprocess)
     with pytest.raises(OSError, match="disk full"):
-        mod.main()
+        prepare_dataset.main()
 
     assert (dest / "data.arrow").read_text() == "old-payload", "a failed run destroyed the previous dataset"
     assert not list(tmp_path.glob(f"*{atomic.PUBLISH_STAGING_SUFFIX}")), "staging directory leaked after the failure"
@@ -152,14 +153,14 @@ def test_a_rerun_reaps_the_map_copies_a_killed_bake_left(tmp_path, monkeypatch):
         }
 
     _stub_main(monkeypatch, tmp_path, str(dest), _preprocess)
-    mod.main()
+    prepare_dataset.main()
     ((scratch, _),) = seen
     assert scratch.startswith(str(tmp_path / "datasets_cache")) and not os.path.exists(scratch)
 
     os.makedirs(scratch)
     with open(os.path.join(scratch, "cache-killed.arrow"), "w") as f:
         f.write("a killed bake's map copy")
-    mod.main()
+    prepare_dataset.main()
     assert seen[1] == (scratch, []), "the rerun baked beside the killed bake's map copies"
     assert not os.path.exists(scratch)
 
@@ -180,7 +181,7 @@ def test_local_publish_restores_the_old_dataset_if_the_swap_fails(tmp_path, monk
             raise OSError("rename failed")
         real_rename(src, dst)
 
-    monkeypatch.setattr(mod.os, "rename", _fail_second_rename)
+    monkeypatch.setattr(publishing.os, "rename", _fail_second_rename)
 
     with pytest.raises(OSError, match="rename failed"):
         _publish(dest, overwrite=True)
@@ -192,7 +193,7 @@ def test_local_publish_refuses_an_existing_destination_without_overwrite(tmp_pat
     dest = tmp_path / "out"
     dest.mkdir()
     with pytest.raises(FileExistsError, match="--overwrite"):
-        mod.stage_local_output(str(dest), overwrite=False)
+        publishing.stage_local_output(str(dest), overwrite=False)
 
 
 def test_local_publish_creates_a_fresh_destination(tmp_path):
@@ -230,15 +231,15 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
     def _fake_upload_folder(folder_path=None, repo_id=None, repo_type=None, token=None, ignore_patterns=None):
         calls.append(("upload_folder", tuple(ignore_patterns or ())))
 
-    monkeypatch.setattr(mod, "HfApi", _FakeApi)
-    monkeypatch.setattr(mod, "upload_folder", _fake_upload_folder)
+    monkeypatch.setattr(publishing, "HfApi", _FakeApi)
+    monkeypatch.setattr(publishing, "upload_folder", _fake_upload_folder)
 
-    mod.save_to_hf_hub(str(_staged(tmp_path)), "org/name", overwrite=True)
+    publishing.save_to_hf_hub(str(_staged(tmp_path)), "org/name", overwrite=True)
 
     ordered = [c[0] for c in calls]
     assert ordered.index("delete_metadata") < ordered.index("upload_folder") < ordered.index("upload_metadata"), calls
     folder_call = next(c for c in calls if c[0] == "upload_folder")
-    assert mod.METADATA_FILE in folder_call[1], "the payload upload must exclude the completion marker"
+    assert publishing.METADATA_FILE in folder_call[1], "the payload upload must exclude the completion marker"
 
 
 # CLI defaults line up with the training side
@@ -250,7 +251,7 @@ def _parse(argv_extra):
     old = sys.argv
     sys.argv = argv
     try:
-        return mod.parse_args()[1]
+        return prepare_dataset.parse_args()[1]
     finally:
         sys.argv = old
 
@@ -272,7 +273,7 @@ def test_train_on_completions_only_defaults_on_and_is_still_switchable():
 def test_the_bake_takes_every_usable_cpu_but_a_reserve_unless_told_otherwise(monkeypatch):
     monkeypatch.delenv("HALO_DATASET_NUM_PROC", raising=False)
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(192)))
-    assert _parse(["--mode", "text"]).num_proc == 192 - mod._BAKE_RESERVED_CPUS
+    assert _parse(["--mode", "text"]).num_proc == 192 - publishing._BAKE_RESERVED_CPUS
     assert _parse(["--mode", "text", "--num_proc", "3"]).num_proc == 3
     monkeypatch.setenv("HALO_DATASET_NUM_PROC", "7")
     assert _parse(["--mode", "text"]).num_proc == 7
@@ -287,7 +288,7 @@ def test_bos_token_override_exists():
 def test_apply_tokenizer_overrides_sets_every_recorded_knob():
     tokenizer = types.SimpleNamespace(pad_token=None, eos_token="</s>", bos_token=None, chat_template=None)
     args = types.SimpleNamespace(pad_token="<pad>", eos_token="<eos>", bos_token="<s>", chat_template=None)
-    mod.apply_tokenizer_overrides(tokenizer, args)
+    publishing.apply_tokenizer_overrides(tokenizer, args)
     assert (tokenizer.pad_token, tokenizer.eos_token, tokenizer.bos_token) == ("<pad>", "<eos>", "<s>")
 
 
@@ -317,7 +318,7 @@ def test_script_uses_the_shared_chat_template_resolver():
     """A second, differently-behaving copy of the path-vs-text resolver would make the recorded
     template and the training-side one disagree on what counts as a file. Asserted on the bound OBJECT, not
     on an import line: a re-implementation that kept the import would satisfy the string."""
-    assert mod.load_chat_template is tokenizer_setup.load_chat_template
+    assert prepare_dataset.load_chat_template is tokenizer_setup.load_chat_template
 
 
 if __name__ == "__main__":

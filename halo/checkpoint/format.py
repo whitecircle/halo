@@ -94,7 +94,7 @@ UNSUFFIXED_RESUME_ENTRIES = (TRAINER_STATE_FILE, RESUME_ADAPTER_DIR, RESUME_ADAP
 
 # Never carried over by the aux copy: a stray weight file would shadow the fresh safetensors.
 WEIGHT_FILE_SUFFIXES = (".safetensors", ".bin", ".pt")
-# Foreign-framework exports, which the aux copy and the Hub-download ignore list both skip.
+# Foreign-framework exports, which the aux copy skips.
 FOREIGN_EXPORT_SUFFIXES = (".pth", ".gguf", ".h5", ".msgpack", ".onnx", ".onnx_data", ".tflite", ".ot", ".mlmodel")
 # Resume state exempt from the weight skip, by name and by prefix: losing one restarts the LR schedule,
 # zeroes the router biases, re-draws every shuffle or skips a pending prefetch batch.
@@ -103,10 +103,8 @@ RESUME_SIDECAR_PREFIXES = ("rng_state", PREFETCH_PENDING_PREFIX)
 # Vendor dumps of the same weights (gpt-oss ``original/``, ``metal/``); exact names, since
 # ``original_adapter_config/`` must be kept.
 WEIGHT_DUMP_DIRS = ("original", "consolidated", "metal")
-# The aux copy's skip as Hub-download patterns.
-WEIGHT_FILE_IGNORE_PATTERNS = tuple(
-    f"*{suffix}" for suffix in (*WEIGHT_FILE_SUFFIXES, *FOREIGN_EXPORT_SUFFIXES)
-) + tuple(f"{name}/*" for name in WEIGHT_DUMP_DIRS)
+# The dumps as Hub-download patterns: a checkpoint tool's fetch skips them as the aux copy does.
+WEIGHT_DUMP_IGNORE_PATTERNS = tuple(f"{name}/*" for name in WEIGHT_DUMP_DIRS)
 
 
 def ep_shard_filename(rank: int, world_size: int) -> str:

@@ -97,7 +97,8 @@ class AsyncRolloutMixin:
         self._prefetch_thread = None
         self._prefetch_queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
         self._prefetch_input_queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
-        self._prefetch_stop_event = threading.Event()
+        # The running worker's own stop event, made by each start.
+        self._prefetch_stop_event: threading.Event | None = None
 
         self._prefetch_hits = 0
         self._prefetch_misses = 0
@@ -269,52 +270,50 @@ class AsyncRolloutMixin:
         return True
 
     def _start_prefetch_thread(self):
-        """Start the background prefetch thread."""
+        """Start the background prefetch thread with a stop event of its own: a previous worker still in its
+        round past the stop's bounded join keeps its set one, so this start cannot revive it."""
         if self._prefetch_thread is not None:
             return
 
-        self._prefetch_stop_event.clear()
+        self._prefetch_stop_event = threading.Event()
         self._prefetch_thread = threading.Thread(
             target=self._prefetch_worker,
+            args=(self._prefetch_stop_event,),
             name="PrefetchWorker",
             daemon=True,
         )
         self._prefetch_thread.start()
         logger.info("Prefetch thread started for async overlap")
 
-    def _prefetch_worker(self):
-        """The prefetch thread: every consumed submission yields exactly one output item, its rollouts or a
-        ``(prompt_count, None)`` failure marker, so the in-flight accounting stays exact."""
+    def _prefetch_worker(self, stop: threading.Event):
+        """The prefetch thread until ``stop`` is set: every consumed submission yields exactly one output item,
+        its rollouts or a ``(prompt_count, None)`` failure marker, so the in-flight accounting stays exact."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
 
         try:
-            while not self._prefetch_stop_event.is_set():
+            while not stop.is_set():
                 try:
-                    item = self._prefetch_input_queue.get(timeout=_PREFETCH_POLL_TIMEOUT_S)
+                    prompts, contexts = self._prefetch_input_queue.get(timeout=_PREFETCH_POLL_TIMEOUT_S)
                 except queue.Empty:
                     continue
 
-                if item is None:  # sentinel
-                    break
-
-                prompts, contexts = item
                 results = None
                 start_time = time.time()
                 try:
                     results = loop.run_until_complete(self._rollout_manager.collect_rollouts(prompts, contexts))
                 except Exception as e:  # a worker-thread raise is invisible; report and mark
                     logger.error(f"Prefetch worker error ({len(prompts)} prompts): {e}")
-                self._put_prefetch_output((len(prompts), results))
+                self._put_prefetch_output((len(prompts), results), stop)
                 if results is not None:
                     logger.debug(f"Prefetched {len(results)} rollouts in {time.time() - start_time:.2f}s")
 
         finally:
             loop.close()
 
-    def _put_prefetch_output(self, item: tuple[int, list[RolloutResult] | None]):
-        """Deliver a prefetch item, blocking in stop-aware slices; only shutdown abandons one (logged)."""
-        while not self._prefetch_stop_event.is_set():
+    def _put_prefetch_output(self, item: tuple[int, list[RolloutResult] | None], stop: threading.Event):
+        """Deliver a prefetch item, blocking in slices until ``stop``; only shutdown abandons one (logged)."""
+        while not stop.is_set():
             try:
                 self._prefetch_queue.put(item, timeout=_PREFETCH_DELIVER_TIMEOUT_S)
                 return
@@ -482,7 +481,8 @@ class AsyncRolloutMixin:
         self._last_sync_attempt_step = -1
 
     def _stop_prefetch_thread(self):
-        """Stop the background prefetch thread."""
+        """Stop the background prefetch thread: it sees its stop event within a poll slice, and nothing is
+        queued for it, so a later start begins on an empty input queue."""
         if self._prefetch_thread is None:
             return
 
@@ -491,9 +491,6 @@ class AsyncRolloutMixin:
         with contextlib.suppress(queue.Empty):
             while not self._prefetch_input_queue.empty():
                 self._prefetch_input_queue.get_nowait()
-
-        with contextlib.suppress(queue.Full):
-            self._prefetch_input_queue.put_nowait(None)
 
         self._prefetch_thread.join(timeout=_PREFETCH_JOIN_TIMEOUT_S)
         if self._prefetch_thread.is_alive():

@@ -4,8 +4,9 @@ Halo runs inside a Docker image that holds the whole Python stack: PyTorch 2.11
 (CUDA 13), Transformers, TRL, Flash Attention and DeepEP. Don't `pip install`
 Halo on the host; the compiled kernels exist only in the image.
 
-The host needs an NVIDIA driver (R580 or newer, for CUDA 13.2), Docker with the
-NVIDIA Container Toolkit, and git. The images are x86_64 only, so Grace-based
+The host needs an NVIDIA driver R580 or newer
+([Docker](../agent-docs/infrastructure/docker.md) ↗), Docker with the NVIDIA
+Container Toolkit, and git. The images are x86_64 only, so Grace-based
 GB200/GB300 hosts (aarch64) need an arm64 build, which the Dockerfile does not
 provide.
 

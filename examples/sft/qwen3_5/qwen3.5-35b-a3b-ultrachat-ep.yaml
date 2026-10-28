@@ -12,12 +12,10 @@ test_size: 0.01
 
 # --- Parallelism & MoE precision ---
 expert_parallel_size: 8               # 256 routed experts → 32/rank
-moe_balancing: bias_update_transient  # aux_loss raises here (Qwen3_5MoeForConditionalGeneration reads
-                                      # output_router_logits from kwargs, never from the config, so the
-                                      # flag records router logits while router_aux_loss_coef never
-                                      # reaches the loss) and the architecture has no exportable bias
-                                      # slot, so exported checkpoints serve without the trained bias
-                                      # (near-tie top-k flips vs training)
+moe_balancing: bias_update_transient  # trainer-side bias balancing: the architecture has no exportable
+                                      # bias slot, so exported checkpoints serve without the trained bias
+                                      # (near-tie top-k flips vs training). aux_loss, which auto resolves
+                                      # to here, is the balancing that exports by construction.
 fp32_router: true
 fp32_experts: true
 fp32_non_ep_params: true

@@ -2,8 +2,8 @@
 
 Reading and writing HuggingFace `Dataset`/`DatasetDict` objects and arbitrary folders in S3, with a
 local cache for distributed training and a CLI. The default bucket comes from
-`HALO_S3_DEFAULT_BUCKET` — set it to your own bucket. Four modules plus a CLI, split so a consumer takes on only the
-dependency it needs:
+`HALO_S3_DEFAULT_BUCKET` — set it to your own bucket. Four modules plus the CLI and its commands, split so a consumer
+takes on only the dependency it needs:
 
 | File | Holds |
 |---|---|
@@ -11,7 +11,8 @@ dependency it needs:
 | `halo/data/sources/dataset_cache.py` | the local cache-publish protocol — `os`/`shutil`/`filelock`, the fetch injected |
 | `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool, the default-bucket helpers |
 | `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load, the mirrored control-file reads |
-| `scripts/before_training/s3.py` | the CLI |
+| `halo/data/sources/s3_commands.py` | the CLI's commands — push, download, list, exists, delete — over one `S3Client` |
+| `scripts/before_training/s3.py` | the CLI's flags |
 
 ## Dataset path formats
 

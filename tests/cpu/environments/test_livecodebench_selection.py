@@ -18,11 +18,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from halo.entrypoints import code_contests_regrade
+from halo.entrypoints.code_contests_eval import build_examples, contest_meta, resolve_selection
 from halo.environments.registry import build_environment
 from halo.environments.tasks.coding import contest_datasets as coding_datasets
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS, CodeDatasetAdapter, ContestSelection
-from scripts.environments.inference import regrade_trajectories
-from scripts.environments.inference.run_code_contests import build_examples, contest_meta, resolve_selection
 
 _DATASET = "livecodebench/code_generation_lite"
 _LCB = CODE_DATASET_ADAPTERS["livecodebench"]
@@ -74,9 +74,9 @@ def release(tmp_path, monkeypatch):
         return str(tmp_path / filename)
 
     monkeypatch.setattr(coding_datasets, "hf_hub_download", download)
-    regrade_trajectories._load_payloads.cache_clear()
+    code_contests_regrade._load_payloads.cache_clear()
     yield
-    regrade_trajectories._load_payloads.cache_clear()
+    code_contests_regrade._load_payloads.cache_clear()
 
 
 def _scored(selection: ContestSelection) -> list[str]:
@@ -248,15 +248,15 @@ def test_the_regrader_rebuilds_the_windowed_examples_from_the_meta_line_the_eval
     env = build_environment("codeforces", {})
     generic = {"env_type": "codeforces", "model": "m", "dataset": _DATASET, "config": "release_v2", "split": "test"}
     meta = json.loads(json.dumps({**generic, **contest_meta("livecodebench", selection, env, "medium", {})}))
-    regrade_trajectories.validate_meta("f.jsonl", meta)
+    code_contests_regrade.validate_meta("f.jsonl", meta)
 
     examples = build_examples(_args(), _LCB, selection)
-    payloads = regrade_trajectories.build_payloads(meta)
+    payloads = code_contests_regrade.build_payloads(meta)
 
     assert [json.loads(example["context"]["answer"]) for example in examples] == list(payloads)
     assert [example["id"] for example in examples] == ["ac_2025_01_04", "ac_2025_04_06"]
     # Without the recorded selection, episode 1 would be graded against another problem's tests.
-    unselected = regrade_trajectories.build_payloads({k: v for k, v in meta.items() if k != "selection"})
+    unselected = code_contests_regrade.build_payloads({k: v for k, v in meta.items() if k != "selection"})
     assert unselected[1] != payloads[1]
 
 

@@ -25,7 +25,7 @@ import pytest
 from datasets import Dataset
 
 from halo.checkpoint import adapter_merge, model_merge, sink_reset
-from scripts.inference import deduplicate_dataset
+from halo.data import deduplication
 
 # --- merge_models: a tokenizer-less artifact is not a deliverable ---------------------------------
 
@@ -208,7 +208,7 @@ def test_an_unknown_additional_field_raises(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
 
     with pytest.raises(ValueError) as excinfo:
-        deduplicate_dataset.save_deduplicated_dataset(
+        deduplication.save_deduplicated_dataset(
             dataset,
             np.array([0, 1]),
             str(tmp_path / "out.jsonl"),
@@ -223,7 +223,7 @@ def test_known_additional_fields_still_narrow_the_output(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
     output = tmp_path / "out.jsonl"
 
-    deduplicate_dataset.save_deduplicated_dataset(dataset, np.array([0]), str(output), additional_fields=["text"])
+    deduplication.save_deduplicated_dataset(dataset, np.array([0]), str(output), additional_fields=["text"])
 
     written = json.loads(output.read_text().splitlines()[0])
     assert written == {"text": "a"}

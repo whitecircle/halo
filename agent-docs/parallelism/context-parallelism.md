@@ -254,7 +254,7 @@ alone OOMs at long sequences (it shards experts, not activations) — that is th
 | multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/ulysses_model.py` |
 | `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_reject_fsdp_settings` |
 | `accelerate launch` | rejected — CP requires `torchrun` | `reject_unsupported_run` and `reject_accelerate_launch` |
-| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`) | `DistributedTrainerMixin._apply_training_args_overrides` |
+| `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`; [rule](../optimization/flash-attention.md#usage)) | `DistributedTrainerMixin._apply_training_args_overrides` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `halo/model_loading/liger/dispatch.py` |
 | `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `reject_offline_cp_options` (offline GRPO) |
 | QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/load_rules.py`, `reject_offline_cp_options` |

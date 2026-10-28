@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from huggingface_hub import constants as hub_constants
-from huggingface_hub import snapshot_download
+from huggingface_hub import is_offline_mode, snapshot_download
 from huggingface_hub.errors import HFValidationError, LocalEntryNotFoundError
 from transformers import AutoConfig, PretrainedConfig
 
@@ -106,12 +106,18 @@ def _cache_remedy(fetched: bool) -> str:
 
 
 def _unresolvable_reason(model_name_or_path: str, revision: str | None, fetch_error: Exception | None) -> str:
-    """Why this rank holds no copy of the source: its own failed fetch, or the input-filesystem
-    declaration that left it reading a cache nobody fetched into."""
+    """Why this rank holds no copy of the source: its own failed fetch, the input-filesystem
+    declaration that left it reading a cache nobody fetched into, or an offline hub, under which no
+    rank fetched."""
     missing = (
         f"{model_name_or_path!r} is not a directory on {socket.gethostname()}, and this rank's Hub cache "
         f"({hub_constants.HF_HUB_CACHE}) holds no snapshot of it at revision {revision or 'main'}."
     )
+    if is_offline_mode():
+        return (
+            f"{missing} The hub is offline (HF_HUB_OFFLINE), so no rank fetched: a local checkpoint must "
+            "exist at this path on this node, and a Hub snapshot must be staged complete into this rank's cache."
+        )
     if fetch_error is not None:
         return f"{missing} This rank fetched for its scope, and the fetch failed: {type(fetch_error).__name__}: {fetch_error}"
     return f"{missing} {_cache_remedy(fetched=False)}"
@@ -130,14 +136,16 @@ def _resolve_on_this_rank(
     model_name_or_path: str, revision: str | None, *, fetch: bool, whole_repo: bool
 ) -> _SourceView:
     """This rank's view of the source: a local directory, or the snapshot its Hub cache holds; only a
-    ``fetch`` rank downloads what the cache lacks."""
+    ``fetch`` rank downloads what the cache lacks. Offline it reads the cache like every other rank: a call
+    that may fetch lists a pinned commit's files through the Hub unless the cache holds that listing, and
+    offline that raises even over a complete snapshot."""
     if os.path.isdir(model_name_or_path):
         return _SourceView(_LOCAL_DIRECTORY)
     try:
         snapshot = snapshot_download(
             model_name_or_path,
             revision=revision,
-            local_files_only=not fetch,
+            local_files_only=not fetch or is_offline_mode(),
             ignore_patterns=None if whole_repo else list(HUB_SUBFOLDER_IGNORE_PATTERNS),
         )
     except (HFValidationError, LocalEntryNotFoundError) as exc:

@@ -22,6 +22,7 @@ from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGene
 
 from halo.checkpoint.parallel.save import save_checkpoint
 from halo.configs.script_arguments import CommonScriptArguments
+from halo.data.preprocessed import publishing
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.entrypoints.model_setup import install_resolved_tokenizer
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
@@ -79,7 +80,6 @@ def test_a_run_without_an_override_keeps_the_processors_own_template(tmp_path):
 
 
 def test_prepare_dataset_renders_vlm_rows_with_the_override():
-    prepare_dataset = load_script_module("scripts/before_training/prepare_dataset.py")
     load_cached_processor(QWEN3_5_9B)  # skips where the processor is not cached
     args = SimpleNamespace(
         model_name_or_path=QWEN3_5_9B,
@@ -92,7 +92,7 @@ def test_prepare_dataset_renders_vlm_rows_with_the_override():
         chat_template=OVERRIDE,
     )
 
-    assert _render(prepare_dataset.setup_vlm_processor(args)) == OVERRIDE_RENDER
+    assert _render(publishing.setup_vlm_processor(args)) == OVERRIDE_RENDER
 
 
 def test_patch_vocab_exports_the_override(tmp_path, monkeypatch):

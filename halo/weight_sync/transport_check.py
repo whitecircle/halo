@@ -168,7 +168,7 @@ def _checkpoint_file(model_id: str, filename: str, revision: str | None) -> str:
         # The served id is whatever the server was launched with: a path on its own host, or an alias.
         raise ValueError(
             f"{model_id!r} is neither a directory on this host nor a Hub repo it can read. Pass "
-            f"--model-id (and --revision) naming the checkpoint the server loaded."
+            f"--model_id (and --revision) naming the checkpoint the server loaded."
         ) from e
 
 
@@ -262,7 +262,7 @@ def run_transport_check(
         connection_timeout=connection_timeout,
         group_host=group_host,
     )
-    # The completion goes under the served name (vLLM rejects any other); --model-id names the checkpoint.
+    # The completion goes under the served name (vLLM rejects any other); --model_id names the checkpoint.
     served = _served_model_id(client)
     checkpoint = model_id or served
     param, tensor = load_checkpoint_tensor(checkpoint, param, revision=revision, device=str(torch_device))

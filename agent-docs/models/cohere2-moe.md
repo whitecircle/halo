@@ -38,11 +38,8 @@ and are never wrapped.
 
 - Load balancing: the architecture has **no bias slot** and **no aux-loss wiring** (no
   `router_aux_loss_coef`; the loss never reads `router_logits`), so `moe_balancing: bias_update`
-  **raises**, `aux_loss` cannot work, and `auto` resolves to `none` with a warning.
-
-    The explicit `bias_update_transient` opts into the trainer-only side-buffer: it steers
-    training-time routing, resumes from `router_balancing_biases.pt`, and never reaches a checkpoint
-    or a served copy (near-tied top-k picks flip between trainer and server).
+  **raises**, `aux_loss` cannot work, and `auto` resolves to `none` with a warning. The explicit
+  `bias_update_transient` is the trainer-only opt-in ([balancing modes](../training-methods/callbacks.md#moe-balancing-modes)).
 
 - Routed experts: `Cohere2MoeExperts`, fused `gate_up_proj [E, 2I, H]` / `down_proj [E, H, I]` —
   the Qwen3.5/GLM-4 layout, so the shared fused-GLU helpers cover compute (grouped GEMM, 2 calls;
@@ -121,6 +118,8 @@ memory-validated shape.
 
 ## Configs
 
-| Config | EP | Notes |
-|---|:--:|---|
-| `examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml` | 8 | VLM checkpoint, text-only SFT; `max_length: 1024` peaks ~255 of the B300's ~268 GiB at EP=8 — 4096 OOMs when DeepEP's elastic buffer resizes. Pins `model_revision` to the layout those numbers hold for and `attn_implementation: flash_attention_2` (the family has no forced fallback; FA4 loads but is unmeasured here) |
+`examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml` runs text-only SFT of the VLM checkpoint at
+EP=8. At `max_length: 1024` it peaks at ~255 of the B300's ~268 GiB; 4096 OOMs when DeepEP's elastic
+buffer resizes. It pins `model_revision` to the layout those numbers hold for, and
+`attn_implementation: flash_attention_2` (the family has no forced fallback; FA4 loads but is unmeasured
+here).

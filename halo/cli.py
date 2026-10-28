@@ -267,7 +267,7 @@ def launch(
         typer.Option("--port", "-p", help="Rendezvous port (torchrun --master_port / accelerate --main_process_port)"),
     ] = None,
     list_methods: Annotated[bool, typer.Option("--list", help="List indexed training methods")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Print command without executing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry_run", help="Print command without executing")] = False,
     root: Annotated[Path, typer.Option("--root", help="Repository root")] = REPO_ROOT,
 ) -> None:
     """Launch a training method without spelling out Python, torchrun/accelerate, or script paths.
@@ -316,7 +316,7 @@ def run(
         str | None, typer.Argument(help="Tool name, e.g. merge-ep-shards or inference/reward-model/score")
     ] = None,
     list_tools: Annotated[bool, typer.Option("--list", help="List indexed tools")] = False,
-    dry_run: Annotated[bool, typer.Option("--dry-run", help="Print command without executing")] = False,
+    dry_run: Annotated[bool, typer.Option("--dry_run", help="Print command without executing")] = False,
     root: Annotated[Path, typer.Option("--root", help="Repository root")] = REPO_ROOT,
 ) -> None:
     """Run a non-training tool (after-training, inference, before-training, environments,
@@ -324,7 +324,7 @@ def run(
     checkpoint tool would race on one output directory.
 
     Flags after the tool name pass through to the underlying script, except the launcher's own
-    (--list, --dry-run, --root), which the CLI consumes first. Put ``--`` before a tool flag that
+    (--list, --dry_run, --root), which the CLI consumes first. Put ``--`` before a tool flag that
     collides (``halo run prepare-dataset -- --help``).
 
     The tool runs in the caller's cwd (unlike ``halo launch``), so a relative path flag means what it

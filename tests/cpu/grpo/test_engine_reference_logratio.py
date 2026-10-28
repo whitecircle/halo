@@ -10,6 +10,7 @@ import re
 import threading
 import types
 from collections import defaultdict
+from functools import partial
 from unittest import mock
 
 import pytest
@@ -359,20 +360,65 @@ def test_prompt_logprob_probe_accepts_batch_shape_noise(prefill_server, client_c
     assert gap == pytest.approx(0.5)
 
 
-class _OneNaNPrefixPosition:
-    """Every prefix scores one NaN log-prob behind finite ones; the whole sequence scores clean."""
+class _NoisyLowProbabilityEngine:
+    """Scores every tenth position of a sequence, from the fourth, as a low-probability token (-10) and the rest
+    confidently (-0.05). A prefix short enough to prefill as a graph moves the low-probability positions by
+    ``noise`` nats and the confident ones by 0.1, the bf16 noise Gemma 4 shows on every engine, and every
+    position by ``shift``, as the drafter overwrite does. ``poison`` maps ``(graph, position)`` to a value
+    replacing that score."""
+
+    def __init__(self, *, noise: float, shift: float = 0.0, poison: dict[tuple[bool, int], float] | None = None):
+        self.noise, self.shift, self.poison = noise, shift, poison or {}
+
+    def close_session(self) -> None:
+        pass
 
     def score_completion_logprobs(self, prompt_ids, completion_ids, timeout):
-        values = [-0.1] * len(completion_ids)
-        if len(completion_ids) <= GRAPH_CAPTURE_TOKENS:
-            values[3] = float("nan")
+        graph = len(completion_ids) <= GRAPH_CAPTURE_TOKENS
+        values = []
+        for position in range(len(completion_ids)):
+            low_probability = position % 10 == 3
+            value = -10.0 if low_probability else -0.05
+            if graph:
+                value += (self.noise if low_probability else -0.1) + self.shift
+            values.append(self.poison.get((graph, position), value))
         return values
 
 
-def test_prompt_logprob_probe_reads_a_non_finite_position_as_an_infinite_gap():
+@pytest.mark.parametrize(("shift", "gap"), [(0.0, 0.1), (-8.0, 8.1)], ids=["bf16-noise", "drafter-overwrite"])
+def test_prompt_logprob_probe_judges_the_gap_where_the_model_is_confident(monkeypatch, shift, gap):
+    """bf16 noise moves a prefix's low-probability positions by several nats (Gemma 4 on vLLM, SGLang and the
+    trainer alike), while the drafter overwrite moves every position by 8-22, so only the positions the whole
+    scores above -1.0 count: the noise passes, the overwrite is refused with its cause."""
+    engine = _NoisyLowProbabilityEngine(noise=4.0, shift=shift)
+    assert _probe_prompt_logprobs(engine, list(range(1100)))[1] == pytest.approx(gap)
+
+    recorder = mock.MagicMock()
+    monkeypatch.setattr(engine_preflight, "logger", recorder)
+    verify = partial(
+        engine_preflight._verify_engine_prompt_logprobs_on_rank0, lambda **_: engine, ["http://probe"], _word_tokenizer
+    )
+    if shift:
+        with pytest.raises(ValueError, match="speculative decoding") as raised:
+            verify()
+        assert f"above -1.0 log-prob, by up to {gap:.2f} nats" in str(raised.value)
+    else:
+        verify()
+        recorder.warning.assert_not_called()
+        (msg,), _ = recorder.info.call_args
+        assert "follow from the tokens" in msg and f"largest prefix gap {gap:.3f}" in msg, msg
+
+
+@pytest.mark.parametrize(
+    "poison",
+    [{(True, 2): math.nan}, {(True, 3): math.nan}, {(True, 3): -math.inf}, {(False, 3): math.nan}],
+    ids=["prefix-confident-nan", "prefix-low-probability-nan", "prefix-low-probability-inf", "whole-nan"],
+)
+def test_prompt_logprob_probe_reads_a_non_finite_position_as_an_infinite_gap(poison):
     """``max`` keeps whichever operand it met first when the other is NaN, so a NaN behind a finite gap
-    would otherwise vanish from the verdict."""
-    _, gap, _ = _probe_prompt_logprobs(_OneNaNPrefixPosition(), list(range(1100)))
+    would otherwise vanish from the verdict; nor may the confidence floor drop one, at a position the whole
+    scores low or in the whole itself."""
+    _, gap, _ = _probe_prompt_logprobs(_NoisyLowProbabilityEngine(noise=4.0, poison=poison), list(range(1100)))
     assert gap == math.inf
 
 

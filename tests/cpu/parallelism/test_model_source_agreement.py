@@ -13,11 +13,13 @@ into the fetching rank's cache; every other lookup is huggingface_hub's own cach
 3. per-node caches holding different commits (staged at different times) fail every rank instead of
    training different weights on different nodes;
 4. a checkpoint directory present on one node only fails every rank instead of stranding the ranks
-   that found it in the next collective;
+   that found it in the next collective, naming the local-checkpoint remedy online and offline;
 5. a trainer handed a path string loads the agreed commit, inside a world-joined load;
 6. a model load fetches the repo's top-level files alone, judged by huggingface_hub's own pattern
    filter: the vendor weight dumps in its subfolders (gpt-oss's ``original/`` and ``metal/``) stay on
-   the Hub unless the loader reads subfolders.
+   the Hub unless the loader reads subfolders;
+7. offline, the fetching rank reads its cache like every other rank, so a pinned commit resolves from a
+   complete snapshot whose tree listing the cache does not hold, and a missing one names the offline hub.
 
     python tests/cpu/parallelism/test_model_source_agreement.py
 """
@@ -73,11 +75,15 @@ TWO_NODES = 2 * RANKS_PER_NODE
 PG_TIMEOUT = datetime.timedelta(seconds=60)
 
 
+def _storage(cache: Path) -> Path:
+    return cache / f"models--{REPO.replace('/', '--')}"
+
+
 def _stage_snapshot(cache: Path, commit: str, *, weights: bool = True, nested: tuple[str, ...] = ()) -> str:
     """What a finished ``snapshot_download`` leaves in a Hub cache: the ref, and the snapshot dir —
     without its weights for the config and tokenizer reads that precede the load — plus the ``nested``
-    files the fetch took."""
-    storage = cache / f"models--{REPO.replace('/', '--')}"
+    files the fetch took. It writes no tree listing, which a cache an older huggingface_hub filled lacks too."""
+    storage = _storage(cache)
     (storage / "refs").mkdir(parents=True, exist_ok=True)
     (storage / "refs" / "main").write_text(commit)
     snapshot = storage / "snapshots" / commit
@@ -107,7 +113,7 @@ def _enter_node(rank: int, tmp_dir: str, *, ranks_per_node: int) -> Path:
 def _fetching_stand_in(tmp_dir: str, rank: int, commit: str):
     """``snapshot_download`` whose online call stages ``commit`` into this rank's cache (and records
     that it fetched), its nested files filtered as huggingface_hub filters a repo listing; a cache-only
-    call is huggingface_hub's own resolution."""
+    call is huggingface_hub's own resolution. The hub must read as online, as the CPU tier runs offline."""
 
     def snapshot_download(repo_id, *, revision=None, local_files_only=False, ignore_patterns=None):
         if not local_files_only:
@@ -129,6 +135,7 @@ def _record(tmp_dir: str, rank: int, path: str) -> None:
 
 def _fetch_worker(rank: int, tmp_dir: str) -> None:
     _enter_node(rank, tmp_dir, ranks_per_node=RANKS_PER_NODE)
+    hub_constants.HF_HUB_OFFLINE = False
     model_source.snapshot_download = _fetching_stand_in(tmp_dir, rank, COMMIT_A)
     _record(tmp_dir, rank, REPO)
 
@@ -144,8 +151,9 @@ def _diverged_caches_worker(rank: int, tmp_dir: str) -> None:
     _record(tmp_dir, rank, REPO)
 
 
-def _directory_on_one_node_worker(rank: int, tmp_dir: str) -> None:
+def _directory_on_one_node_worker(rank: int, tmp_dir: str, offline: bool) -> None:
     node_dir = _enter_node(rank, tmp_dir, ranks_per_node=1)
+    hub_constants.HF_HUB_OFFLINE = offline
     if rank == 0:
         (node_dir / "ckpt").mkdir(exist_ok=True)
     _record(tmp_dir, rank, "ckpt")
@@ -203,13 +211,27 @@ def test_per_node_caches_holding_different_commits_fail_every_rank(tmp_path):
         assert COMMIT_A in outcome and COMMIT_B in outcome, outcome
 
 
-def test_a_checkpoint_directory_on_one_node_only_fails_every_rank(tmp_path):
+@pytest.mark.parametrize(
+    ("offline", "remedy"),
+    [
+        (False, "a local checkpoint must sit on a mount every node sees"),
+        (True, "a local checkpoint must exist at this path on this node"),
+    ],
+    ids=["online", "offline"],
+)
+def test_a_checkpoint_directory_on_one_node_only_fails_every_rank(tmp_path, offline, remedy):
     run_gloo_ranks(
-        _directory_on_one_node_worker, 2, str(tmp_path), pg_timeout=PG_TIMEOUT, env={"DIST_SHARED_FILESYSTEM": "1"}
+        _directory_on_one_node_worker,
+        2,
+        str(tmp_path),
+        offline,
+        pg_timeout=PG_TIMEOUT,
+        env={"DIST_SHARED_FILESYSTEM": "1"},
     )
     holder, missing = _outcomes(tmp_path, 2)
     assert holder.startswith("RuntimeError: Resolving the checkpoint 'ckpt' failed on 1 of 2 rank(s) [1]"), holder
     assert missing.startswith("FileNotFoundError: 'ckpt' is not a directory"), missing
+    assert remedy in holder and remedy in missing, f"the rank missing the checkpoint must name its remedy: {missing}"
 
 
 def test_a_local_directory_keeps_the_callers_revision(tmp_path):
@@ -227,6 +249,7 @@ def test_the_model_fetch_rule_keeps_the_top_level_files_alone():
 @pytest.mark.parametrize("whole_repo", [False, True], ids=["model-load", "whole-repo"])
 def test_the_fetch_leaves_the_subfolders_unless_the_loader_reads_them(tmp_path, monkeypatch, whole_repo):
     monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", False)
     monkeypatch.setattr(model_source, "snapshot_download", _fetching_stand_in(str(tmp_path), 0, COMMIT_A))
 
     source = resolve_model_source(REPO, None, tag="policy", whole_repo=whole_repo)
@@ -236,6 +259,30 @@ def test_the_fetch_leaves_the_subfolders_unless_the_loader_reads_them(tmp_path, 
     fetched = {str(path.relative_to(snapshot)) for path in snapshot.rglob("*") if path.is_file()}
     assert set(SHARDS) <= fetched
     assert sorted(name for name in fetched if "/" in name) == (sorted(NESTED_FILES) if whole_repo else [])
+
+
+@pytest.mark.parametrize("revision", [COMMIT_A, None], ids=["pinned", "main"])
+def test_offline_the_fetching_rank_resolves_from_its_cache_alone(tmp_path, monkeypatch, revision):
+    """huggingface_hub's own resolution, unstubbed. A call that may fetch lists a pinned commit's files
+    through the Hub unless the cache holds that listing, and offline that raises although the snapshot
+    is complete; the fetching rank must read its cache instead, as an unpinned main always did."""
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    snapshot = _stage_snapshot(tmp_path / "hub", COMMIT_A)
+    assert not (_storage(tmp_path / "hub") / "trees").exists()
+
+    assert resolve_model_source(REPO, revision, tag="policy") == ModelSource(REPO, COMMIT_A, snapshot)
+
+
+def test_offline_a_snapshot_missing_from_the_cache_names_the_offline_hub(tmp_path, monkeypatch):
+    monkeypatch.setattr(hub_constants, "HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setattr(hub_constants, "HF_HUB_OFFLINE", True)
+    with pytest.raises(FileNotFoundError) as raised:
+        resolve_model_source(REPO, COMMIT_A, tag="policy")
+    message = str(raised.value)
+    assert f"holds no snapshot of it at revision {COMMIT_A}" in message, message
+    assert "The hub is offline (HF_HUB_OFFLINE)" in message, message
+    assert "a Hub snapshot must be staged complete into this rank's cache" in message, message
 
 
 def test_a_trainer_model_path_loads_the_agreed_commit_inside_the_joined_load(tmp_path, monkeypatch):

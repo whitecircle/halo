@@ -8,9 +8,6 @@ from halo.environments.rollout_config import RolloutConfig
 from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS
 from scripts.cli_arguments import add_openai_endpoint_args
 
-# The split an eval reads when --split is omitted, unless its dataset ships a single split of its own.
-DEFAULT_SPLIT = "test"
-
 
 def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
     """Register the dataset-source, endpoint and output flags every eval script shares; ``--split`` and the

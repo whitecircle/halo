@@ -101,7 +101,7 @@ def test_launch_ambiguous_stem_reports_qualified_names(tmp_path):
     write_script(tmp_path / "scripts/training/nested/reward.py")
     write_config(tmp_path / "config.yaml")
 
-    result = runner.invoke(app, ["launch", "reward", "config.yaml", "--dry-run", "--root", str(tmp_path)])
+    result = runner.invoke(app, ["launch", "reward", "config.yaml", "--dry_run", "--root", str(tmp_path)])
 
     assert result.exit_code != 0
     assert "ambiguous" in result.output
@@ -116,7 +116,7 @@ def test_a_stem_whose_candidates_are_one_script_resolves(tmp_path):
     write_script(tmp_path / "scripts/training/other/rewards.py")
     write_config(tmp_path / "config.yaml")
 
-    result = runner.invoke(app, ["launch", "reward", "config.yaml", "--dry-run", "--root", str(tmp_path)])
+    result = runner.invoke(app, ["launch", "reward", "config.yaml", "--dry_run", "--root", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
     assert str(tmp_path / "scripts/training/other/rewards.py") in result.stdout
@@ -131,7 +131,7 @@ def test_underscored_method_name_resolves_to_the_hyphenated_entry(tmp_path):
 
     commands = set()
     for spelling in ("my-method", "my_method", "My_Method"):
-        result = runner.invoke(app, ["launch", spelling, "config.yaml", "--dry-run", "--root", str(tmp_path)])
+        result = runner.invoke(app, ["launch", spelling, "config.yaml", "--dry_run", "--root", str(tmp_path)])
         assert result.exit_code == 0, f"{spelling}: {result.output}"
         commands.add(result.stdout.strip())
 
@@ -148,7 +148,7 @@ def test_unknown_method_still_fails_loud(tmp_path):
     write_script(tmp_path / "scripts/training/my_method.py")
     write_config(tmp_path / "config.yaml")
 
-    result = runner.invoke(app, ["launch", "my_methodd", "config.yaml", "--dry-run", "--root", str(tmp_path)])
+    result = runner.invoke(app, ["launch", "my_methodd", "config.yaml", "--dry_run", "--root", str(tmp_path)])
 
     assert result.exit_code != 0
     # Substrings, not the whole sentence: the error renders through a width-wrapped rich panel.
@@ -163,8 +163,8 @@ def test_a_root_with_no_scripts_tree_names_the_root(tmp_path):
     write_config(tmp_path / "config.yaml")
 
     results = {
-        "method": runner.invoke(app, ["launch", "sft", "config.yaml", "--dry-run", "--root", str(tmp_path)]),
-        "tool": runner.invoke(app, ["run", "merge-ep-shards", "--dry-run", "--root", str(tmp_path)]),
+        "method": runner.invoke(app, ["launch", "sft", "config.yaml", "--dry_run", "--root", str(tmp_path)]),
+        "tool": runner.invoke(app, ["run", "merge-ep-shards", "--dry_run", "--root", str(tmp_path)]),
     }
 
     for kind, result in results.items():
@@ -317,7 +317,7 @@ def test_launch_command_keeps_launch_as_subcommand(tmp_path):
 
     result = runner.invoke(
         app,
-        ["launch", "sft", "config.yaml", "--nproc", "8", "--dry-run", "--root", str(tmp_path)],
+        ["launch", "sft", "config.yaml", "--nproc", "8", "--dry_run", "--root", str(tmp_path)],
     )
 
     assert result.exit_code == 0
@@ -327,7 +327,7 @@ def test_launch_command_keeps_launch_as_subcommand(tmp_path):
 def test_launch_rejects_missing_config(tmp_path):
     write_script(tmp_path / "scripts/training/sft.py")
 
-    result = runner.invoke(app, ["launch", "sft", "missing.yaml", "--dry-run", "--root", str(tmp_path)])
+    result = runner.invoke(app, ["launch", "sft", "missing.yaml", "--dry_run", "--root", str(tmp_path)])
 
     assert result.exit_code != 0
     assert "config not found" in result.output
@@ -347,7 +347,7 @@ def test_launch_accelerate_option_resolves_config_from_root(tmp_path):
             "config.yaml",
             "--accelerate",
             "accelerate/_cli_test_only.yaml",
-            "--dry-run",
+            "--dry_run",
             "--root",
             str(tmp_path),
         ],
@@ -363,7 +363,7 @@ def test_run_command_passes_flags_through(tmp_path):
 
     result = runner.invoke(
         app,
-        ["run", "merge-ep-shards", "--dry-run", "--root", str(tmp_path), "--", "--input_dir", "ckpt"],
+        ["run", "merge-ep-shards", "--dry_run", "--root", str(tmp_path), "--", "--input_dir", "ckpt"],
     )
 
     assert result.exit_code == 0
@@ -458,7 +458,7 @@ def test_launch_refuses_torchrun_multinode_flags_by_name(tmp_path, flag):
     write_config(tmp_path / "config.yaml")
 
     result = runner.invoke(
-        app, ["launch", "sft", "config.yaml", "--nproc", "8", "--dry-run", "--root", str(tmp_path), flag, "0"]
+        app, ["launch", "sft", "config.yaml", "--nproc", "8", "--dry_run", "--root", str(tmp_path), flag, "0"]
     )
 
     assert result.exit_code != 0
@@ -471,7 +471,7 @@ def test_launch_port_option_reaches_torchrun(tmp_path):
 
     result = runner.invoke(
         app,
-        ["launch", "sft", "config.yaml", "--nproc", "2", "--port", "29751", "--dry-run", "--root", str(tmp_path)],
+        ["launch", "sft", "config.yaml", "--nproc", "2", "--port", "29751", "--dry_run", "--root", str(tmp_path)],
     )
 
     assert result.exit_code == 0
@@ -482,7 +482,7 @@ def _dry_run(tmp_path, verb_args: list[str]) -> list[str]:
     """Tokens of the command a dry run prints."""
     verb, *rest = verb_args
     # Launcher flags first: whatever follows a separator in ``rest`` is the script's.
-    result = runner.invoke(app, [verb, "--dry-run", "--root", str(tmp_path), *rest])
+    result = runner.invoke(app, [verb, "--dry_run", "--root", str(tmp_path), *rest])
     assert result.exit_code == 0, result.output
     return shlex.split(result.stdout.strip())
 
@@ -551,14 +551,14 @@ def test_a_flag_the_launcher_owns_reaches_the_tool_only_after_the_separator(tmp_
     write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
 
     consumed = runner.invoke(
-        app, ["run", "merge-ep-shards", "--input_dir", "ckpt", "--dry-run", "--root", str(tmp_path)]
+        app, ["run", "merge-ep-shards", "--input_dir", "ckpt", "--dry_run", "--root", str(tmp_path)]
     )
     forwarded = runner.invoke(
-        app, ["run", "merge-ep-shards", "--dry-run", "--root", str(tmp_path), "--", "--input_dir", "ckpt", "--dry-run"]
+        app, ["run", "merge-ep-shards", "--dry_run", "--root", str(tmp_path), "--", "--input_dir", "ckpt", "--dry_run"]
     )
 
     assert shlex.split(consumed.stdout.strip())[-2:] == ["--input_dir", "ckpt"]
-    assert shlex.split(forwarded.stdout.strip())[-3:] == ["--input_dir", "ckpt", "--dry-run"]
+    assert shlex.split(forwarded.stdout.strip())[-3:] == ["--input_dir", "ckpt", "--dry_run"]
 
 
 def test_positional_tool_arguments_pass_through_without_a_separator(tmp_path):
@@ -576,7 +576,7 @@ def test_an_override_typed_before_the_config_names_the_argument_order(tmp_path):
     write_config(tmp_path / "config.yaml")
 
     result = runner.invoke(
-        app, ["launch", "sft", "--learning_rate", "1e-5", "config.yaml", "--dry-run", "--root", str(tmp_path)]
+        app, ["launch", "sft", "--learning_rate", "1e-5", "config.yaml", "--dry_run", "--root", str(tmp_path)]
     )
 
     assert result.exit_code != 0
@@ -588,7 +588,7 @@ def test_a_flag_in_the_tool_slot_is_refused_by_name(tmp_path):
     write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
 
     result = runner.invoke(
-        app, ["run", "--input_dir", "ckpt", "merge-ep-shards", "--dry-run", "--root", str(tmp_path)]
+        app, ["run", "--input_dir", "ckpt", "merge-ep-shards", "--dry_run", "--root", str(tmp_path)]
     )
 
     assert result.exit_code != 0

@@ -2,6 +2,7 @@
 rewritten, each staged and verified before it replaces its target, and the others are linked across unchanged;
 a checkpoint that carries no sinks is copied through."""
 
+import functools
 import logging
 import os
 import shutil
@@ -17,6 +18,7 @@ from halo.checkpoint.format import SAFETENSORS_INDEX_FILE, SAFETENSORS_METADATA
 from halo.checkpoint.model_card import tag_exported_model_card
 from halo.checkpoint.offline_export import (
     copy_checkpoint_aux_files,
+    is_non_artifact_subdirectory,
     preflight_resource_warning,
     reject_in_place_conversion,
     resolve_checkpoint_source,
@@ -57,16 +59,29 @@ def _sink_keys_by_shard(shards: list[str]) -> dict[str, list[str]]:
     return found
 
 
+def _non_artifact_subdirectories(root: str, directory: str, names: list[str]) -> list[str]:
+    """``shutil.copytree``'s ignore: the subdirectories of ``root`` the aux copy leaves behind."""
+    if directory != root:
+        return []
+    return [name for name in names if is_non_artifact_subdirectory(name) and os.path.isdir(os.path.join(root, name))]
+
+
 def _passthrough_copy(source: Path, output_dir: Path, dry_run: bool) -> None:
     """Materialise ``output_dir`` for a checkpoint that turned out to carry no sinks.
 
     A no-op reset still writes the output it was asked for: returning without writing would leave the
-    next pipeline stage pointing at a missing directory, or at a stale one of the same name.
+    next pipeline stage pointing at a missing directory, or at a stale one of the same name. It leaves
+    behind the subdirectories a reset that rewrites shards does not carry (a vendor weight dump among them).
     """
     if dry_run or output_dir == source:
         return
     logger.info(f"No sinks to reset — copying the checkpoint to {output_dir} unchanged...")
-    shutil.copytree(str(source), str(output_dir), dirs_exist_ok=True)
+    shutil.copytree(
+        str(source),
+        str(output_dir),
+        dirs_exist_ok=True,
+        ignore=functools.partial(_non_artifact_subdirectories, str(source)),
+    )
     tag_exported_model_card(str(output_dir), source_dir=str(source))
 
 

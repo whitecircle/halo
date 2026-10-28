@@ -20,6 +20,7 @@ import zlib
 import pytest
 
 from halo.configs.grpo_environmental import EnvironmentConfig
+from halo.entrypoints.code_pool_preparation import rating_in_bounds
 from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
 from halo.environments.registry import build_environment, get_registered_environments
 from halo.environments.sandbox.base import SandboxExecutor
@@ -50,7 +51,6 @@ from halo.environments.tasks.coding.verdicts import (
     float_tolerance,
 )
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
-from scripts.environments.preparation.prepare_code_dataset import rating_in_bounds
 from tests.common.code_contests import StubSandbox
 
 # A tolerance special-judge: accept any float within 1e-4 of the reference (argv = 3 file paths).

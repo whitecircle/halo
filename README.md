@@ -22,7 +22,7 @@ Halo is an open-source framework built by [White Circle](https://whitecircle.com
 
 The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP, PP, FSDP2, fused kernels, BF16 training, and distributed rollouts.
 
-Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and supporting a new model family typically takes under 140 lines of integration code.
+Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is 115 lines or fewer for every family but GPT-OSS, at 194 ([Model Integration Cost](human-docs/model-integration-cost.md)).
 
 On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL (3.2× at 25% less peak memory when both sides shard ZeRO-3).
 
@@ -115,7 +115,7 @@ halo launch sft examples/sft/qwen3/qwen3-4b-ultrachat.yaml \
 halo launch --list
 ```
 
-`halo` selects `python`, `torchrun`, or `accelerate launch` based on the arguments, and `--dry-run`
+`halo` selects `python`, `torchrun`, or `accelerate launch` based on the arguments, and `--dry_run`
 prints the command instead of running it. Options after the config that are not the launcher's own are
 passed to the trainer and override the YAML config:
 

@@ -42,7 +42,7 @@ The per-turn reasoning budget counts once, not `max_turns` times (twice under `c
 
 - Cap the longest training row with [`max_train_row_tokens`](episodes.md#trajectory-length) (unset by default; `64000` in the Qwen3.6 curriculum stages).
 - Bound tool output with `max_observation_chars` (default `16384`, in `environment_kwargs`), which every tool-use environment applies ([Common knobs](environments/README.md#common-knobs)).
-- The usual memory savers are on by default: gradient checkpointing (`use_reentrant` is forced to `true` on every MoE) and AdamWBF16 at 6 B/param, which a bf16 run gets from the default `optim` ([BF16 optimizer](../../optimization/bf16-optimizer.md#usage)).
+- The usual memory savers are on by default: gradient checkpointing ([reentrant on every MoE](../../optimization/flash-attention.md#usage)) and AdamWBF16 at 6 B/param, which a bf16 run gets from the default `optim` ([BF16 optimizer](../../optimization/bf16-optimizer.md#usage)).
 
 ## Throughput levers
 

@@ -21,7 +21,7 @@ halo launch <method> <config.yaml> [launcher flags] [field overrides]
 | `--accelerate <yaml>` | `-a` | launch with `accelerate launch` and this config (plain FSDP) |
 | `--port P` | `-p` | rendezvous port for a multi-process launch; set it when two jobs share a host |
 | `--list` | | print every method and its script |
-| `--dry-run` | | print the command instead of running it |
+| `--dry_run` | | print the command instead of running it |
 | `--root <dir>` | | repository root (defaults to the checkout the CLI lives in); the script imports `halo` and `scripts` from it |
 
 The CLI picks the launcher:
@@ -59,11 +59,11 @@ job, run one `torchrun` per node ([Clusters and multi-node](clusters.md)).
 halo run <tool> [launcher flags] [tool flags]
 ```
 
-`halo run` takes `--list`, `--dry-run` and `--root`, and runs the tool as one
+`halo run` takes `--list`, `--dry_run` and `--root`, and runs the tool as one
 process from your current directory: every tool is single-process. Everything
 else goes to the tool, a Gradio app's own `--port` included.
 
-When a tool flag has the same name as a launcher flag (`--help`, `--dry-run`,
+When a tool flag has the same name as a launcher flag (`--help`, `--dry_run`,
 `--root`, `--list`), put `--` before it: `halo run <tool> -- --help` prints the
 tool's help, not the launcher's.
 

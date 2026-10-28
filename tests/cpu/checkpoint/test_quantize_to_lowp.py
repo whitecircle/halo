@@ -1,4 +1,4 @@
-"""CPU test for scripts/after_training/quantize_to_lowp.py — the bf16/fp32 → block-scaled mxfp8/mxfp4/nvfp4
+"""CPU test for halo/checkpoint/lowp_export.py — the bf16/fp32 → block-scaled mxfp8/mxfp4/nvfp4
 checkpoint conversion that pairs with quantization-aware training.
 
 Verifies: (1) only the targeted MLP/expert weights are quantized (attention/norm/embed/bias copied
@@ -20,20 +20,13 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from halo.checkpoint import lowp_export as _quantize_to_lowp
+from halo.checkpoint import lowp_export
+from halo.checkpoint.reading import checkpoint_shard_files
 from halo.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
 from halo.kernels.lowp.spec import MLP_PROJECTIONS
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
 from halo.models.moe.family_specs import per_expert_layouts
 from tests.common.checkpoint_io import weight_files
-
-_DEFAULT_EXCLUDE = _quantize_to_lowp.DEFAULT_EXCLUDE
-_DEFAULT_INCLUDE = _quantize_to_lowp.DEFAULT_INCLUDE
-_QUANTIZABLE_WEIGHT_NAMES = _quantize_to_lowp._QUANTIZABLE_WEIGHT_NAMES
-_fused_expert_axis = _quantize_to_lowp._fused_expert_axis
-_should_quantize = _quantize_to_lowp._should_quantize
-checkpoint_shard_files = _quantize_to_lowp.checkpoint_shard_files
-quantize_checkpoint = _quantize_to_lowp.quantize_checkpoint
 
 _FMT_TOL = {"mxfp8": 0.08, "nvfp4": 0.25, "mxfp4": 0.35}  # inherent block-scaled format error
 
@@ -68,7 +61,7 @@ def test_quantize_to_lowp():
             src, out = os.path.join(root, "src"), os.path.join(root, "out")
             os.makedirs(src)
             gate = _make_checkpoint(src)
-            quantize_checkpoint(src, out, fmt, verify=True)
+            lowp_export.quantize_checkpoint(src, out, fmt, verify=True)
             saved = load_file(os.path.join(out, "model.safetensors"))
 
             g = "model.layers.0.mlp.gate_proj"
@@ -146,7 +139,7 @@ def test_the_nvfp4_export_reads_back_under_the_compressed_tensors_convention(tmp
     src, out = tmp_path / "src", tmp_path / "out"
     src.mkdir()
     gate = _make_checkpoint(str(src))
-    quantize_checkpoint(str(src), str(out), "nvfp4")
+    lowp_export.quantize_checkpoint(str(src), str(out), "nvfp4")
     saved = load_file(str(out / "model.safetensors"))
     g = "model.layers.0.mlp.gate_proj"
 
@@ -171,7 +164,7 @@ def test_an_all_zero_nvfp4_weight_stores_a_finite_global_scale(tmp_path):
     writes it."""
     src, out = tmp_path / "src", tmp_path / "out"
     _write_mlp_checkpoint(src, torch.zeros(32, 64, dtype=torch.bfloat16))
-    quantize_checkpoint(str(src), str(out), "nvfp4", verify=True)
+    lowp_export.quantize_checkpoint(str(src), str(out), "nvfp4", verify=True)
     saved = load_file(str(out / "model.safetensors"))
     zero, live = "model.layers.0.mlp.gate_proj", "model.layers.0.mlp.down_proj"
 
@@ -187,17 +180,17 @@ def test_a_nonzero_weight_below_the_global_scale_range_is_refused(tmp_path):
     src, out = tmp_path / "src", tmp_path / "out"
     _write_mlp_checkpoint(src, torch.full((32, 64), 1e-37, dtype=torch.bfloat16))
     with pytest.raises(ValueError, match="below the range an nvfp4 global scale can store"):
-        quantize_checkpoint(str(src), str(out), "nvfp4")
+        lowp_export.quantize_checkpoint(str(src), str(out), "nvfp4")
 
 
 def test_should_quantize_scoping():
     """The --include/--exclude defaults scope quantization to dense-MLP / expert FFN
     weights only — attention, norms, embeddings, router and biases stay high precision."""
-    inc, exc = re.compile(_DEFAULT_INCLUDE), re.compile(_DEFAULT_EXCLUDE)
+    inc, exc = re.compile(lowp_export.DEFAULT_INCLUDE), re.compile(lowp_export.DEFAULT_EXCLUDE)
     w2d = torch.zeros(16, 16)
 
     def q(name, t=w2d):
-        return _should_quantize(name, t, inc, exc)
+        return lowp_export._should_quantize(name, t, inc, exc)
 
     assert q("model.layers.0.mlp.gate_proj.weight")
     assert q("model.layers.0.mlp.down_proj.weight")
@@ -207,7 +200,7 @@ def test_should_quantize_scoping():
     assert q("model.layers.0.mlp.experts.0.w2.weight")
     # The roster's other expert-container spelling (GLM-4's ``routed_experts``) is an expert too.
     assert q("model.layers.0.mlp.routed_experts.3.gate_proj.weight")
-    assert not _should_quantize(
+    assert not lowp_export._should_quantize(
         "model.layers.0.mlp.routed_experts.3.gate_proj.weight", w2d, inc, exc, apply_moe_experts=False
     )
     # A per-expert roster spelling OUTSIDE an expert segment is a dense projection the trainer never
@@ -216,8 +209,8 @@ def test_should_quantize_scoping():
     assert not q("model.layers.0.feed_forward.w2.weight")
     # Fused MoE experts are 3-D nn.Parameters with no trailing .weight: matched on shape + suffix.
     w3d = torch.zeros(8, 16, 16)
-    assert _should_quantize("model.layers.0.mlp.experts.gate_up_proj", w3d, inc, exc)
-    assert _should_quantize("model.layers.0.mlp.experts.down_proj", w3d, inc, exc)
+    assert lowp_export._should_quantize("model.layers.0.mlp.experts.gate_up_proj", w3d, inc, exc)
+    assert lowp_export._should_quantize("model.layers.0.mlp.experts.down_proj", w3d, inc, exc)
     # ...but a 2-D tensor with a fused-expert-like name is not (no .weight, not 3-D).
     assert not q("model.layers.0.mlp.experts.gate_up_proj")
 
@@ -233,7 +226,7 @@ def test_should_quantize_scoping():
     assert not q("model.layers.0.self_attn.q_proj.weight")
 
     # 1-D tensors are never quantized (no contraction axis to block along).
-    assert not _should_quantize("model.layers.0.mlp.gate_proj.weight", torch.zeros(16), inc, exc)
+    assert not lowp_export._should_quantize("model.layers.0.mlp.gate_proj.weight", torch.zeros(16), inc, exc)
     assert not q("model.layers.0.mlp.gate_up_proj_packed")
 
 
@@ -253,7 +246,7 @@ def test_non_block_divisible_axis_left_high_precision():
         with open(os.path.join(src, "config.json"), "w") as f:
             json.dump({"model_type": "test"}, f)
 
-        quantize_checkpoint(src, out, "mxfp8")
+        lowp_export.quantize_checkpoint(src, out, "mxfp8")
         saved = load_file(os.path.join(out, "model.safetensors"))
         assert "model.layers.0.mlp.gate_proj.weight" in saved
         assert "model.layers.0.mlp.gate_proj.weight_packed" not in saved
@@ -281,7 +274,7 @@ def test_multi_shard_checkpoint_quantized():
         with open(os.path.join(src, "config.json"), "w") as f:
             json.dump({"model_type": "test"}, f)
 
-        quantize_checkpoint(src, out, "mxfp8")
+        lowp_export.quantize_checkpoint(src, out, "mxfp8")
         merged = {}
         for fn in ("model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"):
             merged.update(load_file(os.path.join(out, fn)))
@@ -310,7 +303,7 @@ def _quantize_one_expert(model_type: str, shape: tuple[int, int, int]) -> tuple[
         )
         with open(os.path.join(src, "config.json"), "w") as f:
             json.dump({"model_type": model_type}, f)
-        quantize_checkpoint(src, out, "mxfp8", verify=True)
+        lowp_export.quantize_checkpoint(src, out, "mxfp8", verify=True)
         saved = load_file(os.path.join(out, "model.safetensors"))
         with open(os.path.join(out, "quantization_config.json")) as f:
             mani = json.load(f)
@@ -369,11 +362,11 @@ def test_fused_expert_axis_comes_from_the_layer_class(tmp_path, cfg, expected_ax
     layout, not a model_type table in the script. A wrong axis block-scales the OUTPUT dim and
     silently corrupts every dequantized expert, so an unregistered family must resolve to ``None``
     (the caller raises) rather than defaulting."""
-    assert _fused_expert_axis(_write_config(tmp_path, cfg)) == expected_axis
+    assert lowp_export._fused_expert_axis(_write_config(tmp_path, cfg)) == expected_axis
 
 
 def test_fused_expert_axis_missing_config(tmp_path):
-    assert _fused_expert_axis(str(tmp_path)) is None
+    assert lowp_export._fused_expert_axis(str(tmp_path)) is None
 
 
 def test_unknown_family_fused_expert_raises():
@@ -404,10 +397,10 @@ def test_an_expert_bank_under_an_undeclared_fused_name_is_refused_before_any_wri
         json.dump({"model_type": "step3p7"}, f)
 
     with pytest.raises(ValueError, match="its name is not a fused expert key"):
-        quantize_checkpoint(str(src), str(out), "mxfp8")
+        lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8")
     assert not out.exists(), "a refused conversion must not create its output directory"
 
-    quantize_checkpoint(str(src), str(out), "mxfp8", apply_moe_experts=False)
+    lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8", apply_moe_experts=False)
     assert set(load_file(os.path.join(out, "model.safetensors"))) == {
         f"{prefix}.{name}" for name in ("gate_proj", "up_proj", "down_proj")
     }, "with experts out of scope every bank is copied through unchanged"
@@ -430,10 +423,10 @@ def test_a_moe_checkpoint_whose_experts_match_nothing_is_refused(tmp_path):
         json.dump({"model_type": "qwen3_moe"}, f)
 
     with pytest.raises(ValueError, match="no expert weight is in the low-precision scope"):
-        quantize_checkpoint(str(src), str(out), "mxfp8")
+        lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8")
     assert not out.exists()
 
-    quantize_checkpoint(str(src), str(out), "mxfp8", apply_moe_experts=False)
+    lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8", apply_moe_experts=False)
     written = load_file(os.path.join(out, "model.safetensors"))
     assert "model.layers.0.mlp.gate_proj.weight_packed" in written
     assert torch.equal(
@@ -450,7 +443,7 @@ def test_vision_tower_projections_are_never_quantized():
     Quantizing either on export contradicts this file's "reproduces the QAT forward exactly" claim —
     the served vision encoder would compute in a format training never saw.
     """
-    inc, exc = re.compile(_DEFAULT_INCLUDE), re.compile(_DEFAULT_EXCLUDE)
+    inc, exc = re.compile(lowp_export.DEFAULT_INCLUDE), re.compile(lowp_export.DEFAULT_EXCLUDE)
     w2d = torch.zeros(16, 16)
     for name in (
         "vision_tower.vision_model.encoder.layers.0.mlp.fc1.weight",
@@ -460,7 +453,7 @@ def test_vision_tower_projections_are_never_quantized():
         "multi_modal_projector.linear_1.weight",
         "model.multi_modal_projector.mlp.up_proj.weight",
     ):
-        assert not _should_quantize(name, w2d, inc, exc), f"{name} was quantized but trains in bf16"
+        assert not lowp_export._should_quantize(name, w2d, inc, exc), f"{name} was quantized but trains in bf16"
 
 
 def test_the_quantizable_name_set_is_derived_from_the_two_rosters():
@@ -471,10 +464,10 @@ def test_the_quantizable_name_set_is_derived_from_the_two_rosters():
     be remembered a second time to be covered at all.
     """
     declared = set(MLP_PROJECTIONS) | set(HF_FUSED_EXPERT_KEYS) | {k for keys in per_expert_layouts() for k in keys}
-    assert set(_QUANTIZABLE_WEIGHT_NAMES) == declared
+    assert set(lowp_export._QUANTIZABLE_WEIGHT_NAMES) == declared
     assert {"gate_proj", "up_proj", "down_proj", "gate_up_proj", "w1", "w2", "w3"} <= declared
     for never_converted in ("fc1", "fc2", "mlp", "feed_forward", "experts"):
-        assert never_converted not in _QUANTIZABLE_WEIGHT_NAMES
+        assert never_converted not in lowp_export._QUANTIZABLE_WEIGHT_NAMES
 
 
 def test_fused_expert_names_name_no_per_expert_projection():
@@ -502,13 +495,13 @@ def test_verify_refuses_a_non_finite_weight(fmt, poison):
         weight[3, 7] = poison
         save_file({"model.layers.0.mlp.down_proj.weight": weight}, os.path.join(src, "model.safetensors"))
         with pytest.raises(ValueError, match="non-finite"):
-            quantize_checkpoint(src, out, fmt, verify=True)
+            lowp_export.quantize_checkpoint(src, out, fmt, verify=True)
 
 
 def test_verify_fails_past_the_format_tolerance(monkeypatch, tmp_path):
     """A relerr past the format's own block-scaled error is structural (usually the contraction axis):
     ``--verify`` must fail the run, not log a WARN at INFO under a success exit."""
-    monkeypatch.setattr(_quantize_to_lowp, "_VERIFY_RELERR_TOL", {"mxfp8": 0.0})
+    monkeypatch.setattr(lowp_export, "_VERIFY_RELERR_TOL", {"mxfp8": 0.0})
     src = tmp_path / "src"
     src.mkdir()
     weight = torch.randn(64, 128, dtype=torch.bfloat16) * 0.02
@@ -516,7 +509,7 @@ def test_verify_fails_past_the_format_tolerance(monkeypatch, tmp_path):
     (src / "config.json").write_text('{"model_type": "qwen3"}')
 
     with pytest.raises(ValueError, match="down_proj.weight.*past the mxfp8 tolerance"):
-        quantize_checkpoint(str(src), str(tmp_path / "out"), "mxfp8", verify=True)
+        lowp_export.quantize_checkpoint(str(src), str(tmp_path / "out"), "mxfp8", verify=True)
     written = {path.name for path in (tmp_path / "out").iterdir()}
     assert not written & {"config.json", "quantization_config.json"}, f"a refused export must not load: {written}"
 
@@ -548,7 +541,7 @@ def test_single_file_output_sweeps_a_previous_runs_index():
         _make_checkpoint(src)
         _plant_previous_run(out, single=False, index_shards=("model-00001-of-00002.safetensors",))
 
-        quantize_checkpoint(src, out, "mxfp8")
+        lowp_export.quantize_checkpoint(src, out, "mxfp8")
 
         assert _weight_files(out) == {"model.safetensors"}, f"stale files survived: {sorted(_weight_files(out))}"
         assert not os.path.exists(os.path.join(out, "model.safetensors.index.json"))
@@ -575,7 +568,7 @@ def test_sharded_output_keeps_its_own_index_and_drops_the_stale_single_file():
             json.dump({"model_type": "test"}, f)
         _plant_previous_run(out, single=True)
 
-        quantize_checkpoint(src, out, "mxfp8")
+        lowp_export.quantize_checkpoint(src, out, "mxfp8")
 
         assert _weight_files(out) == {"model-00001-of-00002.safetensors", "model-00002-of-00002.safetensors"}
         with open(os.path.join(out, "model.safetensors.index.json")) as f:
@@ -607,11 +600,11 @@ def test_keep_window_refuses_two_interleaved_block_numberings():
             json.dump({"model_type": "test"}, f)
 
         with pytest.raises(ValueError, match="span 2"):
-            quantize_checkpoint(src, out, "mxfp8", keep_last_blocks=1)
+            lowp_export.quantize_checkpoint(src, out, "mxfp8", keep_last_blocks=1)
 
         # Without a keep window there is no numbering to be ambiguous about, so the same checkpoint
         # exports: the guard must not become a blanket refusal of multi-stack checkpoints.
-        quantize_checkpoint(src, out, "mxfp8")
+        lowp_export.quantize_checkpoint(src, out, "mxfp8")
         assert "model.mtp.layers.0.mlp.gate_proj.weight_packed" in load_file(os.path.join(out, "model.safetensors"))
 
 
@@ -632,7 +625,7 @@ def test_an_unreadable_config_is_refused_before_any_write(tmp_path):
     (src / "config.json").write_text('{"model_type": "qwen3_moe"')
 
     with pytest.raises(json.JSONDecodeError):
-        quantize_checkpoint(str(src), str(out), "mxfp8")
+        lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8")
     assert not out.exists(), "an unreadable config must be refused before the output directory is created"
 
 
@@ -642,7 +635,7 @@ def test_quantize_refuses_to_write_into_its_own_input_dir():
     with tempfile.TemporaryDirectory() as src:
         save_file({"model.layers.0.mlp.down_proj.weight": torch.randn(64, 64)}, os.path.join(src, "model.safetensors"))
         with pytest.raises(ValueError, match="not in-place"):
-            quantize_checkpoint(src, src, "mxfp8")
+            lowp_export.quantize_checkpoint(src, src, "mxfp8")
 
 
 if __name__ == "__main__":

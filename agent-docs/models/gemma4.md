@@ -69,6 +69,8 @@ Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-onl
 
 Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
+Gemma 4's bf16 log-probs carry several nats of noise at low-probability tokens on every bf16 path, the engines and the trainer alike (fp32 agrees to 0.001), and that noise enters the importance ratios, so the engine startup probe compares only the positions the model scores confidently ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
+
 **Attention LoRA** (the `-lora-` recipes) adapts the language model alone. The vision tower's
 projections carry the same `q_proj`…`o_proj` names but are `Gemma4ClippableLinear`, a wrapper holding
 its weight in a child `nn.Linear` that PEFT cannot decompose, so they are excluded from injection with

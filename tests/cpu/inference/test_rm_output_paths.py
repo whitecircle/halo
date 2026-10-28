@@ -37,7 +37,7 @@ def test_each_suffix_keeps_its_own_file():
     """The record shapes are not interchangeable, so the formats must not share a resume file; the
     shared helper spells each script's own suffix rather than one name for all of them."""
     assert _path("model-a", suffix="offline_grpo").name == "prompts_model-a_offline_grpo.jsonl"
-    assert _path("model-a", suffix="rm_scoring").name == "prompts_model-a_rm_scoring.jsonl"
+    assert _path("model-a", suffix="reward_scoring").name == "prompts_model-a_reward_scoring.jsonl"
     assert _path("model-a", suffix="offline_grpo") != _path("model-a")
 
 
@@ -52,7 +52,7 @@ def test_slashed_model_name_stays_one_path_component():
     ("model_name", "dataset", "suffix"),
     [
         ("/models/" + "a" * 400, "/data/prompts.jsonl", "rs"),  # vLLM's --served-model-name default
-        ("m", "/data/" + "p" * 400 + ".jsonl", "rm_scoring"),  # a long prompt path on its own
+        ("m", "/data/" + "p" * 400 + ".jsonl", "reward_scoring"),  # a long prompt path on its own
         ("/models/" + "a" * 200, "/data/" + "p" * 200 + ".jsonl", "offline_grpo"),  # both, each under the cap
         ("m", "/data/" + "я" * 200 + ".jsonl", "rs"),  # multi-byte: 200 chars is 400 bytes
     ],

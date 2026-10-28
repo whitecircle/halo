@@ -391,26 +391,17 @@ disables entropy logging.
 
 ## Checkpoint saving
 
-`save_model()` saves only adapter weights (~MB). `save_peft_adapters` (`halo/checkpoint/parallel/adapters.py`),
-the saver ladder's first rung, handles every mixin-managed mode. Two routes bypass it: an accelerate-managed FSDP run, where the base
-Trainer's save owns the sharded layout, and `merge_expert_lora_on_save`, which goes through the gathered EP
-save instead. Per mode:
+`save_model()` saves only adapter weights (~MB). Which saver writes them, from which rank and with which
+collective under each mode: [Checkpoints](../reference/checkpoints.md#peft-lora-saving). Two layouts are
+specific to LoRA:
 
-- **EP:** attention adapters are replicated (rank 0 saves); native expert adapters are rank-local and
-  gathered across the EP group into the same adapter file. Pure ETP carries attention adapters only;
-  expert LoRA raises at `expert_tp_size > 1`.
-
-    An **expert-only** run has no PEFT model at all, so `save_expert_lora_adapters` writes the adapter with a
-    synthesized config instead: `peft_type: EXPERT_LORA`, the base model path, and every field the delta
-    depends on (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
-
-- **CP:** adapter keys normalized to strip CP wrapper paths (`.original_attention.`, extra `.model.`) so they
-  load onto non-CP models; the module paths in the written `adapter_config.json` (`exclude_modules`, and
-  `target_modules` once `all-linear` made PEFT rewrite it to full paths) are respelled the same way, while
-  the live config keeps the wrapper's spelling; DTensor reconstruction also applied.
-- **FSDP2:** DTensor adapter params reconstructed via `full_tensor()` (a collective) before save; global rank
-  0 saves on a shared FS, rank 0 per node otherwise.
-- **EP+CP:** combines EP rank selection with CP key normalization.
+- An **expert-only** run has no PEFT model at all, so `save_expert_lora_adapters` writes the adapter with a
+  synthesized config: `peft_type: EXPERT_LORA`, the base model path, and every field the delta depends on
+  (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
+- Under **CP** the adapter keys drop the wrapper's path segments (`.original_attention.`, extra `.model.`) so
+  they load onto a non-CP model. The module paths in the written `adapter_config.json` (`exclude_modules`,
+  and `target_modules` once `all-linear` made PEFT rewrite it to full paths) are respelled the same way,
+  while the live config keeps the wrapper's spelling.
 
 **Reloading elsewhere.** Attention adapters carry standard PEFT keys and load onto a stock
 `PeftModel.from_pretrained`. Native expert adapters do not: grouped `[E, K, r]` tensors have no PEFT

@@ -13,7 +13,7 @@ import argparse
 import pytest
 from datasets import Dataset
 
-from scripts.environments.inference import run_env
+from halo.entrypoints import generic_env_eval
 
 
 def _args(dataset: str, **flags) -> argparse.Namespace:
@@ -22,10 +22,10 @@ def _args(dataset: str, **flags) -> argparse.Namespace:
         "config": None,
         "split": "test",
         "prompt_field": "question",
-        "answer_field": run_env.DEFAULT_ANSWER_FIELD,
+        "answer_field": generic_env_eval.DEFAULT_ANSWER_FIELD,
         "context_fields": [],
         "group_by": None,
-        "id_field": run_env.DEFAULT_ID_FIELD,
+        "id_field": generic_env_eval.DEFAULT_ID_FIELD,
         "num_examples": 0,
     }
     return argparse.Namespace(**{**defaults, **flags})
@@ -50,15 +50,15 @@ def saved(tmp_path) -> str:
 )
 def test_a_field_flag_naming_no_column_is_refused_before_any_row(saved, flag, value):
     with pytest.raises(SystemExit, match=f"--{flag} .*: no such column in .*available columns"):
-        run_env.build_examples(_args(saved, **{flag: value}))
+        generic_env_eval.build_column_examples(_args(saved, **{flag: value}))
 
 
 def test_the_default_answer_and_id_columns_may_be_absent(saved):
-    examples = run_env.build_examples(_args(saved, context_fields=["subject"], group_by="subject"))
+    examples = generic_env_eval.build_column_examples(_args(saved, context_fields=["subject"], group_by="subject"))
     assert [example["prompt"] for example in examples] == ["q1", "q2"]
     assert [example["context"] for example in examples] == [{"subject": "x"}, {"subject": "y"}]
     assert [example["id"] for example in examples] == [None, None]
-    renamed = run_env.build_examples(_args(saved, answer_field="gold", id_field="qid"))
+    renamed = generic_env_eval.build_column_examples(_args(saved, answer_field="gold", id_field="qid"))
     assert [(example["context"]["answer"], example["id"]) for example in renamed] == [("a", "p1"), ("b", "p2")]
 
 

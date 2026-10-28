@@ -193,7 +193,7 @@ def test_rejection_sampling_drops_a_row_whose_hypotheses_were_truncated():
 
 def test_score_output_path_helper_is_the_one_under_test(tmp_path):
     """Pins the driver above to the real output-path contract rather than a path it invented."""
-    assert reward_scoring.build_output_path(str(tmp_path), "p.jsonl", "m", "rm_scoring").parent == tmp_path
+    assert reward_scoring.build_output_path(str(tmp_path), "p.jsonl", "m", "reward_scoring").parent == tmp_path
 
 
 # --- run_async_cli: an interrupted run is not a successful one ------------------------------------

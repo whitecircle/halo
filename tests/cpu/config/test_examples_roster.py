@@ -31,7 +31,7 @@ from halo.environments.rollout_config import resolve_reasoning_end_ids
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
-from halo.models.attention.selection import validate_attn_implementation
+from halo.models.attention.selection import flash_kernel, is_flash_attn_implementation, validate_attn_implementation
 from halo.models.config_access import text_config
 from halo.models.context_window import is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
@@ -522,6 +522,11 @@ def test_example_attention_carries_the_sinks_it_keeps_live(config):
     model_config = model_config_for(config, parsed)
     if not uses_gpt_oss_sinks(model_config):
         return
+    if is_flash_attn_implementation(attn_implementation):
+        try:
+            flash_kernel(attn_implementation)
+        except ImportError:
+            pytest.skip(f"{attn_implementation} is not built into this image (the recipe targets another GPU)")
     validate_attn_implementation(
         model_config, attn_implementation, SinksPolicy.from_flags(reset_sinks=parsed_field(parsed, "reset_sinks"))
     )

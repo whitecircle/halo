@@ -173,6 +173,7 @@ way to overlap the two.
 
 ```bash
 make build-vllm   # or set VLLM_IMAGE to the public image
+export HALO_SCRATCH=/path/to/large/volume   # or set it in .env; compose refuses to start without it
 VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_TP=4 VLLM_REASONING_PARSER=qwen3 \
 VLLM_TOOL_CALLING_FLAGS= \
     docker compose -f docker-compose.vllm.yml up -d vllm-server

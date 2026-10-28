@@ -11,7 +11,7 @@ from fnmatch import fnmatch
 
 import torch
 from accelerate.utils import is_peft_model
-from huggingface_hub import snapshot_download
+from huggingface_hub import is_offline_mode, snapshot_download
 from transformers import AutoModel, AutoModelForSequenceClassification
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import GENERATION_CONFIG_NAME
@@ -29,6 +29,7 @@ from halo.checkpoint.format import (
     RUN_INTERNAL_PREFIX,
     UNSUFFIXED_RESUME_ENTRIES,
     WEIGHT_DUMP_DIRS,
+    WEIGHT_DUMP_IGNORE_PATTERNS,
     WEIGHT_FILE_SUFFIXES,
     optimizer_shard_filename,
 )
@@ -59,6 +60,12 @@ ADAPTER_TASKS = ("causal_lm", "classification")
 _LEGACY_TOKENIZER_SIDECARS = ("special_tokens_map.json", "added_tokens.json", "chat_template.json")
 
 
+def is_non_artifact_subdirectory(name: str) -> bool:
+    """Whether a checkpoint's top-level subdirectory ``name`` stays out of an artifact built from it: a hidden
+    one, a run-internal ``_*`` one, a nested ``checkpoint-N`` (resume state) or a vendor weight dump."""
+    return name.startswith((".", RUN_INTERNAL_PREFIX, f"{PREFIX_CHECKPOINT_DIR}-")) or name in WEIGHT_DUMP_DIRS
+
+
 def copy_checkpoint_aux_files(
     input_dir: str, output_dir: str, *, include_resume_sidecars: bool = True, verbose: bool = False
 ) -> None:
@@ -83,7 +90,7 @@ def copy_checkpoint_aux_files(
             continue
         src = os.path.join(input_dir, name)
         if os.path.isdir(src):
-            if name.startswith((".", RUN_INTERNAL_PREFIX, f"{PREFIX_CHECKPOINT_DIR}-")) or name in WEIGHT_DUMP_DIRS:
+            if is_non_artifact_subdirectory(name):
                 continue
             shutil.copytree(src, os.path.join(output_dir, name), dirs_exist_ok=True)
             if verbose:
@@ -237,11 +244,20 @@ def save_full_checkpoint(
 
 
 def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str:
-    """A local checkpoint directory as-is; a Hub repo id resolved through the download cache."""
+    """A local checkpoint directory as-is; a Hub repo id resolved through the download cache, offline from the
+    cache alone: a call that may fetch lists a pinned commit's files through the Hub, which raises offline.
+
+    The fetch leaves the vendor weight dumps behind (:data:`~halo.checkpoint.format.WEIGHT_DUMP_IGNORE_PATTERNS`):
+    no tool reads them, and the aux copy drops them from every output."""
     if os.path.isdir(model_id):
         return model_id
     logger.info(f"Resolving {model_id} through the HF cache (HF_HOME)...")
-    return snapshot_download(model_id, revision=revision)
+    return snapshot_download(
+        model_id,
+        revision=revision,
+        local_files_only=is_offline_mode(),
+        ignore_patterns=list(WEIGHT_DUMP_IGNORE_PATTERNS),
+    )
 
 
 def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:

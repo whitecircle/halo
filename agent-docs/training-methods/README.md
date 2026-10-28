@@ -18,6 +18,8 @@ Every method is YAML-driven, runs through the same distributed parallelism syste
 | [Distillation](distillation/README.md) | `DistributedDistillationTrainer`, `DistributedSelfDistillationTrainer`, `DistributedSDPGTrainer` | SFT conversations (`conversation_field`), or `prompt`, `answer` (online SDPG) | Compress a teacher, or self-distill from a privileged hint (offline or online SDPG) |
 | [Embedding](embedding.md) | `EmbeddingTrainer` | text pairs or triplets, optional `label` / `score` | Retrieval and similarity models, 10 SBERT losses and Matryoshka |
 
+Family overviews: [Preference](preference/README.md) · [GRPO](grpo/README.md).
+
 Column types and per-script defaults: [Dataset Formats](../data/dataset-formats.md#required-columns-by-method). Scripts and their flags: [Scripts Reference](../reference/scripts-reference.md). Undecided: [Choosing a method](../../human-docs/choosing-a-method.md).
 
 ## Vision-language support

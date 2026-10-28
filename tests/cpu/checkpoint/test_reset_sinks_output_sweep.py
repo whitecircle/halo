@@ -342,18 +342,42 @@ def test_a_sink_family_whose_keys_miss_the_spelling_raises(tmp_path):
     assert not out.exists(), "a checkpoint whose sinks were never reset was written anyway"
 
 
+def _build_sink_free_source(source_dir) -> None:
+    """A single-file checkpoint of a family that carries no sinks."""
+    _build_source(source_dir, sharded=False)
+    stripped = {key: tensor for key, tensor in load_file(str(source_dir / SINGLE)).items() if ".sinks" not in key}
+    save_file(stripped, str(source_dir / SINGLE), metadata=SAFETENSORS_METADATA)
+    config = json.loads((source_dir / "config.json").read_text())
+    config["model_type"] = "qwen3"
+    (source_dir / "config.json").write_text(json.dumps(config))
+
+
 def test_a_sink_free_family_is_copied_through(tmp_path):
     """Anti-over-widening: a family that carries no sinks is not refused; its output is written unchanged."""
     source, out = tmp_path / "src", tmp_path / "out"
-    _build_source(source, sharded=False)
-    stripped = {key: tensor for key, tensor in load_file(str(source / SINGLE)).items() if ".sinks" not in key}
-    save_file(stripped, str(source / SINGLE), metadata=SAFETENSORS_METADATA)
-    config = json.loads((source / "config.json").read_text())
-    config["model_type"] = "qwen3"
-    (source / "config.json").write_text(json.dumps(config))
+    _build_sink_free_source(source)
 
     assert reset_sinks(str(source), str(out)) == 0
 
+    assert (out / SINGLE).read_bytes() == (source / SINGLE).read_bytes()
+
+
+def test_the_copy_through_leaves_the_vendor_weight_dumps_behind(tmp_path):
+    """``original/`` and ``metal/`` are the vendor's own copies of the same weights (gpt-oss ships both): a reset
+    that rewrites shards drops them through the aux copy, and the copy-through of a sink-free checkpoint must
+    not carry them either, while a subdirectory that belongs to the checkpoint still arrives."""
+    source, out = tmp_path / "src", tmp_path / "out"
+    _build_sink_free_source(source)
+    for dump in ("original", "metal"):
+        (source / dump).mkdir()
+        (source / dump / SINGLE).write_bytes(b"vendor-dump")
+    (source / "2_Dense").mkdir()
+    (source / "2_Dense" / "config.json").write_text("{}")
+
+    assert reset_sinks(str(source), str(out)) == 0
+
+    assert not (out / "original").exists() and not (out / "metal").exists(), sorted(os.listdir(out))
+    assert (out / "2_Dense" / "config.json").read_text() == "{}"
     assert (out / SINGLE).read_bytes() == (source / SINGLE).read_bytes()
 
 

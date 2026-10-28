@@ -44,7 +44,7 @@ with open(os.path.join(os.environ["FAKE_PY_SPY_LOG"], pid + ".json"), "w") as wi
 def _run(
     tmp_path, command: str, *, failing: tuple[int, ...] = (), default_output: bool = False
 ) -> tuple[subprocess.CompletedProcess, str]:
-    """Run ``command`` against the stand-in; ``default_output`` drops ``--output-dir`` and points
+    """Run ``command`` against the stand-in; ``default_output`` drops ``--output_dir`` and points
     ``HALO_DATA_ROOT`` at ``tmp_path/data``, ``TMPDIR`` at ``tmp_path/tmp``."""
     bin_dir, log_dir, out_dir = (tmp_path / name for name in ("bin", "log", "out"))
     bin_dir.mkdir()

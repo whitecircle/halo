@@ -108,6 +108,7 @@ TOOL_BUILDS = frozenset(
         ("halo/checkpoint/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
         ("halo/checkpoint/offline_export.py", "load_task_model"),
         ("halo/checkpoint/vocab_patch.py", "patch_vocabulary"),
+        ("halo/data/deduplication.py", "compute_embeddings"),
         ("halo/entrypoints/reward_scoring.py", "load_reward_model"),
     }
 )

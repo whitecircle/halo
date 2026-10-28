@@ -23,6 +23,7 @@ import sys
 import pytest
 from datasets import Dataset
 
+from halo.entrypoints import generic_env_eval
 from halo.environments.episode_keys import REWARD_COMPONENTS_KEY
 from halo.environments.eval_runner import reject_answerless_examples
 from halo.environments.registry import build_environment
@@ -114,8 +115,12 @@ def test_a_judge_priced_swe_episode_needs_no_answer():
 def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeypatch):
     """The trainer's dataset gate, held by the generic eval driver too: an answer-graded environment
     over a dataset without the column fails before any episode runs, not after each one."""
-    monkeypatch.setattr(run_env, "load_hf_split", lambda *args: Dataset.from_list([{"prompt": "fix the bug"}]))
-    monkeypatch.setattr(run_env, "build_openai_client", lambda **kwargs: pytest.fail("generation must not start"))
+    monkeypatch.setattr(
+        generic_env_eval, "load_hf_split", lambda *args: Dataset.from_list([{"prompt": "fix the bug"}])
+    )
+    monkeypatch.setattr(
+        generic_env_eval, "build_openai_client", lambda **kwargs: pytest.fail("generation must not start")
+    )
     argv = [
         "run_env.py",
         "--env_type",

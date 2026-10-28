@@ -39,6 +39,24 @@ from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
+# The one backend that returns the log-sum-exp the split form reads, with a gradient.
+_SPLIT_FORM_IMPLEMENTATION = "flash_attention_4"
+
+# The backends tree attention runs on: their varlen kernels take more keys than queries per sequence
+# and align the causal mask and the window bottom-right.
+TREE_ATTN_IMPLEMENTATIONS = (_SPLIT_FORM_IMPLEMENTATION, "flash_attention_2")
+
+# The arguments a delta-rule scan takes its state and segments through, and the flag that has it
+# normalize query and key itself, with the epsilon it then uses.
+_RECURRENCE_STATE_ARGS = ("initial_state", "output_final_state", "cu_seqlens")
+_RECURRENCE_L2NORM_FLAG = "use_qk_l2norm_in_kernel"
+_RECURRENCE_L2NORM_EPS = 1e-6
+
+# Depth of the chains the warm-ups run. The split form needs a parent and a child; the recurrence
+# a state going out, one coming in and going out, one coming in — each a separate kernel compile.
+_SPLIT_WARMUP_DEPTH = 2
+_RECURRENCE_WARMUP_DEPTH = 3
+
 
 @dataclass(frozen=True)
 class _StatefulMixer:
@@ -80,24 +98,6 @@ TREE_FAMILIES = {
     "qwen3_5_text": TreeFamily(modeling_qwen3_5, _GATED_DELTA_NET),
     "qwen3_5_moe_text": TreeFamily(modeling_qwen3_5_moe, _GATED_DELTA_NET),
 }
-
-# The one backend that returns the log-sum-exp the split form reads, with a gradient.
-_SPLIT_FORM_IMPLEMENTATION = "flash_attention_4"
-
-# The backends tree attention runs on: their varlen kernels take more keys than queries per sequence
-# and align the causal mask and the window bottom-right.
-TREE_ATTN_IMPLEMENTATIONS = (_SPLIT_FORM_IMPLEMENTATION, "flash_attention_2")
-
-# The arguments a delta-rule scan takes its state and segments through, and the flag that has it
-# normalize query and key itself, with the epsilon it then uses.
-_RECURRENCE_STATE_ARGS = ("initial_state", "output_final_state", "cu_seqlens")
-_RECURRENCE_L2NORM_FLAG = "use_qk_l2norm_in_kernel"
-_RECURRENCE_L2NORM_EPS = 1e-6
-
-# Depth of the chains the warm-ups run. The split form needs a parent and a child; the recurrence
-# a state going out, one coming in and going out, one coming in — each a separate kernel compile.
-_SPLIT_WARMUP_DEPTH = 2
-_RECURRENCE_WARMUP_DEPTH = 3
 
 
 class _GatherTokens(torch.autograd.Function):

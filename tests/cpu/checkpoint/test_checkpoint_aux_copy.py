@@ -42,7 +42,7 @@ from halo.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     ROUTER_BALANCING_BIASES_FILE,
-    WEIGHT_FILE_IGNORE_PATTERNS,
+    WEIGHT_DUMP_IGNORE_PATTERNS,
     prefetch_pending_filename,
 )
 from halo.checkpoint.offline_export import copy_checkpoint_aux_files
@@ -227,7 +227,7 @@ def test_a_vendor_weight_dump_directory_stays_behind(checkpoint_dir, tmp_path):
     copy_checkpoint_aux_files(str(checkpoint_dir), str(out))
     for dump in ("original", "metal"):
         assert not (out / dump).exists(), f"the {dump}/ vendor weight dump is weights, not aux data"
-        assert f"{dump}/*" in WEIGHT_FILE_IGNORE_PATTERNS, "the hub download must drop what the local copy drops"
+        assert f"{dump}/*" in WEIGHT_DUMP_IGNORE_PATTERNS, "the hub download must drop what the local copy drops"
     # Not a prefix match: original_adapter_config/ IS aux data (asserted copied above).
     assert (out / "original_adapter_config").exists()
 

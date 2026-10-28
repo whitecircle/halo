@@ -25,6 +25,21 @@ import pytest
 from datasets import Dataset, DatasetDict, load_from_disk
 
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from halo.entrypoints import code_contests_regrade, code_pool_preparation
+from halo.entrypoints.code_contests_eval import build_examples, resolve_selection
+from halo.entrypoints.code_pool_preparation import (
+    RATING_BANDS,
+    band_configs,
+    band_of,
+    carve_holdout,
+    checker_is_sound,
+    drop_listed_rows,
+    excluded_by,
+    load_exclusions,
+    load_tests_table,
+    suite_rejects_constants,
+)
+from halo.environments.tasks.coding import suite_compaction
 from halo.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     CodeDatasetAdapter,
@@ -40,23 +55,8 @@ from halo.environments.tasks.coding.contest_datasets import (
     pack_codeforces_verification,
     pack_hardtests_verification,
 )
-from scripts.environments.inference import regrade_trajectories
-from scripts.environments.inference.run_code_contests import build_examples, resolve_selection
-from scripts.environments.preparation import compact_code_tests as cct
+from halo.environments.tasks.coding.suite_compaction import _flatten_indices, cap_tests
 from scripts.environments.preparation import prepare_code_dataset
-from scripts.environments.preparation.compact_code_tests import _flatten_indices, cap_tests
-from scripts.environments.preparation.prepare_code_dataset import (
-    RATING_BANDS,
-    band_configs,
-    band_of,
-    carve_holdout,
-    checker_is_sound,
-    drop_listed_rows,
-    excluded_by,
-    load_exclusions,
-    load_tests_table,
-    suite_rejects_constants,
-)
 from tests.common.repo import REPO_ROOT
 
 _SUITE = json.dumps([{"input": "1 2\n", "output": "3\n"}, {"input": "5 5\n", "output": "10\n"}])
@@ -355,12 +355,14 @@ def test_recompaction_that_keeps_no_rows_removes_the_old_part(tmp_path, monkeypa
     """A part written under wider caps must not survive a rebuild that empties the shard, or the next
     tests-table join reads tests the current caps excluded."""
     part = tmp_path / "shard-0.parquet"
-    stale = pa.Table.from_pylist([], schema=cct._OUTPUT_SCHEMA).replace_schema_metadata(
-        {cct._CAPS_METADATA_KEY: json.dumps({"max_tests": 40}).encode()}
+    stale = pa.Table.from_pylist([], schema=suite_compaction._OUTPUT_SCHEMA).replace_schema_metadata(
+        {suite_compaction._CAPS_METADATA_KEY: json.dumps({"max_tests": 40}).encode()}
     )
     pq.write_table(stale, part)
-    monkeypatch.setitem(cct._COMPACTORS, "empty", lambda path, caps: cct.ShardResult([], 0, 1))
-    assert cct._compact_one(("empty", "shard-0", str(part), {"max_tests": 1}))[1] == 0
+    monkeypatch.setitem(
+        suite_compaction.COMPACTORS, "empty", lambda path, caps: suite_compaction.ShardResult([], 0, 1)
+    )
+    assert suite_compaction._compact_one(("empty", "shard-0", str(part), {"max_tests": 1}))[1] == 0
     assert not part.exists(), "the stale part must be removed, not left for the next join"
 
 
@@ -442,23 +444,23 @@ def test_the_eval_leaves_out_and_counts_examples_only_problems_unless_asked(capl
 def test_the_regrader_rebuilds_the_rows_each_run_scored(monkeypatch):
     """The re-grade reads an episode's problem by index, so it rebuilds the eval's sequence from the meta line: a
     run recording the exclusion scored without the examples-only problems, one predating it with them."""
-    monkeypatch.setattr(regrade_trajectories, "load_hf_split", lambda *_: list(_ROWS))
-    regrade_trajectories._load_payloads.cache_clear()
+    monkeypatch.setattr(code_contests_regrade, "load_hf_split", lambda *_: list(_ROWS))
+    code_contests_regrade._load_payloads.cache_clear()
     meta = {"adapter": "codeforces", "dataset": "examples-only/now", "split": "test"}
-    current = regrade_trajectories.build_payloads({**meta, "selection": ContestSelection().to_meta()})
+    current = code_contests_regrade.build_payloads({**meta, "selection": ContestSelection().to_meta()})
     older = {**meta, "dataset": "examples-only/older", "selection": {"start_date": None, "end_date": None}}
     assert [payload["tests"] for payload in current] == [_ECHO]
-    assert len(regrade_trajectories.build_payloads(older)) == len(_ROWS)
-    regrade_trajectories._load_payloads.cache_clear()
+    assert len(code_contests_regrade.build_payloads(older)) == len(_ROWS)
+    code_contests_regrade._load_payloads.cache_clear()
 
 
 def _prepare(monkeypatch, tmp_path, source: DatasetDict, name: str, *flags: str) -> DatasetDict:
     """``prepare_code_dataset.py --adapter codeforces`` over ``source``, saved under ``tmp_path / name``."""
-    load = prepare_code_dataset.load_dataset
+    load = code_pool_preparation.load_dataset
     monkeypatch.setattr(
-        prepare_code_dataset, "load_dataset", lambda path, *a, **k: source if path == "src" else load(path, *a, **k)
+        code_pool_preparation, "load_dataset", lambda path, *a, **k: source if path == "src" else load(path, *a, **k)
     )
-    monkeypatch.setattr(prepare_code_dataset, "disable_caching", lambda: None)
+    monkeypatch.setattr(code_pool_preparation, "disable_caching", lambda: None)
     out = tmp_path / name
     argv = ["prepare_code_dataset.py", "--adapter", "codeforces", "--dataset", "src", "--output_dir", str(out)]
     # The filters these tests are not about stay off: the fixtures' samples are constant answers.

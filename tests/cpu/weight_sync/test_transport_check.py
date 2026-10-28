@@ -252,7 +252,7 @@ def test_the_default_parameter_is_the_embedding_under_any_prefix(tmp_path):
 
 def test_a_hub_checkpoint_is_read_at_the_requested_revision(monkeypatch, tmp_path):
     """``--revision`` must reach every Hub download, and a served id that is neither a directory here
-    nor a Hub repo must name ``--model-id`` rather than surface a bare validation error."""
+    nor a Hub repo must name ``--model_id`` rather than surface a bare validation error."""
     save_file({"model.embed_tokens.weight": torch.zeros(2, 2)}, str(tmp_path / wst.SAFETENSORS_WEIGHTS_FILE))
     downloads: list[tuple[str, str, str | None]] = []
 
@@ -274,7 +274,7 @@ def test_a_hub_checkpoint_is_read_at_the_requested_revision(monkeypatch, tmp_pat
         raise wst.HFValidationError(f"{repo_id!r} is not a valid repo id")
 
     monkeypatch.setattr(wst, "hf_hub_download", not_a_repo)
-    with pytest.raises(ValueError, match="--model-id"):
+    with pytest.raises(ValueError, match="--model_id"):
         wst.load_checkpoint_tensor("/mnt/models/on-the-server", None)
 
 
@@ -364,7 +364,7 @@ def test_the_cli_gates_on_the_expected_transport_and_an_unchanged_server(monkeyp
     monkeypatch.setattr(preflight_cli, "run_transport_check", lambda **kwargs: results.pop(0))
 
     def run(*argv: str) -> int:
-        monkeypatch.setattr("sys.argv", ["weight_sync_transport.py", "--server-url", "http://server:8000", *argv])
+        monkeypatch.setattr("sys.argv", ["weight_sync_transport.py", "--server_url", "http://server:8000", *argv])
         return preflight_cli.main()
 
     results.append(_result())

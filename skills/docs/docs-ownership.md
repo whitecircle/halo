@@ -132,7 +132,7 @@ changes.
 | `halo/data/tree_layout.py`, `halo/data/pipeline/tree_rows.py`, `halo/data/collators/tree_packing.py`, `halo/models/attention/{tree_plan,tree}.py` | `agent-docs/optimization/tree-packing.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/data/turn_markers.py`, `halo/data/completion_spans.py` | `agent-docs/data/collators.md`, `agent-docs/data/dataset-preparation.md` |
 | `halo/data/` | `agent-docs/data/{dataset-formats,dataset-preparation,filesystem-handling}.md`, `agent-docs/parallelism/data-loading.md` |
-| `halo/data/sources/s3_client.py`, `halo/data/sources/s3_dataset_store.py`, `halo/data/sources/dataset_cache.py`, `halo/data/sources/paths.py`, `scripts/before_training/s3.py` | `agent-docs/data/s3-utilities.md` |
+| `halo/data/sources/s3_client.py`, `halo/data/sources/s3_dataset_store.py`, `halo/data/sources/dataset_cache.py`, `halo/data/sources/paths.py`, `halo/data/sources/s3_commands.py`, `scripts/before_training/s3.py` | `agent-docs/data/s3-utilities.md` |
 | `halo/data/preprocessed/`, `scripts/before_training/prepare_dataset.py` | `agent-docs/data/dataset-preparation.md`, `agent-docs/parallelism/data-loading.md` |
 | `halo/data/pipeline/chat_render.py`, `halo/model_loading/tokenizer_backend.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/data/dataset-preparation.md` |
 | `halo/data/pipeline/vlm_rows.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
@@ -203,6 +203,9 @@ changes.
 | `halo/entrypoints/run_setup.py` | `agent-docs/parallelism/launch-recipes.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/reference/debugging.md` |
 | `halo/entrypoints/script.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/entrypoints/data_setup.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/parallelism/data-loading.md` |
+| `halo/entrypoints/{code_contests_eval,code_contests_regrade}.py` | `agent-docs/training-methods/async-grpo/environments/tasks/code-contests/evaluation.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
+| `halo/entrypoints/generic_env_eval.py` | `agent-docs/training-methods/async-grpo/evaluation.md` |
+| `halo/entrypoints/code_pool_preparation.py` | `agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md` |
 | `halo/callbacks/early_stop.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/inference/endpoints.py`, `halo/inference/openai_client.py`, `halo/inference/batch_requests.py`, `halo/inference/response.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/grpo/rewards/README.md` |
 

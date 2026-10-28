@@ -31,8 +31,11 @@ _PROBE_RETRY = Retry(
 )
 _PROBE_TIMEOUT_S = 60.0
 
-# Batch-shape bf16 noise stays under ~0.5 nats per token; the drafter overwrite moves every one by 8-22.
+# The drafter overwrite moves every position by 8-22 nats. Batch-shape bf16 noise stays under ~0.5 nats where the
+# model is sure of the token but reaches several nats at low-probability ones (Gemma 4 on vLLM, SGLang and the
+# trainer alike), so the gap is judged over the positions the whole sequence scores above the confidence floor.
 _PROMPT_LOGPROB_TOLERANCE_NATS = 2.0
+_PROMPT_LOGPROB_CONFIDENT = -1.0
 # Any servable model all but predicts a counting sequence, while garbage prompt log-probs average 12-22
 # nats: the bound catches a whole sequence that itself prefilled as a graph (a raised capture range).
 _PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL = 4.0
@@ -228,15 +231,19 @@ def _verify_sampler_logprob_reference_on_rank0(
 
 def _probe_prompt_logprobs(client: WeightSyncClientBase, token_ids: list[int]) -> tuple[float, float, int]:
     """``(mean NLL, gap, length)``: the whole sequence's mean NLL, and the largest per-position gap to a prefix
-    scored alone (infinite for a non-finite log-prob), with that prefix's length."""
+    scored alone over the positions the whole scores above :data:`_PROMPT_LOGPROB_CONFIDENT` (infinite for a
+    non-finite log-prob), with that prefix's length."""
     anchor, rest = token_ids[:1], token_ids[1:]
     score = partial(client.score_completion_logprobs, anchor, timeout=_PROBE_TIMEOUT_S)
     whole = score(rest)
     divergences = []
-    # Each prefix prefills as a captured graph.
+    # Each prefix prefills as a captured graph. One without a confident position adds no gap, so a whole that scores
+    # none (itself garbage under a raised capture range) is left to the mean-NLL bound.
     for length in (8, 64, 128, 256, 448):
-        gaps = [abs(a - b) for a, b in zip(score(rest[: length - 1]), whole[: length - 1], strict=True)]
-        divergences.append((max(gaps) if all(map(math.isfinite, gaps)) else math.inf, length))
+        pairs = list(zip(score(rest[: length - 1]), whole[: length - 1], strict=True))
+        gaps = [abs(a - b) for a, b in pairs if b > _PROMPT_LOGPROB_CONFIDENT]
+        finite = all(math.isfinite(a) and math.isfinite(b) for a, b in pairs)
+        divergences.append((max(gaps, default=0.0) if finite else math.inf, length))
     gap, length = max(divergences)
     return -sum(whole) / len(whole), gap, length
 
@@ -260,7 +267,8 @@ def _verify_engine_prompt_logprobs_on_rank0(
                 f"Rollout server {url} returns prompt log-probs that do not follow from the tokens: a "
                 f"{len(token_ids)}-token counting probe scored whole averages {mean_nll:.2f} nats per token (bound "
                 f"{_PROMPT_LOGPROB_PROBE_MAX_MEAN_NLL}), and its first {length} tokens scored alone differ from the "
-                f"same positions by up to {gap:.2f} nats (tolerance {_PROMPT_LOGPROB_TOLERANCE_NATS}), so "
+                f"same positions, where the whole scores above {_PROMPT_LOGPROB_CONFIDENT} log-prob, by up to "
+                f"{gap:.2f} nats (tolerance {_PROMPT_LOGPROB_TOLERANCE_NATS}), so "
                 f"isr_engine_reference would compare the sampling log-probs against garbage. The known cause is "
                 f"vLLM's V1 model runner with speculative decoding (MTP): the drafter's CUDA graph overwrites the "
                 f"hidden states the prompt log-probs are read from whenever the prefill runs as a graph "
@@ -269,7 +277,7 @@ def _verify_engine_prompt_logprobs_on_rank0(
             )
         logger.info(
             f"Rollout server {url}: prompt log-probs follow from the tokens (probe mean NLL {mean_nll:.3f}, "
-            f"largest prefix gap {gap:.3f} nats)"
+            f"largest prefix gap {gap:.3f} nats at confident positions)"
         )
 
 
@@ -323,6 +331,6 @@ def verify_sampler_logprob_reference(
 def verify_engine_prompt_logprobs(urls: list[str], tokenizer, *, backend: str) -> None:
     """COLLECTIVE: refuse a rollout server whose prompt log-probs, which ``isr_engine_reference`` reads, do not
     follow from the tokens alone. The probe scores a counting sequence that prefills eagerly, then prefixes of
-    it at captured-graph lengths, and compares the shared positions.
+    it at captured-graph lengths, and compares the shared positions the whole scores confidently.
     """
     _on_rank0(_verify_engine_prompt_logprobs_on_rank0, backend, urls, tokenizer)

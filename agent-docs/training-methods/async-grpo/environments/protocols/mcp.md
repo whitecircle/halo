@@ -33,6 +33,9 @@ episode's first tool call starts its own server over its own directory, so concu
 group's siblings among them) never read each other's files; a server that dies mid-episode restarts over
 the same directory, and the server stops and the directory goes when the episode is released.
 
+The `memory` server is given no file of its own, so it keeps one knowledge graph that every episode and
+every run on the host read and write, unlike `filesystem` under `episode_scratch`.
+
 | `mcp_server` | Credential | Tools |
 |---|---|---|
 | `filesystem` | — | File operations, jailed to a scratch directory (`episode_scratch`) |

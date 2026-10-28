@@ -85,7 +85,7 @@ def _run(module, tmp_path, config_body: str, patches: list) -> None:
                 patch.stop()
 
 
-def _run_rlvr(tmp_path, dataset: DatasetDict) -> None:
+def _run_online_grpo(tmp_path, dataset: DatasetDict) -> None:
     """Run ``grpo/online.py:main()`` to its dataset stage."""
     module = _script_module("grpo/online.py")
     tokenizer = types.SimpleNamespace(padding_side="right")
@@ -169,10 +169,10 @@ def _run_classification(tmp_path, dataset: DatasetDict) -> None:
 
 # Each text-only method with the dataset shape it actually consumes, and the name its refusal uses.
 _CASES = {
-    "rlvr": (_run_rlvr, {"prompt": ["2+2?"], "answer": ["4"]}, "RLVR Online GRPO"),
+    "grpo/online": (_run_online_grpo, {"prompt": ["2+2?"], "answer": ["4"]}, "RLVR Online GRPO"),
     "embedding": (_run_embedding, {"anchor": ["question"], "positive": ["answer"]}, "Embedding training"),
-    "environmental_grpo": (_run_environmental_grpo, {"prompt": ["2+2?"], "answer": ["4"]}, "Environmental GRPO"),
-    "offline_grpo": (
+    "grpo/environmental": (_run_environmental_grpo, {"prompt": ["2+2?"], "answer": ["4"]}, "Environmental GRPO"),
+    "grpo/offline": (
         _run_offline_grpo,
         {"prompt": [_TEXT_TURNS], "completions": [[_TEXT_TURNS]], "rewards": [[1.0]]},
         "Offline GRPO",

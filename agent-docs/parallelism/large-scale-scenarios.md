@@ -267,9 +267,11 @@ divisor.
 0`, so `ep_size ∈ {2, 4, 8}` — and `8·P_e/8 = 386 GB` of experts per rank before anything else. The
 same ceiling makes node-scope EP useless at 2, 4 and 8 nodes too.
 
-**No EP layout survives: 24 GPUs has one legal layout for this model, `pp3 × ep8`.** Each stage is one
+**No EP layout survives without PP; at 24 GPUs only `pp3 × ep8` fits on a validated path.** Each stage is one
 node holding 24, 20 or 16 of the 60 layers, so `ep8` node-local divides the 512 experts and stage 0
-carries 155 GB of them ([Pipeline-parallel cells](#pipeline-parallel-cells)). Without PP, use 2 nodes
+carries 155 GB of them ([Pipeline-parallel cells](#pipeline-parallel-cells)). `pp3 × etp8` passes the
+config gate with the same expert share per rank, but PP+ETP is verified on tiny models only; `pp3 × ep2`
+passes and does not fit. Without PP, use 2 nodes
 (`ep16` global) or 4 (`ep32` global).
 
 ## Pipeline-parallel cells
@@ -309,7 +311,7 @@ at the [costs above](#pipeline-parallel-cells).
 | Nodes | Cell | Crosses on | Steady `b1 s8192` | Why |
 |---|---|---|---:|---|
 | 2 | `ep16 --ep_scope=global` + `unfreeze_layers_patterns` | RDMA all-to-all | 228 GB full FT / ≈120 GB partial | the only layout that loads and fits; no headroom for 32k or `b>1` |
-| 3 | `pp3` × `ep8` node, `moe_balancing: none` | boundary activations only | 182 GB | the one legal layout ([The 3-node case](#the-3-node-case)); trains unbalanced |
+| 3 | `pp3` × `ep8` node, `moe_balancing: none` | boundary activations only | 182 GB | the one layout that fits on a validated path ([The 3-node case](#the-3-node-case)); trains unbalanced |
 | 4 | **`ep32 --ep_scope=global`** | RDMA all-to-all | 129 GB | first comfortable point on memory — but the binding limit is the 8192 tokens/rank cross-node dispatch ceiling, not the 120 GB spare |
 | 8 | **`ep64 --ep_scope=global`** | RDMA all-to-all | 80 GB | memory headroom to spare, same 8192 tokens/rank ceiling on `b × max_length`; `ep8 + etp8` if the fabric is EFA |
 

@@ -13,6 +13,9 @@ All four are published to Amazon ECR Public under `public.ecr.aws/whitecircle/ha
 ([Building](#building)) under these local names. The images are x86_64-only: Grace-based GB200/GB300
 hosts (aarch64) need an arm64 build the Dockerfile does not provide.
 
+The host needs an NVIDIA driver R580 or newer, the CUDA 13 floor the images' CUDA 13.2 runs on (the GPU
+tiers run on 580.159.03), and the NVIDIA Container Toolkit.
+
 ## Standard training launch
 
 The `Makefile` wraps the `docker run` once; `train` runs `halo launch` with `METHOD` (default `sft`):

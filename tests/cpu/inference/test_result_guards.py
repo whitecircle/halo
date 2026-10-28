@@ -50,7 +50,7 @@ def _prepare_score(monkeypatch, tmp_path, *, prompt_ids, resumed_rows, client):
     # The reward head is never reached on the failure paths; on the success path it stands in for it.
     monkeypatch.setattr(reward_scoring, "score_conversations", lambda *a, **k: [1.0])
 
-    output_path = reward_scoring.build_output_path(str(tmp_path), str(prompts), "gen-model", "rm_scoring")
+    output_path = reward_scoring.build_output_path(str(tmp_path), str(prompts), "gen-model", "reward_scoring")
     if resumed_rows:
         output_path.write_text(
             "\n".join(json.dumps(row) for row in resumed_rows) + "\n",

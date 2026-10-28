@@ -497,7 +497,7 @@ The levers are the same three ideas at step granularity instead of kernel granul
 
 The weight sync itself is a bandwidth question with the same shape as §9's ladder. A full-model broadcast is ~42 GB at 20B and 234 GB for gpt-oss-120b; on one host NCCL moves it GPU to GPU over CUDA IPC (`P2P/CUMEM`).
 
-Across nodes it rides the fabric: on 8× B300 nodes, 53 GB/s (vLLM client, measured on vLLM 0.26.0) to 80 GB/s (SGLang client, measured on SGLang 0.5.17) over EFA against 9.7 GB/s on sockets: 4.4 s, 2.9 s and 24 s for gpt-oss-120b (234 GB), and 0.5–0.8 s at 20B by the same EFA rates ([Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa)). Throughput anatomy and the tuning order live in [Async GRPO with Environments](../training-methods/async-grpo/performance.md#throughput-levers).
+Across nodes it rides the fabric, so the broadcast takes the model size over the sync rate; the measured EFA and socket rates, and what bounds each client, are on [Rollout Servers](../infrastructure/rollout-servers.md#servers-on-other-nodes-efa). Throughput anatomy and the tuning order live in [Async GRPO with Environments](../training-methods/async-grpo/performance.md#throughput-levers).
 
 ---
 

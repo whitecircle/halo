@@ -23,7 +23,7 @@ output_dir: checkpoints/dpo-qwen3.5-9b
 
 `beta` scales the implicit-reward gap inside the loss (`0` flattens the objective), `max_length` truncates prompt + completion keeping the start, and `generation_max_prompt_length` caps prompts of the eval generation split only. Types and defaults: [DPOConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [DPOScriptArguments](../../reference/configuration-reference.md#other-script-arguments).
 
-`loss_type` takes 15 TRL values — `sigmoid`, `hinge`, `ipo`, `sft`, `exo_pair`, `nca_pair`, `robust`, `bco_pair`, `sppo_hard`, `aot`, `aot_unpaired`, `discopop`, `apo_zero`, `apo_down`, `sigmoid_norm` — and a list combines several under `loss_weights` (unset: `1.0` each), so `[sigmoid, sft]` adds an SFT anchor to the preference term.
+`loss_type` takes TRL's losses ([values](../../reference/configuration-reference.md#trl-trainer-configs)), and a list combines several under `loss_weights` (unset: `1.0` each), so `[sigmoid, sft]` adds an SFT anchor to the preference term.
 
 No training-side prompt cap exists, so an over-long prompt eats its own completion: filter those rows in the dataset ([sequence length](../../reference/configuration-reference.md#sequence-length-caps-vs-generation-budgets)).
 

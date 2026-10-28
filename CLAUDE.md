@@ -81,7 +81,7 @@ Training is YAML-driven (`HaloArgumentParser`, `halo/configs/parser.py`): overri
 
 ### Tests
 
-CPU tests are pytest-native (`pytest -m cpu`; `make test-cpu` runs them in the image); GPU tests are scripts registered in `tests/gpu/manifest.py`, each row carrying its own launcher (`torchrun`, or `python` for a single-process script), process count, markers and timeout (`make test-gpu-core` / `test-gpu-full`); both run standalone too. New tests must **fail when the behavior breaks**. The conventions (entry points, markers, free ports, harnesses, goldens, `HALO_TEST_*` knobs) are documented in [Contributing → Tests](agent-docs/contributing/README.md#tests), most of them enforced by `tests/cpu/conventions/`.
+CPU tests are pytest-native (`pytest -m cpu`; `make test-cpu` runs them in the image); GPU tests are scripts registered in `tests/gpu/manifest.py`, each row carrying its own launcher (`torchrun`, or `python` for a driver that starts its own ranks), process count, markers and timeout (`make test-gpu-core` / `test-gpu-full`); both run standalone too. New tests must **fail when the behavior breaks**. The conventions (entry points, markers, free ports, harnesses, goldens, `HALO_TEST_*` knobs) are documented in [Contributing → Tests](agent-docs/contributing/README.md#tests), most of them enforced by `tests/cpu/conventions/`.
 
 ```bash
 python tests/cpu/callbacks/test_variable_scheduler.py                 # CPU (no GPU)
