@@ -31,6 +31,7 @@ from halo.data.pipeline.text_rows import build_chat_row_processor
 from halo.data.pipeline.tree_rows import (
     SHARE_KEY_COLUMN,
     TREE_ROW_FEATURES,
+    _share_key_order,
     _trained_tokens,
     build_share_key_map,
     build_tree_row_processor,
@@ -164,6 +165,18 @@ def test_the_key_map_keys_every_row_of_a_batch_as_share_key_does():
     rows = _conversations()
     keys = build_share_key_map("conversation", MARKERS, REQUIRES)({"conversation": rows})[SHARE_KEY_COLUMN]
     assert keys == [share_key(row, MARKERS, REQUIRES) for row in rows]
+
+
+def test_the_rows_order_as_a_stable_sort_of_their_keys():
+    """A shuffled, duplicate-heavy key column orders as NumPy's stable argsort of the strings, ties in row order, and
+    selects under the same fingerprint, which an unstamped in-memory split keys its next map on."""
+    rng = random.Random(0)
+    digests = [share_key([{"role": "user", "content": str(group)}], MARKERS, REQUIRES) for group in range(64)]
+    keys = Dataset.from_dict({SHARE_KEY_COLUMN: [rng.choice(digests) for _ in range(4096)]})
+    expected = np.argsort(np.asarray(keys[SHARE_KEY_COLUMN]), kind="stable")
+    order = _share_key_order(keys)
+    np.testing.assert_array_equal(order, expected)
+    assert keys.select(order)._fingerprint == keys.select(expected)._fingerprint
 
 
 def test_tree_paths_are_the_flat_examples_token_for_token(tokenizer):
@@ -438,6 +451,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             tree_share_requires=REQUIRES,
             tree_min_shared_tokens=16,
             tree_full_attention="split",
+            generate_eval_examples=False,
         )
         sft_config = SimpleNamespace(
             max_length=MAX_LENGTH,

@@ -26,9 +26,9 @@ Usage::
 """
 
 import argparse
-import os
 
 from halo.entrypoints.code_contests_regrade import regrade_trajectory_files
+from halo.hardware import available_cpu_count
 
 
 def parse_args() -> argparse.Namespace:
@@ -37,7 +37,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument(
         "--max_workers",
         type=int,
-        default=min(64, (os.cpu_count() or 8)),
+        default=min(64, available_cpu_count()),
         help="Concurrent gradings in this single process. Keep at/below the core count so each run "
         "gets a dedicated core and the wall-clock limit stays real.",
     )

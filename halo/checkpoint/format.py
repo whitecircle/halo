@@ -7,6 +7,7 @@ from step 0, an orphaned shard).
 from __future__ import annotations
 
 import re
+from fnmatch import fnmatch
 
 from transformers.trainer_utils import PREFIX_CHECKPOINT_DIR
 from transformers.utils import IMAGE_PROCESSOR_NAME, PROCESSOR_NAME, VIDEO_PROCESSOR_NAME
@@ -122,6 +123,12 @@ def prefetch_pending_filename(rank: int, world_size: int) -> str:
     """Filename of one rank's pending prefetch rounds; the world size in it keeps a resume at another
     width from reading another layout's prompts."""
     return f"{PREFETCH_PENDING_PREFIX}-{rank:05d}-of-{world_size:05d}.pt"
+
+
+def is_per_rank_resume_file(name: str) -> bool:
+    """Whether ``name`` is one rank's own resume file of a save: its optimizer shard, RNG state or pending
+    prefetch rounds."""
+    return fnmatch(name, OPTIMIZER_SHARD_GLOB) or name.startswith(RESUME_SIDECAR_PREFIXES)
 
 
 def is_ep_shard(name: str) -> bool:

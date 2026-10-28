@@ -6,8 +6,7 @@ import contextlib
 import logging
 import os
 import shutil
-from collections.abc import Sequence
-from fnmatch import fnmatch
+from collections.abc import Collection, Iterable, Sequence
 
 import torch
 from accelerate.utils import is_peft_model
@@ -31,6 +30,7 @@ from halo.checkpoint.format import (
     WEIGHT_DUMP_DIRS,
     WEIGHT_DUMP_IGNORE_PATTERNS,
     WEIGHT_FILE_SUFFIXES,
+    is_per_rank_resume_file,
     optimizer_shard_filename,
 )
 from halo.checkpoint.hub_layout import save_pretrained_layout
@@ -67,7 +67,12 @@ def is_non_artifact_subdirectory(name: str) -> bool:
 
 
 def copy_checkpoint_aux_files(
-    input_dir: str, output_dir: str, *, include_resume_sidecars: bool = True, verbose: bool = False
+    input_dir: str,
+    output_dir: str,
+    *,
+    include_resume_sidecars: bool = True,
+    carried: Collection[str] = (),
+    verbose: bool = False,
 ) -> None:
     """Copy a checkpoint's non-weight files from ``input_dir`` to ``output_dir``, then tag the model card.
 
@@ -75,8 +80,9 @@ def copy_checkpoint_aux_files(
     resume-from-merged run restores unless ``include_resume_sidecars`` is off (an artifact that is a new
     base). Subdirectories copy whole, weights included (a SentenceTransformer module directory), except a
     nested ``checkpoint-N``, a run-internal ``_*`` one, a vendor weight dump and a hidden one; unpublished
-    staged files stay behind too. ``output_dir`` inside ``input_dir`` raises: the walk would copy the
-    destination into itself.
+    staged files stay behind too, and so do the ``carried`` names, the files the caller brings across
+    itself (a shard merge's linked resume state). ``output_dir`` inside ``input_dir`` raises: the walk would
+    copy the destination into itself.
     """
     input_root = os.path.realpath(input_dir)
     if os.path.commonpath([input_root, os.path.realpath(output_dir)]) == input_root:
@@ -86,7 +92,7 @@ def copy_checkpoint_aux_files(
             f"artifact to a directory outside the source checkpoint."
         )
     for name in os.listdir(input_dir):
-        if name in UNSUFFIXED_RESUME_ENTRIES and not include_resume_sidecars:
+        if name in carried or (name in UNSUFFIXED_RESUME_ENTRIES and not include_resume_sidecars):
             continue
         src = os.path.join(input_dir, name)
         if os.path.isdir(src):
@@ -131,12 +137,7 @@ def resume_state_sources(input_dirs: Sequence[str]) -> dict[str, str]:
         ValueError: a per-rank file held at different sizes, inputs whose optimizer metas differ, or a rank
             of the meta whose optimizer shard no input holds.
     """
-    names = {
-        name
-        for input_dir in input_dirs
-        for name in os.listdir(input_dir)
-        if fnmatch(name, OPTIMIZER_SHARD_GLOB) or name.startswith(RESUME_SIDECAR_PREFIXES)
-    }
+    names = {name for input_dir in input_dirs for name in os.listdir(input_dir) if is_per_rank_resume_file(name)}
     sources = {name: first_holder(name, input_dirs) for name in sorted(names)}
     meta_paths = [os.path.join(input_dir, OPTIMIZER_META_FILE) for input_dir in input_dirs]
     metas = [
@@ -262,12 +263,15 @@ def resolve_checkpoint_source(model_id: str, revision: str | None = None) -> str
 
 def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:
     """Refuse a conversion whose output directory is its own input: every tool writer ends in
-    :func:`~halo.checkpoint.writing.remove_stale_checkpoint_files`, which deletes the source shards."""
-    if os.path.realpath(input_dir) == os.path.realpath(output_dir):
+    :func:`~halo.checkpoint.writing.remove_stale_checkpoint_files`, which deletes the source shards. An
+    existing output is compared by identity too, since ``realpath`` does not see through a bind mount."""
+    if os.path.realpath(input_dir) == os.path.realpath(output_dir) or (
+        os.path.exists(input_dir) and os.path.exists(output_dir) and os.path.samefile(input_dir, output_dir)
+    ):
         raise ValueError(
-            f"input and output directory are the same path ({output_dir}). These conversions are not "
-            f"in-place: writing the result deletes the source shards it does not overwrite, so the "
-            f"original checkpoint would be destroyed. Write to a new directory."
+            f"input and output directory are the same path (input {input_dir}, output {output_dir}). These "
+            f"conversions are not in-place: writing the result deletes the source shards it does not overwrite, "
+            f"so the original checkpoint would be destroyed. Write to a new directory."
         )
 
 
@@ -288,6 +292,24 @@ def reject_sibling_adapter(input_dir: str) -> None:
         )
 
 
+def _nearest_existing_path(path: str) -> str:
+    """``path`` resolved, or its nearest existing ancestor: a directory a tool has yet to create lands on that
+    ancestor's volume."""
+    target = os.path.realpath(path)
+    while not os.path.exists(target):
+        target = os.path.dirname(target)
+    return target
+
+
+def cross_device_bytes(paths: Iterable[str], output_dir: str) -> int:
+    """An estimate of the bytes of ``paths`` that :func:`~halo.checkpoint.atomic.link_or_copy_file` copies into
+    ``output_dir`` rather than hard-links: those of the files on another filesystem. It undercounts where the
+    output's filesystem refuses a link anyway (a second bind mount of it, a protected hard link, a project-quota
+    boundary), since such a file is copied too."""
+    device = os.stat(_nearest_existing_path(output_dir)).st_dev
+    return sum(status.st_size for status in map(os.stat, paths) if status.st_dev != device)
+
+
 def preflight_resource_warning(tool: str, output_dir: str, *, disk_bytes: int | None, ram_bytes: int | None) -> None:
     """Warn when ``tool``'s estimated peak host RAM or output disk exceeds what the host has free.
 
@@ -302,11 +324,7 @@ def preflight_resource_warning(tool: str, output_dir: str, *, disk_bytes: int | 
                 f"free host memory or run on a larger host. Continuing — this is an estimate."
             )
     if disk_bytes:
-        # The output directory may not exist yet; the nearest existing ancestor is on the same volume.
-        target = os.path.realpath(output_dir)
-        while not os.path.exists(target):
-            target = os.path.dirname(target)
-        free = shutil.disk_usage(target).free
+        free = shutil.disk_usage(_nearest_existing_path(output_dir)).free
         if disk_bytes > free:
             print(  # noqa: T201 — CLI-facing preflight; the conversion tools report via print
                 f"WARNING: {tool}: the output volume for {output_dir} has ~{free / 1e9:.1f} GB free but "

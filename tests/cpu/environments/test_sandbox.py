@@ -24,6 +24,7 @@ import time
 import pytest
 import requests
 
+from halo import hardware
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.local import (
     LOCAL_NPROC_LIMIT,
@@ -205,7 +206,7 @@ def test_execution_slots_env_override_via_env_int():
     """HALO_SANDBOX_MAX_CONCURRENCY parses through halo.env.env_int (single home for env parsing):
     a valid override wins (clamped to >=1), a malformed value warns inside env_int and falls back
     to the usable-CPU default instead of raising mid-run."""
-    default_slots = max(1, len(os.sched_getaffinity(0)))
+    default_slots = hardware.available_cpu_count()
     saved = os.environ.get("HALO_SANDBOX_MAX_CONCURRENCY")
     try:
         os.environ["HALO_SANDBOX_MAX_CONCURRENCY"] = "3"
@@ -223,12 +224,13 @@ def test_execution_slots_env_override_via_env_int():
             os.environ["HALO_SANDBOX_MAX_CONCURRENCY"] = saved
 
 
-def test_execution_slots_default_to_the_cpus_the_process_may_use(monkeypatch):
+def test_execution_slots_default_to_the_cpus_the_process_may_use(monkeypatch, tmp_path):
     """A container cpuset leaves the process fewer CPUs than the host reports; sizing the gate off the
     host count oversubscribes the cores the runs actually get, and a correct solution then times out."""
     monkeypatch.delenv("HALO_SANDBOX_MAX_CONCURRENCY", raising=False)
     monkeypatch.setattr(os, "cpu_count", lambda: 240)
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(216)))
+    monkeypatch.setattr(hardware, "_CGROUP_ROOT", str(tmp_path))  # no CPU quota
     assert _resolve_execution_slots() == 216
 
 

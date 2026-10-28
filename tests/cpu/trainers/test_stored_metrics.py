@@ -160,8 +160,8 @@ def test_every_rank_logs_the_world_mean_not_rank_zeros(tmp_path):
             logs = json.load(fh)
         assert logs["eval_m"] == pytest.approx(_WORLD_MEAN), f"rank {rank} logged {logs['eval_m']}"
         assert logs["eval_n"] == pytest.approx(1 * 2 / 4), f"rank {rank}: an eval_ key must not gain a second prefix"
-        # The key check rides the gather that carries the sums: one collective per logging step.
-        assert logs["collectives"] == {"all_reduce": 0, "all_gather_object": 1}, f"rank {rank}"
+        # One digest all-reduce checks the keys and one more carries the sums; no object gather at any world size.
+        assert logs["collectives"] == {"all_reduce": 2, "all_gather_object": 0}, f"rank {rank}"
 
 
 def _mismatch_worker(rank: int, out: str) -> None:

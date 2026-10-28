@@ -9,6 +9,7 @@ import os
 import shutil
 from collections.abc import Sequence
 
+from halo.checkpoint.atomic import link_or_copy_file
 from halo.checkpoint.format import PP_STAGE_PART_RE
 from halo.checkpoint.offline_export import (
     copy_checkpoint_aux_files,
@@ -24,10 +25,12 @@ logger = logging.getLogger(__name__)
 
 def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
     """Write ``output_dir`` from the per-node directories ``input_dirs`` of one pipeline-parallel save; the result
-    resumes exactly on the save's topology. Every input must carry the same index; each part it names is copied
-    from the first input holding it, every input's per-rank resume files with one optimizer meta, the rank-uniform
-    files (config, tokenizer, remote code, trainer state, scheduler, export sidecars) from the first input, and
-    the index last. Every input check runs before the first write.
+    resumes exactly on the save's topology. Every input must carry the same index. Each part it names is copied
+    from the first input holding it, and the rank-uniform files (config, tokenizer, remote code, trainer state,
+    scheduler, export sidecars) from the first input; every input's per-rank resume files and one optimizer meta
+    are hard-linked where the output shares their filesystem and copied with their mode otherwise; the index
+    lands last. Every input check runs before the first write. A linked file outlives its input's deletion, and a
+    training save into either directory replaces it there rather than writing through the link.
 
     Raises:
         ValueError: an input that is the output, inputs whose indexes differ, a part no input holds or
@@ -60,9 +63,11 @@ def merge_pp_stage_parts(input_dirs: Sequence[str], output_dir: str) -> None:
     resume_sources = resume_state_sources(input_dirs)
 
     os.makedirs(output_dir, exist_ok=True)
-    copy_checkpoint_aux_files(input_dirs[0], output_dir)
-    for name, source in {**sources, **resume_sources}.items():
-        shutil.copy2(os.path.join(source, name), os.path.join(output_dir, name))
+    copy_checkpoint_aux_files(input_dirs[0], output_dir, carried=resume_sources)
+    for part, source in sources.items():
+        shutil.copy2(os.path.join(source, part), os.path.join(output_dir, part))
+    for name, source in resume_sources.items():
+        link_or_copy_file(os.path.join(source, name), os.path.join(output_dir, name))
     write_merged_index(output_dir, index["weight_map"], index.get("metadata", {}))
     reject_partial_checkpoint(output_dir)
     logger.info(f"Merged {len(sources)} parts from {len(input_dirs)} node directories into {output_dir}")

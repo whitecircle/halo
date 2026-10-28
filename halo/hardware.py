@@ -1,11 +1,12 @@
 """Host and accelerator facts: this rank's device, architecture predicates, GPU model detection, the
-dense Tensor-Core peak-FLOPS table, available host RAM and the CPUs this process may run on.
+dense Tensor-Core peak-FLOPS table, available host RAM and the CPUs this process may use.
 
 The kernel predicates read compute capability; the FLOPS table is keyed by SKU name, because peaks
 differ within one architecture.
 """
 
 import logging
+import math
 import os
 import subprocess
 from dataclasses import dataclass
@@ -13,6 +14,11 @@ from dataclasses import dataclass
 import torch
 
 logger = logging.getLogger(__name__)
+
+# The cgroup mounts: v2's unified hierarchy at the root, v1's cpu controller under cpu/.
+_CGROUP_ROOT = "/sys/fs/cgroup"
+# This process's cgroup in each hierarchy, one `<id>:<controllers>:<path>` line apiece (v2's has no controllers).
+_PROC_SELF_CGROUP = "/proc/self/cgroup"
 
 
 def current_device() -> torch.device:
@@ -180,9 +186,57 @@ def available_host_ram_bytes() -> int | None:
     return None
 
 
+def _read_cgroup_file(path: str) -> str | None:
+    """``path`` stripped, or ``None`` where it cannot be read (the other cgroup version, a level the mount does not
+    show, no cgroup at all)."""
+    try:
+        with open(path) as fh:
+            return fh.read().strip()
+    except OSError:
+        return None
+
+
+def _own_cgroup_dirs() -> list[str]:
+    """The directories of this process's cgroup and every ancestor up to the mount, in v2's unified hierarchy and
+    v1's cpu controller. A level the mount does not show reads as no quota, so the walk still reaches the mount's
+    root: v1 Docker mounts the container's own cgroup there, which ``/proc/self/cgroup`` names by its host path."""
+    dirs = []
+    for line in (_read_cgroup_file(_PROC_SELF_CGROUP) or "").splitlines():
+        _, controllers, path = line.split(":", 2)
+        if controllers and "cpu" not in controllers.split(","):
+            continue
+        mount = os.path.join(_CGROUP_ROOT, "cpu") if controllers else _CGROUP_ROOT
+        parts = [part for part in path.split("/") if part]
+        dirs += [os.path.join(mount, *parts[:depth]) for depth in range(len(parts) + 1)]
+    return dirs
+
+
+def _cpu_quota_at(directory: str) -> int | None:
+    """The CPUs the cgroup at ``directory`` may use, rounded up, or ``None`` without a quota there: v2's ``cpu.max``
+    (``"<quota> <period>"``, the quota ``max`` when unlimited), else v1's ``cpu.cfs_quota_us`` (``-1`` when
+    unlimited) over ``cpu.cfs_period_us``."""
+    cpu_max = _read_cgroup_file(os.path.join(directory, "cpu.max"))
+    if cpu_max is not None:
+        quota, period = cpu_max.split()
+    else:
+        quota = _read_cgroup_file(os.path.join(directory, "cpu.cfs_quota_us"))
+        period = _read_cgroup_file(os.path.join(directory, "cpu.cfs_period_us"))
+    if quota is None or period is None or quota == "max" or int(quota) < 0:
+        return None
+    return math.ceil(int(quota) / int(period))
+
+
+def _cgroup_cpu_quota() -> int | None:
+    """The CPUs this process's cgroup CPU quotas allow, or ``None`` without one: the tightest on its own cgroup and
+    every ancestor, since a quota on a parent (a Kubernetes pod, a systemd slice) binds every cgroup below it."""
+    quotas = (_cpu_quota_at(directory) for directory in _own_cgroup_dirs())
+    return min((quota for quota in quotas if quota is not None), default=None)
+
+
 def available_cpu_count() -> int:
-    """The CPUs this process may run on: its affinity set (a container cpuset, a NUMA binding), else the host
-    count."""
-    if hasattr(os, "sched_getaffinity"):
-        return max(1, len(os.sched_getaffinity(0)))
-    return os.cpu_count() or 1
+    """The CPUs this process may use: its affinity set (a container cpuset, a NUMA binding), else the host count,
+    capped by the cgroup CPU quotas over it (``docker --cpus``, a Kubernetes CPU limit, a systemd ``CPUQuota``),
+    which affinity does not show."""
+    count = max(1, len(os.sched_getaffinity(0))) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
+    quota = _cgroup_cpu_quota()
+    return count if quota is None else min(count, quota)

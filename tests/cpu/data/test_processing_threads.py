@@ -1,10 +1,11 @@
 #!/usr/bin/env python
 """Dataset map worker counts: HALO_DATASET_NUM_PROC resolution and the share a follower rank maps with.
 
-Unset, the worker count comes from the CPUs the process may run on (its affinity set, not the host count a
-container cpuset hides): the load rank runs a coordinated map alone while its node's other ranks wait, so it takes
-most of them, capped. Those ranks compute only on a per-rank key (a pre-sharded load), all at once, so each maps with
-its share of the count; on a shared key they read the load rank's cache back at their own count and spawn nothing.
+Unset, the worker count comes from the CPUs the process may use: its affinity set, not the host count a container
+cpuset hides, capped by the cgroup CPU quotas over the process, which the affinity set does not show. The load rank
+runs a coordinated map alone while its node's other ranks wait, so it takes most of them, capped. Those ranks compute
+only on a per-rank key (a pre-sharded load), all at once, so each maps with its share of the count; on a shared key
+they read the load rank's cache back at their own count and spawn nothing.
 Falsy-override guard: applying the override as ``env_int(...) or derived`` makes an explicit ``0`` falsy and
 silently replaces it with the derived value. The resolver fails loud on an override below 1 (``num_proc``
 counts worker processes; 1 disables multiprocessing) and honors any valid explicit value.
@@ -18,6 +19,7 @@ import multiprocess
 import pytest
 from datasets import Dataset
 
+from halo import hardware
 from halo.data.pipeline import coordinated_map
 from halo.data.pipeline.coordinated_map import _resolve_dataset_num_proc
 
@@ -25,6 +27,15 @@ from halo.data.pipeline.coordinated_map import _resolve_dataset_num_proc
 _FORBID_RECOMPUTE = "TEST_FORBID_MAP_RECOMPUTE"
 
 _ROWS = Dataset.from_dict({"x": list(range(16))})
+
+# A private cgroup namespace: the process's cgroup is the mount's root.
+_V2_PRIVATE = "0::/\n"
+
+# A host cgroup namespace: the mount shows the whole hierarchy, the container's cgroup deep inside it.
+_V2_HOST = "0::/system.slice/docker-c0.scope\n"
+
+# cgroup v1 Docker: each controller's mount is the container's own cgroup, which /proc/self/cgroup names by host path.
+_V1_DOCKER = "12:cpuset:/docker/c0\n4:cpu,cpuacct:/docker/c0\n1:name=systemd:/docker/c0\n"
 
 
 def _double(row):
@@ -39,10 +50,77 @@ def _clear_pin(monkeypatch):
     monkeypatch.delenv("HALO_DATASET_NUM_PROC", raising=False)
 
 
+def _cgroups(monkeypatch, root, files: dict[str, str], membership: str = _V2_PRIVATE) -> None:
+    """Serve the CPU count's cgroup reads from ``root``: ``membership`` as ``/proc/self/cgroup`` and ``files`` under
+    the cgroup mount, where none means no quota."""
+    mount = root / "sys-fs-cgroup"
+    for relative_path, content in files.items():
+        path = mount / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content)
+    (root / "proc-self-cgroup").write_text(membership)
+    monkeypatch.setattr(hardware, "_CGROUP_ROOT", str(mount))
+    monkeypatch.setattr(hardware, "_PROC_SELF_CGROUP", str(root / "proc-self-cgroup"))
+
+
 @pytest.mark.parametrize(("usable_cpus", "expected"), [(192, 64), (64, 48), (8, 6), (1, 1)])
-def test_unset_takes_most_of_the_cpus_the_process_may_use(monkeypatch, usable_cpus, expected):
+def test_unset_takes_most_of_the_cpus_the_process_may_use(monkeypatch, tmp_path, usable_cpus, expected):
     monkeypatch.setattr(os, "cpu_count", lambda: 384)
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(usable_cpus)))
+    _cgroups(monkeypatch, tmp_path, {})
+    assert _resolve_dataset_num_proc() == expected
+
+
+@pytest.mark.parametrize(
+    ("usable_cpus", "membership", "cgroup", "expected"),
+    [
+        (192, _V2_PRIVATE, {"cpu.max": "800000 100000\n"}, 6),
+        (192, _V2_PRIVATE, {"cpu.max": "250000 100000\n"}, 2),
+        (8, _V2_PRIVATE, {"cpu.max": "1600000 100000\n"}, 6),
+        (192, _V2_PRIVATE, {"cpu.max": "max 100000\n"}, 64),
+        (
+            192,
+            _V2_HOST,
+            {"system.slice/cpu.max": "max 100000\n", "system.slice/docker-c0.scope/cpu.max": "400000 100000\n"},
+            3,
+        ),
+        (
+            192,
+            "0::/kubepods/pod0/c0\n",
+            {"kubepods/pod0/cpu.max": "800000 100000\n", "kubepods/pod0/c0/cpu.max": "1600000 100000\n"},
+            6,
+        ),
+        (192, _V2_HOST, {"system.slice/docker-c1.scope/cpu.max": "100000 100000\n"}, 64),
+        (192, _V1_DOCKER, {"cpu/cpu.cfs_quota_us": "1600000\n", "cpu/cpu.cfs_period_us": "100000\n"}, 12),
+        (
+            192,
+            _V1_DOCKER,
+            {"cpu/docker/c0/cpu.cfs_quota_us": "400000\n", "cpu/docker/c0/cpu.cfs_period_us": "100000\n"},
+            3,
+        ),
+        (192, _V1_DOCKER, {"cpu/cpu.cfs_quota_us": "-1\n", "cpu/cpu.cfs_period_us": "100000\n"}, 64),
+    ],
+    ids=[
+        "v2-quota",
+        "v2-fractional-quota-rounds-up",
+        "v2-quota-above-the-affinity-set",
+        "v2-unlimited",
+        "v2-host-cgroup-namespace",
+        "v2-ancestor-quota-binds-a-looser-child",
+        "v2-a-sibling-quota-does-not-apply",
+        "v1-mount-of-the-own-cgroup",
+        "v1-host-hierarchy",
+        "v1-unlimited",
+    ],
+)
+def test_unset_takes_most_of_the_tightest_cgroup_cpu_quota(
+    monkeypatch, tmp_path, usable_cpus, membership, cgroup, expected
+):
+    """``docker --cpus``, a Kubernetes CPU limit or a systemd ``CPUQuota`` leaves the affinity set whole: sized off it
+    alone, a map runs 64 workers on the quota's few CPUs. The quota sits on the process's own cgroup or an ancestor,
+    and a host cgroup namespace mounts the whole hierarchy, so reading the mount's root alone misses it."""
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(usable_cpus)))
+    _cgroups(monkeypatch, tmp_path, cgroup, membership)
     assert _resolve_dataset_num_proc() == expected
 
 

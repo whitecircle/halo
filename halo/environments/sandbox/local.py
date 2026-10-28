@@ -74,7 +74,7 @@ _EntryKinds = set[tuple[str, int]]
 
 
 def _resolve_execution_slots() -> int:
-    """Max concurrent sandboxed executions: the CPUs this process may run on (:func:`available_cpu_count`) by
+    """Max concurrent sandboxed executions: the CPUs this process may use (:func:`available_cpu_count`) by
     default, ``HALO_SANDBOX_MAX_CONCURRENCY`` overriding (parsed via :func:`env_int` — a malformed value warns and
     falls back to the default)."""
     override = env_int("HALO_SANDBOX_MAX_CONCURRENCY", None)

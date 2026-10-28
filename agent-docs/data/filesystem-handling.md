@@ -158,15 +158,18 @@ c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) a
 
     Peers wait on store keys bounded by `DIST_STORE_TIMEOUT_HOURS` (or the explicit `timeout`), not
     the NCCL watchdog. World-scoped and collective-equivalent: every rank, same tags, same order. Each
-    rank writes one key and reads the world's in a single `multi_get`, so a join costs O(world) store
-    requests in total rather than O(world) per rank. The coordinated dataset ops and the
+    rank counts itself in on one arrival counter and the last arrival sets the single key the rest
+    wait on; a failing rank first records its reason in a numbered slot, which every rank reads in
+    one `multi_get` once all have arrived. A clean join therefore costs each rank a constant number
+    of store requests, O(world) in total on the one store server; a failed one adds each rank's read
+    of the failing ranks' slots, O(failures × world) in total. The coordinated dataset ops and the
     sharded-dataset loads join through it, and `DeferredRankFailure.store_reject(tag)` closes a
     deferred region with it: the checkpoint savers join that way after the per-rank optimizer and
     sharded-EP shard writes, a gathered save's last part and index, and each pipeline stage's parts.
 
     The tradeoff: a rank that dies *between* joins parks its peers on the store for the full bound
-    rather than the watchdog minutes. The timeout diagnostic names the tag and the knob, and the
-    launcher's elastic agent usually reaps the group first.
+    rather than the watchdog minutes. The timeout diagnostic names the tag, how many ranks arrived
+    and the knob, and the launcher's elastic agent usually reaps the group first.
 
 ```python
 from halo.runtime.filesystem import fs_aware_main_first

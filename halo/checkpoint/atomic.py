@@ -37,14 +37,34 @@ def is_atomic_staging_file(name: str) -> bool:
     return name.startswith(".") and name.endswith((_FILE_STAGING_SUFFIX, WITHHELD_FILE_SUFFIX))
 
 
+def _is_same_entry(path: str | Path, other: str | Path) -> bool:
+    """Whether ``path`` and ``other`` name one directory entry, however their directories are reached (a symlink
+    or a bind mount), rather than two links to one file."""
+    path, other = Path(path), Path(other)
+    return path.name == other.name and os.path.samefile(path.parent, other.parent)
+
+
 def link_or_copy_file(source: str | Path, destination: str | Path) -> None:
-    """Hard-link ``source`` to ``destination``, copying it where the filesystem refuses links."""
+    """Hard-link ``source`` to ``destination``, or copy it with its mode and times where the filesystem refuses
+    links, so the copy reads like the link would.
+
+    An existing ``destination`` is replaced, never written through: it may be a link to another file.
+
+    Raises:
+        ValueError: ``destination`` is the entry holding ``source``'s data, which replacing it would delete.
+    """
+    if os.path.lexists(destination) and _is_same_entry(os.path.realpath(source), destination):
+        raise ValueError(
+            f"{destination} names {source} itself: replacing it would delete the only copy. Write to a "
+            f"directory other than the source's."
+        )
+    Path(destination).unlink(missing_ok=True)
     try:
         os.link(source, destination)
     except OSError as exc:
         if exc.errno not in _LINK_COPY_ERRNOS:
             raise
-        shutil.copyfile(source, destination)
+        shutil.copy2(source, destination)
 
 
 def fsync_directory(directory: str | Path) -> None:
@@ -95,7 +115,6 @@ def atomic_torch_save(
     destination.parent.mkdir(parents=True, exist_ok=True)
     with staged_file(destination.parent, destination.name) as staged:
         if previous is not None and os.path.isfile(previous):
-            staged.unlink()
             link_or_copy_file(previous, staged)
         else:
             torch.save(payload(), staged, pickle_module=pickle_module)

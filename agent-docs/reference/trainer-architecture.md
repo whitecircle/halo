@@ -35,9 +35,8 @@ fails if a sibling base ever intercepts one.
 Three mixins sit outside that composition, in `halo/trainers/`. `StoredMetricsMixin`
 (`stored_metrics.py`) is mixed in *directly* by SMPO, teacher and self
 distillation, and SDPG for buffered per-step metric logging. `log` reports
-each metric's row-weighted world mean through one `WorldMetrics` flush per log call: one object gather
-carries every rank's `(Σ value·rows, Σ rows)` and its key set, and ranks that stored different keys raise
-on every rank. `store_metrics(..., rows=n)` weights
+each metric's row-weighted world mean through one `WorldMetrics` flush per log call, and ranks that stored
+different keys raise on every rank. `store_metrics(..., rows=n)` weights
 a value by the real rows it averages. Every eval store passes `rows=eval_split_rows(n)` (pairs for
 SMPO) and computes its values over those rows — the distillation and SDPG trainers through
 `store_batch_metrics`, which weighs a train micro-batch 1; the eval losses read
@@ -56,9 +55,15 @@ on-policy trainers decouple the completions table from the metric drain. The emb
 ([Embedding](../training-methods/embedding.md#what-to-watch)).
 
 `WorldMetrics` (`world_metrics.py`) is the one cross-rank metric accumulator: `StoredMetricsMixin`, SFT's loss
-metrics, offline GRPO's sign metrics and the GRPO step and rollout metrics record rank-local sums into it, and
-one collective per flush derives each world value. `world_sums` is the one-shot form for a value read outside
-a window (the trust-region breaker, the KL clamp fraction, the prefetch and routing-replay counters).
+metrics, offline GRPO's sign metrics and the GRPO step and rollout metrics record rank-local sums into it. A
+flush agrees the sorted `(key, kind)` schema in one digest all-reduce (a rank with no records learns it by
+broadcast), then folds every column in one float64 SUM and one MAX all-reduce, a min riding as a negated max.
+The number of collectives, their width and the host work do not grow with the rank count (no per-peer read-back
+or unpickle); the all-reduces' own latency does. Only a `percentile`'s raw values, or a schema the ranks disagree
+on (a key behind a data-dependent gate), add an object gather, whose host work does grow with it on NCCL; the
+async GRPO rollout metrics pay that every round for `episode/generation_tokens_p90`. `world_sums` is the one-shot
+form for a value read outside a window (the trust-region breaker, the KL clamp fraction, the prefetch and
+routing-replay counters).
 
 `ModeSetupMixin` dispatches by method, not by mode string: `_apply_ep_fsdp2`,
 `_apply_cp_fsdp2` and `_apply_ep_tp_fsdp2` are called directly from the mode ladder

@@ -105,18 +105,26 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
 
 def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
     """COLLECTIVE: raw text splits to ``(train, eval, generate)``: one chat-template tokenize, as flat rows or
-    trees, then the packing."""
+    trees, then the packing; ``generate`` is ``None`` unless ``generate_eval_examples`` is set."""
     render_kwargs = text_render_kwargs(args)
     num_proc = resolve_map_num_proc(sft_config.dataset_num_proc)
-    common = {"tokenizer": tokenizer, "max_length": sft_config.max_length, **render_kwargs}
-    # From the raw test split, before the train map consumes it.
-    generate_dataset = coordinated_map_and_filter(
-        ds["test"],
-        build_chat_row_processor(**common, add_generation_prompt=True, use_padding=True),
-        desc="Processing generate dataset",
-        cache_key_extras={**render_kwargs, "add_generation_prompt": True},
-        num_proc=num_proc,
-    )
+    generate_dataset = None
+    # Only for the examples callback, its one reader: the map tokenizes the whole test split. From the raw split,
+    # before the train map consumes it.
+    if args.generate_eval_examples:
+        generate_dataset = coordinated_map_and_filter(
+            ds["test"],
+            build_chat_row_processor(
+                tokenizer=tokenizer,
+                max_length=sft_config.max_length,
+                add_generation_prompt=True,
+                use_padding=True,
+                **render_kwargs,
+            ),
+            desc="Processing generate dataset",
+            cache_key_extras={**render_kwargs, "add_generation_prompt": True},
+            num_proc=num_proc,
+        )
     if args.tree_packing:
         train_dataset, eval_dataset = _prepare_tree_rows(
             ds, args, sft_config, tokenizer, hf_config, **render_kwargs, num_proc=num_proc

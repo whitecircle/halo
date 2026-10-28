@@ -4,11 +4,9 @@ deduplicated output."""
 
 import argparse
 import logging
-import os
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from multiprocessing import cpu_count
 from pathlib import Path
 
 import faiss
@@ -24,6 +22,7 @@ from halo.data.sources.paths import (
     parse_dataset_source,
     reject_ambiguous_hub_source,
 )
+from halo.hardware import available_cpu_count
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 
@@ -112,19 +111,19 @@ def _deduplicate_block(embeddings: np.ndarray, similarity_threshold=0.9) -> np.n
 
 def deduplicate_blocks(
     embeddings: np.ndarray,
-    max_workers=cpu_count(),  # noqa: B008  intentional import-time default
+    max_workers: int | None = None,
     batch_size=100_000,
     similarity_threshold=0.9,
 ) -> np.ndarray:
     """Indices of the rows that survive deduplication within each ``batch_size`` block of ``embeddings``,
-    in batch order.
+    in batch order, searched on ``max_workers`` threads (every CPU the process may use when unset).
 
     Batch order, not completion order: the next multistep pass shuffles the survivors with the seeded
     generator, and the run selects the output rows in this order, so an order set by which thread
     finished first would make a seeded run keep different rows.
     """
     starts = range(0, embeddings.shape[0], batch_size)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=max_workers or available_cpu_count()) as executor:
         futures = [
             executor.submit(_deduplicate_block, embeddings[start : start + batch_size], similarity_threshold)
             for start in starts
@@ -140,7 +139,7 @@ def deduplicate_blocks(
 def deduplicate_embeddings(
     embeddings: np.ndarray,
     steps_count=3,
-    max_workers=cpu_count(),  # noqa: B008  intentional import-time default
+    max_workers: int | None = None,
     batch_size=100_000,
     similarity_threshold=0.9,
     seed: int = DEDUP_SHUFFLE_SEED,
@@ -297,7 +296,7 @@ def select_unique_rows(
         unique_indices, sizes_history = deduplicate_embeddings(
             embeddings=embeddings.astype(np.float32),
             steps_count=steps,
-            max_workers=max_workers or os.cpu_count(),
+            max_workers=max_workers,
             batch_size=batch_size,
             similarity_threshold=similarity_threshold,
         )
@@ -314,7 +313,7 @@ def select_unique_rows(
         logger.info("Using single-step deduplication")
         unique_indices = deduplicate_blocks(
             embeddings=embeddings.astype(np.float32),
-            max_workers=max_workers or os.cpu_count(),
+            max_workers=max_workers,
             batch_size=batch_size,
             similarity_threshold=similarity_threshold,
         )

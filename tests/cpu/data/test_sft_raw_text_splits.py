@@ -1,13 +1,16 @@
 #!/usr/bin/env python
-"""A split the length filter empties must fail loud in sft.py, before packing hides the cause.
+"""sft.py's raw-text split preparation: a split the length filter empties fails loud before packing hides the cause,
+and the test split is mapped for generation only when the run generates examples.
 
 The chat processor drops (never truncates) every conversation longer than ``max_length``. Packing an
 emptied split raises ``Columns ['seq_lengths'] not in the dataset`` from deep inside the packer,
 which names neither the split nor ``max_length``. Both splits are checked: a guard covering ``train``
 alone lets an eval split of long conversations crash that way.
 
+The generation map tokenizes the whole test split, and the examples callback is its one reader.
+
 Usage:
-    python tests/cpu/data/test_sft_empty_split_guard.py
+    python tests/cpu/data/test_sft_raw_text_splits.py
 """
 
 from types import SimpleNamespace
@@ -28,7 +31,7 @@ _SHORT = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "h
 _LONG = [{"role": "user", "content": "word " * 400}, {"role": "assistant", "content": "word " * 400}]
 
 
-def _args() -> SimpleNamespace:
+def _args(generate_eval_examples: bool) -> SimpleNamespace:
     return SimpleNamespace(
         dataset=None,
         conversation_field="messages",
@@ -40,6 +43,7 @@ def _args() -> SimpleNamespace:
         assistant_message_template=None,
         train_on_last_assistant_only=False,
         tree_packing=False,
+        generate_eval_examples=generate_eval_examples,
     )
 
 
@@ -61,7 +65,7 @@ def _writable_dataset_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", tmp_path)
 
 
-def _prepare(train_messages, test_messages):
+def _prepare(train_messages, test_messages, generate_eval_examples: bool = False):
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     ds = DatasetDict(
         {
@@ -72,7 +76,7 @@ def _prepare(train_messages, test_messages):
     return _prepare_text_data(
         ds,
         False,
-        _args(),
+        _args(generate_eval_examples),
         _sft_config(),
         SimpleNamespace(model_name_or_path=QWEN3_0_6B),
         tokenizer,
@@ -99,6 +103,14 @@ def test_both_splits_within_the_cap_still_pack():
     assert len(train_dataset) > 0 and len(eval_dataset) > 0
     assert "seq_lengths" in train_dataset.column_names
     assert "seq_lengths" in eval_dataset.column_names
+
+
+def test_the_test_split_is_mapped_for_generation_only_when_examples_are_generated():
+    _train, _eval, skipped, _collator = _prepare([_SHORT] * 4, [_SHORT] * 2)
+    assert skipped is None
+    _train, _eval, generate, _collator = _prepare([_SHORT] * 4, [_SHORT] * 2, generate_eval_examples=True)
+    assert len(generate) == 2
+    assert "input_ids" in generate.column_names
 
 
 if __name__ == "__main__":

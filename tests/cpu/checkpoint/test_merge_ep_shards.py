@@ -11,6 +11,8 @@ tests assert exact shapes AND values, not just key presence.
 
 import json
 import os
+import shutil
+import stat
 import sys
 import tempfile
 from collections import defaultdict
@@ -53,10 +55,12 @@ from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from halo.models.moe.expert_layout import to_hub_expert_tensors
 from halo.models.moe.family_specs import expert_weight_roots, find_moe_family_spec
 from scripts.after_training import merge_ep_shards as merge_script
+from tests.common.checkpoint_resave import resave_in_place
 
 # The whole-dict oracle the streamed merge is pinned against (test-only; see its module docstring).
 from tests.common.ep_merge_oracle import post_process_merged_weights
 from tests.common.ep_stubs import bare_ep_layer
+from tests.common.file_links import OWNER_ONLY_MODE, mount_again, process_umask, refuse_hard_links
 
 
 def _merge_transform(layer_cls):
@@ -81,6 +85,14 @@ PREFIX_MLP = f"{PREFIX}.mlp"
 PREFIX_FF = f"{PREFIX}.feed_forward"
 # The payload ``write_optimizer_meta`` writes beside the two ranks' optimizer shards of an ep2 save.
 OPTIMIZER_META = {"num_ranks": 2, "fingerprint": {"world_size": 2, "ep_size": 2, "optimizer_class": "AdamWBF16"}}
+# The per-rank resume files of that save and the meta vouching for them, which the merge carries itself.
+EP2_RESUME_FILES = (
+    optimizer_shard_filename(0),
+    optimizer_shard_filename(1),
+    "rng_state_0.pth",
+    "rng_state_1.pth",
+    OPTIMIZER_META_FILE,
+)
 
 
 def test_shared_expert_params_are_not_grouped_as_routed_experts():
@@ -662,16 +674,8 @@ def test_the_merged_directory_is_the_resume_source_the_shards_are_not():
     precompute DPO/KTO resume, whose policy is built from these weights, has no untrained reference
     left to sweep and raises; without the optimizer shards and the meta vouching for them, a resume on
     the very topology that wrote them warm-restarts the optimizer."""
-    resume_files = (
-        REFERENCE_LOGPS_FILE,
-        SCHEDULER_STATE_FILE,
-        ROUTER_BALANCING_BIASES_FILE,
-        "rng_state_0.pth",
-        "rng_state_1.pth",
-        optimizer_shard_filename(0),
-        optimizer_shard_filename(1),
-        OPTIMIZER_META_FILE,
-    )
+    # The meta stays last: it is torch-saved, every file before it written as its name's bytes.
+    resume_files = (REFERENCE_LOGPS_FILE, SCHEDULER_STATE_FILE, ROUTER_BALANCING_BIASES_FILE, *EP2_RESUME_FILES)
     with tempfile.TemporaryDirectory() as input_dir, tempfile.TemporaryDirectory() as output_dir:
         _write_ep_checkpoint(input_dir, "gpt_oss", _gptoss_shards(), 2)
         for name in resume_files[:-1]:
@@ -702,6 +706,103 @@ def test_a_rank_whose_optimizer_shard_is_missing_fails_the_merge(tmp_path):
     with pytest.raises(ValueError, match=r"optimizer shards of ranks \[1\]"):
         merge_ep_shards(str(input_dir), str(output_dir), verbose=False)
     assert not output_dir.exists()
+
+
+def _save_with_resume_state(input_dir):
+    """A sharded ep2 save at ``input_dir`` holding :data:`EP2_RESUME_FILES`, each rank's optimizer shard its own."""
+    os.makedirs(input_dir)
+    _write_ep_checkpoint(str(input_dir), "gpt_oss", _gptoss_shards(), 2)
+    for rank in range(2):
+        torch.save(
+            {"state": {0: {"exp_avg": torch.full((4,), float(rank))}}}, input_dir / optimizer_shard_filename(rank)
+        )
+        torch.save({"python": rank}, input_dir / f"rng_state_{rank}.pth")
+    torch.save(OPTIMIZER_META, input_dir / OPTIMIZER_META_FILE)
+    return input_dir
+
+
+def _assert_hard_linked(input_dir, output_dir):
+    for name in EP2_RESUME_FILES:
+        assert not (output_dir / name).is_symlink() and os.path.samefile(input_dir / name, output_dir / name), (
+            f"{name} was copied, not hard-linked"
+        )
+
+
+def test_on_one_filesystem_the_resume_state_is_hard_linked_and_outlives_the_input(tmp_path):
+    """Copied, every rank's optimizer shard would land on the volume twice. Linked, the merged directory
+    stays whole through ``--delete_input_shards`` and the input's removal after it."""
+    input_dir, output_dir = _save_with_resume_state(tmp_path / "save"), tmp_path / "merged"
+
+    merge_ep_shards(str(input_dir), str(output_dir), verbose=False, delete_input_shards=True)
+
+    _assert_hard_linked(input_dir, output_dir)
+    shutil.rmtree(input_dir)
+    assert classify_resume_weights(str(output_dir)) == "full"
+    assert torch.load(output_dir / OPTIMIZER_META_FILE, weights_only=True) == OPTIMIZER_META
+    shard = torch.load(output_dir / optimizer_shard_filename(1), weights_only=True)
+    assert torch.equal(shard["state"][0]["exp_avg"], torch.full((4,), 1.0)), "rank 1's shard is not its own"
+
+
+def test_across_filesystems_the_resume_state_is_copied_with_its_mode(tmp_path, monkeypatch):
+    input_dir, output_dir = _save_with_resume_state(tmp_path / "save"), tmp_path / "merged"
+    for name in EP2_RESUME_FILES:
+        os.chmod(input_dir / name, OWNER_ONLY_MODE)
+    refuse_hard_links(monkeypatch)
+
+    with process_umask():
+        merge_ep_shards(str(input_dir), str(output_dir), verbose=False)
+
+    for name in EP2_RESUME_FILES:
+        copied = (output_dir / name).stat()
+        assert copied.st_ino != (input_dir / name).stat().st_ino
+        assert stat.S_IMODE(copied.st_mode) == OWNER_ONLY_MODE, f"{name} took the umask's mode, not its source's"
+        assert (output_dir / name).read_bytes() == (input_dir / name).read_bytes(), f"{name} changed on the way"
+
+
+def test_a_merge_rerun_into_its_output_directory_links_the_resume_state_again(tmp_path):
+    """A re-run finds the first run's links under the names it carries and must take them over rather than
+    fail on them."""
+    input_dir, output_dir = _save_with_resume_state(tmp_path / "save"), tmp_path / "merged"
+    merge_ep_shards(str(input_dir), str(output_dir), verbose=False)
+
+    merge_ep_shards(str(input_dir), str(output_dir), verbose=False)
+
+    _assert_hard_linked(input_dir, output_dir)
+    assert classify_resume_weights(str(output_dir)) == "full"
+
+
+@pytest.mark.parametrize("resaved", ["input", "merged"])
+def test_a_save_that_rewrites_one_linked_directory_leaves_the_other_as_merged(tmp_path, resaved):
+    """A run saving a step it saved before rewrites that ``checkpoint-N`` in place, and the optimizer-shard and
+    RNG writers truncate an existing name. The input re-saved after the merge, or the merged directory re-saved
+    by a run resumed from it, must not change the other directory's linked resume state with it."""
+    step_dir = tmp_path / "run" / "checkpoint-2"
+    other = tmp_path / ("merged" if resaved == "input" else "save")
+    input_dir, output_dir = (step_dir, other) if resaved == "input" else (other, step_dir)
+    _save_with_resume_state(input_dir)
+    merge_ep_shards(str(input_dir), str(output_dir), verbose=False)
+    _assert_hard_linked(input_dir, output_dir)
+    before = {name: (other / name).read_bytes() for name in EP2_RESUME_FILES}
+
+    resave_in_place(step_dir, world_size=2)
+
+    for name in (optimizer_shard_filename(0), "rng_state_0.pth", OPTIMIZER_META_FILE):
+        assert (step_dir / name).read_bytes() != before[name], f"premise: the re-save rewrote {name}"
+    changed = [name for name in EP2_RESUME_FILES if (other / name).read_bytes() != before[name]]
+    assert not changed, f"the re-save of the {resaved} directory rewrote the other's {changed}"
+
+
+def test_an_output_that_is_the_input_mounted_again_is_refused_and_the_input_survives(tmp_path, monkeypatch):
+    """A second bind mount reaches the save by a path ``realpath`` keeps distinct. Merged there, the merge would
+    replace the save's own per-rank files and sweep its weight shards, so it must be refused before any write."""
+    input_dir = _save_with_resume_state(tmp_path / "save")
+    saved = {path.name: path.read_bytes() for path in input_dir.iterdir()}
+    mount_again(monkeypatch, input_dir, tmp_path / "mounted")
+
+    with pytest.raises(ValueError, match="not in-place"):
+        merge_ep_shards(str(input_dir), str(tmp_path / "mounted"), verbose=False)
+
+    assert {path.name: path.read_bytes() for path in input_dir.iterdir()} == saved
 
 
 def _gathered_reference(layer_cls, gate_up, down):

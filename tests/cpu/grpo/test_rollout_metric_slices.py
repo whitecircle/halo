@@ -21,6 +21,7 @@ from halo.rewards.terms import REWARD_COMPONENT_PREFIX
 from halo.trainers import world_metrics
 from halo.trainers.grpo.environmental import rollout_metrics
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
+from tests.common.world_metrics import pooled_states
 
 
 def _host():
@@ -97,9 +98,15 @@ def test_slices_and_the_p90_pool_every_ranks_episodes(monkeypatch):
         _result("low", {}, 0.0, 1.0, tokens=50),
     ]
     payloads = []
-    monkeypatch.setattr(world_metrics, "_gathered", lambda payload, group: payloads.append(payload) or [payload])
+    monkeypatch.setattr(
+        world_metrics, "_world_states", lambda states, group, key_mismatch_error: payloads.append(states) or states
+    )
     _host()._log_rollout_metrics(peer, "train", [[10]] * len(peer))
-    monkeypatch.setattr(world_metrics, "_gathered", lambda payload, group: [payload, *payloads])
+    monkeypatch.setattr(
+        world_metrics,
+        "_world_states",
+        lambda states, group, key_mismatch_error: pooled_states([states, *payloads], key_mismatch_error),
+    )
     host = _host()
     own = [
         _result("high", {"language": "cpp"}, 1.0, 1.0, reward=1.2, tokens=100),

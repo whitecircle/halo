@@ -38,7 +38,9 @@ Read the script's `--help` before running it — don't guess the flags.
 - **A per-rank sharded checkpoint is NOT directly loadable.** Every loader refuses `metadata.format`
   `ep_sharded` and names the merge tool. Run the merge first. The merged directory (and a
   `merge_pp_stages.py` output) carries every rank's optimizer shard, so it resumes exactly on the
-  topology that wrote it.
+  topology that wrote it. On the input's filesystem those files are hard links, which a later training
+  save into either directory replaces rather than writes through
+  (`agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp`).
 
 ## "I trained with X → single HF checkpoint" decision table
 

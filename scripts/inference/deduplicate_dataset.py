@@ -104,7 +104,7 @@ def _add_search_args(parser: argparse.ArgumentParser) -> None:
         "--max_workers",
         type=int,
         default=None,
-        help="Worker threads for the similarity search (default: the CPU count).",
+        help="Worker threads for the similarity search (default: the CPUs the process may use).",
     )
 
 

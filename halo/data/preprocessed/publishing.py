@@ -58,7 +58,7 @@ class PrepareDatasetArguments:
 
 
 def bake_num_proc() -> int:
-    """The bake's default worker count: ``HALO_DATASET_NUM_PROC``, else every CPU the process may run on but
+    """The bake's default worker count: ``HALO_DATASET_NUM_PROC``, else every CPU the process may use but
     :data:`_BAKE_RESERVED_CPUS`. The tool runs alone on its host, so the training default's share and cap would idle
     most of a large one."""
     override = dataset_num_proc_override()

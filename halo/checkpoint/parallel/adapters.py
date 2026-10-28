@@ -227,7 +227,7 @@ def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:
     optimizer state belongs to the adapters. They go to :data:`~halo.checkpoint.format.RESUME_ADAPTER_DIR`
     through the non-merged save's adapter writer at their live dtype, then each save rank marks its
     own complete copy; with older markers removed before the save began
-    (:func:`~halo.checkpoint.parallel.completeness.remove_stale_completion_markers`), a failed adapter write
+    (:func:`~halo.checkpoint.parallel.completeness.prepare_checkpoint_rewrite`), a failed adapter write
     leaves no marker.
     """
     # Rank-uniform, and a no-op when sharded: a forward's transient unsharded params predate the

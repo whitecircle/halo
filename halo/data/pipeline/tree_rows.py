@@ -12,7 +12,8 @@ from itertools import groupby
 from typing import Any
 
 import numpy as np
-from datasets import DatasetDict, Features, List, Value
+import pyarrow.compute as pc
+from datasets import Dataset, DatasetDict, Features, List, Value
 from transformers import PreTrainedTokenizer
 
 from halo.data.completion_spans import PACKED_SPAN_POLICY, build_span_labels, resolve_spans_or_warn
@@ -190,6 +191,13 @@ def build_tree_row_processor(
     return process_batch
 
 
+def _share_key_order(keys: Dataset) -> np.ndarray:
+    """The indices that sort ``keys`` by share key, ties in row order. Sorted in Arrow: read into Python strings, the
+    column takes about a minute and 1.5 GB per rank at 10M rows. int64, since ``select`` fingerprints the indices,
+    dtype included, and an unstamped in-memory split keys its next map on that fingerprint."""
+    return pc.sort_indices(keys.with_format("arrow")[SHARE_KEY_COLUMN]).to_numpy().astype(np.int64)
+
+
 def _order_by_share_key(
     dataset: DatasetDict, conversation_field: str, markers: tuple[str, ...], requires: str | None, num_proc: int
 ) -> DatasetDict:
@@ -206,11 +214,7 @@ def _order_by_share_key(
     step = f"tree-order-{hashlib.md5(repr((markers, requires)).encode()).hexdigest()[:12]}"
     return DatasetDict(
         {
-            split: carry_cache_key(
-                dataset[split],
-                dataset[split].select(np.argsort(np.asarray(keys[split][SHARE_KEY_COLUMN]), kind="stable")),
-                step,
-            )
+            split: carry_cache_key(dataset[split], dataset[split].select(_share_key_order(keys[split])), step)
             for split in dataset
         }
     )

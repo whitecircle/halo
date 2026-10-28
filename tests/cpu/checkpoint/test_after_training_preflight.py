@@ -3,24 +3,35 @@
 
 The preflight WARNS and continues — the figures are estimates, so aborting on them would refuse
 conversions that fit. What these tests pin: the warning fires (with numbers) when an estimate
-exceeds the host, stays silent when the host is ample or unreadable, and the merge scripts actually
-route through the shared helper before their heavy phase.
+exceeds the host, stays silent when the host is ample or unreadable, the merge scripts actually
+route through the shared helper before their heavy phase, and the disk estimate leaves out what a
+merge hard-links instead of copying.
 """
 
 import json
 import os
+import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
+import halo.checkpoint.ep_shard_merge as ep_shard_merge
 import halo.checkpoint.offline_export as offline_export
 from halo.checkpoint.ep_shard_merge import merge_ep_shards
-from halo.checkpoint.offline_export import preflight_model_load_resources, preflight_resource_warning
+from halo.checkpoint.format import OPTIMIZER_META_FILE, optimizer_shard_filename
+from halo.checkpoint.offline_export import (
+    cross_device_bytes,
+    preflight_model_load_resources,
+    preflight_resource_warning,
+)
 from halo.hardware import available_host_ram_bytes
 
 H = 32
+# A tmpfs on every Linux host and container, so never the filesystem of a test's tmp_path on disk.
+SECOND_FILESYSTEM = "/dev/shm"
 
 
 def test_ram_warning_fires_with_numbers(monkeypatch, capsys, tmp_path):
@@ -132,6 +143,42 @@ def test_merge_ep_shards_routes_through_the_preflight_and_still_completes(monkey
     assert "WARNING: merge_ep_shards" in out and "RAM" in out
     merged = load_file(os.path.join(output_dir, "model.safetensors"))
     assert "model.layers.0.mlp.experts.gate_up_proj" in merged
+
+
+def test_merge_ep_shards_disk_estimate_leaves_out_the_resume_state_it_links(monkeypatch, tmp_path):
+    """On one filesystem the optimizer shards are hard-linked, so the output volume needs room for the merged
+    weights alone; counting the shards too would warn a merge off a volume it fits on."""
+    estimates = []
+    monkeypatch.setattr(
+        ep_shard_merge,
+        "preflight_resource_warning",
+        lambda tool, output_dir, *, disk_bytes, ram_bytes: estimates.append(disk_bytes),
+    )
+    input_dir = tmp_path / "in"
+    os.makedirs(input_dir)
+    _write_tiny_ep_checkpoint(str(input_dir))
+    weight_bytes = sum(path.stat().st_size for path in input_dir.glob("*.safetensors"))
+    for rank in range(2):
+        torch.save({"state": {0: {"exp_avg": torch.zeros(H * H)}}}, input_dir / optimizer_shard_filename(rank))
+    torch.save({"num_ranks": 2}, input_dir / OPTIMIZER_META_FILE)
+
+    merge_ep_shards(str(input_dir), str(tmp_path / "out"), verbose=False)
+
+    assert estimates == [weight_bytes]
+
+
+def test_cross_device_bytes_counts_only_the_files_a_link_cannot_reach(tmp_path):
+    linkable = tmp_path / optimizer_shard_filename(0)
+    linkable.write_bytes(bytes(100))
+    with tempfile.TemporaryDirectory(dir=SECOND_FILESYSTEM) as other:
+        assert os.stat(other).st_dev != os.stat(tmp_path).st_dev, f"premise: {SECOND_FILESYSTEM} is another filesystem"
+        unlinkable = Path(other) / optimizer_shard_filename(1)
+        unlinkable.write_bytes(bytes(7))
+        # The merges preflight before they create the output directory.
+        output_dir = str(tmp_path / "merged")
+
+        assert cross_device_bytes([str(linkable)], output_dir) == 0
+        assert cross_device_bytes([str(linkable), str(unlinkable)], output_dir) == 7
 
 
 if __name__ == "__main__":

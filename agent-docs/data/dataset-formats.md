@@ -229,6 +229,12 @@ DeepEP/NCCL process groups (unpicklable, so the map dies mid-pass).
 tunables through `fn_kwargs` also puts them in the cache key, which values read off `self` never
 reach.
 
+At `num_proc > 1` both seams pickle the callable once per call, its `fn_kwargs` bound, and every
+worker task carries those bytes. `datasets` otherwise pickles the callable into each task one after
+another in the calling process, whatever the dataset size: about 1.2 s of dill per task for a captured
+Qwen3 tokenizer, 3.6 s for Gemma 4. The key reads the bare callable, so every rank names the same cache
+file whatever worker count it maps with.
+
 The key (`halo/data/pipeline/map_cache_key.py`) hashes the callable's source plus the source of every
 first-party module-level function it calls by bare name, so editing such a helper re-maps. A helper
 reached as a module attribute or a method stays out of the key, and editing it reuses stale rows: call

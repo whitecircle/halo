@@ -176,7 +176,7 @@ Rlimits bound each `local` / `bubblewrap` run; `remote` enforces its own.
 
 ## Concurrency and sizing
 
-- Every `local` / `bubblewrap` execution takes a slot of a process-global `ExecutionGate` (`sandbox_execution_gate`) before its timeout starts. `HALO_SANDBOX_MAX_CONCURRENCY` sets the slot count (default: the CPUs in the process's affinity set); the rest queue.
+- Every `local` / `bubblewrap` execution takes a slot of a process-global `ExecutionGate` (`sandbox_execution_gate`) before its timeout starts. `HALO_SANDBOX_MAX_CONCURRENCY` sets the slot count (default: the CPUs the process may use, its affinity set capped by any cgroup CPU quota over the process); the rest queue.
 - Oversubscribed cores make a correct solution time out from starvation, and `swe` episodes hit `episode_timeout`.
 - The gate is **per process**, fixed at import: set the variable before the process starts. When several processes share a host, size the slots to **sum** to the core count.
 - Each execution writes a working directory plus stdout and stderr files of up to 64 MiB each under `TMPDIR`. Point `TMPDIR` at a large volume; a `swe` session's whole tree lives there for the episode.

@@ -498,8 +498,10 @@ through a single writer. Host memory is not a reason to choose it: a sharded sav
 node (every local rank buffers its own slice).
 
 The cost is that nothing loads the result. `merge_ep_shards.py` must run before resume or serving;
-it carries the optimizer shards and their meta, so a resume from the merged directory is exact on the
-save's topology ([Checkpoints & Resume](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)).
+it carries the optimizer shards and their meta, hard-linked when the output is on the input's
+filesystem, so a resume from the merged directory is exact on the save's topology. A later training save
+into either directory replaces the linked files rather than writing through them
+([Checkpoints & Resume](../reference/checkpoints.md#expert-parallelism-ep-eptp-epcp)).
 
 `save_max_shard_size` does not apply to these files; a per-rank shard is one file by design. The cap
 bounds the gathered save; the merged artifact takes `merge_ep_shards.py --max_shard_size`.

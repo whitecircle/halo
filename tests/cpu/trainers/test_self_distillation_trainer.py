@@ -322,9 +322,9 @@ def test_only_a_loss_recording_the_sft_metrics_flushes_them_per_log(trainer_cls,
     trainer = object.__new__(trainer_cls)
     trainer.model = types.SimpleNamespace(training=True)
     trainer._loss_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
-    with mock.patch.object(world_metrics, "_gathered", return_value=[{}]) as gathered:
+    with mock.patch.object(world_metrics, "_world_states", return_value={}) as folded:
         trainer._drain_loss_metrics()
-    assert gathered.call_count == flushes
+    assert folded.call_count == flushes
 
 
 def _vision_reuse_probe(model_type):

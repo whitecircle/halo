@@ -52,7 +52,7 @@ def _rank(cp_rank=0, *, training=True, cp=True, replication=None):
 
 
 def _no_collective():
-    return mock.patch.object(world_metrics, "_gathered", side_effect=AssertionError("a collective ran"))
+    return mock.patch.object(world_metrics, "_world_states", side_effect=AssertionError("a collective ran"))
 
 
 def _accumulate(rank, outputs, labels, attention_mask):
@@ -81,7 +81,7 @@ def _microbatch(seed, rows=2, aux_loss=None, attended=SEQ, cp=True):
 
 
 def _drain_in_lockstep(ranks):
-    """Every rank's drain, each flush gathering every rank's window as the world's."""
+    """Every rank's drain, each flush folding every rank's window as the world's."""
     with fake_world(*(rank._loss_metrics["train" if rank.model.training else "eval"] for rank in ranks)):
         for rank in ranks:
             rank._drain_loss_metrics()
@@ -182,17 +182,19 @@ def test_ratio_metrics_are_token_weighted_when_microbatches_differ_in_length():
 
 
 @pytest.mark.parametrize("cp", [True, False], ids=["cp", "no-cp"])
-def test_drain_is_one_collective_per_log_on_every_rank_however_many_microbatches(cp):
+def test_drain_folds_once_per_log_on_every_rank_however_many_microbatches(cp):
     """Participation is structural: a rank whose window is empty (its first log) enters the flush too,
     never skips it — one rank sitting out is a hang for the other 511 — and a full window costs the
-    same one collective."""
+    same one fold across the ranks."""
     full, empty = _rank(0, cp=cp), _rank(1, cp=cp)
     for seed in range(8):
         _accumulate(full, *_microbatch(seed, aux_loss=0.3, cp=cp))
     for rank in (full, empty):
-        with mock.patch.object(world_metrics, "_gathered", side_effect=lambda payload, group: [payload]) as gather:
+        with mock.patch.object(
+            world_metrics, "_world_states", side_effect=lambda states, group, key_mismatch_error: states
+        ) as fold:
             rank._drain_loss_metrics()
-        assert gather.call_count == 1
+        assert fold.call_count == 1
 
 
 def _oracle(logits, labels):

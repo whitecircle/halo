@@ -243,7 +243,6 @@ def reset_sinks(
         copy_checkpoint_aux_files(str(source), str(output_path))
         for shard in shards:
             if shard not in sink_keys:
-                (output_path / os.path.basename(shard)).unlink(missing_ok=True)
                 link_or_copy_file(shard, output_path / os.path.basename(shard))
         if (source / SAFETENSORS_INDEX_FILE).is_file():
             # A fresh mtime: the sweep below breaks an index-versus-single-file tie by it.

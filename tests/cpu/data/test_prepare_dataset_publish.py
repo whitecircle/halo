@@ -30,6 +30,7 @@ import types
 import pytest
 from datasets import DatasetDict
 
+from halo import hardware
 from halo.checkpoint import atomic
 from halo.data.pipeline import coordinated_map
 from halo.data.preprocessed import publishing
@@ -270,9 +271,10 @@ def test_train_on_completions_only_defaults_on_and_is_still_switchable():
     assert _parse(["--mode", "text"]).train_on_completions_only is False
 
 
-def test_the_bake_takes_every_usable_cpu_but_a_reserve_unless_told_otherwise(monkeypatch):
+def test_the_bake_takes_every_usable_cpu_but_a_reserve_unless_told_otherwise(monkeypatch, tmp_path):
     monkeypatch.delenv("HALO_DATASET_NUM_PROC", raising=False)
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(192)))
+    monkeypatch.setattr(hardware, "_CGROUP_ROOT", str(tmp_path))  # no CPU quota
     assert _parse(["--mode", "text"]).num_proc == 192 - publishing._BAKE_RESERVED_CPUS
     assert _parse(["--mode", "text", "--num_proc", "3"]).num_proc == 3
     monkeypatch.setenv("HALO_DATASET_NUM_PROC", "7")

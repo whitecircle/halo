@@ -1,8 +1,9 @@
 """World-level metrics folded from rank-local sums.
 
 TRL's ``log`` averages each process's own ``_metrics`` list and only the main process reports, so a value
-computed over one rank's rows is logged as if it were the batch's. Each rank records its sums instead, and one
-collective per flush derives every metric from the world totals.
+computed over one rank's rows is logged as if it were the batch's. Each rank records its sums instead, and a
+flush derives every metric from the world totals in fixed-width all-reduces; only a percentile's raw values, or
+key sets the ranks disagree on, travel in an object gather.
 """
 
 import math
@@ -14,10 +15,18 @@ import torch
 import torch.distributed as dist
 
 from halo.runtime.collectives import collective_device
+from halo.runtime.consensus import agree_across_ranks
 from halo.runtime.ranks import is_multi_rank_run
 
 Count = torch.Tensor | float | int
 State = tuple[float, ...]
+# A flush's sorted ``(key, kind)`` pairs, which fix the layout of its reduced columns.
+Schema = tuple[tuple[str, str], ...]
+MismatchErrorFactory = Callable[[dict[int, list[str]]], Exception]
+
+# The state-column folds one MAX all-reduce carries, each at its sign: a min crosses the ranks as the max of its
+# negation. Every other column is summed.
+_MAX_SIGNS: dict[Callable, float] = {max: 1.0, min: -1.0}
 
 
 def _ratio(numerator: float, denominator: float) -> float:
@@ -53,6 +62,11 @@ _KINDS: dict[str, tuple[tuple[Callable, ...] | None, Callable[..., dict]]] = {
 }
 
 
+def _pooled(kind: str) -> bool:
+    """Whether ``kind``'s states concatenate across the ranks, raw values a fixed-width reduce cannot carry."""
+    return _KINDS[kind][0] is None
+
+
 def _fold(kind: str, states: Sequence[State]) -> State:
     """One ``kind`` state from several: a rank's records, or the ranks' states."""
     folds = _KINDS[kind][0]
@@ -61,13 +75,111 @@ def _fold(kind: str, states: Sequence[State]) -> State:
     return tuple(fold(column) for fold, column in zip(folds, zip(*states, strict=True), strict=True))
 
 
-def _gathered(payload: dict, group: dist.ProcessGroup | None) -> list[dict]:
+def _gathered(payload: object, group: dist.ProcessGroup | None) -> list:
     """COLLECTIVE over ``group`` (the world when None): every rank's ``payload``, in rank order."""
     if not is_multi_rank_run():
         return [payload]
     gathered: list = [None] * dist.get_world_size(group)
     dist.all_gather_object(gathered, payload, group=group)
     return gathered
+
+
+def _schema(states: dict[str, tuple[str, State]]) -> Schema:
+    """A rank's sorted ``(key, kind)`` pairs; empty when it recorded nothing."""
+    return tuple(sorted((key, kind) for key, (kind, _) in states.items()))
+
+
+def _union_schema(schemas: Sequence[Schema], key_mismatch_error: MismatchErrorFactory | None) -> Schema:
+    """Every key any rank holds, at its one kind; raises ``ValueError`` on a key held as two kinds. With
+    ``key_mismatch_error`` the ranks holding records must hold the same keys, else it raises
+    ``key_mismatch_error({rank: sorted keys})``."""
+    if key_mismatch_error is not None:
+        keys_by_rank = {rank: [key for key, _ in schema] for rank, schema in enumerate(schemas) if schema}
+        if len({tuple(keys) for keys in keys_by_rank.values()}) > 1:
+            raise key_mismatch_error(keys_by_rank)
+    kinds: dict[str, set[str]] = defaultdict(set)
+    for key, kind in chain.from_iterable(schemas):
+        kinds[key].add(kind)
+    union = []
+    for key in sorted(kinds):
+        if len(kinds[key]) != 1:
+            raise ValueError(f"{key} was recorded as {sorted(kinds[key])} on different ranks")
+        union.append((key, *kinds[key]))
+    return tuple(union)
+
+
+def _agreed_schema(
+    states: dict[str, tuple[str, State]],
+    group: dist.ProcessGroup | None,
+    key_mismatch_error: MismatchErrorFactory | None,
+) -> tuple[Schema, list[dict[str, tuple[str, State]]]]:
+    """COLLECTIVE over ``group``: the schema every rank folds, and every rank's pooled-kind states when it has any.
+
+    One :func:`agree_across_ranks` all-reduce; a rank with no records abstains and, when a peer holds records,
+    learns the schema by broadcast. Only a schema the ranks disagree on, or one with a pooled kind, gathers the
+    schemas and the pooled states. Every rank takes each branch together, the verdict read off a collective.
+    """
+    schema = _schema(states)
+    agreement = agree_across_ranks(schema, abstain=not schema, group=group)
+    if agreement.first_present is None:
+        return (), []
+    if agreement.agreed and agreement.any_abstained:
+        shared = [schema]
+        dist.broadcast_object_list(shared, group=group, group_src=agreement.first_present)
+        schema = shared[0]
+    if agreement.agreed and not any(_pooled(kind) for _, kind in schema):
+        return schema, []
+    local_pooled = {key: entry for key, entry in states.items() if _pooled(entry[0])}
+    gathered = _gathered((schema, local_pooled), group)
+    if not agreement.agreed:
+        schema = _union_schema([rank_schema for rank_schema, _ in gathered], key_mismatch_error)
+    return schema, [rank_pooled for _, rank_pooled in gathered]
+
+
+def _world_states(
+    states: dict[str, tuple[str, State]],
+    group: dist.ProcessGroup | None,
+    key_mismatch_error: MismatchErrorFactory | None,
+) -> dict[str, tuple[str, State]]:
+    """COLLECTIVE over ``group`` (the world when None): each key's state folded over the ranks, keys sorted.
+
+    After :func:`_agreed_schema`, one float64 SUM all-reduce carries every summed column and one MAX all-reduce
+    every max and negated min, a rank without the key adding 0 or -inf. Their count and width, and the host work,
+    do not grow with the world (no per-peer read-back or unpickle); the all-reduces' own latency does.
+    """
+    schema, pooled = _agreed_schema(states, group, key_mismatch_error)
+    sums: list[float] = []
+    maxes: list[float] = []
+    for key, kind in schema:
+        if _pooled(kind):
+            continue
+        local = states[key][1] if key in states else None
+        for column, fold in enumerate(_KINDS[kind][0]):
+            if fold in _MAX_SIGNS:
+                maxes.append(-math.inf if local is None else _MAX_SIGNS[fold] * local[column])
+            else:
+                sums.append(0.0 if local is None else local[column])
+    reduced: list[float] = []
+    if sums or maxes:
+        columns = torch.tensor(sums + maxes, dtype=torch.float64, device=collective_device(group))
+        if is_multi_rank_run():
+            if sums:
+                dist.all_reduce(columns[: len(sums)], group=group)
+            if maxes:
+                dist.all_reduce(columns[len(sums) :], op=dist.ReduceOp.MAX, group=group)
+        reduced = columns.tolist()
+    summed, maxed = iter(reduced[: len(sums)]), iter(reduced[len(sums) :])
+
+    world: dict[str, tuple[str, State]] = {}
+    for key, kind in schema:
+        if _pooled(kind):
+            state = _fold(kind, [rank[key][1] for rank in pooled if key in rank])
+        else:
+            state = tuple(
+                _MAX_SIGNS[fold] * next(maxed) if fold in _MAX_SIGNS else next(summed) for fold in _KINDS[kind][0]
+            )
+        world[key] = (kind, state)
+    return world
 
 
 def world_sums(values: Sequence[Count]) -> list[float]:
@@ -95,6 +207,9 @@ class WorldMetrics:
       dominates, 0 when all are zero); ``covariance``: E[xy] - E[x] E[y] of the masked pairs;
     - ``moments``: ``<key>_{mean,std,min,max,range}`` of the masked values, std = sqrt(E[x²] - E[x]²), not reported
       without a sample; ``percentile``: the nearest-rank percentile, the one kind that ships raw values.
+
+    A NaN reaching a ``maximum`` or a ``moments`` min or max may be dropped: neither Python's ``max`` within a rank
+    nor the backend's MAX across ranks propagates it reliably. A sum does, so the moments mean and std report it.
     """
 
     def __init__(self) -> None:
@@ -153,7 +268,7 @@ class WorldMetrics:
         target: MutableMapping[str, list[float]] | None = None,
         *,
         group: dist.ProcessGroup | None = None,
-        key_mismatch_error: Callable[[dict[int, list[str]]], Exception] | None = None,
+        key_mismatch_error: MismatchErrorFactory | None = None,
     ) -> dict[str, float]:
         """COLLECTIVE over ``group`` (the world when None): every rank calls it at the same point, records or not.
 
@@ -163,22 +278,9 @@ class WorldMetrics:
         ``key_mismatch_error({rank: sorted keys})``.
         """
         states, self._records = self._local_states(), {}
-        gathered = _gathered(states, group)
-        if key_mismatch_error is not None:
-            keys_by_rank = {rank: sorted(rank_states) for rank, rank_states in enumerate(gathered) if rank_states}
-            if len({tuple(keys) for keys in keys_by_rank.values()}) > 1:
-                raise key_mismatch_error(keys_by_rank)
-        merged: dict[str, list[tuple[str, State]]] = defaultdict(list)
-        for rank_states in gathered:
-            for key, entry in rank_states.items():
-                merged[key].append(entry)
         world: dict[str, float] = {}
-        for key in sorted(merged):
-            kinds = {kind for kind, _ in merged[key]}
-            if len(kinds) != 1:
-                raise ValueError(f"{key} was recorded as {sorted(kinds)} on different ranks")
-            kind = kinds.pop()
-            world.update(_KINDS[kind][1](key, *_fold(kind, [state for _, state in merged[key]])))
+        for key, (kind, state) in _world_states(states, group, key_mismatch_error).items():
+            world.update(_KINDS[kind][1](key, *state))
         if target is not None:
             for key, value in world.items():
                 target.setdefault(key, []).append(value)

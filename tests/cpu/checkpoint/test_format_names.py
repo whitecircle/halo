@@ -72,5 +72,35 @@ def test_the_name_builders_spell_their_files():
     assert stream_part == "model-streaming-00002.safetensors"
 
 
+@pytest.mark.parametrize(
+    "name",
+    [
+        checkpoint_format.optimizer_shard_filename(3),
+        checkpoint_format.prefetch_pending_filename(1, 8),
+        "rng_state_3.pth",
+        "rng_state.pth",
+    ],
+)
+def test_a_ranks_own_resume_file_is_per_rank(name):
+    assert checkpoint_format.is_per_rank_resume_file(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        checkpoint_format.OPTIMIZER_META_FILE,
+        *checkpoint_format.OPTIMIZER_STATE_FILES,
+        checkpoint_format.SCHEDULER_STATE_FILE,
+        checkpoint_format.TRAINER_STATE_FILE,
+        checkpoint_format.REFERENCE_LOGPS_FILE,
+        checkpoint_format.ROUTER_BALANCING_BIASES_FILE,
+        checkpoint_format.ep_shard_filename(0, 2),
+    ],
+)
+def test_a_file_of_the_whole_save_is_not_per_rank(name):
+    """Files a save writes once for all its ranks, and one rank's weight shard: none is a rank's resume state."""
+    assert not checkpoint_format.is_per_rank_resume_file(name)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

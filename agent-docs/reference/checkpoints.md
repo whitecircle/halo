@@ -130,12 +130,16 @@ rotation can remove the previous complete checkpoint. Offline GRPO's ragged payl
 
 Staging and durable publication live in `halo/checkpoint/atomic.py` (`staged_file` for one file). Every
 file Halo's writers create gets `0o666` under the process umask; a file copied from a source keeps that
-file's mode. safetensors creates its files `0600`, so every safetensors writer goes through
-`save_safetensors_file`, and a `save_pretrained` writer is followed by `apply_umask_mode` on its weight
-file or on the directory it owns — each sentence-transformers module folder (`2_Dense/`,
-`2_Router/query_0_Dense/`) included. `apply_umask_mode` reads the mode off a probe file, so a default
-ACL applies too. Export copies omit every unpublished file an interrupted save leaves: a staged write's
-stage, the withheld `.trainer_state.json.uncommitted`, and the `.<name>.<uuid hex>.tmp` spelling.
+file's mode. `link_or_copy_file`, which carries an unchanged file into another directory, hard-links it
+where the filesystem allows and otherwise copies it with its mode and mtime; it replaces an existing
+destination rather than writing through it, and refuses a destination that is the source's own entry
+reached by another path. safetensors creates its files `0600`, so every safetensors
+writer goes through `save_safetensors_file`, and a `save_pretrained` writer is followed by
+`apply_umask_mode` on its weight file or on the directory it owns — each sentence-transformers module
+folder (`2_Dense/`, `2_Router/query_0_Dense/`) included. `apply_umask_mode` reads the mode off a probe
+file, so a default ACL applies too. Export copies omit every unpublished file an interrupted save
+leaves: a staged write's stage, the withheld `.trainer_state.json.uncommitted`, and the
+`.<name>.<uuid hex>.tmp` spelling.
 
 A failed write raises on every rank; no gathered save falls back to `pytorch_model.bin`. Only the
 config write is gated on the model carrying one; a model without a config still gets normalized weights
@@ -311,6 +315,22 @@ that vouches for them. The merged directory therefore resumes exactly on the top
 under any other meets the same [fingerprint gates](#warm-restart-vs-exact-resume-torchrun) as the save. A
 meta naming a rank whose shard is absent refuses the merge. A resume pointed at the unmerged directory raises
 the merge-first error.
+
+The per-rank files and the meta are hard-linked into the merged directory when it is on the input's
+filesystem, so the optimizer state is not stored twice, and copied with their mode otherwise. The disk
+preflight counts the bytes of those on a filesystem other than the output's, an estimate: the output's
+filesystem can still refuse a link (two bind mounts of one volume, a protected hard link to a file the
+merging user does not own, a project-quota boundary), and that file is then copied uncounted.
+
+A linked file is one file under two names. Deleting the input, `--delete_input_shards` included (it
+removes only the input's weight shards), leaves the merged directory whole. A training save that rewrites
+either directory in place (a run reaching that step again in the same `output_dir`) unlinks its per-rank
+files and `optimizer_meta.pt` before writing them ([Interrupted saves](#interrupted-saves)), so the other
+directory keeps its copy. A writer outside a training save that truncates one of these files in place
+changes both.
+
+`merge_pp_stages.py` carries a pipeline-parallel save's per-rank files the same way
+([Per-node export](../parallelism/pipeline-parallelism.md#per-node-export)).
 
 ### Tensor parallelism (TP)
 
@@ -603,11 +623,14 @@ directory, training state included; `end` pushes only from a final `save_model` 
 which no training script makes.
 
 A resumed run that saves a step it saved before writes into that step's existing directory, so every save
-first removes the directory's completion markers (`trainer_state.json`, its uncommitted spelling,
-`optimizer_meta.pt`, `resume_adapter.json`). A save stopped mid-weights, mid-sidecars or mid-shards (a
-preemption, a full disk) thus leaves a step directory with no `trainer_state.json`, which
-`resume_from_checkpoint: true` passes over, moving it out of rotation's sight with a warning; an explicit
-path to it raises.
+first removes, on each filesystem's save rank and before any rank writes, the directory's completion markers
+(`trainer_state.json`, its uncommitted spelling, `optimizer_meta.pt`, `resume_adapter.json`) and its
+per-rank resume files (`optimizer_shard_*.pt`, `rng_state*`, `prefetch_pending*`). A save stopped
+mid-weights, mid-sidecars or mid-shards (a preemption, a full disk) thus leaves a step directory with no
+`trainer_state.json`, which `resume_from_checkpoint: true` passes over, moving it out of rotation's sight
+with a warning; an explicit path to it raises. The optimizer-shard and RNG writers truncate an existing
+name, so removing the per-rank files first also leaves a directory a
+[shard merge](#expert-parallelism-ep-eptp-epcp) hard-linked them into as it was.
 
 > [!NOTE]
 > **accelerate launch**

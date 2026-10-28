@@ -1,4 +1,5 @@
-"""Checkpoint completion markers: the files a save publishes last and a resume takes a directory by."""
+"""Checkpoint completion markers, the files a save publishes last and a resume takes a directory by, and the
+clearing of a step directory a save rewrites in place."""
 
 from __future__ import annotations
 
@@ -16,6 +17,7 @@ from halo.checkpoint.format import (
     RESUME_ADAPTER_MARKER_FILE,
     TRAINER_STATE_FILE,
     UNCOMMITTED_TRAINER_STATE_FILE,
+    is_per_rank_resume_file,
 )
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit, rank_consensus
 from halo.runtime.filesystem import is_fs_save_rank
@@ -28,13 +30,33 @@ def complete_on_every_rank(checkpoint: str) -> bool:
     return rank_consensus(os.path.isfile(os.path.join(checkpoint, TRAINER_STATE_FILE))).all_ok
 
 
-def remove_stale_completion_markers(checkpoint_dir: str) -> None:
-    """COLLECTIVE. Remove the :data:`CHECKPOINT_COMPLETION_MARKERS` an earlier save left in ``checkpoint_dir``
-    before this save rewrites it in place, so a save torn before its own markers is refused on resume
-    rather than vouched for by the abandoned save's."""
-    with barrier_on_exit(f"Removing the stale completion markers in {checkpoint_dir}"):
+def _earlier_save_files(checkpoint_dir: str) -> list[str]:
+    """The files an earlier save left in ``checkpoint_dir`` that a save rewriting it must remove first; none
+    where the directory does not exist yet.
+
+    The markers go by name, so a stale directory listing cannot keep one that vouches for this save; only the
+    per-rank names, which follow the earlier save's world size, come from the listing.
+    """
+    try:
+        listed = os.listdir(checkpoint_dir)
+    except FileNotFoundError:
+        return []
+    return [*CHECKPOINT_COMPLETION_MARKERS, *filter(is_per_rank_resume_file, listed)]
+
+
+def prepare_checkpoint_rewrite(checkpoint_dir: str) -> None:
+    """COLLECTIVE. Unlink what an earlier save left in ``checkpoint_dir`` before this save rewrites it in place,
+    on each filesystem's save rank ahead of every rank's write.
+
+    The :data:`CHECKPOINT_COMPLETION_MARKERS` go, so a save torn before its own markers is refused on resume
+    rather than vouched for by the abandoned save's. So do the per-rank resume files
+    (:func:`~halo.checkpoint.format.is_per_rank_resume_file`): the optimizer-shard and RNG-state writers
+    truncate an existing name, which a shard merge may have hard-linked into another directory, whose copy the
+    rewrite would then change too. Unlinked, each is written as a new file and the other directory keeps its own.
+    """
+    with barrier_on_exit(f"Clearing the earlier save's files from {checkpoint_dir}"):
         if is_fs_save_rank():
-            for name in CHECKPOINT_COMPLETION_MARKERS:
+            for name in _earlier_save_files(checkpoint_dir):
                 with suppress(FileNotFoundError):
                     os.remove(os.path.join(checkpoint_dir, name))
 

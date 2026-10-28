@@ -29,6 +29,8 @@ _INT64_MIN = -(2**63)
 # The [d, -d] pair of a rank whose object cannot be digested: 2**62 is above every real digest while
 # 0 is at or above every real -d, so max(d) != -max(-d) whoever else takes part.
 _UNDIGESTIBLE = (2**_AGREEMENT_DIGEST_BITS, 0)
+# Splits a store-join failure record "<rank><sep><reason>": a rank number never holds it, a reason may.
+_FAILURE_RECORD_SEP = "\n"
 
 _T = TypeVar("_T")
 
@@ -306,36 +308,77 @@ class StorePhase:
         root = f"_halo_phase/{tag}/{scope}"
         self._phase = self._store.add(f"{root}/entered{participant}", 1)
         self._prefix = f"{root}/p{self._phase}"
+        self._arrived = False
+
+    def _key(self, name: str) -> str:
+        return f"{self._prefix}/{name}"
 
     def set(self, name: str, value: str = "1") -> None:
-        self._store.set(f"{self._prefix}/{name}", value)
+        self._store.set(self._key(name), value)
+
+    def add(self, name: str, amount: int = 1) -> int:
+        """Add ``amount`` to the phase's counter ``name`` and return the sum; ``0`` reads it."""
+        return self._store.add(self._key(name), amount)
 
     def get_all(self, names) -> list[str]:
-        """Values of keys this participant already waited on, in ``names`` order, in one store round
-        trip (a key-per-participant loop is O(world²) requests)."""
-        values = self._store.multi_get([f"{self._prefix}/{name}" for name in names])
+        """Values of keys set before a key this participant waited on, in ``names`` order, in one store
+        round trip (a key-per-participant loop is O(world²) requests); no request for no names."""
+        keys = [self._key(name) for name in names]
+        if not keys:
+            return []
+        values = self._store.multi_get(keys)
         return [value.decode() if isinstance(value, bytes) else str(value) for value in values]
 
     def wait(self, names) -> None:
-        keys = [f"{self._prefix}/{name}" for name in names]
+        keys = [self._key(name) for name in names]
         if not keys:
             return
         try:
             self._store.wait(keys, self._timeout)
         except Exception as e:
-            raise RuntimeError(
-                f"Store coordination '{self._label}' timed out after {self._timeout} waiting for "
-                f"{keys} (this participant is in phase {self._phase} of {self._num}). Either the "
-                f"peer that writes these keys is still working — raise DIST_STORE_TIMEOUT_HOURS — or "
-                f"the participants disagree on how many times they entered this tag / on their "
-                f"coordination scope, which leaves this one waiting on a key nobody will write."
-            ) from e
+            raise self._timeout_error(str(keys)) from e
+
+    def arrive_and_wait(self, failure: str | None = None) -> list[str]:
+        """Return the participants' ``failure`` records, in slot order, once every participant has arrived.
+
+        A failure takes a numbered slot before its participant arrives, so the slot count is final once all
+        have. The arrivals count on one key and the last one sets the single key the rest wait on: O(1) store
+        requests per participant, plus one read of the slots when any participant failed (a wait on a key
+        per participant costs each one O(participants)).
+        """
+        self._arrived = True
+        if failure:
+            slot = self.add("failures")
+            self.set(f"failed{slot}", failure)
+        if self.add("arrived") == self._num:
+            self.set("all_arrived")
+        try:
+            self._store.wait([self._key("all_arrived")], self._timeout)
+        except Exception as e:
+            arrived = self.add("arrived", 0)
+            raise self._timeout_error(f"all {self._num} participants to arrive ({arrived} did)") from e
+        return self.get_all(self._failure_slots())
+
+    def _failure_slots(self) -> list[str]:
+        return [f"failed{slot}" for slot in range(1, self.add("failures", 0) + 1)]
 
     def finish(self, transient_names) -> None:
-        """Mark this participant done with the phase; the last one deletes the phase's keys."""
-        if self._store.add(f"{self._prefix}/exited", 1) == self._num:
-            for name in (*transient_names, "exited"):
-                self._store.delete_key(f"{self._prefix}/{name}")
+        """Mark this participant done with the phase; the last one deletes the phase's keys, those of
+        :meth:`arrive_and_wait` included. The last one reads the failure count itself: every participant has
+        exited by then, so the count is final even when its own wait timed out."""
+        if self.add("exited") == self._num:
+            arrival_names = ("arrived", "all_arrived", "failures", *self._failure_slots()) if self._arrived else ()
+            for name in (*transient_names, *arrival_names, "exited"):
+                self._store.delete_key(self._key(name))
+
+    def _timeout_error(self, waiting_for: str) -> RuntimeError:
+        return RuntimeError(
+            f"Store coordination '{self._label}' timed out after {self._timeout} waiting for "
+            f"{waiting_for} (this participant is in phase {self._phase} of {self._num}). Either a peer "
+            f"is still working — raise DIST_STORE_TIMEOUT_HOURS — or the participants disagree on how "
+            f"many times they entered this tag / on their coordination scope, which leaves this one "
+            f"waiting on a key nobody will write."
+        )
 
 
 def store_reject_across_ranks(
@@ -348,21 +391,25 @@ def store_reject_across_ranks(
     """COLLECTIVE over the c10d store (every rank calls it with the same tags in the same order):
     :func:`reject_across_ranks` bounded by ``DIST_STORE_TIMEOUT_HOURS`` rather than the NCCL watchdog,
     for a join after unbounded single-rank work (a fresh dataset map, a shard download).
+
+    A failing rank records its reason in a numbered slot before it arrives
+    (:meth:`StorePhase.arrive_and_wait`): a clean join costs each rank O(1) store requests, a failed one
+    also a read of the failing ranks' slots.
     """
     if not is_multi_rank_run():
         if local_reason:
             raise exc_type(local_reason)
         return
     rank, world = get_global_rank(), get_global_world_size()
-    reason_keys = [f"reason{i}" for i in range(world)]
     phase = StorePhase(f"reject/{tag}", "world", rank, world, timeout or store_timeout())
     try:
-        # "" is the no-failure sentinel.
-        phase.set(f"reason{rank}", local_reason or "")
-        phase.wait(reason_keys)
-        reasons: list[str | None] = [reason or None for reason in phase.get_all(reason_keys)]
+        records = phase.arrive_and_wait(f"{rank}{_FAILURE_RECORD_SEP}{local_reason}" if local_reason else None)
     finally:
-        phase.finish(reason_keys)
+        phase.finish([])
+    reasons: list[str | None] = [None] * world
+    for record in records:
+        failed_rank, reason = record.split(_FAILURE_RECORD_SEP, 1)
+        reasons[int(failed_rank)] = reason
     _raise_gathered_reasons(reasons, what, exc_type)
 
 

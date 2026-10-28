@@ -20,6 +20,7 @@ import pytest
 
 import halo.trainers.grpo.environmental.rollout_metrics as rm
 from halo.trainers import world_metrics
+from tests.common.world_metrics import pooled_states
 
 
 class _MetricsHost(rm.RolloutMetricsMixin):
@@ -45,8 +46,12 @@ def _episode(latency: float, tokens: int, requests_expired_in_sync: int = 0):
 
 
 def _fake_dp_world(monkeypatch, world: int):
-    """Make the metrics flush gather ``world`` ranks holding this rank's identical shard."""
-    monkeypatch.setattr(world_metrics, "_gathered", lambda payload, group: [payload] * world)
+    """Make the metrics flush fold ``world`` ranks holding this rank's identical shard."""
+    monkeypatch.setattr(
+        world_metrics,
+        "_world_states",
+        lambda states, group, key_mismatch_error: pooled_states([states] * world, key_mismatch_error),
+    )
 
 
 def _log_round(host, results: list, mode: str = "train") -> None:

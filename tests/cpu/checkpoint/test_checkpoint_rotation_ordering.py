@@ -28,8 +28,6 @@ import time
 from types import SimpleNamespace
 
 import pytest
-import torch
-import torch.nn as nn
 from transformers import TrainerState
 from transformers.trainer_utils import rotate_checkpoints
 
@@ -38,18 +36,9 @@ import halo.trainers.checkpointing as checkpointing_mod
 from halo.checkpoint.parallel.optimizer import OptimizerShardStore
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.base_save import BaseTrainerSave
-from tests.common.checkpoint_io import load_context
+from tests.common.checkpoint_resave import stepped_store_context
 
 OPTIMIZER_FILES = ("optimizer.pt", "optimizer.bin")
-
-
-def _stepped_store_context(*, fsdp_wrapped: bool = True):
-    """A load context over a live model+optimizer that holds state to save."""
-    model = nn.Linear(4, 4)
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
-    model.weight.grad = torch.zeros_like(model.weight)
-    optimizer.step()
-    return load_context(model, optimizer=optimizer, fsdp_wrapped=fsdp_wrapped)
 
 
 class _RecordingStore(OptimizerShardStore):
@@ -57,7 +46,7 @@ class _RecordingStore(OptimizerShardStore):
     window under test)."""
 
     def __init__(self, trainer, *, fsdp_wrapped: bool, fail: bool):
-        super().__init__(_stepped_store_context(fsdp_wrapped=fsdp_wrapped))
+        super().__init__(stepped_store_context(fsdp_wrapped=fsdp_wrapped))
         self.trainer = trainer
         self.fail = fail
 
@@ -235,7 +224,7 @@ def test_the_checkpoint_push_uploads_the_complete_checkpoint(tmp_path, monkeypat
 
 
 def _real_store_over_a_stepped_optimizer() -> OptimizerShardStore:
-    return OptimizerShardStore(_stepped_store_context())
+    return OptimizerShardStore(stepped_store_context())
 
 
 def test_an_unproducible_optimizer_state_keeps_the_previous_checkpoint(tmp_path, monkeypatch):
@@ -282,7 +271,7 @@ def test_a_merged_checkpoint_gets_its_resume_adapter_before_rotation(tmp_path, m
     def recording_resume_adapter(ctx, checkpoint_dir):
         trainer.events.append(("resume_adapter", ctx, checkpoint_dir, os.path.isdir(previous)))
 
-    monkeypatch.setattr(checkpointing_mod, "remove_stale_completion_markers", recording_unmark)
+    monkeypatch.setattr(checkpointing_mod, "prepare_checkpoint_rewrite", recording_unmark)
     monkeypatch.setattr(checkpointing_mod, "save_resume_adapter", recording_resume_adapter)
 
     trainer._save_checkpoint(model=None, trial=None)
@@ -297,10 +286,10 @@ def test_a_merged_checkpoint_gets_its_resume_adapter_before_rotation(tmp_path, m
 
 def test_a_torn_resave_of_a_saved_step_does_not_vouch_for_the_abandoned_save(tmp_path, monkeypatch):
     """A run resumed from an earlier checkpoint saves a step it saved before, in place. Stopped after
-    the base save but before its own optimizer shards, the directory holds this save's weights beside
-    the abandoned save's trainer state, shard and meta. Those markers must be gone before anything is
-    written: left in place, the resume detection takes the directory for complete and the optimizer
-    restore loads the abandoned run's moments under this run's weights."""
+    the base save but before its own optimizer shards, the directory would hold this save's weights beside
+    the abandoned save's trainer state, shard and meta. Those must be gone before anything is written: left
+    in place, the resume detection takes the directory for complete and the optimizer restore loads the
+    abandoned run's moments under this run's weights."""
     run_dir = str(tmp_path)
     abandoned = os.path.join(run_dir, "checkpoint-2")
     os.makedirs(abandoned)
@@ -314,9 +303,9 @@ def test_a_torn_resave_of_a_saved_step_does_not_vouch_for_the_abandoned_save(tmp
         trainer._save_checkpoint(model=None, trial=None)
 
     left = sorted(os.listdir(abandoned))
-    for marker in ("trainer_state.json", "optimizer_meta.pt"):
-        assert marker not in left, f"the abandoned save's {marker} still vouches for the torn re-save: {left}"
-    with pytest.raises(RuntimeError, match="torn set of an interrupted save"):
+    for name in ("trainer_state.json", "optimizer_meta.pt", "optimizer_shard_00000.pt"):
+        assert name not in left, f"the abandoned save's {name} outlived the torn re-save: {left}"
+    with pytest.raises(RuntimeError, match="interrupted before its per-rank shards were written"):
         _real_store_over_a_stepped_optimizer().load(abandoned)
 
 

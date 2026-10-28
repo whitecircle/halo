@@ -18,7 +18,7 @@ from halo.checkpoint.model_card import with_halo_tags
 from halo.checkpoint.parallel.adapters import save_resume_adapter
 from halo.checkpoint.parallel.completeness import (
     commit_trainer_state,
-    remove_stale_completion_markers,
+    prepare_checkpoint_rewrite,
     trainer_state_withheld,
 )
 from halo.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
@@ -160,8 +160,8 @@ class CheckpointingMixin:
         """
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
-        # Any run type: a marker left in a directory this save rewrites is stale by definition.
-        remove_stale_completion_markers(output_dir)
+        # Any run type: what an earlier save left in a directory this save rewrites is stale by definition.
+        prepare_checkpoint_rewrite(output_dir)
         # Do not force save_only_model for EP/CP here: it drops scheduler.pt and RNG.
         guard = DeferredRankFailure(f"checkpoint write to step {self.state.global_step}")
         save_total_limit, push_to_hub = self.args.save_total_limit, self.args.push_to_hub

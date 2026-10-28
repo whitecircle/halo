@@ -18,6 +18,7 @@ from typing import Any
 import datasets
 from datasets import Dataset, DatasetDict, load_from_disk
 from datasets import fingerprint as hf_fingerprint
+from multiprocess.reduction import ForkingPickler
 from trl.data_utils import pack_dataset as _trl_pack_dataset
 
 from halo.data.pipeline.map_cache_key import (
@@ -55,7 +56,7 @@ def dataset_num_proc_override() -> int | None:
 
 def _resolve_dataset_num_proc() -> int:
     """Default map/filter worker processes, ``HALO_DATASET_NUM_PROC`` overriding: three quarters of the CPUs this
-    process may run on, at most 64. The load rank runs a coordinated operation while its node's other ranks wait
+    process may use, at most 64. The load rank runs a coordinated operation while its node's other ranks wait
     and then read its cache files back, whatever their own count; those ranks compute only on a per-rank key (a
     pre-sharded load), sharing the count then (:func:`coordinated_dataset_operation`)."""
     override = dataset_num_proc_override()
@@ -71,6 +72,12 @@ DATASET_NUM_PROC = _resolve_dataset_num_proc()
 def resolve_map_num_proc(configured: int | None) -> int:
     """``dataset_num_proc`` → map/filter worker count. Unset means the toolkit default, not 1 worker."""
     return configured or DATASET_NUM_PROC
+
+
+def _maps_in_workers(num_proc: int | None) -> bool:
+    """Whether a coordinated map or filter at ``num_proc`` runs in worker processes, each task carrying a pickle of
+    the callable; at 1 or below it hands ``datasets`` ``None`` and maps in process."""
+    return num_proc is not None and num_proc > 1
 
 
 def datasets_cache_dir() -> str:
@@ -89,7 +96,7 @@ def ensure_cache_dir(writer_rank: Callable[[], bool] = is_local_main_process) ->
 def reject_self_capturing_fn(func: Callable, num_proc: int | None, operation: str) -> None:
     """Refuse a bound method as a multi-worker map callable: at ``num_proc > 1`` dill pickles its whole ``self``
     graph to every worker, the model and under EP the unpicklable process groups included."""
-    if num_proc is None or num_proc <= 1:
+    if not _maps_in_workers(num_proc):
         return
     target = func.func if isinstance(func, functools.partial) else func
     if inspect.ismethod(target):
@@ -99,6 +106,33 @@ def reject_self_capturing_fn(func: Callable, num_proc: int | None, operation: st
             f"Every worker would pickle its `self` — including the model and, under EP, the DeepEP/"
             f"NCCL process groups. Use a module-level function and pass its state via fn_kwargs."
         )
+
+
+def _load_map_callable(payload: bytes, cache_key: str) -> Callable:
+    """The bare callable a :class:`_PickledOnceCallable` pickled; ``cache_key`` only enters the fingerprint."""
+    return ForkingPickler.loads(payload)
+
+
+class _PickledOnceCallable:
+    """A multi-worker map callable, its ``fn_kwargs`` bound, that pickles itself once. ``datasets`` pickles the
+    callable into each worker's task one task after another in this process, about a second each for a captured
+    tokenizer; every task carries these bytes instead, and the workers unpickle them in parallel. ``cache_key``
+    rides along so the fingerprint ``datasets`` takes of the bytes, which hold no first-party helper's source,
+    changes with the cache name."""
+
+    def __init__(self, fn: Callable, fn_kwargs: dict | None, cache_key: str):
+        self._fn = functools.partial(fn, **fn_kwargs) if fn_kwargs else fn
+        self._cache_key = cache_key
+        self._payload: bytes | None = None
+
+    def __call__(self, *args, **kwargs):
+        return self._fn(*args, **kwargs)
+
+    def __reduce__(self):
+        if self._payload is None:
+            # The pickler the pool's task queue uses, so a worker rebuilds what a per-task pickle would carry.
+            self._payload = bytes(ForkingPickler.dumps(self._fn))
+        return _load_map_callable, (self._payload, self._cache_key)
 
 
 def _cached_map_or_filter(
@@ -124,6 +158,10 @@ def _cached_map_or_filter(
         )
     reject_self_capturing_fn(fn, num_proc, operation_name)
     cache_file_name = map_cache_file_name(operation, fn, dataset, desc, op_kwargs, cache_key_extras=cache_key_extras)
+    # Wrapped after the naming, which reads the bare callable's source and closure. A coroutine function stays bare:
+    # datasets' map and filter pick their async path off the callable they are handed.
+    if _maps_in_workers(num_proc) and not inspect.iscoroutinefunction(fn):
+        fn = _PickledOnceCallable(fn, op_kwargs.pop("fn_kwargs", None), cache_file_name)
 
     return coordinated_dataset_operation(
         lambda **kwargs: getattr(dataset, operation)(fn, desc=desc, **op_kwargs, **kwargs),
@@ -208,10 +246,10 @@ def coordinated_dataset_operation(
 
     # A follower computes only on a per-rank key (a pre-sharded load), and then every follower of the node maps at
     # once, so each takes its share of the count; on a cache hit no count spawns a worker.
-    if num_proc is not None and num_proc > 1 and not is_fs_load_rank():
+    if _maps_in_workers(num_proc) and not is_fs_load_rank():
         num_proc = max(1, num_proc // get_local_world_size())
     # None, not 1: HF still spawns a subprocess at num_proc=1.
-    effective_num_proc = None if num_proc is not None and num_proc <= 1 else num_proc
+    effective_num_proc = num_proc if _maps_in_workers(num_proc) else None
     operation_kwargs = {"num_proc": effective_num_proc, "load_from_cache_file": True}
 
     if isinstance(dataset, DatasetDict):

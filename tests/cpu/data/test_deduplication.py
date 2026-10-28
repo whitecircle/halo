@@ -123,5 +123,21 @@ def test_multistep_maps_survivors_back_to_the_input_rows():
     np.testing.assert_array_equal(np.sort(DUPLICATED_BASIS[survivors].argmax(axis=1)), [0, 1, 2, 3])
 
 
+def test_unset_max_workers_reads_the_usable_cpu_count_at_call_time(monkeypatch):
+    """The default follows available_cpu_count when the pass runs, so a container CPU quota caps the threads,
+    not the host count frozen at import."""
+    seen = []
+    real_executor = deduplication.ThreadPoolExecutor
+
+    def recording_executor(max_workers):
+        seen.append(max_workers)
+        return real_executor(max_workers=max_workers)
+
+    monkeypatch.setattr(deduplication, "available_cpu_count", lambda: 3)
+    monkeypatch.setattr(deduplication, "ThreadPoolExecutor", recording_executor)
+    deduplicate_embeddings(DUPLICATED_BASIS, steps_count=2, batch_size=8, similarity_threshold=0.9)
+    assert seen == [3, 3]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

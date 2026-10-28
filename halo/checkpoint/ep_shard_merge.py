@@ -7,16 +7,17 @@ The merge streams one MoE layer's experts (or one replicated tensor) at a time t
 import logging
 import os
 import re
-import shutil
 from collections import defaultdict
 from contextlib import ExitStack
 
 import torch
 from safetensors import safe_open
 
+from halo.checkpoint.atomic import link_or_copy_file
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_ep_shard
 from halo.checkpoint.offline_export import (
     copy_checkpoint_aux_files,
+    cross_device_bytes,
     preflight_resource_warning,
     reject_in_place_conversion,
     reject_sibling_adapter,
@@ -277,6 +278,10 @@ def merge_ep_shards(
     """
     Merge EP-sharded checkpoint into a single model, streaming one tensor group at a time.
 
+    The save's per-rank resume files and optimizer meta are hard-linked into ``output_dir`` where it shares
+    the input's filesystem, and copied with their mode otherwise. A linked file outlives the input's deletion,
+    and a training save into either directory replaces it there rather than writing through the link.
+
     Args:
         input_dir: Path to EP-sharded checkpoint
         output_dir: Path to save merged checkpoint
@@ -301,7 +306,8 @@ def merge_ep_shards(
         writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
         # Peak RAM is about twice the largest group (the concatenated inputs plus the transform's
         # copies) on top of the writer's pending output shard. On disk the merged artifact is the
-        # input shards' size, since tensors are re-emitted at their stored dtype, plus the resume state.
+        # input shards' size, since tensors are re-emitted at their stored dtype, plus the resume state
+        # it cannot hard-link.
         largest_group = max(
             [sum(shards.nbytes(f"{prefix}.{suffix}") for suffix in params) for prefix, params in expert_groups.items()]
             + [shards.nbytes(name) for name in non_expert],
@@ -310,7 +316,8 @@ def merge_ep_shards(
         preflight_resource_warning(
             "merge_ep_shards",
             output_dir,
-            disk_bytes=sum(os.path.getsize(os.path.join(input_dir, f)) for f in (*shard_files, *resume_files)),
+            disk_bytes=sum(os.path.getsize(os.path.join(input_dir, f)) for f in shard_files)
+            + cross_device_bytes([os.path.join(input_dir, name) for name in resume_files], output_dir),
             ram_bytes=2 * largest_group + writer.max_bytes,
         )
 
@@ -325,12 +332,12 @@ def merge_ep_shards(
     # The optimizer meta lands after every shard and before the aux copy brings trainer_state.json, so a
     # merge that died midway leaves a directory the resume refuses rather than one that warm-restarts.
     for name in resume_files:
-        shutil.copy2(os.path.join(input_dir, name), os.path.join(output_dir, name))
+        link_or_copy_file(os.path.join(input_dir, name), os.path.join(output_dir, name))
     # The inputs go LAST, once the merged weights and their index are on disk, so a merge that died
     # earlier leaves the only copy of the weights where it found them. generation_config.json rides
     # across verbatim: the format gate admits only this toolkit's sharded writer's output, which
     # emits that file only for a generating model off an already-sanitized config.
-    copy_checkpoint_aux_files(input_dir, output_dir, verbose=verbose)
+    copy_checkpoint_aux_files(input_dir, output_dir, carried=resume_files, verbose=verbose)
     if delete_input_shards:
         for shard_file in shard_files:
             os.remove(os.path.join(input_dir, shard_file))

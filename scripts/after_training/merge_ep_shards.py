@@ -7,7 +7,9 @@ with these merge instructions). The merge writes each family's ``ExpertLayout`` 
 ``to_hub_expert_tensors`` the gathered save applies, so merged-from-sharded equals gathered.
 A gathered save (``save_sharded_ep: false``) needs no merge; it is slower to write but directly
 loadable. The merge carries the save's resume state, optimizer shards included, so the merged directory
-resumes exactly on the topology that wrote it.
+resumes exactly on the topology that wrote it; the per-rank files are hard-linked when the output is on
+the input's filesystem, and a later training save into either directory replaces them there rather than
+writing through the link.
 
 The merge is streamed: input shards are opened once and read group by group (one MoE layer's
 experts, or one replicated tensor, at a time), each merged group is transformed and handed straight
