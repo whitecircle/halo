@@ -102,9 +102,9 @@ Dataset trees go through `halo.data.sources.s3_dataset_store`; everything else i
 | `load_dataset_from_s3_uri(s3_uri, keep_in_memory=None, use_cache=True)` | Load HF dataset by URI; cached with file locking |
 | `push_dataset_to_s3_uri(dataset, s3_uri, overwrite=True)` | Push HF dataset by URI: the tree uploads whole to a `.staging-*` sibling prefix, is sealed, then promoted by server-side copy with the load gates (`state.json`/`dataset_dict.json`) deleted first and copied last. A crash leaves either a complete copy at the destination or the sealed push, which `load_dataset_from_s3_uri` falls back to; the next successful push heals and sweeps. One writer per destination at a time |
 | `push_dataset(client, dataset, key, ...)` / `load_dataset(client, key, ...)` | The same on an explicit `S3Client` (the URI functions above wrap these) |
-| `build_s3_uri(key, subfolder=None)` (`s3_client`) | Full S3 URI from key (+ optional subfolder) under `HALO_S3_DEFAULT_BUCKET` (`default_bucket()`, which raises while it is unset), without constructing a client |
+| `build_s3_uri(path, subfolder=None, *, given_as)` (`s3_client`) | The S3 URI a CLI path names, without constructing a client: a full `s3://` URI as given, a bare key (+ optional subfolder) under `HALO_S3_DEFAULT_BUCKET`. A bare key with the variable unset raises naming `given_as`, the flag the path came from |
 
-`subfolder` is prepended to `key`; key paths may be nested. Everything else — folder transfers, listings,
+`subfolder` is prepended to a bare key; key paths may be nested. Everything else — folder transfers, listings,
 deletes — is an `S3Client` method, called on a client built for the bucket in question.
 
 ### S3Client
@@ -153,7 +153,8 @@ python scripts/before_training/s3.py delete my_folder --recursive --yes
 ```
 
 Commands: `push`, `download`, `list`, `exists`, `delete`. Every command takes `--subfolder/-s`,
-`--bucket/-b` and `--verbose/-v`. The other flags are per command:
+`--bucket/-b` (default `HALO_S3_DEFAULT_BUCKET`, required while that is unset) and `--verbose/-v`. The
+other flags are per command:
 
 | Flag | Commands | Notes |
 |---|---|---|

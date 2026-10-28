@@ -223,7 +223,7 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 
 | Mode | LoRA | QLoRA | Target restriction | Notes |
 |---|---|---|---|---|
-| DDP / FSDP | Yes | Yes | None | Standard path |
+| DDP / FSDP | Yes | Yes | None | Standard path; QLoRA on a MoE is unverified ([QLoRA](#quantized-training-qlora)) |
 | EP | Yes | No | Attention + experts | Attention via PEFT; expert FFNs via native grouped adapters. QLoRA rejected: EP loaders materialize plain de-quantized weights, losing `Params4bit` |
 | CP | Yes | Yes* | None | CP shards the sequence, not the weights — adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. *QLoRA only on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
 | TP | **No** | No | — | Rejected — adapters are plain tensors outside the TP DTensor graph |
@@ -351,9 +351,10 @@ The embedding trainer injects LoRA into its backbone in place, on data paralleli
 
 ## Quantized training (QLoRA)
 
-QLoRA combines LoRA with 4-bit/8-bit base quantization under DDP/FSDP, and under CP on a dense model. CP
-keeps the standard `from_pretrained` loader, which preserves `Params4bit`. AdamWBF16 optimizes only the bf16
-adapter params; the frozen quantized base is skipped.
+QLoRA combines LoRA with 4-bit/8-bit base quantization under DDP/FSDP (a MoE base also needs
+`use_grouped_gemm: false`), and under CP on a dense model. CP keeps the standard `from_pretrained` loader,
+which preserves `Params4bit`. Every QLoRA GPU row trains dense Qwen3-0.6B, so QLoRA on a MoE is admitted but
+unverified. AdamWBF16 optimizes only the bf16 adapter params; the frozen quantized base is skipped.
 
 `load_distributed_model` raises for EP, TP, and the grouped-GEMM MoE loader — pure ETP included, since
 the gate reads `ep_group_size = ep_size × expert_tp_size`. Those loaders materialize plain de-quantized

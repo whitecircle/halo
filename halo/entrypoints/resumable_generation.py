@@ -10,6 +10,7 @@ from collections.abc import Callable, Coroutine
 from datasets import Dataset
 
 from halo.data.conversation import build_base_prompt, resolve_system_prompt
+from halo.data.sources.paths import parse_s3_uri
 from halo.data.sources.s3_client import S3Client, build_s3_uri
 from halo.data.sources.s3_dataset_store import load_dataset_from_s3_uri, push_dataset_to_s3_uri
 from halo.inference.batch_requests import parallel_openai_requests
@@ -26,17 +27,20 @@ def load_prompts_with_resume(args) -> tuple[list[dict], list[dict]]:
     the caller can write them out again alongside the new ones. An empty first element means every
     prompt is already done.
     """
-    logger.info(f"Loading dataset from S3: {args.dataset} (subfolder: {args.subfolder})")
-    dataset = load_dataset_from_s3_uri(build_s3_uri(args.dataset, args.subfolder))
+    dataset_uri = build_s3_uri(args.dataset, args.subfolder, given_as="--dataset")
+    output_uri = build_s3_uri(args.output_path, args.subfolder, given_as="--output_path")
+    logger.info(f"Loading dataset from S3: {dataset_uri}")
+    dataset = load_dataset_from_s3_uri(dataset_uri)
 
     if args.prompt_field not in dataset.column_names or args.id_field not in dataset.column_names:
         raise ValueError(f"Dataset must contain '{args.prompt_field}' and '{args.id_field}' columns")
 
     processed_ids: set = set()
     existing_results: list[dict] = []
-    if S3Client().exists(args.output_path, subfolder=args.subfolder):
-        logger.info(f"Loading existing results from S3: {args.output_path}")
-        existing_dataset = load_dataset_from_s3_uri(build_s3_uri(args.output_path, args.subfolder))
+    output_bucket, output_key = parse_s3_uri(output_uri)
+    if S3Client(bucket=output_bucket).exists(output_key):
+        logger.info(f"Loading existing results from S3: {output_uri}")
+        existing_dataset = load_dataset_from_s3_uri(output_uri)
         processed_ids = set(existing_dataset[args.id_field])
         existing_results = list(existing_dataset)
         logger.info(f"Skipping {len(processed_ids)} already completed prompts")
@@ -73,8 +77,9 @@ def save_results_to_s3(existing_results: list[dict], results: list[dict], *, out
     all_results = existing_results + results
     all_keys = {key for record in all_results for key in record}
     all_results = [{key: record.get(key) for key in all_keys} for record in all_results]
-    logger.info(f"Saving {len(all_results)} results to S3: {output_path}")
-    push_dataset_to_s3_uri(Dataset.from_list(all_results), build_s3_uri(output_path, subfolder))
+    output_uri = build_s3_uri(output_path, subfolder, given_as="--output_path")
+    logger.info(f"Saving {len(all_results)} results to S3: {output_uri}")
+    push_dataset_to_s3_uri(Dataset.from_list(all_results), output_uri)
     logger.info("Done!")
 
 

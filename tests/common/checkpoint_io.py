@@ -1,8 +1,8 @@
 """Readers for the artifacts the toolkit's checkpoint writers produce, and the probes save, reload and resume
 tests compare them by: the tensors as written, key sets through the production reader (``load_full_state_dict``),
-the files a save must leave, the same fixed batch's loss before a save and after its reload or resume, and the
-optimizer and scheduler state a resume restored (:func:`run_two_phase_resume` drives the whole save-then-resume
-shape).
+the save schedule a run's arguments carry, the files a save must leave, the same fixed batch's loss before a save
+and after its reload or resume, and the optimizer and scheduler state a resume restored
+(:func:`run_two_phase_resume` drives the whole save-then-resume shape).
 """
 
 import json
@@ -127,6 +127,11 @@ def model_save_checks(save_dir: str, rank: int) -> dict[str, bool]:
     for name, ok in checks.items():
         log(f"  {name}: {'PASS' if ok else 'FAIL'}")
     return checks
+
+
+def save_schedule(save_every: int | None) -> dict:
+    """The training-argument fields for a checkpoint every ``save_every`` steps, or for none."""
+    return {"save_strategy": "steps", "save_steps": save_every} if save_every else {"save_strategy": "no"}
 
 
 def resume_checkpoint_checks(checkpoint_dir: str, world_size: int) -> dict[str, bool]:

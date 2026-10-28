@@ -80,7 +80,7 @@ torchrun --nproc_per_node=2 scripts/training/preference/smpo.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_smpo_*.py` (FSDP2, EP, CP, TP, VLM, padding-free and its per-document isolation, text-on-VLM, TP resume), plus `tests/gpu/parallelism/cp/test_cp_smpo_logprobs.py`.
+Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/preference/test_smpo_*.py` (FSDP2, EP, CP, TP, VLM, padding-free and its per-document isolation, text-on-VLM, TP resume), plus `tests/gpu/parallelism/cp/test_cp_smpo_logprobs.py` and, under pipeline parallelism, `tests/gpu/parallelism/pp/test_pp_smpo.py` and `test_pp_trainer_checkpoints.py --trainer smpo` (save, exact resume, export).
 
 ## What to watch
 

@@ -120,8 +120,9 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
         model_config = SimpleNamespace(model_name_or_path="stub-model")
         parallelism_config = SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1)
 
+        tokenizer = make_tokenizer()
         _train, _eval, _gen, collator = _prepare_text_data(
-            ds, True, args, sft_config, model_config, make_tokenizer(), parallelism_config, hf_config=None
+            ds, True, args, sft_config, model_config, tokenizer, tokenizer, parallelism_config, hf_config=None
         )
         return collator
     finally:

@@ -184,7 +184,7 @@ patching when `expert_tp_size > 1`. Per-rank sharded EP save is rejected — see
 
 ## Limitations
 
-**Trainers.** Every trainer runs ETP, as it runs EP. Matrix:
+**Trainers.** No trainer refuses ETP or EP. Matrix:
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 **Models.** Every EP-capable MoE family

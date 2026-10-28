@@ -427,6 +427,15 @@ their restore is gated on the topology fingerprint and `pp_stage_partition` (bot
 resume through the training scripts, which repoint the load at the checkpoint
 ([Resume by parallelism mode](../reference/checkpoints.md#resume-by-parallelism-mode)).
 
+Every PP trainer's save, resume and export runs on GPU through the real trainer, on one host. SFT
+resumes in `tests/gpu/parallelism/pp/test_pp_resume.py` (dense `pp2`), exports in
+`test_pp_sft_trainer_e2e.py`, and does both with experts in `test_pp_ep_resume.py` (gpt-oss `pp2 × ep2`
+and `pp2 × etp2`); on per-node storage its checkpoint is also merged with `merge_pp_stages.py` and resumed
+from the merge ([Verified topologies](multi-node.md#verified-topologies)). The other trainers run in
+`test_pp_trainer_checkpoints.py`, one row per trainer and two for offline GRPO (with and without the KL
+reference that rides each checkpoint as `reference_logps.pt`); each resume there restores the optimizer
+bit for bit and replays the unbroken run.
+
 ### Per-node export
 
 On per-node output storage each node's directory holds the full index but only the parts of the

@@ -143,7 +143,7 @@ torchrun --nproc_per_node=8 scripts/training/grpo/offline.py \
 Run `max_steps: 10` with `save_strategy: "no"` on a slice of the data first. A bad `loss_type`, `advantage_method` or `policy_gradient_formulation` fails when the config is parsed.
 
 - CPU: `pytest tests/cpu/grpo -m cpu`.
-- GPU, under `tests/gpu/`: `trainers/grpo/test_offline_grpo*.py`, `parallelism/{cp,combined}/test_*cp_grpo_scoring.py` (CP1 vs CP2/CP4), `trainers/lora/test_lora_offline_grpo*.py`.
+- GPU, under `tests/gpu/`: `trainers/grpo/test_offline_grpo*.py`, `parallelism/{cp,combined}/test_*cp_grpo_scoring.py` (CP1 vs CP2/CP4), `trainers/lora/test_lora_offline_grpo*.py`; under pipeline parallelism `parallelism/pp/test_pp_offline_grpo*.py` and, for save, exact resume and export, `parallelism/pp/test_pp_trainer_checkpoints.py --trainer offline_grpo` / `offline_grpo_kl`.
 
 ## What to watch
 

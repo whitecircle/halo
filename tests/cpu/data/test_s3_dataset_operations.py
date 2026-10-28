@@ -34,6 +34,7 @@ from halo.data.sources.dataset_cache import (
 from halo.data.sources.s3_client import S3Client, build_s3_uri
 from halo.data.sources.s3_client import logger as s3_module_logger
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
+from scripts.before_training import s3 as s3_cli_mod
 from scripts.before_training.s3 import main as s3_cli_main
 
 
@@ -569,25 +570,60 @@ def test_load_preprocessed_metadata_from_s3():
 
 
 def test_build_s3_uri(monkeypatch):
-    """Test the build_s3_uri helper."""
+    """A bare key lands under the subfolder in the default bucket, slashes normalized."""
     monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", "team-bucket")
 
-    assert build_s3_uri("my_dataset", "datasets") == "s3://team-bucket/datasets/my_dataset"
-    assert build_s3_uri("my_dataset", None) == "s3://team-bucket/my_dataset"
-    assert build_s3_uri("/my_dataset/", "") == "s3://team-bucket/my_dataset"
-    assert build_s3_uri("my_dataset", "/datasets/") == S3Client(bucket="team-bucket").s3_uri("my_dataset", "datasets")
-    assert build_s3_uri("nested/path/data") == "s3://team-bucket/nested/path/data"
+    def build(key, subfolder=None):
+        return build_s3_uri(key, subfolder, given_as="--dataset")
+
+    assert build("my_dataset", "datasets") == "s3://team-bucket/datasets/my_dataset"
+    assert build("my_dataset", None) == "s3://team-bucket/my_dataset"
+    assert build("/my_dataset/", "") == "s3://team-bucket/my_dataset"
+    assert build("my_dataset", "/datasets/") == S3Client(bucket="team-bucket").s3_uri("my_dataset", "datasets")
+    assert build("nested/path/data") == "s3://team-bucket/nested/path/data"
+
+
+@pytest.mark.parametrize("default", ["team-bucket", None], ids=["default_set", "default_unset"])
+def test_a_full_s3_uri_resolves_to_itself(monkeypatch, default):
+    """A full URI already names its bucket and key: neither the default bucket nor the subfolder may be
+    prefixed onto it (``s3://team-bucket/datasets/s3://my-bucket/...``), and an unset default bucket is no
+    reason to refuse it."""
+    monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", default)
+
+    for subfolder in ("datasets", None):
+        assert build_s3_uri("s3://my-bucket/prompts", subfolder, given_as="--dataset") == "s3://my-bucket/prompts"
+    with pytest.raises(ValueError, match="Invalid S3 URI"):
+        build_s3_uri("s3://my-bucket", "datasets", given_as="--dataset")
 
 
 def test_a_key_only_path_without_a_configured_bucket_is_refused(monkeypatch):
     """With ``HALO_S3_DEFAULT_BUCKET`` unset there is no bucket to address: a placeholder name would
-    read and write a real bucket the user does not own, so both key-only entry points refuse."""
+    read and write a real bucket the user does not own, so both key-only entry points refuse, each
+    naming the input that left the bucket out and the way to give one there."""
     monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", None)
 
-    with pytest.raises(ValueError, match="HALO_S3_DEFAULT_BUCKET"):
-        build_s3_uri("my_dataset")
-    with pytest.raises(ValueError, match="HALO_S3_DEFAULT_BUCKET"):
+    with pytest.raises(ValueError) as excinfo:
+        build_s3_uri("my_dataset", given_as="--output_path")
+    message = str(excinfo.value)
+    assert "--output_path 'my_dataset'" in message
+    assert "s3://<bucket>/<key>" in message and "HALO_S3_DEFAULT_BUCKET" in message
+    assert "--bucket" not in message, "the generation CLIs take no --bucket flag"
+    with pytest.raises(ValueError, match=r"S3Client: pass bucket=.*HALO_S3_DEFAULT_BUCKET"):
         S3Client()
+
+
+def test_the_s3_cli_requires_a_bucket_only_without_a_default(monkeypatch, capsys):
+    """``--bucket`` falls back to ``HALO_S3_DEFAULT_BUCKET``; with that unset the CLI refuses at the flag
+    rather than handing the client no bucket."""
+    monkeypatch.setattr(s3_cli_mod, "DEFAULT_BUCKET", "team-bucket")
+    assert s3_cli_mod.build_parser().parse_args(["list"]).bucket == "team-bucket"
+
+    monkeypatch.setattr(s3_cli_mod, "DEFAULT_BUCKET", None)
+    with pytest.raises(SystemExit) as excinfo:
+        s3_cli_mod.build_parser().parse_args(["list"])
+    assert excinfo.value.code == 2
+    assert "--bucket" in capsys.readouterr().err
+    assert s3_cli_mod.build_parser().parse_args(["list", "--bucket", "my-bucket"]).bucket == "my-bucket"
 
 
 def test_s3_cache_dir_derives_from_scratch_root():
@@ -639,7 +675,7 @@ def _run_cli(
         patch("halo.data.sources.s3_client.S3Client.exists", return_value=exists),
         patch("halo.data.sources.s3_client.S3Client.object_exists", return_value=object_exists),
         patch("builtins.input", return_value=answer),
-        patch.object(sys, "argv", ["s3", *argv]),
+        patch.object(sys, "argv", ["s3", *argv, "--bucket", "test-bucket"]),
     ):
         s3_cli_main()
     return mock_delete

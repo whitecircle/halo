@@ -242,7 +242,8 @@ no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` na
 
 SGLang 0.5.22 reads each family's hub layout through its own per-family loader, so the same un-fuse rule
 applies, Cohere2 MoE, DeepSeek-V4 and GLM-5 Next included (their loaders drop the fused pair without an
-error; a DeepSeek-V4 export is unverified there even after the rewrite); it registers no class for
+error; a DeepSeek-V4 export is unverified there even after the rewrite), except that its LFM-2 loader also
+takes the fused pair; it registers no class for
 Mistral4 or Ring's architecture, and its Zaya loader reads a per-expert layout the gathered export does
 not carry.
 

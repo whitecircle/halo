@@ -211,6 +211,8 @@ def preprocess_dataset(
     metadata = PreprocessedDatasetMetadata(
         model_name=config.model_name_or_path,
         tokenizer_vocab_size=len(tokenizer),
+        # The processor's for a VLM bake: it renders with a template of its own.
+        rendered_chat_template=tokenizer_or_processor.chat_template if config.mode == "chat" else None,
         max_length=config.max_length,
         packed=config.pack_sequences,
         packing_strategy=config.packing_strategy if config.pack_sequences else None,

@@ -34,8 +34,8 @@ _TRAINER_ARCHITECTURE = REPO_ROOT / "agent-docs" / "reference" / "trainer-archit
 _MODELS_INDEX = REPO_ROOT / "agent-docs" / "models" / "README.md"
 _HUMAN_MATRIX = REPO_ROOT / "human-docs" / "supported-matrix.md"
 
-# Doc column header -> whether the class declaration admits that axis. EP, ETP and TP run under every
-# trainer, so the matrix carries the two axes a trainer declares.
+# Doc column header -> whether the class declaration admits that axis. No trainer refuses EP, ETP or TP,
+# so the matrix carries the two axes a trainer declares.
 _TRAINER_AXIS_SUPPORT = {"CP": lambda cls: cls.SUPPORTS_CP, "PP": lambda cls: cls.PP_REFUSAL is None}
 
 # EP capabilities a family may switch off: its spec's ``supports_*`` fields (default True) and

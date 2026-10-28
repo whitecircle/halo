@@ -1,17 +1,16 @@
 #!/usr/bin/env python
-"""Reward (Bradley-Terry) and Classification under Expert Parallelism (ep2, tiny Qwen3-MoE).
+"""Reward (Bradley-Terry) and Classification on a tiny Qwen3-MoE under EP (ep2), attention TP (tp2) and expert
+TP (etp2), each on two ranks.
 
-Both trainers run EP and ship EP example configs, while their other GPU
-coverage runs plain FSDP data-parallel; this is the POOLED-HEAD MoE under EP. That
-matters because these two are the only supported trainers whose loss reads a single pooled position
-per row instead of per-token logits: the EP dispatch→expert→combine round trip has to reproduce the
-dense expert output at exactly the token the sequence-classification pooling later selects, and the
-head itself (``score``) is a non-expert parameter synced by FSDP2's reduce-scatter, while the
-FSDP-ignored expert weights sync through the EP gradient hooks.
+These two are the only supported trainers whose loss reads a single pooled position per row instead of
+per-token logits: the parallel MoE forward has to reproduce the dense output at exactly the token the
+sequence-classification pooling later selects. Under EP that is the dispatch→expert→combine round trip,
+under TP the attention projections split across the ranks, under ETP each expert's FFN; the head itself
+(``score``) is a non-expert parameter in every mode.
 
 Every seam is silent when it breaks — a mis-permuted combine or a dropped expert changes the pooled
 score, not the shape — so the step-1 loss is pinned against the trainer's exact objective recomputed
-on a DENSE, un-EP-patched copy of the same seeded weights over the CAPTURED batch:
+on a DENSE, unpatched copy of the same seeded weights over the CAPTURED batch:
 
   * reward: TRL's ``-logsigmoid(chosen - rejected - margin).mean() + coef * mean((c+r)**2)`` over the
     ``[chosen ⧺ rejected]`` chunk layout, margin included.
@@ -19,36 +18,54 @@ on a DENSE, un-EP-patched copy of the same seeded weights over the CAPTURED batc
 
 Each comparison carries a perturbation control that must MISS by orders of magnitude (reward: the
 pair halves swapped; classification: the labels rolled), so a reference that had silently collapsed
-to a constant could not pass. Sharding is asserted structurally too — each rank must physically hold
-``num_experts / ep_size`` experts, or "EP" would be a dense run wearing an EP config.
+to a constant could not pass. The axis is read off the model (``parallel_shape_checks``), or the mode
+would be a dense run wearing a parallel config.
+
+The model loads as the reward and classification scripts load it, from a saved base through
+``load_distributed_model``. A second phase (:func:`tests.common.resume_export.run_resume_export`) trains with
+a checkpoint midway and at the end, resumes a fresh trainer built from the midway checkpoint and holds it to an
+exact replay, and loads the final checkpoint through ``AutoModelForSequenceClassification`` with the trained
+score head.
 
 Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_pooled_head_trainers.py \
-         --trainer reward
+         --trainer reward --mode ep2
 """
 
 import argparse
+import os
 import sys
 
 import torch
 import torch.nn.functional as F
 from datasets import Dataset
-from transformers import AutoTokenizer, Qwen3MoeConfig, Qwen3MoeForSequenceClassification
+from transformers import (
+    AutoModelForSequenceClassification,
+    AutoTokenizer,
+    Qwen3MoeConfig,
+    Qwen3MoeForSequenceClassification,
+)
 from trl import RewardConfig
 
 from halo.configs.classification import ClassificationConfig
-from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from halo.trainers.reward.classification import ClassificationTrainer
-from tests.common.distributed import world_mean
+from tests.common.checkpoint_io import save_schedule
+from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_mean
+from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
+from tests.common.memory import finish_phase
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_MOE_CONFIG
+from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.rank_log import log
+from tests.common.resume_export import ResumeExportRoute, load_route_model, run_resume_export, save_base_checkpoint
 
-EP_SIZE = 2
+# Each row's parallel shape on its two ranks; tp2 keeps the experts on the grouped-GEMM EP layers at ep_size 1.
+MODES = {"ep2": {"ep_size": 2}, "tp2": {"tp_size": 2}, "etp2": {"expert_tp_size": 2}}
 N_ROWS = 32
 N_STEPS = 6
+# Midway through N_STEPS, which lands mid-epoch on every row (4 or more steps per epoch).
+SAVE_STEP = N_STEPS // 2
 PAIRS_PER_RANK = 2
 SEQ_LEN = 64
 PAD_ID = 0
@@ -57,8 +74,9 @@ CENTER_COEF = 0.05
 
 # The EP path computes the expert FFN through DeepEP dispatch/combine in bf16 against the
 # reference's dense HF experts, so the two agree only to bf16 kernel and reduction-order noise (plus
-# the logged loss itself being a bf16-rounded scalar). Measured relative error: 1.2e-4 (reward),
-# 4.9e-4 (classification). Relative, because the two objectives differ in scale.
+# the logged loss itself being a bf16-rounded scalar). Measured relative error under ep2: 1.2e-4
+# (reward), 4.9e-4 (classification); tp2 and etp2 sum bf16 partials across their ranks instead, noise
+# of the same kind. Relative, because the two objectives differ in scale.
 LOSS_RTOL = 5e-3
 # A control that lands inside this band would mean the comparison cannot see a real bug. Measured
 # control error: 0.42 (reward, halves swapped), 0.11 (classification, labels rolled).
@@ -124,14 +142,14 @@ def pooled_logits(model, batch: dict, device) -> torch.Tensor:
     return outputs.logits.squeeze(-1) if outputs.logits.shape[-1] == 1 else outputs.logits
 
 
-def build_trainer(kind: str, model, dataset, tokenizer, config, output_dir):
+def build_trainer(kind: str, model, dataset, tokenizer, config, output_dir, *, max_steps=N_STEPS, save_every=None):
     common = {
         "output_dir": output_dir,
-        "max_steps": N_STEPS,
+        "max_steps": max_steps,
         "learning_rate": 5e-3,
         "lr_scheduler_type": "constant",
         "logging_steps": 1,
-        "save_strategy": "no",
+        **save_schedule(save_every),
         "report_to": [],
         "logging_nan_inf_filter": False,
         "seed": 42,
@@ -167,7 +185,9 @@ def build_trainer(kind: str, model, dataset, tokenizer, config, output_dir):
 def run(ctx):
     parser = argparse.ArgumentParser()
     parser.add_argument("--trainer", choices=("reward", "classification"), default="reward")
-    kind = parser.parse_args().trainer
+    parser.add_argument("--mode", choices=sorted(MODES), default="ep2")
+    cli = parser.parse_args()
+    kind = cli.trainer
 
     checks, metrics = {}, {}
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
@@ -176,26 +196,37 @@ def run(ctx):
     tokenizer.pad_token = tokenizer.convert_ids_to_tokens(PAD_ID)
 
     num_labels = 1 if kind == "reward" else NUM_LABELS
-    config = ParallelismConfig(ep_size=EP_SIZE)
-    model = build_model(num_labels).to(ctx.device)
-    apply_ep_layers(model, config.ep_config())
-
-    # ── EP is structurally live: a dense run wearing an EP config would pass every loss check
-    # below (the dense reference IS the unsharded path), so the sharding itself is asserted.
-    ep_layers = [module for module in model.modules() if isinstance(module, EPMoELayerBase)]
-    checks["model_has_ep_layers"] = len(ep_layers) == TINY_QWEN3_MOE_CONFIG["num_hidden_layers"]
-    expected_local = TINY_QWEN3_MOE_CONFIG["num_experts"] // EP_SIZE
-    checks["each_rank_holds_a_shard_of_experts"] = bool(ep_layers) and all(
-        layer.experts_per_rank == expected_local for layer in ep_layers
-    )
-
+    config = ParallelismConfig(**MODES[cli.mode])
+    if config.ep_size > 1:
+        # The resume phase replays a run exactly, which DeepEP's atomic receive order would not.
+        pin_deterministic_ep_dispatch()
+    root = shared_output_dir(ctx)
+    base = save_base_checkpoint(ctx, build_model(num_labels), tokenizer, os.path.join(root, "base"))
     dataset = build_reward_dataset(7) if kind == "reward" else build_classification_dataset(7)
-    trainer = build_trainer(kind, model, dataset, tokenizer, config, ctx.output_dir)
+
+    def route_trainer(model, output_dir, *, max_steps, save_every, resume_checkpoint):
+        # Neither script tells its trainer about a resume: train() restores everything from the checkpoint.
+        return build_trainer(
+            kind, model, dataset, tokenizer, config, output_dir, max_steps=max_steps, save_every=save_every
+        )
+
+    # The dense reference's attention, so the step-1 pin compares the parallel forward to its own kernel.
+    route = ResumeExportRoute(
+        route_trainer,
+        AutoModelForSequenceClassification,
+        dtype=torch.bfloat16,
+        attn_implementation=TINY_QWEN3_MOE_CONFIG["attn_implementation"],
+    )
+    trainer = build_trainer(
+        kind, load_route_model(route, base, config, resume=False), dataset, tokenizer, config, ctx.output_dir
+    )
     ctx.on_teardown(trainer.cleanup_ep)
-    checks["trainer_in_ep_mode"] = trainer.parallelism_config.has_ep_group is True
+    checks |= parallel_shape_checks(trainer.model, config)
+    # Every decoder layer is sparse, so a load that wrapped only some of them passes the check above.
+    checks["every_moe_layer_wrapped"] = len(ep_layers(trainer.model)) == TINY_QWEN3_MOE_CONFIG["num_hidden_layers"]
 
     # ── Capture step 1's batch straight off the trainer's own compute_loss, so the reference
-    # consumes exactly the rows and padding the EP forward saw.
+    # consumes exactly the rows and padding the parallel forward saw.
     captured: dict = {}
     real_compute_loss = trainer.compute_loss
 
@@ -220,8 +251,8 @@ def run(ctx):
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
 
     # ── Step-1 loss vs the exact objective on a DENSE copy of the init weights. The logged loss is
-    # the world mean over ranks, each holding its own DP shard, so the reference is averaged the
-    # same way.
+    # the world mean over ranks, each holding its own DP shard (or, under tp2 and etp2, the same batch),
+    # so the reference is averaged the same way.
     checks["captured_step1_batch"] = bool(captured)
     reference_model = build_model(num_labels).to(ctx.device).eval()
     scores = pooled_logits(reference_model, captured, ctx.device)
@@ -249,7 +280,13 @@ def run(ctx):
     metrics["step1_rel_err"], metrics["control_rel_err"] = error, control_error
     checks["step1_loss_matches_dense_reference"] = error < LOSS_RTOL
     checks["control_misses"] = control_error > CONTROL_MIN_RTOL
+    finish_phase(trainer)
 
+    phase_checks, phase_metrics = run_resume_export(
+        ctx, route, config, base=base, root=os.path.join(root, "resume"), save_step=SAVE_STEP, total_steps=N_STEPS
+    )
+    checks |= phase_checks
+    metrics |= phase_metrics
     return {"checks": checks, "metrics": metrics}
 
 

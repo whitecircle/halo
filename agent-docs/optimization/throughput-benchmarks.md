@@ -12,7 +12,7 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
     FA4's end-to-end gain is small on MoE/EP and grows with sequence length on dense; see [Flash Attention](flash-attention.md).
 
-    The pinned Liger adds host time per kernel launch, at most ~1.5% per step on a host-bound row ([Liger → Benchmarks](liger-kernels.md#benchmarks)).
+    Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks).
 
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes). Both are rank 0's.

@@ -80,6 +80,7 @@ def _prepare(train_messages, test_messages, generate_eval_examples: bool = False
         _sft_config(),
         SimpleNamespace(model_name_or_path=QWEN3_0_6B),
         tokenizer,
+        tokenizer,
         SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
         hf_config=None,
     )

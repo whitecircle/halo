@@ -85,13 +85,15 @@ def base_args(output_dir: str, **overrides) -> ClassificationConfig:
     return build_pp_args(
         ClassificationConfig,
         output_dir,
-        max_steps=N_STEPS,
-        per_device_train_batch_size=BATCH,
-        per_device_eval_batch_size=BATCH,
-        gradient_accumulation_steps=MICROBATCHES,  # becomes the pipeline's microbatch count
-        learning_rate=8e-3,
-        max_length=SEQ_LEN,
-        **overrides,
+        **{
+            "max_steps": N_STEPS,
+            "per_device_train_batch_size": BATCH,
+            "per_device_eval_batch_size": BATCH,
+            "gradient_accumulation_steps": MICROBATCHES,  # becomes the pipeline's microbatch count
+            "learning_rate": 8e-3,
+            "max_length": SEQ_LEN,
+            **overrides,
+        },
     )
 
 

@@ -21,7 +21,7 @@ _URI = "s3://test-bucket/my_folder/a.json"
 
 
 def _run_delete(delete_result: bool, *, is_object: bool = True, recursive: bool = False) -> None:
-    argv = ["s3", "delete", "my_folder/a.json", "--yes", *(["--recursive"] if recursive else [])]
+    argv = ["s3", "delete", "my_folder/a.json", "--yes", "--bucket", "test-bucket", *(["-r"] if recursive else [])]
     with (
         patch("halo.data.sources.s3_client.S3Client.__post_init__"),
         patch("halo.data.sources.s3_client.S3Client.delete", return_value=delete_result),

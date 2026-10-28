@@ -12,6 +12,9 @@ corrupts or throws away a run:
 * A tool-call-only turn carries ``content: None``. Spelled ``str(answer)`` into the follow-up
   request, the model is told its own previous answer was the literal text "None" — and the record
   written to S3 for that same message disagrees with the conversation the model actually saw.
+* ``--dataset`` / ``--output_path`` given as full ``s3://`` URIs must be read, probed and written where
+  they point: prefixed with the default bucket and ``--subfolder`` they address a key nobody wrote, or
+  refuse for want of a bucket the URI already names.
 
 Run: python tests/cpu/inference/test_generation_script_contracts.py  (or pytest)
 """
@@ -22,7 +25,9 @@ import sys
 import types
 
 import pytest
+from datasets import Dataset
 
+from halo.data.sources import s3_client
 from halo.entrypoints import resumable_generation
 from scripts.inference.generation import openai_batched_generation as batched
 
@@ -66,7 +71,7 @@ def _stub_module(monkeypatch, module, *, rows, existing, request_impl):
     monkeypatch.setattr(module, "load_prompts_with_resume", lambda args: (rows, existing))
     monkeypatch.setattr(module, "build_openai_client", lambda **kwargs: object())
     monkeypatch.setattr(module, "parallel_openai_requests", fake_requests)
-    monkeypatch.setattr(module, "build_s3_uri", lambda path, subfolder: f"s3://bucket/{subfolder}/{path}")
+    monkeypatch.setattr(module, "build_s3_uri", lambda path, subfolder, *, given_as: f"s3://bucket/{subfolder}/{path}")
     monkeypatch.setattr(module, "push_dataset_to_s3_uri", lambda dataset, uri: pushed.append(dataset))
     return calls, pushed
 
@@ -242,6 +247,88 @@ def test_a_resume_over_another_record_layout_keeps_the_fresh_batch_columns(monke
     fresh = saved[len(existing)]
     assert fresh["conversation"][-1]["content"] == "fresh-0", "the fresh batch's own columns must survive the merge"
     assert fresh["chosen"] is None, "a column only the resumed rows carry is filled, not dropped"
+
+
+# --- S3 paths: a full URI addresses its own bucket, a bare key the default one -------------------
+
+
+def _stub_s3_run(monkeypatch, *, default_bucket: str | None) -> dict[str, list[str]]:
+    """Stub the batched run's S3 and API edges at their seams, recording every URI the run loads,
+    probes for a resume and pushes. The output dataset already holds row 0, so the resume is real."""
+    monkeypatch.setattr(s3_client, "DEFAULT_BUCKET", default_bucket)
+    seen: dict[str, list[str]] = {"loaded": [], "probed": [], "pushed": []}
+    stored = iter([Dataset.from_list(_ROWS), Dataset.from_list(_ROWS[:1])])
+
+    def fake_load(uri):
+        seen["loaded"].append(uri)
+        return next(stored)
+
+    class _Client:
+        def __init__(self, bucket=None):
+            self.bucket = bucket
+
+        def exists(self, key, subfolder=None):
+            seen["probed"].append(f"s3://{self.bucket}/{s3_client.S3Client.full_key(key, subfolder)}")
+            return True
+
+    async def fake_requests(**kwargs):
+        return [_response("a")] * len(kwargs["messages"])
+
+    monkeypatch.setattr(resumable_generation, "load_dataset_from_s3_uri", fake_load)
+    monkeypatch.setattr(resumable_generation, "S3Client", _Client)
+    monkeypatch.setattr(
+        resumable_generation, "push_dataset_to_s3_uri", lambda dataset, uri: seen["pushed"].append(uri)
+    )
+    monkeypatch.setattr(resumable_generation, "build_openai_client", lambda **kwargs: object())
+    monkeypatch.setattr(resumable_generation, "parallel_openai_requests", fake_requests)
+    return seen
+
+
+_URIS = ("s3://in-bucket/prompts", "s3://out-bucket/runs/responses")
+
+
+@pytest.mark.parametrize(
+    ("default_bucket", "paths", "expected"),
+    [
+        (None, _URIS, _URIS),
+        ("team-bucket", _URIS, _URIS),
+        (
+            "team-bucket",
+            ("prompts", "responses"),
+            ("s3://team-bucket/datasets/prompts", "s3://team-bucket/datasets/responses"),
+        ),
+    ],
+    ids=["uris_default_unset", "uris_default_set", "bare_keys"],
+)
+def test_dataset_paths_resolve_to_the_uri_they_name(monkeypatch, default_bucket, paths, expected):
+    """A full URI is its own address whatever the default bucket and ``--subfolder`` say; a bare key keeps
+    its place under both. The resume probe and the push target the output the reload read, or a resumed run
+    regenerates rows it already wrote and publishes them elsewhere."""
+    seen = _stub_s3_run(monkeypatch, default_bucket=default_bucket)
+    dataset, output_path = paths
+    monkeypatch.setattr(
+        sys, "argv", ["prog", "--model", "gen-model", "--dataset", dataset, "--output_path", output_path]
+    )
+
+    asyncio.run(batched.main())
+
+    in_uri, out_uri = expected
+    assert seen == {"loaded": [in_uri, out_uri], "probed": [out_uri], "pushed": [out_uri]}
+
+
+def test_a_bare_key_without_a_default_bucket_names_its_flag(monkeypatch):
+    """The refusal names the flag and value that needed a bucket and the URI spelling that supplies one —
+    not a ``--bucket`` flag this CLI does not have — and lands before any S3 read."""
+    seen = _stub_s3_run(monkeypatch, default_bucket=None)
+    argv = ["prog", "--model", "gen-model", "--dataset", "s3://in-bucket/prompts", "--output_path", "responses"]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(ValueError) as excinfo:
+        asyncio.run(batched.main())
+    message = str(excinfo.value)
+    assert "--output_path 'responses'" in message and "s3://<bucket>/<key>" in message
+    assert "--bucket" not in message
+    assert seen == {"loaded": [], "probed": [], "pushed": []}
 
 
 def test_an_empty_follow_up_is_no_follow_up():

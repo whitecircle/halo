@@ -15,6 +15,7 @@ from halo.callbacks.factory import build_run_callbacks
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.checkpoint_io import save_schedule
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.optimizer_state import local_optimizer_state
 from tests.common.pp_equivalence import causal_lm_loss, dp_slice_batch
@@ -36,9 +37,10 @@ def expect_construction_error(trainer_cls, name: str, checks: dict, match: str, 
             log(f"[{name}] raised without the expected mechanism: {exc}")
 
 
-def build_pp_args(config_cls, output_dir: str, **fields):
+def build_pp_args(config_cls, output_dir: str, *, save_every: int | None = None, **fields):
     """``config_cls`` with what every PP suite shares, ``fields`` overriding: accumulation becomes the
-    pipeline's microbatch count, a constant LR, every step logged, nothing saved, fp32."""
+    pipeline's microbatch count, a constant LR, every step logged, fp32, and a checkpoint every
+    ``save_every`` steps (none by default)."""
     return config_cls(
         **{
             "output_dir": output_dir,
@@ -46,7 +48,7 @@ def build_pp_args(config_cls, output_dir: str, **fields):
             "learning_rate": 5e-3,
             "lr_scheduler_type": "constant",
             "logging_steps": 1,
-            "save_strategy": "no",
+            **save_schedule(save_every),
             "report_to": [],
             "logging_nan_inf_filter": False,
             "seed": 42,

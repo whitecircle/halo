@@ -471,6 +471,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             sft_config,
             SimpleNamespace(model_name_or_path=GPT_OSS_20B),
             tokenizer,
+            tokenizer,
             SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
             hf_config=hf_config,
         )

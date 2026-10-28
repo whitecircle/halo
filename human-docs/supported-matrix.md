@@ -56,8 +56,12 @@ Per-family details:
 
 ## Training methods
 
-Every trainer supports EP, TP and ETP. CP and PP are enabled per trainer; CP on
-any other loss would silently mis-pool across sequence shards.
+No trainer refuses EP, TP or ETP. SMPO, KTO, teacher distillation and embedding
+are verified under EP and TP only, and self-distillation under EP only
+([Trainer Compatibility](../agent-docs/reference/trainer-architecture.md#trainer-compatibility) ↗).
+CP and PP are enabled per trainer; CP on any other loss would silently mis-pool
+across sequence shards. Under PP every trainer's checkpoint save, resume and
+export are verified.
 
 | Method | Script | CP | PP | Notes |
 | --- | --- | :---: | :---: | --- |
@@ -147,7 +151,7 @@ turns grouped GEMM off under ETP. Online RL per family:
 | Feature | Status |
 | --- | --- |
 | LoRA | supported except under TP, EP+TP and PP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1` |
-| QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated rather than sharded; a MoE model also needs `use_grouped_gemm: false`; rejected by both online RL methods and by offline GRPO under CP |
+| QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated rather than sharded; verified on dense models only: a MoE model also needs `use_grouped_gemm: false`, which no GPU test runs; rejected by both online RL methods and by offline GRPO under CP |
 | Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint; native EP expert LoRA merges at save time instead (`merge_expert_lora_on_save: true`) |
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
 | Muon, FlashAdamW | supported optimizer options, except under PP |

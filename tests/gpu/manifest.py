@@ -503,11 +503,21 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=900,
     ),
+    # The two pooled-head trainers on a tiny Qwen3-MoE under ep2 (the bare rows), tp2 and etp2: the step-1 loss
+    # against the dense objective, then save, exact resume and export.
     "parallelism/ep/test_ep_pooled_head_trainers.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
-        args_matrix=("--trainer reward", "--trainer classification"),
-        timeout=420,
+        args_matrix=(
+            "--trainer reward",
+            "--trainer classification",
+            *(
+                Row(f"--trainer {trainer} --mode {mode}", markers=("gpu", "full", "2gpu", axis, "moe", "qwen3"))
+                for mode, axis in (("tp2", "tp"), ("etp2", "etp"))
+                for trainer in ("reward", "classification")
+            ),
+        ),
+        timeout=900,
     ),
     # The ep1 row is the default MoE shape at ep_size=1 (fsdp_shard_ep1_experts → FSDP2 DTensor
     # experts), a different shard layout from the ep row's plain FSDP-ignored expert tensors.
@@ -735,6 +745,17 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "full", "4gpu", "pp", "ep", "etp", "moe", "gptoss"),
         timeout=1500,
         args_matrix=("--mode ep2", "--mode etp2"),
+    ),
+    # Save, exact resume and export of each PP trainer beyond SFT: one row per trainer, two for offline GRPO
+    # (without and with the KL reference).
+    "parallelism/pp/test_pp_trainer_checkpoints.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "pp", "qwen3"),
+        timeout=1200,
+        args_matrix=tuple(
+            f"--trainer {trainer}"
+            for trainer in ("smpo", "dpo", "kto", "reward", "classification", "offline_grpo", "offline_grpo_kl")
+        ),
     ),
     "parallelism/pp/test_pp_offline_grpo.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "pp", "qwen3"), timeout=1500

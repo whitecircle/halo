@@ -27,6 +27,9 @@ class FakeVLMTokenizer:
 class FakeVLMProcessorBase:
     """A whitespace 'processor' honouring the HF processor call contract."""
 
+    # What apply_chat_template renders, recorded by the bake like a real processor's template.
+    chat_template = "{% for m in messages %}{{ m.role }} : {{ m.content }} {% endfor %}"
+
     def __init__(self, tokenizer=None):
         self.tokenizer = FakeVLMTokenizer() if tokenizer is None else tokenizer
 

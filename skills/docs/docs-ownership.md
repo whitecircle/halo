@@ -75,10 +75,11 @@ changes.
 | `halo/environments/ray_actors.py` | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/async-grpo/setup.md` |
 | `halo/checkpoint/parallel/save.py`, `halo/checkpoint/parallel/resume_weights.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/trainer-architecture.md`, `agent-docs/parallelism/tensor-parallelism.md` |
 | `halo/checkpoint/parallel/ep.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md` |
-| `halo/checkpoint/parallel/pp.py`, `halo/checkpoint/tools/pp_stage_merge.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
+| `halo/checkpoint/parallel/pp.py`, `halo/checkpoint/tools/pp_stage_merge.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/parallelism/multi-node.md` |
 | `halo/checkpoint/parallel/adapters.py`, `halo/checkpoint/adapters.py` | `agent-docs/optimization/peft.md`, `agent-docs/reference/checkpoints.md` |
 | `halo/checkpoint/parallel/context.py`, `halo/checkpoint/parallel/sidecars.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/trainer-architecture.md` |
-| `halo/checkpoint/{format,hub_layout,atomic,weights_source,sidecars,writing}.py`, `halo/checkpoint/parallel/completeness.py` | `agent-docs/reference/checkpoints.md` |
+| `halo/checkpoint/{format,hub_layout,weights_source,sidecars,writing}.py` | `agent-docs/reference/checkpoints.md` |
+| `halo/checkpoint/atomic.py`, `halo/checkpoint/parallel/completeness.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `halo/checkpoint/reading.py`, `halo/checkpoint/tools/offline_export.py`, `halo/checkpoint/tools/fp8_dequant.py`, `halo/checkpoint/tools/deepseek_v4_dequant.py`, `halo/checkpoint/tools/sink_reset.py`, `halo/checkpoint/tools/expert_unfuse.py`, `halo/checkpoint/tools/vision_reattach.py`, `halo/checkpoint/tools/vocab_patch.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md` |
 | `halo/checkpoint/parallel/resume_source.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/architecture.md` |
 | `halo/checkpoint/parallel/reading.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/checkpoints.md` |
@@ -96,7 +97,7 @@ changes.
 | `halo/model_loading/parallel/model_source.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/troubleshooting.md` |
 | `halo/entrypoints/model_setup.py` | `agent-docs/training-methods/sft.md`, `agent-docs/models/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/distributed/fsdp.py` | `agent-docs/parallelism/data-parallelism.md`, `agent-docs/reference/checkpoints.md` |
-| `halo/runtime/` | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/architecture.md`, `agent-docs/reference/debugging.md` |
+| `halo/runtime/` | `agent-docs/parallelism/multi-node.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/architecture.md`, `agent-docs/reference/debugging.md`, `agent-docs/reference/troubleshooting.md` |
 | `halo/distributed/nvlink.py` | `agent-docs/parallelism/multi-node.md`, `agent-docs/infrastructure/deepep.md` |
 | `halo/diagnostics/profiling.py`, `halo/diagnostics/py_spy.py` | `agent-docs/reference/debugging.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `halo/weight_sync/transport_check.py`, `scripts/profiling/weight_sync_transport.py` | `agent-docs/infrastructure/rollout-servers.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/debugging.md` |
@@ -165,7 +166,7 @@ changes.
 | `halo/callbacks/factory.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `halo/callbacks/torch_profiler.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/debugging.md` |
 | `halo/models/moe/{balancing,config_fields,router_logits,router_aux_gradient}.py`, `halo/callbacks/balancing.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/models/README.md` |
-| `halo/hardware.py` | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/optimization/grouped-gemm.md` |
+| `halo/hardware.py` | `agent-docs/optimization/throughput-benchmarks.md`, `agent-docs/optimization/flash-attention.md`, `agent-docs/optimization/grouped-gemm.md`; the CPU-count defaults also `agent-docs/reference/configuration-reference.md`, `agent-docs/data/dataset-preparation.md`, `agent-docs/training-methods/async-grpo/environments/sandbox.md` |
 
 ## Environments (Async GRPO with Environments)
 
@@ -216,7 +217,7 @@ changes.
 | `scripts/profiling/**` | `agent-docs/reference/debugging.md`, `agent-docs/reference/scripts-reference.md` |
 | `scripts/environments/**` | `agent-docs/reference/scripts-reference.md`, `agent-docs/training-methods/async-grpo/evaluation.md` |
 | `scripts/cli_arguments.py`, `scripts/inference/inference_arguments.py`, `scripts/inference/reward_model/reward_model_arguments.py`, `halo/entrypoints/{resumable_generation,reward_scoring,rejection_sampling}.py`, `halo/entrypoints/eval_contract.py` | `agent-docs/reference/scripts-reference.md` |
-| `scripts/after_training/merge_ep_shards.py`, `halo/checkpoint/tools/ep_shard_merge.py` | `agent-docs/reference/checkpoints.md` |
+| `scripts/after_training/merge_ep_shards.py`, `halo/checkpoint/tools/ep_shard_merge.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/parallelism/expert-parallelism.md` |
 | `scripts/after_training/merge_pp_stages.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
 | `scripts/after_training/quantize_to_lowp.py`, `halo/checkpoint/tools/lowp_export.py` | `agent-docs/optimization/low-precision-moe-kernels.md` |
 | `scripts/after_training/convert_to_bf16.py`, `halo/checkpoint/tools/bf16_conversion.py` | `agent-docs/reference/scripts-reference.md`, `agent-docs/reference/checkpoints.md` |

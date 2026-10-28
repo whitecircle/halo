@@ -212,6 +212,7 @@ def _sft_config(**overrides) -> SFTConfig:
         ({"dataset_text_field": "messages"}, "dataset_text_field"),
         ({"dataset_kwargs": {"add_special_tokens": False}}, "dataset_kwargs"),
         ({"eval_packing": True}, "eval_packing"),
+        ({"chat_template_path": "template.jinja"}, "chat_template_path"),
     ],
 )
 def test_trl_dataset_prep_knobs_are_refused(overrides, knob):
@@ -226,7 +227,8 @@ def test_trl_dataset_prep_defaults_pass():
 
 def test_each_trl_dataset_prep_refusal_names_its_own_way_out():
     """A mask knob's refusal points at the script's own masking; a rendering knob's at the caller's
-    rendering remedy. Neither message carries the other's advice."""
+    rendering remedy; TRL's template override's at the run's own chat_template. No message carries another's
+    advice."""
     with pytest.raises(ValueError) as masked:
         reject_trl_dataset_prep_args("Some script", _sft_config(assistant_only_loss=True), render_remedy="REMEDY")
     assert "train_on_completions_only" in str(masked.value) and "REMEDY" not in str(masked.value)
@@ -234,6 +236,14 @@ def test_each_trl_dataset_prep_refusal_names_its_own_way_out():
     with pytest.raises(ValueError) as rendered:
         reject_trl_dataset_prep_args("Some script", _sft_config(dataset_text_field="messages"), render_remedy="REMEDY")
     assert "REMEDY" in str(rendered.value) and "train_on_completions_only" not in str(rendered.value)
+
+    with pytest.raises(ValueError) as templated:
+        reject_trl_dataset_prep_args(
+            "Some script", _sft_config(chat_template_path="template.jinja"), render_remedy="REMEDY"
+        )
+    message = str(templated.value)
+    assert "force_chat_template: true" in message and "REMEDY" not in message
+    assert "train_on_completions_only" not in message
 
 
 # Per-script rejection of knobs the script cannot honor
@@ -329,6 +339,10 @@ def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
         # TRL's own dataset prep and default collator — the only consumers — are both replaced.
         ("sft.py", "assistant_only_loss: true\n", "assistant_only_loss"),
         ("distillation/self_distill.py", "completion_only_loss: false\n", "completion_only_loss"),
+        # TRL's trainer re-templates the processing class after the script rendered every row, so the
+        # checkpoint would export a template the model never trained on.
+        ("sft.py", "chat_template_path: template.jinja\n", "chat_template_path"),
+        ("distillation/self_distill.py", "chat_template_path: template.jinja\n", "chat_template_path"),
         # Both only feed the reference term, and no reference model is loaded at this coefficient.
         (
             "distillation/self_distill.py",

@@ -3,15 +3,14 @@
 Parallel requests with checkpointing (a resumed run reloads the partial dataset) and S3 dataset I/O.
 Supports follow-up prompts, per-row tool definitions, and system prompts.
 
-Paths are S3 keys under ``HALO_S3_DEFAULT_BUCKET`` rather than full URIs; they are resolved through
-``build_s3_uri``, which prepends the bucket.
+``--dataset`` and ``--output_path`` are full ``s3://`` URIs, used as given, or bare keys that
+``build_s3_uri`` places under ``--subfolder`` in ``HALO_S3_DEFAULT_BUCKET``.
 
 Usage:
-    HALO_S3_DEFAULT_BUCKET=my-bucket \\
     python scripts/inference/generation/openai_batched_generation.py \\
         --model my-model \\
-        --dataset prompts \\
-        --output_path responses
+        --dataset s3://my-bucket/datasets/prompts \\
+        --output_path s3://my-bucket/datasets/responses
 
 Input dataset format (HuggingFace Dataset in S3):
     Required: id_field, prompt_field (list of message dicts)

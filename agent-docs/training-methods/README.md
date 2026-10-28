@@ -30,7 +30,7 @@ Per-method rules: [Modality support](../reference/trainer-architecture.md#modali
 
 ## Parallelism support
 
-EP, TP and ETP are available on every trainer. Context parallelism is declare-to-enable per trainer (`SUPPORTS_CP`): SFT, SMPO and offline GRPO full fine-tuning support it; online and environment GRPO do not.
+No trainer refuses EP, TP or ETP ([Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility)). Context parallelism is declare-to-enable per trainer (`SUPPORTS_CP`): SFT, SMPO and offline GRPO full fine-tuning support it; online and environment GRPO do not.
 
 Pipeline parallelism is declare-to-enable the same way (`PP_REFUSAL = None`): SFT, SMPO, DPO and KTO (precompute-only), offline GRPO, reward and classification support it ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md)).
 

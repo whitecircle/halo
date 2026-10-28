@@ -76,7 +76,7 @@ halo run prepare-dataset -- --help
 ```
 
 The tool tokenizes, optionally packs (`--pack_sequences`), and shards the
-corpus, and can push the result to the Hub or S3. Three rules decide whether the
+corpus, and can push the result to the Hub or S3. Four rules decide whether the
 output trains:
 
 - `--max_length` is stored with the data and must equal the training config's
@@ -85,6 +85,9 @@ output trains:
   `1` trains at any size.
 - `--mode text` tokenizes raw text for pre-training; the default `chat` renders
   the conversation through the chat template.
+- The training run must end with the template the rows were rendered with, since
+  the checkpoint exports the run's: after a `--chat_template` bake, set the same
+  `chat_template` plus `force_chat_template: true`, or the load raises.
 
 `--tokenizer_backend gigatoken` swaps in a faster Rust encoder whose IDs are
 checked against the HF tokenizer at startup; training configs take the same

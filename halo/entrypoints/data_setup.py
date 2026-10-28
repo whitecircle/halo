@@ -31,8 +31,10 @@ def reject_trl_dataset_prep_args(
     context: str, sft_config, *unread_fields: str, render_remedy: str | None = None
 ) -> None:
     """Refuse the ``SFTConfig`` knobs only TRL's own dataset prep and default collator read, which a script that
-    renders and masks its rows replaces (:func:`disable_trl_dataset_prep`). ``unread_fields`` are further defaulted
-    fields the caller's path leaves unread; ``render_remedy`` is what the script offers instead."""
+    renders and masks its rows replaces (:func:`disable_trl_dataset_prep`), and ``chat_template_path``, which
+    TRL's trainer applies to the processing class after those rows were rendered with the run's template.
+    ``unread_fields`` are further defaulted fields the caller's path leaves unread; ``render_remedy`` is what the
+    script offers instead."""
     reject_unsupported_args(
         f"{context} (it masks completions through train_on_completions_only + assistant_message_template)",
         # Tri-state: an explicit False ("train on the full sequence") is ignored the same as True.
@@ -45,6 +47,13 @@ def reject_trl_dataset_prep_args(
         "dataset_text_field",
         "dataset_kwargs",
         *unread_fields,
+    )
+    reject_non_default_args(
+        f"{context} (the rows are rendered before the trainer applies chat_template_path, so the checkpoint would "
+        f"export a template they never saw; set chat_template instead, with force_chat_template: true over a "
+        f"template the checkpoint ships and added_special_tokens for any tokens it needs)",
+        sft_config,
+        "chat_template_path",
     )
 
 

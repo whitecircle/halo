@@ -114,7 +114,9 @@ them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 | `DistributedSelfDistillationTrainer` | `DistributedSFTTrainer` | No | No |
 | `EmbeddingTrainer` | `SentenceTransformerTrainer` | No | No |
 
-EP, ETP and TP run under every trainer. A **No** PP trainer is refused at config time
+No trainer refuses EP, TP or ETP. GPU rows run all three under SFT, DPO, offline, online and async GRPO,
+SDPG, reward and classification; SMPO, KTO, teacher distillation and embedding are verified under EP and TP,
+and self-distillation under EP only. A **No** PP trainer is refused at config time
 (`<Trainer> does not support Pipeline Parallelism (PP)`); see
 [Pipeline Parallelism](../parallelism/pipeline-parallelism.md).
 

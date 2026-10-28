@@ -14,7 +14,8 @@ from scripts.before_training.s3 import main as s3_cli_main
 
 
 def _run(argv: list[str]) -> None:
-    with patch("halo.data.sources.s3_client.S3Client.__post_init__"), patch.object(sys, "argv", ["s3", *argv]):
+    argv = ["s3", *argv, "--bucket", "test-bucket"]
+    with patch("halo.data.sources.s3_client.S3Client.__post_init__"), patch.object(sys, "argv", argv):
         s3_cli_main()
 
 

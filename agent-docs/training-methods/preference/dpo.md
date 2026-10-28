@@ -102,7 +102,7 @@ Covering tests:
 
 - `pytest tests/cpu/trainers -m cpu`
 - `tests/gpu/trainers/preference/test_dpo.py`, `test_dpo_vlm.py` and `test_pref_ep_expert_lora_reference.py`
-- pipeline parallelism on precomputed reference log-probs: `tests/gpu/parallelism/pp/test_pp_preference_precompute.py --trainer dpo`
+- pipeline parallelism on precomputed reference log-probs: `tests/gpu/parallelism/pp/test_pp_preference_precompute.py --trainer dpo`, and its save, exact resume and export: `test_pp_trainer_checkpoints.py --trainer dpo`
 - precompute resume, over `tests/common/preference_precompute_e2e.py`: `tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py` (Qwen3-MoE and the dense model in the core tier; every other EP family, with TP and EP+TP where its attention has a TP plan, and EP+ETP on four ranks for every EP family in the full tier)
 
 ## What to watch

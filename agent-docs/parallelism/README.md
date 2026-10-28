@@ -178,8 +178,8 @@ instead of replicating the DP dimension across domains.
 Each axis page states its own knob rejections, every one traced to the code that raises:
 [EP](expert-parallelism.md#limitations) · [ETP](expert-tensor-parallelism.md#limitations) ·
 [TP](tensor-parallelism.md#limitations) · [CP](context-parallelism.md#limitations) ·
-[PP](pipeline-parallelism.md#rejected-combinations) · [DP](data-parallelism.md#limitations). EP, ETP and
-TP run under every trainer; CP and PP are declared per class (`SUPPORTS_CP` / `PP_REFUSAL`):
+[PP](pipeline-parallelism.md#rejected-combinations) · [DP](data-parallelism.md#limitations). No trainer
+refuses EP, ETP or TP; CP and PP are declared per class (`SUPPORTS_CP` / `PP_REFUSAL`):
 [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility). Which family
 runs which axis: [Compatibility matrix](../models/README.md#compatibility-matrix).
 

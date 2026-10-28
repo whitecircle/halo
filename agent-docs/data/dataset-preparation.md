@@ -22,7 +22,8 @@ SFT only, optional) → shard (Megatron-LM style, optional) → save (S3 / Hub /
 The knobs baked into the rows are recorded in `metadata.json` and re-checked against the training
 config at startup. A disagreement raises when the training YAML **states** the knob — a runtime value
 cannot re-render already-baked rows. A knob left at its own default only warns: that config claims
-nothing about the artifact, and the prepared value is what trained.
+nothing about the artifact, and the prepared value is what trained. The rendered-template check below
+still applies.
 
 Two groups are compared. The chat-render knobs are `--conversation_field`, `--system_prompt`,
 `--model_supports_system_role false`, `--tools_field`, `--interleaved_thinking`, `--images_field`, and, under
@@ -31,12 +32,19 @@ completion masking, `--assistant_message_template`. The tokenizer mutations — 
 the completion-mask boundaries, and a template override re-renders every turn. `--chat_template` is
 recorded as resolved template *text*, so a path and the text it names compare equal.
 
+The template the rows were rendered with is recorded too (`rendered_chat_template`, the processor's under
+`--is_vlm`), and training raises when the tokenizer or processor it ends with, whose template the checkpoint
+exports, carries another. Preparation applies `--chat_template` whatever template the tokenizer ships, while
+training applies `chat_template` over a shipped one only with `force_chat_template: true`, so a `--chat_template`
+bake trains with the same `chat_template` plus that flag. A stamp without `rendered_chat_template` is held to its
+recorded `--chat_template` outside `--is_vlm`, and to nothing otherwise.
+
 The checked set is every `PreprocessingConfig` field outside `_UNCOMPARED_FIELDS`, so a new knob is
 compared by default, and a knob the metadata does not record warns instead. `--mode text`
 artifacts render no template and skip the render check entirely. A training config setting
 `packing: true` against an unpacked artifact warns — preprocessed rows are never packed at runtime.
-A `model_name_or_path` other than the prep `--model_name_or_path` only warns, so train with the tokenizer
-the rows were baked with.
+A `model_name_or_path` other than the prep `--model_name_or_path` only warns, unless the template the run
+exports differs from the rows' (which raises, see above), so train with the tokenizer the rows were baked with.
 
 `--mode` is validated on the config, not only by the CLI's choices: an unvalidated typo like `txt`
 falls through every `mode == "text"` branch and chat-templates a raw pretraining corpus. A knob belonging
@@ -157,7 +165,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--tokenizer_backend` | `hf` | `hf` = the model's tokenizer; `gigatoken` = Rust bulk encoder (see above) |
 | `--test_size` | `None` | Test split fraction (e.g. `0.01`), cut from `train`. Refused when the input already carries a `test`/`validation` split — point `--input` at the train split alone. Without it (and without a `test` or `validation` split in the input) the output is train-only: an unsharded one trains with the first 100 train rows warned in as a placeholder test split, and `--num_shards` above `1` is refused before tokenization, since training rejects a sharded dataset with no test split |
 | `--pad_token` / `--eos_token` / `--bos_token` | `None` | Override pad / EOS / BOS token. Recorded in `metadata.json` and re-checked at training time |
-| `--chat_template` | `None` | Override chat template (Jinja2 string, or a path to a `.jinja`/`.jinja2`/`.j2` file). The resolved text is recorded and re-checked |
+| `--chat_template` | `None` | Override chat template (Jinja2 string, or a path to a `.jinja`/`.jinja2`/`.j2` file), applied whatever template the tokenizer ships. The resolved text is recorded and re-checked; training applies it over a shipped template only with `force_chat_template: true` |
 | `--overwrite` | `False` | Replace an existing output. Only the local writer keeps the previous dataset intact through a failed publish (see below) |
 | `--dry_run` | `False` | Print the planned output paths and exit before the tokenizer or input dataset load — it validates nothing about the data |
 | `--private` | `False` | Make Hub dataset private |

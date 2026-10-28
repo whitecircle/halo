@@ -143,9 +143,9 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
     return train_dataset, eval_dataset, generate_dataset
 
 
-def _load_verified_metadata(args, sft_config, model_config):
-    """The pre-processed dataset's metadata, verified against this run's length, model, masking, render and
-    packing."""
+def _load_verified_metadata(args, sft_config, model_config, processing_class):
+    """The pre-processed dataset's metadata, verified against this run's length, model, masking, render, packing
+    and the chat template ``processing_class`` (the trainer's, after the tokenizer setup) exports."""
     metadata = load_preprocessed_metadata(args.dataset)
     verify_preprocessed_dataset(
         metadata,
@@ -154,17 +154,20 @@ def _load_verified_metadata(args, sft_config, model_config):
         required_train_on_completions_only=args.train_on_completions_only,
         render_args=args,
         required_packing=sft_config.packing,
+        run_processing_class=processing_class,
     )
     return metadata
 
 
-def _prepare_text_data(ds, is_preprocessed, args, sft_config, model_config, tokenizer, parallelism_config, hf_config):
+def _prepare_text_data(
+    ds, is_preprocessed, args, sft_config, model_config, processing_class, tokenizer, parallelism_config, hf_config
+):
     """Text dataset path: the pre-processed splits as baked, or the raw ones tokenized and packed; returns
     ``(train, eval, generate, collator)``."""
     if is_preprocessed:
         # Offline-packed data still needs the packing collator: without per-document position_ids from
         # seq_lengths documents attend across pack boundaries. Keyed on metadata.packed, not the flag.
-        collator_packing = _load_verified_metadata(args, sft_config, model_config).packed
+        collator_packing = _load_verified_metadata(args, sft_config, model_config, processing_class).packed
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
     else:
         collator_packing = sft_config.packing
@@ -205,7 +208,7 @@ def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, proce
             ds, args, sft_config, processor, tokenizer, hf_config, desc="Processing train/eval dataset"
         )
         return train_dataset, eval_dataset, None, collator
-    if not _load_verified_metadata(args, sft_config, model_config).is_vlm:
+    if not _load_verified_metadata(args, sft_config, model_config, processor).is_vlm:
         raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
     collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
     return ds["train"], ds["test"], None, collator
@@ -300,7 +303,15 @@ def main():
         )
     else:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_text_data(
-            ds, is_preprocessed, args, sft_config, model_config, tokenizer, parallelism_config, model.config
+            ds,
+            is_preprocessed,
+            args,
+            sft_config,
+            model_config,
+            processing_class,
+            tokenizer,
+            parallelism_config,
+            model.config,
         )
 
     log_script_dataset_examples(

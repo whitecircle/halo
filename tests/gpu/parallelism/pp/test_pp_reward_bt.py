@@ -72,6 +72,24 @@ def build_dataset(vocab_size: int, n_rows: int, seed: int) -> Dataset:
     return Dataset.from_list(rows)
 
 
+def build_args(output_dir: str, **overrides) -> RewardConfig:
+    return build_pp_args(
+        RewardConfig,
+        output_dir,
+        **{
+            "max_steps": N_STEPS,
+            "per_device_train_batch_size": PAIRS_PER_RANK,
+            "gradient_accumulation_steps": MICROBATCHES,  # becomes the pipeline's microbatch count
+            "learning_rate": 8e-3,
+            "max_length": SEQ_LEN,
+            "gradient_checkpointing": False,
+            "center_rewards_coefficient": CENTER_COEF,
+            "per_device_eval_batch_size": PAIRS_PER_RANK,
+            **overrides,
+        },
+    )
+
+
 def reference_bt_loss(model, input_ids, attention_mask, margin_interleaved) -> float:
     """TRL's exact objective on an interleaved batch, pooled by transformers' own seq-cls forward."""
     with torch.no_grad():
@@ -99,18 +117,7 @@ def reference_pair_scores(model, rows, device) -> torch.Tensor:
 def run(ctx):
     config = ParallelismConfig(world_size=ctx.world_size, gpus_per_node=2, nvlink_domain_size=2, pp_size=PP_SIZE)
     tokenizer = tiny_vocab_tokenizer()
-    args = build_pp_args(
-        RewardConfig,
-        ctx.output_dir,
-        max_steps=N_STEPS,
-        per_device_train_batch_size=PAIRS_PER_RANK,
-        gradient_accumulation_steps=MICROBATCHES,  # becomes the pipeline's microbatch count
-        learning_rate=8e-3,
-        max_length=SEQ_LEN,
-        gradient_checkpointing=False,
-        center_rewards_coefficient=CENTER_COEF,
-        per_device_eval_batch_size=PAIRS_PER_RANK,
-    )
+    args = build_args(ctx.output_dir)
 
     eval_dataset = build_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=2 * PAIRS_PER_RANK, seed=23)
 

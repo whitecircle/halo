@@ -299,6 +299,36 @@ def test_sft_forwards_render_args_and_packing_to_the_preprocessed_check():
         )
 
 
+def _passed_name(call: ast.Call, func: ast.FunctionDef, param: str) -> str | None:
+    """The variable ``call`` passes for ``func``'s parameter ``param``, positionally or by keyword."""
+    value = {kw.arg: kw.value for kw in call.keywords}.get(param)
+    if value is None:
+        index = [a.arg for a in func.args.args].index(param)
+        value = call.args[index] if index < len(call.args) else None
+    return value.id if isinstance(value, ast.Name) else None
+
+
+def test_sft_holds_the_preprocessed_rows_to_the_template_the_trainer_exports():
+    """``run_processing_class=None`` skips the exported-template check, and checking another object than the one
+    the trainer saves (a VLM run's tokenizer instead of its processor) checks a template the checkpoint never
+    carries. Traced from the trainer's ``processing_class`` through both data paths to the check."""
+    tree = ast.parse((_TRAINING_DIR / "sft.py").read_text(encoding="utf-8"))
+    functions = {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}
+    (check,) = _named_calls(tree, "verify_preprocessed_dataset")
+    checked = {kw.arg: kw.value for kw in check.keywords}.get("run_processing_class")
+    assert isinstance(checked, ast.Name), "sft.py must pass the run's processing class as run_processing_class"
+    checker = next(name for name, node in functions.items() if _named_calls(node, "verify_preprocessed_dataset"))
+    (trainer,) = _named_calls(functions["main"], "DistributedSFTTrainer")
+    exported = {kw.arg: kw.value for kw in trainer.keywords}["processing_class"].id
+    for path in ("_prepare_text_data", "_prepare_vlm_data"):
+        (inner,) = _named_calls(functions[path], checker)
+        path_param = _passed_name(inner, functions[checker], checked.id)
+        (outer,) = _named_calls(functions["main"], path)
+        assert path_param is not None and _passed_name(outer, functions[path], path_param) == exported, (
+            f"sft.py {path} checks another object than the processing_class the trainer exports"
+        )
+
+
 # Fail-loud rejection of silently-ignored fields
 
 

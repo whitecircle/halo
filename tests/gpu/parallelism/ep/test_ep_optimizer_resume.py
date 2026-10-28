@@ -42,7 +42,6 @@ Usage:
 """
 
 import argparse
-import logging
 import os
 
 import torch
@@ -67,7 +66,7 @@ from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import max_or_nan, relative_l2
 from tests.common.optimizer_state import local_optimizer_state, optimizer_state_matches
-from tests.common.rank_log import log
+from tests.common.rank_log import log, logged_messages
 from tests.common.tiny_models import build_tied_qwen3_checkpoint
 from tests.common.tolerances import TOL
 from tests.common.training_checks import snapshot_trainable, step_losses
@@ -449,15 +448,7 @@ def run(ctx):
     # ── Phase 4 (ep only): topology mismatch → loud warm restart, run proceeds ─
     if mode == "ep":
         log("\n--- Phase 4 (ep): resume the ep_size=2 checkpoint at ep_size=1 (mismatch) ---")
-        warnings: list[str] = []
-
-        class _Grab(logging.Handler):
-            def emit(self, record):
-                warnings.append(record.getMessage())
-
-        handler = _Grab(level=logging.WARNING)
-        optimizer_store_mod.logger.addHandler(handler)
-        try:
+        with logged_messages(optimizer_store_mod.logger) as store_log:
             pc_ep1 = ParallelismConfig(ep_size=1, use_grouped_gemm=True)
             trainer = _make_trainer(
                 ckpt_dir,
@@ -471,8 +462,6 @@ def run(ctx):
             trainer_ref = {"trainer": trainer, "capture": None}
             trainer.add_callback(_ResumeCapture(trainer_ref))
             trainer.train(resume_from_checkpoint=ckpt_dir)
-        finally:
-            optimizer_store_mod.logger.removeHandler(handler)
         capture = trainer_ref["capture"]
         checks["mismatch_capture_fired"] = capture is not None
         if capture is not None:
@@ -494,9 +483,9 @@ def run(ctx):
             if (carried_moments or carried_steps) and ctx.rank == 0:
                 log(f"mismatch resume carried: moments={carried_moments[:5]} steps={carried_steps[:5]}")
             checks["mismatch_warm_restarted"] = world_all(not carried_moments and not carried_steps, device)
-        mismatch_warned = any("fingerprint mismatch" in w and "ep_size" in w for w in warnings)
+        mismatch_warned = any("fingerprint mismatch" in w and "ep_size" in w for w in store_log)
         if ctx.rank == 0 and not mismatch_warned:
-            log(f"captured warnings: {warnings}")
+            log(f"captured optimizer-store messages: {store_log}")
         # The warning logs on the main process only; every rank must have taken the warm restart.
         checks["mismatch_warning_fired"] = world_all(mismatch_warned or ctx.rank != 0, device)
         mismatch_losses = step_losses(trainer)

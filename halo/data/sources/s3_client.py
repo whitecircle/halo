@@ -18,7 +18,7 @@ from botocore.exceptions import ClientError
 from tqdm import tqdm
 
 from halo.data.sources.dataset_cache import compute_etag_fingerprint
-from halo.data.sources.paths import METADATA_FILE
+from halo.data.sources.paths import METADATA_FILE, parse_dataset_source
 from halo.env import env_int, env_str
 from halo.log import info_logger
 
@@ -37,13 +37,11 @@ _S3_FOLDER_CONCURRENCY = max(1, env_int("HALO_S3_MAX_FOLDER_CONCURRENCY", 16))
 _S3_DELETE_BATCH = 1000
 
 
-def default_bucket() -> str:
-    """The bucket a key-only S3 path lives in: ``HALO_S3_DEFAULT_BUCKET``, raising when it is unset."""
+def default_bucket(needed_by: str, remedy: str) -> str:
+    """The bucket a key-only S3 path lives in: ``HALO_S3_DEFAULT_BUCKET``. Unset, it raises naming ``needed_by``,
+    the input that gave no bucket, and ``remedy``, the way to give one there."""
     if not DEFAULT_BUCKET:
-        raise ValueError(
-            "No S3 bucket given: use a full s3://<bucket>/... URI (or --bucket), or set "
-            "HALO_S3_DEFAULT_BUCKET to your own bucket."
-        )
+        raise ValueError(f"No S3 bucket for {needed_by}: {remedy}, or set HALO_S3_DEFAULT_BUCKET to your own bucket.")
     return DEFAULT_BUCKET
 
 
@@ -115,7 +113,7 @@ class S3Client:
 
     def __post_init__(self):
         if self.bucket is None:
-            self.bucket = default_bucket()
+            self.bucket = default_bucket("S3Client", "pass bucket=<name>")
         session_kwargs = {}
         if self.aws_access_key_id:
             session_kwargs["aws_access_key_id"] = self.aws_access_key_id
@@ -397,7 +395,11 @@ class S3Client:
         return local_path
 
 
-def build_s3_uri(key: str, subfolder: str | None = None) -> str:
-    """Build a full S3 URI from key (+optional subfolder) under :func:`default_bucket`, without
-    constructing a client."""
-    return f"s3://{default_bucket()}/{S3Client.full_key(key, subfolder)}"
+def build_s3_uri(path: str, subfolder: str | None = None, *, given_as: str) -> str:
+    """The S3 URI ``path`` names, without constructing a client: a full ``s3://bucket/key`` URI as given (a
+    malformed one raises), a bare key under ``subfolder`` in :func:`default_bucket`. ``given_as`` names the
+    input ``path`` came from (a CLI flag), for the unset-bucket error."""
+    if parse_dataset_source(path)[0] == "s3":
+        return path
+    bucket = default_bucket(f"{given_as} {path!r}", "pass a full s3://<bucket>/<key> URI")
+    return f"s3://{bucket}/{S3Client.full_key(path, subfolder)}"

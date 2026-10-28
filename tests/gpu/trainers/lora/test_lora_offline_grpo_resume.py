@@ -39,7 +39,6 @@ Usage:
 """
 
 import argparse
-import logging
 import math
 import os
 import shutil
@@ -71,7 +70,7 @@ from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.numerics import max_or_nan
 from tests.common.optimizer_state import local_optimizer_state, optimizer_state_matches
-from tests.common.rank_log import log
+from tests.common.rank_log import log, logged_messages
 from tests.common.tolerances import TOL
 from tests.common.training_checks import step_losses
 
@@ -366,17 +365,6 @@ class _ResumeCapture(TrainerCallback):
         return control
 
 
-class _WarningTap(logging.Handler):
-    """Collect the optimizer store's warm-restart warnings for the topology-mismatch phase."""
-
-    def __init__(self):
-        super().__init__(level=logging.WARNING)
-        self.messages: list[str] = []
-
-    def emit(self, record):
-        self.messages.append(record.getMessage())
-
-
 def _release(live: dict) -> None:
     """End a phase: DeepEP buffers first, then the callback cycle holding the model.
 
@@ -536,16 +524,12 @@ def run(ctx) -> dict:
         log(f"\n--- Phase 3 ({mode}): resume the ep_size=2 checkpoint at ep_size=1 ---")
         ep1_dir = os.path.join(workspace, "restored_adapters_ep1")
         pc = ParallelismConfig(ep_size=1)
-        tap = _WarningTap()
-        optimizer_store_mod.logger.addHandler(tap)
         live.clear()
-        try:
+        with logged_messages(optimizer_store_mod.logger) as store_log:
             trainer = _make_trainer(mode, pc, tokenizer, dataset, _config(train_out, TOTAL_STEPS, None, pc, mode))
             live["trainer"] = trainer
             trainer.add_callback(_ResumeCapture(live, ep1_dir))
             trainer.train(resume_from_checkpoint=checkpoint)
-        finally:
-            optimizer_store_mod.logger.removeHandler(tap)
         ep1_losses = step_losses(trainer)
         log(f"ep1 resumed losses: {[f'{loss:.5f}' for loss in ep1_losses]}")
         checks["ep1_run_proceeded"] = (
@@ -565,9 +549,9 @@ def run(ctx) -> dict:
         # The warm restart is what the fingerprint promises when the topology changes; it logs on the
         # main process only, so the other rank asserts the run continued rather than the message.
         if ctx.rank == 0:
-            warned = any("fingerprint mismatch" in msg and "ep_size" in msg for msg in tap.messages)
+            warned = any("fingerprint mismatch" in msg and "ep_size" in msg for msg in store_log)
             if not warned:
-                log(f"captured optimizer-store warnings: {tap.messages}")
+                log(f"captured optimizer-store messages: {store_log}")
             checks["ep1_optimizer_warm_restart_warned"] = warned
         _release(live)
         del trainer

@@ -66,19 +66,30 @@ def add_checkpoint_interval_arg(parser: argparse.ArgumentParser) -> argparse.Arg
 def add_s3_dataset_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     """Add the S3 prompt-dataset block every checkpointing generation CLI reads its rows through.
 
-    Paths are S3 keys under ``HALO_S3_DEFAULT_BUCKET``, resolved by ``build_s3_uri``; the field names
-    are the ones :func:`load_prompts_with_resume` and the record builders consume, so a script
-    declaring its own would resume against a differently-keyed output.
+    A path is a full ``s3://bucket/key`` URI, used as given, or a bare key under ``--subfolder`` in
+    ``HALO_S3_DEFAULT_BUCKET`` (``build_s3_uri``); the field names are the ones
+    :func:`load_prompts_with_resume` and the record builders consume, so a script declaring its own
+    would resume against a differently-keyed output.
     """
-    parser.add_argument("--dataset", type=str, required=True, help="S3 key of the input prompt dataset.")
     parser.add_argument(
-        "--output_path", type=str, required=True, help="S3 key of the output dataset, appended to and resumed from."
+        "--dataset",
+        type=str,
+        required=True,
+        help="Input prompt dataset: a full s3://<bucket>/<key> URI, or a bare key under --subfolder in "
+        "$HALO_S3_DEFAULT_BUCKET.",
+    )
+    parser.add_argument(
+        "--output_path",
+        type=str,
+        required=True,
+        help="Output dataset, appended to and resumed from: a full s3:// URI or a bare key, read as --dataset is.",
     )
     parser.add_argument(
         "--subfolder",
         type=str,
         default="datasets",
-        help=f"S3 subfolder (default: datasets, use '{NO_SUBFOLDER_SENTINEL}' to skip)",
+        help=f"Prefix of a bare-key --dataset / --output_path, unused by a full s3:// URI (default: datasets, "
+        f"use '{NO_SUBFOLDER_SENTINEL}' to skip)",
     )
     return add_prompt_field_args(parser)
 

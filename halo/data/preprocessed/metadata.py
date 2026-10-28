@@ -211,6 +211,8 @@ class PreprocessedDatasetMetadata:
 
     model_name: str = ""
     tokenizer_vocab_size: int = 0
+    # The template the chat rows were rendered with, overrides applied; None for a text artifact.
+    rendered_chat_template: str | dict[str, str] | None = None
 
     max_length: int = 0
     packed: bool = False
@@ -378,10 +380,17 @@ def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any
         detail = "; ".join(
             f"{name}: prepared={prep!r} vs this run's default={run!r}" for name, (prep, run) in unstated.items()
         )
+        remedy = "set these explicitly in the YAML to silence this"
+        if "chat_template" in unstated:
+            # A stated chat_template replaces a shipped one only with force_chat_template: the exported template
+            # is the run tokenizer's.
+            remedy += (
+                ", chat_template together with force_chat_template: true, without which a checkpoint that ships "
+                "its own template keeps and exports it"
+            )
         logger.warning(
             f"Preprocessed dataset was prepared with render settings the training config does not "
-            f"state ({detail}). Rendering is baked, so the PREPARED value is what trained; set these "
-            f"explicitly in the YAML to silence this."
+            f"state ({detail}). Rendering is baked, so the PREPARED value is what trained; {remedy}."
         )
     if mismatched:
         detail = "; ".join(f"{name}: prepared={prep!r} vs run={run!r}" for name, (prep, run) in mismatched.items())
@@ -394,6 +403,48 @@ def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any
         )
 
 
+def _rows_chat_template(metadata: PreprocessedDatasetMetadata) -> tuple[Any, str] | None:
+    """``(template, origin)`` of the template the artifact's chat rows were rendered with, or None where the stamp
+    does not say: a text artifact renders none, and one without ``rendered_chat_template`` names at most a
+    ``--chat_template`` override. A non-VLM bake applies that whatever the tokenizer ships; such a VLM stamp does
+    not show whether its processor rendered with it."""
+    recorded = metadata.config or {}
+    if recorded.get("mode") == "text":
+        return None
+    override = recorded.get("chat_template")
+    template = metadata.rendered_chat_template
+    if template is None and not metadata.is_vlm:
+        template = override
+    if template is None:
+        return None
+    origin = (
+        "the --chat_template override metadata.json records"
+        if override
+        else f"the template {metadata.model_name} ships"
+    )
+    return template, origin
+
+
+def _verify_exported_chat_template(
+    metadata: PreprocessedDatasetMetadata, exported: Any, render_args: Any | None, run_model: str | None
+) -> None:
+    """Raise when ``exported``, the chat template the run ends with and its checkpoint exports, is not the one the
+    artifact's rows were rendered with: the model would train on one template and be served with the other."""
+    rows = _rows_chat_template(metadata)
+    if rows is None or rows[0] == exported:
+        return
+    run_side = "no chat template" if exported is None else f"the template {run_model or 'its checkpoint'} ships"
+    if getattr(render_args, "chat_template", None) and not getattr(render_args, "force_chat_template", False):
+        run_side += " (chat_template is set, but without force_chat_template: true it never replaces a shipped one)"
+    raise ValueError(
+        f"The preprocessed rows were rendered with {rows[1]}, but this run ends with {run_side}. The saved "
+        f"checkpoint exports the run's template, so the model would train on one template and be served with "
+        f"another. Rendering is baked: train with the rows' template (chat_template set to it, plus "
+        f"force_chat_template: true), or re-preprocess with the template this run exports "
+        f"(scripts/before_training/prepare_dataset.py)."
+    )
+
+
 def verify_preprocessed_dataset(
     metadata: PreprocessedDatasetMetadata,
     required_max_length: int,
@@ -401,10 +452,13 @@ def verify_preprocessed_dataset(
     required_train_on_completions_only: bool | None = None,
     render_args: Any | None = None,
     required_packing: bool | None = None,
+    run_processing_class: Any | None = None,
 ) -> None:
-    """Raise on a max_length, baked-label-masking or render-knob mismatch with the run; warn on a model mismatch
-    and on ``required_packing`` (the run's ``packing``) against an unpacked artifact. ``render_args`` is the
-    run's script-args object, compared on every render knob it carries."""
+    """Raise on a max_length, baked-label-masking or render-knob mismatch with the run, and on a chat template
+    ``run_processing_class`` (the run's final tokenizer or processor) ends with other than the rows were
+    rendered with; warn on a model mismatch and on ``required_packing`` (the run's ``packing``) against an
+    unpacked artifact. ``render_args`` is the run's script-args object, compared on every render knob it
+    carries."""
     if metadata.max_length < required_max_length:
         raise ValueError(
             f"Preprocessed dataset max_length ({metadata.max_length}) is less than "
@@ -444,6 +498,8 @@ def verify_preprocessed_dataset(
 
     if render_args is not None:
         _verify_render_knobs(metadata, render_args)
+    if run_processing_class is not None:
+        _verify_exported_chat_template(metadata, run_processing_class.chat_template, render_args, required_model)
 
     if required_packing and not metadata.packed:
         logger.warning(

@@ -65,7 +65,7 @@ torchrun --nproc_per_node=2 scripts/training/classification.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu` and `tests/gpu/trainers/other/test_classification.py`.
+Covering tests: `pytest tests/cpu/trainers tests/cpu/config -m cpu` and `tests/gpu/trainers/other/test_classification.py`; under EP, TP and ETP with save, exact resume and export, `tests/gpu/parallelism/ep/test_ep_pooled_head_trainers.py --trainer classification`; under PP, `tests/gpu/parallelism/pp/test_pp_classification.py` and `test_pp_trainer_checkpoints.py --trainer classification`.
 
 ## What to watch
 

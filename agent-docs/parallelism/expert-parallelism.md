@@ -545,7 +545,7 @@ replicas from rank 0. All ranks must enter the collectives even though only one 
 
 ## Limitations
 
-**Trainers.** Every trainer supports EP, and the `ep_size == 1` grouped-GEMM EP layers with it.
+**Trainers.** No trainer refuses EP or the `ep_size == 1` grouped-GEMM EP layers.
 The families whose spec declares a
 `weight_sync_refusal` narrow this — online and async GRPO raise at construction for
 each of them ([Per-family EP restrictions](#per-family-ep-restrictions)). Matrix:

@@ -88,7 +88,7 @@ torchrun --nproc_per_node=2 scripts/training/reward/reward_model.py <config> \
     --max_steps=5 --save_strategy=no --report_to=none
 ```
 
-Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/test_reward.py` and `test_reward_vlm_e2e.py`.
+Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/test_reward.py` and `test_reward_vlm_e2e.py`; under EP, TP and ETP with save, exact resume and export, `tests/gpu/parallelism/ep/test_ep_pooled_head_trainers.py --trainer reward`; under PP, `tests/gpu/parallelism/pp/test_pp_reward_bt.py` and `test_pp_trainer_checkpoints.py --trainer reward`.
 
 Once trained, score fresh generations or build preference pairs with `scripts/inference/reward_model/score.py` and `rejection_sample.py` ([Scripts](../reference/scripts-reference.md)). Both generate against a served endpoint from a `--dataset` prompt file before scoring; neither scores an existing (prompt, completion) corpus. Keep their `--rm_dtype` at `bfloat16`: reward logits are unbounded, and fp16 saturates on the completions the score must separate.
 

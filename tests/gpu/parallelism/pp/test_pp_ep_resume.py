@@ -86,8 +86,7 @@ def run(ctx):
             max_steps=max_steps,
             per_device_train_batch_size=BATCH,
             max_length=SEQ_LEN,
-            save_strategy="steps" if save_steps else "no",
-            save_steps=save_steps or 500,
+            save_every=save_steps,
             bf16=True,
             gradient_checkpointing=False,  # resume compares optimizer state, not the checkpoint path
         )

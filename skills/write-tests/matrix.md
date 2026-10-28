@@ -9,8 +9,8 @@ Every supported cell needs a correctness test (loss finite + decreasing over ≥
 invariants); every refused one a rejection test (must raise). The cells live once:
 
 - trainer × CP/PP: [Trainer Compatibility](../../agent-docs/reference/trainer-architecture.md#trainer-compatibility),
-  read off `SUPPORTS_CP` / `PP_REFUSAL` by `reject_undeclared_axes` (EP, ETP and TP run under every
-  trainer). A PP-supporting trainer still needs the construction-refusal tests of
+  read off `SUPPORTS_CP` / `PP_REFUSAL` by `reject_undeclared_axes` (no trainer refuses EP, ETP or
+  TP). A PP-supporting trainer still needs the construction-refusal tests of
   [Rejected combinations](../../agent-docs/parallelism/pipeline-parallelism.md#rejected-combinations);
   each PP suite lives under `tests/gpu/parallelism/pp/`;
 - supported axis sets and topology rules:

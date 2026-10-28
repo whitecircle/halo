@@ -23,7 +23,7 @@ The `scripts.*` flag helpers are the shared flag surfaces:
 
 The generation CLIs' runs live in `halo/entrypoints/`: `resumable_generation.py` (the S3 prompt dataset and its resume, the merged push, the empty-run refusal, the batched generation run and `run_async_cli`), `reward_scoring.py` (the reward-model load, the batched scorer and the `score.py` run) and `rejection_sampling.py` (the `rejection_sample.py` run).
 
-Multi-word flags use underscores (`--base_url`), matching the YAML field names a training flag overrides. One concept has one spelling across the tools: `--output_dir` for an output directory, `--output_path` for an output file, `--dataset` / `--split` / `--config` for a dataset source, `--model_id` for a model that may be a Hub repo, `--max_tokens` for a generation cap and `--max_workers` for request or episode concurrency.
+Multi-word flags use underscores (`--base_url`), matching the YAML field names a training flag overrides; a training script also takes the dashed spelling of an override ([CLI overrides](configuration-reference.md#cli-overrides)). A tool's on/off flag is negated by argparse's `--no-` prefix (`--no-trust_remote_code`), and a tool flag that is itself a negative keeps underscores (`--no_overwrite`). A training script's flags-only command line also takes transformers' `--no_<field>` for a field that defaults to true (`--no_gradient_checkpointing`); with a YAML, override it as `--<field>=false`. Beyond argparse's `-h`, short options exist only on `s3.py` (`-b`, `-s`, `-v`, `-q`, `-r`, `-n`, `-y`), `gradio_openai_chatbot.py` (`-m`) and `halo launch` (`-n`, `-a`, `-p`). One concept has one spelling across the tools: `--output_dir` for an output directory, `--output_path` for an output file, `--dataset` / `--split` / `--config` for a dataset source, `--model_id` for a model that may be a Hub repo, `--max_tokens` for a generation cap and `--max_workers` for request or episode concurrency.
 
 The checkpoint tools under `after_training/` and `before_training/` take one source/destination pair: `--input_dir` → `--output_dir` for a local checkpoint directory, `--model_id` → `--output_dir` where the source may also be a Hub repo (`patch_vocab.py`, `convert_deepseek_v4_bf16.py`, `convert_mistral4_bf16.py`, `convert_glm5_bf16.py`, `reset_sinks.py`). `reattach_vision_tower.py` takes both: `--input_dir` for the text-only export, `--model_id` for the multimodal base. A Hub `--model_id` is fetched without its vendor weight dumps (gpt-oss's `original/` and `metal/`), which no tool reads or carries into its output.
 
@@ -68,9 +68,10 @@ Which parallelism axes each trainer takes: [Trainer compatibility](trainer-archi
 | `scripts/environments/inference/eval_env.py` | Evaluate a served model on any other environment (`qa_search`, `exam_qa`, `swe`, `mcp`, …): [Evaluation](../training-methods/async-grpo/evaluation.md#running-an-evaluation) |
 | `scripts/environments/inference/regrade_trajectories.py` | Re-grade saved `eval_code_contests.py` trajectories in one bounded process, apart from generation: [Re-grading](../training-methods/async-grpo/evaluation.md#re-grading-recorded-trajectories) |
 
-In `openai_batched_generation.py`, `--dataset` / `--output_path` are S3 **keys**, not URIs:
-`build_s3_uri` joins them under `HALO_S3_DEFAULT_BUCKET` (required; unset raises) and `--subfolder`
-(default `datasets`, `None` to skip). On `deduplicate_dataset.py`, `--dataset` is a
+In `openai_batched_generation.py`, `--dataset` / `--output_path` name S3 datasets. A full
+`s3://<bucket>/<key>` URI is used as given; a bare key is placed by `build_s3_uri` under `--subfolder`
+(default `datasets`, `None` to skip) in `HALO_S3_DEFAULT_BUCKET`, and raises naming its flag while that
+variable is unset. On `deduplicate_dataset.py`, `--dataset` is a
 local file or a Hub dataset id and `--output_path` a local path.
 
 The three async CLIs — `openai_batched_generation.py`, `rejection_sample.py`, `score.py`
@@ -91,9 +92,8 @@ is no separate Azure mode — point `--base_url` at the deployment's OpenAI-comp
 any other endpoint.
 
 ```bash
-HALO_S3_DEFAULT_BUCKET=your-bucket \
 python scripts/inference/generation/openai_batched_generation.py \
-    --model my-model --dataset prompts --output_path responses
+    --model my-model --dataset s3://your-bucket/datasets/prompts --output_path s3://your-bucket/datasets/responses
 
 python scripts/inference/reward_model/score.py \
     --model my-model --dataset data/prompts.jsonl --rm_model_id path/to/reward-model
@@ -222,7 +222,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 | Script | Description |
 |--------|-------------|
 | `scripts/before_training/prepare_dataset.py` | Pre-process SFT or raw-text datasets: tokenization, packing, sharding. `--mode chat` (default) applies the chat template; `--mode text` tokenizes `--text_field` directly and appends EOS per document — the (continued) pre-training path. The output holds `train` and `test` (an input with no `test` bakes its `validation` split as `test`); any other input split is left out with a warning. A `--conversation_field` / `--text_field` / `--tools_field` / `--images_field` the run reads but a baked split does not carry is refused before tokenization |
-| `scripts/before_training/s3.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`). `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
+| `scripts/before_training/s3.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`, required while that is unset). `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
 | `scripts/before_training/patch_vocab.py` | Patch vocabulary with new tokens, reset attention sinks |
 | `scripts/before_training/convert_deepseek_v4_bf16.py` | Dequantize a FineGrained-FP8 DeepSeek-V4 checkpoint to uniform bf16 for training; `--max_shard_size` sizes the output shards (default `5GB`; see [DeepSeek-V4](../models/deepseek-v4.md)) |
 | `scripts/before_training/convert_mistral4_bf16.py` | Dequantize a public FP8 Mistral Small 4 checkpoint to bf16, streaming shard-by-shard (no full-model RAM footprint); `--max_shard_size` caps the output shards (default `5GB`; see [Mistral4](../models/mistral4.md)) |
