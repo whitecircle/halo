@@ -121,7 +121,7 @@ The SGLang server needs `SGLANG_TRUST_REMOTE_CODE=1` (the repo ships its modelin
 
 ## Configs
 
-`inclusionAI/Ling-mini-2.0` (16B, 256 experts) trains under EP=8 at 24K max length with `moe_balancing: bias_update`: `examples/sft/ling_mini_2/ling-mini-2-ultrachat-ep.yaml`.
+`inclusionAI/Ling-mini-2.0` (16B, 256 experts) trains under EP=8 at 24K max length with `moe_balancing: bias_update`: `examples/sft/bailing/ling-mini-2-ultrachat-ep.yaml`.
 
 The shipped config pins the toolkit's own `jinja-templates/ling/ling-multiturn.jinja` with `force_chat_template: true` (`ling-instruct.jinja` is its single-turn sibling and raises on multi-turn data; `ling3-instruct.jinja` is the Ling 3.0 template), because the hub templates drift across revisions and the training template must match the served one. `ling-native.jinja` is the verbatim upstream `inclusionAI/Ling-mini-2.0` template (system messages + tools) for runs that need the exact hub render.
 

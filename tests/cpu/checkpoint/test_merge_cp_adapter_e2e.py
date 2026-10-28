@@ -39,10 +39,10 @@ from peft import LoraConfig, PeftModel, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.gemma4.modeling_gemma4 import Gemma4ClippableLinear
 
-from halo.checkpoint.adapter_merge import merge_peft_adapter
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ROUTER_BALANCING_BIASES_FILE, TRAINING_PROVENANCE_FILE
 from halo.checkpoint.parallel.adapters import _cp_normalized_config, save_peft_adapters
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS, apply_training_sidecars
+from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS

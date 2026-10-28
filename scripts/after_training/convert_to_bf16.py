@@ -15,7 +15,7 @@ Usage:
 
 import argparse
 
-from halo.checkpoint.bf16_conversion import convert_to_bf16
+from halo.checkpoint.tools.bf16_conversion import convert_to_bf16
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_device_map_arg, add_max_shard_size_arg, add_task_arg, add_trust_remote_code_arg
 

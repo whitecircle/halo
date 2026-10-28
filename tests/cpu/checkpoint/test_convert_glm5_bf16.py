@@ -25,7 +25,7 @@ import torch
 from safetensors import safe_open
 from safetensors.torch import save_file
 
-from halo.checkpoint.fp8_dequant import dequantize_block_fp8
+from halo.checkpoint.tools.fp8_dequant import dequantize_block_fp8
 from scripts.before_training.convert_glm5_bf16 import main
 
 _BLOCK = (4, 4)

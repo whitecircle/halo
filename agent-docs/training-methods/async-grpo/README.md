@@ -98,7 +98,7 @@ Run the environment on a few rows first. `--training_config` samples under the t
 ([Smoke-testing a config](evaluation.md#smoke-testing-a-config)).
 
 ```bash
-python scripts/environments/inference/run_env.py \
+python scripts/environments/inference/eval_env.py \
     --training_config examples/grpo/environmental/environmental-grpo-template.yaml \
     --dataset <hub-id> --split test --num_examples 20 \
     --base_url http://localhost:8000/v1 --model <served-model-id>

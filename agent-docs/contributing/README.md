@@ -143,9 +143,9 @@ are enforced by `tests/cpu/conventions/`.
 - **Imports resolve from the image, not from `sys.path` surgery.** `PYTHONPATH=/workspace` is baked in
   and `tests/conftest.py` puts the repo root on the path, so `from halo...` / `from tests.common...` work
   under `pytest` and a standalone `torchrun`. A tool's driver lives in `halo/` and a test imports it from
-  there (`from halo.checkpoint.model_merge import merge_models`); `scripts/` is a namespace package, so a
+  there (`from halo.checkpoint.tools.model_merge import merge_models`); `scripts/` is a namespace package, so a
   test that drives a CLI's own parser imports it by dotted path
-  (`from scripts.environments.inference.run_code_contests import parse_args`), and
+  (`from scripts.environments.inference.eval_code_contests import parse_args`), and
   `tests.common.repo.load_script_module` loads a file by path where a test needs its own module object or
   the file sits outside the packages (`docker/`).
 - **Every first-party reference resolves without running.**
@@ -173,9 +173,8 @@ are enforced by `tests/cpu/conventions/`.
 - **The import layering is read off the import graph.** `tests/cpu/conventions/test_import_layering.py`
   holds the layer table (`_LAYERS`: a unit imports only units of lower rows, `cli` imports nothing from
   the package, the tool-safe units reach no process group, parallelism or rollout sync, one lazy
-  `deep_ep` importer, no module cycle), places a module that has not moved yet through
-  `_PENDING_MOVES`, refuses a raw toolkit env read, and asserts `_LAYERS` equals the table
-  [Architecture](../reference/architecture.md#layer-table) renders. `TYPE_CHECKING` imports are exempt.
+  `deep_ep` importer, no module cycle), refuses a raw toolkit env read, and asserts `_LAYERS` equals the
+  table [Architecture](../reference/architecture.md#layer-table) renders. `TYPE_CHECKING` imports are exempt.
 - **Convention tests also run on the hosted runner.** The `conventions` job in `.github/workflows/lint.yml`
   runs the files it lists on the standard library and pytest alone, so such a test reads the source with
   `ast` and takes repo helpers from `tests.common.repo`; a listed test that runs a probe script names the

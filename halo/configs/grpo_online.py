@@ -1,4 +1,4 @@
-"""Script arguments for RLVR online GRPO (verifiable rule-based rewards)."""
+"""Online GRPO script arguments."""
 
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
@@ -18,7 +18,7 @@ from halo.rewards.terms import RewardTerm, parse_reward_terms, read_context_file
 
 
 @dataclass
-class RLVROnlineGRPOScriptArguments(
+class OnlineGRPOScriptArguments(
     PromptDatasetArguments,
     ChunkedLogprobsArguments,
     AdvantageShapingArguments,

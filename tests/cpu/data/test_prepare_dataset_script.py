@@ -60,7 +60,7 @@ class _ReachedPreprocess(Exception):
     pass
 
 
-publishing.setup_tokenizer = lambda args: object()  # never used (preprocess is stubbed) — avoids any download
+publishing.load_tokenizer = lambda args: object()  # never used (preprocess is stubbed) — avoids any download
 publishing.AutoConfig = types.SimpleNamespace(
     from_pretrained=lambda *args, **kwargs: types.SimpleNamespace(model_type="qwen3")
 )

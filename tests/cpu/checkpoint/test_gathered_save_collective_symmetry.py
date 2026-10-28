@@ -9,7 +9,7 @@ but nothing prevents one), so these tests count gather calls on both sides of ``
 waiting for a live hang to prove it.
 
 Counting is done by replacing the gather primitives where every branch reads them — the pair
-``halo.runtime.dtensor.resolve_retained`` reads (``full_cpu_tensor`` / ``materialize_dtensor``). The
+``halo.runtime.dtensor.gather_full_tensors`` reads (``full_cpu_tensor`` / ``materialize_dtensor``). The
 tensors themselves stay plain, since a real DTensor needs an initialized process group.
 """
 

@@ -1,10 +1,8 @@
 """The parallelism axis vocabulary, the allowlist of axis combinations, and every config-time refusal.
 
-Each ``reject_*`` reads a :class:`~halo.distributed.parallelism_config.ParallelismConfig` and raises
-``ValueError``. ``reject_unsupported_axes`` runs before topology resolution and reads only the axis sizes;
-the composition refusals read the resolved topology. The config applies both at construction; the
-accelerate-launch and determinism refusals are applied by the trainers and entry scripts.
-"""
+Each ``reject_*`` reads a ``ParallelismConfig`` and raises ``ValueError``. ``reject_unsupported_axes`` reads only the
+axis sizes, before topology resolution; the composition refusals read the resolved topology. The config applies both
+at construction; the trainers and entry scripts apply the accelerate-launch and determinism refusals."""
 
 from __future__ import annotations
 

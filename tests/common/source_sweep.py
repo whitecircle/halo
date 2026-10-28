@@ -10,7 +10,7 @@ import ast
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
-from halo.checkpoint.offline_export import load_task_model
+from halo.checkpoint.tools.offline_export import load_task_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.model_preparation import auto_load_model
 from tests.common.repo import REPO_ROOT

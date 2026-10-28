@@ -185,7 +185,7 @@ def test_tool_commands_cover_after_training_inference_and_preparation(tmp_path):
     write_script(tmp_path / "scripts/after_training/merge_ep_shards.py")
     write_script(tmp_path / "scripts/inference/reward_model/score.py")
     write_script(tmp_path / "scripts/before_training/prepare_dataset.py")
-    write_script(tmp_path / "scripts/environments/inference/run_env.py")
+    write_script(tmp_path / "scripts/environments/inference/eval_env.py")
     # training scripts must NOT leak into the tool index
     write_script(tmp_path / "scripts/training/sft.py")
 
@@ -195,7 +195,7 @@ def test_tool_commands_cover_after_training_inference_and_preparation(tmp_path):
     assert index["merge-ep-shards"] == tmp_path / "scripts/after_training/merge_ep_shards.py"
     assert index["inference/reward-model/score"] == tmp_path / "scripts/inference/reward_model/score.py"
     assert index["before-training/prepare-dataset"] == tmp_path / "scripts/before_training/prepare_dataset.py"
-    assert index["environments/inference/run-env"] == tmp_path / "scripts/environments/inference/run_env.py"
+    assert index["environments/inference/eval-env"] == tmp_path / "scripts/environments/inference/eval_env.py"
     assert all(not name.startswith("training/") for name in index)
     assert "sft" not in index
 

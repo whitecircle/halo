@@ -50,5 +50,5 @@ For imbalanced data set `class_weights`, or `derive_class_weights` on single-lab
 single-label runs, `mcc`, which stays honest under class imbalance.
 
 Every knob, the vision-language reward path and the head roster:
-[Reward modeling](../../agent-docs/training-methods/preference/reward-modeling.md) ↗ ·
+[Reward modeling](../../agent-docs/training-methods/reward-modeling.md) ↗ ·
 [Classification](../../agent-docs/training-methods/classification.md) ↗.

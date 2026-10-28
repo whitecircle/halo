@@ -16,10 +16,10 @@ import torch.nn as nn
 from safetensors import safe_open
 
 from halo.checkpoint.reading import StreamingCheckpointReader
-from halo.distributed.expert_parallel.lazy_plan import PER_EXPERT_KEY_PATTERN
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import reject_fp8_tensor
 from halo.model_loading.lazy_safetensors.materialization import assign_tensor_to_model, verify_loaded_shape
+from halo.model_loading.parallel.lazy_plan import PER_EXPERT_KEY_PATTERN
 from halo.models.moe.family_specs import per_expert_fusion_map
 
 logger = logging.getLogger(__name__)

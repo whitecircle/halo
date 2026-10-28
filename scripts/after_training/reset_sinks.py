@@ -18,7 +18,7 @@ Usage:
 
 import argparse
 
-from halo.checkpoint.sink_reset import reset_sinks
+from halo.checkpoint.tools.sink_reset import reset_sinks
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args
 

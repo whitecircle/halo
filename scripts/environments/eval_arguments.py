@@ -1,6 +1,6 @@
 """The flags every environment eval script registers: the dataset source, the endpoint, the training contract,
 the sampling overrides and the outputs. Flags only; the readers they feed live in
-:mod:`halo.entrypoints.environment_eval`."""
+:mod:`halo.entrypoints.eval_contract`."""
 
 import argparse
 
@@ -9,7 +9,7 @@ from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS
 from scripts.cli_arguments import add_openai_endpoint_args
 
 
-def add_endpoint_args(parser: argparse.ArgumentParser) -> None:
+def add_eval_args(parser: argparse.ArgumentParser) -> None:
     """Register the dataset-source, endpoint and output flags every eval script shares; ``--split`` and the
     task flags stay the runner's own. The sampling flags default to ``None``, so :func:`rollout_config_from_args`
     tells an explicit value from an omitted one: explicit flag > ``--training_config`` > the script's default."""

@@ -35,6 +35,7 @@ from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import TREE_PACKING_FIELDS
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
+    SelfDistillVLMDataCollator,
     audit_self_distill_row,
     confidence_normalizer,
     encode_self_distill_row,
@@ -42,7 +43,6 @@ from halo.data.collators.self_distill import (
     privileged_hint,
     teacher_history,
 )
-from halo.data.collators.vlm import SelfDistillVLMDataCollator
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.text_rows import text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset

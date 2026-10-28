@@ -57,7 +57,6 @@ from trl import SFTConfig
 
 from halo.callbacks.efficiency import EfficiencyCallback
 from halo.callbacks.torch_profiler import TorchProfilerCallback
-from halo.diagnostics.ep_span_timing import get_ep_span_timer
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_float, torch_trace_dir
@@ -76,6 +75,7 @@ from tests.common.distributed import (
     setup_cache_dirs,
     teardown_distributed,
 )
+from tests.common.ep_span_timer import get_ep_span_timer
 from tests.common.memory import cleanup_memory, gpu_mem_gb, host_peak_rss_gib, reset_host_peak_rss
 from tests.common.models import MODEL_CONFIGS
 from tests.common.rank_log import log

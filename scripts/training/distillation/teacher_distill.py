@@ -9,7 +9,7 @@ import logging
 
 from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
 
-from halo.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
+from halo.configs.distillation import TeacherDistillationConfig, TeacherDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.collators.factory import select_data_collator
@@ -44,7 +44,7 @@ from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distillation.divergences import resolve_shared_vocab_width
-from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -108,7 +108,7 @@ def _text_distill_collator(args, tokenizer, model_config):
 
 def main():
     args, training_config, model_config, dist_args = parse_script_args(
-        TeacherDistillScriptArguments, DistillationConfig, ModelArguments, ParallelismArguments
+        TeacherDistillScriptArguments, TeacherDistillationConfig, ModelArguments, ParallelismArguments
     )
 
     context = init_training_script(
@@ -117,7 +117,7 @@ def main():
         model_config,
         dist_args,
         script_prefix="distill",
-        trainer_cls=DistributedDistillationTrainer,
+        trainer_cls=DistributedTeacherDistillationTrainer,
     )
     parallelism_config = context.parallelism_config
 
@@ -179,7 +179,7 @@ def main():
 
     barrier()
 
-    trainer = DistributedDistillationTrainer(
+    trainer = DistributedTeacherDistillationTrainer(
         student_model=student_model,
         teacher_model=teacher_model,
         teacher_tokenizer=teacher_tokenizer,

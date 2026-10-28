@@ -1,10 +1,8 @@
 """AdamW with bf16 master weights and moments (6 B/param), stochastically rounded.
 
-Stochastic rounding keeps the bf16 writes unbiased, where nearest rounding would truncate a sub-ULP
-``lr*step`` update to zero and inflate the non-negative second moment. Writes go through
-``p.detach()`` and bump ``_version`` explicitly: the Triton stores are invisible to ATen, and the
-low-precision weight cache keys on the counter.
-"""
+Stochastic rounding keeps the bf16 writes unbiased, where nearest rounding would truncate a sub-ULP ``lr*step``
+update to zero and inflate the non-negative second moment. Writes go through ``p.detach()`` and bump ``_version``
+explicitly: the Triton stores are invisible to ATen, and the low-precision weight cache keys on the counter."""
 
 import logging
 import math

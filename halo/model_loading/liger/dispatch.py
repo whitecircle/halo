@@ -1,10 +1,8 @@
 """Liger Kernel dispatch: resolve the applier per ``model_type`` (the toolkit spec for it or its text sub-config's,
-then Liger's registry in the same order) and apply it with the per-family defaults and the parallelism safety
-rules.
+then Liger's registry in the same order) and apply it with the per-family defaults and the parallelism safety rules.
 
 Cross-entropy is always the toolkit's scoped patch: an upstream applier's CE branch rebinds
-``torch.nn.functional.cross_entropy`` process-wide, under every caller that is not the model's loss.
-"""
+``torch.nn.functional.cross_entropy`` process-wide, under every caller that is not the model's loss."""
 
 from __future__ import annotations
 

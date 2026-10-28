@@ -9,7 +9,7 @@ from collections.abc import Callable, Coroutine
 
 from datasets import Dataset
 
-from halo.data.pipeline.conversation import build_base_prompt, resolve_system_prompt
+from halo.data.conversation import build_base_prompt, resolve_system_prompt
 from halo.data.sources.s3_client import S3Client, build_s3_uri
 from halo.data.sources.s3_dataset_store import load_dataset_from_s3_uri, push_dataset_to_s3_uri
 from halo.inference.batch_requests import parallel_openai_requests

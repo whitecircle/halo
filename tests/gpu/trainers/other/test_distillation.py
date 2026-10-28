@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""DistributedDistillationTrainer end-to-end, with the logged loss pinned to its exact objective.
+"""DistributedTeacherDistillationTrainer end-to-end, with the logged loss pinned to its exact objective.
 
 The objective is ``alpha * KL(teacher_T || student_T) * T^2 + (1 - alpha) * CE(student, hard_labels)``,
 each term ONE mean over the batch's supervised positions. Everything that can go wrong there is
@@ -34,11 +34,11 @@ import torch.nn.functional as F
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from halo.configs.distillation import DistillationConfig
+from halo.configs.distillation import TeacherDistillationConfig
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_all, world_mean
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
@@ -206,7 +206,7 @@ def run(ctx):
 
     dataset = create_distillation_dataset(NUM_TRAIN_SAMPLES, tokenizer)
 
-    config = DistillationConfig(
+    config = TeacherDistillationConfig(
         output_dir=ctx.output_dir,
         max_steps=NUM_TRAIN_STEPS,
         per_device_train_batch_size=BATCH_SIZE,
@@ -231,7 +231,7 @@ def run(ctx):
         distill_alpha=ALPHA,
     )
 
-    trainer = DistributedDistillationTrainer(
+    trainer = DistributedTeacherDistillationTrainer(
         student_model=build_model(),
         teacher_model=build_model(),
         teacher_tokenizer=tokenizer,

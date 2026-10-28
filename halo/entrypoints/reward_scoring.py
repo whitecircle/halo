@@ -19,8 +19,8 @@ from tqdm import tqdm
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
 from halo.checkpoint.reading import reject_partial_checkpoint
-from halo.data.pipeline.chat_render import tokenize_rendered
-from halo.data.pipeline.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
+from halo.data.chat_render import tokenize_rendered
+from halo.data.conversation import build_base_prompt, reject_image_content, resolve_system_prompt
 from halo.entrypoints.resumable_generation import assistant_turn, follow_up_messages, reject_empty_results
 from halo.inference.openai_client import build_openai_client, chat_completion
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason

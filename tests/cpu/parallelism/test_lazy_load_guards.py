@@ -33,16 +33,16 @@ import halo.model_loading.parallel.ep as ep_lazy_loader
 import halo.model_loading.parallel.model_source as model_source
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser
-from halo.distributed.expert_parallel.lazy_plan import WeightPlanner
 from halo.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
 from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.expert_fuser import ExpertFuser
+from halo.model_loading.parallel.lazy_plan import WeightPlanner
 from halo.runtime import consensus
 from tests.common.models import TINY_GPTOSS_CONFIG
 from tests.common.repo import REPO_ROOT
 
 E_GLOBAL, M, H = 8, 6, 4
-LOADER_LOGGER = "halo.distributed.expert_parallel.lazy_plan"
+LOADER_LOGGER = "halo.model_loading.parallel.lazy_plan"
 
 # Loaders that open the lazy safetensors path and must reach it through the shared rank-0 gate.
 _LAZY_GATE_CALL_SITES = (

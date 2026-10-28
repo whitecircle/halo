@@ -86,15 +86,15 @@ TOOL_DRIVER_ROOTS = ("scripts", "halo/checkpoint", "halo/entrypoints/reward_scor
 INFERENCE_TOOL_LOADERS = (
     ("halo/entrypoints/reward_scoring.py", "load_reward_model"),
     ("halo/data/deduplication.py", "compute_embeddings"),
-    ("halo/checkpoint/bf16_conversion.py", "_load_verified"),
+    ("halo/checkpoint/tools/bf16_conversion.py", "_load_verified"),
 )
 
 # Load → cast/patch/merge → save. No forward exists in these files, and ``state_dict`` omits
 # non-persistent buffers, so an unrepaired one reaches neither a number nor the written checkpoint.
 CONVERSION_TOOL_LOADERS = (
-    ("halo/checkpoint/adapter_merge.py", "load_task_base_model"),
-    ("halo/checkpoint/vocab_patch.py", "patch_vocabulary"),
-    ("halo/checkpoint/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
+    ("halo/checkpoint/tools/adapter_merge.py", "load_task_base_model"),
+    ("halo/checkpoint/tools/vocab_patch.py", "patch_vocabulary"),
+    ("halo/checkpoint/tools/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
 )
 
 # How a file betrays that it runs the model it loaded, for the save-only half of the split above.

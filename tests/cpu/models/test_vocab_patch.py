@@ -23,7 +23,7 @@ import pytest
 import torch
 from torch import nn
 
-from halo.checkpoint import vocab_patch as pv
+from halo.checkpoint.tools import vocab_patch as pv
 
 # --------------------------------------------------------------------------- #
 # Tiny stubs reproducing the gpt-oss shape: tokenizer vocab < padded embedding.

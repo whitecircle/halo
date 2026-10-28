@@ -18,11 +18,11 @@ from unittest.mock import patch
 
 import pytest
 
-from halo.distributed.expert_parallel import lazy_plan
 from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
-from halo.distributed.expert_parallel.lazy_plan import (
+from halo.model_loading.parallel import lazy_plan
+from halo.model_loading.parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
     PER_EXPERT_KEY_PATTERN,
     ExpertKeyLayout,

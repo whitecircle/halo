@@ -17,7 +17,7 @@ from trl import GRPOTrainer
 
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.dataloaders import DataParallelLoaderMixin
-from halo.trainers.grpo.environmental.environmental_rules import validate_eval_round
+from halo.trainers.grpo.environmental.environmental_rules import reject_straddling_eval_groups
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 
 SENTINEL = object()
@@ -102,7 +102,7 @@ def test_custom_dp_path_sizes_its_loader_params_from_the_hook():
 
 
 def _validate(host) -> None:
-    validate_eval_round(host.args, host.async_config, host.num_generations_eval)
+    reject_straddling_eval_groups(host.args, host.async_config, host.num_generations_eval)
 
 
 def test_round_must_hold_whole_eval_groups_and_a_full_tail():

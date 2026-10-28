@@ -1,10 +1,8 @@
-"""ctypes binding of the libnccl calls rank 0 of a vLLM weight-transfer group makes. Vendored from vLLM v0.18.0
-(``vllm.distributed.device_communicators.pynccl_wrapper``), Apache-2.0.
-
-Wire contract: the trainer publishes ``ncclUniqueId`` pickled from this module path, and the vLLM image
-unpickles it through a shim at the same path that re-exports vLLM's own class (``Dockerfile.vllm``). The
-path, the class name and its ``_fields_`` are pinned by ``tests/cpu/weight_sync/test_wire_pins.py``.
-"""
+"""ctypes binding of the libnccl calls rank 0 of a vLLM weight-transfer group makes, vendored from vLLM v0.18.0
+(``vllm.distributed.device_communicators.pynccl_wrapper``), Apache-2.0. Wire contract: the trainer publishes
+``ncclUniqueId`` pickled from this module path, and the vLLM image unpickles it through a shim at the same path that
+re-exports vLLM's own class (``Dockerfile.vllm``). The path, the class name and its ``_fields_`` are pinned by
+``tests/cpu/weight_sync/test_wire_pins.py``."""
 
 import ctypes
 import functools

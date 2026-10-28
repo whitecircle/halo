@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Validation tests for ClassificationConfig, EmbeddingConfig,
-TeacherDistillScriptArguments and RLVROnlineGRPOScriptArguments ``__post_init__`` (a CLI override meets
+TeacherDistillScriptArguments and OnlineGRPOScriptArguments ``__post_init__`` (a CLI override meets
 the same guards), plus the NaN refusal on every float those configs and SMPO range-check.
 
 Each boundary the validator rejects is exercised (raise expected) alongside a valid
@@ -16,9 +16,9 @@ Run: pytest tests/cpu/config/test_config_validators.py
 import pytest
 
 from halo.configs.classification import ClassificationConfig
-from halo.configs.distillation import DistillationConfig, TeacherDistillScriptArguments
+from halo.configs.distillation import TeacherDistillationConfig, TeacherDistillScriptArguments
 from halo.configs.embedding import EmbeddingConfig
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.preference import SMPOConfig
 
@@ -172,11 +172,11 @@ def test_embedding_weights_without_dimensions_raises_on_cli_override(tmp_path):
         parser.parse_dict(parser.load_values([str(config), "--matryoshka_weights=1.0,0.5"]))
 
 
-# DistillationConfig / TeacherDistillScriptArguments / RLVROnlineGRPOScriptArguments range guards
+# TeacherDistillationConfig / TeacherDistillScriptArguments / OnlineGRPOScriptArguments range guards
 
 
 def test_distill_defaults_valid():
-    cfg = DistillationConfig(**_CPU_OK)
+    cfg = TeacherDistillationConfig(**_CPU_OK)
     assert cfg.distill_temperature == 1.0
     assert cfg.distill_alpha == 1.0
     assert cfg.distill_loss == "kl_divergence"
@@ -194,7 +194,7 @@ def test_distill_defaults_valid():
 )
 def test_distill_out_of_range_raises(kwargs, match):
     with pytest.raises(ValueError, match=match):
-        DistillationConfig(**_CPU_OK, **kwargs)
+        TeacherDistillationConfig(**_CPU_OK, **kwargs)
 
 
 def test_distill_teacher_model_still_required_on_the_script_args():
@@ -213,14 +213,14 @@ def test_distill_teacher_model_still_required_on_the_script_args():
 )
 def test_rlvr_rlrr_out_of_range_raises(kwargs, match):
     with pytest.raises(ValueError, match=match):
-        RLVROnlineGRPOScriptArguments(**kwargs)
+        OnlineGRPOScriptArguments(**kwargs)
 
 
 @pytest.mark.parametrize(
     ("config_cls", "field_name"),
     [
         (ClassificationConfig, "focal_gamma"),
-        (DistillationConfig, "distill_temperature"),
+        (TeacherDistillationConfig, "distill_temperature"),
         (EmbeddingConfig, "loss_scale"),
         (SMPOConfig, "target_margin"),
         (SMPOConfig, "initial_margin"),

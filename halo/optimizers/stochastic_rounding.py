@@ -1,10 +1,8 @@
 """Stochastic rounding to bf16: the rounding-noise seeds and the rounding step every SR optimizer shares.
 
-The noise is a pure function of a parameter's optimizer step and name, so replicas round alike whatever
-else each rank's optimizer holds, and a resumed run rounds as the uninterrupted one did, with no generator
-state to checkpoint. An element's noise is keyed by its offset in the rank's local shard: reproducible for
-one sharding layout (the one a resume must keep to restore optimizer shards), not across layouts.
-"""
+The noise is a pure function of a parameter's optimizer step and name, so replicas round alike and a resumed run rounds
+as the uninterrupted one did, with no generator state to checkpoint. An element's noise is keyed by its local-shard
+offset: reproducible for one sharding layout (the one an optimizer-shard resume must keep), not across layouts."""
 
 import functools
 import hashlib

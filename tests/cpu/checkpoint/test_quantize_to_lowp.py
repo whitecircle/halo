@@ -1,4 +1,4 @@
-"""CPU test for halo/checkpoint/lowp_export.py — the bf16/fp32 → block-scaled mxfp8/mxfp4/nvfp4
+"""CPU test for halo/checkpoint/tools/lowp_export.py — the bf16/fp32 → block-scaled mxfp8/mxfp4/nvfp4
 checkpoint conversion that pairs with quantization-aware training.
 
 Verifies: (1) only the targeted MLP/expert weights are quantized (attention/norm/embed/bias copied
@@ -20,8 +20,8 @@ import torch
 import torch.nn.functional as F
 from safetensors.torch import load_file, save_file
 
-from halo.checkpoint import lowp_export
 from halo.checkpoint.reading import checkpoint_shard_files
+from halo.checkpoint.tools import lowp_export
 from halo.kernels.lowp.quantization import BlockScaledTensor, dequantize, fake_quant
 from halo.kernels.lowp.spec import MLP_PROJECTIONS
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS

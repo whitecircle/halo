@@ -29,8 +29,8 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from halo.checkpoint import offline_export
-from halo.checkpoint.bf16_conversion import (
+from halo.checkpoint.tools import offline_export
+from halo.checkpoint.tools.bf16_conversion import (
     _BF16_VERIFY_MIN_FRACTION,
     convert_to_bf16,
     verify_adapter_conversion,

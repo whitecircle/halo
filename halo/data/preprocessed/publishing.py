@@ -81,7 +81,7 @@ def apply_tokenizer_overrides(tokenizer, config: PreprocessingConfig) -> None:
         tokenizer.pad_token = tokenizer.eos_token
 
 
-def setup_tokenizer(config: PreprocessingConfig) -> PreTrainedTokenizer:
+def load_tokenizer(config: PreprocessingConfig) -> PreTrainedTokenizer:
     logger.info(f"Loading tokenizer from {config.model_name_or_path}")
     tokenizer = AutoTokenizer.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
     apply_tokenizer_overrides(tokenizer, config)
@@ -93,7 +93,7 @@ def setup_tokenizer(config: PreprocessingConfig) -> PreTrainedTokenizer:
     return tokenizer
 
 
-def setup_vlm_processor(config: PreprocessingConfig):
+def load_vlm_processor(config: PreprocessingConfig):
     logger.info(f"Loading VLM processor from {config.model_name_or_path}")
     processor_kwargs = {"trust_remote_code": config.trust_remote_code}
     if config.min_pixels is not None:
@@ -311,7 +311,7 @@ def run_dataset_preparation(args: PrepareDatasetArguments, config: Preprocessing
         logger.info("DRY RUN - no changes will be made")
         return
 
-    tokenizer_or_processor = setup_vlm_processor(config) if config.is_vlm else setup_tokenizer(config)
+    tokenizer_or_processor = load_vlm_processor(config) if config.is_vlm else load_tokenizer(config)
     dataset = load_input_dataset(args)
     require_declared_columns(dataset, config, args.input)
 

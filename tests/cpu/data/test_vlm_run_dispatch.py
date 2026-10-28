@@ -27,17 +27,17 @@ from datasets import Image as ImageFeature
 from PIL import Image as PILImage
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from halo.data import conversation as conversation_module
 from halo.data import vlm_detection as vlm_detection_module
 from halo.data import vlm_render as vlm_render_module
+from halo.data.chat_render import render_generation_prompt
 from halo.data.collators.self_distill import SelfDistillTextCollator
-from halo.data.pipeline import conversation as conversation_module
-from halo.data.pipeline import vlm_rows as vlm_rows_module
-from halo.data.pipeline.chat_render import render_generation_prompt
-from halo.data.pipeline.conversation import (
+from halo.data.conversation import (
     IMAGE_PART_PAYLOAD_KEY,
     IMAGE_PART_TYPE,
     conversation_carries_images,
 )
+from halo.data.pipeline import vlm_rows as vlm_rows_module
 from halo.data.pipeline.preferences import render_preference_row
 from halo.data.pipeline.text_rows import prepare_generative_row, render_row_conversation
 from halo.data.pipeline.vlm_rows import normalize_vlm_conversation

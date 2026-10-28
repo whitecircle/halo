@@ -21,12 +21,6 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from halo.checkpoint.ep_shard_merge import (
-    EP_EXPERT_PATTERN,
-    EP_EXPERT_SUFFIXES,
-    group_expert_weights,
-    merge_ep_shards,
-)
 from halo.checkpoint.format import (
     EP_SHARD_KEY_RE,
     OPTIMIZER_META_FILE,
@@ -38,6 +32,12 @@ from halo.checkpoint.format import (
     optimizer_shard_filename,
 )
 from halo.checkpoint.parallel.resume_source import classify_resume_weights
+from halo.checkpoint.tools.ep_shard_merge import (
+    EP_EXPERT_PATTERN,
+    EP_EXPERT_SUFFIXES,
+    group_expert_weights,
+    merge_ep_shards,
+)
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
 from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer

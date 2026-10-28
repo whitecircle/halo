@@ -7,15 +7,15 @@ from functools import partial
 import torch
 
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
-from halo.distributed.expert_parallel.lazy_plan import LazyLoadPlan
 from halo.model_loading.lazy_safetensors.materialization import (
     WeightAction,
     WeightPlan,
     materialize_empty_like,
     stream_planned_weights,
 )
+from halo.model_loading.parallel.expert_fuser import ExpertFuser, FusionTask
 from halo.model_loading.parallel.fp32_masters import fp32_master_param_keys, verify_fp32_master_coverage
+from halo.model_loading.parallel.lazy_plan import LazyLoadPlan
 from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.ranks import get_local_rank
 

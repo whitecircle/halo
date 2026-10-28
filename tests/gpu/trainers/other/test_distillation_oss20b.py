@@ -2,7 +2,7 @@
 """
 Distillation training test with EP/TP parallelism on GptOss-20B.
 
-Validates that DistributedDistillationTrainer works with different parallelism
+Validates that DistributedTeacherDistillationTrainer works with different parallelism
 modes using GptOss-20B as both teacher and student (one checkpoint on both
 sides). The teacher is always loaded without parallelism; only the student
 gets EP/TP.
@@ -36,12 +36,12 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer, DataCollatorForLanguageModeling
 
-from halo.configs.distillation import DistillationConfig
+from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import supports_grouped_mm
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime.collectives import barrier
-from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
@@ -168,7 +168,7 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
 
         data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-        config = DistillationConfig(
+        config = TeacherDistillationConfig(
             output_dir=output_dir,
             max_steps=NUM_TRAIN_STEPS,
             per_device_train_batch_size=BATCH_SIZE,
@@ -189,8 +189,8 @@ def run_distillation_test(mode: str, rank: int, world_size: int, local_rank: int
             distill_alpha=0.5,
         )
 
-        log("\n--- Creating DistributedDistillationTrainer ---")
-        trainer = DistributedDistillationTrainer(
+        log("\n--- Creating DistributedTeacherDistillationTrainer ---")
+        trainer = DistributedTeacherDistillationTrainer(
             student_model=student_model,
             teacher_model=teacher_model,
             teacher_tokenizer=tokenizer,

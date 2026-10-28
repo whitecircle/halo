@@ -41,7 +41,7 @@ TRAINERS = {
     "OfflineGRPOTrainer",
     "DistributedOnlineGRPOTrainer",
     "DistributedAsyncEnvironmentalGRPOTrainer",
-    "DistributedDistillationTrainer",
+    "DistributedTeacherDistillationTrainer",
     "DistributedSelfDistillationTrainer",
     "DistributedSDPGTrainer",
     "EmbeddingTrainer",

@@ -12,8 +12,8 @@ import json
 
 import pytest
 
+from halo.data.conversation import resolve_json_value
 from halo.data.pipeline import vlm_rows
-from halo.data.pipeline.conversation import resolve_json_value
 from halo.data.pipeline.map_cache_key import function_cache_id, kwargs_fingerprint, map_cache_file_name
 from halo.data.pipeline.preferences import render_preference_row
 from halo.data.pipeline.text_rows import build_chat_row_processor, prepare_generative_row, render_row_conversation

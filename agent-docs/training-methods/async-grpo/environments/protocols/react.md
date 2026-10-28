@@ -65,7 +65,7 @@ Per-turn shaping, logged as `reward/turn_shaping`: `+thought_reward` or `-no_tho
 ## Evaluation
 
 ```bash
-python scripts/environments/inference/run_env.py \
+python scripts/environments/inference/eval_env.py \
     --env_type react_math --dataset <hf-id-or-dir> --split test \
     --prompt_field prompt --answer_field answer \
     --base_url http://localhost:8000/v1 --model <served-model> --num_examples 20

@@ -36,21 +36,21 @@ import torch
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
-from halo.checkpoint import deepseek_v4_dequant, vocab_patch
-from halo.checkpoint.adapter_merge import merge_peft_adapter
-from halo.checkpoint.bf16_conversion import convert_to_bf16
-from halo.checkpoint.ep_shard_merge import merge_ep_shards
-from halo.checkpoint.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
-from halo.checkpoint.lowp_export import quantize_checkpoint
-from halo.checkpoint.model_merge import merge_models
 from halo.checkpoint.reading import (
     checkpoint_shard_files,
     detect_model_type,
     is_ep_sharded_checkpoint,
     reject_partial_checkpoint,
 )
-from halo.checkpoint.sink_reset import reset_sinks
+from halo.checkpoint.tools import deepseek_v4_dequant, vocab_patch
+from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
+from halo.checkpoint.tools.bf16_conversion import convert_to_bf16
+from halo.checkpoint.tools.ep_shard_merge import merge_ep_shards
+from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
+from halo.checkpoint.tools.lowp_export import quantize_checkpoint
+from halo.checkpoint.tools.model_merge import merge_models
+from halo.checkpoint.tools.sink_reset import reset_sinks
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.models.moe.family_specs import per_expert_hub_model_types
 from scripts.before_training import convert_deepseek_v4_bf16, convert_glm5_bf16, convert_mistral4_bf16, patch_vocab
@@ -627,9 +627,9 @@ def test_convert_deepseek_v4_bf16_loads_through_the_coverage_gate(tmp_path, monk
     ("module", "progress_logger"),
     [
         # The shared FP8 driver logs the per-shard progress of the converters that delegate to it.
-        ("scripts.before_training.convert_mistral4_bf16", "halo.checkpoint.fp8_dequant"),
-        ("scripts.before_training.convert_deepseek_v4_bf16", "halo.checkpoint.deepseek_v4_dequant"),
-        ("scripts.before_training.convert_glm5_bf16", "halo.checkpoint.fp8_dequant"),
+        ("scripts.before_training.convert_mistral4_bf16", "halo.checkpoint.tools.fp8_dequant"),
+        ("scripts.before_training.convert_deepseek_v4_bf16", "halo.checkpoint.tools.deepseek_v4_dequant"),
+        ("scripts.before_training.convert_glm5_bf16", "halo.checkpoint.tools.fp8_dequant"),
     ],
 )
 def test_converter_progress_lines_survive_the_src_root_handler(module, progress_logger):

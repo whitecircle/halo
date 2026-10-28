@@ -9,7 +9,7 @@ import datasets
 from datasets.features import Json
 from PIL import Image
 
-from halo.data.pipeline.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, resolve_json_value
+from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.rejected_rows import dataset_total_size, report_rejected_rows
 from halo.data.render_columns import reject_missing_render_column

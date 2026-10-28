@@ -11,13 +11,13 @@ from collections.abc import Sequence
 
 from halo.checkpoint.atomic import link_or_copy_file
 from halo.checkpoint.format import PP_STAGE_PART_RE
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import read_checkpoint_index, reject_partial_checkpoint
+from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
     first_holder,
     reject_in_place_conversion,
     resume_state_sources,
 )
-from halo.checkpoint.reading import read_checkpoint_index, reject_partial_checkpoint
 from halo.checkpoint.writing import write_merged_index
 
 logger = logging.getLogger(__name__)

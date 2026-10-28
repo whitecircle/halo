@@ -273,7 +273,7 @@ holds for `prepare_dataset.py --is_vlm` and `patch_vocab.py --chat_template`.
 ### Special-token ownership
 
 Rendered chat-template text tokenizes through `tokenize_rendered`
-(`halo/data/pipeline/chat_render.py`), which probes each tokenizer once — tokenizing `""` with
+(`halo/data/chat_render.py`), which probes each tokenizer once — tokenizing `""` with
 `add_special_tokens=True` — to learn what its post-processor actually adds. `bos_token` alone is
 unreliable: gpt-oss and Bailing declare a nominal BOS their post-processor never emits, and Zaya
 appends a trailing `<|im_end|>` instead of prepending BOS.

@@ -158,7 +158,7 @@ def write_eval_outputs(
     meta_extra: dict[str, Any] | None = None,
 ) -> None:
     """Write the ``--output_path`` JSON dump and the trajectory JSONL, whose meta line records the run's whole contract
-    plus ``meta_extra`` (what an offline re-grade needs); only :func:`add_endpoint_args`' flags are read."""
+    plus ``meta_extra`` (what an offline re-grade needs); only :func:`add_eval_args`' flags are read."""
     if args.output_path:
         # Written after every episode ran, so a missing parent directory must not discard the run.
         os.makedirs(os.path.dirname(os.path.abspath(args.output_path)), exist_ok=True)

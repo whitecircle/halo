@@ -3,7 +3,7 @@
 
 The properties pinned here:
 
-  * ``get_model_context_window`` reads the window off ``config.get_text_config()``, so a composite
+  * ``resolve_model_context_window`` reads the window off ``config.get_text_config()``, so a composite
     (VLM) config — which carries ``max_position_embeddings`` on its nested ``text_config`` only —
     resolves instead of falling through to the tokenizer's unset sentinel and raising, and it is the
     single resolver (env-GRPO's ``_context_limit`` delegates to it rather than keeping a copy);
@@ -31,7 +31,7 @@ from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.preference import SMPOConfig
 from halo.entrypoints.model_setup import apply_max_length, apply_prompt_completion_window, apply_tokenizer_window
-from halo.models.context_window import get_model_context_window, resolve_length_to_context
+from halo.models.context_window import resolve_length_to_context, resolve_model_context_window
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.offline.offline_rules import reject_inert_max_length
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
@@ -70,7 +70,7 @@ def _tokenizer(model_max_length=_UNSET_SENTINEL) -> SimpleNamespace:
 
 
 def test_context_window_from_plain_config():
-    assert get_model_context_window(_model(_TextConfig(max_position_embeddings=8192)), _tokenizer()) == 8192
+    assert resolve_model_context_window(_model(_TextConfig(max_position_embeddings=8192)), _tokenizer()) == 8192
 
 
 def test_context_window_from_composite_vlm_config():
@@ -79,7 +79,7 @@ def test_context_window_from_composite_vlm_config():
     leaving ``max_length: null`` unusable on every VLM."""
     config = _CompositeConfig(text_config={"max_position_embeddings": 131072})
     assert not hasattr(config, "max_position_embeddings"), "fixture must not carry a top-level window"
-    assert get_model_context_window(_model(config), _tokenizer()) == 131072
+    assert resolve_model_context_window(_model(config), _tokenizer()) == 131072
 
 
 def test_context_window_rejects_tokenizer_unset_sentinel():
@@ -89,14 +89,14 @@ def test_context_window_rejects_tokenizer_unset_sentinel():
         model_type = "halo_test_no_window"
 
     with pytest.raises(ValueError, match="context window"):
-        get_model_context_window(_model(_NoWindow()), _tokenizer())
+        resolve_model_context_window(_model(_NoWindow()), _tokenizer())
 
 
 def test_context_window_falls_back_to_tokenizer():
     class _NoWindow(PretrainedConfig):
         model_type = "halo_test_no_window"
 
-    assert get_model_context_window(_model(_NoWindow()), _tokenizer(model_max_length=2048)) == 2048
+    assert resolve_model_context_window(_model(_NoWindow()), _tokenizer(model_max_length=2048)) == 2048
 
 
 @pytest.mark.parametrize("unset", [None, 0, -1])
@@ -248,7 +248,7 @@ def test_env_grpo_pins_the_models_resolved_context_window():
     model = _model(_CompositeConfig(text_config={"max_position_embeddings": 131072}))
     tokenizer = _setup_tokenizer()
 
-    returned = apply_tokenizer_window(_setup_args(), model, tokenizer, get_model_context_window(model, tokenizer))
+    returned = apply_tokenizer_window(_setup_args(), model, tokenizer, resolve_model_context_window(model, tokenizer))
 
     assert returned is tokenizer, "apply_tokenizer_window must return the backend-resolved tokenizer"
     assert tokenizer.model_max_length == 131072
@@ -269,7 +269,7 @@ def test_env_grpo_context_limit_uses_the_shared_resolver():
     host = SimpleNamespace(_tokenizer=_tokenizer(), model=_model(_NPositionsConfig()))
     limit = DistributedAsyncEnvironmentalGRPOTrainer._context_limit.__get__(host)
 
-    assert limit() == get_model_context_window(host.model, host._tokenizer) == 3072
+    assert limit() == resolve_model_context_window(host.model, host._tokenizer) == 3072
 
 
 def test_smpo_budget_defaults_split_max_length_in_half():

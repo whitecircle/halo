@@ -21,11 +21,11 @@ import torch
 from datasets import Dataset
 from PIL import Image
 
+from halo.data import chat_render as rendered
+from halo.data.chat_render import render_conversation
 from halo.data.collators.self_distill import SelfDistillTextCollator
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.pipeline import chat_render as rendered
 from halo.data.pipeline import preferences, rejected_rows
-from halo.data.pipeline.chat_render import render_conversation
 from halo.data.pipeline.preferences import (
     render_vlm_preference_row,
     split_vlm_preference_row,

@@ -22,7 +22,7 @@ from transformers import TrainerControl, TrainerState
 from halo.callbacks.early_stop import StopsTrainingEarly
 from halo.configs.grpo import EarlyStopConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.entrypoints.script import EarlyStopExit, run_trainer
 from halo.trainers.grpo.early_stop import SAMPLING_LOGP_GAP_KEY, GRPOEarlyStopCallback, build_early_stop_callback
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -200,8 +200,8 @@ def test_the_env_config_adds_the_breaker_condition_to_the_shared_ones():
 def test_online_args_carry_the_shared_conditions_and_no_breaker_one():
     """Every shared field reaches the config at a non-default value, so a dropped one cannot pass by
     matching its default; the breaker condition is env-only, since only that trainer skips updates."""
-    assert "early_stop_on_skipped_updates" not in {f.name for f in dataclasses.fields(RLVROnlineGRPOScriptArguments)}
-    args = RLVROnlineGRPOScriptArguments(
+    assert "early_stop_on_skipped_updates" not in {f.name for f in dataclasses.fields(OnlineGRPOScriptArguments)}
+    args = OnlineGRPOScriptArguments(
         early_stop_entropy_band=[0.2, 0.6], early_stop_logratio_gap=0.01, early_stop_patience=5
     )
     assert args.build_early_stop_config() == EarlyStopConfig(entropy_band=(0.2, 0.6), logratio_gap=0.01, patience=5)

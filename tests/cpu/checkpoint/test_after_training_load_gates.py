@@ -33,7 +33,7 @@ from peft import LoraConfig, get_peft_model
 from safetensors.torch import load_file, save_file
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
 
-from halo.checkpoint import adapter_merge, bf16_conversion
+from halo.checkpoint.tools import adapter_merge, bf16_conversion
 from halo.model_loading import model_preparation
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG

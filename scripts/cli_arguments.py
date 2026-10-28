@@ -8,7 +8,7 @@ import argparse
 from collections.abc import Sequence
 
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.checkpoint.offline_export import TASK_MODEL_CLASSES
+from halo.checkpoint.tools.offline_export import TASK_MODEL_CLASSES
 from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL, resolve_local_api_key
 from halo.model_loading.dtype import DTYPE_BY_NAME
 
@@ -92,7 +92,7 @@ def add_task_arg(
     parser: argparse.ArgumentParser, *, tasks: Sequence[str] = tuple(TASK_MODEL_CLASSES)
 ) -> argparse.ArgumentParser:
     """Add ``--task``, the head a checkpoint tool loads a checkpoint with, over ``tasks`` (default: every
-    :data:`~halo.checkpoint.offline_export.TASK_MODEL_CLASSES` key)."""
+    :data:`~halo.checkpoint.tools.offline_export.TASK_MODEL_CLASSES` key)."""
     parser.add_argument(
         "--task",
         choices=list(tasks),

@@ -17,12 +17,12 @@ from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceC
 
 from halo.checkpoint.hub_layout import ModuleLayoutView
 from halo.checkpoint.reading import resolve_checkpoint_weights
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser
-from halo.distributed.expert_parallel.lazy_plan import ExpertKeyLayout, WeightPlanner
 from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.lazy_safetensors.materialization import materialize_weight_plan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from halo.model_loading.parallel.expert_fuser import ExpertFuser
+from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, WeightPlanner
 from halo.models.moe.config_fields import require_expert_count
 from halo.models.param_roles import persistent_buffers
 from tests.common.models import TINY_QWEN3_MOE_CONFIG

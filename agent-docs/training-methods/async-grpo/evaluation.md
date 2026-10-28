@@ -23,10 +23,10 @@ For exact means, make `len(split) × num_generations_eval` a multiple of `eval_r
 
 ## Running an evaluation
 
-Two CLIs drive training's own episode loop (`play_episode`, through `halo/environments/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `run_env.py` for generic environments, `run_code_contests.py` for code contests; their runs are `halo/entrypoints/generic_env_eval.py` and `halo/entrypoints/code_contests_eval.py`. Replies are read by the training rollout's own parser (`turn_from_chat_completion`).
+Two CLIs drive training's own episode loop (`play_episode`, through `halo/environments/eval_runner.py`) against an OpenAI-compatible endpoint (vLLM, SGLang, OpenRouter): `eval_env.py` for generic environments, `eval_code_contests.py` for code contests; their runs are `halo/entrypoints/generic_env_eval.py` and `halo/entrypoints/code_contests_eval.py`. Replies are read by the training rollout's own parser (`turn_from_chat_completion`).
 
 ```bash
-python scripts/environments/inference/run_env.py --env_type qa_search \
+python scripts/environments/inference/eval_env.py --env_type qa_search \
     --dataset basicv8vc/SimpleQA --split test --prompt_field problem \
     --base_url http://localhost:8000/v1 --model <served-name> --num_examples 100
 ```
@@ -37,7 +37,7 @@ python scripts/environments/inference/run_env.py --env_type qa_search \
 | `--base_url` / `--api_key` / `--model` | local vLLM / `$VLLM_API_KEY`, `$OPENAI_API_KEY`, else a placeholder / — | Endpoint and model name |
 | `--training_config <yaml>` | none | Grade under a run's contract ([below](#grading-under-a-training-config)) |
 | `--num_examples` / `--num_samples` | 100 (50 coding) / 1 | Rows scored; episodes per row |
-| `--success_threshold` | `1.0` | `run_env.py` only: the reward that counts as solved without an environment solve verdict |
+| `--success_threshold` | `1.0` | `eval_env.py` only: the reward that counts as solved without an environment solve verdict |
 | `--max_workers` | 32 (16 coding) | Concurrent episodes |
 | `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config |
 | `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding: [Generation budget](environments/tasks/code-contests/evaluation.md#generation-budget)) / 180 s | Sampling, HTTP timeout |
@@ -48,13 +48,13 @@ A message-list `prompt` reaches the environment as its last `user` turn, as in t
 
 ### Script-specific flags
 
-`run_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through `--context_fields`, buckets by `--group_by` and names examples by `--id_field` (default `id`). A field naming no column exits before any row is read (the default answer and id columns may be absent). Like the trainer, it refuses a dataset without the answer field when the environment declares `requires_answer`.
+`eval_env.py` reads `--prompt_field` / `--answer_field`, passes extra columns through `--context_fields`, buckets by `--group_by` and names examples by `--id_field` (default `id`). A field naming no column exits before any row is read (the default answer and id columns may be absent). Like the trainer, it refuses a dataset without the answer field when the environment declares `requires_answer`.
 
-`run_code_contests.py` takes instead `--adapter` (fixing the bucket and id fields per benchmark), `--language`, `--eval_protocol`, `--reasoning_effort` (`low` / `medium` / `high` / `none`), `--include_examples_only` and, on dated benchmarks, `--start_date` / `--end_date` / `--platform` ([Code Contests evaluation](environments/tasks/code-contests/evaluation.md)). An option with a flag of its own is refused in `--env_kwargs`.
+`eval_code_contests.py` takes instead `--adapter` (fixing the bucket and id fields per benchmark), `--language`, `--eval_protocol`, `--reasoning_effort` (`low` / `medium` / `high` / `none`), `--include_examples_only` and, on dated benchmarks, `--start_date` / `--end_date` / `--platform` ([Code Contests evaluation](environments/tasks/code-contests/evaluation.md)). An option with a flag of its own is refused in `--env_kwargs`.
 
 ### Grading under a training config
 
-`--training_config <yaml>` parses the YAML with the training script's config classes (`TrainingContract`, `halo/entrypoints/environment_eval.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, thinking and episode output budgets, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
+`--training_config <yaml>` parses the YAML with the training script's config classes (`TrainingContract`, `halo/entrypoints/eval_contract.py`), adopting its `RolloutConfig` (backend, template variables, stop tokens, thinking and episode output budgets, sampling, request timeout) and environment config (rewards, `max_turns`, `environment_kwargs`, `environment_type`). An explicit flag beats the YAML; the YAML beats the default.
 
 - It refuses what the trainer refuses, through the same resolvers, before any episode: a `rollout_stop_tokens` entry the config's tokenizer does not know (`resolve_rollout_stop_token_ids`), and under vLLM a thinking budget the served model type cannot enforce (Mistral 4), from the run-wide cap or any effort level the environment can draw (`reject_unenforceable_thinking_budget`).
 - The YAML's dataset keys (`dataset`, `prompt_field`, `answer_field`, `context_fields`) are not read: pass the matching flags.
@@ -103,7 +103,7 @@ Each later line is an `episode` addressed by `index` and `id`: `reward`, `succes
 
 ## Re-grading recorded trajectories
 
-Only `run_code_contests.py` dumps carry the meta a re-grade needs; a `run_env.py` dump is refused. A wall-clock grade inflates under host load, so a high-concurrency sweep can read a correct, fast solution as TIME-LIMIT-EXCEEDED. Generate in parallel, then re-grade in one bounded process:
+Only `eval_code_contests.py` dumps carry the meta a re-grade needs; an `eval_env.py` dump is refused. A wall-clock grade inflates under host load, so a high-concurrency sweep can read a correct, fast solution as TIME-LIMIT-EXCEEDED. Generate in parallel, then re-grade in one bounded process:
 
 ```bash
 python scripts/environments/inference/regrade_trajectories.py \
@@ -129,7 +129,7 @@ Per file it reports the protocol and, over the `n` episodes with a verdict, `s@1
 Point the eval at the training YAML and a few rows before a long run:
 
 ```bash
-python scripts/environments/inference/run_env.py --training_config <config>.yaml \
+python scripts/environments/inference/eval_env.py --training_config <config>.yaml \
     --dataset <the config's dataset> --model <served-name> \
     --num_examples 5 --max_workers 4 --save_trajectories /tmp/smoke.jsonl
 ```

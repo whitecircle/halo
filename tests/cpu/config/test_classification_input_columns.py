@@ -55,7 +55,7 @@ def test_text_field_naming_a_missing_column_raises_with_the_name(classification)
 
 def test_a_multi_label_sentinel_is_absence_in_every_split(classification):
     labels = {"train": {"-1", "a"}, "test": {"-1", "b"}}
-    classification.refuse_unlabeled_rows(labels, ("train", "test"), is_multi_label=True)
+    classification.reject_unlabeled_rows(labels, ("train", "test"), is_multi_label=True)
     assert classification.build_label_list(labels) == ["a", "b"]
 
 
@@ -69,12 +69,12 @@ def test_a_single_label_sentinel_in_a_read_split_is_refused_by_name(classificati
     labels = {"train": {"a", "b"}, "test": {"a", "b"}}
     labels[split] = labels[split] | {"-1"}
     with pytest.raises(ValueError, match=rf"The '{split}' split .*'no label' sentinel.*{remedy}"):
-        classification.refuse_unlabeled_rows(labels, ("train", "test"), is_multi_label=False)
+        classification.reject_unlabeled_rows(labels, ("train", "test"), is_multi_label=False)
 
 
 def test_a_single_label_sentinel_in_an_unread_split_is_dropped_from_the_classes(classification):
     labels = {"train": {"a", "b"}, "validation": {"-1", "a"}, "test": {"-1"}}
-    classification.refuse_unlabeled_rows(labels, ("train",), is_multi_label=False)
+    classification.reject_unlabeled_rows(labels, ("train",), is_multi_label=False)
     assert classification.build_label_list(labels) == ["a", "b"]
 
 
@@ -87,7 +87,7 @@ def test_an_empty_split_contributes_no_labels(classification):
     label-set gather rather than raise before it while its peers wait."""
     empty = Dataset.from_dict({"prompt": [], "label": []})
     ds = DatasetDict({"train": Dataset.from_dict({"prompt": [_TURNS], "label": [0]}), "test": empty})
-    assert classification.get_label_list(ds, "test") == []
+    assert classification.labels_in_split(ds, "test") == []
 
 
 def test_an_empty_presharded_train_shard_is_refused_before_its_label_type_is_read(classification):

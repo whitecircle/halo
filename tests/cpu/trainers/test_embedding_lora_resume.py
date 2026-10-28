@@ -77,19 +77,19 @@ from transformers.trainer_utils import rotate_checkpoints
 import halo.checkpoint.parallel.adapters as peft_mod
 import halo.trainers.checkpointing as checkpointing_mod
 import halo.trainers.embedding.trainer as embedding_module
-from halo.checkpoint.adapter_merge import merge_peft_adapter
 from halo.checkpoint.adapters import resume_adapter_dir
-from halo.checkpoint.bf16_conversion import convert_to_bf16
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
 )
-from halo.checkpoint.model_merge import merge_models
 from halo.checkpoint.parallel.resume_source import classify_resume_weights, resolve_resume_weights_source
 from halo.checkpoint.parallel.resume_weights import resume_numel_coverage
 from halo.checkpoint.reading import resolve_checkpoint_weights
+from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
+from halo.checkpoint.tools.bf16_conversion import convert_to_bf16
+from halo.checkpoint.tools.model_merge import merge_models
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.parallelism_config import ParallelismConfig

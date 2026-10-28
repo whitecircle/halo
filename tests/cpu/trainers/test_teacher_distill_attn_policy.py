@@ -27,7 +27,7 @@ from transformers import AutoModelForImageTextToText, PreTrainedTokenizerBase
 
 import scripts.training.distillation.teacher_distill as distill_script
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
-from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
 
 PINNED_SHA = "970cfc9f5e7e5a4f5f6f0645955928a9b6a98415"
@@ -63,7 +63,7 @@ def test_a_teacher_path_is_refused_so_the_trainer_cannot_load_one_itself():
     path's. A path handed to the trainer has to fail at construction, not be fetched.
     """
     with pytest.raises(TypeError, match="already-loaded module"):
-        DistributedDistillationTrainer(
+        DistributedTeacherDistillationTrainer(
             student_model="org/student",
             teacher_model="org/teacher",
             teacher_tokenizer=MagicMock(spec=PreTrainedTokenizerBase),

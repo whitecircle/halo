@@ -1,11 +1,11 @@
 #!/usr/bin/env python
-"""CPU tests for ``run_env.py``'s example builder: every field flag must name a column of the split.
+"""CPU tests for ``eval_env.py``'s example builder: every field flag must name a column of the split.
 
 A mistyped ``--prompt_field`` skips every row and reports an eval of zero examples; a mistyped answer,
 context field, ``--group_by`` or ``--id_field`` drops that value from every example with nothing said.
 The default answer and id columns may be absent: a dataset need carry neither.
 
-    python tests/cpu/environments/test_run_env_examples.py
+    python tests/cpu/environments/test_eval_env_examples.py
 """
 
 import argparse

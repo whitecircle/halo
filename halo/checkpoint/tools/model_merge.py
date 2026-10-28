@@ -17,12 +17,12 @@ from transformers import AutoConfig
 
 from halo.checkpoint.config_export import finalize_exported_config
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import header_nbytes, header_numel, iter_checkpoint_shard_entries
+from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
 )
-from halo.checkpoint.reading import header_nbytes, header_numel, iter_checkpoint_shard_entries
 from halo.checkpoint.writing import StreamingShardWriter, is_tie_reconcile_key
 from halo.model_loading.dtype import DTYPE_BY_NAME
 from halo.model_loading.model_preparation import resolve_auto_model_class
@@ -42,6 +42,8 @@ KNOB_DOMAINS: dict[str, tuple[Callable[[float], bool], str]] = {
     "density": (lambda value: 0.0 < value <= 1.0, "in (0, 1]"),
     "lambda": (math.isfinite, "finite"),
 }
+# Per-key tensor arguments the caller controls through a CLI knob rather than a value.
+_KNOB_BY_TENSOR_ARG = {"weights": "models:weight", "base": "base_model"}
 
 
 def _parse_model_spec(spec: str) -> tuple[str, float | None]:
@@ -106,6 +108,26 @@ def _reference_keys(readers: list[_TensorReader], base_reader: _TensorReader | N
     return sorted((base_reader if base_reader is not None else readers[0]).keys())
 
 
+def _tied_head_key(reference: list[str], base_only: set[str], readers: list[_TensorReader], config) -> set[str]:
+    """The tied half of the base's head/embedding pair when the merged models rebuild it, else nothing.
+
+    A save under ``tie_word_embeddings`` writes the embedding alone and transformers rebuilds the head
+    from it at load, while some Hub checkpoints store both halves. A base of that kind carries a head
+    none of its fine-tunes do, and that head is the merged embedding again rather than a missing
+    tensor, provided every merged model stores the other half and the shipped config ties the pair at
+    both of its levels: a text-only class reads the text sub-config's flag, a multimodal wrapper its
+    own. The pair is the one ``reconcile_tie_word_embeddings`` compares.
+    """
+    pair = [key for key in reference if is_tie_reconcile_key(key)]
+    tied_away = [key for key in pair if key in base_only]
+    kept = [key for key in pair if all(key in reader.weight_map for reader in readers)]
+    if len(pair) != 2 or len(tied_away) != 1 or len(kept) != 1:
+        return set()
+    if not all(getattr(level, TIE_WORD_EMBEDDINGS_FLAG, False) for level in config_sources(config)):
+        return set()
+    return set(tied_away)
+
+
 def _excused_base_keys(
     reference: list[str], readers: list[_TensorReader], config_source: str, *, trust_remote_code: bool
 ) -> set[str]:
@@ -128,26 +150,6 @@ def _excused_base_keys(
     # Matched as transformers matches them: searched anywhere in the key.
     load_ignored = {key for key in base_only if any(re.search(pattern, key) for pattern in patterns)}
     return load_ignored | _tied_head_key(reference, base_only, readers, config)
-
-
-def _tied_head_key(reference: list[str], base_only: set[str], readers: list[_TensorReader], config) -> set[str]:
-    """The tied half of the base's head/embedding pair when the merged models rebuild it, else nothing.
-
-    A save under ``tie_word_embeddings`` writes the embedding alone and transformers rebuilds the head
-    from it at load, while some Hub checkpoints store both halves. A base of that kind carries a head
-    none of its fine-tunes do, and that head is the merged embedding again rather than a missing
-    tensor, provided every merged model stores the other half and the shipped config ties the pair at
-    both of its levels: a text-only class reads the text sub-config's flag, a multimodal wrapper its
-    own. The pair is the one ``reconcile_tie_word_embeddings`` compares.
-    """
-    pair = [key for key in reference if is_tie_reconcile_key(key)]
-    tied_away = [key for key in pair if key in base_only]
-    kept = [key for key in pair if all(key in reader.weight_map for reader in readers)]
-    if len(pair) != 2 or len(tied_away) != 1 or len(kept) != 1:
-        return set()
-    if not all(getattr(level, TIE_WORD_EMBEDDINGS_FLAG, False) for level in config_sources(config)):
-        return set()
-    return set(tied_away)
 
 
 def _check_key_coverage(reference: set[str], contributors: list[_TensorReader], excused: set[str]) -> None:
@@ -277,8 +279,6 @@ MERGE_METHODS: dict[str, _MergeMethod] = {
         lambda n_models: 5.25 * n_models + 5,
     ),
 }
-# Per-key tensor arguments the caller controls through a CLI knob rather than a value.
-_KNOB_BY_TENSOR_ARG = {"weights": "models:weight", "base": "base_model"}
 # Effective values for consumed knobs the caller left unset (None = unset, so explicitness shows).
 KNOB_DEFAULTS: dict[str, float] = {knob: default for m in MERGE_METHODS.values() for knob, default in m.knobs.items()}
 
@@ -412,6 +412,57 @@ def _stream_merged_tensors(
             logger.info(f"  merged {i + 1}/{len(ref_keys)} tensors")
 
 
+def _copy_aux_files(
+    source_dir: str,
+    output_dir: str,
+    dtype: str,
+    verbose: bool,
+    *,
+    allow_missing_tokenizer: bool,
+    trust_remote_code: bool,
+) -> None:
+    """Reproduce ``source_dir``'s non-weight files (config, tokenizer, processor, …) in ``output_dir``.
+
+    The merged model is the same architecture as the source, so all non-weight metadata is copied,
+    including the processor files for multimodal models (``preprocessor_config.json``,
+    ``processor_config.json``, ``chat_template.*``), ``generation_config.json`` and a remote-code
+    family's ``.py`` modules, none of which a config plus tokenizer re-save emits: re-saving the config
+    instead would write the source's ``auto_map`` while shipping none of the modules it names, leaving a
+    directory that raises ``does not appear to have a file named modeling_<x>.py``. Two files are
+    rewritten after the copy: the config's ``dtype`` is set to the merged dtype so ``from_pretrained``
+    loads it consistently, and the ``README.md`` card gains the Halo Hub tag, or is created holding it.
+    """
+    # No resume state (include_resume_sidecars=False): it describes a single training run, and an N-way
+    # merged artifact has none, so shipping one input's would seed a resume or serve with state the
+    # merged weights never trained under.
+    copy_checkpoint_aux_files(source_dir, output_dir, include_resume_sidecars=False)
+    if not any(name.startswith(("tokenizer", "vocab", "spiece", "merges")) for name in os.listdir(output_dir)):
+        # Raise rather than warn: a merged artifact with no usable tokenizer would fail at the next
+        # pipeline stage's load instead.
+        if not allow_missing_tokenizer:
+            raise RuntimeError(
+                f"{source_dir} shipped no tokenizer files, so the merged checkpoint in {output_dir} "
+                f"has none and every from_pretrained-based consumer will fail to build a tokenizer. "
+                f"The merged weights are already written — re-run with --tokenizer_source pointing at "
+                f"a directory or Hub id that carries the tokenizer (it is copied verbatim), or pass "
+                f"--allow_missing_tokenizer if a tokenizer-less artifact is genuinely what you want."
+            )
+        logger.warning(f"{source_dir} shipped no tokenizer files (--allow_missing_tokenizer).")
+    if verbose:
+        logger.info(f"  copied config/tokenizer/processor files from {source_dir}")
+
+    # Keep the saved config's dtype consistent with the merged weights, and write the canonical torch
+    # name: `--dtype bf16` is accepted but `torch.bf16` does not exist, so a raw write would fail
+    # every from_pretrained.
+    config = AutoConfig.from_pretrained(output_dir, trust_remote_code=trust_remote_code)
+    config.dtype = str(DTYPE_BY_NAME[dtype]).removeprefix("torch.")
+    config.save_pretrained(output_dir)
+    # The merged directory carries the same config contract as any other export: the merge tools and
+    # the pinned servers read a family-less vendor config (Bailing/Ling) and a source-schema family
+    # (Step-3.7) through those rewrites alone.
+    finalize_exported_config(config, output_dir, source=source_dir)
+
+
 def merge_models(
     model_specs: list[str],
     output_dir: str,
@@ -490,54 +541,3 @@ def merge_models(
         trust_remote_code=trust_remote_code,
     )
     logger.info(f"✓ Merged model saved to {output_dir}")
-
-
-def _copy_aux_files(
-    source_dir: str,
-    output_dir: str,
-    dtype: str,
-    verbose: bool,
-    *,
-    allow_missing_tokenizer: bool,
-    trust_remote_code: bool,
-) -> None:
-    """Reproduce ``source_dir``'s non-weight files (config, tokenizer, processor, …) in ``output_dir``.
-
-    The merged model is the same architecture as the source, so all non-weight metadata is copied,
-    including the processor files for multimodal models (``preprocessor_config.json``,
-    ``processor_config.json``, ``chat_template.*``), ``generation_config.json`` and a remote-code
-    family's ``.py`` modules, none of which a config plus tokenizer re-save emits: re-saving the config
-    instead would write the source's ``auto_map`` while shipping none of the modules it names, leaving a
-    directory that raises ``does not appear to have a file named modeling_<x>.py``. Two files are
-    rewritten after the copy: the config's ``dtype`` is set to the merged dtype so ``from_pretrained``
-    loads it consistently, and the ``README.md`` card gains the Halo Hub tag, or is created holding it.
-    """
-    # No resume state (include_resume_sidecars=False): it describes a single training run, and an N-way
-    # merged artifact has none, so shipping one input's would seed a resume or serve with state the
-    # merged weights never trained under.
-    copy_checkpoint_aux_files(source_dir, output_dir, include_resume_sidecars=False)
-    if not any(name.startswith(("tokenizer", "vocab", "spiece", "merges")) for name in os.listdir(output_dir)):
-        # Raise rather than warn: a merged artifact with no usable tokenizer would fail at the next
-        # pipeline stage's load instead.
-        if not allow_missing_tokenizer:
-            raise RuntimeError(
-                f"{source_dir} shipped no tokenizer files, so the merged checkpoint in {output_dir} "
-                f"has none and every from_pretrained-based consumer will fail to build a tokenizer. "
-                f"The merged weights are already written — re-run with --tokenizer_source pointing at "
-                f"a directory or Hub id that carries the tokenizer (it is copied verbatim), or pass "
-                f"--allow_missing_tokenizer if a tokenizer-less artifact is genuinely what you want."
-            )
-        logger.warning(f"{source_dir} shipped no tokenizer files (--allow_missing_tokenizer).")
-    if verbose:
-        logger.info(f"  copied config/tokenizer/processor files from {source_dir}")
-
-    # Keep the saved config's dtype consistent with the merged weights, and write the canonical torch
-    # name: `--dtype bf16` is accepted but `torch.bf16` does not exist, so a raw write would fail
-    # every from_pretrained.
-    config = AutoConfig.from_pretrained(output_dir, trust_remote_code=trust_remote_code)
-    config.dtype = str(DTYPE_BY_NAME[dtype]).removeprefix("torch.")
-    config.save_pretrained(output_dir)
-    # The merged directory carries the same config contract as any other export: the merge tools and
-    # the pinned servers read a family-less vendor config (Bailing/Ling) and a source-schema family
-    # (Step-3.7) through those rewrites alone.
-    finalize_exported_config(config, output_dir, source=source_dir)

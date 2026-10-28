@@ -21,9 +21,9 @@ host has no usable Python ([Docker](../infrastructure/docker.md)).
 | Distributed | EP/CP/TP/ETP/PP setup, process groups, validation, FSDP2 sharding | `halo/distributed/parallelism_config.py`, `halo/distributed/fsdp.py` | [Parallelism](../parallelism/README.md) |
 | Data | Dataset loading, sharding, collators; the dataset tools' drivers (semantic dedup, the offline preparation's run and publish, the S3 commands) | `halo/data/`, `halo/data/collators/` | [Dataset Formats](../data/dataset-formats.md) |
 | Callbacks | Throughput, MoE load, router-bias balancing | `halo/callbacks/`, `halo/hardware.py` (GPU detection + peak-FLOPs table) | [Callbacks](../training-methods/callbacks.md) |
-| Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots, EP span timing | `halo/diagnostics/` | [Debugging](debugging.md) |
+| Diagnostics | Opt-in and off by default: py-spy capture, torch-profiler traces, CUDA memory snapshots | `halo/diagnostics/` | [Debugging](debugging.md) |
 | Kernels | Grouped GEMM, the fused GLU and MoE permute kernels, chunked fp32 log-probs, Flash Attention and FlexAttention on sliding-window layers, low-precision quantization | `halo/kernels/`, `halo/models/attention/selection.py`, `halo/models/attention/sdpa_flex_sliding.py` | [Grouped GEMM](../optimization/grouped-gemm.md) |
-| Checkpoints | The flat saver ladder and its rungs (PEFT and expert-LoRA adapters, PP, EP, CP, TP, FSDP2), weight resume, per-rank optimizer shards + LR scheduler, load-coverage gate — over the sharding-agnostic on-disk layer, which also holds the offline checkpoint tools' drivers (shard and model merges, the bf16, low-precision and fp8 conversions, sink reset, expert unfuse, vision re-attach, vocabulary patch) | `halo/checkpoint/parallel/`, `halo/checkpoint/`, `halo/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
+| Checkpoints | The flat saver ladder and its rungs (PEFT and expert-LoRA adapters, PP, EP, CP, TP, FSDP2), weight resume, per-rank optimizer shards + LR scheduler, load-coverage gate — over the sharding-agnostic on-disk layer; beside it, `tools/` holds the offline checkpoint tools' drivers (shard and model merges, the bf16, low-precision and fp8 conversions, sink reset, expert unfuse, vision re-attach, vocabulary patch) | `halo/checkpoint/parallel/`, `halo/checkpoint/`, `halo/checkpoint/tools/`, `halo/model_loading/checkpoint_coverage.py` | [Checkpoints](checkpoints.md) |
 | Optimizers | AdamWBF16 (SR), Muon, FlashAdamW | `halo/optimizers/` | [BF16 Optimizer](../optimization/bf16-optimizer.md) |
 | Models | The sharding-agnostic model side: module-tree introspection, composite-config access, the context window, load-time patches (attention selection, GptOss sinks, Zaya), MoE router balancing, the head-path transform contract, and the sequence-classification heads transformers does not ship (`halo/models/seq_cls_heads.py`, registered by an import in `halo/model_loading/model_preparation.py`) | `halo/models/` | [Adding a Model](../models/adding-a-model.md) |
 | Model loading | Sharding-agnostic model construction: the `Auto*` class and the coverage-verified `from_pretrained` call, the family patches and run policies every loaded model takes, the run dtype and the loaded-parameter cast, the processing class and its `model_max_length` pin, remote-code compatibility, the post-load buffer repair, Liger applied at load (`liger/`), and the lazy safetensors core the EP and PP loaders share. Above it, `parallel/` holds the parallelism-aware loads: the `load_distributed_model` dispatcher (`loader.py`), the refusals it runs before any weight (`load_rules.py`), the `ModelSource` every rank agrees on (`model_source.py`), the whole-model load core (`whole_model.py`), the TP and CP loaders (`tp.py`, `cp.py`), the frozen reference and teacher loads, and the PEFT and freeze-pattern setup | `halo/model_loading/` | [Models](../models/README.md) |
@@ -60,10 +60,12 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `halo/data/sources/dataset_cache.py` | the local cache-publish protocol (lock, completion marker, content fingerprint, atomic publish, stale-temp sweep) — `os`/`shutil`/`filelock`, the fetch injected; one protocol for both dataset caches, so their crash and staleness semantics cannot drift |
 | `halo/data/sources/s3_client.py` | S3 transport: the boto3 `S3Client`, the bounded parallel transfer pool and the default-bucket helpers |
 | `halo/data/sources/s3_dataset_store.py` | dataset trees on S3: the push protocol, the cached load and the mirrored control-file reads |
-| `halo/checkpoint/parallel/writing.py` | the collective half of a gathered write: retain-gated DTensor resolve of params AND buffers (with the neutralized GptOss sinks), the conversion-closed chunks and the streamed writer they feed — a leg every gathered writer runs symmetrically or hangs |
+| `halo/checkpoint/parallel/writing.py` | the collective half of a gathered write: retain-gated DTensor gather of params AND buffers (with the neutralized GptOss sinks), the conversion-closed chunks and the streamed writer they feed — a leg every gathered writer runs symmetrically or hangs |
 | `halo/checkpoint/parallel/reading.py` | the two reads a resume shares: one file every rank agrees on (`consensus_read`), and a checkpoint's shards opened on every rank (`joined_streaming_reader`) |
 | `halo/checkpoint/parallel/resume_source.py` | which checkpoint a run resumes from (the newest complete on every rank, incomplete ones moved out of rotation's sight) and which weights its policy is built from |
 | `halo/data/preprocessed/shard_index.py` | the torch-free `shard_index.json` contract and the stamped-sidecar writer both halves of a preprocessed artifact use |
+| `halo/data/conversation.py` | conversation shaping the text and VLM renders share: JSON columns, the image-part spelling, system-prompt folding and the template kwargs |
+| `halo/data/chat_render.py` | the text chat render and the tokenization of rendered text, with probe-based special-token ownership; the text twin of `vlm_render.py` |
 | `halo/data/vlm_render.py` | the VLM chat render, the processor call, the over-length refusal, image decoding and the placeholder token ids; one render for the batch and the offline bake, so both tokenize a row identically |
 | `halo/data/vlm_detection.py` | whether a run takes the VLM data path: the image-column spellings, a dataset's image evidence and the cross-rank verdicts and refusals off them |
 | `halo/data/preprocessed/metadata.py` | the `metadata.json` contract: the recorded `PreprocessingConfig`, the stamp and the compatibility verdicts, readable without importing the bake that wrote the rows |
@@ -102,7 +104,8 @@ L10 entrypoints
 ```
 
 `checkpoint.model_free` is the `halo/checkpoint/` modules that read no model (`format`, `atomic`,
-`reading`, `model_card`); the rest of `halo/checkpoint/` outside `parallel/` is `checkpoint.model_aware`.
+`reading`, `model_card`); the rest of `halo/checkpoint/` outside `parallel/`, `tools/` included, is
+`checkpoint.model_aware`.
 
 ## Trainers
 
@@ -152,11 +155,10 @@ of `halo/model_loading/` stays sharding-agnostic. The collective checkpoint half
 These packages import each other acyclically
 (`tests/cpu/conventions/test_import_layering.py`).
 
-No parallelism package imports `halo/model_loading/parallel/`, so what both sides need sits in the
-parallelism packages: `expert_parallel/lazy_plan.py` holds the expert-key vocabulary, the lazy gate, the
-per-key weight planner and the prologue both lazy loaders share, and
-`expert_parallel/expert_fuser.py` stacks a per-expert checkpoint's local experts. The loaders themselves
-sit in the dispatch package: `ep.py`, `pp.py`, the weight load both run once their plans are final
+The lazy load sits whole in the dispatch package, since only its loaders use it: `lazy_plan.py` holds the
+expert-key vocabulary, the lazy gate, the per-key weight planner and the prologue the EP and PP loaders share
+(a dense PP load runs it too); `expert_fuser.py` stacks a per-expert checkpoint's local experts; beside them
+sit the loaders, `ep.py` and `pp.py`, the weight load both run once their plans are final
 (`lazy_load.py`), and `fp32_masters.py`, which selects the configured FP32 parameter masters off the EP
 layer registry and streams their stored values back for eager construction
 ([Load precision](../models/README.md#load-precision)).

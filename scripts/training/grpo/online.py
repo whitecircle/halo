@@ -16,11 +16,11 @@ from trl import GRPOConfig
 
 from halo.config_validation import reject_non_default_args, reject_unsupported_args
 from halo.configs.grpo import RLRRArguments
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.pipeline.chat_render import render_generation_prompt
-from halo.data.pipeline.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
+from halo.data.chat_render import render_generation_prompt
+from halo.data.conversation import as_conversation, chat_template_kwargs, fold_system_into_conversation
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
 from halo.data.render_columns import reject_missing_render_column
@@ -53,7 +53,7 @@ from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from halo.trainers.grpo.rollout.engine_preflight import verify_context_window, verify_sampler_logprob_reference
 
 
-def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
+def build_rlvr_row_fn(args: OnlineGRPOScriptArguments, tokenizer):
     """Row transform for the RLVR map: the rendered generation prompt, the conversation it was rendered
     from and the ground-truth answer. Accepts conversational (list of messages) and string prompts."""
 
@@ -96,7 +96,7 @@ def build_rlvr_row_fn(args: RLVROnlineGRPOScriptArguments, tokenizer):
 
 def main():
     args, grpo_config, model_config, dist_args = parse_script_args(
-        RLVROnlineGRPOScriptArguments, GRPOConfig, ModelArguments, ParallelismArguments
+        OnlineGRPOScriptArguments, GRPOConfig, ModelArguments, ParallelismArguments
     )
 
     # The weight sync forwards trainer parameter names verbatim, and the text-only CausalLM sibling

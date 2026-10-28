@@ -23,11 +23,11 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import GptOssConfig, GptOssForCausalLM
 
-import halo.checkpoint.sink_reset as reset_sinks_mod
-from halo.checkpoint import offline_export
+import halo.checkpoint.tools.sink_reset as reset_sinks_mod
 from halo.checkpoint.format import SAFETENSORS_METADATA
 from halo.checkpoint.reading import checkpoint_shard_files
-from halo.checkpoint.sink_reset import reset_sinks
+from halo.checkpoint.tools import offline_export
+from halo.checkpoint.tools.sink_reset import reset_sinks
 from tests.common.checkpoint_io import weight_files
 
 INDEX = "model.safetensors.index.json"

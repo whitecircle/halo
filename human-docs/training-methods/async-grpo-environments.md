@@ -190,7 +190,7 @@ Before a long run, put the config through a few rows. This exercises the parser,
 sandbox or judge backend in a minute:
 
 ```bash
-halo run run-env --training_config <config>.yaml --dataset <hub-id-or-path> --split train \
+halo run eval-env --training_config <config>.yaml --dataset <hub-id-or-path> --split train \
     --answer_field <column> --num_examples 20 --base_url http://localhost:8000/v1 --model <served-id>
 ```
 

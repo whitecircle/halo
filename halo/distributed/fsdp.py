@@ -1,10 +1,8 @@
-"""FSDP2 (``fully_shard``) data-parallel gradient sync for every torchrun mode, plus the sharding-state
-helpers its consumers need afterwards.
+"""FSDP2 (``fully_shard``) data-parallel gradient sync for every torchrun mode, plus the sharding-state helpers.
 
-The DP entry point builds its mesh and the TP one takes the loader's ``(dp, tp)`` mesh; both run one
-wrap body, so a policy knob cannot drift between them. ``reshard_after_forward``: False =
-SHARD_GRAD_OP (faster), True = FULL_SHARD (lower peak memory).
-"""
+The DP entry point builds its mesh and the TP one takes the loader's ``(dp, tp)`` mesh; both run one wrap body, so a
+policy knob cannot drift between them. ``reshard_after_forward``: False = SHARD_GRAD_OP (faster), True = FULL_SHARD
+(lower peak memory)."""
 
 import contextlib
 import logging

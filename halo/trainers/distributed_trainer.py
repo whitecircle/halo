@@ -38,6 +38,7 @@ from halo.models.config_access import (
     set_config_field_run_scoped,
     snapshot_config_fields,
 )
+from halo.models.moe.config_fields import resolve_active_router_aux_loss_coef
 from halo.models.moe.router_logits import mark_router_logits_forced_off
 from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers
 from halo.optimizers.registry import (
@@ -80,11 +81,7 @@ from halo.trainers.trainer_rules import (
     reject_trainer_router_aux_loss_coef,
     reject_unreloadable_best_model,
 )
-from halo.trainers.training_args_overrides import (
-    align_save_on_each_node,
-    disable_trl_liger,
-    resolve_active_router_aux_loss_coef,
-)
+from halo.trainers.training_args_overrides import align_save_on_each_node, disable_trl_liger
 
 logger = logging.getLogger(__name__)
 

@@ -48,7 +48,7 @@ from halo.log import configure_cli_logging
 
 # Adapters whose datasets load with a plain ``load_dataset`` (the RL training pools). Benchmark
 # adapters with a custom ``load`` (LiveCodeBench, ICPC-Eval) are eval-only: they are scored directly
-# by ``run_code_contests.py`` rather than materialized into a training set here.
+# by ``eval_code_contests.py`` rather than materialized into a training set here.
 _TRAINING_ADAPTERS = sorted(name for name, a in CODE_DATASET_ADAPTERS.items() if a.load is None)
 
 

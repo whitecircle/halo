@@ -24,7 +24,7 @@ A checkpoint with no fused expert keys is reported and copied through unchanged.
 
 import argparse
 
-from halo.checkpoint.expert_unfuse import unfuse_checkpoint
+from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_max_shard_size_arg
 

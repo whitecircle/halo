@@ -45,7 +45,7 @@ from halo.checkpoint.format import (
     WEIGHT_DUMP_IGNORE_PATTERNS,
     prefetch_pending_filename,
 )
-from halo.checkpoint.offline_export import copy_checkpoint_aux_files
+from halo.checkpoint.tools.offline_export import copy_checkpoint_aux_files
 from tests.common.checkpoint_io import mark_resume_adapter
 
 SKIPPED = (

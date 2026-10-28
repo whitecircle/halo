@@ -37,13 +37,13 @@ from transformers.integrations.mxfp4 import Mxfp4Dequantize
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
 import halo.checkpoint.parallel.ep as ep_save
-from halo.checkpoint.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.hub_layout import ModuleLayoutView
 from halo.checkpoint.parallel.ep import (
     reject_unmergeable_ep_sharded_save,
     save_ep_gathered_checkpoint,
 )
 from halo.checkpoint.parallel.save import save_fsdp2_checkpoint, save_tp_checkpoint
+from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.lazy_safetensors.conversion import Concat

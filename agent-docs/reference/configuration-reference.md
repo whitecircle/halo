@@ -35,7 +35,7 @@ Three knob names carry the length settings. They mean the same thing everywhere;
 | SMPO (`SMPOConfig`) | total budget, split into the two shares below (`resolve_length_budget`) | truncate per `truncation_mode`; `null` → **half of `max_length`** | truncate (EOS only within the budget); `null` → the `max_length − max_prompt_length` remainder. The two shares must fit inside `max_length` |
 | Reward (`RewardConfig`) | TRL **filters**: pairs whose chosen *or* rejected exceeds it are dropped, not truncated | — | — |
 | Classification (`ClassificationConfig`) | **truncate** at tokenization on the script path; a dataset handed straight to the trainer as raw `text`/`label` is tokenized untruncated and **filtered** instead | — | — |
-| Distillation (`DistillationConfig`) | over-length conversations are **dropped**, not truncated | — | — |
+| Distillation (`TeacherDistillationConfig`) | over-length conversations are **dropped**, not truncated | — | — |
 | Embedding (`EmbeddingConfig`) | installed as SentenceTransformers' `max_seq_length` (truncates) | — | — |
 | Offline GRPO (`OfflineGRPOConfig`) | read only under pipeline parallelism, as the fixed padded row length; elsewhere any value is **rejected** at trainer construction and the budget is the two shares | **left**-truncate (keep the tokens nearest the completion) | truncate the stored completion (EOS only within the budget); also the `dr_grpo` loss normalizer |
 | Online GRPO — RLVR (`GRPOConfig` + script args) | — | dataset **filter**: over-length prompts are dropped, never truncated | **generation budget** (TRL `max_new_tokens` / vLLM `SamplingParams`) |
@@ -55,7 +55,7 @@ Every training script but embedding routes its `tokenizer.model_max_length` writ
 
     HF resolves any `truncation=True, max_length=None` call against `model_max_length`, so pinning a partial sum would turn the *unbounded* half into a silent cap at the other half's budget. An unbounded half therefore leaves the tokenizer at its own value. On the on-policy scripts the completion half is a generation budget with no unbounded setting; an unset one is rejected here.
 
-- `apply_tokenizer_window` with `get_model_context_window` — Async GRPO, whose multi-turn trajectory no configured length bounds (`rollout_max_episode_tokens` caps the generated share alone). It pins the raw context window, the same hard limit the rollout server enforces, which the trainer fails against rather than truncating.
+- `apply_tokenizer_window` with `resolve_model_context_window` — Async GRPO, whose multi-turn trajectory no configured length bounds (`rollout_max_episode_tokens` caps the generated share alone). It pins the raw context window, the same hard limit the rollout server enforces, which the trainer fails against rather than truncating.
 
 Boundedness is one predicate everywhere (`is_bounded_length`): a positive int bounds, while `null` and any non-positive value mean unset.
 
@@ -186,12 +186,12 @@ Each trainer combines a **trainer config** (hyperparameters) with **script argum
 | `DistributedDPOTrainer` | [DPOConfig](#trl-trainer-configs) (TRL) | [DPOScriptArguments](#other-script-arguments) | `preference/dpo.py` |
 | `DistributedKTOTrainer` | [KTOConfig](#trl-trainer-configs) (TRL) | [KTOScriptArguments](#other-script-arguments) | `preference/kto.py` |
 | `OfflineGRPOTrainer` | [OfflineGRPOConfig](#offlinegrpoconfig) | [OfflineGRPOScriptArguments](#other-script-arguments) | `grpo/offline.py` |
-| `DistributedOnlineGRPOTrainer` (RLVR) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) | `grpo/online.py` |
-| `DistributedSDPGTrainer` (online SDPG) | [GRPOConfig](#trl-trainer-configs) (TRL) | [RLVROnlineGRPOScriptArguments](#rlvronlinegrposcriptarguments) (`--use_sdpg=true`) | `grpo/online.py` |
+| `DistributedOnlineGRPOTrainer` (RLVR) | [GRPOConfig](#trl-trainer-configs) (TRL) | [OnlineGRPOScriptArguments](#onlinegrposcriptarguments) | `grpo/online.py` |
+| `DistributedSDPGTrainer` (online SDPG) | [GRPOConfig](#trl-trainer-configs) (TRL) | [OnlineGRPOScriptArguments](#onlinegrposcriptarguments) (`--use_sdpg=true`) | `grpo/online.py` |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | [GRPOConfig](#trl-trainer-configs) (TRL) + [EnvironmentConfig](#environmentconfig) + [AsyncRolloutConfig](#asyncrolloutconfig) | [EnvironmentalGRPOScriptArguments](#environmentalgrposcriptarguments) | `grpo/environmental.py` |
 | `DistributedRewardTrainer` | [RewardConfig](#trl-trainer-configs) (TRL) | [RewardScriptArguments](#other-script-arguments) | `reward/reward_model.py` |
 | `ClassificationTrainer` | [ClassificationConfig](#classificationconfig) | [ClassificationScriptArguments](#other-script-arguments) | `classification.py` |
-| `DistributedDistillationTrainer` | [DistillationConfig](#distillationconfig) | [TeacherDistillScriptArguments](#teacherdistillscriptarguments) | `distillation/teacher_distill.py` |
+| `DistributedTeacherDistillationTrainer` | [TeacherDistillationConfig](#teacherdistillationconfig) | [TeacherDistillScriptArguments](#teacherdistillscriptarguments) | `distillation/teacher_distill.py` |
 | `DistributedSelfDistillationTrainer` (offline SDPG) | [SFTConfig](#trl-trainer-configs) (TRL) | [SelfDistillScriptArguments](#selfdistillscriptarguments) | `distillation/self_distill.py` |
 | `EmbeddingTrainer` | [EmbeddingConfig](#embeddingconfig) (extends `SentenceTransformerTrainingArguments`) | [EmbeddingScriptArguments](#other-script-arguments) | `embedding.py` |
 
@@ -399,9 +399,9 @@ The class also overrides four `TrainingArguments` defaults: `learning_rate=1e-6`
 
 ---
 
-## DistillationConfig
+## TeacherDistillationConfig
 
-`DistributedDistillationTrainer`. **Source:** `halo/configs/distillation.py`. The teacher and the conversation-rendering fields live in `TeacherDistillScriptArguments` below.
+`DistributedTeacherDistillationTrainer`. **Source:** `halo/configs/distillation.py`. The teacher and the conversation-rendering fields live in `TeacherDistillScriptArguments` below.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -601,7 +601,7 @@ Base shared by all training scripts, mixing in `TorchProfilerArguments` (`enable
 | `model_supports_system_role` | `bool` | `True` | If `False`, system prompt is prepended to the first user message. |
 | `interleaved_thinking` | `bool` | `False` | Pass `clear_thinking=False` to `apply_chat_template`. Needed for templates with a `clear_thinking` switch (e.g. GLM) when the rollout backend kept historical assistant reasoning — the template default otherwise strips `<think>…</think>` from history. Text-only: the VLM path raises. |
 
-### RLVROnlineGRPOScriptArguments
+### OnlineGRPOScriptArguments
 
 RLVR Online GRPO. **Source:** `halo/configs/grpo_online.py`
 
@@ -641,7 +641,7 @@ The `rlrr_*` tunables of RLRR relative-reward shaping ([arXiv:2601.23058](https:
 
 ### SDPGArguments
 
-The privileged-teacher OPD term, shared by [online SDPG](../training-methods/distillation/online-sdpg.md) (on `RLVROnlineGRPOScriptArguments`, read only under `use_sdpg: true`) and [self-distillation](../training-methods/distillation/self-distillation.md). **Source:** `halo/configs/distillation.py`
+The privileged-teacher OPD term, shared by [online SDPG](../training-methods/distillation/online-sdpg.md) (on `OnlineGRPOScriptArguments`, read only under `use_sdpg: true`) and [self-distillation](../training-methods/distillation/self-distillation.md). **Source:** `halo/configs/distillation.py`
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -688,7 +688,7 @@ These extend `CommonScriptArguments` with minimal additions:
 | `DPOScriptArguments` | `halo/configs/preference.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`), `generation_max_prompt_length` (`512`) — bounds the eval-time generation dataset only; DPO has no training-side prompt cap — and `images_field` (`None`) — VLM only: image column renamed to the `images` spelling TRL's vision probe reads, ahead of the dispatch |
 | `OfflineGRPOScriptArguments` | `halo/configs/grpo_offline.py` | `generate_eval_examples` (`True`), `num_eval_examples` (`50`) |
 | `KTOScriptArguments` | `halo/configs/preference.py` | `completion_field` (`"completion"`), `label_field` (`"label"`) — KTO uses an *unpaired* `{prompt, completion, label}` dataset — and `images_field` (`None`) — VLM only: renamed to TRL's `images` spelling; the vision path refuses `precompute_ref_log_probs` and paired columns |
-| `RewardScriptArguments` | `halo/configs/reward.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/preference/reward-modeling.md#vision-language)) |
+| `RewardScriptArguments` | `halo/configs/reward.py` | `images_field` (`None`) — VLM only: image column, renamed to `images` and merged into the shared prompt conversation; declares the run VLM on a score-headed multimodal checkpoint ([reward VLMs](../training-methods/reward-modeling.md#vision-language)) |
 | `ClassificationScriptArguments` | `halo/configs/classification.py` | `text_field` (`None`) — raw-text column wrapped as one user turn when the dataset has no `prompt` conversation (e.g. text/label sets like imdb) |
 | `EmbeddingScriptArguments` | `halo/configs/embedding.py` | *None (inherits only)* |
 

@@ -39,7 +39,7 @@ A `judge` or `reward_model` term reads the row's `conversation` and `answer` col
 
 ## Configuration
 
-Fields: [`RLVROnlineGRPOScriptArguments`](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments), TRL's `GRPOConfig`, `ModelArguments` and `ParallelismArguments`.
+Fields: [`OnlineGRPOScriptArguments`](../../reference/configuration-reference.md#onlinegrposcriptarguments), TRL's `GRPOConfig`, `ModelArguments` and `ParallelismArguments`.
 
 ```yaml
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507

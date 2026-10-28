@@ -10,7 +10,7 @@ import json
 
 import pytest
 
-from halo.entrypoints.environment_eval import write_eval_outputs
+from halo.entrypoints.eval_contract import write_eval_outputs
 from halo.environments.rollout_config import RolloutConfig
 
 

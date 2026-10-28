@@ -12,15 +12,9 @@ from safetensors import safe_open
 from safetensors.torch import save_file
 from transformers import GptOssConfig, GptOssForCausalLM, GptOssModel
 
-import halo.distributed.expert_parallel.lazy_plan as lazy_plan  # noqa: E402
 import halo.model_loading.parallel.ep as ep_loading  # noqa: E402
+import halo.model_loading.parallel.lazy_plan as lazy_plan  # noqa: E402
 from halo.checkpoint.reading import CheckpointWeights  # noqa: E402
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser  # noqa: E402
-from halo.distributed.expert_parallel.lazy_plan import (  # noqa: E402
-    ExpertKeyLayout,
-    WeightPlanner,
-    is_lazy_loadable,
-)
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping  # noqa: E402
 from halo.model_loading.lazy_safetensors.materialization import (  # noqa: E402
     SafetensorsWeightLoader,
@@ -29,6 +23,12 @@ from halo.model_loading.lazy_safetensors.materialization import (  # noqa: E402
     assign_tensor_to_model,
 )
 from halo.model_loading.parallel.ep import _check_fused_experts_mapped  # noqa: E402
+from halo.model_loading.parallel.expert_fuser import ExpertFuser  # noqa: E402
+from halo.model_loading.parallel.lazy_plan import (  # noqa: E402
+    ExpertKeyLayout,
+    WeightPlanner,
+    is_lazy_loadable,
+)
 from tests.common.models import TINY_GPTOSS_CONFIG  # noqa: E402
 from tests.common.tiny_models import module_with_weight_keys  # noqa: E402
 

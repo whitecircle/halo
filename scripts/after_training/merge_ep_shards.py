@@ -26,7 +26,7 @@ Usage:
 
 import argparse
 
-from halo.checkpoint.ep_shard_merge import merge_ep_shards
+from halo.checkpoint.tools.ep_shard_merge import merge_ep_shards
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_max_shard_size_arg
 

@@ -14,7 +14,7 @@ import pytest
 
 import halo.configs.grpo_environmental as grpo_environmental
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.preference import SMPOConfig
 from halo.rewards.terms import EnvironmentTerm
@@ -350,7 +350,7 @@ def test_env_config_spells_environment_type_as_the_registry_keys_it(tmp_path):
         EnvironmentConfig(environment_type=None)
 
 
-# RLVROnlineGRPOScriptArguments reward terms
+# OnlineGRPOScriptArguments reward terms
 
 
 def test_rlvr_args_refuse_a_veto_judge():
@@ -359,9 +359,9 @@ def test_rlvr_args_refuse_a_veto_judge():
     judge = {"source": "judge", "name": "conduct"}
     checks = [{"name": "cheated", "description": "Hard-coded the expected output.", "veto": True}]
     with pytest.raises(ValueError, match=r"\['conduct'\] list 'checks'.*list 'requirements' instead"):
-        RLVROnlineGRPOScriptArguments(rewards=[{**judge, "checks": checks}])
+        OnlineGRPOScriptArguments(rewards=[{**judge, "checks": checks}])
     requirements = [{"name": "clear", "description": "Clear."}]
-    (term,) = RLVROnlineGRPOScriptArguments(rewards=[{**judge, "requirements": requirements}]).reward_terms
+    (term,) = OnlineGRPOScriptArguments(rewards=[{**judge, "requirements": requirements}]).reward_terms
     assert not term.is_veto
 
 

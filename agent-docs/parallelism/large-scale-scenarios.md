@@ -157,7 +157,7 @@ forward**, after the whole model has loaded, with nothing in the message naming 
 
 Only three loaders shard at load time: `WeightAction.EXPERT_SHARD`
 (`halo/model_loading/lazy_safetensors/`, planned by `WeightPlanner` in
-`halo/distributed/expert_parallel/lazy_plan.py`), the PP stage loader (its stage's layers, plus the EP
+`halo/model_loading/parallel/lazy_plan.py`), the PP stage loader (its stage's layers, plus the EP
 slice under PP+EP) and HF `tp_plan="auto"` for **dense** models.
 
 Every other branch of `_dispatch_model_loading` materializes all 396.8 B on one GPU: **794 GB, never

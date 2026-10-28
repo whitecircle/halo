@@ -31,10 +31,10 @@ from accelerate import PartialState
 from peft import LoraConfig, get_peft_model
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
-from halo.checkpoint import adapter_merge as mpa
-from halo.checkpoint import bf16_conversion as cb
-from halo.checkpoint import model_merge as mm
-from halo.checkpoint import offline_export
+from halo.checkpoint.tools import adapter_merge as mpa
+from halo.checkpoint.tools import bf16_conversion as cb
+from halo.checkpoint.tools import model_merge as mm
+from halo.checkpoint.tools import offline_export
 from tests.common.checkpoint_io import weight_files
 from tests.common.repo import load_script_module
 from tests.common.tiny_models import word_level_tokenizer

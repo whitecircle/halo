@@ -85,7 +85,7 @@ A row with `choices` switches `exam_qa` to letter grading and appends the choice
 ## Evaluation
 
 ```bash
-python scripts/environments/inference/run_env.py --env_type exam_qa \
+python scripts/environments/inference/eval_env.py --env_type exam_qa \
     --dataset <hub-id-or-dir> --split test --prompt_field question --answer_field answer \
     --context_fields choices --group_by subject \
     --base_url http://localhost:8000/v1 --model <served-name> --num_examples 100

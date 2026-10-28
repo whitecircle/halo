@@ -11,8 +11,8 @@ from transformers import ProcessorMixin
 from transformers.data.data_collator import DataCollatorMixin
 from trl.trainer.utils import pad
 
+from halo.data.chat_render import lacks_emitted_bos
 from halo.data.completion_spans import completion_labels
-from halo.data.pipeline.chat_render import lacks_emitted_bos
 from halo.data.pipeline.preferences import PROMPT_OVERLAP_COLUMN
 from halo.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS, run_vlm_processor
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX

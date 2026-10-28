@@ -16,14 +16,14 @@ from safetensors.torch import load_file
 from halo.checkpoint.atomic import create_staged_file, link_or_copy_file, publish_staged_file, save_safetensors_file
 from halo.checkpoint.format import SAFETENSORS_INDEX_FILE, SAFETENSORS_METADATA
 from halo.checkpoint.model_card import tag_exported_model_card
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import checkpoint_shard_files, detect_model_types, reject_partial_checkpoint
+from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
     is_non_artifact_subdirectory,
     preflight_resource_warning,
     reject_in_place_conversion,
     resolve_checkpoint_source,
 )
-from halo.checkpoint.reading import checkpoint_shard_files, detect_model_types, reject_partial_checkpoint
 from halo.checkpoint.writing import sweep_after_full_save
 from halo.models.attention.gpt_oss_sinks import is_sink_key, neutralized_sink_value, uses_gpt_oss_sinks
 

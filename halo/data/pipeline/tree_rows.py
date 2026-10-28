@@ -16,9 +16,9 @@ import pyarrow.compute as pc
 from datasets import Dataset, DatasetDict, Features, List, Value
 from transformers import PreTrainedTokenizer
 
+from halo.data.chat_render import tokenize_rendered
 from halo.data.completion_spans import PACKED_SPAN_POLICY, build_span_labels, resolve_spans_or_warn
-from halo.data.pipeline.chat_render import tokenize_rendered
-from halo.data.pipeline.conversation import resolve_json_value
+from halo.data.conversation import resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.pipeline.rejected_rows import dataset_total_size, report_rejected_rows

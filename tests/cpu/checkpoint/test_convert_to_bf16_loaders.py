@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CPU tests for ``halo.checkpoint.bf16_conversion``'s loader dispatch.
+"""CPU tests for ``halo.checkpoint.tools.bf16_conversion``'s loader dispatch.
 
 One table must drive both call sites that load a model (convert, inference check) instead of a repeated
 ``--task`` if-ladder, whose trailing ``else`` silently loads a bare ``AutoModel`` for any unknown
@@ -22,10 +22,10 @@ import types
 
 import pytest
 
-import halo.checkpoint.bf16_conversion as convert_module
-from halo.checkpoint import offline_export
-from halo.checkpoint.bf16_conversion import load_model
-from halo.checkpoint.offline_export import ADAPTER_TASKS, TASK_MODEL_CLASSES
+import halo.checkpoint.tools.bf16_conversion as convert_module
+from halo.checkpoint.tools import offline_export
+from halo.checkpoint.tools.bf16_conversion import load_model
+from halo.checkpoint.tools.offline_export import ADAPTER_TASKS, TASK_MODEL_CLASSES
 from scripts.after_training import convert_to_bf16 as convert_script
 from scripts.after_training import merge_peft_adapters as merge_script
 

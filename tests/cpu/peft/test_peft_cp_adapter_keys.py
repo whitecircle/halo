@@ -178,7 +178,7 @@ def test_resume_roundtrip_loads_every_saved_tensor():
 
 def test_resume_remap_covers_modules_to_save_buffers():
     """A ``modules_to_save`` clone serializes its persistent buffers (a router's balancing bias —
-    the reason ``resolve_adapter_state`` chains ``persistent_buffers``). The resume remap must map
+    the reason ``gather_adapter_state`` chains ``persistent_buffers``). The resume remap must map
     them back to live spelling exactly like parameters; a live map built from ``named_parameters()``
     alone leaves the buffer in portable spelling, the loader reports it unexpected, and the bias
     silently resumes at init."""

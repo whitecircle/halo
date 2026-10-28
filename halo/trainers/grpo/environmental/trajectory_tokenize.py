@@ -18,7 +18,7 @@ from halo.environments.rollout_config import (
     VLLM_BACKEND,
 )
 from halo.log import warn_once
-from halo.models.context_window import UNSET_MODEL_MAX_LENGTH, get_model_context_window, is_bounded_length
+from halo.models.context_window import UNSET_MODEL_MAX_LENGTH, is_bounded_length, resolve_model_context_window
 from halo.trainers.grpo.environmental.trajectory_spans import TemplateSpanError, locate_assistant_spans
 
 logger = logging.getLogger(__name__)
@@ -78,12 +78,12 @@ class TrajectoryTokenizeMixin:
 
     def _context_limit(self) -> int:
         """The context window bounding every training row: the tokenizer's, where the training script pins the
-        served window, else the model config's (:func:`get_model_context_window`, which raises rather than
+        served window, else the model config's (:func:`resolve_model_context_window`, which raises rather than
         fall back to a size that would disable the overflow check)."""
         limit = self._tokenizer.model_max_length
         if is_bounded_length(limit) and limit < UNSET_MODEL_MAX_LENGTH:
             return int(limit)
-        return get_model_context_window(self.model, self._tokenizer)
+        return resolve_model_context_window(self.model, self._tokenizer)
 
     def _warn_if_no_reasoning_captured(
         self, rollout_results: list[RolloutResult], *, price_on: bool, floor_on: bool

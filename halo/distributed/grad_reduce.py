@@ -1,7 +1,4 @@
-"""Gradient all-reduce primitives for every post-backward sync path. A leaf (torch, :mod:`halo.env` and
-:mod:`halo.runtime.collectives` only), so any package can reduce gradients without importing a
-parallelism package.
-"""
+"""Gradient all-reduce primitives for every post-backward sync path."""
 
 from __future__ import annotations
 

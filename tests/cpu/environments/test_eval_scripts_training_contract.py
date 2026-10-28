@@ -17,9 +17,9 @@ import pytest
 from transformers import CONFIG_MAPPING
 
 import halo.environments.rollout_config as rollout_config
-from halo.entrypoints import environment_eval
+from halo.entrypoints import eval_contract
 from halo.entrypoints.code_contests_eval import CODING_ENV_TYPES, resolve_env_config
-from halo.entrypoints.environment_eval import (
+from halo.entrypoints.eval_contract import (
     TrainingContract,
     load_training_contract,
     rollout_config_from_args,
@@ -77,14 +77,14 @@ class _Tokenizer:
 @pytest.fixture(autouse=True)
 def dense_model_config(monkeypatch):
     """The model config the contract reads to check a vLLM thinking budget is enforceable."""
-    monkeypatch.setattr(environment_eval.AutoConfig, "from_pretrained", lambda *a, **k: CONFIG_MAPPING["qwen3"]())
+    monkeypatch.setattr(eval_contract.AutoConfig, "from_pretrained", lambda *a, **k: CONFIG_MAPPING["qwen3"]())
 
 
 @pytest.fixture
 def contract(tmp_path, monkeypatch):
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML)
-    monkeypatch.setattr(environment_eval.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     return TrainingContract.load(str(path))
 
 
@@ -157,7 +157,7 @@ def test_a_mixed_case_environment_type_reaches_the_coding_eval_as_the_registry_n
     the coding eval compares the name against its coding envs, and must accept the run it trained."""
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML.replace("environment_type: code_contests", "environment_type: Code_Contests"))
-    monkeypatch.setattr(environment_eval.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     environment_type = TrainingContract.load(str(path)).env_config.environment_type
     assert environment_type == "code_contests" and environment_type in CODING_ENV_TYPES
 
@@ -187,7 +187,7 @@ def test_training_still_refuses_the_recipe_on_the_default_watchdog(default_watch
 def test_an_unresolvable_stop_token_is_refused(tmp_path, monkeypatch):
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML.replace('["<|call|>"]', '["<|call|>", "<|nope|>"]'))
-    monkeypatch.setattr(environment_eval.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     contract = TrainingContract.load(str(path))
     with pytest.raises(ValueError, match="<\\|nope\\|>"):
         contract.rollout_config(_env(contract))
@@ -198,8 +198,8 @@ def test_a_thinking_budget_vllm_cannot_enforce_is_refused(tmp_path, monkeypatch)
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML)
     mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
-    monkeypatch.setattr(environment_eval.AutoConfig, "from_pretrained", lambda *a, **k: mistral_small_4)
-    monkeypatch.setattr(environment_eval.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    monkeypatch.setattr(eval_contract.AutoConfig, "from_pretrained", lambda *a, **k: mistral_small_4)
+    monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     contract = TrainingContract.load(str(path))
     with pytest.raises(ValueError, match="cannot enforce a thinking budget"):
         contract.rollout_config(_env(contract))
@@ -223,7 +223,7 @@ def test_a_level_budget_vllm_cannot_enforce_is_refused_without_a_run_wide_one(tm
     """A drawable level's ``thinking_tokens`` reaches vLLM as the turn's budget just as the run-wide cap does,
     so a Mistral 4 run budgeted per level alone is refused too; the same run without the level budget samples."""
     mistral_small_4 = CONFIG_MAPPING["mistral3"](text_config=CONFIG_MAPPING["mistral4"]())
-    monkeypatch.setattr(environment_eval.AutoConfig, "from_pretrained", lambda *a, **k: mistral_small_4)
+    monkeypatch.setattr(eval_contract.AutoConfig, "from_pretrained", lambda *a, **k: mistral_small_4)
     budgeted = tmp_path / "budgeted.yaml"
     budgeted.write_text(_LEVEL_BUDGET_YAML)
     contract = TrainingContract.load(str(budgeted))
@@ -243,7 +243,7 @@ def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_bud
     counts each turn's reasoning up to: a contract with neither never loads one, and captures no ids."""
     budgeted = tmp_path / "budgeted.yaml"
     budgeted.write_text(_TRAINING_YAML.replace('rollout_stop_tokens: ["<|call|>"]\n', ""))
-    monkeypatch.setattr(environment_eval.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     contract = TrainingContract.load(str(budgeted))
     rollout = contract.rollout_config(_env(contract))
     assert rollout.stop_token_ids is None and rollout.reasoning_end_token_id == _THINK_END_ID
@@ -251,7 +251,7 @@ def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_bud
     def never(*a, **k):
         raise AssertionError("the contract loaded a tokenizer with nothing to resolve")
 
-    monkeypatch.setattr(environment_eval.AutoTokenizer, "from_pretrained", never)
+    monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", never)
     plain = tmp_path / "plain.yaml"
     plain.write_text(
         _LEVEL_BUDGET_YAML.replace("  reasoning_effort_profiles:\n    low: {thinking_tokens: 1024}\n", "")
@@ -263,7 +263,7 @@ def test_the_contract_loads_the_tokenizer_for_stop_tokens_or_a_vllm_thinking_bud
 
 def test_the_eval_resolves_stop_tokens_as_the_trainer_does():
     """One resolver, one policy: a recipe the trainer accepts is one its eval accepts."""
-    assert environment_eval.resolve_rollout_stop_token_ids is rollout_config.resolve_rollout_stop_token_ids
+    assert eval_contract.resolve_rollout_stop_token_ids is rollout_config.resolve_rollout_stop_token_ids
 
 
 @pytest.mark.parametrize(
@@ -277,7 +277,7 @@ def test_the_coding_eval_takes_the_level_the_training_env_was_built_with(tmp_pat
     reading the null as unset and grading a no-level policy at the default."""
     path = tmp_path / "train.yaml"
     path.write_text(_TRAINING_YAML.replace("  timeout_per_test: 3\n", f"  timeout_per_test: 3\n{effort_line}"))
-    monkeypatch.setattr(environment_eval.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
+    monkeypatch.setattr(eval_contract.AutoTokenizer, "from_pretrained", lambda *a, **k: _Tokenizer())
     contract = TrainingContract.load(str(path))
     trained_env = contract.env_config.to_env_config()
     training = build_environment(contract.env_config.environment_type, {**trained_env, "sandbox": StubSandbox()})

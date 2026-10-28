@@ -21,7 +21,7 @@ import pyarrow as pa
 import pytest
 from datasets import Dataset
 
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation, build_rejection_row, is_valid_example
 from halo.data.pipeline.text_rows import build_chat_row_processor
@@ -291,7 +291,7 @@ def test_rlvr_rows_survive_an_all_rejected_writer_batch(content):
     struct<role: string, content: string> to null``. The blanked conversation keeps the struct type —
     text parts staying parts, since a blank string beside them in the mixed batch cannot share a
     column — and the blank prompt still drops the row."""
-    args = RLVROnlineGRPOScriptArguments(dataset="org/rlvr", prompt_field="messages", max_prompt_length=8)
+    args = OnlineGRPOScriptArguments(dataset="org/rlvr", prompt_field="messages", max_prompt_length=8)
     long_turn = [{"role": "user", "content": content(" ".join(["w"] * 32))}]
     short_turn = [{"role": "user", "content": content("short prompt")}]
     dataset = Dataset.from_dict(

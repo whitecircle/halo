@@ -16,7 +16,7 @@ import pytest
 import torch
 
 from halo.configs.grpo import RLRRConfig
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
@@ -111,8 +111,8 @@ def test_unscorable_member_does_not_shift_its_siblings():
 
 def test_build_rlrr_config_from_args():
     """The RLVR script args build a usable RLRRConfig only when use_rlrr is set."""
-    assert RLVROnlineGRPOScriptArguments(use_rlrr=False).build_rlrr_config() is None
-    cfg = RLVROnlineGRPOScriptArguments(
+    assert OnlineGRPOScriptArguments(use_rlrr=False).build_rlrr_config() is None
+    cfg = OnlineGRPOScriptArguments(
         use_rlrr=True, rlrr_mode="prr", rlrr_tau=0.2, rlrr_correctness_clip=False
     ).build_rlrr_config()
     assert isinstance(cfg, RLRRConfig)

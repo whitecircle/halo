@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import pytest
 from datasets import Dataset, DatasetDict
 
-from halo.data.pipeline.chat_render import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
+from halo.data.chat_render import probe_tokenizer_specials, render_generation_prompt, tokenize_rendered
 from halo.entrypoints.data_setup import prepare_chat_text_split
 from tests.common.repo import load_script_module
 
@@ -432,12 +432,12 @@ def test_classification_row_tokenization_never_doubles_bos():
 @pytest.mark.parametrize(
     ("labels", "expected"),
     [
-        ([0, 2], [1.0, 0.0, 1.0]),  # int-valued column: get_label_list stringified the keys
+        ([0, 2], [1.0, 0.0, 1.0]),  # int-valued column: labels_in_split stringified the keys
         (["0", "1"], [1.0, 1.0, 0.0]),  # already strings
     ],
 )
 def test_classification_row_maps_multi_labels_of_either_type(labels, expected):
-    """``get_label_list`` stringifies every key, so both label paths must look up ``str(label)``.
+    """``labels_in_split`` stringifies every key, so both label paths must look up ``str(label)``.
 
     An int-valued multi-label column is what a HF dataset with a ``Sequence(ClassLabel)`` column
     yields, and a raw-value lookup ``KeyError``s on it while the single-label path accepts the very

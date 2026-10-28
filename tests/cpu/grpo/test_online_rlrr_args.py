@@ -21,7 +21,7 @@ import pytest
 
 from halo.config_validation import reject_non_default_args
 from halo.configs.grpo import RLRRArguments, RLRRConfig, rlrr_arg_name
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parser import HaloArgumentParser
 from tests.common.repo import REPO_ROOT
 
@@ -41,7 +41,7 @@ NON_DEFAULT_CONFIG = RLRRConfig(
 
 
 def _script_fields() -> dict[str, dataclasses.Field]:
-    return {f.name: f for f in dataclasses.fields(RLVROnlineGRPOScriptArguments)}
+    return {f.name: f for f in dataclasses.fields(OnlineGRPOScriptArguments)}
 
 
 def test_every_rlrr_script_field_is_derived_from_the_config_field():
@@ -57,17 +57,17 @@ def test_every_rlrr_script_field_is_derived_from_the_config_field():
 
 
 def test_forwarded_config_equals_the_explicit_one():
-    args = RLVROnlineGRPOScriptArguments(
+    args = OnlineGRPOScriptArguments(
         use_rlrr=True,
         **{rlrr_arg_name(f.name): getattr(NON_DEFAULT_CONFIG, f.name) for f in dataclasses.fields(RLRRConfig)},
     )
     assert args.build_rlrr_config() == NON_DEFAULT_CONFIG
-    assert RLVROnlineGRPOScriptArguments().build_rlrr_config() is None
+    assert OnlineGRPOScriptArguments().build_rlrr_config() is None
 
 
 def test_the_parser_surfaces_the_derived_fields_with_their_choices():
     """A make_dataclass field must reach the parser like a hand-written one: parsed, and its Literal gated."""
-    parser = HaloArgumentParser((RLVROnlineGRPOScriptArguments,))
+    parser = HaloArgumentParser((OnlineGRPOScriptArguments,))
     (args,) = parser.parse_dict({"use_rlrr": True, "rlrr_mode": "prr", "rlrr_lambda": 64.0})
     assert args.build_rlrr_config() == RLRRConfig(mode="prr", lam=64.0)
     with pytest.raises(ValueError, match="rlrr_mode"):
@@ -90,14 +90,14 @@ def test_the_parser_surfaces_the_derived_fields_with_their_choices():
 @pytest.mark.parametrize("use_rlrr", [True, False])
 def test_every_rlrr_invariant_fails_when_the_args_are_built(kwargs, match, use_rlrr):
     with pytest.raises(ValueError, match=match):
-        RLVROnlineGRPOScriptArguments(use_rlrr=use_rlrr, **kwargs)
+        OnlineGRPOScriptArguments(use_rlrr=use_rlrr, **kwargs)
 
 
 def test_an_inverted_band_fails_on_the_cli_override_path(tmp_path):
     """A ``--key=value`` override meets the RLRR block of the cooperative ``_validate_fields`` chain."""
     yaml_path = tmp_path / "rlvr.yaml"
     yaml_path.write_text("use_rlrr: true\n")
-    parser = HaloArgumentParser((RLVROnlineGRPOScriptArguments,))
+    parser = HaloArgumentParser((OnlineGRPOScriptArguments,))
     with pytest.raises(ValueError, match="rlrr_xi_neg <= rlrr_xi_pos"):
         parser.parse_dict(parser.load_values([str(yaml_path), "--rlrr_xi_neg=1.0"]))
 
@@ -106,17 +106,15 @@ def test_an_inverted_band_fails_on_the_cli_override_path(tmp_path):
 
 
 def test_rlrr_tunables_without_the_gate_are_refused_by_the_default_comparing_guard():
-    reject_non_default_args(
-        "RLVR Online GRPO with use_rlrr off", RLVROnlineGRPOScriptArguments(), *RLRRArguments.TUNABLES
-    )
+    reject_non_default_args("RLVR Online GRPO with use_rlrr off", OnlineGRPOScriptArguments(), *RLRRArguments.TUNABLES)
     with pytest.raises(ValueError, match=r"\['rlrr_tau'\]"):
         reject_non_default_args(
-            "RLVR Online GRPO with use_rlrr off", RLVROnlineGRPOScriptArguments(rlrr_tau=0.3), *RLRRArguments.TUNABLES
+            "RLVR Online GRPO with use_rlrr off", OnlineGRPOScriptArguments(rlrr_tau=0.3), *RLRRArguments.TUNABLES
         )
 
 
 def test_sdpg_tunables_cover_the_shared_block_plus_the_rlvr_only_gate():
-    assert set(RLVROnlineGRPOScriptArguments.SDPG_TUNABLES) == {
+    assert set(OnlineGRPOScriptArguments.SDPG_TUNABLES) == {
         "sdpg_hint_template",
         "sdpg_loss",
         "sdpg_temperature",
@@ -129,8 +127,8 @@ def test_sdpg_tunables_cover_the_shared_block_plus_the_rlvr_only_gate():
     with pytest.raises(ValueError, match=r"\['opd_positive_advantage_only'\]"):
         reject_non_default_args(
             "RLVR Online GRPO with use_sdpg off",
-            RLVROnlineGRPOScriptArguments(opd_positive_advantage_only=False),
-            *RLVROnlineGRPOScriptArguments.SDPG_TUNABLES,
+            OnlineGRPOScriptArguments(opd_positive_advantage_only=False),
+            *OnlineGRPOScriptArguments.SDPG_TUNABLES,
         )
 
 

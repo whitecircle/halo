@@ -26,20 +26,20 @@ import pytest
 import torch
 from safetensors.torch import save_file
 
-from halo.checkpoint import adapter_merge, bf16_conversion
-from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, assert_no_expert_lora_adapter
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE, reject_expert_lora_adapter
 from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_WEIGHT_NAMES,
     MERGED_ADAPTER_CONFIG_DIR,
     SAFETENSORS_INDEX_FILE,
 )
+from halo.checkpoint.tools import adapter_merge, bf16_conversion
 
 # The gates that must run for real: each one is the check under test, not a stand-in for it.
 _REAL_GATES = (
     "reject_partial_checkpoint",
     "reject_in_place_conversion",
-    "assert_no_expert_lora_adapter",
+    "reject_expert_lora_adapter",
     "preflight_model_load_resources",
 )
 
@@ -240,7 +240,7 @@ def test_an_unmarked_expert_adapter_is_caught_in_either_weight_file(tmp_path, we
         torch.save(expert_tensor, adapter / weights_file)
 
     with pytest.raises(ValueError, match="expert-LoRA adapter"):
-        assert_no_expert_lora_adapter(str(adapter))
+        reject_expert_lora_adapter(str(adapter))
 
 
 def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch):

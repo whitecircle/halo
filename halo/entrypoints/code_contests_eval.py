@@ -1,7 +1,7 @@
 """The code-contest eval's run: the contest selection, the protocol, effort and environment config resolved
 from the flags over a training contract, the examples an adapter composes from raw contest rows, and the scored
 run with the trajectory meta the offline re-grade rebuilds it from. Behind
-``scripts/environments/inference/run_code_contests.py``."""
+``scripts/environments/inference/eval_code_contests.py``."""
 
 import argparse
 import asyncio
@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Any
 
-from halo.entrypoints.environment_eval import (
+from halo.entrypoints.eval_contract import (
     DEFAULT_SPLIT,
     load_training_contract,
     resolve_setting,
@@ -63,7 +63,7 @@ def parse_language_flag(value: str) -> str | list[str]:
     return languages if len(languages) > 1 else languages[0]
 
 
-def refuse_flag_owned_env_kwargs(env_kwargs: dict) -> None:
+def reject_flag_owned_env_kwargs(env_kwargs: dict) -> None:
     """A :data:`FLAG_OWNED_ENV_KWARGS` option also passed through ``--env_kwargs`` would silently
     override its flag, the JSON being laid over the flags."""
     for key in FLAG_OWNED_ENV_KWARGS:
@@ -230,7 +230,7 @@ def run_code_contests_eval(args: argparse.Namespace) -> None:
         raise SystemExit(f"--split on --adapter {args.adapter}: {exc}") from exc
     selection = resolve_selection(args, adapter)
     env_kwargs = json.loads(args.env_kwargs)
-    refuse_flag_owned_env_kwargs(env_kwargs)
+    reject_flag_owned_env_kwargs(env_kwargs)
     contract = load_training_contract(args.training_config)
     trained_env = contract.env_config.to_env_config() if contract is not None else {}
     env_type = resolve_setting(

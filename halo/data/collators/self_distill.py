@@ -1,6 +1,6 @@
-"""Text collator for SDPG self-distillation: the student batch plus a ``teacher_*`` branch whose last user
-turn carries the privileged hint, with the hint's rendering and injection, the response-alignment contract
-and the confidence weighting both SDPG collators share."""
+"""The SDPG self-distillation collators, text and VLM: the student batch plus a ``teacher_*`` branch whose last
+user turn carries the privileged hint, with the hint's rendering and injection, the response-alignment
+contract and the confidence weighting both share."""
 
 import math
 import string
@@ -10,9 +10,11 @@ from typing import Any
 import torch
 from trl.trainer.utils import pad
 
+from halo.data.chat_render import render_conversation, tokenize_rendered
+from halo.data.collators.vlm import VLMDataCollator
 from halo.data.completion_spans import build_completion_only_labels
-from halo.data.pipeline.chat_render import render_conversation, tokenize_rendered
 from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
+from halo.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 
 
@@ -247,6 +249,74 @@ class SelfDistillTextCollator(SelfDistillBranchMixin):
                 padding_side=side,
             ),
         }
+
+
+class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
+    """VLM collator for SDPG-style self-distillation (arXiv:2606.04036): the student batch plus a hinted
+    ``teacher_*`` branch whose labels select the same response tokens (:func:`require_aligned_responses`).
+
+    The text-only hint leaves the image grid unchanged, so the trainer reuses the student's image tensors.
+    Takes the self-distill span policy, like :class:`SelfDistillTextCollator`; ``hint_template=None``
+    builds no teacher branch. Optionally emits ``confidence_weights``.
+    """
+
+    _COMPLETION_SPAN_POLICY = None
+
+    def __init__(
+        self,
+        *args,
+        hint_template: str | None,
+        answer_field: str | None,
+        solution_field: str | None,
+        confidence_power: float,
+        confidence_field: str | None = None,
+        confidence_normalizer: float | None = None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._init_self_distill_fields(
+            hint_template, answer_field, solution_field, confidence_field, confidence_power, confidence_normalizer
+        )
+
+    def audit_row(self, example: dict[str, Any]) -> dict[str, Any]:
+        """Refuse a row whose two branches would supervise different tokens; returns no columns. Reads the
+        rendered text as the processor tokenizes it, before the image placeholders (all in the user turn)
+        expand; mapped at prep by ``audit_self_distill_row``, where the raise is world-uniform."""
+        if not self.builds_teacher_branch:
+            return {}
+        history = example.get("history", [])
+        labels = []
+        for branch in (history, self._teacher_history(history, example)):
+            text = self._render(branch, example)
+            input_ids = torch.tensor([self.tokenizer(text, add_special_tokens=False)["input_ids"]])
+            labels.append(self._build_labels(input_ids, torch.ones_like(input_ids)))
+        require_aligned_responses({"labels": labels[0], "teacher_labels": labels[1]})
+        return {}
+
+    def __call__(self, examples):
+        batch = super().__call__(examples)
+
+        if self.builds_teacher_branch:
+            # Never truncated either: the hinted teacher is the longer branch, so truncation would cut response
+            # tokens the student keeps and break OPD row alignment.
+            teacher_batch = self._process_batch(
+                examples,
+                lambda example: self._teacher_history(example.get("history", []), example),
+                "teacher branch (student history + privileged hint)",
+            )
+            batch["teacher_input_ids"] = teacher_batch["input_ids"]
+            batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
+            batch["teacher_labels"] = self._build_labels(
+                teacher_batch["input_ids"], teacher_batch.get("attention_mask")
+            )
+            # Per-token tensors (GLM-4.6V mm_token_type_ids) must be the teacher's own — its sequence is longer.
+            for key in SEQUENCE_ALIGNED_VISION_KEYS:
+                if key in teacher_batch:
+                    batch[f"teacher_{key}"] = teacher_batch[key]
+            require_aligned_responses(batch)
+
+        self._add_confidence_weights(batch, examples)
+        return batch
 
 
 def _encode_branch(

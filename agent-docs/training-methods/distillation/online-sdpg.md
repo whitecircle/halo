@@ -8,7 +8,7 @@ Use it when a verifiable answer exists and the policy solves too few prompts for
 
 Every knob lives on the RLVR script arguments and is read only with `use_sdpg: true`; setting one away from its default with the gate off is refused before the model loads. An out-of-range value is refused at parse time, gate on or off. No shipped YAML enables it — start from `examples/grpo/online/rlvr-online-grpo-template.yaml`, which carries the block commented out.
 
-The hint (`sdpg_hint_template`) is appended to the rendered generation prompt for the teacher forward only; `{answer}` is the one placeholder it fills. `opd_positive_advantage_only` restricts OPD to rows with a positive advantage; `false` distills every completion row. Types, defaults and bounds: [SDPGArguments](../../reference/configuration-reference.md#sdpgarguments) and [RLVROnlineGRPOScriptArguments](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments).
+The hint (`sdpg_hint_template`) is appended to the rendered generation prompt for the teacher forward only; `{answer}` is the one placeholder it fills. `opd_positive_advantage_only` restricts OPD to rows with a positive advantage; `false` distills every completion row. Types, defaults and bounds: [SDPGArguments](../../reference/configuration-reference.md#sdpgarguments) and [OnlineGRPOScriptArguments](../../reference/configuration-reference.md#onlinegrposcriptarguments).
 
 OPD runs on the tokens the GRPO loss trains, so tool-output tokens are excluded. The hint is tokenized and appended to each rollout's prompt ids, so the term is text-only. It reads the pinned `answer` column that `process_for_rlvr` normalizes `answer_field` into — a train dataset without that column raises at construction whenever `sdpg_beta_base` is non-zero and the template names `{answer}`, and a loss batch without the teacher prompts raises rather than training plain GRPO.
 
@@ -58,4 +58,4 @@ Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TR
 ## Related pages
 
 - [Online GRPO (RLVR)](../grpo/online.md) · [Self-Distillation](self-distillation.md) · [Distillation Overview](README.md)
-- [Configuration Reference](../../reference/configuration-reference.md#rlvronlinegrposcriptarguments) — the RLVR script arguments the `sdpg_*` fields extend
+- [Configuration Reference](../../reference/configuration-reference.md#onlinegrposcriptarguments) — the RLVR script arguments the `sdpg_*` fields extend

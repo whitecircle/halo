@@ -28,10 +28,10 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-from halo.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from tests.common.distributed import cleanup_dirs, shared_scratch_dir
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory

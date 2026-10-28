@@ -27,7 +27,7 @@ halo launch <method> <config.yaml> [launcher flags] [field overrides]
 The CLI picks the launcher:
 
 - one process: plain `python`
-- `--nproc` above 1: `torchrun` (required for EP, CP, TP and ETP)
+- `--nproc` above 1: `torchrun` (required for EP, CP, TP, ETP and PP)
 - `--accelerate`: `accelerate launch`
 
 Other flags after the config go to the trainer as is, so config overrides ride
@@ -82,7 +82,7 @@ tool's help, not the launcher's.
 | `openai-batched-generation` | batched generation against a vLLM or OpenAI-compatible endpoint |
 | `inference/reward-model/score` | generate one response per prompt against an endpoint and score it with a reward model |
 | `inference/reward-model/rejection-sample` | generate N responses per prompt, score them, and keep the best and worst as preference pairs or offline GRPO data |
-| `run-env` / `run-code-contests` / `regrade-trajectories` | evaluate a model on an RL environment through an OpenAI-compatible endpoint; re-grade recorded code-contest trajectories |
+| `eval-env` / `eval-code-contests` / `regrade-trajectories` | evaluate a model on an RL environment through an OpenAI-compatible endpoint; re-grade recorded code-contest trajectories |
 | `gradio-openai-chatbot` / `gradio-environment-playground` | chat with a served model, or play an environment against it, in the browser |
 | `nvlink-health` / `py-spy-diag` / `trace-report` | preflight and debugging; see [Troubleshooting](troubleshooting.md) |
 | `weight-sync-transport` | check which transport the trainer-to-rollout-server weight sync uses |

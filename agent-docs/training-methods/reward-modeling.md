@@ -1,12 +1,12 @@
 # Reward Modeling
 
-A reward model scores a (prompt, completion) pair with one scalar, fit to pairwise preferences under the Bradley-Terry loss. Use it for rejection sampling or as an RL reward signal; to train a policy on the same pairs use [DPO](dpo.md) or [SMPO](smpo.md).
+A reward model scores a (prompt, completion) pair with one scalar, fit to pairwise preferences under the Bradley-Terry loss. Use it for rejection sampling or as an RL reward signal; to train a policy on the same pairs use [DPO](preference/dpo.md) or [SMPO](preference/smpo.md).
 
-Trainer `DistributedRewardTrainer`, script `scripts/training/reward/reward_model.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP, EP+TP and PP apply; CP does not — the score head pools the whole sequence ([matrix](../../reference/trainer-architecture.md#trainer-compatibility)).
+Trainer `DistributedRewardTrainer`, script `scripts/training/reward/reward_model.py`, model class `AutoModelForSequenceClassification` with `num_labels=1`. EP, TP, ETP, EP+TP and PP apply; CP does not — the score head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
 
 ## Dataset
 
-The pairwise `prompt` / `chosen` / `rejected` format DPO and SMPO use, plus implicit-prompt datasets carrying no `prompt` column, with the shared turns repeated inside both sides (`Skywork/Skywork-Reward-Preference-80K-v0.2`). See [Dataset Formats](../../data/dataset-formats.md#reward-modeling).
+The pairwise `prompt` / `chosen` / `rejected` format DPO and SMPO use, plus implicit-prompt datasets carrying no `prompt` column, with the shared turns repeated inside both sides (`Skywork/Skywork-Reward-Preference-80K-v0.2`). See [Dataset Formats](../data/dataset-formats.md#reward-modeling).
 
 TRL's `RewardTrainer` chat-templates and tokenizes the raw columns itself, concatenating `prompt + chosen` / `prompt + rejected` with no hub-shape normalization: a `prompt` column whose completions repeat those turns renders the prompt twice, silently. DPO and SMPO strip that prefix, and so does the reward VLM path.
 
@@ -29,11 +29,11 @@ gradient_checkpointing: true
 output_dir: checkpoints/rm-qwen3.5-9b-skywork-pref80k
 ```
 
-`max_length` is a **filter**: TRL drops pairs whose chosen or rejected side exceeds it. `center_rewards_coefficient` penalizes `(chosen + rejected)²`, pulling scores toward zero mean. `tools_field` names a column of per-row tool schemas, aliased onto `tools` and rendered on conversational rows only; `images_field` is under [Vision-language](#vision-language). Types and defaults: [RewardConfig](../../reference/configuration-reference.md#trl-trainer-configs) and [RewardScriptArguments](../../reference/configuration-reference.md#other-script-arguments).
+`max_length` is a **filter**: TRL drops pairs whose chosen or rejected side exceeds it. `center_rewards_coefficient` penalizes `(chosen + rejected)²`, pulling scores toward zero mean. `tools_field` names a column of per-row tool schemas, aliased onto `tools` and rendered on conversational rows only; `images_field` is under [Vision-language](#vision-language). Types and defaults: [RewardConfig](../reference/configuration-reference.md#trl-trainer-configs) and [RewardScriptArguments](../reference/configuration-reference.md#other-script-arguments).
 
 `max_length: null` resolves to the model's context window. `learning_rate` defaults to TRL's `1e-4`, high for a full fine-tune. A `chat_template_kwargs` column is splatted into the template too.
 
-The script defaults `attn_implementation` to `sdpa` for its right-padded batches when the YAML pins none, and requests nothing under `reset_sinks: false`, where only a sink-carrying backend is accepted ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). `text_only_model` and `log_decoded_samples` are refused, not silently ignored.
+The script defaults `attn_implementation` to `sdpa` for its right-padded batches when the YAML pins none, and requests nothing under `reset_sinks: false`, where only a sink-carrying backend is accepted ([padded workloads](../optimization/flash-attention.md#model-specific-handling)). `text_only_model` and `log_decoded_samples` are refused, not silently ignored.
 
 Where the tokenizer pads with eos (DeepSeek-V4), an INFO line names the cost: the recorded `config.pad_token_id` binds `nn.Embedding(padding_idx=<eos id>)` on the next load, masking that row's input-embedding gradient. Give such a base its own `pad_token:` to keep the EOS embedding training on the input side.
 
@@ -62,7 +62,7 @@ lora_task_type: SEQ_CLS         # required for a pooled score head
 lora_modules_to_save: [score]
 ```
 
-LoRA is rejected under TP, EP+TP and PP ([PEFT](../../optimization/peft.md#parallelism-compatibility)).
+LoRA is rejected under TP, EP+TP and PP ([PEFT](../optimization/peft.md#parallelism-compatibility)).
 
 ## Vision-language
 
@@ -90,7 +90,7 @@ torchrun --nproc_per_node=2 scripts/training/reward/reward_model.py <config> \
 
 Covering tests: `pytest tests/cpu/trainers -m cpu`, `tests/gpu/trainers/other/test_reward.py` and `test_reward_vlm_e2e.py`.
 
-Once trained, score fresh generations or build preference pairs with `scripts/inference/reward_model/score.py` and `rejection_sample.py` ([Scripts](../../reference/scripts-reference.md)). Both generate against a served endpoint from a `--dataset` prompt file before scoring; neither scores an existing (prompt, completion) corpus. Keep their `--rm_dtype` at `bfloat16`: reward logits are unbounded, and fp16 saturates on the completions the score must separate.
+Once trained, score fresh generations or build preference pairs with `scripts/inference/reward_model/score.py` and `rejection_sample.py` ([Scripts](../reference/scripts-reference.md)). Both generate against a served endpoint from a `--dataset` prompt file before scoring; neither scores an existing (prompt, completion) corpus. Keep their `--rm_dtype` at `bfloat16`: reward logits are unbounded, and fp16 saturates on the completions the score must separate.
 
 ## What to watch
 

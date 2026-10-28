@@ -21,7 +21,7 @@ from halo.models.config_access import (
     get_config_field,
     set_config_field_run_scoped,
 )
-from halo.models.moe.router_logits import DeclaredRouter, declared_routers, router_logits_forced_off
+from halo.models.moe.router_logits import ROUTER_LOGITS_KEY, DeclaredRouter, declared_routers, router_logits_forced_off
 from halo.runtime.consensus import rank_max
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
 
@@ -79,9 +79,9 @@ def compute_moe_load_metrics(
 
 def _extract_router_logits(output) -> tuple[torch.Tensor, ...] | None:
     """Return the tuple of per-layer router logits if present, else None."""
-    router_logits = getattr(output, "router_logits", None)
+    router_logits = getattr(output, ROUTER_LOGITS_KEY, None)
     if router_logits is None and isinstance(output, dict):
-        router_logits = output.get("router_logits")
+        router_logits = output.get(ROUTER_LOGITS_KEY)
     if router_logits is None:
         return None
     if isinstance(router_logits, torch.Tensor):

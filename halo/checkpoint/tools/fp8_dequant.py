@@ -16,12 +16,6 @@ from safetensors import safe_open
 
 from halo.checkpoint.config_export import write_config_json
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.checkpoint.offline_export import (
-    copy_checkpoint_aux_files,
-    preflight_resource_warning,
-    reject_in_place_conversion,
-    resolve_checkpoint_source,
-)
 from halo.checkpoint.reading import (
     FP8_HEADER_DTYPE,
     SAFETENSORS_FLOAT_DTYPES,
@@ -30,6 +24,12 @@ from halo.checkpoint.reading import (
     header_numel,
     iter_checkpoint_shards,
     read_checkpoint_config,
+)
+from halo.checkpoint.tools.offline_export import (
+    copy_checkpoint_aux_files,
+    preflight_resource_warning,
+    reject_in_place_conversion,
+    resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import StreamingShardWriter, cast_to_save_dtype
 

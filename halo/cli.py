@@ -272,7 +272,7 @@ def launch(
 ) -> None:
     """Launch a training method without spelling out Python, torchrun/accelerate, or script paths.
 
-    Defaults to Python (single process) or torchrun (``--nproc > 1``, required for EP/CP/TP); pass
+    Defaults to Python (single process) or torchrun (``--nproc > 1``, required for EP/CP/TP/ETP/PP); pass
     ``--accelerate <config>`` for standard FSDP data-parallel via ``accelerate launch``.
 
     Config-field overrides follow the config and reach the training script as typed

@@ -39,7 +39,7 @@ from halo.models.unwrapping import (
 )
 from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
-from halo.runtime.dtensor import resolve_retained
+from halo.runtime.dtensor import gather_full_tensors
 from halo.runtime.filesystem import fs_aware_makedirs, is_output_shared_filesystem
 from halo.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
@@ -67,9 +67,9 @@ def _save_key_remap(*, cp_key_remap: bool, peft_prefix: str | None) -> Callable[
 def _resolve_and_cast(
     items: Iterable[tuple[str, torch.Tensor]], cast: Callable[[str, torch.Tensor], torch.Tensor], *, retain: bool
 ) -> dict[str, torch.Tensor]:
-    """COLLECTIVE: :func:`resolve_retained`, each tensor cast as it lands, so the retaining rank never
+    """COLLECTIVE: :func:`gather_full_tensors`, each tensor cast as it lands, so the retaining rank never
     holds the replicated half at an fp32 master's width."""
-    return {key: cast(key, t) for item in items for key, t in resolve_retained([item], retain=retain).items()}
+    return {key: cast(key, t) for item in items for key, t in gather_full_tensors([item], retain=retain).items()}
 
 
 def _ep_gathered_chunks(
@@ -102,7 +102,7 @@ def _ep_gathered_chunks(
     buffers = (
         (name, buf) for name, buf in persistent_buffers(model, exclude_prefixes=ep_prefixes) if remap(name) is not None
     )
-    for name, buf in resolve_retained(buffers, retain=retain).items():
+    for name, buf in gather_full_tensors(buffers, retain=retain).items():
         state.setdefault(name, buf)
     # EP+TP: attention sinks are TP-sharded as plain tensors, needing this explicit mesh gather.
     gather_hand_sliced_params(model, state, retain=retain, keep_live_dtype=True)

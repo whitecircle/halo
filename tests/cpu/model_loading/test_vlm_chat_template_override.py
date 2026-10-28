@@ -92,7 +92,7 @@ def test_prepare_dataset_renders_vlm_rows_with_the_override():
         chat_template=OVERRIDE,
     )
 
-    assert _render(publishing.setup_vlm_processor(args)) == OVERRIDE_RENDER
+    assert _render(publishing.load_vlm_processor(args)) == OVERRIDE_RENDER
 
 
 def test_patch_vocab_exports_the_override(tmp_path, monkeypatch):

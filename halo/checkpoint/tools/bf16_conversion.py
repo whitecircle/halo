@@ -11,10 +11,12 @@ from peft import PeftConfig, PeftModel
 from safetensors import safe_open
 from transformers import AutoTokenizer
 
-from halo.checkpoint.adapter_merge import adapter_input_gates, load_base_for_adapter
 from halo.checkpoint.atomic import save_safetensors_file
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
+from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
+from halo.checkpoint.tools.adapter_merge import adapter_input_gates, load_base_for_adapter
+from halo.checkpoint.tools.offline_export import (
     ADAPTER_TASKS,
     TASK_MODEL_CLASSES,
     cast_norms_to_fp32,
@@ -24,8 +26,6 @@ from halo.checkpoint.offline_export import (
     reject_in_place_conversion,
     save_full_checkpoint,
 )
-from halo.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
-from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.tokenizer_setup import load_processing_class
 
@@ -44,25 +44,16 @@ _SMOKE_TEMPERATURE = 0.7
 _SMOKE_CLASSIFICATION_TEXT = "This is a test sentence for classification."
 
 
-def load_model(model_path, task, is_peft=False, **load_kwargs):
-    """Load ``model_path`` as ``task``, through the checkpoint-coverage gate.
+def _load_verified(model_path, task, *, excuse_task_head: bool, text_only: bool = False, **load_kwargs):
+    """:func:`load_task_model` with the loaded model's buffers finalized.
 
-    Raises on an unknown type, or a PEFT-unsupported one, rather than falling back to a different
-    architecture head.
-
-    ``is_peft`` loads the adapter's base and applies the adapter on top instead of handing the
-    directory to PEFT's own auto-class: that class reaches ``from_pretrained`` for the base directly,
-    where a truncated or key-mismatched checkpoint random-initializes the absent tensors with only a
-    log line, and this tool would write them out as a finished bf16 model. A missing seq-cls head is
-    legitimate only when the adapter declares one in ``modules_to_save`` (a classification adapter
-    trained on a plain causal-LM base), so the exemption is read off that declaration.
-    The base loads through the class the adapter's keys address (:func:`load_base_for_adapter`).
+    ``--check_inference`` generates from what this returns, and transformers 5 hands back every
+    non-persistent buffer as uninitialized memory, so the repair belongs on the load rather than on
+    whichever caller happens to run a forward.
     """
-    if task not in TASK_MODEL_CLASSES:
-        raise ValueError(f"Unknown task {task!r}; expected one of {sorted(TASK_MODEL_CLASSES)}")
-    if not is_peft:
-        return _load_verified(model_path, task, excuse_task_head=False, **load_kwargs)
-    return _load_adapter_model(model_path, task, load_kwargs)
+    model = load_task_model(model_path, task, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs)
+    finalize_loaded_model(model)
+    return model
 
 
 def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
@@ -86,16 +77,25 @@ def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
     return PeftModel.from_pretrained(base.model, adapter_dir)
 
 
-def _load_verified(model_path, task, *, excuse_task_head: bool, text_only: bool = False, **load_kwargs):
-    """:func:`load_task_model` with the loaded model's buffers finalized.
+def load_model(model_path, task, is_peft=False, **load_kwargs):
+    """Load ``model_path`` as ``task``, through the checkpoint-coverage gate.
 
-    ``--check_inference`` generates from what this returns, and transformers 5 hands back every
-    non-persistent buffer as uninitialized memory, so the repair belongs on the load rather than on
-    whichever caller happens to run a forward.
+    Raises on an unknown type, or a PEFT-unsupported one, rather than falling back to a different
+    architecture head.
+
+    ``is_peft`` loads the adapter's base and applies the adapter on top instead of handing the
+    directory to PEFT's own auto-class: that class reaches ``from_pretrained`` for the base directly,
+    where a truncated or key-mismatched checkpoint random-initializes the absent tensors with only a
+    log line, and this tool would write them out as a finished bf16 model. A missing seq-cls head is
+    legitimate only when the adapter declares one in ``modules_to_save`` (a classification adapter
+    trained on a plain causal-LM base), so the exemption is read off that declaration.
+    The base loads through the class the adapter's keys address (:func:`load_base_for_adapter`).
     """
-    model = load_task_model(model_path, task, excuse_task_head=excuse_task_head, text_only=text_only, **load_kwargs)
-    finalize_loaded_model(model)
-    return model
+    if task not in TASK_MODEL_CLASSES:
+        raise ValueError(f"Unknown task {task!r}; expected one of {sorted(TASK_MODEL_CLASSES)}")
+    if not is_peft:
+        return _load_verified(model_path, task, excuse_task_head=False, **load_kwargs)
+    return _load_adapter_model(model_path, task, load_kwargs)
 
 
 def _stored_bf16_share_passes(headers: Iterable, model_path: str) -> bool:

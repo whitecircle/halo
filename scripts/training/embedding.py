@@ -51,30 +51,65 @@ from halo.trainers.embedding.trainer import EmbeddingTrainer
 logger = logging.getLogger(__name__)
 
 
-def build_sentence_transformer(
-    context: ScriptContext,
-    embedding_config: EmbeddingConfig,
-    model_config: ModelArguments,
-    args: EmbeddingScriptArguments,
-) -> SentenceTransformer:
-    """Build the run's SentenceTransformer: under EP/TP the parallel loader's backbone wrapped in
-    :class:`PreloadedTransformer` and assembled into a pipeline, otherwise ``SentenceTransformer(model_name)``."""
-    # QLoRA/k-bit is unsupported here: neither the EP/TP loader nor the SentenceTransformer path
-    # applies it, so --load_in_4bit/--load_in_8bit would train at full precision.
-    if get_quantization_config(model_config) is not None:
+def resolve_embedding_max_length(embedding_config: EmbeddingConfig, transformer_module) -> int:
+    """Fix ``embedding_config.max_length`` against the pipeline's backbone and return it.
+
+    Both loading paths land here before the length reaches a tokenizer, so ``null`` means the same
+    thing on either: the backbone's context window. ``transformer_module`` is the pipeline's first
+    module — SentenceTransformers' own ``Transformer`` or our :class:`PreloadedTransformer`, both of
+    which hold the backbone as ``auto_model``.
+    """
+    backbone = getattr(transformer_module, "auto_model", None)
+    if backbone is None:
         raise ValueError(
-            "QLoRA / k-bit quantization is not supported for embedding training. The SentenceTransformer "
-            "loader does not apply a quantization_config, so --load_in_4bit/--load_in_8bit would be "
-            "silently ignored. Use full-precision LoRA (--use_peft) or full fine-tuning."
+            f"The loaded SentenceTransformer pipeline opens with {type(transformer_module).__name__}, "
+            "which carries no transformer backbone — there is nothing to train or to read a context "
+            "window from. Point model_name_or_path at a transformer/ST checkpoint."
         )
-    parallelism_config = context.parallelism_config
-    if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
-        st_model = _assemble_preloaded_pipeline(context, embedding_config, model_config, args)
-    else:
-        st_model = _load_sentence_transformer(context, embedding_config, model_config, args)
-    # sentence-transformers writes its card from model_card_data, never from the backbone's model_tags.
-    st_model.model_card_data.add_tags(list(HUB_TAGS))
-    return st_model
+    embedding_config.max_length = resolve_length_to_context(
+        embedding_config.max_length, backbone, transformer_module.tokenizer
+    )
+    return embedding_config.max_length
+
+
+def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config: EmbeddingConfig) -> None:
+    """Apply ``pooling_mode`` / ``normalize_embeddings`` / ``max_length`` to a loaded ST pipeline.
+
+    ``max_length`` must already be resolved (:func:`resolve_embedding_max_length`); it is installed as
+    SentenceTransformers' ``max_seq_length``, the length its tokenizer truncates to.
+
+    Warns on every value it changes, since the config overrides a checkpoint that ships its own
+    pooling (Qwen3-Embedding is ``lasttoken``).
+    """
+    st_model.max_seq_length = embedding_config.max_length
+
+    pooling_modules = [module for module in st_model if isinstance(module, Pooling)]
+    if not pooling_modules:
+        raise ValueError(
+            "The loaded SentenceTransformer pipeline has no Pooling module, so `pooling_mode` cannot be "
+            "applied. Point model_name_or_path at a transformer/ST checkpoint (SentenceTransformer adds "
+            "mean pooling to a bare backbone) instead of a pre-pooled encoder."
+        )
+    for module in pooling_modules:
+        if module.pooling_mode != embedding_config.pooling_mode:
+            if is_global_main_process():
+                logger.warning(
+                    f"Overriding the checkpoint's pooling_mode {module.pooling_mode!r} with the configured "
+                    f"{embedding_config.pooling_mode!r}."
+                )
+            module.pooling_mode = embedding_config.pooling_mode
+
+    has_normalize = any(isinstance(module, Normalize) for module in st_model)
+    if embedding_config.normalize_embeddings and not has_normalize:
+        if is_global_main_process():
+            logger.warning("Appending a Normalize module (normalize_embeddings=True); the checkpoint had none.")
+        st_model.append(Normalize())
+    elif not embedding_config.normalize_embeddings and has_normalize:
+        raise ValueError(
+            "normalize_embeddings=False, but the loaded checkpoint's pipeline ends in a Normalize module. "
+            "Dropping it would change what the checkpoint's downstream similarity thresholds mean — set "
+            "normalize_embeddings: true, or use a checkpoint without the Normalize module."
+        )
 
 
 def _assemble_preloaded_pipeline(
@@ -167,65 +202,30 @@ def _load_sentence_transformer(
     return st_model
 
 
-def resolve_embedding_max_length(embedding_config: EmbeddingConfig, transformer_module) -> int:
-    """Fix ``embedding_config.max_length`` against the pipeline's backbone and return it.
-
-    Both loading paths land here before the length reaches a tokenizer, so ``null`` means the same
-    thing on either: the backbone's context window. ``transformer_module`` is the pipeline's first
-    module — SentenceTransformers' own ``Transformer`` or our :class:`PreloadedTransformer`, both of
-    which hold the backbone as ``auto_model``.
-    """
-    backbone = getattr(transformer_module, "auto_model", None)
-    if backbone is None:
+def build_sentence_transformer(
+    context: ScriptContext,
+    embedding_config: EmbeddingConfig,
+    model_config: ModelArguments,
+    args: EmbeddingScriptArguments,
+) -> SentenceTransformer:
+    """Build the run's SentenceTransformer: under EP/TP the parallel loader's backbone wrapped in
+    :class:`PreloadedTransformer` and assembled into a pipeline, otherwise ``SentenceTransformer(model_name)``."""
+    # QLoRA/k-bit is unsupported here: neither the EP/TP loader nor the SentenceTransformer path
+    # applies it, so --load_in_4bit/--load_in_8bit would train at full precision.
+    if get_quantization_config(model_config) is not None:
         raise ValueError(
-            f"The loaded SentenceTransformer pipeline opens with {type(transformer_module).__name__}, "
-            "which carries no transformer backbone — there is nothing to train or to read a context "
-            "window from. Point model_name_or_path at a transformer/ST checkpoint."
+            "QLoRA / k-bit quantization is not supported for embedding training. The SentenceTransformer "
+            "loader does not apply a quantization_config, so --load_in_4bit/--load_in_8bit would be "
+            "silently ignored. Use full-precision LoRA (--use_peft) or full fine-tuning."
         )
-    embedding_config.max_length = resolve_length_to_context(
-        embedding_config.max_length, backbone, transformer_module.tokenizer
-    )
-    return embedding_config.max_length
-
-
-def align_st_pipeline_to_config(st_model: SentenceTransformer, embedding_config: EmbeddingConfig) -> None:
-    """Apply ``pooling_mode`` / ``normalize_embeddings`` / ``max_length`` to a loaded ST pipeline.
-
-    ``max_length`` must already be resolved (:func:`resolve_embedding_max_length`); it is installed as
-    SentenceTransformers' ``max_seq_length``, the length its tokenizer truncates to.
-
-    Warns on every value it changes, since the config overrides a checkpoint that ships its own
-    pooling (Qwen3-Embedding is ``lasttoken``).
-    """
-    st_model.max_seq_length = embedding_config.max_length
-
-    pooling_modules = [module for module in st_model if isinstance(module, Pooling)]
-    if not pooling_modules:
-        raise ValueError(
-            "The loaded SentenceTransformer pipeline has no Pooling module, so `pooling_mode` cannot be "
-            "applied. Point model_name_or_path at a transformer/ST checkpoint (SentenceTransformer adds "
-            "mean pooling to a bare backbone) instead of a pre-pooled encoder."
-        )
-    for module in pooling_modules:
-        if module.pooling_mode != embedding_config.pooling_mode:
-            if is_global_main_process():
-                logger.warning(
-                    f"Overriding the checkpoint's pooling_mode {module.pooling_mode!r} with the configured "
-                    f"{embedding_config.pooling_mode!r}."
-                )
-            module.pooling_mode = embedding_config.pooling_mode
-
-    has_normalize = any(isinstance(module, Normalize) for module in st_model)
-    if embedding_config.normalize_embeddings and not has_normalize:
-        if is_global_main_process():
-            logger.warning("Appending a Normalize module (normalize_embeddings=True); the checkpoint had none.")
-        st_model.append(Normalize())
-    elif not embedding_config.normalize_embeddings and has_normalize:
-        raise ValueError(
-            "normalize_embeddings=False, but the loaded checkpoint's pipeline ends in a Normalize module. "
-            "Dropping it would change what the checkpoint's downstream similarity thresholds mean — set "
-            "normalize_embeddings: true, or use a checkpoint without the Normalize module."
-        )
+    parallelism_config = context.parallelism_config
+    if parallelism_config.has_ep_group or parallelism_config.is_tp_mode:
+        st_model = _assemble_preloaded_pipeline(context, embedding_config, model_config, args)
+    else:
+        st_model = _load_sentence_transformer(context, embedding_config, model_config, args)
+    # sentence-transformers writes its card from model_card_data, never from the backbone's model_tags.
+    st_model.model_card_data.add_tags(list(HUB_TAGS))
+    return st_model
 
 
 def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: EmbeddingScriptArguments) -> None:

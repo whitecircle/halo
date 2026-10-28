@@ -3,7 +3,7 @@ carries, and the cross-rank verdicts and refusals read off them."""
 
 from datasets import Image as ImageFeature
 
-from halo.data.pipeline.conversation import IMAGE_PART_PAYLOAD_KEY, conversation_carries_images
+from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, conversation_carries_images
 from halo.models.modality import is_vlm_model
 from halo.runtime.consensus import agree_probe_across_ranks
 
@@ -69,7 +69,7 @@ def _feature_carries_image(feature) -> bool:
 
 def _conversation_schema_declares_images(column_feature) -> bool:
     """Whether a parts-form conversation column's Arrow schema can hold image parts: an
-    :data:`~halo.data.pipeline.conversation.IMAGE_PART_PAYLOAD_KEY` field or a ``datasets.Image`` feature.
+    :data:`~halo.data.conversation.IMAGE_PART_PAYLOAD_KEY` field or a ``datasets.Image`` feature.
     Row-independent, since Arrow unions the parts struct over the whole split."""
     messages = _struct_fields(_list_element_feature(column_feature))
     if messages is None or "content" not in messages:

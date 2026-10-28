@@ -13,17 +13,17 @@ import torch
 from peft import PeftConfig, PeftModel
 from transformers import PreTrainedModel
 
-from halo.checkpoint.adapters import adapter_module_paths, assert_no_expert_lora_adapter
+from halo.checkpoint.adapters import adapter_module_paths, reject_expert_lora_adapter
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, MERGED_ADAPTER_CONFIG_DIR, PROCESSOR_FILES
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import reject_partial_checkpoint
+from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
+from halo.checkpoint.tools.offline_export import (
     cast_norms_to_fp32,
     load_task_model,
     preflight_model_load_resources,
     reject_in_place_conversion,
     save_full_checkpoint,
 )
-from halo.checkpoint.reading import reject_partial_checkpoint
-from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
 from halo.model_loading.tokenizer_setup import resolve_peft_processing_class
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,7 @@ def adapter_input_gates(adapter_dir: str, output_dir: str) -> PeftConfig:
     """
     reject_partial_checkpoint(adapter_dir)
     reject_in_place_conversion(adapter_dir, output_dir)
-    assert_no_expert_lora_adapter(adapter_dir)
+    reject_expert_lora_adapter(adapter_dir)
 
     peft_config = PeftConfig.from_pretrained(adapter_dir)
     base_model_path = peft_config.base_model_name_or_path

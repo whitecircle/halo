@@ -1,6 +1,6 @@
 """The generic environment eval's run: the examples read from a dataset's prompt, answer and context columns, every
 named column checked first, and the scored run of any registered environment over them. Behind
-``scripts/environments/inference/run_env.py``."""
+``scripts/environments/inference/eval_env.py``."""
 
 import argparse
 import asyncio
@@ -9,7 +9,7 @@ import logging
 from typing import Any
 
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from halo.entrypoints.environment_eval import (
+from halo.entrypoints.eval_contract import (
     load_training_contract,
     resolve_setting,
     resolve_trajectory_path,

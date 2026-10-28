@@ -13,7 +13,7 @@
   with the attention delta already folded into the base weights being gathered. This is what makes
   "re-save with ``merge_expert_lora_on_save=True``" a real export route for the mixed shape rather
   than an adapter file no tool folds, and it is the behavior
-  ``halo.checkpoint.adapters.assert_no_expert_lora_adapter`` points users at.
+  ``halo.checkpoint.adapters.reject_expert_lora_adapter`` points users at.
 * the QLoRA post-backward sweep — it must honor
   ``parallelism_config.fp32_grad_reduce`` (the QLoRA path bypasses FSDP2's ``reduce_dtype``, so
   dropping the flag silently reduces adapter grads in bf16).
@@ -262,7 +262,7 @@ def test_merged_save_routes_a_mixed_run_to_the_ep_merge_path(tmp_path):
 
 
 def test_adapter_only_save_of_a_mixed_run_goes_to_the_peft_saver(tmp_path):
-    """Flag off is the branch that produces the shape ``assert_no_expert_lora_adapter`` refuses.
+    """Flag off is the branch that produces the shape ``reject_expert_lora_adapter`` refuses.
 
     Without it the same mixed run writes an adapter file, which is exactly why the flag — not a
     retrain — is the remedy that message hands out.

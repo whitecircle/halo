@@ -10,7 +10,7 @@ Test-only. The tool never calls this; a second in-tool path holding the whole mo
 defeat the streaming the tool exists for.
 """
 
-from halo.checkpoint.ep_shard_merge import group_expert_weights, resolve_merge_transform
+from halo.checkpoint.tools.ep_shard_merge import group_expert_weights, resolve_merge_transform
 from halo.models.moe.expert_layout import to_hub_expert_tensors
 
 

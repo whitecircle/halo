@@ -93,7 +93,7 @@ ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_
 # shell that holds no weights.
 NON_TRAINING_BUILDS = frozenset(
     {
-        ("halo/checkpoint/adapter_merge.py", "merge_adapter_into_base"),
+        ("halo/checkpoint/tools/adapter_merge.py", "merge_adapter_into_base"),
         ("halo/models/head_transform.py", "_probe_logits"),
     }
 )
@@ -102,12 +102,12 @@ NON_TRAINING_BUILDS = frozenset(
 # classifies each by what it does with the model (a forward, or only a cast and a save).
 TOOL_BUILDS = frozenset(
     {
-        ("halo/checkpoint/adapter_merge.py", "load_task_base_model"),
-        ("halo/checkpoint/bf16_conversion.py", "_load_adapter_model"),
-        ("halo/checkpoint/bf16_conversion.py", "_load_verified"),
-        ("halo/checkpoint/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
-        ("halo/checkpoint/offline_export.py", "load_task_model"),
-        ("halo/checkpoint/vocab_patch.py", "patch_vocabulary"),
+        ("halo/checkpoint/tools/adapter_merge.py", "load_task_base_model"),
+        ("halo/checkpoint/tools/bf16_conversion.py", "_load_adapter_model"),
+        ("halo/checkpoint/tools/bf16_conversion.py", "_load_verified"),
+        ("halo/checkpoint/tools/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
+        ("halo/checkpoint/tools/offline_export.py", "load_task_model"),
+        ("halo/checkpoint/tools/vocab_patch.py", "patch_vocabulary"),
         ("halo/data/deduplication.py", "compute_embeddings"),
         ("halo/entrypoints/reward_scoring.py", "load_reward_model"),
     }

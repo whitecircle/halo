@@ -416,7 +416,7 @@ The mixed label keeps every `LoraConfig` field beside it, plus an `ep_expert_lor
 half's `r`/`lora_alpha`/`lora_dropout`/`use_rslora`/`expert_projections`; resume reads the tensors directly
 and the file only for its scaling check (below).
 
-The repo's merge and convert scripts check those markers (`assert_no_expert_lora_adapter`) and fall through
+The repo's merge and convert scripts check those markers (`reject_expert_lora_adapter`) and fall through
 to a tensor-key scan when the config is absent or carries a stock `peft_type`, so an unmarked directory
 holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 

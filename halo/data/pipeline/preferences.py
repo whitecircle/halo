@@ -8,7 +8,7 @@ from datasets import Dataset, Features, Sequence, Value
 from datasets import Image as ImageFeature
 from transformers import PreTrainedTokenizer, PreTrainedTokenizerBase, ProcessorMixin
 
-from halo.data.pipeline.conversation import as_conversation, chat_template_kwargs, reject_image_content
+from halo.data.conversation import as_conversation, chat_template_kwargs, reject_image_content
 from halo.data.pipeline.coordinated_map import DATASET_NUM_PROC, coordinated_map
 from halo.data.pipeline.prompt_completion import (
     render_prompt_completions,

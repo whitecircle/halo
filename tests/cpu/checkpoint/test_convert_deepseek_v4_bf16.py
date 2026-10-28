@@ -29,7 +29,7 @@ from safetensors import safe_open
 from safetensors.torch import load_file, save_file
 from transformers import DeepseekV4Config, DeepseekV4ForCausalLM
 
-from halo.checkpoint.deepseek_v4_dequant import reject_uneven_fp8_blocks
+from halo.checkpoint.tools.deepseek_v4_dequant import reject_uneven_fp8_blocks
 from scripts.before_training.convert_deepseek_v4_bf16 import main
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import randomize_tid2eid, word_level_tokenizer

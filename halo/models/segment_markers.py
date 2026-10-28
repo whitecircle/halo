@@ -1,9 +1,8 @@
 """Per-document segment markers for the conv / linear-attention mixers of a multi-document row.
 
-Attention isolates a row's documents from ``position_ids``, which restart at 0 at every document;
-some families' conv and linear-attention mixers read the boundaries from forward kwargs instead and
-carry state across documents without them. Held here: who reads which markers, the refusals for rows
-no marker can isolate, and the markers themselves."""
+Attention isolates a row's documents from ``position_ids``, which restart at 0 at every document; some families'
+conv and linear-attention mixers read the boundaries from forward kwargs instead and carry state across documents
+without them. Held here: who reads which markers, the refusals for rows no marker can isolate, and the markers."""
 
 from dataclasses import dataclass
 

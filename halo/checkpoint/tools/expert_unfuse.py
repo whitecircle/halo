@@ -11,11 +11,6 @@ import torch
 from transformers.utils import CONFIG_NAME
 
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.checkpoint.offline_export import (
-    copy_checkpoint_aux_files,
-    preflight_resource_warning,
-    reject_in_place_conversion,
-)
 from halo.checkpoint.reading import (
     checkpoint_shard_files,
     detect_model_type,
@@ -23,6 +18,11 @@ from halo.checkpoint.reading import (
     iter_checkpoint_shard_entries,
     iter_checkpoint_tensors,
     read_checkpoint_config,
+)
+from halo.checkpoint.tools.offline_export import (
+    copy_checkpoint_aux_files,
+    preflight_resource_warning,
+    reject_in_place_conversion,
 )
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS, iter_per_expert_split

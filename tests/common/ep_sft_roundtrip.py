@@ -17,9 +17,9 @@ from transformers import AutoTokenizer, PreTrainedModel
 from trl import SFTConfig
 
 from halo.configs.script_arguments import CommonScriptArguments
-from halo.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.script import ScriptContext, configure_balancing_and_build_callbacks
+from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.module_tree import backbone_with_layers
 from halo.trainers.sft import DistributedSFTTrainer

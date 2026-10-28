@@ -48,7 +48,7 @@ every run on the host read and write, unlike `filesystem` under `episode_scratch
 ## Evaluation
 
 ```bash
-python scripts/environments/inference/run_env.py \
+python scripts/environments/inference/eval_env.py \
     --env_type mcp --env_kwargs '{"mcp_server": "fetch"}' \
     --dataset <hf-id-or-dir> --split test --prompt_field prompt --answer_field answer \
     --base_url http://localhost:8000/v1 --model <served-model> --num_examples 10

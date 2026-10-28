@@ -27,8 +27,8 @@ import shutil
 import torch
 import torch.distributed as dist
 
-from halo.checkpoint.ep_shard_merge import merge_ep_shards
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint, save_ep_sharded_checkpoint
+from halo.checkpoint.tools.ep_shard_merge import merge_ep_shards
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.model_preparation import auto_load_model

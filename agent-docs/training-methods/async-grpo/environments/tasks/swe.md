@@ -57,7 +57,7 @@ An episode that never completed grades 0. A completed one is graded by the first
 
 There is no completion fallback:
 
-- Without a `test_function`, `requires_answer` defaults on: the trainer and `run_env.py` refuse a dataset with no `answer` column, and the playground an empty Expected Answer box.
+- Without a `test_function`, `requires_answer` defaults on: the trainer and `eval_env.py` refuse a dataset with no `answer` column, and the playground an empty Expected Answer box.
 - `requires_answer: false` without a `test_function` raises at construction.
 - A row carrying neither raises at grading.
 - A judge-only reward (no `environment` term) takes no grade from the environment, so it needs neither, and a null `answer` or a raising `test_function` voids nothing.
@@ -71,7 +71,7 @@ The `environment` term prices the grade as `reward/objective` ([Reward Terms](..
 ## Evaluation
 
 ```bash
-python scripts/environments/inference/run_env.py --env_type swe \
+python scripts/environments/inference/eval_env.py --env_type swe \
     --dataset <hub-id-or-dir> --base_url http://localhost:8000/v1 \
     --model <served-name> --num_examples 20
 ```

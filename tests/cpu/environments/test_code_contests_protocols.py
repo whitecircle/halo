@@ -24,12 +24,12 @@ from halo.entrypoints.code_contests_eval import (
     SOLUTION_HEADROOM_TOKENS,
     contest_meta,
     default_max_tokens,
-    refuse_flag_owned_env_kwargs,
+    reject_flag_owned_env_kwargs,
     resolve_env_config,
     resolve_eval_protocol,
     run_trajectory_path,
 )
-from halo.entrypoints.environment_eval import rollout_config_from_args
+from halo.entrypoints.eval_contract import rollout_config_from_args
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import (
@@ -45,7 +45,7 @@ from halo.environments.tasks.coding.code_contests_prompts import (
 from halo.environments.tasks.coding.contest_datasets import ContestSelection
 from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL
 from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
-from scripts.environments.inference.run_code_contests import parse_args
+from scripts.environments.inference.eval_code_contests import parse_args
 from tests.common.code_contests import (
     SINGLE_TEST_ANSWER,
     StubSandbox,
@@ -239,7 +239,7 @@ def test_a_contradiction_stated_for_this_run_is_refused():
 
 def test_the_eval_script_takes_the_protocol_from_its_flag_only():
     with pytest.raises(SystemExit, match="--eval_protocol, not --env_kwargs"):
-        refuse_flag_owned_env_kwargs({"eval_protocol": "leaderboard"})
+        reject_flag_owned_env_kwargs({"eval_protocol": "leaderboard"})
 
 
 def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
@@ -251,8 +251,8 @@ def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
     assert flag_set <= set(FLAG_OWNED_ENV_KWARGS), sorted(flag_set - set(FLAG_OWNED_ENV_KWARGS))
     for key in sorted(flag_set):
         with pytest.raises(SystemExit, match=f"--{key}, not --env_kwargs"):
-            refuse_flag_owned_env_kwargs({key: 3})
-    refuse_flag_owned_env_kwargs({"timeout_per_test": 3})
+            reject_flag_owned_env_kwargs({key: 3})
+    reject_flag_owned_env_kwargs({"timeout_per_test": 3})
 
 
 def test_a_default_run_keeps_its_trajectory_file_name():
@@ -276,7 +276,7 @@ def test_a_default_run_keeps_its_trajectory_file_name():
 
 def _parse_flags(monkeypatch, *flags: str):
     """The eval script's own parser over ``flags`` plus the two it requires."""
-    monkeypatch.setattr(sys, "argv", ["run_code_contests.py", "--dataset", "d", "--model", "m", *flags])
+    monkeypatch.setattr(sys, "argv", ["eval_code_contests.py", "--dataset", "d", "--model", "m", *flags])
     return parse_args()
 
 

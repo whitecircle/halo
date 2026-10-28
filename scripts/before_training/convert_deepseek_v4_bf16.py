@@ -24,7 +24,7 @@ Usage (inside the training image; point HF_HOME and the output at a large volume
 
 import argparse
 
-from halo.checkpoint.deepseek_v4_dequant import convert_deepseek_v4_checkpoint
+from halo.checkpoint.tools.deepseek_v4_dequant import convert_deepseek_v4_checkpoint
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 

@@ -20,7 +20,7 @@ Usage:
 
 import argparse
 
-from halo.checkpoint.vision_reattach import reattach_vision_tower
+from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg, add_trust_remote_code_arg
 

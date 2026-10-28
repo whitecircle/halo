@@ -31,8 +31,8 @@ import halo.model_loading.parallel.tp as tp_loading
 import halo.model_loading.parallel.whole_model as whole_model
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
+from halo.model_loading.parallel.expert_fuser import ExpertFuser, FusionTask
 from halo.model_loading.parallel.fp32_masters import fp32_master_param_keys
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.runtime import consensus, load_coordination

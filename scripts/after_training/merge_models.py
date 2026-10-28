@@ -35,7 +35,7 @@ Examples:
 import argparse
 import sys
 
-from halo.checkpoint.model_merge import KNOB_DEFAULTS, KNOB_DOMAINS, MERGE_METHODS, knob_dest, merge_models
+from halo.checkpoint.tools.model_merge import KNOB_DEFAULTS, KNOB_DOMAINS, MERGE_METHODS, knob_dest, merge_models
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_dtype_arg, add_max_shard_size_arg, add_trust_remote_code_arg
 

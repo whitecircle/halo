@@ -18,11 +18,11 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-import halo.checkpoint.ep_shard_merge as ep_shard_merge
-import halo.checkpoint.offline_export as offline_export
-from halo.checkpoint.ep_shard_merge import merge_ep_shards
+import halo.checkpoint.tools.ep_shard_merge as ep_shard_merge
+import halo.checkpoint.tools.offline_export as offline_export
 from halo.checkpoint.format import OPTIMIZER_META_FILE, optimizer_shard_filename
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.tools.ep_shard_merge import merge_ep_shards
+from halo.checkpoint.tools.offline_export import (
     cross_device_bytes,
     preflight_model_load_resources,
     preflight_resource_warning,

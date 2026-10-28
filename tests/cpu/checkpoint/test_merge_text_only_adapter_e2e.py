@@ -45,10 +45,10 @@ from transformers import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
-from halo.checkpoint import adapter_merge, bf16_conversion
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, PROCESSOR_FILES
 from halo.checkpoint.reading import iter_checkpoint_shard_entries
-from halo.checkpoint.vision_reattach import reattach_vision_tower
+from halo.checkpoint.tools import adapter_merge, bf16_conversion
+from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
 from halo.model_loading.model_preparation import auto_load_model, resolve_auto_model_class
 from halo.model_loading.tokenizer_setup import load_processing_class
 from tests.common.models import QWEN3_5_2B, TINY_QWEN35_CONFIG, TINY_QWEN35_MOE_CONFIG

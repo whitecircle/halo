@@ -44,9 +44,10 @@ def reject_straddling_train_groups(
         )
 
 
-def validate_eval_round(args, async_config, num_generations_eval: int) -> None:
-    """The per-rank eval round (``eval_rollout_batch_size``, else ``per_device_eval_batch_size``) of a run that
-    evaluates must hold whole groups; TRL validates only the global eval batch."""
+def reject_straddling_eval_groups(args, async_config, num_generations_eval: int) -> None:
+    """In a run that evaluates, refuse a per-rank eval round (``eval_rollout_batch_size``, else
+    ``per_device_eval_batch_size``) that splits a generation group (TRL validates only the global eval batch), and an
+    ``eval_rollout_batch_size`` under ``dataloader_drop_last``, whose dropped tail is the whole eval."""
     if not uses_evaluation(args):
         return
     rows = async_config.eval_rollout_batch_size

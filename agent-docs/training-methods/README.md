@@ -13,9 +13,9 @@ Every method is YAML-driven, runs through the same distributed parallelism syste
 | [Offline GRPO](grpo/offline.md) | `OfflineGRPOTrainer` | `prompt`, `completions`, `rewards` | Completions already generated and scored |
 | [Online GRPO (RLVR)](grpo/online.md) | `DistributedOnlineGRPOTrainer` | `prompt`, `answer` | Single-turn verifiable rewards (math, format) against a live vLLM server |
 | [Async GRPO with Environments](async-grpo/README.md) | `DistributedAsyncEnvironmentalGRPOTrainer` | `prompt` (+ `answer` where the environment grades against one) | Multi-turn RL with tools, sandboxes or a judge, on vLLM or SGLang |
-| [Reward modeling](preference/reward-modeling.md) | `DistributedRewardTrainer` | `chosen`, `rejected` | A Bradley-Terry scorer to rank completions |
+| [Reward modeling](reward-modeling.md) | `DistributedRewardTrainer` | `chosen`, `rejected` | A Bradley-Terry scorer to rank completions |
 | [Classification](classification.md) | `ClassificationTrainer` | `prompt` or `text_field`, `label` | Single- and multi-label sequence classification |
-| [Distillation](distillation/README.md) | `DistributedDistillationTrainer`, `DistributedSelfDistillationTrainer`, `DistributedSDPGTrainer` | SFT conversations (`conversation_field`), or `prompt`, `answer` (online SDPG) | Compress a teacher, or self-distill from a privileged hint (offline or online SDPG) |
+| [Distillation](distillation/README.md) | `DistributedTeacherDistillationTrainer`, `DistributedSelfDistillationTrainer`, `DistributedSDPGTrainer` | SFT conversations (`conversation_field`), or `prompt`, `answer` (online SDPG) | Compress a teacher, or self-distill from a privileged hint (offline or online SDPG) |
 | [Embedding](embedding.md) | `EmbeddingTrainer` | text pairs or triplets, optional `label` / `score` | Retrieval and similarity models, 10 SBERT losses and Matryoshka |
 
 Family overviews: [Preference](preference/README.md) · [GRPO](grpo/README.md).

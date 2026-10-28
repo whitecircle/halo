@@ -6,7 +6,7 @@ from typing import Any
 
 from transformers import PreTrainedTokenizer
 
-from halo.data.pipeline.conversation import (
+from halo.data.conversation import (
     chat_template_kwargs,
     fold_system_into_conversation,
     reject_image_content,

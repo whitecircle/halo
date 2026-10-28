@@ -1,6 +1,6 @@
 # Classification
 
-Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`halo/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](preference/reward-modeling.md).
+Sequence classification — single-label (multi-class) and multi-label — on `AutoModelForSequenceClassification`. Trainer `ClassificationTrainer` (`halo/trainers/reward/classification.py`), script `scripts/training/classification.py`. Text-only. For a scalar preference score on the same architecture use [Reward Modeling](reward-modeling.md).
 
 EP, TP, ETP, EP+TP, EP+ETP, PP, PP+EP and PP+ETP run, as does plain FSDP2 data parallelism; under PP `compute_metrics` is served. CP does not — the head pools the whole sequence ([matrix](../reference/trainer-architecture.md#trainer-compatibility)).
 
@@ -56,7 +56,7 @@ LoRA takes `lora_task_type: SEQ_CLS` and is rejected under TP, EP+TP and PP ([PE
 
 Not supported. The script loads through the text-only `load_model_and_tokenizer`, builds no processor, and refuses `text_only_model` as well as any image column.
 
-A multimodal checkpoint is also checked for a sequence-classification head before the load and refused without one. transformers 5.20 ships that head for a few families and the toolkit registers two more ([roster](preference/reward-modeling.md#vision-language)).
+A multimodal checkpoint is also checked for a sequence-classification head before the load and refused without one. transformers 5.20 ships that head for a few families and the toolkit registers two more ([roster](reward-modeling.md#vision-language)).
 
 ## Testing a setup
 
@@ -82,6 +82,6 @@ Failure signatures:
 
 ## Related pages
 
-- [Reward Modeling](preference/reward-modeling.md) · [SFT](sft.md)
+- [Reward Modeling](reward-modeling.md) · [SFT](sft.md)
 - [Expert Parallelism](../parallelism/expert-parallelism.md) · [Pipeline Parallelism](../parallelism/pipeline-parallelism.md)
 - [ClassificationConfig Reference](../reference/configuration-reference.md#classificationconfig) · [Scripts Reference](../reference/scripts-reference.md)

@@ -36,15 +36,15 @@ from trl.trainer.utils import generate_model_card
 
 import halo.checkpoint.parallel.adapters as peft_saver
 from halo.checkpoint import model_card
-from halo.checkpoint import model_merge as merge_models_script
 from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
-from halo.checkpoint.bf16_conversion import convert_to_bf16
 from halo.checkpoint.config_export import finalize_exported_config, save_model_config
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.model_card import MalformedModelCardError, tag_model_card
-from halo.checkpoint.offline_export import copy_checkpoint_aux_files
 from halo.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
-from halo.checkpoint.sink_reset import reset_sinks
+from halo.checkpoint.tools import model_merge as merge_models_script
+from halo.checkpoint.tools.bf16_conversion import convert_to_bf16
+from halo.checkpoint.tools.offline_export import copy_checkpoint_aux_files
+from halo.checkpoint.tools.sink_reset import reset_sinks
 from halo.configs.embedding import EmbeddingConfig
 from halo.configs.script_arguments import ModelArguments
 from halo.model_loading.model_preparation import apply_run_model_policies

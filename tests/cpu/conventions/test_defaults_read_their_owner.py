@@ -10,11 +10,11 @@ import pytest
 from halo.callbacks.generate_examples import GenerateExamplesCallback
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.data.collators.factory import select_data_collator
-from halo.data.collators.self_distill import SelfDistillTextCollator
-from halo.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
+from halo.data.collators.self_distill import SelfDistillTextCollator, SelfDistillVLMDataCollator
+from halo.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
 from halo.data.pipeline.text_rows import build_chat_row_processor, render_row_conversation
 from halo.data.pipeline.vlm_rows import build_vlm_row_processor
-from halo.entrypoints.environment_eval import rollout_config_from_args
+from halo.entrypoints.eval_contract import rollout_config_from_args
 from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL, DEFAULT_LOCAL_SERVER_URL
 from halo.inference.openai_client import REQUEST_TIMEOUT_SECONDS, generate_openai_response
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer

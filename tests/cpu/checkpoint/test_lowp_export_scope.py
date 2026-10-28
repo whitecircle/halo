@@ -22,7 +22,7 @@ import pytest
 import torch
 from safetensors.torch import load_file, save_file
 
-from halo.checkpoint.lowp_export import quantize_checkpoint
+from halo.checkpoint.tools.lowp_export import quantize_checkpoint
 from halo.kernels.lowp.spec import kept_block_indices
 from halo.models.module_tree import decoder_layer_index
 

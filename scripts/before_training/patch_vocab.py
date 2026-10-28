@@ -26,7 +26,7 @@ import argparse
 import json
 import logging
 
-from halo.checkpoint.vocab_patch import patch_vocabulary
+from halo.checkpoint.tools.vocab_patch import patch_vocabulary
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import (
     add_device_map_arg,

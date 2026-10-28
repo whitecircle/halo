@@ -71,7 +71,7 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
 _INIT_GATES = (
     "reject_unverified_carried_reasoning",
     "reject_straddling_train_groups",
-    "validate_eval_round",
+    "reject_straddling_eval_groups",
     "keep_all_dataset_columns",
     "reject_answerless_datasets",
     "reject_inert_reasoning_terms",

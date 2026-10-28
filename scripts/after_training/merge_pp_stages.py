@@ -13,7 +13,7 @@ Usage:
 
 import argparse
 
-from halo.checkpoint.pp_stage_merge import merge_pp_stage_parts
+from halo.checkpoint.tools.pp_stage_merge import merge_pp_stage_parts
 from halo.log import configure_cli_logging
 
 

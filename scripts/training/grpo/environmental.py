@@ -43,8 +43,8 @@ from halo.config_validation import reject_unsupported_args
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentalGRPOScriptArguments, EnvironmentConfig
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, ModelArguments
-from halo.data.pipeline.chat_render import render_generation_prompt
-from halo.data.pipeline.conversation import as_conversation
+from halo.data.chat_render import render_generation_prompt
+from halo.data.conversation import as_conversation
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter
 from halo.data.pipeline.rejected_rows import blank_conversation
 from halo.data.render_columns import missing_render_column_splits, reject_missing_render_column
@@ -70,7 +70,7 @@ from halo.environments.reasoning_effort import bind_episode_effort
 from halo.environments.registry import build_environment
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_on_policy_grpo
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.models.context_window import get_model_context_window
+from halo.models.context_window import resolve_model_context_window
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
@@ -283,7 +283,7 @@ def main():
     grpo_config.max_completion_length = async_config.rollout_max_tokens
 
     # The trainer raises on a trajectory past the window rather than truncating.
-    tokenizer = apply_tokenizer_window(args, model, tokenizer, get_model_context_window(model, tokenizer))
+    tokenizer = apply_tokenizer_window(args, model, tokenizer, resolve_model_context_window(model, tokenizer))
 
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
     log_model_info(model, tokenizer)

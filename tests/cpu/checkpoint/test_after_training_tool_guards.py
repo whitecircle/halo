@@ -24,7 +24,7 @@ import numpy as np
 import pytest
 from datasets import Dataset
 
-from halo.checkpoint import adapter_merge, model_merge, sink_reset
+from halo.checkpoint.tools import adapter_merge, model_merge, sink_reset
 from halo.data import deduplication
 
 # --- merge_models: a tokenizer-less artifact is not a deliverable ---------------------------------
@@ -180,7 +180,7 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
 
     monkeypatch.setattr(adapter_merge, "PeftConfig", _FakePeftConfig)
     monkeypatch.setattr(adapter_merge, "PeftModel", _FakePeftModel)
-    monkeypatch.setattr(adapter_merge, "assert_no_expert_lora_adapter", lambda _path: None)
+    monkeypatch.setattr(adapter_merge, "reject_expert_lora_adapter", lambda _path: None)
     monkeypatch.setattr(adapter_merge, "resolve_peft_processing_class", lambda *a, **k: object())
     monkeypatch.setattr(adapter_merge, "preflight_model_load_resources", lambda *a, **k: None)
     monkeypatch.setattr(adapter_merge, "reject_partial_checkpoint", lambda _path: None)

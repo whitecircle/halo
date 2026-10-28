@@ -21,19 +21,19 @@ need a large `--max_tokens`: too low truncates the chain of thought before any s
 
 Examples:
     # Codeforces verifiable test split, 50 problems, success@1, on a local vLLM server
-    python scripts/environments/inference/run_code_contests.py \\
+    python scripts/environments/inference/eval_code_contests.py \\
         --dataset open-r1/codeforces --config verifiable --split test --adapter codeforces \\
         --base_url http://localhost:8000/v1 --model Qwen/Qwen3.6-35B-A3B \\
         --num_examples 50 --max_tokens 24576
 
     # DeepCoder (taco), success@4 against OpenRouter
-    python scripts/environments/inference/run_code_contests.py \\
+    python scripts/environments/inference/eval_code_contests.py \\
         --dataset agentica-org/DeepCoder-Preview-Dataset --config taco --split train --adapter deepcoder \\
         --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" \\
         --model qwen/qwen3-235b-a22b --num_examples 100 --num_samples 4
 
     # LiveCodeBench release_v6, AtCoder contests from 2025-01-04 on, leaderboard protocol, success@4
-    python scripts/environments/inference/run_code_contests.py \\
+    python scripts/environments/inference/eval_code_contests.py \\
         --dataset livecodebench/code_generation_lite --config release_v6 --adapter livecodebench \\
         --start_date 2025-01-04 --platform atcoder --eval_protocol leaderboard \\
         --base_url http://localhost:8000/v1 --model <served-name> --num_examples 0 --num_samples 4
@@ -49,7 +49,7 @@ from halo.entrypoints.code_contests_eval import (
     SOLUTION_HEADROOM_TOKENS,
     run_code_contests_eval,
 )
-from halo.entrypoints.environment_eval import DEFAULT_SPLIT
+from halo.entrypoints.eval_contract import DEFAULT_SPLIT
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import (
     DEFAULT_REASONING_EFFORT,
@@ -58,7 +58,7 @@ from halo.environments.tasks.coding.code_contests import (
 )
 from halo.environments.tasks.coding.contest_datasets import CODE_DATASET_ADAPTERS
 from halo.log import configure_cli_logging
-from scripts.environments.eval_arguments import add_endpoint_args
+from scripts.environments.eval_arguments import add_eval_args
 
 
 def _add_selection_args(p: argparse.ArgumentParser) -> None:
@@ -192,7 +192,7 @@ def parse_args() -> argparse.Namespace:
         help=f"Coding env (default: the training config's environment_type under --training_config, else "
         f"{DEFAULT_ENV_TYPE}).",
     )
-    add_endpoint_args(p)
+    add_eval_args(p)
     _add_selection_args(p)
     _add_generation_args(p)
     return p.parse_args()

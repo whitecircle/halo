@@ -28,7 +28,7 @@ from halo.models.config_access import ties_word_embeddings
 from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS
 from halo.models.param_roles import persistent_buffers
 from halo.runtime.consensus import DeferredRankFailure
-from halo.runtime.dtensor import resolve_retained
+from halo.runtime.dtensor import gather_full_tensors
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -69,7 +69,7 @@ def chunked_saveable_tensors(
     items: Iterable[tuple[str, torch.Tensor]] | None = None,
     fold: Callable[[torch.Tensor], torch.Tensor] | None = None,
 ) -> Iterator[dict[str, torch.Tensor]]:
-    """COLLECTIVE: :func:`saveable_items` and the GptOss sinks, resolved in conversion-closed chunks and kept
+    """COLLECTIVE: :func:`saveable_items` and the GptOss sinks, gathered in conversion-closed chunks and kept
     only where ``retain``.
 
     The chunk plan is built from names only, so every rank builds the same one; the writer's host RAM
@@ -85,7 +85,7 @@ def chunked_saveable_tensors(
     for name, tensor in pairs:
         groups.setdefault(conversion_chunk_key(name), []).append((name, tensor))
     for group in groups.values():
-        yield resolve_retained(group if fold is None else ((name, fold(t)) for name, t in group), retain=retain)
+        yield gather_full_tensors(group if fold is None else ((name, fold(t)) for name, t in group), retain=retain)
 
 
 def gather_hand_sliced_params(

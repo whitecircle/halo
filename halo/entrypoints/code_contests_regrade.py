@@ -25,8 +25,8 @@ from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
 from halo.environments.tools.definitions import NativeToolCall, ToolArgumentError
 
 # Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
-# hidden tests, model/language name the row of the report. Only run_code_contests.py stamps the full
-# set — run_env.py writes the generic eval meta, without adapter/language.
+# hidden tests, model/language name the row of the report. Only eval_code_contests.py stamps the full
+# set — eval_env.py writes the generic eval meta, without adapter/language.
 _REQUIRED_META_KEYS = ("env_type", "adapter", "dataset", "split", "model", "language")
 # The env options the meta line records at its top level, as the env resolved them, and the re-grade
 # reads from there alone; ``env_kwargs`` supplies every other option.
@@ -43,8 +43,8 @@ def validate_meta(path: str, meta: dict[str, Any]) -> None:
     if missing:
         raise ValueError(
             f"{path}: trajectory meta is missing {missing}. Re-grading needs the code-contest meta "
-            f"stamped by scripts/environments/inference/run_code_contests.py; trajectories from "
-            f"run_env.py carry the generic eval meta (no adapter/language) and cannot be re-graded."
+            f"stamped by scripts/environments/inference/eval_code_contests.py; trajectories from "
+            f"eval_env.py carry the generic eval meta (no adapter/language) and cannot be re-graded."
         )
 
 

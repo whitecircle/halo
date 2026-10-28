@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """LoRA / QLoRA / native-expert-LoRA on the off-policy teacher-distillation trainer (+ adapter ckpt).
 
-``DistributedDistillationTrainer`` takes ``peft_config`` and wraps the student through
+``DistributedTeacherDistillationTrainer`` takes ``peft_config`` and wraps the student through
 ``build_peft_model`` (k-bit prep, the QLoRA bf16 cast and its autocast), as the script passes it.
 The test asserts the adapter-only invariant, that the adapters move, and that an adapter checkpoint
 round-trips. Liger is left on (toolkit default) so the LoRA path is exercised with fused kernels.
@@ -22,10 +22,10 @@ import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling
 
-from halo.configs.distillation import DistillationConfig
+from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.collectives import barrier
-from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.adapters import (
     assert_adapter_checkpoint,
     assert_adapters_moved,
@@ -91,7 +91,7 @@ def run(ctx) -> dict:
     for p in teacher.parameters():
         p.requires_grad = False
 
-    config = DistillationConfig(
+    config = TeacherDistillationConfig(
         output_dir=ctx.output_dir,
         max_steps=MAX_STEPS,
         per_device_train_batch_size=1,
@@ -111,7 +111,7 @@ def run(ctx) -> dict:
         distill_temperature=1.0,
         distill_alpha=0.5,
     )
-    trainer = DistributedDistillationTrainer(
+    trainer = DistributedTeacherDistillationTrainer(
         student_model=student,
         teacher_model=teacher,
         teacher_tokenizer=tokenizer,

@@ -126,7 +126,7 @@ def _run_environmental_grpo(tmp_path, dataset: DatasetDict) -> None:
         mock.patch.object(
             module, "load_model_and_tokenizer", return_value=(types.SimpleNamespace(config=None), tokenizer)
         ),
-        mock.patch.object(module, "get_model_context_window", return_value=None),
+        mock.patch.object(module, "resolve_model_context_window", return_value=None),
         mock.patch.object(module, "apply_tokenizer_window", side_effect=lambda args, model, tok, window: tok),
         mock.patch.object(module, "configure_adapter_training", return_value=None),
         mock.patch.object(module, "log_model_info"),

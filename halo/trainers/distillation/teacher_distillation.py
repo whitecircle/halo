@@ -18,7 +18,7 @@ from transformers import (
 )
 from transformers.trainer_callback import TrainerCallback
 
-from halo.configs.distillation import DistillationConfig
+from halo.configs.distillation import TeacherDistillationConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
@@ -41,7 +41,7 @@ from halo.trainers.stored_metrics import StoredMetricsMixin
 logger = logging.getLogger(__name__)
 
 
-def require_distill_loss(args: DistillationConfig) -> Callable:
+def require_distill_loss(args: TeacherDistillationConfig) -> Callable:
     """The ``distill_loss`` divergence, refused under ``apply_hard_labels`` when it weighs the gold token itself."""
     loss_fn = require_divergence(args.distill_loss)
     if args.apply_hard_labels and uses_hard_labels(loss_fn):
@@ -52,7 +52,7 @@ def require_distill_loss(args: DistillationConfig) -> Callable:
     return loss_fn
 
 
-class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
+class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
     """Knowledge distillation from teacher to student, with EP/TP on the student.
 
     Loss is ``distill_alpha * L_distill + (1 - distill_alpha) * L_clm`` (``distill_alpha=1.0`` drops
@@ -78,7 +78,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
         self,
         student_model: str | PreTrainedModel | nn.Module,
         teacher_model: PreTrainedModel | nn.Module,
-        args: DistillationConfig | None = None,
+        args: TeacherDistillationConfig | None = None,
         data_collator: DataCollator | None = None,
         train_dataset: Dataset | IterableDataset | None = None,
         eval_dataset: Dataset | IterableDataset | dict[str, Dataset] | None = None,
@@ -123,7 +123,7 @@ class DistributedDistillationTrainer(StoredMetricsMixin, DistributedTrainerMixin
             student_model, peft_config, args, disable_dropout=False
         )
 
-        # The method knobs live on ``args`` (DistillationConfig) and are read there; only the
+        # The method knobs live on ``args`` (TeacherDistillationConfig) and are read there; only the
         # resolved loss callable is worth holding.
         self.distillation_loss_fn = require_distill_loss(args)
 

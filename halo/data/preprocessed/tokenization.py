@@ -19,7 +19,7 @@ from halo.data.completion_spans import (
     build_completion_only_labels,
     mask_batch_to_completion_spans,
 )
-from halo.data.pipeline.conversation import resolve_json_value
+from halo.data.conversation import resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.rejected_rows import is_valid_example, report_rejected_rows
 from halo.data.pipeline.text_rows import build_chat_row_processor, build_text_row_processor

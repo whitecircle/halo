@@ -126,7 +126,7 @@ def jensen_shannon_divergence(
     return temperature_rescaled(jsd, temperature)
 
 
-# Pinned by a test against each arm's config Literal (SelfDistillationLoss, DistillationConfig.distill_loss):
+# Pinned by a test against each arm's config Literal (SelfDistillationLoss, TeacherDistillationConfig.distill_loss):
 # the config layer imports no trainer.
 DIVERGENCES: dict[str, Callable[..., torch.Tensor]] = {
     "reverse_kl": reverse_kl_loss,

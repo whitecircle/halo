@@ -1,8 +1,7 @@
-"""The TRL/HF TrainingArguments fields the toolkit owns, written before the TRL/HF constructor reads them."""
+"""The TRL/HF TrainingArguments fields the toolkit writes or reads before or around the TRL/HF constructor."""
 
 import logging
 
-from halo.models.config_access import config_sources
 from halo.runtime.filesystem import is_output_shared_filesystem
 from halo.runtime.ranks import get_num_nodes, is_global_main_process
 
@@ -63,19 +62,3 @@ def keep_all_dataset_columns(training_args, reason: str | None = None) -> None:
 def uses_evaluation(training_args) -> bool:
     """Whether the HF loop evaluates at all: an eval strategy, or ``eval_on_start`` under ``"no"``."""
     return training_args.eval_strategy not in ("no", None) or bool(training_args.eval_on_start)
-
-
-def resolve_active_router_aux_loss_coef(model) -> float:
-    """The router aux-loss coefficient ``model`` would add to its loss, else ``0``, over every config level: a
-    multimodal MoE declares the routing fields on the text config, and either level may carry
-    ``output_router_logits``."""
-    config = getattr(model, "config", None)
-    if config is None:
-        return 0.0
-    for cfg in config_sources(config):
-        if not getattr(cfg, "output_router_logits", False):
-            continue
-        coef = getattr(cfg, "router_aux_loss_coef", 0) or 0
-        if coef > 0:
-            return float(coef)
-    return 0.0

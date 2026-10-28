@@ -21,8 +21,8 @@ Usage:
 
 import argparse
 
-from halo.checkpoint.adapter_merge import merge_peft_adapter
-from halo.checkpoint.offline_export import ADAPTER_TASKS
+from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
+from halo.checkpoint.tools.offline_export import ADAPTER_TASKS
 from halo.log import configure_cli_logging
 from halo.model_loading.dtype import DTYPE_BY_NAME
 from scripts.cli_arguments import (

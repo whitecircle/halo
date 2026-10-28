@@ -16,6 +16,6 @@ class RewardScriptArguments(CommonScriptArguments):
             "help": "VLM only: dataset column holding the row's image(s), renamed to 'images' and merged into the "
             "prompt conversation both sides of a pair share. Setting it declares the run VLM on a multimodal "
             "checkpoint, as a dataset with an 'images'/'image' column does without it. "
-            "See agent-docs/training-methods/preference/reward-modeling.md#vision-language."
+            "See agent-docs/training-methods/reward-modeling.md#vision-language."
         },
     )

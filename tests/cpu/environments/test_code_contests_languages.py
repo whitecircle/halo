@@ -18,7 +18,7 @@ from dataclasses import replace
 
 import pytest
 
-from halo.entrypoints.code_contests_eval import parse_language_flag, refuse_flag_owned_env_kwargs
+from halo.entrypoints.code_contests_eval import parse_language_flag, reject_flag_owned_env_kwargs
 from halo.environments.episode_keys import EPISODE_SLICES_KEY, REWARD_COMPONENTS_KEY
 from halo.environments.sandbox.base import SandboxExecutor
 from halo.environments.sandbox.languages import LANGUAGES
@@ -176,8 +176,8 @@ def test_the_eval_flag_normalizes_one_name_and_splits_a_list():
     with pytest.raises(SystemExit, match="names no language"):
         parse_language_flag(" , ")
     with pytest.raises(SystemExit, match="--language, not --env_kwargs"):
-        refuse_flag_owned_env_kwargs({"language": "cpp"})
-    refuse_flag_owned_env_kwargs({"timeout_per_test": 3})
+        reject_flag_owned_env_kwargs({"language": "cpp"})
+    reject_flag_owned_env_kwargs({"timeout_per_test": 3})
 
 
 def test_language_set_validation():

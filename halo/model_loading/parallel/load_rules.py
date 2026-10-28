@@ -1,10 +1,8 @@
 """The refusals a load runs before it reads a weight: the run against its launcher and dtype, the model's
-``config.json`` against the parallelism shape, the quantized, from-scratch and low-precision options, then the
-module tree CP and selective TP need, read off a meta-device shell.
+``config.json`` against the parallelism shape, the quantized, from-scratch and low-precision options, then the module
+tree CP and selective TP need, read off a meta-device shell.
 
-``ParallelismConfig`` is model-blind, so these rules are otherwise reached only minutes and several
-collectives into a job (expert assignment after the EP groups exist, the first DeepEP dispatch).
-"""
+``ParallelismConfig`` is model-blind, so these faults otherwise surface minutes and several collectives into a job."""
 
 from __future__ import annotations
 

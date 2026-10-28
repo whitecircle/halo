@@ -17,7 +17,6 @@ import torch
 from halo.checkpoint.atomic import save_safetensors_file
 from halo.checkpoint.config_export import write_config_json
 from halo.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_WEIGHTS_FILE
-from halo.checkpoint.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
 from halo.checkpoint.reading import (
     SAFETENSORS_FLOAT_DTYPES,
     checkpoint_shard_files,
@@ -25,6 +24,7 @@ from halo.checkpoint.reading import (
     iter_checkpoint_shard_entries,
     read_checkpoint_config,
 )
+from halo.checkpoint.tools.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
 from halo.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, kept_block_indices
@@ -351,6 +351,61 @@ def _log_export(tally: _ExportTally, fmt: str, *, verify: bool) -> None:
         )
 
 
+def _write_manifest(
+    input_dir: str,
+    output_dir: str,
+    fmt: str,
+    block: int,
+    axis: int,
+    names: list[str],
+    weight_axes: dict[str, int],
+    scope: dict,
+) -> None:
+    """Copy every non-weight file (config, tokenizer, chat_template.jinja, remote-code .py) + drop a
+    quantization_config.json describing the block-scaled scheme."""
+    copy_checkpoint_aux_files(input_dir, output_dir)
+    # The ``lowp_precision`` spelling that trains this storage format.
+    lowp_precision = next(precision for precision, recipe in LOWP_RECIPES.items() if recipe.quant_format == fmt)
+    manifest = {
+        "quant_method": "block_scaled",
+        "format": fmt,
+        "weight_dtype": "float8_e4m3fn" if fmt == "mxfp8" else "uint8_packed_e2m1",
+        "scale_dtype": "uint8_e8m0" if fmt in ("mxfp8", "mxfp4") else "float8_e4m3fn",
+        "block_size": block,
+        "contraction_axis": axis,
+        # Per-weight contraction axis: 3-D fused experts differ by family, so a loader reads the axis
+        # per weight here and falls back to contraction_axis only for names absent from this map.
+        "weight_axes": weight_axes,
+        "layout": "compressed-tensors block-scaled (weight_packed / weight_scale / weight_shape)",
+        # nvfp4 is two-level: the e4m3 block scale is relative to a per-tensor fp32 global scale.
+        "global_scale_key_suffix": ".weight_global_scale" if fmt == "nvfp4" else None,
+        # The low-precision scope this export reproduced. Recorded because it is not derivable from
+        # the weights: a re-export, or a comparison against the training run, needs the same four
+        # ``lowp_*`` values.
+        "scope": scope,
+        "quantized_weights": names,
+        "note": (
+            f"Trained with mixed-precision QAT (lowp_precision: {lowp_precision}, "
+            f"i.e. {fmt}); quantizing the bf16/fp32 master to this format reproduces the QAT "
+            "forward exactly. Dequantize via halo.kernels.lowp.quantization.dequantize, whose nvfp4 "
+            "global scale is the reciprocal of the stored weight_global_scale."
+        ),
+    }
+    with open(os.path.join(output_dir, "quantization_config.json"), "w") as f:
+        json.dump(manifest, f, indent=2)
+
+    # Stamp the scheme into config.json, the key readers consult; it also flips the toolkit's
+    # native-quantized detection (EP lazy loading routes such checkpoints to from_pretrained, whose
+    # coverage gate refuses the missing *.weight keys). vLLM and SGLang refuse the unknown
+    # "block_scaled" method; plain transformers only warns, skips quantization and random-initializes
+    # every quantized weight. A raw format name ("mxfp4", "nvfp4", "mxfp8") would instead select a
+    # transformers or vLLM method that reads a different on-disk layout.
+    config = read_checkpoint_config(output_dir, missing_ok=True)
+    if config is not None:
+        config["quantization_config"] = manifest
+        write_config_json(output_dir, config)
+
+
 def quantize_checkpoint(
     input_dir: str,
     output_dir: str,
@@ -426,58 +481,3 @@ def quantize_checkpoint(
     block = FORMAT_BLOCK_SIZE[fmt]
     _write_manifest(input_dir, output_dir, fmt, block, contraction_axis, tally.quantized, tally.weight_axes, scope)
     _log_export(tally, fmt, verify=verify)
-
-
-def _write_manifest(
-    input_dir: str,
-    output_dir: str,
-    fmt: str,
-    block: int,
-    axis: int,
-    names: list[str],
-    weight_axes: dict[str, int],
-    scope: dict,
-) -> None:
-    """Copy every non-weight file (config, tokenizer, chat_template.jinja, remote-code .py) + drop a
-    quantization_config.json describing the block-scaled scheme."""
-    copy_checkpoint_aux_files(input_dir, output_dir)
-    # The ``lowp_precision`` spelling that trains this storage format.
-    lowp_precision = next(precision for precision, recipe in LOWP_RECIPES.items() if recipe.quant_format == fmt)
-    manifest = {
-        "quant_method": "block_scaled",
-        "format": fmt,
-        "weight_dtype": "float8_e4m3fn" if fmt == "mxfp8" else "uint8_packed_e2m1",
-        "scale_dtype": "uint8_e8m0" if fmt in ("mxfp8", "mxfp4") else "float8_e4m3fn",
-        "block_size": block,
-        "contraction_axis": axis,
-        # Per-weight contraction axis: 3-D fused experts differ by family, so a loader reads the axis
-        # per weight here and falls back to contraction_axis only for names absent from this map.
-        "weight_axes": weight_axes,
-        "layout": "compressed-tensors block-scaled (weight_packed / weight_scale / weight_shape)",
-        # nvfp4 is two-level: the e4m3 block scale is relative to a per-tensor fp32 global scale.
-        "global_scale_key_suffix": ".weight_global_scale" if fmt == "nvfp4" else None,
-        # The low-precision scope this export reproduced. Recorded because it is not derivable from
-        # the weights: a re-export, or a comparison against the training run, needs the same four
-        # ``lowp_*`` values.
-        "scope": scope,
-        "quantized_weights": names,
-        "note": (
-            f"Trained with mixed-precision QAT (lowp_precision: {lowp_precision}, "
-            f"i.e. {fmt}); quantizing the bf16/fp32 master to this format reproduces the QAT "
-            "forward exactly. Dequantize via halo.kernels.lowp.quantization.dequantize, whose nvfp4 "
-            "global scale is the reciprocal of the stored weight_global_scale."
-        ),
-    }
-    with open(os.path.join(output_dir, "quantization_config.json"), "w") as f:
-        json.dump(manifest, f, indent=2)
-
-    # Stamp the scheme into config.json, the key readers consult; it also flips the toolkit's
-    # native-quantized detection (EP lazy loading routes such checkpoints to from_pretrained, whose
-    # coverage gate refuses the missing *.weight keys). vLLM and SGLang refuse the unknown
-    # "block_scaled" method; plain transformers only warns, skips quantization and random-initializes
-    # every quantized weight. A raw format name ("mxfp4", "nvfp4", "mxfp8") would instead select a
-    # transformers or vLLM method that reads a different on-disk layout.
-    config = read_checkpoint_config(output_dir, missing_ok=True)
-    if config is not None:
-        config["quantization_config"] = manifest
-        write_config_json(output_dir, config)

@@ -84,7 +84,7 @@ def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
     monkeypatch.setattr(prepare_dataset, "parse_args", lambda: (args, config))
     monkeypatch.setattr(publishing, "PartialState", lambda: types.SimpleNamespace(num_processes=1))
-    monkeypatch.setattr(publishing, "setup_tokenizer", lambda config: object())
+    monkeypatch.setattr(publishing, "load_tokenizer", lambda config: object())
     monkeypatch.setattr(publishing, "load_input_dataset", lambda args: DatasetDict())
     monkeypatch.setattr(publishing, "require_declared_columns", lambda *a: None)
     monkeypatch.setattr(publishing, "preprocess_dataset", preprocess)

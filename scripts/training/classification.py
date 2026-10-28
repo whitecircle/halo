@@ -26,8 +26,8 @@ from halo.config_validation import reject_unsupported_args
 from halo.configs.classification import ClassificationConfig, ClassificationScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.pipeline.chat_render import tokenize_rendered
-from halo.data.pipeline.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
+from halo.data.chat_render import tokenize_rendered
+from halo.data.conversation import chat_template_kwargs, reject_image_content, resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.sources.paths import EVAL_SPLIT_NAMES
 from halo.data.vlm_detection import reject_image_columns
@@ -56,7 +56,7 @@ from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
 
-# A "no label" row, in the stringified form get_label_list gives every label.
+# A "no label" row, in the stringified form labels_in_split gives every label.
 NO_LABEL_SENTINEL = "-1"
 
 # Every split whose labels join the class list: an eval split may hold a class train lacks, and a
@@ -138,6 +138,23 @@ def run_splits(training_config) -> tuple[str, ...]:
     return ("train", "test") if uses_evaluation(training_config) else ("train",)
 
 
+def labels_in_split(raw_dataset, split="train") -> list[str]:
+    """The stringified labels of ``split``, flattened for a multi-label one.
+
+    Empty for an empty split: a pre-sharded eval split can leave a rank without rows, and that rank
+    must still reach the label-set gather its peers enter.
+    """
+    if len(raw_dataset[split]) == 0:
+        return []
+    if isinstance(raw_dataset[split]["label"][0], list):
+        label_list = [label for sample in raw_dataset[split]["label"] for label in sample]
+        label_list = list(set(label_list))
+    else:
+        label_list = raw_dataset[split].unique("label")
+    label_list = [str(label) for label in label_list]
+    return label_list
+
+
 def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
     """Each label-bearing split's stringified label set, unioned across the world on a pre-sharded load.
 
@@ -151,7 +168,7 @@ def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
             "Loading the pre-sharded dataset",
             ValueError,
         )
-    labels = {split: set(get_label_list(ds, split)) for split in LABEL_SPLITS if split in ds}
+    labels = {split: set(labels_in_split(ds, split)) for split in LABEL_SPLITS if split in ds}
     if dataset_presharded and get_global_world_size() > 1:
         gathered = [None] * get_global_world_size()
         dist.all_gather_object(gathered, labels)
@@ -159,7 +176,7 @@ def split_label_sets(ds, dataset_presharded: bool) -> dict[str, set[str]]:
     return labels
 
 
-def refuse_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_multi_label: bool) -> None:
+def reject_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_multi_label: bool) -> None:
     """Refuse the ``-1`` "no label" sentinel in a single-label split the run reads.
 
     A multi-hot row reads the sentinel as absence. A single-label row has no class to put it in:
@@ -203,23 +220,6 @@ def build_label_list(split_labels: dict[str, set[str]]) -> list[str]:
     return sorted(union - {NO_LABEL_SENTINEL})
 
 
-def get_label_list(raw_dataset, split="train") -> list[str]:
-    """The stringified labels of ``split``, flattened for a multi-label one.
-
-    Empty for an empty split: a pre-sharded eval split can leave a rank without rows, and that rank
-    must still reach the label-set gather its peers enter.
-    """
-    if len(raw_dataset[split]) == 0:
-        return []
-    if isinstance(raw_dataset[split]["label"][0], list):
-        label_list = [label for sample in raw_dataset[split]["label"] for label in sample]
-        label_list = list(set(label_list))
-    else:
-        label_list = raw_dataset[split].unique("label")
-    label_list = [str(label) for label in label_list]
-    return label_list
-
-
 def main():
     args, classification_config, model_config, dist_args = parse_script_args(
         ClassificationScriptArguments, ClassificationConfig, ModelArguments, ParallelismArguments
@@ -253,7 +253,7 @@ def main():
             logger.info("Label type is list, doing multi-label classification")
 
     used_splits = run_splits(classification_config)
-    refuse_unlabeled_rows(split_labels, used_splits, is_multi_label)
+    reject_unlabeled_rows(split_labels, used_splits, is_multi_label)
     label_list = build_label_list(split_labels)
     num_labels = len(label_list)
     if num_labels <= 1:

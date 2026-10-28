@@ -25,7 +25,8 @@ from PIL import Image
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING_NAMES
 from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
 
-from halo.data.collators.vlm import PreprocessedVLMDataCollator, SelfDistillVLMDataCollator, VLMDataCollator
+from halo.data.collators.self_distill import SelfDistillVLMDataCollator
+from halo.data.collators.vlm import PreprocessedVLMDataCollator, VLMDataCollator
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.tokenization import tokenize_vlm_dataset

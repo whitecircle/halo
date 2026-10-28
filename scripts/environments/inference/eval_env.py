@@ -9,7 +9,7 @@ mean reward and success@k. The rollout loop and reporting are shared via
 :mod:`halo.environments.eval_runner`.
 
 For competitive programming (`code_contests` / `codeforces`) use
-`scripts/environments/inference/run_code_contests.py` instead; it carries the dataset adapters,
+`scripts/environments/inference/eval_code_contests.py` instead; it carries the dataset adapters,
 solution language and per-benchmark report buckets, keeping that logic out of this generic runner.
 
 Per-env settings go through `--env_kwargs` (a JSON dict merged into the env config), e.g.
@@ -20,13 +20,13 @@ tokens, thinking budget, sampling) — with any flag passed explicitly laid over
 
 Examples:
     # Factual QA over SimpleQA against a local vLLM server
-    python scripts/environments/inference/run_env.py \\
+    python scripts/environments/inference/eval_env.py \\
         --env_type qa_search --dataset basicv8vc/SimpleQA --split test \\
         --prompt_field problem --answer_field answer \\
         --base_url http://localhost:8000/v1 --model Qwen/Qwen3.6-35B-A3B --num_examples 100
 
     # Multiple-choice exam, bucketed by category, via OpenRouter
-    python scripts/environments/inference/run_env.py \\
+    python scripts/environments/inference/eval_env.py \\
         --env_type exam_qa --dataset <multiple-choice-dataset> --split test \\
         --prompt_field question --answer_field answer --context_fields choices --group_by subject \\
         --base_url https://openrouter.ai/api/v1 --api_key "$OPENROUTER_API_KEY" --model qwen/qwen3-235b-a22b
@@ -41,11 +41,11 @@ Grading notes: `agent-docs/training-methods/async-grpo/environments/tasks/qa-ben
 import argparse
 
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
-from halo.entrypoints.environment_eval import DEFAULT_SPLIT
+from halo.entrypoints.eval_contract import DEFAULT_SPLIT
 from halo.entrypoints.generic_env_eval import DEFAULT_ID_FIELD, run_generic_env_eval
 from halo.environments.rollout_config import RolloutConfig
 from halo.log import configure_cli_logging
-from scripts.environments.eval_arguments import add_endpoint_args
+from scripts.environments.eval_arguments import add_eval_args
 
 
 def parse_args() -> argparse.Namespace:
@@ -58,7 +58,7 @@ def parse_args() -> argparse.Namespace:
         help="Registered environment name (qa_search, exam_qa, swe, mcp, ...). Required unless "
         "--training_config names one (environment_type).",
     )
-    add_endpoint_args(p)
+    add_eval_args(p)
     p.add_argument("--split", default=DEFAULT_SPLIT, help="Dataset split (default: %(default)s).")
     p.add_argument("--prompt_field", default="prompt", help="Row field holding the prompt.")
     p.add_argument(

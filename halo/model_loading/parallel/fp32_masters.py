@@ -17,9 +17,7 @@ from torch.distributed.tensor.placement_types import _StridedShard
 
 from halo.checkpoint.reading import StreamingCheckpointReader, resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from halo.distributed.expert_parallel.lazy_plan import ExpertKeyLayout, WeightPlanner
 from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from halo.distributed.mesh import MeshDim
 from halo.log import KEY_PREVIEW_COUNT
@@ -30,6 +28,8 @@ from halo.model_loading.lazy_safetensors.materialization import (
     materialize_weight_plan,
     verify_loaded_shape,
 )
+from halo.model_loading.parallel.expert_fuser import ExpertFuser
+from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, WeightPlanner
 from halo.models.moe.config_fields import require_expert_count
 
 

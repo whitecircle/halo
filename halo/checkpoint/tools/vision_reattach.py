@@ -12,13 +12,13 @@ from transformers import AutoConfig
 
 from halo.checkpoint.config_export import finalize_exported_config
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, PROCESSOR_FILES
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import checkpoint_shard_files, iter_checkpoint_shard_entries, iter_checkpoint_tensors
+from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
     preflight_resource_warning,
     reject_in_place_conversion,
     resolve_checkpoint_source,
 )
-from halo.checkpoint.reading import checkpoint_shard_files, iter_checkpoint_shard_entries, iter_checkpoint_tensors
 from halo.checkpoint.writing import StreamingShardWriter
 
 logger = logging.getLogger(__name__)

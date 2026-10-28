@@ -343,7 +343,7 @@ _ROWS_PER_EXAMPLE: dict[str, int] = {
     # the model once per text column.
     "ClassificationTrainer": 1,
     "DistributedAsyncEnvironmentalGRPOTrainer": 1,
-    "DistributedDistillationTrainer": 1,
+    "DistributedTeacherDistillationTrainer": 1,
     "DistributedOnlineGRPOTrainer": 1,
     "DistributedKTOTrainer": 1,
     "DistributedSDPGTrainer": 1,

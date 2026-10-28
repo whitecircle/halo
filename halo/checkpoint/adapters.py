@@ -236,7 +236,7 @@ def lora_scaling_mismatch(adapter_dir: str, attention: Mapping | None, expert: M
     )
 
 
-def assert_no_expert_lora_adapter(adapter_dir: str) -> None:
+def reject_expert_lora_adapter(adapter_dir: str) -> None:
     """Refuse an adapter directory carrying native EP expert-LoRA deltas, which ``merge_and_unload`` drops.
 
     The verdict follows the shape, not just the marker: an absent or unmarked config falls back to a

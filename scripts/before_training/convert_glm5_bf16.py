@@ -27,7 +27,7 @@ Usage (inside the training image; point HF_HOME and the output at a large volume
 
 import argparse
 
-from halo.checkpoint.fp8_dequant import block_fp8_rules, run_dequant_conversion
+from halo.checkpoint.tools.fp8_dequant import block_fp8_rules, run_dequant_conversion
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args, add_max_shard_size_arg
 

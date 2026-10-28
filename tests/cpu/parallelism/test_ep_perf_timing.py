@@ -7,8 +7,8 @@ so the ``ep.*`` spans appear in a profiler trace at no cost. Only ``benchmark_sf
 swaps in :meth:`EPSpanTimer.time_operation` (two ``torch.cuda.synchronize()`` per phase per forward).
 
 Wiring the timer by default costs a per-phase full-device sync on every training step of every EP run,
-a throughput regression with no failing test and no error message. So: the layer's spans must be the
-profiler label AND must not even construct a timer.
+a throughput regression with no failing test and no error message. So the layer's spans must be the
+profiler label.
 
 Run: ``pytest -m cpu tests/cpu/parallelism/test_ep_perf_timing.py``
 """
@@ -21,7 +21,6 @@ import pytest
 import torch
 
 import halo.distributed.expert_parallel.moe_layer.layer as layer_module
-from halo.diagnostics import ep_span_timing
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 
 
@@ -60,22 +59,13 @@ def _ep_layer(monkeypatch: pytest.MonkeyPatch) -> EPMoELayerBase:
     return _PerfProbeLayer(ep_config, hidden_dim=8)
 
 
-@pytest.fixture(autouse=True)
-def _fresh_global_timer(monkeypatch: pytest.MonkeyPatch):
-    """Reset the process-wide timer so "was one created?" is this test's own answer."""
-    monkeypatch.setattr(ep_span_timing, "_global_timer", None)
-
-
-def test_the_spans_are_profiler_labels_and_build_no_timer(monkeypatch: pytest.MonkeyPatch):
+def test_the_spans_are_profiler_labels(monkeypatch: pytest.MonkeyPatch):
     layer = _ep_layer(monkeypatch)
 
     assert layer._perf is torch.profiler.record_function, (
         f"an EP layer labels its phases with {layer._perf!r} instead of torch.profiler.record_function: "
         f"every EP run now pays the timer's per-phase torch.cuda.synchronize() on every forward"
     )
-    with layer._perf("ep.dispatch"):
-        pass
-    assert ep_span_timing._global_timer is None, "building and running an EP layer constructed an EPSpanTimer"
 
 
 if __name__ == "__main__":

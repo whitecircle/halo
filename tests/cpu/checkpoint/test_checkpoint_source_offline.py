@@ -15,8 +15,8 @@ import pytest
 from huggingface_hub import constants as hub_constants
 from huggingface_hub.utils import filter_repo_objects
 
-from halo.checkpoint import offline_export
-from halo.checkpoint.offline_export import resolve_checkpoint_source
+from halo.checkpoint.tools import offline_export
+from halo.checkpoint.tools.offline_export import resolve_checkpoint_source
 
 REPO = "org/model"
 COMMIT = "c" * 40

@@ -31,7 +31,7 @@ from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGe
 
 from halo.checkpoint import config_export
 from halo.checkpoint.config_export import save_model_config
-from halo.checkpoint.offline_export import save_full_checkpoint
+from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG

@@ -21,8 +21,8 @@ from transformers.models.inkling.modeling_inkling import InklingTopkRouter
 from halo.distributed.context_parallel.model_rules import _UNSUPPORTED_SEQUENCE_AXIS_LAYERS
 from halo.distributed.expert_parallel.families.inkling import EPInklingMoELayer
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
-from halo.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
+from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.models.moe.config_fields import resolve_expert_count
 
 SEED = 1234

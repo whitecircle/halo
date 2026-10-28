@@ -14,7 +14,7 @@ from halo.callbacks.generate_examples import GenerateExamplesCallback
 from halo.configs.grpo_offline import OfflineGRPOConfig, OfflineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.pipeline.conversation import chat_template_kwargs, reject_image_content
+from halo.data.conversation import chat_template_kwargs, reject_image_content
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.prompt_completion import render_prompt_completions
 from halo.data.pipeline.text_rows import prepare_generative_row

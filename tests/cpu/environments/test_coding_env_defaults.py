@@ -38,7 +38,7 @@ from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, 
 from halo.environments.tasks.coding.swe import SweEnvironment
 from halo.environments.tasks.coding.verdicts import VERDICT_DETAIL_FULL, VERDICT_DETAIL_OUTCOME
 from halo.rewards.terms import OBJECTIVE_REWARD_KEY
-from scripts.environments.inference import run_env
+from scripts.environments.inference import eval_env
 from tests.common.code_contests import RecordingSandboxSession, StubSandbox
 
 _JUDGE = {"source": "judge", "name": "quality", "requirements": [{"name": "done", "description": "Done."}]}
@@ -122,7 +122,7 @@ def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeyp
         generic_env_eval, "build_openai_client", lambda **kwargs: pytest.fail("generation must not start")
     )
     argv = [
-        "run_env.py",
+        "eval_env.py",
         "--env_type",
         "swe",
         "--dataset",
@@ -134,7 +134,7 @@ def test_the_eval_driver_refuses_an_answerless_dataset_before_generating(monkeyp
     ]
     monkeypatch.setattr(sys, "argv", argv)
     with pytest.raises(ValueError, match="requires_answer"):
-        run_env.main()
+        eval_env.main()
 
 
 @pytest.mark.parametrize(

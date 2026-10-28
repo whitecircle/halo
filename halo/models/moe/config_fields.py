@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from typing import NamedTuple
 
-from halo.models.config_access import get_config_field
+from halo.models.config_access import config_sources, get_config_field
 from halo.models.moe.router_logits import has_discard_expert_slot
 
 # First non-zero wins, so the unambiguous fields precede bare ``top_k``, which is also the generation sampling
@@ -84,6 +84,22 @@ def require_router_aux_loss_coef(cfg) -> float:
             f"(moe_balancing) for this family."
         )
     return float(coef)
+
+
+def resolve_active_router_aux_loss_coef(model) -> float:
+    """The router aux-loss coefficient ``model`` would add to its loss, else ``0``, over every config level: a
+    multimodal MoE declares the routing fields on the text config, and either level may carry
+    ``output_router_logits``."""
+    config = getattr(model, "config", None)
+    if config is None:
+        return 0.0
+    for cfg in config_sources(config):
+        if not getattr(cfg, "output_router_logits", False):
+            continue
+        coef = getattr(cfg, "router_aux_loss_coef", 0) or 0
+        if coef > 0:
+            return float(coef)
+    return 0.0
 
 
 def has_routed_experts(cfg) -> bool:

@@ -49,8 +49,8 @@ def full_cpu_tensor(param_data: torch.Tensor) -> torch.Tensor:
     return param_data.detach().cpu()
 
 
-def resolve_retained(items: Iterable[tuple[str, torch.Tensor]], *, retain: bool) -> dict[str, torch.Tensor]:
-    """Gather every item on every rank; return the host copies only where ``retain``. COLLECTIVE.
+def gather_full_tensors(items: Iterable[tuple[str, torch.Tensor]], *, retain: bool) -> dict[str, torch.Tensor]:
+    """COLLECTIVE: gather every item on every rank; return the host copies only where ``retain``.
 
     Gating the gather itself on ``retain`` would hang a gathered save; non-writers join through
     :func:`materialize_dtensor`, skipping the host copy.

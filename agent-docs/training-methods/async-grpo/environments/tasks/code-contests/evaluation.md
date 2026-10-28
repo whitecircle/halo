@@ -1,6 +1,6 @@
 # Evaluation
 
-`scripts/environments/inference/run_code_contests.py` scores a served model on this environment. Flags, output
+`scripts/environments/inference/eval_code_contests.py` scores a served model on this environment. Flags, output
 files and re-grading shared by every environment are on [Evaluation](../../../evaluation.md).
 
 ## Evaluation protocols
@@ -20,7 +20,7 @@ files and re-grading shared by every environment are on [Evaluation](../../../ev
 ## Running an evaluation
 
 ```bash
-python scripts/environments/inference/run_code_contests.py --adapter codeforces \
+python scripts/environments/inference/eval_code_contests.py --adapter codeforces \
     --dataset open-r1/codeforces --config verifiable --split test \
     --training_config examples/grpo/environmental/qwen3_5/vllm/qwen3.6-35b-a3b-code-contests-full-ep1-stage1-codeforces.yaml \
     --base_url http://localhost:8000/v1 --model <served-name> \
@@ -73,7 +73,7 @@ A LiveCodeBench release is cumulative (every problem since May 2023), so score a
 training cutoff:
 
 ```bash
-python scripts/environments/inference/run_code_contests.py --adapter livecodebench \
+python scripts/environments/inference/eval_code_contests.py --adapter livecodebench \
     --dataset livecodebench/code_generation_lite --config release_v6 \
     --start_date 2025-01-01 --end_date 2025-04-30 --platform atcoder,codeforces \
     --eval_protocol leaderboard --base_url http://localhost:8000/v1 --model <served-name> \

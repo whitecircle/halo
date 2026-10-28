@@ -19,9 +19,9 @@ import torch
 import torch.nn as nn
 from safetensors.torch import save_file
 
-from halo.checkpoint.adapter_merge import load_base_for_adapter
 from halo.checkpoint.adapters import adapter_module_paths
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+from halo.checkpoint.tools.adapter_merge import load_base_for_adapter
 
 _Q, _EMBED, _HEAD = "model.layers.0.self_attn.q_proj", "model.embed_tokens", "lm_head"
 _PREFIX = "base_model.model."

@@ -417,8 +417,8 @@ warm-up.
 
 `ep_lazy_loading` (default `true`) builds the model shell with **parameters on the meta device and
 buffers computed for real** (`accelerate.init_empty_weights(include_buffers=False)`), then streams
-each rank's expert slice straight from safetensors (`load_ep_model` in `halo/model_loading/parallel/ep.py`:
-the expert-key plan in `expert_parallel/lazy_plan.py`, the per-expert fuser in `expert_parallel/expert_fuser.py`,
+each rank's expert slice straight from safetensors (`load_ep_model` in `halo/model_loading/parallel/ep.py`,
+with the expert-key plan in `lazy_plan.py` and the per-expert fuser in `expert_fuser.py` beside it, and
 the shared materializer in `halo/model_loading/lazy_safetensors/`). The shell carries the **run's** dtype, not the
 checkpoint config's. Float parameters stream at that dtype; a float buffer keeps its stored dtype unless the
 family's fp32 pins name it (GLM-5 Next's `e_score_correction_bias`), which then loads fp32, as `from_pretrained`

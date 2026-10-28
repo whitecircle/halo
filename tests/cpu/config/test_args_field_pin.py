@@ -105,7 +105,7 @@ _EXPECTED = {
         "generate_eval_examples": "True",
         "num_eval_examples": "50",
     },
-    "RLVROnlineGRPOScriptArguments": {
+    "OnlineGRPOScriptArguments": {
         "answer_field": "'answer'",
         "balance_token_mass": "False",
         "drop_degenerate_groups": "False",

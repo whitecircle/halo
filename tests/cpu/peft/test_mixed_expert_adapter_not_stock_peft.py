@@ -32,12 +32,12 @@ from halo.checkpoint.adapters import (
     EXPERT_LORA_PEFT_TYPE,
     EXPERT_LORA_SCALING_FIELDS,
     MIXED_EXPERT_LORA_PEFT_TYPE,
-    assert_no_expert_lora_adapter,
     expert_lora_adapter_config,
     expert_lora_config_fields,
     is_expert_lora_key,
     lora_scaling_mismatch,
     read_adapter_config,
+    reject_expert_lora_adapter,
     write_adapter_config,
     write_mixed_adapter_config,
 )
@@ -135,7 +135,7 @@ def test_merge_guard_reports_the_mixed_shape(tmp_path):
     """
     _write_mixed_adapter(tmp_path)
     with pytest.raises(ValueError, match="MIXED attention\\+expert") as excinfo:
-        assert_no_expert_lora_adapter(str(tmp_path))
+        reject_expert_lora_adapter(str(tmp_path))
     message = str(excinfo.value)
     assert "merge_expert_lora_on_save=True" in message, message
     assert "resume-only" not in message, message
@@ -147,18 +147,18 @@ def test_merge_guard_falls_back_to_keys_for_an_unmarked_mixed_adapter(tmp_path):
     through: the marker is a fast path, the expert-key scan is the verdict."""
     _write_mixed_adapter(tmp_path, stock_label=True)
     with pytest.raises(ValueError, match="MIXED attention\\+expert"):
-        assert_no_expert_lora_adapter(str(tmp_path))
+        reject_expert_lora_adapter(str(tmp_path))
 
 
 def test_merge_guard_keeps_the_expert_only_remedy(tmp_path):
     """Same remedy for the expert-only shape; only the marker and the shape description differ."""
     save_file({EXPERT_KEY_A: torch.randn(4, 8, 2)}, os.path.join(tmp_path, ADAPTER_SAFETENSORS_FILE))
     with pytest.raises(ValueError, match="merge_expert_lora_on_save=True"):
-        assert_no_expert_lora_adapter(str(tmp_path))
+        reject_expert_lora_adapter(str(tmp_path))
     with open(os.path.join(tmp_path, ADAPTER_CONFIG_FILE), "w") as fh:
         json.dump({"peft_type": EXPERT_LORA_PEFT_TYPE}, fh)
     with pytest.raises(ValueError, match=EXPERT_LORA_PEFT_TYPE):
-        assert_no_expert_lora_adapter(str(tmp_path))
+        reject_expert_lora_adapter(str(tmp_path))
 
 
 def test_the_expert_config_records_every_field_a_resume_holds_to_the_live_run():
@@ -177,7 +177,7 @@ def test_an_expert_only_adapter_config_round_trips_through_the_resume_and_merge_
     assert lora_scaling_mismatch(str(tmp_path), None, live) is None
     assert "lora_alpha" in lora_scaling_mismatch(str(tmp_path), None, {**live, "lora_alpha": 2 * SPEC.alpha})
     with pytest.raises(ValueError, match=EXPERT_LORA_PEFT_TYPE):
-        assert_no_expert_lora_adapter(str(tmp_path))
+        reject_expert_lora_adapter(str(tmp_path))
 
 
 def test_attention_only_adapter_still_passes_the_guard(tmp_path):
@@ -185,7 +185,7 @@ def test_attention_only_adapter_still_passes_the_guard(tmp_path):
     peft_model = get_peft_model(_TinyLM(), LoraConfig(target_modules=["q_proj"]))
     peft_model.save_pretrained(str(tmp_path))
     assert not any(is_expert_lora_key(k) for k in load_file(os.path.join(tmp_path, ADAPTER_SAFETENSORS_FILE)))
-    assert_no_expert_lora_adapter(str(tmp_path))
+    reject_expert_lora_adapter(str(tmp_path))
     PeftModel.from_pretrained(_TinyLM(), str(tmp_path))
 
 

@@ -12,21 +12,21 @@ from transformers import AutoModelForCausalLM
 
 from halo.checkpoint.reading import has_whole_model_weight_file
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser
-from halo.distributed.expert_parallel.lazy_plan import (
-    FUSED_EXPERT_KEY_PATTERN,
-    ExpertKeyLayout,
-    LazyLoadPlan,
-    is_lazy_loadable,
-    lazy_load_prologue,
-)
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.dtype import resolve_load_dtype
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from halo.model_loading.parallel.expert_fuser import ExpertFuser
 from halo.model_loading.parallel.lazy_load import load_planned_weights
+from halo.model_loading.parallel.lazy_plan import (
+    FUSED_EXPERT_KEY_PATTERN,
+    ExpertKeyLayout,
+    LazyLoadPlan,
+    is_lazy_loadable,
+    lazy_load_prologue,
+)
 from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
 from halo.model_loading.parallel.whole_model import load_whole_model
 from halo.models.attention.selection import revalidate_attn_kwarg

@@ -7,12 +7,12 @@ import torch
 from transformers import PreTrainedModel, PreTrainedTokenizer
 
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import reject_partial_checkpoint
+from halo.checkpoint.tools.offline_export import (
     preflight_model_load_resources,
     reject_in_place_conversion,
     save_full_checkpoint,
 )
-from halo.checkpoint.reading import reject_partial_checkpoint
 from halo.model_loading.dtype import DTYPE_BY_NAME
 from halo.model_loading.model_preparation import auto_load_model
 from halo.model_loading.tokenizer_setup import (

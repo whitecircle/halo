@@ -47,7 +47,7 @@ from halo.models.peft_adapters import lora_fold_targets
 from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import barrier_on_exit
-from halo.runtime.dtensor import resolve_retained
+from halo.runtime.dtensor import gather_full_tensors
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
@@ -441,7 +441,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         model = self._top_level_model()
         reshard_fsdp2_modules(model)
         is_save_rank = is_fs_save_rank()
-        state = resolve_retained(trainable_tensors(model).items(), retain=is_save_rank)
+        state = gather_full_tensors(trainable_tensors(model).items(), retain=is_save_rank)
         # The scaling the adapters trained at, which the resume holds its own to.
         peft_config = require_injected_lora_config(model)
         adapter_dir = os.path.join(checkpoint_dir, RESUME_ADAPTER_DIR)

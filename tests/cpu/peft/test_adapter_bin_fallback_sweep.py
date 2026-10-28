@@ -1,7 +1,7 @@
 """CPU tests for the adapter writer's ``.bin`` fallback.
 
 Every reader prefers ``adapter_model.safetensors`` over ``adapter_model.bin`` — the loader's
-``restore_adapters``, ``assert_no_expert_lora_adapter`` and ``PeftModel.from_pretrained`` all probe
+``restore_adapters``, ``reject_expert_lora_adapter`` and ``PeftModel.from_pretrained`` all probe
 the safetensors name first. So when the safetensors save fails and the writer falls back to the
 ``.bin``, a leftover safetensors file (this attempt's partial write, or a previous save's complete
 one) would silently shadow the state that was just saved: a resume or merge then reads the PREVIOUS

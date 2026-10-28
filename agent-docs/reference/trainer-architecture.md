@@ -12,7 +12,7 @@ its concern:
 |---|---|
 | `accelerator.py` | `AcceleratorMixin`: the plain `Accelerator` on the mixin-managed path (`build_plain_accelerator`, no DDP wrapping) and the training loop's no-wrap `prepare`; `accelerate_manages_fsdp` / `accelerate_manages_ddp` say when an `accelerate launch` owns the wrap |
 | `optimizer_selection.py` | `resolve_bf16_optimizer` and `build_optimizer` ([below](#optimizer-construction)) |
-| `training_args_overrides.py` | The TRL/HF `TrainingArguments` fields the toolkit owns: `align_save_on_each_node`, `disable_trl_liger`, `keep_all_dataset_columns`, `uses_evaluation`, `resolve_active_router_aux_loss_coef` |
+| `training_args_overrides.py` | The TRL/HF `TrainingArguments` fields the toolkit writes or reads before or around the TRL/HF constructor: `align_save_on_each_node`, `disable_trl_liger`, `keep_all_dataset_columns`, `uses_evaluation` |
 | `ctor_slots.py` | Positional ctor slots of a TRL/HF base, read off its installed signature (`resolve_ctor_positions`, `get_ctor_arg`, `get_ctor_config`, `get_ctor_model_and_config`) |
 | `checkpointing.py` | `CheckpointingMixin`: save / resume over an explicit `CheckpointContext`, the LR-scheduler and router-balancing-bias sidecars and a per-trainer sidecar hook |
 | `dataloaders.py` | `DataParallelLoaderMixin`: the parallelism-aware DP-sharded train / eval / test loaders and the pre-sharded length equalization |
@@ -110,7 +110,7 @@ them ([Reference model](../training-methods/grpo/offline.md#reference-model)).
 | `DistributedOnlineGRPOTrainer` | `GRPOTrainer` | No | No |
 | `DistributedSDPGTrainer` | `DistributedOnlineGRPOTrainer` | No | No |
 | `DistributedAsyncEnvironmentalGRPOTrainer` | `GRPOTrainer` | No | No |
-| `DistributedDistillationTrainer` | `Trainer` | No | No |
+| `DistributedTeacherDistillationTrainer` | `Trainer` | No | No |
 | `DistributedSelfDistillationTrainer` | `DistributedSFTTrainer` | No | No |
 | `EmbeddingTrainer` | `SentenceTransformerTrainer` | No | No |
 
@@ -192,7 +192,7 @@ for an image run only.
 | SMPO | Yes | `DataCollatorForVLMSMPO` processes images at collation; CP and padding-free are text-only. See [SMPO — VLMs](../training-methods/preference/smpo.md) |
 | Teacher distillation | Yes | Student and teacher share the processor's vision geometry; over-length rows pre-filtered |
 | Self-distillation (SDPG offline) | Yes | Privileged hint appended to the last user turn; teacher branch fails loud on overflow |
-| Reward | Yes, on score-headed families | `DataCollatorForVLMPreference` expands images into the shared prompt at collation. Refused before the distributed init on a multimodal family with no sequence-classification head. See [Reward — VLMs](../training-methods/preference/reward-modeling.md#vision-language) |
+| Reward | Yes, on score-headed families | `DataCollatorForVLMPreference` expands images into the shared prompt at collation. Refused before the distributed init on a multimodal family with no sequence-classification head. See [Reward — VLMs](../training-methods/reward-modeling.md#vision-language) |
 | Classification | No | Same head roster as reward modeling, but the classification script has no vision data path; multimodal architectures still train on text |
 | GRPO (offline / online / async) | No | Text rollouts |
 | Embedding | No | Text towers only |
@@ -494,7 +494,7 @@ these declares `RECORDS_LOSS_METRICS = False` and skips the flush (self-distilla
 - **DistributedDPOTrainer** — the reference model is never parallelized: under EP/TP a frozen copy is a
   whole dense replica per rank (warned); `precompute_ref_log_probs=True`, or PEFT/LoRA with
   `ref_model=None` (LoRA works under EP, not TP), avoids it.
-- **DistributedDistillationTrainer** — losses `kl_divergence`, `mse`, `soft_cross_entropy`,
+- **DistributedTeacherDistillationTrainer** — losses `kl_divergence`, `mse`, `soft_cross_entropy`,
   `cosine_similarity`, `jensen_shannon`, `slim`; the teacher forward runs under `torch.no_grad()` in
   `eval()` mode.
 - **DistributedAsyncEnvironmentalGRPOTrainer** — async multi-turn RL with Ray actors against vLLM or

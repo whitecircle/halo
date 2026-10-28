@@ -15,7 +15,8 @@ from safetensors import safe_open
 
 from halo.checkpoint.atomic import link_or_copy_file
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_ep_shard
-from halo.checkpoint.offline_export import (
+from halo.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
+from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
     cross_device_bytes,
     preflight_resource_warning,
@@ -23,7 +24,6 @@ from halo.checkpoint.offline_export import (
     reject_sibling_adapter,
     resume_state_sources,
 )
-from halo.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.models.moe.expert_layout import to_hub_expert_tensors
 from halo.models.moe.family_specs import (

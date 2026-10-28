@@ -39,7 +39,7 @@ def context_window_from_config(config: PretrainedConfig) -> int | None:
     return None
 
 
-def get_model_context_window(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> int:
+def resolve_model_context_window(model: PreTrainedModel, tokenizer: PreTrainedTokenizer) -> int:
     """A model's max context window in tokens: the config's (:func:`context_window_from_config`), else
     ``tokenizer.model_max_length`` below :data:`UNSET_MODEL_MAX_LENGTH`; raises when neither states one."""
     window = context_window_from_config(model.config)
@@ -62,7 +62,7 @@ def resolve_length_to_context(value: int | None, model: PreTrainedModel, tokeniz
     truncates at the real window rather than a small dataclass default)."""
     if is_bounded_length(value):
         return value
-    context = get_model_context_window(model, tokenizer)
+    context = resolve_model_context_window(model, tokenizer)
     if is_global_main_process():
         logger.info("max_length unset → resolved to the model context window (%d)", context)
     return context

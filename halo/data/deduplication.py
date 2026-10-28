@@ -170,8 +170,9 @@ def deduplicate_embeddings(
     return surviving_indices, sizes_history
 
 
-def setup_device(device_arg: str) -> torch.device:
-    """Setup and return the appropriate device."""
+def resolve_device(device_arg: str) -> torch.device:
+    """The torch device ``--device`` names: ``auto`` is CUDA when a GPU is visible, else CPU; any other value
+    goes to :class:`torch.device` as given."""
     if device_arg == "auto":
         if torch.cuda.is_available():
             device = torch.device("cuda")
@@ -374,7 +375,7 @@ def run_deduplication(args: argparse.Namespace) -> int:
     logger.info(f"Arguments: {vars(args)}")
 
     try:
-        device = setup_device(args.device)
+        device = resolve_device(args.device)
 
         dataset = load_dataset_from_path(
             input_path=args.dataset,

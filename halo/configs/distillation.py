@@ -1,5 +1,5 @@
 """Distillation arguments: the privileged-teacher (SDPG) term, the self- and teacher-distillation script
-arguments and ``DistillationConfig``."""
+arguments and ``TeacherDistillationConfig``."""
 
 from dataclasses import dataclass, field, fields
 from typing import Any, ClassVar, Literal, get_args
@@ -248,7 +248,7 @@ class TeacherDistillScriptArguments(ConversationRenderArguments, CommonScriptArg
 
 
 @dataclass
-class DistillationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
+class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArguments):
     """Configuration for distillation training, extending HuggingFace TrainingArguments."""
 
     distill_loss: Literal[

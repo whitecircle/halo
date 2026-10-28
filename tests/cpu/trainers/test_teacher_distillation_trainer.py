@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``DistributedDistillationTrainer``'s objective, teacher gate and PEFT wiring, on stub models.
+"""``DistributedTeacherDistillationTrainer``'s objective, teacher gate and PEFT wiring, on stub models.
 
 The objective is ``alpha * L_distill + (1 - alpha) * L_clm``, each term one mean over the batch's
 supervised (shifted) tokens. Every way it can go wrong keeps the loss finite: an ignored alpha or a
@@ -33,7 +33,7 @@ from halo.entrypoints.model_setup import PolicyLoad
 from halo.entrypoints.script import ScriptContext
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.trainers.distillation.divergences import place_frozen_scorer, require_divergence
-from halo.trainers.distillation.teacher_distillation import DistributedDistillationTrainer
+from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.models import QWEN3_0_6B
 from tests.common.tokenizers import load_cached_tokenizer
 
@@ -80,7 +80,7 @@ TOKENS = {f"t{i}": i for i in range(VOCAB)}
 
 def _trainer(distill_loss="kl_divergence", *, apply_hard_labels=False, alpha=ALPHA, peft_casted=False):
     """The real ``compute_loss`` on a bare trainer; returns ``(trainer, stored_metrics)``."""
-    trainer = object.__new__(DistributedDistillationTrainer)
+    trainer = object.__new__(DistributedTeacherDistillationTrainer)
     trainer.model = _TokenTableModel(seed=0)
     trainer.teacher_model = _TokenTableModel(seed=1)
     trainer.args = types.SimpleNamespace(
@@ -137,13 +137,13 @@ def _construct(args, *, peft_config=None):
 
     with (
         mock.patch.object(teacher_distillation, "resolve_trainer_model", lambda model, *a, **k: model),
-        mock.patch.object(DistributedDistillationTrainer, "_init_distributed_config", init_config),
+        mock.patch.object(DistributedTeacherDistillationTrainer, "_init_distributed_config", init_config),
         mock.patch.object(Trainer, "__init__", lambda self, model, **kwargs: vars(self).update(kwargs, model=model)),
         mock.patch.object(nn.Linear, "add_model_tags", create=True),
-        mock.patch.object(DistributedDistillationTrainer, "_configure_distributed_modes"),
+        mock.patch.object(DistributedTeacherDistillationTrainer, "_configure_distributed_modes"),
         mock.patch.object(teacher_distillation, "place_frozen_scorer", return_value=(None, torch.device("cpu"))),
     ):
-        return DistributedDistillationTrainer(
+        return DistributedTeacherDistillationTrainer(
             student_model=nn.Linear(2, 2),
             teacher_model=nn.Linear(2, 2),
             teacher_tokenizer=_Tokenizer(TOKENS),
@@ -264,9 +264,9 @@ def test_the_trainer_wraps_peft_through_prepare_policy_model_and_keeps_its_cast_
 
 
 def test_the_teacher_tokenizer_is_keyword_only_so_positional_callers_keep_their_slots():
-    parameter = inspect.signature(DistributedDistillationTrainer.__init__).parameters["teacher_tokenizer"]
+    parameter = inspect.signature(DistributedTeacherDistillationTrainer.__init__).parameters["teacher_tokenizer"]
     assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
-    assert list(inspect.signature(DistributedDistillationTrainer.__init__).parameters)[1:4] == [
+    assert list(inspect.signature(DistributedTeacherDistillationTrainer.__init__).parameters)[1:4] == [
         "student_model",
         "teacher_model",
         "args",
@@ -321,7 +321,7 @@ def _run_teacher_script(tmp_path, teacher_tokens):
             local_rank=0,
             resume_checkpoint=None,
             model_source="stub/student",
-            trainer_cls=DistributedDistillationTrainer,
+            trainer_cls=DistributedTeacherDistillationTrainer,
         ),
         "load_script_datasets": lambda *a, **k: (None, False),
         "resolve_vlm_run": lambda *a, **k: False,

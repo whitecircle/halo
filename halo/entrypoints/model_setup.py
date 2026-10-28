@@ -107,7 +107,7 @@ def load_model_and_tokenizer(
     stays on the loader's ``LOADED_WEIGHTS_FROM_ATTR`` stamp.
     """
     overrides = {**(getattr(training_config, "model_init_kwargs", None) or {}), **(model_config_overrides or {})}
-    # Non-TRL configs (DistillationConfig, the plain HF classification/embedding ones) carry none.
+    # Non-TRL configs (TeacherDistillationConfig, the plain HF classification/embedding ones) carry none.
     if hasattr(training_config, "model_init_kwargs"):
         training_config.model_init_kwargs = None
     use_liger_kernel = training_config.use_liger_kernel

@@ -27,7 +27,7 @@ from halo.checkpoint.format import (
     optimizer_shard_filename,
     pp_stage_part_prefix,
 )
-from halo.checkpoint.pp_stage_merge import merge_pp_stage_parts
+from halo.checkpoint.tools.pp_stage_merge import merge_pp_stage_parts
 from halo.checkpoint.writing import StreamingShardWriter, write_merged_index
 from tests.common.checkpoint_resave import resave_in_place
 from tests.common.file_links import OWNER_ONLY_MODE, process_umask, refuse_hard_links

@@ -5,14 +5,14 @@ The EP layers label their dispatch / expert-compute / combine spans with
 ``time_operation`` — these tests pin the contract both rely on: the operation name
 must show up as a profiler event, and the monitor must aggregate timings.
 
-Run: python tests/cpu/diagnostics/test_ep_span_timing.py
+Run: python tests/cpu/conventions/test_ep_span_timer.py
 """
 
 import pytest
 import torch
 from torch.profiler import ProfilerActivity, profile
 
-from halo.diagnostics.ep_span_timing import EPSpanTimer
+from tests.common.ep_span_timer import EPSpanTimer
 
 
 def _profiled_event_names() -> tuple[set[str], EPSpanTimer]:

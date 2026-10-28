@@ -19,6 +19,7 @@ from tokenizers.models import WordLevel
 from tokenizers.processors import TemplateProcessing
 from transformers import ProcessorMixin
 
+from halo.data.chat_render import render_conversation, tokenize_rendered
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     encode_self_distill_row,
@@ -28,7 +29,6 @@ from halo.data.collators.self_distill import (
 )
 from halo.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, build_completion_only_labels
 from halo.data.pipeline import map_cache_key
-from halo.data.pipeline.chat_render import render_conversation, tokenize_rendered
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import (
     CACHE_KEY_ATTR,

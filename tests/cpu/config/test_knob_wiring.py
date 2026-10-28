@@ -24,7 +24,7 @@ from trl import SFTConfig
 from halo.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
 from halo.configs.grpo import RLRRConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.entrypoints.data_setup import reject_trl_dataset_prep_args
 from halo.entrypoints.script import distributed_trainer_kwargs
@@ -495,7 +495,7 @@ def test_rlrr_script_args_thread_every_tunable_into_the_shaping_config():
     default clip while the config says otherwise. Asserted field-by-field against non-default values
     so a dropped or mis-wired field cannot pass by matching its own default.
     """
-    args = RLVROnlineGRPOScriptArguments(
+    args = OnlineGRPOScriptArguments(
         use_rlrr=True,
         rlrr_mode="prr",
         rlrr_tau=0.25,
@@ -540,7 +540,7 @@ def test_rlrr_rejects_an_inverted_clip_band_from_the_script_args():
     """
     for use_rlrr in (True, False):
         with pytest.raises(ValueError, match="rlrr_xi_neg <= rlrr_xi_pos"):
-            RLVROnlineGRPOScriptArguments(use_rlrr=use_rlrr, rlrr_xi_pos=-1.0, rlrr_xi_neg=1.0)
+            OnlineGRPOScriptArguments(use_rlrr=use_rlrr, rlrr_xi_pos=-1.0, rlrr_xi_neg=1.0)
 
 
 # SDPG: the shared argument mixin and the two arms that hand it to a trainer
@@ -591,7 +591,7 @@ def test_rlvr_script_args_thread_every_sdpg_tunable_into_the_trainer_kwargs():
     so a field it forgets is a knob the user sets and the OPD term never sees — the run distils on the
     paper's defaults while the config file says otherwise.
     """
-    args = RLVROnlineGRPOScriptArguments(use_sdpg=True, opd_positive_advantage_only=False, **_SDPG_TUNABLES)
+    args = OnlineGRPOScriptArguments(use_sdpg=True, opd_positive_advantage_only=False, **_SDPG_TUNABLES)
 
     kwargs = args.build_sdpg_kwargs()
 
@@ -611,7 +611,7 @@ def test_rlvr_script_args_thread_every_sdpg_tunable_into_the_trainer_kwargs():
 def test_sdpg_kwargs_are_empty_while_the_gate_is_off():
     """The gate is the builder's whole remaining job — the RLVR script splats the result
     unconditionally, so an off run must contribute no trainer kwargs at all."""
-    assert RLVROnlineGRPOScriptArguments(**_SDPG_TUNABLES).build_sdpg_kwargs() == {}
+    assert OnlineGRPOScriptArguments(**_SDPG_TUNABLES).build_sdpg_kwargs() == {}
 
 
 def test_sdpg_trainer_adopts_every_tunable_from_the_dataclass():

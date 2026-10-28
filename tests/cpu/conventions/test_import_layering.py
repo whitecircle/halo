@@ -1,7 +1,7 @@
 """The import layering of ``halo/``, read off the import graph: the sharding-agnostic trees reach no
 ``halo.distributed``, ``torch.distributed`` or loader dispatch, no parallelism package imports the dispatch, the
 packages import their members acyclically, toolkit env knobs go through ``halo/env.py``, and every import follows the
-final layer table ``_LAYERS``, which agent-docs/reference/architecture.md renders. ``TYPE_CHECKING`` imports and the
+layer table ``_LAYERS``, which agent-docs/reference/architecture.md renders. ``TYPE_CHECKING`` imports and the
 package's bootstrap ``__init__`` are exempt; a function-local import counts like any other."""
 
 import ast
@@ -17,13 +17,13 @@ from scripts.docs.references import PACKAGE, RepoIndex, dotted_name
 from tests.common.repo import REPO_ROOT
 from tests.common.sample_tree import write_sample_tree
 
-_SRC = REPO_ROOT / PACKAGE
+_PACKAGE_ROOT = REPO_ROOT / PACKAGE
 _INDEX = RepoIndex(REPO_ROOT)
 _ARCHITECTURE_DOC = REPO_ROOT / "agent-docs" / "reference" / "architecture.md"
 
 # The package above every parallelism implementation, which nothing in halo/distributed imports.
 _DISPATCH_PACKAGE = "model_loading.parallel"
-_DISPATCH_DIR = _SRC.joinpath(*_DISPATCH_PACKAGE.split("."))
+_DISPATCH_DIR = _PACKAGE_ROOT.joinpath(*_DISPATCH_PACKAGE.split("."))
 # The collective half of the checkpoint tree, which the agnostic sweep skips and the dispatch sweep covers.
 _CHECKPOINT_PARALLEL = "checkpoint.parallel"
 
@@ -34,11 +34,11 @@ _FORBIDDEN_ROOTS = (f"{PACKAGE}.distributed", "torch.distributed", f"{PACKAGE}.{
 # EP_* stays out: EP_DISABLE_GIN / EP_SUPPRESS_NCCL_CHECK are DeepEP's own vars, read raw at
 # their owner by design (halo/env.py docstring).
 _ENV_PREFIXES = ("HALO_", "DIST_", "VLLM_", "SGLANG_", "NVLINK_")
-_ENV_OWNER = _SRC / "env.py"
+_ENV_OWNER = _PACKAGE_ROOT / "env.py"
 
 _TYPE_CHECKING_GUARDS = ("TYPE_CHECKING", "typing.TYPE_CHECKING")
 
-# The final layer table, bottom to top: a unit imports only units of lower rows.
+# The layer table, bottom to top: a unit imports only units of lower rows.
 _LAYERS = (
     ("env",),
     ("log",),
@@ -84,8 +84,6 @@ _MEMBER_ORDERS = {
         ("moe_layer",),
         ("families",),
         ("parallelize",),
-        ("lazy_plan",),
-        ("expert_fuser",),
     ),
     "distributed.expert_parallel.deepep": (("settings",), ("capacity",), ("backends",), ("dispatcher",)),
     "distributed.expert_parallel.moe_layer": (
@@ -105,9 +103,6 @@ _PACKAGE_INTERNAL = {
     f"distributed.expert_parallel.moe_layer.{name}": "distributed.expert_parallel"
     for name in ("compute", "routing", "grad_sync", "gather", "balancing_bias")
 }
-# Where each module that has not moved yet lands, by its longest entry: today's dotted path under the package
-# root -> the final one. A move deletes its entry; a module staying in its unit and member needs none.
-_PENDING_MOVES: dict[str, str] = {}
 
 
 class _Import(NamedTuple):
@@ -123,11 +118,11 @@ class _Import(NamedTuple):
 
 
 class _Break(NamedTuple):
-    """One break of the final layer table."""
+    """One break of the layer table."""
 
     rule: str
-    importer: str  # a final path; a cycle's members
-    imported: str  # a final path or a third-party module; "" for a cycle
+    importer: str  # dotted under the package root; a cycle's members
+    imported: str  # dotted under the package root, or a third-party module; "" for a cycle
     location: str  # "file:line"; "" for a cycle
     detail: str
 
@@ -196,23 +191,13 @@ def _member(module: str, package: str) -> str | None:
     return module.removeprefix(f"{package}.").partition(".")[0]
 
 
-def _final_path(module: str, moves: Mapping[str, str]) -> str:
-    """Where ``module`` (dotted under the package root) lands, through the longest entry of ``moves`` naming
-    it or a package above it."""
-    parts = module.split(".")
-    for end in range(len(parts), 0, -1):
-        prefix = ".".join(parts[:end])
-        if prefix in moves:
-            return ".".join([moves[prefix], *parts[end:]])
-    return module
-
-
 _IMPORTS = _package_imports(_INDEX)
 _AGNOSTIC_FILES = sorted(
     path
     for directory in _AGNOSTIC_DIRS
-    for path in (_SRC / directory).rglob("*.py")
-    if not path.is_relative_to(_DISPATCH_DIR) and not _is_within(_module_name(_SRC, path), _CHECKPOINT_PARALLEL)
+    for path in (_PACKAGE_ROOT / directory).rglob("*.py")
+    if not path.is_relative_to(_DISPATCH_DIR)
+    and not _is_within(_module_name(_PACKAGE_ROOT, path), _CHECKPOINT_PARALLEL)
 )
 _ENV_SWEPT_FILES = _package_files(_INDEX) + sorted((REPO_ROOT / "scripts").rglob("*.py"))
 
@@ -275,7 +260,7 @@ def _cycles(graph: Mapping[str, Iterable[str]]) -> list[list[str]]:
 
 
 def _unit(module: str) -> str:
-    """The layer-table unit of the final path ``module``."""
+    """The layer-table unit of ``module``."""
     top, _, rest = module.partition(".")
     member = rest.partition(".")[0]
     if top in ("checkpoint", "model_loading") and member == "parallel":
@@ -287,7 +272,7 @@ def _unit(module: str) -> str:
 
 
 def _misplaced(module: str) -> str | None:
-    """Why the final path ``module`` has no place in the table, or None."""
+    """Why ``module`` has no place in the table, or None."""
     if _unit(module) not in _LEVEL:
         return f"its unit {_unit(module)!r} is in no row of _LAYERS"
     for package, rows in _MEMBER_ROW.items():
@@ -300,19 +285,18 @@ def _misplaced(module: str) -> str | None:
 def _parallelism_package(module: str) -> str | None:
     """The parallelism package ``module`` (dotted under the package root) sits in: a member of ``distributed``, or
     the checkpoint tree's collective half; None outside them."""
-    if _is_within(_final_path(module, _PENDING_MOVES), _CHECKPOINT_PARALLEL):
+    if _is_within(module, _CHECKPOINT_PARALLEL):
         return _CHECKPOINT_PARALLEL
     return _member(module, "distributed")
 
 
 def _lands_below_dispatch(path: Path) -> bool:
     """Whether a parallelism-package module lands at or below the dispatch's row, outside the dispatch."""
-    module = _module_name(_SRC, path)
-    final = _final_path(module, _PENDING_MOVES)
+    module = _module_name(_PACKAGE_ROOT, path)
     return (
         _parallelism_package(module) is not None
-        and _LEVEL.get(_unit(final), 0) <= _LEVEL[_DISPATCH_PACKAGE]
-        and not _is_within(final, _DISPATCH_PACKAGE)
+        and _LEVEL.get(_unit(module), 0) <= _LEVEL[_DISPATCH_PACKAGE]
+        and not _is_within(module, _DISPATCH_PACKAGE)
     )
 
 
@@ -320,7 +304,7 @@ _BELOW_DISPATCH_FILES = [path for path in _package_files(_INDEX) if _lands_below
 
 
 def _edge_breaks(location: str, source: str, target: str) -> list[_Break]:
-    """The rules a first-party import from final path ``source`` to final path ``target`` breaks."""
+    """The rules a first-party import from ``source`` to ``target`` breaks."""
     breaks = []
     source_unit, target_unit = _unit(source), _unit(target)
     if source_unit != target_unit and _LEVEL[target_unit] >= _LEVEL[source_unit]:
@@ -344,7 +328,7 @@ def _edge_breaks(location: str, source: str, target: str) -> list[_Break]:
 
 
 def _third_party_breaks(location: str, source: str, module: str, lazy: bool) -> list[_Break]:
-    """The rules an import of the third-party ``module`` from final path ``source`` breaks."""
+    """The rules an import of the third-party ``module`` from ``source`` breaks."""
     breaks = []
     if _is_within(module, "deep_ep"):
         if source != _DEEP_EP_IMPORTER:
@@ -363,20 +347,19 @@ def _third_party_breaks(location: str, source: str, module: str, lazy: bool) -> 
     return breaks
 
 
-def _layer_table_breaks(imports: Iterable[_Import], moves: Mapping[str, str]) -> list[_Break]:
-    """Every break of the final layer table by ``imports``, each module placed through ``moves``."""
+def _layer_table_breaks(imports: Iterable[_Import]) -> list[_Break]:
+    """Every break of the layer table by ``imports``."""
     breaks = []
     graph: dict[str, set[str]] = defaultdict(set)
     for found in imports:
         if not found.importer:
             continue
         location = f"{found.file}:{found.line}"
-        source = _final_path(found.importer, moves)
+        source = found.importer
         target = _in_package(found.module)
         if target is None:
             breaks += _third_party_breaks(location, source, found.module, found.lazy)
             continue
-        target = _final_path(target, moves)
         if _unit(source) in _PACKAGE_FREE_UNITS:
             imported = target or PACKAGE
             breaks.append(_Break("package-free", source, imported, location, f"{source} imports {imported}"))
@@ -403,7 +386,7 @@ def test_the_sweep_sees_every_agnostic_tree():
     assert len(_AGNOSTIC_FILES) > 10, f"the sharding-agnostic sweep collapsed to {len(_AGNOSTIC_FILES)} files"
     assert _DISPATCH_DIR.is_dir(), f"halo/{_DISPATCH_PACKAGE.replace('.', '/')} moved; the sweep excludes it by path"
     for directory in _AGNOSTIC_DIRS:
-        assert any(path.is_relative_to(_SRC / directory) for path in _AGNOSTIC_FILES), directory
+        assert any(path.is_relative_to(_PACKAGE_ROOT / directory) for path in _AGNOSTIC_FILES), directory
 
 
 @pytest.mark.parametrize("path", _AGNOSTIC_FILES, ids=lambda p: str(p.relative_to(REPO_ROOT)))
@@ -427,7 +410,7 @@ def test_the_sweep_sees_the_dispatch_and_every_parallelism_package():
     """Anti-vacuity: a moved dispatch package leaves nothing to import, and the packages it reaches into must
     all be in the sweep."""
     assert _INDEX.module_source(f"{PACKAGE}.{_DISPATCH_PACKAGE}") is not None, f"no {_DISPATCH_PACKAGE} package"
-    swept = {_parallelism_package(_module_name(_SRC, path)) for path in _BELOW_DISPATCH_FILES}
+    swept = {_parallelism_package(_module_name(_PACKAGE_ROOT, path)) for path in _BELOW_DISPATCH_FILES}
     assert {
         "expert_parallel",
         "context_parallel",
@@ -514,15 +497,6 @@ def test_toolkit_env_vars_are_read_only_through_the_env_helpers(path):
     )
 
 
-def test_a_pending_move_places_a_module_by_its_longest_entry():
-    moves = {"old": "new", "old.kept_apart": "elsewhere.module"}
-
-    assert _final_path("old", moves) == "new"
-    assert _final_path("old.sub.module", moves) == "new.sub.module"
-    assert _final_path("old.kept_apart.inner", moves) == "elsewhere.module.inner"
-    assert _final_path("older", moves) == "older"
-
-
 def test_a_module_outside_every_row_has_no_place():
     assert _misplaced("args.sft_args") is not None
     assert _misplaced("distributed.new_member") is not None
@@ -551,7 +525,6 @@ def test_each_break_of_the_layer_table_is_reported(tmp_path):
                 import $pkg
                 import $pkg.env
             """,
-            "$pkg/old_ranks.py": "",
             "$pkg/kernels/__init__.py": "",
             "$pkg/kernels/dispatch.py": "import $pkg.env\n",
             "$pkg/kernels/fused.py": """
@@ -566,11 +539,12 @@ def test_each_break_of_the_layer_table_is_reported(tmp_path):
             "$pkg/kernels/lowp/linear.py": "from torch.distributed.tensor import DTensor\n",
             "$pkg/runtime/__init__.py": "",
             "$pkg/runtime/ranks.py": "import $pkg.kernels.dispatch\n",
+            "$pkg/runtime/old_ranks.py": "",
             "$pkg/models/__init__.py": "",
             "$pkg/models/geometry.py": """
                 import torch.distributed
 
-                import $pkg.old_ranks
+                import $pkg.runtime.old_ranks
                 from $pkg.runtime.ranks import is_global_main_process
             """,
             "$pkg/models/typing_only.py": """
@@ -610,7 +584,7 @@ def test_each_break_of_the_layer_table_is_reported(tmp_path):
         },
     )
 
-    breaks = _layer_table_breaks(_package_imports(RepoIndex(tmp_path)), {"old_ranks": "runtime.old_ranks"})
+    breaks = _layer_table_breaks(_package_imports(RepoIndex(tmp_path)))
 
     assert Counter((found.rule, found.importer) for found in breaks) == Counter(
         {
@@ -630,27 +604,20 @@ def test_each_break_of_the_layer_table_is_reported(tmp_path):
     ), _report(breaks)
 
 
-def test_every_module_has_a_place_in_the_final_table():
+def test_every_module_has_a_place_in_the_table():
     """Each module lands in a unit of the table and, inside an ordered package, in one of its rows; a module
     the table cannot place would drop out of every rule."""
     unplaced = {
         module: why
         for path in _package_files(_INDEX)
-        if (module := _module_name(_SRC, path)) and (why := _misplaced(_final_path(module, _PENDING_MOVES)))
+        if (module := _module_name(_PACKAGE_ROOT, path)) and (why := _misplaced(module))
     }
-    assert not unplaced, f"place these through _LAYERS, _MEMBER_ORDERS or _PENDING_MOVES: {unplaced}"
-
-
-def test_every_pending_move_is_still_pending():
-    """A landed move leaves an entry naming a module that no longer exists."""
-    landed = sorted(key for key in _PENDING_MOVES if _INDEX.module_source(f"{PACKAGE}.{key}") is None)
-    assert not landed, f"these modules moved; drop their _PENDING_MOVES entries: {landed}"
-    assert not [key for key, final in _PENDING_MOVES.items() if key == final]
+    assert not unplaced, f"place these through _LAYERS or _MEMBER_ORDERS: {unplaced}"
 
 
 def test_the_layer_table_sweep_sees_every_unit():
     """Anti-vacuity: a unit no module lands in is a misspelled row, and a collapsed import graph checks nothing."""
-    placed = {_unit(_final_path(_module_name(_SRC, path), _PENDING_MOVES)) for path in _package_files(_INDEX)}
+    placed = {_unit(_module_name(_PACKAGE_ROOT, path)) for path in _package_files(_INDEX)}
     assert not set(_LEVEL) - placed, f"no module lands in {sorted(set(_LEVEL) - placed)}"
     first_party = [found for found in _IMPORTS if found.importer and _in_package(found.module)]
     assert len(first_party) > 2000, f"only {len(first_party)} first-party imports"
@@ -664,9 +631,9 @@ def test_the_rank_queries_tool_safe_units_import_reach_only_log():
         assert imported <= _RANK_QUERIES_IMPORTS, f"{module} imports {sorted(imported)} from the package"
 
 
-def test_imports_follow_the_final_layer_table():
-    breaks = _layer_table_breaks(_IMPORTS, _PENDING_MOVES)
-    assert not breaks, f"these imports break the final layer table:\n{_report(breaks)}"
+def test_imports_follow_the_layer_table():
+    breaks = _layer_table_breaks(_IMPORTS)
+    assert not breaks, f"these imports break the layer table:\n{_report(breaks)}"
 
 
 def test_architecture_doc_renders_the_layer_table():

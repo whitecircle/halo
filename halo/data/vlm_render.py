@@ -9,7 +9,7 @@ from typing import Any
 from datasets import Features, Sequence, Value
 from PIL import Image
 
-from halo.data.pipeline.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, fold_system_into_conversation
+from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, fold_system_into_conversation
 
 # A preprocessed VLM dataset's schema, pinned on the bake (an all-None batch infers null columns).
 VLM_OUTPUT_FEATURES = Features(

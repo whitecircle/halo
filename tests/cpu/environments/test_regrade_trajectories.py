@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """The offline re-grader must validate a trajectory's meta record before it grades anything.
 
-``regrade_trajectories.py`` consumes meta keys two different producers stamp: ``run_code_contests.py``
-adds ``adapter``/``language`` on top of the generic eval meta, ``run_env.py`` does not. Pointed at a
-``run_env.py`` file, an unvalidated selector surfaces as a bare ``KeyError`` and a report-only key as
+``regrade_trajectories.py`` consumes meta keys two different producers stamp: ``eval_code_contests.py``
+adds ``adapter``/``language`` on top of the generic eval meta, ``eval_env.py`` does not. Pointed at an
+``eval_env.py`` file, an unvalidated selector surfaces as a bare ``KeyError`` and a report-only key as
 a ``TypeError`` in the summary line — the latter only AFTER the whole file has been graded, which is
 minutes of sandboxed execution per file.
 
@@ -23,7 +23,7 @@ from halo.environments.tasks.coding.contest_datasets import ContestSelection
 from halo.environments.tasks.coding.grading import GradingSpec
 from halo.environments.tasks.coding.verdicts import FloatTolerance
 
-# What run_code_contests.py stamps (generic eval meta + its meta_extra).
+# What eval_code_contests.py stamps (generic eval meta + its meta_extra).
 _FULL_META = {
     "env_type": "code_contests",
     "adapter": "code_contests",
@@ -32,7 +32,7 @@ _FULL_META = {
     "model": "org/model",
     "language": "python",
 }
-# What run_env.py stamps: the generic eval meta only.
+# What eval_env.py stamps: the generic eval meta only.
 _RUN_ENV_META = {k: v for k, v in _FULL_META.items() if k not in ("adapter", "language")}
 
 
@@ -53,7 +53,7 @@ def test_validate_meta_reports_every_missing_key_and_its_producer():
 
     message = str(excinfo.value)
     assert "adapter" in message and "language" in message
-    assert "run_code_contests.py" in message, "the error must name the producer that stamps the missing keys"
+    assert "eval_code_contests.py" in message, "the error must name the producer that stamps the missing keys"
 
 
 def test_a_meta_without_its_split_is_refused():
@@ -85,7 +85,7 @@ def test_regrade_file_validates_before_it_grades_anything(tmp_path, monkeypatch)
 
 
 def test_every_grading_knob_reaches_the_meta_block():
-    """The block ``run_code_contests.py`` stamps must cover the WHOLE contract, derived from the
+    """The block ``eval_code_contests.py`` stamps must cover the WHOLE contract, derived from the
     dataclass. A hand-typed subset silently defaults the ninth field added tomorrow — precisely the
     re-threading :class:`GradingSpec` exists to prevent."""
     env = CodeContestsEnvironment(language="python", sandbox_backend="local")

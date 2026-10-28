@@ -16,7 +16,7 @@ Usage:
 
 import pytest
 
-from halo.data.pipeline.conversation import fold_system_into_conversation
+from halo.data.conversation import fold_system_into_conversation
 from halo.data.pipeline.text_rows import render_row_conversation
 from halo.data.vlm_render import extract_conversation_images
 

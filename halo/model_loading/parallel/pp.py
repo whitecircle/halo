@@ -15,13 +15,6 @@ from transformers import AutoModelForCausalLM
 
 from halo.checkpoint.reading import PER_NODE_PLACEMENT_REMEDY
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.expert_fuser import ExpertFuser, FusionTask
-from halo.distributed.expert_parallel.lazy_plan import (
-    ExpertKeyLayout,
-    LazyLoadPlan,
-    is_lazy_loadable,
-    lazy_load_prologue,
-)
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_structure
@@ -36,7 +29,14 @@ from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from halo.model_loading.parallel.expert_fuser import ExpertFuser, FusionTask
 from halo.model_loading.parallel.lazy_load import load_planned_weights
+from halo.model_loading.parallel.lazy_plan import (
+    ExpertKeyLayout,
+    LazyLoadPlan,
+    is_lazy_loadable,
+    lazy_load_prologue,
+)
 from halo.model_loading.parallel.model_source import ModelSource, resolve_lazy_checkpoint
 from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, tie_flag_configs
 from halo.models.module_tree import split_layer_path

@@ -47,8 +47,8 @@ from unittest.mock import patch
 import pytest
 from datasets import DatasetDict
 
-from halo.checkpoint import adapter_merge, deepseek_v4_dequant, vocab_patch
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
+from halo.checkpoint.tools import adapter_merge, deepseek_v4_dequant, vocab_patch
 from halo.data.preprocessed import publishing, tokenization
 from scripts.cli_arguments import (
     HUB_SOURCE_HELP,
@@ -410,7 +410,7 @@ def test_prepare_dataset_threads_the_flag_into_the_label_bake_config_read(tmp_pa
         tokenization.resolve_label_eos_token_ids(config, tokenizer_or_processor)
 
     monkeypatch.setattr(tokenization.AutoConfig, "from_pretrained", _record)
-    monkeypatch.setattr(publishing, "setup_tokenizer", lambda args: object())
+    monkeypatch.setattr(publishing, "load_tokenizer", lambda args: object())
     monkeypatch.setattr(publishing, "load_input_dataset", lambda args: DatasetDict())
     monkeypatch.setattr(publishing, "preprocess_dataset", _bake)
     argv = ["--input", "org/raw", "--output", str(tmp_path / "out"), "--model_name_or_path", "org/model"]

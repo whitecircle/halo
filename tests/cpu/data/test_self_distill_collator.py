@@ -19,16 +19,16 @@ import torch
 from datasets import Dataset, DatasetDict
 
 import halo.data.collators.self_distill as self_distill_collator
+from halo.data.chat_render import render_conversation, tokenize_rendered
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
+    SelfDistillVLMDataCollator,
     confidence_normalizer,
     inject_privileged_hint,
     privileged_hint,
     teacher_history,
 )
-from halo.data.collators.vlm import SelfDistillVLMDataCollator
 from halo.data.completion_spans import build_completion_only_labels
-from halo.data.pipeline.chat_render import render_conversation, tokenize_rendered
 from halo.data.pipeline.vlm_rows import _filter_vlm_over_length
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import load_script_module

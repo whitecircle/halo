@@ -1,10 +1,8 @@
-"""Where every rank reads a checkpoint from, agreed before any rank loads it, the rank-0 verdicts a
-lazy load takes on that directory, and the checkpoint config and modality verdict read ahead of a load.
+"""Where every rank reads a checkpoint from, agreed before any rank loads it, the rank-0 verdicts a lazy load takes on
+that directory, and the checkpoint config and modality verdict read ahead of a load.
 
-Each rank resolves the run's source on its own node (the directory as that node mounts it, the
-snapshot in the Hub cache its ``HF_HOME`` points at), so the world agrees on what every rank found
-before any of them reads a weight.
-"""
+Each rank resolves the run's source on its own node (the directory as that node mounts it, the snapshot in the Hub
+cache its ``HF_HOME`` points at), so the world agrees on what every rank found before any of them reads a weight."""
 
 from __future__ import annotations
 

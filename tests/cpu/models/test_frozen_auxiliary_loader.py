@@ -66,7 +66,7 @@ FROZEN_LOAD_STEP_OWNERS = frozenset(
         "halo/model_loading/parallel/loader.py",
         "scripts/training/embedding.py",
         "halo/checkpoint/sidecars.py",
-        "halo/checkpoint/vocab_patch.py",
+        "halo/checkpoint/tools/vocab_patch.py",
     }
 )
 

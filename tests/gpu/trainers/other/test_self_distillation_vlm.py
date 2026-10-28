@@ -23,7 +23,7 @@ from datasets import Image as HFImage
 from transformers import AutoModelForImageTextToText, AutoProcessor
 from trl import SFTConfig
 
-from halo.data.collators.vlm import SelfDistillVLMDataCollator
+from halo.data.collators.self_distill import SelfDistillVLMDataCollator
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_int
 from halo.trainers.distillation.self_distillation import DistributedSelfDistillationTrainer

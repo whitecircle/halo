@@ -21,7 +21,7 @@ from transformers.models.qwen3_5_moe import (
     Qwen3_5MoeForConditionalGeneration,
 )
 
-from halo.checkpoint.vision_reattach import reattach_vision_tower
+from halo.checkpoint.tools.vision_reattach import reattach_vision_tower
 from tests.common.models import TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 
 

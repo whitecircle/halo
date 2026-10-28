@@ -42,11 +42,11 @@ from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.tensor import DTensor
 from transformers import Trainer, TrainingArguments
 
-from halo.checkpoint.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.parallel.context import CheckpointLoadContext
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.parallel.save import save_fsdp2_checkpoint
+from halo.checkpoint.tools.expert_unfuse import unfuse_checkpoint
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer
 from halo.distributed.parallelism_config import ParallelismConfig

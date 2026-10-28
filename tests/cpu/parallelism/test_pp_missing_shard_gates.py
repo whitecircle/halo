@@ -12,7 +12,7 @@ Run: ``python tests/cpu/parallelism/test_pp_missing_shard_gates.py`` (or ``pytes
 
 import pytest
 
-from halo.distributed.expert_parallel.expert_fuser import FusionTask
+from halo.model_loading.parallel.expert_fuser import FusionTask
 from halo.model_loading.parallel.pp import _missing_fusion_shards_reason
 
 

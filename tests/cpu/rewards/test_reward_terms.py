@@ -9,7 +9,7 @@ import math
 import pytest
 
 from halo.configs.grpo_environmental import EnvironmentConfig
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 from halo.rewards.composer import RewardComposer
 from halo.rewards.graders.verifiable import AccuracyTerm, FormatTerm
@@ -352,7 +352,7 @@ def test_a_reward_with_no_terms_is_refused():
     with pytest.raises(ValueError, match="at least one reward term"):
         EnvironmentConfig(rewards=[])
     with pytest.raises(ValueError, match="at least one reward term"):
-        RLVROnlineGRPOScriptArguments(rewards=[])
+        OnlineGRPOScriptArguments(rewards=[])
     # The upper bound and the lower bound are the same guard's two sides.
     with pytest.raises(ValueError, match="at most one environment term"):
         RewardComposer([EnvironmentTerm(), EnvironmentTerm()])
@@ -362,10 +362,10 @@ def test_a_reward_with_no_terms_is_refused():
 def test_the_rlvr_arm_admits_its_graders_and_the_external_scorers_only():
     """The RLVR arm runs its two graders and scores the judge and reward-model terms externally; it has
     no environment whose grade an environment term would read."""
-    args = RLVROnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, {"source": "format"}, JUDGE_SPEC, RM_SPEC])
+    args = OnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, {"source": "format"}, JUDGE_SPEC, RM_SPEC])
     assert [type(term) for term in args.reward_terms] == [AccuracyTerm, FormatTerm, JudgeTerm, RewardModelTerm]
     with pytest.raises(ValueError, match="unknown reward source 'environment'"):
-        RLVROnlineGRPOScriptArguments(rewards=[{"source": "environment"}])
+        OnlineGRPOScriptArguments(rewards=[{"source": "environment"}])
 
 
 def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():
@@ -382,7 +382,7 @@ def test_environment_checks_defer_a_veto_judge_s_checks_to_its_environment():
     assert kept is judge
     assert resolve_environment_checks([term], ()) == (term,)
     with pytest.raises(ValueError, match=r"\['audit'\] list 'checks'"):
-        RLVROnlineGRPOScriptArguments(rewards=[spec])
+        OnlineGRPOScriptArguments(rewards=[spec])
     with pytest.raises(ValueError, match="declares none"):
         RewardComposer([EnvironmentTerm(), term])
 
@@ -398,7 +398,7 @@ def test_a_judge_context_file_is_read_into_its_context_when_a_config_parses(tmp_
     forwarded = env_config.to_env_config()["reward_terms"][1]
     assert forwarded["context"] == "The policy has a scratchpad.\n" and "context_file" not in forwarded
     assert env_config.reward_terms[1].context == "The policy has a scratchpad.\n"
-    online = RLVROnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, spec])
+    online = OnlineGRPOScriptArguments(rewards=[{"source": "accuracy"}, spec])
     assert online.reward_terms[1].context == "The policy has a scratchpad.\n"
     with pytest.raises(ValueError, match="not both"):
         EnvironmentConfig(rewards=[{"source": "environment"}, {**spec, "context": "inline"}])

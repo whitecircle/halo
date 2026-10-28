@@ -2,7 +2,7 @@
 """CP+PEFT adapter round trip through the REAL writer and the REAL loader, file on disk included.
 
 ``tests/cpu/peft/test_peft_cp_adapter_keys.py`` pins the key algebra (normalize / remap) and
-``test_adapter_state_includes_buffers.py`` pins ``resolve_adapter_state``, but both stop short of
+``test_adapter_state_includes_buffers.py`` pins ``gather_adapter_state``, but both stop short of
 the artifact: neither calls :func:`save_peft_adapters` nor :func:`_load_peft_adapter_state`, the
 function resume actually runs. So the three contracts that only hold END TO END are pinned here:
 

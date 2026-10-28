@@ -18,8 +18,8 @@ from sentence_transformers.models import Dense, Pooling, Router
 from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3Model
 
 from halo.checkpoint.adapters import write_adapter_file
-from halo.checkpoint.bf16_conversion import convert_to_bf16
-from halo.checkpoint.offline_export import save_full_checkpoint
+from halo.checkpoint.tools.bf16_conversion import convert_to_bf16
+from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from halo.checkpoint.writing import StreamingShardWriter
 from halo.configs.embedding import EmbeddingConfig
 from halo.distributed.parallelism_config import ParallelismConfig

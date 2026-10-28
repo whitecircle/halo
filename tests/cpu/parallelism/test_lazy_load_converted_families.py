@@ -31,12 +31,12 @@ from transformers.models.glm5_next.modeling_glm5_next import Glm5NextForConditio
 from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
-import halo.distributed.expert_parallel.lazy_plan as lazy_plan
 import halo.model_loading.parallel.ep as ep_lazy_loader
+import halo.model_loading.parallel.lazy_plan as lazy_plan
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.lazy_plan import is_lazy_loadable
 from halo.model_loading.parallel.ep import load_ep_model_lazy
+from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.models.moe.family_specs import expert_weight_roots
 from tests.common.models import (
     TINY_DSV4_CONFIG,

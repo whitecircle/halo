@@ -21,12 +21,12 @@ import pytest
 import torch
 
 from halo.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.data.collators.self_distill import format_field_names, inject_privileged_hint, privileged_hint
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from tests.common.repo import load_script_module
 
-ONLINE_ARMS = (SDPGArguments, RLVROnlineGRPOScriptArguments)
+ONLINE_ARMS = (SDPGArguments, OnlineGRPOScriptArguments)
 ALL_ARMS = (*ONLINE_ARMS, SelfDistillScriptArguments)
 
 
@@ -124,8 +124,8 @@ def test_a_malformed_template_is_refused(arm, template):
 
 @pytest.mark.parametrize(
     "build",
-    [SDPGArguments, SelfDistillScriptArguments, lambda **kw: RLVROnlineGRPOScriptArguments(use_sdpg=True, **kw)],
-    ids=["SDPGArguments", "SelfDistillScriptArguments", "RLVROnlineGRPOScriptArguments-use_sdpg"],
+    [SDPGArguments, SelfDistillScriptArguments, lambda **kw: OnlineGRPOScriptArguments(use_sdpg=True, **kw)],
+    ids=["SDPGArguments", "SelfDistillScriptArguments", "OnlineGRPOScriptArguments-use_sdpg"],
 )
 def test_a_null_template_is_refused_naming_the_field(build):
     """A YAML ``sdpg_hint_template: null`` parses to None, which ``string.Formatter`` meets with a bare

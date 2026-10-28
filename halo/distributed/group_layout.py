@@ -1,18 +1,4 @@
-"""Process-group rank layouts: which ranks form which EP/CP group, in block-local rank space.
-
-Node-local (:class:`NodeLocalLayout`): each NVLink domain splits into contiguous ``group_size``
-blocks, numbered domain-major (2 domains of 8, group_size=4)::
-
-    group 0: [0, 1, 2, 3]     group 1: [4, 5, 6, 7]        # domain 0
-    group 2: [8, 9, 10, 11]   group 3: [12, 13, 14, 15]    # domain 1
-
-Cross-node (:class:`CrossNodeLayout`, ``ep_scope="global"``): the column-block layout. DeepEP's
-intranode P2P kernel addresses peers by device offset, so each group takes one contiguous block per
-domain (group-rank = ``rdma_rank * members_per_domain + nvl_rank``). World=16, 2 domains of 8, group=8::
-
-    EP group 0: [0, 1, 2, 3, 8, 9, 10, 11]      # block 0 of each domain
-    EP group 1: [4, 5, 6, 7, 12, 13, 14, 15]    # block 1 of each domain
-"""
+"""Process-group rank layouts: which ranks form which EP/CP group, in block-local rank space."""
 
 from __future__ import annotations
 
@@ -21,7 +7,12 @@ from dataclasses import dataclass, field
 
 @dataclass(frozen=True, kw_only=True)
 class NodeLocalLayout:
-    """Groups as contiguous ``group_size`` blocks tiling each ``domain_size``-wide NVLink domain."""
+    """Groups as contiguous ``group_size`` blocks tiling each ``domain_size``-wide NVLink domain, numbered
+    domain-major (2 domains of 8, group_size=4)::
+
+        group 0: [0, 1, 2, 3]     group 1: [4, 5, 6, 7]        # domain 0
+        group 2: [8, 9, 10, 11]   group 3: [12, 13, 14, 15]    # domain 1
+    """
 
     world_size: int
     group_size: int
@@ -58,7 +49,15 @@ class NodeLocalLayout:
 
 @dataclass(frozen=True, kw_only=True)
 class CrossNodeLayout:
-    """The column-block layout of global-scope EP; construction raises on a group that cannot tile it."""
+    """The column-block layout of global-scope EP (``ep_scope="global"``); construction raises on a group that
+    cannot tile it.
+
+    DeepEP's intranode P2P kernel addresses peers by device offset, so each group takes one contiguous block per
+    domain (group-rank = ``rdma_rank * members_per_domain + nvl_rank``). World=16, 2 domains of 8, group=8::
+
+        EP group 0: [0, 1, 2, 3, 8, 9, 10, 11]      # block 0 of each domain
+        EP group 1: [4, 5, 6, 7, 12, 13, 14, 15]    # block 1 of each domain
+    """
 
     world_size: int
     group_size: int

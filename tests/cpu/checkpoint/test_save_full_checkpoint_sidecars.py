@@ -28,7 +28,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3Moe
 from transformers.integrations.finegrained_fp8 import Fp8Dequantize
 
 from halo.checkpoint.hub_layout import conversions_to_revert
-from halo.checkpoint.offline_export import save_full_checkpoint
+from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.tiny_models import word_level_tokenizer
 

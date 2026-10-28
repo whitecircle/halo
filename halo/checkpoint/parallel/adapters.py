@@ -1,11 +1,8 @@
 """PEFT and native expert-LoRA adapters: their saves, and the restore that resumes them.
 
-EP and CP rebuild a resumed model with zero-init adapters, so the trained ones reload through
-:func:`restore_adapters`. A CP save respells adapter keys for a non-CP reload
-(:func:`~halo.models.unwrapping.plain_adapter_key`) and the restore maps them back onto the live CP-wrapped
-names. Restores write through :func:`~halo.runtime.dtensor.copy_full_tensor`, the DTensor-aware whole-tensor
-write.
-"""
+EP and CP rebuild a resumed model with zero-init adapters, so the trained ones reload through :func:`restore_adapters`,
+which writes DTensors through :func:`~halo.runtime.dtensor.copy_full_tensor` and maps a CP save's keys, respelled for a
+non-CP reload (:func:`~halo.models.unwrapping.plain_adapter_key`), back onto the live CP-wrapped names."""
 
 from __future__ import annotations
 
@@ -70,7 +67,7 @@ def _is_adapter_relevant(name: str) -> bool:
     return any(marker in name for marker in ("lora_", "modules_to_save", "embed", "lm_head"))
 
 
-def resolve_adapter_state(peft_model: PeftModel) -> dict:
+def gather_adapter_state(peft_model: PeftModel) -> dict:
     """COLLECTIVE: the PEFT adapter state, resolving only the adapter-relevant params and persistent buffers.
 
     Resolving every parameter would retain the frozen base on every rank. The buffers ride along because
@@ -148,7 +145,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     )
     state, expert_state = None, {}
     if mixed or gathered:
-        state = resolve_adapter_state(peft_model)
+        state = gather_adapter_state(peft_model)
     elif is_cp_mode:
         # CP without DTensors (QLoRA+CP) still needs the manual write for its changed key paths.
         state = get_peft_model_state_dict(peft_model)

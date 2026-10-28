@@ -25,7 +25,7 @@ from halo.configs.distillation import SelfDistillScriptArguments, TeacherDistill
 from halo.configs.embedding import EmbeddingScriptArguments
 from halo.configs.grpo_environmental import EnvironmentalGRPOScriptArguments
 from halo.configs.grpo_offline import OfflineGRPOScriptArguments
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.preference import DPOScriptArguments, KTOScriptArguments, SMPOScriptArguments
 from halo.configs.reward import RewardScriptArguments
@@ -44,7 +44,7 @@ _PROJECT_NAMES = {
     EnvironmentalGRPOScriptArguments: "environmental-grpo",
     KTOScriptArguments: "kto-tuning",
     OfflineGRPOScriptArguments: "offline-grpo-tuning",
-    RLVROnlineGRPOScriptArguments: "rlvr-online-grpo",
+    OnlineGRPOScriptArguments: "rlvr-online-grpo",
     RewardScriptArguments: "reward-modeling",
     SFTScriptArguments: "sft-tuning",
     SMPOScriptArguments: "smpo-tuning",

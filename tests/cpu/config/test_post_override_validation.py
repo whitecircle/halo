@@ -20,15 +20,15 @@ import pytest
 from halo.config_validation import ValidatedConfig
 from halo.configs.classification import ClassificationConfig
 from halo.configs.distillation import (
-    DistillationConfig,
     SDPGArguments,
     SelfDistillScriptArguments,
+    TeacherDistillationConfig,
     TeacherDistillScriptArguments,
 )
 from halo.configs.embedding import EmbeddingConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
 from halo.configs.grpo_offline import OfflineGRPOConfig
-from halo.configs.grpo_online import RLVROnlineGRPOScriptArguments
+from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.parser import HaloArgumentParser, _literal_choices
 from halo.configs.preference import SMPOConfig
@@ -68,9 +68,9 @@ _RANGE_VIOLATIONS = [
     (AsyncRolloutConfig, "sync_weights_every_n_steps", "0"),
     (AsyncRolloutConfig, "max_retries", "-1"),
     (AsyncRolloutConfig, "scale_rewards_std_floor", "-0.05"),
-    (RLVROnlineGRPOScriptArguments, "scale_rewards_std_floor", "nan"),
-    (RLVROnlineGRPOScriptArguments, "sdpg_temperature", "0"),
-    (RLVROnlineGRPOScriptArguments, "sdpg_hint_template", "{solution}"),
+    (OnlineGRPOScriptArguments, "scale_rewards_std_floor", "nan"),
+    (OnlineGRPOScriptArguments, "sdpg_temperature", "0"),
+    (OnlineGRPOScriptArguments, "sdpg_hint_template", "{solution}"),
     (SelfDistillScriptArguments, "sdpg_beta_warmup_steps", "-1"),
     (SelfDistillScriptArguments, "sdpg_hint_template", "{answr}"),
     (SelfDistillScriptArguments, "reference_kl_coef", "-0.1"),
@@ -216,7 +216,7 @@ def test_async_episode_timeout_default_clears_the_watchdog_warning():
 _DIVERGENCE_FIELDS = (
     (SDPGArguments, "sdpg_loss"),
     (SelfDistillScriptArguments, "reference_kl_loss"),
-    (DistillationConfig, "distill_loss"),
+    (TeacherDistillationConfig, "distill_loss"),
 )
 
 
@@ -253,7 +253,7 @@ def test_unknown_reasoning_effort_is_rejected_at_parse_time(tmp_path):
     """The env-GRPO path validates this steer in EnvironmentBase.__init__; the RLVR path has only the
     parser, and an unknown level is silently ignored by most chat templates (no steer at all)."""
     with pytest.raises(ValueError, match="reasoning_effort"):
-        _parse(RLVROnlineGRPOScriptArguments, tmp_path, ["--reasoning_effort=hgih"])
+        _parse(OnlineGRPOScriptArguments, tmp_path, ["--reasoning_effort=hgih"])
 
 
 if __name__ == "__main__":

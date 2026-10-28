@@ -19,11 +19,11 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
+    reject_straddling_eval_groups,
     reject_straddling_train_groups,
     reject_unread_grpo_knobs,
     reject_unverified_carried_reasoning,
     reject_vespo_loss,
-    validate_eval_round,
 )
 from halo.trainers.grpo.environmental.importance_sampling import ImportanceSamplingMixin
 from halo.trainers.grpo.environmental.reasoning import ReasoningBudgetMixin, reasoning_token_counts
@@ -118,7 +118,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         reject_straddling_train_groups(
             self.args.per_device_train_batch_size, self.args.steps_per_generation, self.num_generations
         )
-        validate_eval_round(self.args, self.async_config, self.num_generations_eval)
+        reject_straddling_eval_groups(self.args, self.async_config, self.num_generations_eval)
         # The rollout context IS the row minus ``prompt``: pruning would drop ``answer`` and the context fields.
         keep_all_dataset_columns(
             self.args,

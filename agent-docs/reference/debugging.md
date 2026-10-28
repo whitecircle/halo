@@ -156,13 +156,9 @@ model class and EP degree, not the dense ceiling.
 collective report (`scripts/profiling/trace_report.py`), which attributes wait time per collective
 per rank without a code change.
 
-**Fine-grained op timing** — `get_ep_span_timer().time_operation(name)`
-(`halo/diagnostics/ep_span_timing.py`) times a span on CUDA events where available, else the
-wall clock, and accumulates it into the timer's `.stats` map: one `TimingStats` (`count`,
-`total_time`, `.avg_time`) per operation name.
-
-`tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` swaps it in for the EP layers'
-dispatch/expert-compute/combine labels and prints the split from those stats; it syncs twice per
+**EP phase split** — `tests/gpu/profiling/benchmark_sft_ep.py --comm_profile` swaps the EP layers'
+dispatch/expert-compute/combine labels for the benchmark's span timer (`tests/common/ep_span_timer.py`),
+which times each phase on CUDA events, and prints the per-layer split on rank 0. It syncs twice per
 phase, so it measures the communication fraction, not throughput. `enable_torch_profiler` shows the
 same `ep.*` spans at no cost.
 
