@@ -11,7 +11,7 @@
   <a href="https://whitecircle.com/research/halo"><strong>Blog post</strong></a> ·
   <a href="https://whitecircle.com/halo/docs"><strong>Docs</strong></a> ·
   <a href="examples/"><strong>Examples</strong></a> ·
-  <a href="human-docs/performance.md"><strong>Benchmarks</strong></a>
+  <a href="https://whitecircle.com/halo/docs/performance"><strong>Benchmarks</strong></a>
 </p>
 
 <br/>
