@@ -113,8 +113,8 @@ def test_gate():
     os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
     try:
         assert not use_deepgemm(256, 2880), "opted-in but below the shape floor → still off"
-        # The gate also requires deep_gemm to be importable. On an image without it (the default —
-        # deep_gemm is an opt-in install), use_deepgemm stays off even at a qualifying shape.
+        # The gate also requires deep_gemm to be importable. The Blackwell image ships it; on the Hopper
+        # image it is absent and use_deepgemm stays off even at a qualifying shape.
         if deepgemm_available():
             assert use_deepgemm(2048, 8192), "opted-in at a qualifying wide/large-M shape → on"
         else:
@@ -171,9 +171,9 @@ if __name__ == "__main__":
     print("test_availability_gate_is_honest")
     installed = test_availability_gate_is_honest()
     if not installed:
-        # deep_gemm ships in neither image, so this is the normal path. Report it as a SKIP, not a
-        # PASS: the gate above is verified, but the fp8/fp4 kernel tests below never ran.
-        print("SKIP: deep_gemm absent (opt-in); the gate is verified, the fp8/fp4 kernel tests are not")
+        # deep_gemm ships in the Blackwell image only, so on Hopper this is the normal path. Report it as a
+        # SKIP, not a PASS: the gate above is verified, but the fp8/fp4 kernel tests below never ran.
+        print("SKIP: deep_gemm absent (Blackwell image only); the gate is verified, the fp8/fp4 kernel tests are not")
         sys.exit(0)
     print("test_deepgemm_forward_backward")
     test_deepgemm_forward_backward()

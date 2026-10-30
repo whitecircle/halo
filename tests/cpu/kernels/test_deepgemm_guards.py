@@ -133,5 +133,103 @@ def test_a_genuinely_different_shape_still_warns(caplog):
             deepgemm._WARNED_FALLBACK_SHAPES.discard(key)
 
 
+_WEIGHT_K = 256  # divisible by the fp8 block (128) and the fp4 packing (256)
+# Aligned and unaligned N, and E=1 where a slice of the padded layout would keep the padded stride.
+_WEIGHT_SHAPES = [("mxfp8", 4, 256), ("mxfp8", 4, 100), ("mxfp8", 1, 100), ("nvfp4", 4, 100), ("nvfp4", 1, 100)]
+_CHUNKS = pytest.mark.parametrize("chunk_mb", [256, 0], ids=["one-chunk", "chunk-per-expert"])
+
+
+def _weight_cast(fmt, utils):
+    """The cast ``_quant_weight`` applies per format, on whichever ``utils`` it is handed."""
+    if fmt == "nvfp4":
+        return lambda t: utils.per_token_cast_to_fp4(t, use_ue8m0=True, gran_k=32)
+    return lambda t: utils.per_block_cast_to_fp8(t, use_ue8m0=True, gran_k=128)
+
+
+def _per_expert_loop(b, cast):
+    """The pre-batching reference: one cast per expert into dense preallocated outputs."""
+    data0, sf0 = cast(b[0])
+    data = b.new_empty((b.shape[0], *data0.shape), dtype=data0.dtype)
+    sf = sf0.new_empty((b.shape[0], *sf0.shape))
+    data[0], sf[0] = data0, sf0
+    for i in range(1, b.shape[0]):
+        data[i], sf[i] = cast(b[i])
+    return data, sf
+
+
+def _bits(t):
+    return t.view(torch.uint8) if t.element_size() == 1 else t
+
+
+def _assert_matches_the_loop(fmt, w, utils):
+    data, sf = deepgemm._quant_weight(w, fmt, _WEIGHT_K, cacheable=False)
+    ref_data, ref_sf = _per_expert_loop(w.transpose(-2, -1).contiguous(), _weight_cast(fmt, utils))
+    assert data.shape == ref_data.shape and sf.shape == ref_sf.shape
+    assert data.dtype == ref_data.dtype and sf.dtype == ref_sf.dtype
+    assert torch.equal(_bits(data), _bits(ref_data))
+    assert torch.equal(_bits(sf), _bits(ref_sf))
+    assert data.stride() == ref_data.stride(), "DeepGEMM asserts the weight's expert stride is N * K"
+
+
+@_CHUNKS
+@pytest.mark.parametrize(("fmt", "E", "N"), _WEIGHT_SHAPES)
+def test_batched_weight_cast_is_bitwise_the_per_expert_loop(monkeypatch, fmt, E, N, chunk_mb):
+    """The real DeepGEMM casts, not a stand-in: a per-row stand-in cannot show that the fp8 cast scales
+    128 x 128 blocks, which is what makes an unpadded flatten mix scales across experts."""
+    # Inside the test: a module-level skip would also skip every guard above in the Hopper image.
+    utils = pytest.importorskip("deep_gemm.utils")
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (None, utils))
+    monkeypatch.setattr(deepgemm, "_CAST_CHUNK_MB", chunk_mb)
+    torch.manual_seed(0)
+    _assert_matches_the_loop(fmt, torch.randn(E, _WEIGHT_K, N, dtype=torch.bfloat16), utils)
+
+
+def _stand_in_utils(cast_rows: list[int]):
+    """Block-scaled fp8 and row-scaled fp4 casts with the real signatures and layouts, recording the
+    row count of every call. Unlike a per-row stand-in, the fp8 scale spans 128 rows, so a flatten that
+    lets a block cross two experts changes the result."""
+
+    def per_block_cast_to_fp8(t, use_ue8m0, gran_k):
+        cast_rows.append(t.shape[0])
+        m, n = t.shape
+        pm, pn = -(-m // gran_k) * gran_k, -(-n // gran_k) * gran_k
+        padded = t.new_zeros(pm, pn)
+        padded[:m, :n] = t
+        sf = padded.float().abs().reshape(pm // gran_k, gran_k, pn // gran_k, gran_k).amax((1, 3))
+        return (t.float() * 10).clamp(-127, 127).to(torch.int8), sf
+
+    def per_token_cast_to_fp4(t, use_ue8m0, gran_k):
+        cast_rows.append(t.shape[0])
+        m, n = t.shape
+        sf = t.float().abs().reshape(m, n // gran_k, gran_k).amax(-1)
+        return (t[:, ::2].float() * 10).clamp(-127, 127).to(torch.int8), sf
+
+    return types.SimpleNamespace(
+        align=lambda value, alignment: -(-value // alignment) * alignment,
+        per_block_cast_to_fp8=per_block_cast_to_fp8,
+        per_token_cast_to_fp4=per_token_cast_to_fp4,
+    )
+
+
+@_CHUNKS
+@pytest.mark.parametrize(("fmt", "E", "N"), _WEIGHT_SHAPES)
+def test_batched_weight_cast_matches_the_loop_and_stays_in_bounded_chunks(monkeypatch, fmt, E, N, chunk_mb):
+    """Runs without ``deep_gemm``: the pad, chunk and copy-back bookkeeping, and the chunk bound."""
+    cast_rows: list[int] = []
+    utils = _stand_in_utils(cast_rows)
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (None, utils))
+    monkeypatch.setattr(deepgemm, "_CAST_CHUNK_MB", chunk_mb)
+    torch.manual_seed(0)
+    w = torch.randn(E, _WEIGHT_K, N, dtype=torch.bfloat16)
+
+    _assert_matches_the_loop(fmt, w, utils)
+
+    # _assert_matches_the_loop ran the batched cast first, then E reference casts of N rows each.
+    batched_rows = cast_rows[:-E]
+    n_cast = -(-N // 128) * 128 if fmt == "mxfp8" else N
+    experts_per_call = 1 if chunk_mb == 0 else E
+    assert batched_rows == [experts_per_call * n_cast] * (E // experts_per_call)
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))
