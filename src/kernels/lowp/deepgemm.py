@@ -25,6 +25,9 @@ DEEPGEMM_FORMATS = ("mxfp8", "nvfp4")
 
 _MIN_TOKENS_PER_EXPERT = env_int("HALO_DEEPGEMM_MIN_TOKENS_PER_EXPERT", 1024)
 _MIN_N = env_int("HALO_DEEPGEMM_MIN_N", 4096)
+# Budget for the fp32 temporaries one weight-cast call builds, which are the size of its input: the
+# experts are quantized in chunks that stay under it.
+_CAST_CHUNK_MB = env_int("HALO_DEEPGEMM_CAST_CHUNK_MB", 256)
 _ALIGN = 128  # DeepGEMM contiguous layout: each expert's row segment padded to this boundary
 # nvfp4 packs two e2m1 values per byte, so the contraction (K) dim must be a multiple of this many
 # elements. Distinct from _ALIGN, which pads the M (row) dim; the two must stay separate.
@@ -98,6 +101,39 @@ def _deep_gemm():
     return deep_gemm, utils
 
 
+def _cast_experts(b: torch.Tensor, cast, align, block_scaled: bool):
+    """Quantize ``b`` ``[E, N, K]`` with ``cast`` over chunks of experts, into dense ``(data, sf)`` outputs.
+
+    One cast per chunk replaces one per expert. The fp4 cast scales row by row, so experts flatten
+    as they are. The fp8 weight cast scales ``_ALIGN`` x ``_ALIGN`` blocks, so each expert's N is
+    zero-padded to a block boundary first; a block then never spans two experts, and the padding adds
+    the same zeros the per-expert cast would pad internally. Outputs are allocated dense and filled by
+    copy, since DeepGEMM asserts the weight's expert stride is ``N * K`` and a slice of the padded
+    layout keeps the padded stride when E is 1."""
+    E, N, K = b.shape
+    n_cast = align(N, _ALIGN) if block_scaled else N
+    fp32_bytes = 4 * n_cast * K  # one expert's fp32 temporary inside the cast
+    step = max(1, (_CAST_CHUNK_MB << 20) // fp32_bytes)
+    chunks = []
+    for start in range(0, E, step):
+        chunk = b[start : start + step]
+        count = chunk.shape[0]
+        if n_cast != N:
+            chunk = F.pad(chunk, (0, 0, 0, n_cast - N))
+        data_c, sf_c = cast(chunk.reshape(count * n_cast, K))
+        chunks.append(
+            (data_c.reshape(count, n_cast, *data_c.shape[1:])[:, :N], sf_c.reshape(count, -1, *sf_c.shape[1:]))
+        )
+    data = chunks[0][0].new_empty((E, N, *chunks[0][0].shape[2:]))
+    sf = chunks[0][1].new_empty((E, *chunks[0][1].shape[1:]))
+    start = 0
+    for data_c, sf_c in chunks:
+        data[start : start + len(data_c)] = data_c
+        sf[start : start + len(sf_c)] = sf_c
+        start += len(data_c)
+    return data, sf
+
+
 def _quant_weight(w: torch.Tensor, fmt: str, k_pad: int, cacheable: bool = True):
     """Per-expert quantized weight operand (DeepGEMM B = ``[E, N, K]``), cached per optimizer step.
 
@@ -121,13 +157,7 @@ def _quant_weight(w: torch.Tensor, fmt: str, k_pad: int, cacheable: bool = True)
         if fmt == "nvfp4"
         else (lambda t: dg_utils.per_block_cast_to_fp8(t, use_ue8m0=True, gran_k=_ALIGN))
     )
-    data0, sf0 = cast(b[0])
-    data = b.new_empty((b.shape[0], *data0.shape), dtype=data0.dtype)
-    sf = sf0.new_empty((b.shape[0], *sf0.shape))
-    data[0], sf[0] = data0, sf0
-    for i in range(1, b.shape[0]):
-        data[i], sf[i] = cast(b[i])
-    operand = (data, sf)
+    operand = _cast_experts(b, cast, dg_utils.align, block_scaled=fmt != "nvfp4")
     if cacheable:
         _WEIGHT_CACHE.put(w, fingerprint, operand)
     return operand
