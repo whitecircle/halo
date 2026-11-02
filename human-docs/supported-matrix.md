@@ -35,18 +35,35 @@ Halo picks the backend: FA4 on Blackwell, FA3 on Hopper, FA2 as the fallback,
 SDPA or eager where no flash kernel serves the family.
 
 - **Padded-batch scripts** (preference, reward, classification, teacher
-  distillation, GRPO) default to SDPA when the YAML sets none. Exceptions keep
-  the hardware pick: SMPO and offline GRPO under CP, and a GPT-OSS run with live
-  sinks (`reset_sinks: false`).
+  distillation, GRPO) keep the hardware pick on Blackwell when the YAML sets none,
+  except for a remote-code, head_dim-256 or softcapped checkpoint, and default to SDPA on
+  other GPUs. Every GPU keeps the hardware pick for SMPO and offline GRPO under
+  CP, and for a GPT-OSS run with live sinks (`reset_sinks: false`).
+- **Gemma 2 / Gemma 3 (head_dim 256)**: FA2 on Blackwell, since FA4's head_dim-256
+  kernel takes no softcap or sliding window; Gemma 3 takes SDPA in the padded
+  scripts. A model with attention softcapping (Gemma 2) never runs SDPA, which
+  would drop the softcap.
+- **Gemma 2 27B (head_dim 128)**: FA4 on Blackwell at one unpadded row per batch;
+  FA2 on packed, padding-free or padded rows, since FA4's varlen backward takes no
+  softcap.
 - **Gemma 4**: no flash path (FA2 caps head_dim at 256, FA4 overflows tensor
   memory at its 512-wide global layers).
-- **Qwen3.5/3.6, GLM-4 MoE Lite**: SDPA on Blackwell (FA4's backward NaNs at
-  their shapes), FA3 on Hopper.
-- **GLM-5 Next, Step-3.7 Flash, Inkling**: fall back to SDPA on their own.
+- **Qwen3.5/3.6, Qwen3-Next, GLM-4 MoE Lite**: FA4 on Blackwell, FA3 on Hopper.
+  Under `full_determinism`, SDPA on Blackwell. Packed SFT on Qwen3.5/3.6 and
+  Qwen3-Next takes FA2 on Blackwell in either case.
+- **GLM-5 Next, Step-3.7 Flash, Inkling**: fall back to SDPA on their own. On
+  GLM-5 Next that SDPA runs a packed row as one causal sequence, so it refuses
+  flat `packing`; tree packing keeps its documents apart, and otherwise it trains
+  on padded batches.
 - **DeepSeek-V4**: eager only.
-- **Bailing/Ling, Laguna**: no automatic fallback. Set
-  `attn_implementation: sdpa`, as their shipped configs do; on Bailing/Ling any
-  flash label, the auto-selected one included, fails the model build.
+- **Laguna, Ling 3.0**: no automatic fallback. Set `attn_implementation: sdpa`
+  (Laguna's shipped configs do); on Ling 3.0 any flash label, the auto-selected
+  one included, fails the model build, and SDPA runs a packed row as one causal
+  sequence, so Ling 3.0 refuses `packing` and trains on padded batches.
+- **Ling 2.0, Ring**: the auto-selected flash kernel. SDPA and eager run a packed
+  row as one causal sequence, so packing is refused there. Ring's linear-attention
+  layers cross packed documents on every kernel, so packing Ring is refused unless
+  `allow_cross_document_linear_attention: true`.
 
 CP picks its own kernel and ignores the configured label: FA3 on Hopper, FA4 on
 Blackwell (FA2 for the families that fall back from FA4), FA2 otherwise. It
@@ -131,13 +148,13 @@ advanced parallelism. What each family is for:
 | Laguna S / XS 2.1 | Yes | Yes | No | No | No | ETP passes tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
 | Inkling-Small | Yes | Yes | No | No | No | multimodal MoE; LoRA passes tiny-model GPU tests only |
 | Gemma 4 MoE | Yes | Yes | No | No | No | no router balancing; LoRA adapts the language model only |
-| Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP passes a tiny-model LoRA test only |
+| Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP passes a tiny-model LoRA test only; Ling 3.0 refuses `packing` and `padding_free` |
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |
 | Mistral4 MoE | Yes | Yes | Yes | Yes | No | EP+CP passes a tiny-model LoRA test only |
 | DeepSeek-V4 | Yes | Yes | No | No | Yes | eager only; `packing` and `padding_free` refused; ETP passes tiny-model GPU tests only; LoRA skips the grouped `o_a_proj` |
 | Zaya (ZAYA1) | Yes | Yes | No | No | No | always without gradient checkpointing |
 | Command A+ (Cohere2 MoE) | Yes | Yes | Yes | Yes | No | only EP validated on the 200B+ checkpoint; the other modes and LoRA pass tiny-model GPU tests |
-| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first |
+| GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | composite VLM, SDPA only; `packing` and `padding_free` refused; the fp8 release needs `halo run convert-glm5-bf16` first |
 | Step-3.7 Flash | Yes | Yes | No | No | Yes | composite VLM, SDPA only; sharded EP saves refused |
 | Any other HF causal LM | — | — | No | if the model has a `tp_plan` | No | a dense model without a TP plan raises under TP |
 
@@ -156,7 +173,7 @@ turns grouped GEMM off under ETP. Online RL per family:
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
 | Muon, FlashAdamW | supported optimizer options, except under PP |
 | HuggingFace, local and `s3://` datasets | supported; offline tokenize, pack and shard with `halo run prepare-dataset` |
-| Tree packing (`tree_packing`) | SFT on GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE), raw text datasets, FA4 or FA2; refused under CP, TP and PP; ETP and EP+ETP are admitted but unverified ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗) |
+| Tree packing (`tree_packing`) | SFT on raw text datasets: GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE) on FA4 or FA2, GLM-5 Next on SDPA; refused under CP, TP and PP; ETP and EP+ETP are admitted but unverified ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗) |
 | VLM packing / padding-free | unsupported: images cannot be packed, so VLM inputs use standard padding |
 | Streaming an infinite corpus | unsupported: the loaders build a map-style `Dataset`; pre-tokenize and shard offline |
 

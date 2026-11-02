@@ -10,11 +10,15 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
+from halo.data.collators.collator_rules import reject_unsupported_collator_options
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
+from halo.models import segment_markers
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
-from tests.common.models import QWEN3_0_6B
+from tests.common.models import BAILING_LING_3_TINY, BAILING_MOE_LING_MINI, BAILING_MOE_RING_MINI, QWEN3_0_6B
+from tests.common.tiny_models import remote_config, unknown_hybrid_config
 from tests.common.tokenizers import load_cached_tokenizer
 
 
@@ -28,10 +32,12 @@ def _make_tokenizer():
 
 
 def _mock_model_config(model_type: str = "qwen3") -> MagicMock:
-    """Real strings where the factory reads them: ``model_type_matches`` does ``.startswith`` on
-    ``model_type`` via ``get_text_config``, and a bare MagicMock is truthy for EVERY family gate."""
+    """Real values where the factory reads them: ``model_type_matches`` does ``.startswith`` on
+    ``model_type`` via ``get_text_config``, and a bare MagicMock is truthy for EVERY family gate,
+    ``layer_group_size`` included."""
     config = MagicMock()
     config.model_type = model_type
+    config.layer_group_size = None
     config.get_text_config.return_value = config
     return config
 
@@ -426,6 +432,79 @@ def test_renderable_template_carrying_the_marker_stays_quiet(caplog):
     with caplog.at_level(logging.WARNING, logger=_MARKER_LOGGER):
         assert _select_with_probe(_probe_tokenizer(renders=True)) is not None
     assert not [r for r in caplog.records if "Could not verify assistant_message_template" in r.getMessage()]
+
+
+# Linear-attention layers no segment marker reaches cross documents on every backend; flash attention
+# isolating the softmax layers must not make that silent.
+
+
+_BOTH_FLAGS = ("packing", "padding_free")
+# name -> (config builder, whether its rows cross, the flags it is checked under)
+_LINEAR_ATTENTION_CONFIGS = {
+    "ring_lightning_attention": (lambda: remote_config(BAILING_MOE_RING_MINI), True, _BOTH_FLAGS),
+    "ling3_kda": (lambda: remote_config(BAILING_LING_3_TINY), True, _BOTH_FLAGS),
+    "glm5_next_kda": (lambda: CONFIG_MAPPING["glm5_next_text"](), True, _BOTH_FLAGS),
+    "unknown_family_linear_attention": (unknown_hybrid_config, True, _BOTH_FLAGS),
+    "ling2_softmax_only": (lambda: remote_config(BAILING_MOE_LING_MINI), False, _BOTH_FLAGS),
+    # Each group's last layer is softmax attention, so groups of one hold no Lightning Attention-2 layer.
+    "ring_groups_of_one_softmax_only": (
+        lambda: remote_config(BAILING_MOE_RING_MINI, layer_group_size=1),
+        False,
+        _BOTH_FLAGS,
+    ),
+    "qwen3_next_gated_deltanet_marked": (lambda: CONFIG_MAPPING["qwen3_next"](), False, _BOTH_FLAGS),
+    # qwen3_next carries the GatedDeltaNet exemption under padding_free.
+    "qwen3_5_gated_deltanet_marked": (lambda: CONFIG_MAPPING["qwen3_5_text"](), False, ("packing",)),
+    "qwen3_softmax_only": (lambda: CONFIG_MAPPING["qwen3"](), False, _BOTH_FLAGS),
+}
+_LINEAR_ATTENTION_CASES = [
+    (name, flag) for name, (_, _, flags) in sorted(_LINEAR_ATTENTION_CONFIGS.items()) for flag in flags
+]
+_CROSSING_ALLOWED_MESSAGE = "under allow_cross_document_linear_attention"
+
+
+@pytest.mark.parametrize(
+    ("name", "flag"), _LINEAR_ATTENTION_CASES, ids=[f"{name}-{flag}" for name, flag in _LINEAR_ATTENTION_CASES]
+)
+def test_unmarked_linear_attention_is_refused_on_flash(caplog, monkeypatch, name, flag):
+    """On a flash label the softmax layers isolate and nothing else refuses, so Ring's Lightning Attention-2
+    or a KDA layer would carry state across the row's documents silently: refused, and built only under
+    allow_cross_document_linear_attention, with a warning. GatedDeltaNet reads the cu_seq_lens markers and
+    softmax-only models have no such layer: built without the opt-in, and quiet with it."""
+    # GatedDeltaNet's segment-aware kernels need CUDA; taken as present, as on the images.
+    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
+    monkeypatch.setattr(segment_markers, "_CROSSING_ALLOWED_WARNED", set())
+    build, crosses, _ = _LINEAR_ATTENTION_CONFIGS[name]
+    config = build()
+    config._attn_implementation = "flash_attention_4"
+    if crosses:
+        with pytest.raises(ValueError, match=f"{flag}=True is refused .*allow_cross_document_linear_attention"):
+            _select(**{flag: True}, model_config=config)
+    else:
+        assert _select(**{flag: True}, model_config=config) is not None
+    with caplog.at_level(logging.WARNING, logger=segment_markers.__name__):
+        assert _select(**{flag: True}, model_config=config, allow_cross_document_linear_attention=True) is not None
+    warned = any(_CROSSING_ALLOWED_MESSAGE in record.getMessage() for record in caplog.records)
+    assert warned is crosses, f"{name}: warned={warned} under the opt-in, expected {crosses}"
+
+
+def test_a_caller_that_names_no_opt_in_is_refused():
+    """The rule's opt-in defaults off, so a direct caller that never names it refuses the crossing row."""
+    config = CONFIG_MAPPING["glm5_next_text"]()
+    config._attn_implementation = "flash_attention_4"
+    with pytest.raises(ValueError, match="packing=True is refused .*allow_cross_document_linear_attention"):
+        reject_unsupported_collator_options(
+            _make_tokenizer(),
+            padding_free=False,
+            packing=True,
+            train_on_completions_only=False,
+            assistant_message_template=None,
+            use_context_parallel=False,
+            train_on_last_assistant_only=False,
+            model_config=config,
+            per_device_train_batch_size=1,
+            keeps_packed_rows=False,
+        )
 
 
 if __name__ == "__main__":

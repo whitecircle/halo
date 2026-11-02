@@ -48,7 +48,7 @@ def _sliding_call(query, key, value, autocast: bool) -> list[dict]:
         patch.object(sdpa_flex_sliding, "_compiled_flex", compiled),
         torch.autocast("cpu", dtype=torch.bfloat16, enabled=autocast),
     ):
-        sdpa_flex_sliding._sliding_flex_attention(query, key, value, [None], scaling=1.0)
+        sdpa_flex_sliding._block_sparse_attention(query, key, value, [None], scaling=1.0)
     return seen
 
 

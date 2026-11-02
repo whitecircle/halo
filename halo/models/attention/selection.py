@@ -1,7 +1,8 @@
 """Attention-implementation selection: the flash vocabulary, the backend resolver and its validator.
 
-Picks ``attn_implementation`` (FA4/FA3, then FA2, SDPA, flex, eager) by GPU capability and the model
-class's support flags, including which implementations may run against GptOss's live sinks.
+Picks ``attn_implementation`` (FA4/FA3, then FA2, SDPA, flex, eager) by GPU capability, the model class's
+support flags and what each kernel carries: GptOss's live sinks, attention logit softcapping, FA4's
+head_dim-256 kernel limits and its varlen backward's.
 """
 
 from __future__ import annotations
@@ -9,6 +10,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import logging
+import os
 
 import torch
 from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
@@ -23,8 +25,13 @@ from halo.models.attention.gpt_oss_sinks import (
     install_sdpa_for_reset_sinks,
     uses_gpt_oss_sinks,
 )
-from halo.models.attention.layout import GDN_MODEL_TYPE_PREFIXES, declares_attention_heads, resolve_head_dim
-from halo.models.config_access import model_type_matches, set_config_field_run_scoped, text_config
+from halo.models.attention.layout import (
+    declares_attention_heads,
+    has_sliding_window_layers,
+    resolve_head_dim,
+    resolve_qk_v_head_dims,
+)
+from halo.models.config_access import get_config_field, set_config_field_run_scoped, text_config
 from halo.models.model_classes import mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
@@ -49,6 +56,10 @@ FLASH_SINK_PARAM_NAMES = ("s_aux", "learnable_sink")
 
 # The widest head FA2 takes; FA4's SM100 kernel overflows tensor memory past it.
 FLASH_MAX_HEAD_DIM = 256
+# The query/key head width flash-attn-4 routes to its dedicated SM100/SM110 2-CTA kernel.
+FA4_DEDICATED_HEAD_DIM = 256
+# transformers' switch for its flash kernels' ``deterministic`` argument; ``full_determinism`` sets it.
+FLASH_ATTENTION_DETERMINISTIC_ENV = "FLASH_ATTENTION_DETERMINISTIC"
 
 
 def is_flash_attn_implementation(attn_impl: str | None) -> bool:
@@ -128,17 +139,61 @@ def has_head_dim_beyond_flash(model_config) -> bool:
     return declares_attention_heads(model_config) and resolve_head_dim(model_config) > FLASH_MAX_HEAD_DIM
 
 
-def is_fa4_backward_nan_prone(model_config) -> bool:
-    """Whether the FA4 backward emits NaN gradients for this model (256-wide qk heads, partially rotated): a MoE
-    family's spec says, and every GatedDeltaNet family without one (dense Qwen3.5, Qwen3-Next) is.
+def has_attention_logit_softcap(model_config) -> bool:
+    """Whether the config softcaps its attention scores (Gemma 2's ``attn_logit_softcapping``), which
+    transformers' SDPA path drops without a word."""
+    return bool(get_config_field(model_config, "attn_logit_softcapping", per_layer_reduce=max))
 
-    Keyed on the family, not the numbers: Qwen3-Next declares ``head_dim: 256`` with a partial-rotary
-    factor, while MLA GLM-4 MoE Lite reaches 256 as ``qk_nope_head_dim + qk_rope_head_dim``.
-    """
-    spec = find_moe_family_spec_for_config(model_config)
-    if spec is not None:
-        return spec.fa4_backward_nan_prone
-    return model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES)
+
+def uses_fa4_dedicated_head_dim(model_config) -> bool:
+    """Whether the attention runs FA4's dedicated head_dim-256 kernel: a :data:`FA4_DEDICATED_HEAD_DIM`-wide
+    query/key head, MLA's nope + RoPE split counted (GLM-4.7-Flash's 192 + 64). The value width is not read:
+    transformers' flash path pads values up to the query/key width."""
+    return declares_attention_heads(model_config) and resolve_qk_v_head_dims(model_config)[0] == FA4_DEDICATED_HEAD_DIM
+
+
+def fa4_dedicated_kernel_refusal(model_config) -> str | None:
+    """What this model's attention needs that FA4's dedicated head_dim-256 kernel refuses (Gemma 2's softcap,
+    Gemma 3's sliding windows), or ``None`` where FA4 runs it on another kernel or the dedicated one takes it."""
+    if not uses_fa4_dedicated_head_dim(model_config):
+        return None
+    if has_attention_logit_softcap(model_config):
+        return "attention logit softcapping"
+    if has_sliding_window_layers(model_config):
+        return "sliding-window attention"
+    return None
+
+
+def fa4_varlen_backward_refusal(model_config) -> str | None:
+    """What this model's attention needs that FA4's varlen backward refuses (Gemma 2's softcap, which only its dense
+    call trains with), or ``None``. Packed, padding-free and padded training batches all reach that backward."""
+    return "attention logit softcapping" if has_attention_logit_softcap(model_config) else None
+
+
+def flash_attention_2_in_place_of_fa4(reason: str) -> str:
+    """``flash_attention_2`` for a model FA4 cannot train, ``reason`` naming the kernel limit; raises where no FA2
+    build imports, since what is left either drops a softcap (SDPA) or cannot compile under EP (flex)."""
+    if not is_flash_attn_2_available():
+        raise ValueError(
+            f"{reason}, and no FlashAttention-2 build imports to run it instead. Install flash-attn, or set "
+            f"attn_implementation to flex_attention or eager (sdpa too for a model without a softcap)."
+        )
+    if is_global_main_process():
+        logger.warning(f"{reason}; falling back to attn_implementation='flash_attention_2'.")
+    return "flash_attention_2"
+
+
+def flash_attention_deterministic() -> bool:
+    """Whether transformers calls its flash kernels with ``deterministic=True``, by its own read of
+    :data:`FLASH_ATTENTION_DETERMINISTIC_ENV` (only ``"1"`` turns it on)."""
+    return os.environ.get(FLASH_ATTENTION_DETERMINISTIC_ENV, "0") == "1"
+
+
+def supports_fa4_backward(model_config) -> bool:
+    """Whether FA4 can train this model in this process: not when transformers asks its kernels for a deterministic
+    backward (:func:`flash_attention_deterministic`) and the attention runs the dedicated head_dim-256 kernel
+    (:func:`uses_fa4_dedicated_head_dim`), whose backward has no deterministic mode."""
+    return not (flash_attention_deterministic() and uses_fa4_dedicated_head_dim(model_config))
 
 
 def _attn_impl_handles_sinks(attn_impl: str) -> bool:
@@ -155,10 +210,25 @@ def _attn_impl_handles_sinks(attn_impl: str) -> bool:
     return any(name in params for name in FLASH_SINK_PARAM_NAMES)
 
 
-def validate_attn_implementation(model_config, attn_impl: str, sinks_policy: SinksPolicy | None = None) -> str:
+def declared_model_class(model_config) -> type | None:
+    """The transformers class declaring this config's ``_supports_*`` flags: the CausalLM class, else, for a
+    composite VLM with no CausalLM sibling, the image-text one. None for a remote-code config."""
+    return mapped_model_class(model_config, AutoModelForCausalLM, AutoModelForImageTextToText)
+
+
+def declares_attention_backends(model_config) -> bool:
+    """Whether :func:`validate_attn_implementation` reads this config's backend flags off a class. It cannot for a
+    remote-code config, so a flash label that class refuses (Bailing's v4-era code) raises only at the model build."""
+    return declared_model_class(model_config) is not None
+
+
+def validate_attn_implementation(
+    model_config, attn_impl: str, sinks_policy: SinksPolicy | None = None, *, dtype: torch.dtype | None = None
+) -> str:
     """Return ``attn_impl`` or the first fallback the model class's ``_supports_*`` flags and the sink
     matrix accept. A neutralized ``sinks_policy`` allows SDPA on a sinks model (the dropped column is 0),
-    a live one never; ``None`` re-validates against the verdict already recorded on this config.
+    a live one never; ``None`` re-validates against the verdict already recorded on this config. SDPA never
+    runs a softcapped model. A float32 ``dtype`` keeps the fallback off FA2, which is half-precision only.
     """
     has_sinks = uses_gpt_oss_sinks(model_config)
     sinks_reset = None if sinks_policy is None else not sinks_policy.live
@@ -171,14 +241,14 @@ def validate_attn_implementation(model_config, attn_impl: str, sinks_policy: Sin
         set_config_field_run_scoped(model_config, RESOLVED_SINKS_RESET_ATTR, sinks_reset)
     recorded_reset = getattr(model_config, RESOLVED_SINKS_RESET_ATTR, None)
 
-    # A composite VLM with no CausalLM sibling declares its flags on the image-text class. An unmapped
-    # config keeps sdpa allowed (the model build raises if it must) and the sinks escape hatch closed.
-    resolved_class = mapped_model_class(model_config, AutoModelForCausalLM, AutoModelForImageTextToText)
+    # An unmapped config keeps sdpa allowed (the model build raises if it must) and the sinks escape hatch closed.
+    resolved_class = declared_model_class(model_config)
     supports_sdpa = getattr(resolved_class, "_supports_sdpa", True)
     supports_flash = getattr(resolved_class, "_supports_flash_attn", True)
 
-    # sdpa drops sinks, so it is valid only without sinks, or when they were reset (here or earlier).
-    sdpa_ok = supports_sdpa and (not has_sinks or recorded_reset is True)
+    # sdpa drops sinks and the softcap: valid only without either, or once the sinks were reset (here or earlier).
+    softcapped = has_attention_logit_softcap(model_config)
+    sdpa_ok = supports_sdpa and not softcapped and (not has_sinks or recorded_reset is True)
 
     live_sinks = has_sinks and recorded_reset is False
     if live_sinks and not _attn_impl_handles_sinks(attn_impl):
@@ -190,12 +260,12 @@ def validate_attn_implementation(model_config, attn_impl: str, sinks_policy: Sin
             f"only with a build exposing it), or set reset_sinks: true for off-policy fine-tuning."
         )
 
-    # Fallback chain: sinks models prefer FA2 over flex, whose compile path is unusable under EP.
+    # Fallback chain: sinks and softcap models prefer FA2 over flex, whose compile path is unusable under EP.
     candidates = [attn_impl]
-    if has_sinks:
+    if has_sinks or softcapped:
         if live_sinks:
             candidates.append("flash_attention_4")
-        if is_flash_attn_2_available():
+        if is_flash_attn_2_available() and dtype != torch.float32 and not has_head_dim_beyond_flash(model_config):
             candidates.append("flash_attention_2")
         candidates.append("flex_attention")
     if sdpa_ok:
@@ -242,17 +312,21 @@ def resolve_attn_implementation(
     dtype: torch.dtype,
     *,
     sinks_policy: SinksPolicy,
-    fa4_nan_fallback: str = "sdpa",
+    fa4_fallback: str = "sdpa",
 ) -> str:
     """The attention backend for ``model_config``: auto-detected when ``attn_implementation`` is None,
-    narrowed by the per-family kernel limits (fp32, FA4 backward NaN, DeepSeek-V4, heads past the flash
-    cap), then validated. Parallelism-specific overrides stay with the caller that knows the topology,
-    among them ``fa4_nan_fallback``, the label an FA4-backward-NaN family takes in place of FA4.
+    narrowed by the per-family kernel limits (fp32, FA4's head_dim-256 kernel and the deterministic backward it
+    lacks, DeepSeek-V4, heads past the flash cap), then validated. Parallelism-specific overrides stay with the
+    caller that knows the topology, among them ``fa4_fallback``, the label taken in place of FA4 where
+    :func:`supports_fa4_backward` refuses it. FA4's varlen backward limit (:func:`fa4_varlen_backward_refusal`)
+    depends on the training rows, so the scripts' requests apply it.
     """
     attn_implementation = attn_implementation or _detect_attention_impl()
 
     if dtype == torch.float32 and is_flash_attn_implementation(attn_implementation):
-        fp32_fallback = "flex_attention" if uses_gpt_oss_sinks(model_config) else "sdpa"
+        # flex carries the sinks and the softcap SDPA drops.
+        needs_flex = uses_gpt_oss_sinks(model_config) or has_attention_logit_softcap(model_config)
+        fp32_fallback = "flex_attention" if needs_flex else "sdpa"
         if is_global_main_process():
             logger.warning(
                 f"dtype=float32 (fp32 training) is incompatible with {attn_implementation}; "
@@ -260,13 +334,21 @@ def resolve_attn_implementation(
             )
         attn_implementation = fp32_fallback
 
-    if attn_implementation == "flash_attention_4" and is_fa4_backward_nan_prone(model_config):
+    # FA2 takes head_dim 256 with a softcap and a window; SDPA would drop the softcap. Ahead of the
+    # deterministic-backward fallback, which would hand such a model SDPA.
+    if attn_implementation == "flash_attention_4" and (refused := fa4_dedicated_kernel_refusal(model_config)):
+        attn_implementation = flash_attention_2_in_place_of_fa4(
+            f"FlashAttention-4 runs head_dim-{FA4_DEDICATED_HEAD_DIM} attention through a kernel without {refused}"
+        )
+
+    if attn_implementation == "flash_attention_4" and not supports_fa4_backward(model_config):
         if is_global_main_process():
             logger.warning(
-                "FlashAttention-4 produces NaN gradients for this model's head_dim-256 partial-rotary "
-                f"attention; falling back to attn_implementation='{fa4_nan_fallback}'."
+                "FlashAttention-4's head_dim-256 kernel has no deterministic backward, which this run asks for "
+                f"(FLASH_ATTENTION_DETERMINISTIC=1, full_determinism); falling back to "
+                f"attn_implementation='{fa4_fallback}'."
             )
-        attn_implementation = fa4_nan_fallback
+        attn_implementation = fa4_fallback
 
     # Force eager before from_pretrained rejects the auto-detected FA default.
     spec = find_moe_family_spec_for_config(model_config)
@@ -287,4 +369,4 @@ def resolve_attn_implementation(
             )
         attn_implementation = "sdpa"
 
-    return validate_attn_implementation(model_config, attn_implementation, sinks_policy)
+    return validate_attn_implementation(model_config, attn_implementation, sinks_policy, dtype=dtype)

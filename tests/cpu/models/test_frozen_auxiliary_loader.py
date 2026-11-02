@@ -118,8 +118,9 @@ def _script_teacher(*, reset_sinks):
     """The shipped distillation launch path (the script preloads the teacher for the trainer)."""
     return distill_script._load_distill_teacher(
         args=types.SimpleNamespace(teacher_model=AUX_MODEL, teacher_model_revision=None, reset_sinks=reset_sinks),
-        model_config=types.SimpleNamespace(attn_implementation=None, trust_remote_code=False),
+        model_config=types.SimpleNamespace(trust_remote_code=False),
         training_config=types.SimpleNamespace(bf16=True, fp16=False),
+        requested_attn=None,
         is_vlm=False,
         local_rank=0,
     )
@@ -135,6 +136,7 @@ def _sdpg_reference(*, reset_sinks):
         sft_config=types.SimpleNamespace(bf16=True, fp16=False),
         tokenizer=_tokenizer(),
         is_vlm=False,
+        attn_default=None,
     )
 
 
@@ -232,6 +234,7 @@ def test_the_sdpg_reference_takes_the_policy_pin_only_from_the_policy_repo(refer
             sft_config=types.SimpleNamespace(bf16=True, fp16=False),
             tokenizer=_tokenizer(),
             is_vlm=False,
+            attn_default=None,
         )
     captured = captured_load(caps)
     assert captured.load_positional[0] == reference
@@ -339,9 +342,9 @@ def test_reset_sinks_default_matches_the_policy_loaders():
 def test_the_reference_requests_the_policy_s_attention_default():
     """The reference must inherit the POLICY's fallback backend, not auto-detect its own.
 
-    DPO/KTO pin the policy to ``attn_default="sdpa"`` (padded batches run FA4's slow varlen path).
-    A reference that passes only ``model_config.attn_implementation`` sends ``None`` — the request
-    that means "auto-detect" — and lands on flash_attention_4 on Blackwell. Every logratio is then
+    Off Blackwell DPO/KTO request ``attn_default="sdpa"`` for the policy's padded batches. A reference
+    that passes only ``model_config.attn_implementation`` sends ``None`` — the request that means
+    "auto-detect" — and lands on the GPU's flash kernel. Every logratio is then
     a difference of logprobs computed by two different kernels, which biases the objective instead
     of crashing. The unset case is the common one: no shipped preference YAML sets the field.
     """

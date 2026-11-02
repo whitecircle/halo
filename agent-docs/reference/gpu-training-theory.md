@@ -242,7 +242,7 @@ FlashAttention never materializes `S`. It tiles the sequence, computes scores fo
 
 The compute stays `O(seq²)`: this is an IO optimization, not a cheaper algorithm. In roofline terms (§2) it moves attention across the ridge. Naive AI ≈ `head_dim` (64–128 for most models, well below the ~275 ridge, so memory-bound), while Flash's effective AI ≈ `seq/2` lands attention on the compute-bound side.
 
-The versions are arch-tuning of one algorithm, each pairing the same math with its generation's tensor cores: FA2 on Ampere `mma` (the portable baseline, which under-feeds Hopper/Blackwell — the §4 narrow straw), FA3 on Hopper `wgmma` + TMA, FA4 on Blackwell `tcgen05` + tensor memory + 2-CTA clusters. Auto-selected per architecture; selection logic, GptOss sink handling, and the per-family NaN→SDPA fallbacks are in [Flash Attention & Backends](../optimization/flash-attention.md).
+The versions are arch-tuning of one algorithm, each pairing the same math with its generation's tensor cores: FA2 on Ampere `mma` (the portable baseline, which under-feeds Hopper/Blackwell — the §4 narrow straw), FA3 on Hopper `wgmma` + TMA, FA4 on Blackwell `tcgen05` + tensor memory + 2-CTA clusters. Auto-selected per architecture; selection logic, GptOss sink handling, and the per-family fallbacks are in [Flash Attention & Backends](../optimization/flash-attention.md).
 
 ---
 

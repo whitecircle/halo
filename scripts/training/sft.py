@@ -13,13 +13,23 @@ from halo.config_validation import reject_non_default_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
+from halo.data.collators.collator_rules import (
+    reject_dense_attention_rows,
+    reject_fa4_varlen_training,
+    reject_mrope_padding_free,
+    rows_reach_varlen_kernel,
+)
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.data.collators.vlm import PreprocessedVLMDataCollator
 from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, coordinated_pack, resolve_map_num_proc
 from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from halo.data.pipeline.tree_rows import prepare_tree_dataset
-from halo.data.preprocessed.metadata import load_preprocessed_metadata, verify_preprocessed_dataset
+from halo.data.preprocessed.metadata import (
+    PreprocessedDatasetMetadata,
+    load_preprocessed_metadata,
+    verify_preprocessed_dataset,
+)
 from halo.data.sources.loading import load_datasets_auto
 from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
 from halo.entrypoints.data_setup import (
@@ -34,6 +44,7 @@ from halo.entrypoints.data_setup import (
 from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
+    default_training_rows_attn_implementation,
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
@@ -46,18 +57,23 @@ from halo.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from halo.model_loading.dtype import resolve_training_dtype
+from halo.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
 from halo.model_loading.parallel.loader import resolve_policy_attn_implementation
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.parallel.whole_model import warm_tree_attention_kernels
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.selection import fa4_varlen_backward_refusal
 from halo.models.attention.tree import (
     install_tree_attention,
     reject_unsupported_tree_attention,
     resolve_tree_plan_options,
 )
-from halo.models.segment_markers import reject_compressed_kv_rows
+from halo.models.segment_markers import (
+    has_dense_packing_leak,
+    reject_compressed_kv_rows,
+    reject_unmarked_linear_attention_rows,
+)
 from halo.runtime.collectives import barrier
 from halo.runtime.consensus import agree_probe_across_ranks
 from halo.runtime.ranks import is_global_main_process
@@ -143,10 +159,9 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
     return train_dataset, eval_dataset, generate_dataset
 
 
-def _load_verified_metadata(args, sft_config, model_config, processing_class):
-    """The pre-processed dataset's metadata, verified against this run's length, model, masking, render, packing
-    and the chat template ``processing_class`` (the trainer's, after the tokenizer setup) exports."""
-    metadata = load_preprocessed_metadata(args.dataset)
+def _verify_metadata(metadata, args, sft_config, model_config, processing_class) -> None:
+    """Verify the pre-processed dataset's metadata against this run's length, model, masking, render, packing and
+    the chat template ``processing_class`` (the trainer's, after the tokenizer setup) exports."""
     verify_preprocessed_dataset(
         metadata,
         required_max_length=sft_config.max_length,
@@ -156,21 +171,72 @@ def _load_verified_metadata(args, sft_config, model_config, processing_class):
         required_packing=sft_config.packing,
         run_processing_class=processing_class,
     )
-    return metadata
+
+
+def _packs_rows(sft_config, metadata) -> bool:
+    """Whether the collator packs: a pre-processed corpus (``metadata``) as it was baked, since offline-packed rows
+    still need the packing collator's per-document position_ids, a raw one as ``packing`` says."""
+    return metadata.packed if metadata is not None else sft_config.packing
+
+
+def _trains_on_varlen_rows(sft_config, metadata) -> bool:
+    """Whether the training rows reach FlashAttention's varlen call (:func:`rows_reach_varlen_kernel`)."""
+    return rows_reach_varlen_kernel(
+        packing=_packs_rows(sft_config, metadata),
+        padding_free=sft_config.padding_free,
+        per_device_train_batch_size=sft_config.per_device_train_batch_size,
+    )
+
+
+def _policy_attn_default(sft_config, model_config, checkpoint_config, metadata) -> str | None:
+    """The attention default the policy loads with: :func:`default_training_rows_attn_implementation` for the rows
+    the collator builds."""
+    return default_training_rows_attn_implementation(
+        model_config,
+        packing=_packs_rows(sft_config, metadata),
+        padding_free=sft_config.padding_free,
+        per_device_train_batch_size=sft_config.per_device_train_batch_size,
+        dtype=resolve_training_dtype(sft_config),
+        checkpoint_config=checkpoint_config,
+    )
+
+
+def _resolved_policy_attn(args, sft_config, dist_args, checkpoint_config, request: str | None) -> str:
+    """The backend the policy load resolves ``request`` to for this config, dtype and GPU, read before any weight
+    loads."""
+    return resolve_policy_attn_implementation(
+        checkpoint_config,
+        request,
+        resolve_training_dtype(sft_config),
+        sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
+        init_from_scratch=dist_args.init_from_scratch,
+    )
+
+
+def _planned_policy_attn(args, sft_config, model_config, dist_args, checkpoint_config) -> str:
+    """The backend the policy load resolves for rows as the packing flags shape them, read before the dataset and
+    the weights load: the request :func:`_policy_attn_default` makes for them, through :func:`_resolved_policy_attn`."""
+    request = _policy_attn_default(sft_config, model_config, checkpoint_config, None)
+    return _resolved_policy_attn(args, sft_config, dist_args, checkpoint_config, request)
 
 
 def _prepare_text_data(
-    ds, is_preprocessed, args, sft_config, model_config, processing_class, tokenizer, parallelism_config, hf_config
+    ds,
+    metadata: PreprocessedDatasetMetadata | None,
+    args,
+    sft_config,
+    model_config,
+    processing_class,
+    tokenizer,
+    parallelism_config,
+    hf_config,
 ):
-    """Text dataset path: the pre-processed splits as baked, or the raw ones tokenized and packed; returns
-    ``(train, eval, generate, collator)``."""
-    if is_preprocessed:
-        # Offline-packed data still needs the packing collator: without per-document position_ids from
-        # seq_lengths documents attend across pack boundaries. Keyed on metadata.packed, not the flag.
-        collator_packing = _load_verified_metadata(args, sft_config, model_config, processing_class).packed
+    """Text dataset path: the pre-processed splits as baked (``metadata`` set), or the raw ones tokenized and
+    packed; returns ``(train, eval, generate, collator)``."""
+    if metadata is not None:
+        _verify_metadata(metadata, args, sft_config, model_config, processing_class)
         train_dataset, eval_dataset, generate_dataset = ds["train"], ds["test"], None
     else:
-        collator_packing = sft_config.packing
         train_dataset, eval_dataset, generate_dataset = _prepare_raw_text_splits(
             ds, args, sft_config, tokenizer, hf_config
         )
@@ -185,10 +251,10 @@ def _prepare_text_data(
     collator = select_data_collator(
         tokenizer=tokenizer,
         padding_free=sft_config.padding_free,
-        packing=collator_packing,
+        packing=_packs_rows(sft_config, metadata),
         # Preprocessed labels are baked (completion masking included); runtime re-masking would overwrite them —
         # re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
-        train_on_completions_only=args.train_on_completions_only and not is_preprocessed,
+        train_on_completions_only=args.train_on_completions_only and metadata is None,
         assistant_message_template=args.assistant_message_template,
         pad_to_multiple_of=parallelism_config.cp_size if parallelism_config.is_cp_mode else None,
         use_context_parallel=parallelism_config.is_cp_mode,
@@ -196,19 +262,23 @@ def _prepare_text_data(
         model_config=hf_config,
         per_device_train_batch_size=sft_config.per_device_train_batch_size,
         keeps_packed_rows=parallelism_config.pp_size > 1,
+        allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
     )
     return train_dataset, eval_dataset, generate_dataset, collator
 
 
-def _prepare_vlm_data(ds, is_preprocessed, args, sft_config, model_config, processor, tokenizer, hf_config):
-    """VLM dataset path: the pre-processed splits as baked, or the raw VLM map; returns
+def _prepare_vlm_data(
+    ds, metadata: PreprocessedDatasetMetadata | None, args, sft_config, model_config, processor, tokenizer, hf_config
+):
+    """VLM dataset path: the pre-processed splits as baked (``metadata`` set), or the raw VLM map; returns
     ``(train, eval, None, collator)``, since GenerateExamplesCallback needs tokenized input_ids."""
-    if not is_preprocessed:
+    if metadata is None:
         train_dataset, eval_dataset, collator = prepare_raw_vlm_split(
             ds, args, sft_config, processor, tokenizer, hf_config, desc="Processing train/eval dataset"
         )
         return train_dataset, eval_dataset, None, collator
-    if not _load_verified_metadata(args, sft_config, model_config, processor).is_vlm:
+    _verify_metadata(metadata, args, sft_config, model_config, processor)
+    if not metadata.is_vlm:
         raise ValueError(f"Dataset at '{args.dataset}' is not a VLM preprocessed dataset.")
     collator = PreprocessedVLMDataCollator(tokenizer=tokenizer, max_length=sft_config.max_length)
     return ds["train"], ds["test"], None, collator
@@ -222,6 +292,8 @@ def main():
     reject_unsupported_sft_data_options(sft_config, dist_args)
     if args.tree_packing:
         reject_unsupported_tree_packing(args, sft_config, dist_args)
+        # A tree row's plan segments the linear-attention layers of every family tree packing admits.
+        reject_non_default_args("Halo SFT with tree_packing on", args, "allow_cross_document_linear_attention")
     else:
         reject_non_default_args("Halo SFT with tree_packing off", args, *TREE_PACKING_FIELDS)
     reject_trl_dataset_prep_args(
@@ -240,7 +312,26 @@ def main():
     )
     # The collator factory refuses the same rows, but only after the model load and the packing pass.
     if sft_config.packing or sft_config.padding_free:
-        reject_compressed_kv_rows(checkpoint_config, "packing" if sft_config.packing else "padding_free")
+        mode = "packing" if sft_config.packing else "padding_free"
+        reject_compressed_kv_rows(checkpoint_config, mode)
+        reject_mrope_padding_free(checkpoint_config, padding_free=sft_config.padding_free)
+        if not args.tree_packing:
+            # Resolved only where a dense kernel refuses the rows, since the load resolves the backend again and
+            # repeats its warnings; a config the probe could not read leaves the check to the factory after the load.
+            if checkpoint_config is not None and (
+                sft_config.padding_free or has_dense_packing_leak(checkpoint_config)
+            ):
+                reject_dense_attention_rows(
+                    checkpoint_config,
+                    _planned_policy_attn(args, sft_config, model_config, dist_args, checkpoint_config),
+                    padding_free=sft_config.padding_free,
+                    packing=sft_config.packing,
+                )
+            reject_unmarked_linear_attention_rows(
+                checkpoint_config,
+                mode,
+                allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+            )
     context = init_training_script(
         args,
         sft_config,
@@ -252,17 +343,13 @@ def main():
     )
     parallelism_config = context.parallelism_config
     if args.tree_packing:
-        # Before any weight loads: the backend the loader will resolve for this config, dtype and GPU.
+        # Tree rows are packed text rows, never pre-processed, so the planned backend is the one the load makes.
         reject_unsupported_tree_attention(
             checkpoint_config,
-            resolve_policy_attn_implementation(
-                checkpoint_config,
-                model_config.attn_implementation,
-                resolve_training_dtype(sft_config),
-                sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
-                init_from_scratch=dist_args.init_from_scratch,
-            ),
+            _planned_policy_attn(args, sft_config, model_config, dist_args, checkpoint_config),
             args.tree_full_attention,
+            lora_target_modules=model_config.lora_target_modules if model_config.use_peft else None,
+            quantization_config=resolve_quantization_config(model_config, sft_config),
         )
 
     (ds, is_preprocessed), dataset_presharded = load_script_datasets(
@@ -280,9 +367,26 @@ def main():
     )
     if is_vlm:
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
+    metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
+    attn_default = _policy_attn_default(sft_config, model_config, checkpoint_config, metadata)
+    varlen_rows = _trains_on_varlen_rows(sft_config, metadata)
+    if attn_default == "flash_attention_4" and varlen_rows and fa4_varlen_backward_refusal(checkpoint_config):
+        # A pinned FA4 the load keeps is refused before the load, not by the collator factory after it (an unset
+        # request never reaches FA4 on these rows). Resolved only where it can refuse: the load repeats its warnings.
+        reject_fa4_varlen_training(
+            checkpoint_config,
+            varlen_rows=varlen_rows,
+            attn_impl=_resolved_policy_attn(args, sft_config, dist_args, checkpoint_config, attn_default),
+        )
 
     policy = load_policy_model(
-        context, sft_config, model_config, args, vlm_run=is_vlm, init_from_scratch=dist_args.init_from_scratch
+        context,
+        sft_config,
+        model_config,
+        args,
+        vlm_run=is_vlm,
+        attn_default=attn_default,
+        init_from_scratch=dist_args.init_from_scratch,
     )
     model = policy.model
     tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
@@ -299,12 +403,12 @@ def main():
 
     if is_vlm:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_vlm_data(
-            ds, is_preprocessed, args, sft_config, model_config, processing_class, tokenizer, model.config
+            ds, metadata, args, sft_config, model_config, processing_class, tokenizer, model.config
         )
     else:
         train_dataset, eval_dataset, generate_dataset, collator = _prepare_text_data(
             ds,
-            is_preprocessed,
+            metadata,
             args,
             sft_config,
             model_config,

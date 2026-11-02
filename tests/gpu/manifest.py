@@ -299,6 +299,23 @@ MANIFEST: dict[str, TestSpec] = {
     "data/test_cache_isolation.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "data/test_coordinated_processing.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "data/test_packing_isolation.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    "data/test_family_packing_isolation.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu", "moe"),
+        args_matrix=tuple(
+            Row(f"--family {family}{attn}", markers=("gpu", "core", "1gpu", "moe", marker))
+            for family, marker, attn in (
+                ("bailing_moe", "bailing", ""),
+                ("bailing_moe", "bailing", " --attn flash_attention_2"),
+                ("bailing_moe_linear", "bailing", ""),
+                ("bailing_moe_linear", "bailing", " --attn flash_attention_2"),
+                ("zaya", "zaya", ""),
+                ("zaya", "zaya", " --attn flash_attention_2"),
+                ("zaya", "zaya", " --attn sdpa"),
+            )
+        ),
+        timeout=900,
+    ),
     # 1800s: the FA4 varlen backward JITs per segment shape, and a packed batch>1 row spans many that
     # never converge to a cached set, so the budget has to cover repeated JIT rather than a warm run.
     "data/test_packing_batch_gt1.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=1800),
@@ -308,10 +325,44 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_chunked_logprob_precision.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_deepgemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fa4_trainable_sink_rescale.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    # 1200s: FA4 JIT-compiles the head_dim-256 forward and backward per shape, dense and varlen.
+    "kernels/test_fa4_hd256_contiguous.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "qwen3", "glm4"), timeout=1200
+    ),
+    "kernels/test_fa4_hd256_family_parity.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu", "qwen3"),
+        args_matrix=(
+            "--family qwen3_5",
+            Row("--family qwen3_5_moe_text", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
+            Row("--family qwen3_next", markers=("gpu", "core", "1gpu", "moe", "qwen3")),
+            Row("--family glm4_moe_lite", markers=("gpu", "core", "1gpu", "moe", "glm4")),
+        ),
+        timeout=1200,
+    ),
     "kernels/test_fa4_tree_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "gptoss", "qwen3"), timeout=900
     ),
+    "kernels/test_tree_sparse_attention.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "glm5"), timeout=900
+    ),
     "kernels/test_sdpa_flex_sliding.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=900),
+    "kernels/test_reward_scorer_flex_sliding.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "gemma4"), timeout=900
+    ),
+    "kernels/test_softcap_window_attention.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu"),
+        args_matrix=("--family gemma2", "--family gemma2_hd128", "--family gemma3_text"),
+        timeout=600,
+    ),
+    # 900s: every warmed geometry JITs its FA4 forward and backward and its FlexAttention graphs once.
+    "kernels/test_attention_warmup_per_layer_heads.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "step3p7", "laguna"), timeout=900
+    ),
+    "kernels/test_flex_masked_layers.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "moe", "step3p7", "gemma4"), timeout=900
+    ),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
     "kernels/test_family_kernel_stack_numerics.py": TestSpec(
@@ -654,6 +705,25 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/pp/test_pp_packing_pad_tail.py": TestSpec(
         nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3"), timeout=1200
+    ),
+    # Packed microbatches on flash: the stage seam's varlen set against the per-layer derivation, bit for bit, on
+    # the runner (schedules, microbatch counts, GC, fused head) and through the SFT trainer's packing path, dense
+    # and pp2 x ep2. FA2 throughout; the FA4 row skips off Blackwell.
+    "parallelism/pp/test_pp_packed_flash_varlen.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "pp", "qwen3"),
+        timeout=1500,
+        args_matrix=(
+            "",
+            "--microbatches 4 --gc --fused",
+            "--schedule gpipe --microbatches 4",
+            "--trainer --gc",
+            Row("--trainer --ep 2 --gc", markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss")),
+            Row(
+                "--trainer --ep 2 --gc --attn flash_attention_4",
+                markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss"),
+            ),
+        ),
     ),
     "parallelism/pp/test_pp_vs_single_gpu.py": TestSpec(
         nproc=4,

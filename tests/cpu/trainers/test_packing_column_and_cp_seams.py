@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Three seams that keep packed-batch inputs intact on their way into a trainer.
+"""Five seams that keep packed-batch inputs intact on their way into a trainer.
 
 1. Column pruning: ``seq_lengths`` is a collator input, not a model-forward parameter, so HF's
    signature-based pruning drops it unless the trainer's signature set names it. TRL's SFT trainer
@@ -11,6 +11,12 @@
 3. The compressed-KV rejection must see a packing / padding-free collator handed straight to the
    trainer, which skips the factory: a multi-document row on DeepSeek-V4's compressors reads another
    document's compressed KV.
+4. The M-RoPE rejection must see a padding-free collator handed straight to the trainer: a flattened M-RoPE
+   row (every Qwen3.5/3.6 decoder) faults the flash varlen kernels, while ``packing`` serves the same rows.
+5. The unmarked-linear-attention rejection must see a packing / padding-free collator handed straight to the
+   trainer too: a KDA or Lightning Attention-2 layer carries state across a multi-document row's documents. A
+   collator the factory built under the run's ``allow_cross_document_linear_attention`` carries the opt-in, so the
+   trainer admits what the factory did; a tree collator's plan segments those layers.
 
 Run: python tests/cpu/trainers/test_packing_column_and_cp_seams.py
 """
@@ -20,13 +26,21 @@ import types
 from unittest import mock
 
 import pytest
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.deepseek_v4 import DeepseekV4Config
 from trl import SFTTrainer
 
-from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
+from halo.data.collators.factory import select_data_collator
+from halo.data.collators.packing import (
+    DataCollatorWithFlattening,
+    DataCollatorWithFlatteningAndCompletionMask,
+    DataCollatorWithPacking,
+)
+from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
 from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.tiny_models import unknown_hybrid_config
 
 
 class _Base:
@@ -111,6 +125,71 @@ def test_a_hand_built_multi_document_collator_reaches_the_compressed_kv_gate(roo
     refusal = f"{mode} is refused .* layers pool KV over windows"
     with pytest.raises(ValueError, match=refusal) if compressed else contextlib.nullcontext():
         _construct_sft(cp=False, model=model, collator=object.__new__(root))
+
+
+@pytest.mark.parametrize(
+    ("collator_class", "flattens"),
+    [
+        (DataCollatorWithFlattening, True),
+        (DataCollatorWithFlatteningAndCompletionMask, True),
+        (DataCollatorWithPacking, False),
+    ],
+)
+@pytest.mark.parametrize(
+    ("model_type", "mrope"), [("qwen3_5", True), ("qwen3_5_moe_text", True), ("qwen3_next", False)]
+)
+def test_a_hand_built_padding_free_collator_reaches_the_mrope_gate(collator_class, flattens, model_type, mrope):
+    """Refused for an M-RoPE decoder, read through a composite wrapper too; packing there, and a padding-free
+    collator on a plain-RoPE decoder, construct."""
+    model = types.SimpleNamespace(config=CONFIG_MAPPING[model_type]())
+    with pytest.raises(ValueError, match="M-RoPE") if flattens and mrope else contextlib.nullcontext():
+        _construct_sft(cp=False, model=model, collator=object.__new__(collator_class))
+
+
+_ROOTS = [(DataCollatorWithPacking, "packing"), (DataCollatorWithFlattening, "padding_free")]
+# model_type -> whether its rows cross in linear-attention layers no segment marker reaches.
+_LINEAR_ATTENTION = {"glm5_next_text": True, "qwen3_next": False, "qwen3": False}
+
+
+@pytest.mark.parametrize(("root", "mode"), _ROOTS)
+@pytest.mark.parametrize("model_type", sorted(_LINEAR_ATTENTION))
+def test_a_hand_built_multi_document_collator_reaches_the_linear_attention_gate(root, mode, model_type):
+    """Refused for GLM-5 Next's KDA layers; GatedDeltaNet reads its markers and softmax-only models have no such
+    layer, so both construct."""
+    crosses = _LINEAR_ATTENTION[model_type]
+    model = types.SimpleNamespace(config=CONFIG_MAPPING[model_type]())
+    refusal = f"{mode}=True is refused for model_type='{model_type}': its linear-attention layers"
+    with pytest.raises(ValueError, match=refusal) if crosses else contextlib.nullcontext():
+        _construct_sft(cp=False, model=model, collator=object.__new__(root))
+
+
+@pytest.mark.parametrize(("root", "mode"), _ROOTS)
+def test_a_factory_built_collator_carries_the_run_opt_in(root, mode):
+    """The factory admits the crossing row under the opt-in and records it, so the trainer admits it too; the
+    same collator without the record is refused, so the trainer reads the record and nothing else."""
+    config = unknown_hybrid_config()
+    config._attn_implementation = "flash_attention_4"
+    tokenizer = types.SimpleNamespace(pad_token_id=0, eos_token_id=1, padding_side="right")
+    collator = select_data_collator(
+        tokenizer,
+        train_on_completions_only=False,
+        model_config=config,
+        allow_cross_document_linear_attention=True,
+        **{mode: True},
+    )
+    assert isinstance(collator, root) and collator.allow_cross_document_linear_attention is True
+    model = types.SimpleNamespace(config=config)
+    _construct_sft(cp=False, model=model, collator=collator)
+    collator.allow_cross_document_linear_attention = False
+    with pytest.raises(ValueError, match=f"{mode}=True is refused"):
+        _construct_sft(cp=False, model=model, collator=collator)
+
+
+def test_a_tree_collator_is_left_to_its_plan():
+    """A tree row's plan segments the linear-attention layers of every family tree packing admits, and tree
+    packing refuses the opt-in, so its collator never carries one."""
+    model = types.SimpleNamespace(config=CONFIG_MAPPING["glm5_next_text"]())
+    _construct_sft(cp=False, model=model, collator=object.__new__(DataCollatorWithTreePacking))
 
 
 if __name__ == "__main__":

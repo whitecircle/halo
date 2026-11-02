@@ -14,18 +14,35 @@ declares has to reach the hub fetch:
 * On a live-sinks model (``reset_sinks: false``, the GptOss RL flow) a sink-dropping backend shifts
   every teacher logprob by nats while the student is restricted to sink-carrying impls, so the
   backend must be resolved under the SAME ``SinksPolicy`` the student was loaded with.
+* Student and teacher load on ONE padded-workload request, decided on both checkpoints, so the two
+  forwards compared token by token resolve from the same label.
+* A student loaded on FA4 whose padded batches reach FA4's varlen backward, which takes no softcap (Gemma 2 at
+  more than one row per batch), is refused before the teacher loads, not in the first backward.
 
 Run: python tests/cpu/trainers/test_teacher_distill_attn_policy.py  (or pytest)
 """
 
+import contextlib
+import functools
+import sys
 import types
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
-from transformers import AutoModelForImageTextToText, PreTrainedTokenizerBase
+from transformers import (
+    AutoModelForImageTextToText,
+    Gemma2Config,
+    GemmaConfig,
+    PretrainedConfig,
+    PreTrainedTokenizerBase,
+    Qwen3Config,
+)
 
 import scripts.training.distillation.teacher_distill as distill_script
+from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints import model_setup
+from halo.models.attention import selection
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.frozen_loader import STUB_CONFIG, STUB_RESOLVED_ATTN, captured_load, stub_frozen_loader
@@ -35,18 +52,32 @@ PINNED_SHA = "970cfc9f5e7e5a4f5f6f0645955928a9b6a98415"
 LOCAL_RANK = 3
 
 
+class _RemoteCodeConfig(PretrainedConfig):
+    """A config no Auto mapping knows, as a remote-code teacher's is (Bailing's)."""
+
+    model_type = "halo_test_remote_code"
+
+
 def _script_teacher_load_capturing(
-    *, revision=None, reset_sinks=True, is_vlm=False, bf16=True, fp16=False, pinned_attn=None, trust_remote_code=False
+    *,
+    revision=None,
+    reset_sinks=True,
+    is_vlm=False,
+    bf16=True,
+    fp16=False,
+    requested_attn="sdpa",
+    trust_remote_code=False,
 ):
     """Run the shipped script's teacher load with the shared loader's hub calls stubbed."""
     args = types.SimpleNamespace(teacher_model="org/teacher", teacher_model_revision=revision, reset_sinks=reset_sinks)
-    model_config = types.SimpleNamespace(attn_implementation=pinned_attn, trust_remote_code=trust_remote_code)
+    model_config = types.SimpleNamespace(trust_remote_code=trust_remote_code)
     training_config = types.SimpleNamespace(bf16=bf16, fp16=fp16)
     with stub_frozen_loader() as caps:
         teacher = distill_script._load_distill_teacher(
             args=args,
             model_config=model_config,
             training_config=training_config,
+            requested_attn=requested_attn,
             is_vlm=is_vlm,
             local_rank=LOCAL_RANK,
         )
@@ -129,16 +160,122 @@ def test_script_teacher_backend_is_resolved_against_the_teacher_config():
     The padded-workload SDPA default is only a *request*; skipping the resolver would hand an fp32 run
     the student's pinned FlashAttention, and a DeepSeek-V4 / Gemma-4 teacher a backend it cannot run.
     """
-    caps = _script_teacher_load_capturing(pinned_attn="flash_attention_4", bf16=False, fp16=False)
+    caps = _script_teacher_load_capturing(requested_attn="flash_attention_4", bf16=False, fp16=False)
     assert caps.resolver["model_config"] == STUB_CONFIG
     assert caps.resolver["dtype"] is torch.float32
     assert caps.resolver["attn_implementation"] == "flash_attention_4"
     assert caps.load["attn_implementation"] == STUB_RESOLVED_ATTN, "the resolved backend, not the request"
 
 
-def test_script_teacher_defaults_to_the_padded_workload_backend():
-    """Nothing pinned: SDPA is requested (FA4 runs padded batches through its slow varlen path)."""
-    assert _script_teacher_load_capturing().resolver["attn_implementation"] == "sdpa"
+class _StopAtTeacherLoad(Exception):
+    """Raised by the stubbed teacher load: main() runs only as far as the two requests under test."""
+
+
+def _main_requests(tmp_path, *, student_config, teacher_config, blackwell=True, yaml_body="", student=None):
+    """The (student, teacher) attention requests the shipped ``main()`` hands its two loads, on a host that is
+    Blackwell when ``blackwell`` is set, for checkpoints with these configs; ``student`` is the loaded model."""
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"model_name_or_path: org/student\nteacher_model: org/teacher\noutput_dir: {tmp_path / 'out'}\n"
+        f"bf16: false\nuse_cpu: true\n{yaml_body}"
+    )
+    runtime = types.SimpleNamespace(parallelism_config=ParallelismConfig(), local_rank=0)
+    requests: dict = {}
+    tokenizer = MagicMock(spec=PreTrainedTokenizerBase)
+
+    def fake_policy_load(context, training_config, model_config, args, *, vlm_run, attn_default):
+        requests["student"] = attn_default
+        return types.SimpleNamespace(
+            model=student or MagicMock(), tokenizer=tokenizer, processing_class=tokenizer, is_vlm=False
+        )
+
+    def fake_teacher_load(*, requested_attn, **_):
+        requests["teacher"] = requested_attn
+        raise _StopAtTeacherLoad
+
+    stubs = {
+        "init_training_script": MagicMock(return_value=runtime),
+        "load_script_datasets": MagicMock(return_value=(None, False)),
+        "resolve_vlm_run": MagicMock(return_value=False),
+        "_load_teacher_metadata": MagicMock(return_value=(tokenizer, teacher_config)),
+        "load_policy_model": fake_policy_load,
+        "apply_max_length": MagicMock(return_value=tokenizer),
+        "configure_adapter_training": MagicMock(return_value=None),
+        "resolve_shared_vocab_width": MagicMock(),
+        "_load_distill_teacher": fake_teacher_load,
+    }
+    with contextlib.ExitStack() as stack:
+        for name, stub in stubs.items():
+            stack.enter_context(patch.object(distill_script, name, stub))
+        stack.enter_context(patch.object(selection, "is_blackwell_gpu", lambda: blackwell))
+        stack.enter_context(patch.object(model_setup, "fetch_checkpoint_config", return_value=student_config))
+        stack.enter_context(patch("halo.entrypoints.script.install_log_tee"))
+        stack.enter_context(patch.object(sys, "argv", ["prog", str(config)]))
+        stack.enter_context(pytest.raises(_StopAtTeacherLoad))
+        distill_script.main()
+    return requests["student"], requests["teacher"]
+
+
+_NATIVE, _REMOTE, _HEAD_DIM_256 = Qwen3Config(), _RemoteCodeConfig(), GemmaConfig()
+
+
+@pytest.mark.parametrize(
+    ("student_config", "teacher_config", "expected"),
+    [
+        (_NATIVE, _NATIVE, None),
+        (_NATIVE, _REMOTE, "sdpa"),
+        (_REMOTE, _NATIVE, "sdpa"),
+        (_NATIVE, _HEAD_DIM_256, "sdpa"),
+        (_HEAD_DIM_256, _NATIVE, "sdpa"),
+    ],
+    ids=["native-native", "native-remote", "remote-native", "native-hd256", "hd256-native"],
+)
+def test_student_and_teacher_load_on_one_request_decided_on_both_checkpoints(
+    student_config, teacher_config, expected, tmp_path
+):
+    """On Blackwell the request is the loader's own pick only when neither checkpoint rules it out, and both
+    loads take it: a request decided on one checkpoint alone would hand the other model a label its class
+    cannot be read for (remote code) or a kernel the padded scripts keep off (head_dim 256)."""
+    requests = _main_requests(tmp_path, student_config=student_config, teacher_config=teacher_config)
+    assert requests == (expected, expected)
+
+
+@pytest.mark.parametrize(
+    ("blackwell", "yaml_body", "expected"),
+    [(False, "", "sdpa"), (True, "attn_implementation: eager\n", "eager"), (True, "reset_sinks: false\n", None)],
+    ids=["off-blackwell", "pinned", "live-sinks"],
+)
+def test_the_shared_request_keeps_the_padded_default_rules(blackwell, yaml_body, expected, tmp_path):
+    requests = _main_requests(
+        tmp_path, student_config=_NATIVE, teacher_config=_NATIVE, blackwell=blackwell, yaml_body=yaml_body
+    )
+    assert requests == (expected, expected)
+
+
+def _softcapped_student_on_fa4():
+    """A Gemma 2 27B-geometry student (head_dim 128, softcapped) the load kept on FA4."""
+    config = Gemma2Config(hidden_size=4608, num_attention_heads=32, num_key_value_heads=16, head_dim=128)
+    config._attn_implementation = "flash_attention_4"
+    return types.SimpleNamespace(config=config)
+
+
+@pytest.mark.parametrize(("batch_size", "refused"), [(2, True), (1, False)], ids=["padded-bs2", "unpadded-bs1"])
+def test_a_softcapped_student_on_fa4_is_refused_on_padded_rows_before_the_teacher_loads(batch_size, refused, tmp_path):
+    """More than one row per batch pads, and a padded batch reaches FA4's varlen backward, which takes no softcap;
+    one unpadded row per batch runs FA4's dense kernel and reaches the teacher load."""
+    run = functools.partial(
+        _main_requests,
+        tmp_path,
+        student_config=_NATIVE,
+        teacher_config=_NATIVE,
+        yaml_body=f"attn_implementation: flash_attention_4\nper_device_train_batch_size: {batch_size}\n",
+        student=_softcapped_student_on_fa4(),
+    )
+    if refused:
+        with pytest.raises(ValueError, match="whose backward takes no attention logit softcapping"):
+            run()
+    else:
+        assert run() == ("flash_attention_4", "flash_attention_4")
 
 
 @pytest.mark.parametrize("reset_sinks", [True, False])

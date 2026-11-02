@@ -1,0 +1,31 @@
+{# GLM-5 (glm5_next, GLM-5.3-Flash) multi-turn chat SFT template (non-thinking).
+
+   Renders the hub template's own non-thinking turn: `<|assistant|><think></think>` then the stripped
+   content (GLM-4.7's template spells the empty block `</think>` alone; GLM-5 renders both tags). The
+   hub's default `<|system|>Reasoning Effort: Max` line is left out: it budgets a reasoning block these
+   turns do not have. Intermediate assistant turns end at the next role marker (`<|user|>` /
+   `<|observation|>`, both in `config.eos_token_id`); the final one carries `<|endoftext|>`. The
+   generation prompt opens the same empty block, so a served model answers directly. Tool definitions,
+   tool calls and tool results are refused, not dropped: the hub's tool format is not rendered here. Pair
+   with `assistant_message_template: "<|assistant|>"`. #}
+{%- set tool_refusal = "glm5-chat.jinja renders system, user and assistant text turns only; render tool data with the hub template" -%}
+{%- if tools -%}
+  {{- raise_exception(tool_refusal + " (this conversation passes tool definitions)") -}}
+{%- endif -%}
+[gMASK]<sop>
+{%- for message in messages -%}
+  {%- if message.role == "system" -%}
+<|system|>{{ message.content }}
+  {%- elif message.role == "user" -%}
+<|user|>{{ message.content }}
+  {%- elif message.role == "assistant" and not message.tool_calls -%}
+<|assistant|><think></think>{{ message.content | trim }}{% if loop.last %}<|endoftext|>{% endif %}
+  {%- elif message.role == "assistant" -%}
+  {{- raise_exception(tool_refusal + " (an assistant turn carries tool_calls)") -}}
+  {%- else -%}
+  {{- raise_exception(tool_refusal + " (a " + message.role + " turn)") -}}
+  {%- endif -%}
+{%- endfor -%}
+{%- if add_generation_prompt -%}
+<|assistant|><think></think>
+{%- endif -%}

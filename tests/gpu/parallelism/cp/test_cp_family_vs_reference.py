@@ -21,9 +21,10 @@ adds the checks only its wrapper needs:
     coefficient minus the loss at zero, matches the reference and is the same on every rank. A hybrid
     ``layer_types`` config, whose GatedDeltaNet layers scan the sequence axis, is refused by name.
   * ``bailing_moe``: remote code with a fused ``query_key_value``, an output projection named ``dense``,
-    Q/K RMSNorm before a partial rotary and a softmax scale the module never stores. Its sdpa label is
-    accepted while a Lightning-Attention-2 layer, whose file reuses the full-attention class names, is
-    refused by name, and the wrapper reads its scale, Q/K norm and output projection off the config.
+    Q/K RMSNorm before a partial rotary and a softmax scale the module never stores. An sdpa label is
+    accepted (the wrapper calls flash itself) while a Lightning-Attention-2 layer, whose file reuses the
+    full-attention class names, is refused by name, and the wrapper reads its scale, Q/K norm and output
+    projection off the config.
 
 Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/cp/test_cp_family_vs_reference.py --family bailing_moe
 """
@@ -222,14 +223,18 @@ class BailingMoeChecks(FamilyChecks):
 
     @staticmethod
     def _validation_checks(model: nn.Module) -> dict[str, bool]:
-        """The sdpa label is accepted; a Lightning-Attention-2 layer, injected by the class name the validator and
+        """An sdpa label is accepted; a Lightning-Attention-2 layer, injected by the class name the validator and
         the patcher both match on, is refused by name."""
         checks = {"sdpa_label_accepted": True, "linear_attention_refused_by_name": False}
+        label = model.config._attn_implementation
+        model.config._attn_implementation = "sdpa"
         try:
             reject_unsupported_ulysses_model(model, cp_size=CP_SIZE)
         except CPConfigError as error:
-            log(f"  FAIL: validation rejected the shipped Bailing label: {error}")
+            log(f"  FAIL: validation rejected an sdpa-labeled Bailing model: {error}")
             checks["sdpa_label_accepted"] = False
+        finally:
+            model.config._attn_implementation = label
         model.model.layers[0].linear_attn_probe = type("BailingMoeV2LinearAttention", (nn.Module,), {})()
         try:
             reject_unsupported_ulysses_model(model, cp_size=CP_SIZE)

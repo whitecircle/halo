@@ -22,7 +22,7 @@ Diagnose a hang / OOM / NaN-loss / DeepEP fault / NCCL timeout. Every helper and
 env var below matches its owner **exactly** — `halo/runtime/consensus.py` (`assert_rank_uniform` consistency
 check), `halo/diagnostics/py_spy.py` (py-spy capture), `halo/diagnostics/profiling.py`
 (`cuda_memory_history`, `log_cuda_memory`), `halo/env.py` (`DIST_NCCL_TIMEOUT_MINUTES`),
-`halo/models/attention/selection.py` (`is_fa4_backward_nan_prone`) — do not invent flags. Before a
+`halo/models/attention/selection.py` (`supports_fa4_backward`) — do not invent flags. Before a
 verdict on anything non-trivial, find the symptom's row in
 [Troubleshooting](../../agent-docs/reference/troubleshooting.md#symptom--cause--fix) and the helper's
 enable recipe in [Debugging](../../agent-docs/reference/debugging.md).
@@ -63,10 +63,10 @@ the others never reach.
 
 ### NaN / Inf loss
 
-1. **Which model + attention impl?** qwen3.5/3.6/Qwen3-Next and GLM-4 MoE Lite under FA4 NaN the
-   first backward (head_dim-256 + partial rotary) — the fix is the automatic fallback from FA4 to SDPA,
-   or to FA2 under CP (`is_fa4_backward_nan_prone`, applied in `resolve_attn_implementation` in
-   `halo/models/attention/selection.py`); confirm it engaged, don't force FA4.
+1. **Which model + attention impl?** On FA4, the head_dim-256 families (qwen3.5/3.6/Qwen3-Next, GLM-4 MoE
+   Lite) need their q/k/v handed contiguous to the dedicated kernel, or it reads them scrambled: wrong outputs
+   and gradients, NaN in training. Confirm `install_fa4_contiguous_dedicated_head_inputs` logged its install
+   (`halo/models/attention/backend_setup.py`, applied by `apply_family_patches` on every FA4 load).
 2. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
    check `fp32_grad_reduce` / `fp32_non_ep_params`.
@@ -112,7 +112,7 @@ the others never reach.
   `trace_report.py` turns the trace into TraceLens workbooks (gpu_timeline compute/comm/idle split,
   op tables, roofline).
 
-The per-failure-mode rows (DeepEP ep4 rejection, Qwen3.5 FA4 NaN, Gemma 4 attention, Zaya GC refusal,
+The per-failure-mode rows (DeepEP ep4 rejection, the head_dim-256 FA4 determinism fallback, Gemma 4 attention, Zaya GC refusal,
 the MoE `CheckpointError`, tokenizer-cache embedding OOB, a fused EP export an engine rejects) are in
 [Troubleshooting](../../agent-docs/reference/troubleshooting.md#symptom--cause--fix); reading
 `TorchProfilerCallback` artifacts is [Debugging §1a](../../agent-docs/reference/debugging.md#1a-torchprofiler--gpuoperator-trace).

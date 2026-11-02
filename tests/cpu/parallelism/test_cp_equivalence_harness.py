@@ -1,7 +1,7 @@
 """The CP equivalence harness: its roster covers every Ulysses wrapper class, its CPU stand-ins for the flash
-kernel and the list all-to-all keep their contracts, the GPU tier keeps CP's own kernel choice, two launches of
-today's CP code match bit for bit, the envelope rule judges a base that does not repeat, each seeded change to the
-CP path shows up in exactly the records it touches, and a negative control that raises fails the verdict.
+kernel and the list all-to-all keep their contracts, two launches of today's CP code match bit for bit, the
+envelope rule judges a base that does not repeat, each seeded change to the CP path shows up in exactly the
+records it touches, and a negative control that raises fails the verdict.
 
 Run: python tests/cpu/parallelism/test_cp_equivalence_harness.py
 """
@@ -27,7 +27,6 @@ from tests.common.equivalence.cp_equivalence import (
     FAMILIES,
     LEVELS,
     assess,
-    deterministic_kernels,
     gloo_all_to_all,
     judge,
     produce,
@@ -161,20 +160,6 @@ def test_the_reference_attention_refuses_a_keyword_it_does_not_implement():
     q = torch.randn(1, 4, 2, 8)
     with pytest.raises(TypeError, match="softcap"):
         reference_flash_attn(q, q, q, causal=True, softcap=30.0)
-
-
-def test_the_gpu_tier_keeps_the_kernel_cp_picks_and_makes_it_deterministic():
-    picked = []
-
-    def probe(allow_fa4):
-        picked.append(allow_fa4)
-        return lambda *args, **kwargs: kwargs
-
-    _flash_attn_func = deterministic_kernels(probe)
-
-    assert _flash_attn_func(False)(causal=True) == {"causal": True, "deterministic": True}
-    assert _flash_attn_func()() == {"deterministic": True}
-    assert picked == [False, True]
 
 
 def test_the_gloo_all_to_all_delivers_what_the_list_collective_does():

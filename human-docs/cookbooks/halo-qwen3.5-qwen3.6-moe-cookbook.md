@@ -107,10 +107,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 
 ## Settings that matter
 
-- **Attention.** The SFT recipe pins `flash_attention_2`. FA4's backward produces NaN gradients on this
-  family, so Halo replaces an FA4 pick with SDPA. The GRPO recipes pin `sdpa`.
-- **Packing, not padding-free.** Keep `padding_free: false`. Its variable-length path crashes FA2 on this
-  family's multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
+- **Attention.** The SFT recipe pins `flash_attention_2`, and the GRPO recipes pin `sdpa`. Unpinned,
+  Blackwell runs FA4; under `full_determinism` Halo replaces it with SDPA.
+- **Packing, not padding-free.** Halo refuses `padding_free: true` on this family: its variable-length path
+  crashes FA2 on the multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
   (`tree_packing: true` with `tree_full_attention: gather`;
   [Tree Packing](../../agent-docs/optimization/tree-packing.md) ↗).
 - **Router balancing.** The SFT recipes set `moe_balancing: bias_update_transient`, and the GRPO recipes

@@ -67,7 +67,7 @@ warning and falls back to the default.
   quarters of the CPUs the process may use, at most 64; all but two in
   `prepare_dataset.py`), for example on a memory-tight host.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels) or
-  `HALO_FLEX_SLIDING=0` (Gemma 4's FlexAttention, also needed for
+  `HALO_FLEX_SLIDING=0` (FlexAttention on SDPA runs of Gemma 4 and Step-3.7, also needed for
   `full_determinism` on more than one GPU).
 - **RL code sandboxes:** `HALO_SANDBOX_BACKEND`; the default `local` does not
   isolate the program ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)).

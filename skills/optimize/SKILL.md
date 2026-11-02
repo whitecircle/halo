@@ -40,7 +40,7 @@ Mention these only to confirm, not as new advice:
 [grouped GEMM](../../agent-docs/optimization/grouped-gemm.md) and its atomic-free permute and fused MoE path,
 [Liger](../../agent-docs/optimization/liger-kernels.md), [FA4 on Blackwell](../../agent-docs/optimization/flash-attention.md),
 [AdamWBF16 with stochastic rounding](../../agent-docs/optimization/bf16-optimizer.md) (auto-off under replicated DDP),
-`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image), and FlexAttention on Gemma 4's sliding layers
+`CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image), and FlexAttention on the masked layers of SDPA runs (Gemma 4, Step-3.7)
 ([`sdpa_flex_sliding`](../../agent-docs/optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa)).
 
 ## Throughput flow (raise tok/s/GPU)

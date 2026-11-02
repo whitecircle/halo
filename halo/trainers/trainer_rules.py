@@ -4,12 +4,14 @@ the trainers' own hooks."""
 from __future__ import annotations
 
 from halo.config_validation import differs_from_default
+from halo.data.collators.collator_rules import reject_mrope_padding_free
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
+from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
-from halo.models.segment_markers import reject_compressed_kv_rows
+from halo.models.segment_markers import reject_compressed_kv_rows, reject_unmarked_linear_attention_rows
 from halo.models.unwrapping import find_peft_model
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, STOCK_ADAMW_OPTIMIZERS, optim_name
 
@@ -164,6 +166,27 @@ def reject_compressed_kv_collator(collator, model_config) -> None:
         reject_compressed_kv_rows(model_config, "packing")
     elif isinstance(collator, DataCollatorWithFlattening):
         reject_compressed_kv_rows(model_config, "padding_free")
+
+
+def reject_mrope_padding_free_collator(collator, model_config) -> None:
+    """Refuse a padding-free collator handed to a trainer for an M-RoPE decoder
+    (:func:`~halo.data.collators.collator_rules.reject_mrope_padding_free`, which the collator factory runs too)."""
+    reject_mrope_padding_free(model_config, padding_free=isinstance(collator, DataCollatorWithFlattening))
+
+
+def reject_unmarked_linear_attention_collator(collator, model_config) -> None:
+    """Refuse a packing / padding-free collator handed to a trainer for a model whose linear-attention layers no
+    segment marker reaches (:func:`~halo.models.segment_markers.reject_unmarked_linear_attention_rows`, which the
+    collator factory runs too), under the opt-in the factory recorded on it. A tree row's plan segments those
+    layers."""
+    if isinstance(collator, DataCollatorWithTreePacking):
+        return
+    if isinstance(collator, DataCollatorWithPacking | DataCollatorWithFlattening):
+        reject_unmarked_linear_attention_rows(
+            model_config,
+            "packing" if isinstance(collator, DataCollatorWithPacking) else "padding_free",
+            allow_cross_document_linear_attention=collator.allow_cross_document_linear_attention,
+        )
 
 
 def reject_reference_sinks_mismatch(model, ref_model, alternatives: str) -> None:

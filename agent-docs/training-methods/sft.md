@@ -41,12 +41,13 @@ Refused at startup:
 
 - `packing` together with `padding_free`, `packing` without an explicit `max_length` (the pack size bounds memory), and `eval_packing: true` without `packing`.
 - `padding_free` on a non-varlen attention implementation, under CP (which refuses `packing` too) or under PP (use `packing`; [PP packing](../parallelism/pipeline-parallelism.md#packing)).
+- A pinned `flash_attention_4` the load keeps for a softcapped model (Gemma 2 27B; at head_dim 256 the resolver moves the pin to FA2) on packed, padding-free or padded rows (more than one per batch), before the load: FA4's varlen backward takes no softcap.
 - TRL's `completion_only_loss` / `assistant_only_loss`, and a non-default `dataset_text_field` / `dataset_kwargs`: they act inside the dataset prep and collator this script replaces. The script renders `conversation_field` itself; tokenize a raw-text column offline with `prepare_dataset.py --mode text`.
 - TRL's `chat_template_path`: the trainer applies it after the script rendered every row, so the checkpoint would export a template the model never trained on. Set `chat_template` instead, with `force_chat_template: true` over a template the checkpoint ships.
 
 With `use_liger_kernel: false`, TRL 1.14 resolves an unset `loss_type` to `chunked_nll`, which projects `lm_head` outside the model's forward and so skips the family's head transform and the router aux loss; the trainer replaces any `chunked_nll`, set or resolved, with `nll` and warns.
 
-Per-family configs live under `examples/sft/`; every field's type and default is in [SFTConfig](../reference/configuration-reference.md#trl-trainer-configs) and [SFTScriptArguments](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2 ([Flash Attention](../optimization/flash-attention.md)).
+Per-family configs live under `examples/sft/`; every field's type and default is in [SFTConfig](../reference/configuration-reference.md#trl-trainer-configs) and [SFTScriptArguments](../reference/configuration-reference.md#sftscriptarguments). The parser turns `use_liger_kernel` and `bf16` on and `logging_nan_inf_filter` off; `attn_implementation` auto-selects FA4 on Blackwell, FA3 on Hopper, else FA2. On Blackwell an unpinned run loads FA2 instead for packed rows on the head_dim-256 GatedDeltaNet families (Qwen3.5/3.6, Qwen3-Next) and padding-free ones on Qwen3-Next, and for a softcapped model whose rows reach FA4's varlen call ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)); a pre-processed corpus counts as it was baked.
 
 ## Launch
 

@@ -48,7 +48,8 @@ Notes on the ones that cause trouble:
 - **`attn_implementation`**: most examples pin it; keep the pin when you copy.
   Left unset, SFT and self-distillation pick the backend for your GPU and model
   (FA4 on Blackwell, FA3 on Hopper). Preference, reward, classification, teacher
-  distillation and GRPO default to SDPA. Embedding takes the GPU pick under EP or
+  distillation and GRPO take the same pick on Blackwell and default to SDPA on
+  other GPUs. Embedding takes the GPU pick under EP or
   TP and the transformers default otherwise. Per-family exceptions are in the
   [Supported matrix](supported-matrix.md#attention-backends).
 - **`model_revision`** pins a Hub commit.

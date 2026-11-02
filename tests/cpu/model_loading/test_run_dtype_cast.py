@@ -10,7 +10,8 @@ CPU run reaches hand back a uniform run-dtype model for every pinned family, (3)
 masters the lazy loaders preserve every configured non-EP master (including stored pins), while
 without the flag they load all bf16, and (4) that every model build in
 ``halo/`` and ``scripts/training/`` either casts and finalizes or is pinned as no training load, so a
-new loader that forgets either fails here rather than on its first GPU step.
+new loader that forgets either fails here rather than on its first GPU step. The path-string trainer load
+also warms its attention kernels last, at the dtype it cast to.
 
 Run: python tests/cpu/model_loading/test_run_dtype_cast.py  (or pytest)
 """
@@ -29,6 +30,7 @@ from transformers import AutoConfig
 
 import halo.model_loading.parallel.ep as ep_lazy_loader
 import halo.model_loading.parallel.pp as pp_lazy_loader
+import halo.model_loading.parallel.whole_model as whole_model
 import scripts.training.embedding as embedding_script
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.configs.embedding import EmbeddingConfig
@@ -297,6 +299,27 @@ def test_the_path_string_loader_trains_in_one_dtype(pinned_checkpoints, model_in
     model = resolve_trainer_model(pinned_checkpoints["deepseek_v4"], args, parallelism_config=None)
 
     assert params_off_dtype(model, torch.bfloat16) == []
+
+
+@pytest.mark.parametrize("model_init_kwargs", [{"dtype": "bfloat16"}, {"dtype": "auto"}, {}], ids=repr)
+def test_the_path_string_loader_warms_its_kernels_last_at_the_run_dtype(
+    pinned_checkpoints, model_init_kwargs, monkeypatch
+):
+    """Every rank runs this load, so it ends in the fenced attention warm-up as the other loaders do: after the
+    buffer repair, at the dtype the parameters were cast to, not at one rank's first forward while its peers wait
+    in a collective."""
+    order = []
+    monkeypatch.setattr(
+        whole_model, "finalize_loaded_model", lambda model: order.append("finalize") or finalize_loaded_model(model)
+    )
+    monkeypatch.setattr(
+        whole_model, "warm_attention_kernels", lambda model, *, dtype: order.append(("warmup", model, dtype))
+    )
+    args = types.SimpleNamespace(model_init_kwargs=dict(model_init_kwargs), gradient_checkpointing=False)
+
+    model = resolve_trainer_model(pinned_checkpoints["deepseek_v4"], args, parallelism_config=None)
+
+    assert order == ["finalize", ("warmup", model, torch.bfloat16)]
 
 
 @pytest.mark.parametrize("ep_wrapped", [True, False])

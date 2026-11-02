@@ -129,7 +129,7 @@ MTP-carrying checkpoint names that reason first.
 | GPT-OSS 20b / 120b (`GptOssModel`) | registered | period 2, so `pp_size` ≤ 12 for 20b (24 layers), 18 for 120b (36 layers). `bias_update` or `none` balancing |
 | Step-3.7 Flash text tower (`Step3p7TextModel`) | registered | period-4 `full,s,s,s` list ([split offsets](#split-offset-constraint)). The family ships only the composite `Step3p7ForConditionalGeneration`; a text-only run of it is admitted (tower and projector re-emitted in every checkpoint), image data is refused. The hub's `num_nextn_predict_layers: 3` is metadata and passes |
 | DeepSeek-V4 (`DeepseekV4Model`) | registered | hyper-connection boundary, any split offset. Every `hash_moe` layer (`mlp_layer_types`, the first 3 by default) must sit on stage 0 — its `tid2eid` router reads `input_ids`, which only stage 0 has. `bias_update` or `none` balancing; eager attention only (family) |
-| GLM-5 Next text tower (`Glm5NextTextModel`) | registered | hyper-connection boundary, any split offset; a stage may not begin on a `shared` DSA indexer layer (`indexer_types`; GLM-5.3-Flash ships all `full`). The composite `Glm5NextForConditionalGeneration` trains text-only, as Step-3.7's does |
+| GLM-5 Next text tower (`Glm5NextTextModel`) | registered | hyper-connection boundary, any split offset; a stage may not begin on a `shared` DSA indexer layer (`indexer_types`; GLM-5.3-Flash ships all `full`). The composite `Glm5NextForConditionalGeneration` trains text-only, as Step-3.7's does; packing is refused ([Packing](#packing)) |
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
 | Inkling (`InklingTextModel`) | refused | loader-only validation: no schedule, end-to-end or save/resume row |
@@ -264,7 +264,7 @@ before any rank math; the rest by their own gate.
 | PP + `aux_loss` with a live `router_aux_loss_coef`, or a stage with no MoE layer at `ep_group_size > 1` | The split severs the aux-loss path; a dense stage runs a different collective program than its MoE peers and deadlocks ([PP + EP](#pp--ep-moe)). |
 | PP + `compute_metrics` on DPO, KTO or offline GRPO, or an eval batch size other than the train one | No pipeline reproduces their prediction convention; the P2P shapes are frozen ([Evaluation](#evaluation)). |
 | PP + DPO/KTO with positional `model`/`args`, a live `ref_model`, or reference log-probs not precomputed | The PP reference contract is precompute-only ([Trainer support](#trainer-support)). |
-| PP + `packing` on the GatedDeltaNet families, or more than one packed row per microbatch | The kept rows carry no per-row `cu_seq_lens`, and FlashAttention isolates documents only at batch size 1 ([Packing](#packing)). |
+| PP + `packing` on a model whose conv / linear-attention layers read segment markers or no boundary at all (Qwen3.5 / 3.6 and GLM-5 Next in the roster), or more than one packed row per microbatch | A stage's forward passes no segment marker, and FlashAttention isolates documents only at batch size 1 ([Packing](#packing)). |
 
 ## Fused head and loss on the last stage
 
@@ -316,9 +316,15 @@ rank.
 ## Packing
 
 `packing: true` composes with PP and is the way to avoid full-window compute on short rows: PP pads
-every batch to `max_length`. The collator factory **raises** for the GatedDeltaNet families
-(`qwen3_5*`, `qwen3_next*`) under PP: the kept rows carry no per-row `cu_seq_lens`, so the delta rule
-would cross document boundaries.
+every batch to `max_length`. A stage's forward passes a model's conv / linear-attention layers no
+segment marker, so packing is refused where those layers need one (`segment_markers_for`: `seq_idx` for
+GatedDeltaNet and LFM-2 ShortConv, `cu_seq_lens` for the delta rule) or read no boundary at all
+(`has_unmarked_linear_attention`: KDA, Lightning Attention-2): their state would carry from each document
+of a packed row into the next. In the roster that refuses Qwen3.5 / 3.6 and GLM-5 Next; padded rows hold
+one document each and still run.
+`reject_pipeline_packed_rows` (`halo/models/segment_markers.py`) holds the rule; the collator factory
+applies it when PP keeps the packed rows, and `reject_pp_collator` again to the trainer's final collator,
+whatever built it.
 
 Under PP the packing collator keeps its `[B, L]` rows instead of flattening to `[1, B*L]`: the
 schedule splits dim 0 into microbatches, so **the microbatch split is the flattening**, and each
@@ -333,8 +339,16 @@ pipeline_microbatches: 4
 A microbatch carrying more than one packed row leaks attention across documents under FlashAttention,
 which derives `cu_seqlens` from `position_ids` only at batch size 1 (~1.9 nats of logprob error); the
 gate does not vary by backend ([Document isolation](../data/collators.md#document-isolation-under-packing)).
-The trailing pad region is an inert document: every `position_ids == 0` is a segment start and an
-ignored label, so each pad token is its own length-1 segment carrying no gradient.
+The trailing pad region is inert: its positions restart at 0 every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens,
+so it forms a few segments of its own with ignored labels.
+
+On a flash backend each stage hands its decoder a packed microbatch's varlen set: `cu_seq_lens_q/k` and
+the longest segment as a host-int `max_length_q/k`, built from one host read of the row
+(`PipelineStageModule` in `halo/distributed/pipeline_parallel/stage.py`). The schedule splits only
+batch-dim tensors, so the set the packing collator builds for a flattened row cannot ride in with the
+batch; without it every attention layer derives it from `position_ids` again, three host syncs per layer
+and again in the recompute. A masked or one-document microbatch, a non-flash backend and the
+GatedDeltaNet families get no set, so their attention runs as before.
 
 ## Per-step metrics
 

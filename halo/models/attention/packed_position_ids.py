@@ -1,5 +1,6 @@
-"""The flash-interface view a modeling module's attention registry takes, and packed-document ``position_ids``
-re-injection through it for families whose forward drops them before flash attention."""
+"""The flash-interface view a modeling module's attention registry takes, the ``position_ids`` stash a forward
+leaves on the modules below it, and packed-document re-injection through both for families whose forward drops
+``position_ids`` before flash attention."""
 
 from __future__ import annotations
 
@@ -13,6 +14,14 @@ from transformers.models.mistral4 import modeling_mistral4 as m4
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
+
+_STASH_ATTR = "_halo_packed_position_ids"
+
+
+def get_stashed_position_ids(module):
+    """The ``position_ids`` a forward wrapped by :func:`install_position_ids_stash` left on ``module``, or
+    ``None`` outside such a forward."""
+    return getattr(module, _STASH_ATTR, None)
 
 
 class FlashInterfaceViewBase(ABC):
@@ -55,12 +64,43 @@ class PositionIdsInjectingRegistry(FlashInterfaceViewBase):
     def wrap_flash_interface(self, fn):
         @functools.wraps(fn)
         def with_position_ids(module, *fargs, **fkwargs):
-            position_ids = getattr(module, "_halo_packed_position_ids", None)
+            position_ids = get_stashed_position_ids(module)
             if position_ids is not None and "position_ids" not in fkwargs:
                 fkwargs["position_ids"] = position_ids
             return fn(module, *fargs, **fkwargs)
 
         return with_position_ids
+
+
+def is_position_ids_stash_installed(owner_cls) -> bool:
+    """Whether :func:`install_position_ids_stash` already wraps ``owner_cls.forward``."""
+    return getattr(owner_cls.forward, _STASH_ATTR, False)
+
+
+def install_position_ids_stash(owner_cls, stash_targets) -> bool:
+    """Leave ``owner_cls.forward``'s ``position_ids`` on the modules ``stash_targets(self)`` returns for the
+    duration of each call (:func:`get_stashed_position_ids` reads it). ``False`` when already installed."""
+    if is_position_ids_stash_installed(owner_cls):
+        return False
+    original_forward = owner_cls.forward
+    signature = inspect.signature(original_forward)
+
+    @functools.wraps(original_forward)
+    def forward(self, *args, **kwargs):
+        bound = signature.bind(self, *args, **kwargs)
+        position_ids = bound.arguments.get("position_ids")
+        targets = stash_targets(self)
+        for target in targets:
+            setattr(target, _STASH_ATTR, position_ids)
+        try:
+            return original_forward(self, *args, **kwargs)
+        finally:
+            for target in targets:
+                setattr(target, _STASH_ATTR, None)
+
+    setattr(forward, _STASH_ATTR, True)
+    owner_cls.forward = forward
+    return True
 
 
 def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targets) -> bool:
@@ -71,28 +111,10 @@ def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targ
     dense causal sequence on flash; dense backends form the packed mask at the model level. ``False``
     when already installed.
     """
-    if getattr(owner_cls.forward, "_halo_packed_position_ids", False):
+    if is_position_ids_stash_installed(owner_cls):
         return False
     registry = modeling_module.ALL_ATTENTION_FUNCTIONS
-
-    original_forward = owner_cls.forward
-    signature = inspect.signature(original_forward)
-
-    @functools.wraps(original_forward)
-    def forward(self, *args, **kwargs):
-        bound = signature.bind(self, *args, **kwargs)
-        position_ids = bound.arguments.get("position_ids")
-        targets = stash_targets(self)
-        for target in targets:
-            target._halo_packed_position_ids = position_ids
-        try:
-            return original_forward(self, *args, **kwargs)
-        finally:
-            for target in targets:
-                target._halo_packed_position_ids = None
-
-    forward._halo_packed_position_ids = True
-    owner_cls.forward = forward
+    install_position_ids_stash(owner_cls, stash_targets)
     if not isinstance(registry, PositionIdsInjectingRegistry):
         modeling_module.ALL_ATTENTION_FUNCTIONS = PositionIdsInjectingRegistry(registry)
     return True

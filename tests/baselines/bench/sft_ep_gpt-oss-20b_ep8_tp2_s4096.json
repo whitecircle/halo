@@ -9,7 +9,7 @@
   },
   "repeats": [
     {
-      "tokens_per_second": 9394.91,
+      "tokens_per_second": 4697.45,
       "cluster_tokens_per_second": 37667.33,
       "peak_allocated_gb": 31.0,
       "training_peak_allocated_gb": 30.59,
@@ -28,7 +28,7 @@
       "median_step_time_ms": 433.16
     },
     {
-      "tokens_per_second": 9525.16,
+      "tokens_per_second": 4762.58,
       "cluster_tokens_per_second": 38153.53,
       "peak_allocated_gb": 31.03,
       "training_peak_allocated_gb": 30.63,
@@ -47,7 +47,7 @@
       "median_step_time_ms": 429.38
     },
     {
-      "tokens_per_second": 9459.28,
+      "tokens_per_second": 4729.64,
       "cluster_tokens_per_second": 37743.29,
       "peak_allocated_gb": 31.02,
       "training_peak_allocated_gb": 30.63,
@@ -66,7 +66,7 @@
       "median_step_time_ms": 431.98
     },
     {
-      "tokens_per_second": 9535.26,
+      "tokens_per_second": 4767.63,
       "cluster_tokens_per_second": 38077.75,
       "peak_allocated_gb": 31.01,
       "training_peak_allocated_gb": 30.63,
@@ -85,7 +85,7 @@
       "median_step_time_ms": 429.95
     },
     {
-      "tokens_per_second": 9484.79,
+      "tokens_per_second": 4742.4,
       "cluster_tokens_per_second": 37994.29,
       "peak_allocated_gb": 31.01,
       "training_peak_allocated_gb": 30.64,

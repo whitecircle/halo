@@ -8,7 +8,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeli
 
 - **Attention interleave** — 34 `Glm5NextTextLinearAttention` layers (KDA: depthwise conv1d k=4 + delta-rule scan) and 11 `Glm5NextTextAttention` layers (`indexed_attention`: MLA with `q_lora_rank` 1536 / `kv_lora_rank` 512, qk 256 **NoPE**), 1-in-4 from index 3.
 
-    RoPE exists only inside the top-2048 `Glm5NextTextIndexer`. `layer_types` spells `"linear_attention"`, which is what the CP gate reads.
+    No text layer applies a position encoding: the config refuses a non-zero `qk_rope_head_dim`, and the top-2048 `Glm5NextTextIndexer` applies no rotary either, so position reaches a DSA layer only through the indexer's pool boundaries. `layer_types` spells `"linear_attention"`, which is what the CP gate reads.
 
 - **Hyper-connections** (`hc_mult: 4`, `hc_sinkhorn_iters: 20`, `hc_eps: 1e-6`) — per-layer `hc_attn_*` / `hc_ffn_*` tensors route a 4×-widened residual state across layers; the mHC mapping (Sinkhorn-projected combine matrix) computes in fp32 by upcasting its inputs and `fn` inside the forward, and the model declares `_is_stateful = True`.
 - **MoE** — 288 routed experts, sigmoid top-8 `noaux_tc` (`n_group` 1 → plain top-k), `norm_topk_prob: true`, `routed_scaling_factor: 2.5`, 1 shared expert, `moe_intermediate_size` 2048; the first 3 layers are dense.
@@ -67,7 +67,24 @@ Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend 
 
 - **CP** — 34 of 45 layers are a KDA linear recurrence over the sequence axis; validation rejects both the `Glm5NextTextLinearAttention` module and any `layer_types` containing `"linear_attention"` ([Context Parallelism](../parallelism/context-parallelism.md#supported-model-architectures)).
 - **TP** — no shard plan: the DSA indexer and the KDA projections have no sound sharding, so a `tensor_parallel_size > 1` run is rejected (zero shardable layers).
-- **Packing** — the KDA conv/scan crosses packed document boundaries on every backend, the same accepted mixer class as Zaya and Ling ([Collators](../data/collators.md#document-isolation-under-packing)); pack only where a small amount of cross-document mixing is acceptable.
+- **Packing** — flat packing isolates neither layer type: both receive only the 2D padding mask, so the DSA layers attend across the documents of a packed row and the KDA conv/scan carries state across them ([Collators](../data/collators.md#document-isolation-under-packing)). The family runs no varlen backend, so `dense_packing_leaks` on its spec refuses flat `packing` whatever `allow_cross_document_linear_attention` says, and `padding_free` is refused on SDPA as well; so is packing under pipeline parallelism ([PP packing](../parallelism/pipeline-parallelism.md#packing)). [Tree packing](#tree-packing) isolates both layer types; otherwise train on padded rows.
+
+## Tree packing
+
+`tree_packing: true` ([Tree Packing](../optimization/tree-packing.md)) leaves the resolved backend (SDPA) in place for plan-less forwards; under a plan neither layer type reaches the attention interface, so `tree_full_attention` is not read.
+
+- **KDA layers** take the GatedDeltaNet treatment: the conv runs each node behind the last 3 tokens of its path, and the KDA scan (fla `chunk_kda`) runs one tree depth at a time from the parent's final state.
+- **DSA layers** select along each token's own path: the indexer's 4-token pools are a token and its path predecessors, and a query's candidates are the pools whose last token precedes it on its path, plus its incomplete tail pool. Attention over the selected keys runs on the 512-wide MLA latent with `kv_b_proj` folded in, not on a dense `[T, T]` mask; under autocast it reads the folded query and the latent in the autocast dtype. An adapter on `kv_b_proj`, a quantized load (`load_in_4bit`/`load_in_8bit`, or the fp8 release before [conversion](#checkpoint-conversion)) and a training-time `attention_dropout` are refused before the model loads (a regex target at the first tree batch): drop `kv_b_proj` from the [LoRA example](#configs)'s `lora_target_modules`.
+
+The plan comes with every batch, so plain documents packed into one row are isolated in both layer types as well. `jinja-templates/glm/glm5-chat.jinja` renders every turn byte for byte as the hub template renders GLM-5's own non-thinking turn (`<|assistant|><think></think>` and the answer), minus the hub's `Reasoning Effort` system line and plus `<|endoftext|>` on the final turn (`tests/cpu/data/test_glm5_chat_template.py`, against the hub template vendored at one revision). Its generation prompt closes the empty block, so a model served with it answers directly; the hub template's opens `<think>`. It refuses tool definitions, tool calls and tool results instead of dropping them, since it does not render the hub's tool format. On top of the options tree packing requires (`packing`, `tree_share_markers`, `train_on_completions_only`), a GLM-5 run sets:
+
+```yaml
+attn_implementation: sdpa
+tree_packing: true
+chat_template: jinja-templates/glm/glm5-chat.jinja
+force_chat_template: true
+assistant_message_template: "<|assistant|>"
+```
 
 ## Configs
 

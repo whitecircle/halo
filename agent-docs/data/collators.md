@@ -41,7 +41,9 @@ Constructor notes that matter when you build one directly:
 
 **`DataCollatorWithPacking`** — packs multiple sequences per sample. Position IDs reset at each boundary; labels at `position_ids == 0` are set to `-100` so the model is not penalized for predicting the next document's first token across a boundary.
 
-It drops the dense `attention_mask` so Flash Attention builds a per-document block-diagonal `cu_seqlens` from the resetting position IDs, and flattens the packed mini-batch to a single `[1, total_tokens]` row of **real tokens only** — transformers' packed-sequence detection only engages at batch size 1, so a `[B>1, L]` batch would silently fall back to dense-causal attention.
+It drops the dense `attention_mask` so Flash Attention runs its varlen kernel over per-document `cu_seq_lens`, handed over by the collator (below) or derived from the resetting position IDs, and flattens the packed mini-batch to a single `[1, total_tokens]` row of **real tokens only** — transformers' packed-sequence detection only engages at batch size 1, so a `[B>1, L]` batch would silently fall back to dense-causal attention.
+
+On a flash run (the resolved backend `select_data_collator` reads) it also hands attention that varlen set on every multi-document row: `cu_seq_lens_q`/`cu_seq_lens_k` and host-int `max_length_q`/`max_length_k`, the values transformers would derive from the position IDs. No attention layer then re-derives them — a packed-row check, a `nonzero` and a max length read back, each a device sync, per layer — and a gradient-checkpointing recompute, reentrant or not, re-runs attention on the same set. A one-document row carries none and keeps transformers' dense kernel. PP's kept rows carry none either: the schedule splits only batch-dim tensors, so each pipeline stage builds the set per microbatch instead ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
 
 Inter-row padding is dropped in the flatten. A pad carries position 0, so every kept pad would be its own varlen segment, and the FA4 backward pays a fixed per-segment cost.
 
@@ -110,7 +112,8 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 |---------------|----------|
 | CP + packing | **rejected** — the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other |
 | PP + padding_free | **rejected** — the flattened width varies per step while the pipeline's P2P buffers are frozen after the first |
-| PP + packing on the GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) | **rejected** — the kept `[B, L]` rows carry no per-row `cu_seq_lens` for the delta rule ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
+| padding_free on an M-RoPE decoder (Qwen3.5/3.6 text towers included, the Qwen-VL text models) | **rejected** on every backend (`reject_mrope_padding_free`), as is a padding-free collator handed straight to the SFT trainer (`reject_mrope_padding_free_collator`) — the flattened M-RoPE row faults the flash varlen kernels; `packing` serves the same rows |
+| PP + packing on a model whose conv / linear-attention layers read segment markers (GatedDeltaNet, LFM-2 ShortConv) or no boundary at all (KDA, Lightning Attention-2) | **rejected** — a stage's forward passes those layers no segment marker, so they cross the kept rows' documents ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
 | CP + completion masking | `DataCollatorForCompletionOnlyLM` (CP mode) |
 | CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `padded.py`) |
 | padding_free + completion masking | `DataCollatorWithFlatteningAndCompletionMask` |
@@ -151,19 +154,21 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
 | DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors cut KV windows at row indices and judge their causality by position, so every document after the first attends the row's first windows — `packing` and `padding_free` are **refused** |
 | Qwen3.5 / 3.6, Qwen3-Next | isolated | GatedDeltaNet reads `seq_idx` (conv) + `cu_seq_lens_q` (delta rule): the collators and SMPO's padding-free forward emit both for the family, so its boundaries reach the kernels — but only the `fla` / `causal-conv1d` fast paths consume them (both installed in the images). The torch fallbacks take neither, so a multi-document row would cross in the conv *and* the scan — the factory refuses `packing` / `padding_free`, and SMPO its `padding_free`, unless transformers' own fast-path predicates hold |
-| Bailing / Ling | remote code; see [Bailing/Ling](../models/bailing.md) | KDA linear attention — **crosses**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
-| GLM-5 Next | both layer types receive the 2D padding mask `create_recurrent_attention_mask` builds, so no packed-boundary parameter reaches the DSA attention either | KDA linear attention — **crosses**, the same unreachable-boundary class as Bailing/Ling |
+| Bailing / Ling | Ling 2.0, Ring: isolated on flash only (`patch_v4_flash_attention_template`); eager/SDPA **leak** — the remote file builds its mask from `attention_mask` alone ([Bailing/Ling](../models/bailing.md#attention-and-packing)). Ling 3.0: flash refused, MLA on SDPA leaks the same way, so Ling 3.0 cannot pack | Ling 3.0 KDA and Ring's Lightning-Attention-2 linear layers — **cross**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
+| GLM-5 Next | both layer types receive the 2D padding mask `create_recurrent_attention_mask` builds, so no packed-boundary parameter reaches the DSA attention either — flat packing **crosses**, so it is refused; [tree packing](../optimization/tree-packing.md) isolates it (the DSA forward reads the plan's path links) | KDA linear attention — **crosses** under flat packing, the same unreachable-boundary class as Bailing/Ling; isolated under tree packing (conv and scan segmented by the plan) |
 | LFM-2 | isolated | ShortConv is isolated exactly: the collators and SMPO's padding-free forward emit `seq_idx` for this family and both conv paths honor it |
-| Zaya | isolated — flash needs `patch_zaya_flash_packed_position_ids` | CCA convolution + delayed-value recurrence — **cross by construction**, amplifying with depth |
+| Zaya | isolated — flash needs `patch_zaya_packed_document_isolation` | CCA convolution + delayed-value recurrence — isolated exactly by the same patch, which restarts both at every document start ([Zaya](../models/zaya.md#document-isolation-under-packing)) |
 | Cohere2 MoE | isolated on every backend, no patch needed — the forward feeds `position_ids` into mask construction and through layer kwargs to the attention interface | — |
 | Step-3.7 Flash | isolated on SDPA and eager, no patch needed — the forward feeds `position_ids` into both mask constructions (full and sliding); bit-exact through dense layers, MoE layers add expert-summation reduction noise (~1e-7 fp32). Training path only: a live cache suppresses the packed mask (`use_cache=False`, as DeepSeek-V4) | — |
 
-Two families are refused outright in `select_data_collator`. Both checks read the text sub-config
+These families are refused outright in `select_data_collator`. The checks read the text sub-config
 too, so a composite (VLM) wrapper is covered:
 
-- **GPT-OSS** (`dense_packing_leaks` on its `MoEFamilySpec`, read by `has_dense_packing_leak` in
-  `halo/models/segment_markers.py`): packing on a non-varlen backend raises. Pin `flash_attention_2` or turn
-  packing off.
+- **GPT-OSS**, **Bailing / Ling** (Ling 2.0, Ring, Ling 3.0) and **GLM-5 Next**, `dense_packing_leaks` on
+  their `MoEFamilySpec`, read by `has_dense_packing_leak` in `halo/models/segment_markers.py`: packing on a
+  non-varlen backend raises (`reject_dense_attention_rows`, which the SFT script also runs before the model
+  load, against the backend the loader will resolve). Use a flash backend or turn packing off; Ling 3.0 and
+  GLM-5 Next have no flash backend.
 - **DeepSeek-V4**, or any model whose `layer_types` declare a compressed-KV layer (the
   `"compressed"` kind in `halo/models/attention/layout.py`: `compressed_sparse_attention`,
   `heavily_compressed_attention`): `packing` and `padding_free` raise on every backend
@@ -175,21 +180,42 @@ too, so a composite (VLM) wrapper is covered:
   the same two collator roots as the CP gate), as does SMPO for its `padding_free` forward.
 
 Which families get which segment markers, and the kernel refusal below, live in
-`halo/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward.
+`halo/models/segment_markers.py`, shared by the collators and SMPO's padding-free forward. LFM-2's
+ShortConv is matched by family; GatedDeltaNet by the layers a config declares, under any `model_type`:
+`linear_attention` in `layer_types` on a config carrying GatedDeltaNet's `linear_num_key_heads` /
+`linear_num_value_heads` split. Kimi Delta Attention spells its layers `linear_attention` too but declares a
+single `linear_num_heads`, and gets no markers.
 
-The GatedDeltaNet families (`qwen3_5*`, `qwen3_next*`) carry one more refusal, about markers that
+A model with GatedDeltaNet layers carries one more refusal, about markers that
 would be emitted but not read. transformers selects their segment-aware linear-attention kernels at
 modeling-import time via `is_causal_conv1d_available()` / `is_flash_linear_attention_available()`,
 which require the package installed, `fla >= 0.2.2`, **and** a CUDA-capable torch.
 
 The torch fallbacks it takes otherwise drop `seq_idx` and `cu_seq_lens_q`, so conv and recurrent
-state cross document boundaries while attention stays isolated, invisible in the loss. `packing`
-and `padding_free` (SFT and SMPO) are refused unless those same predicates hold, so the refusal
-cannot disagree with the kernels actually selected (the production images satisfy them).
+state cross document boundaries while attention stays isolated, invisible in the loss. SFT's
+`packing` and `padding_free` and SMPO's `padding_free` are refused unless those same predicates
+hold, so the refusal cannot disagree with the kernels actually selected (the production images
+satisfy them).
 
 "Crosses by construction" applies where the mixer has no per-document boundary parameter at
-all (Zaya's CCA, Inkling's convs). Pack such a family only where a
-small amount of cross-document mixing is acceptable, and prefer padded batches when it is not.
+all (Inkling's convs). Pack such a family only where a small amount of cross-document mixing is
+acceptable, and prefer padded batches when it is not.
+
+A linear-attention layer no segment marker reaches is refused unless the run opts in:
+`has_unmarked_linear_attention` (`halo/models/segment_markers.py`) reads hybrid layer groups
+(`layer_group_size` above 1: Ring's Lightning Attention-2, Ling 3.0's KDA) or `linear_attention` layer
+types (GLM-5 Next's KDA) outside the families that read `cu_seq_lens`. SFT's `packing` / `padding_free`
+(before the model load and again at collator selection) and SMPO's `padding_free` raise on every backend
+through `reject_unmarked_linear_attention_rows`, flash included, where the softmax layers isolate and the
+loss shows nothing. So does the SFT trainer for a packing / padding-free collator handed to it directly
+(`reject_unmarked_linear_attention_collator`), under the opt-in the factory records on the collators it
+builds; a tree collator is left to its plan. `allow_cross_document_linear_attention: true` (`SFTScriptArguments`, `SMPOConfig`)
+trains such rows anyway, with a warning: those layers' recurrent state then carries from each document of
+a row into the next. It admits no GLM-5 Next row: the family runs only dense backends, where its DSA
+layers read only the padding mask (table above), so the SFT script (before the model load) and the
+collator factory refuse its flat packing before the opt-in is read, and its `padding_free` needs a varlen
+kernel it does not have. Tree packing skips this check and refuses the opt-in: its plan segments the
+linear-attention layers of every family it admits ([Tree Packing](../optimization/tree-packing.md)).
 
 Under distillation the teacher and the frozen reference forward with `use_cache=False` explicitly, so
 they score packed rows under the same masks the student does.
@@ -209,6 +235,12 @@ they score packed rows under the same masks the student does.
     makes packing raise too ([Document isolation](#document-isolation-under-packing)), and
     DeepSeek-V4 (eager-only: head_dim 512 exceeds FA's 256 cap) refuses both. Gemma 4 lands on the
     warning; its shipped config packs at batch 1. See [Padding-Free Collator](../optimization/padding-free-collator.md).
+
+- **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose backward takes no softcap. Packed,
+  padding-free and padded rows (more than one per batch: transformers unpads any batch holding a padding token)
+  all reach it (`rows_reach_varlen_kernel`). Left unset, `attn_implementation` takes FA2 there; a pinned
+  `flash_attention_4` the load keeps (Gemma 2 27B; the resolver moves a head_dim-256 pin to FA2) is refused before
+  the load and again on the resolved backend by `select_data_collator` (`reject_fa4_varlen_training`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 - **Padding-free is incompatible with Context Parallelism**, and **packing is rejected under CP**.
   Under CP use the padded collator, which sets `pad_to_multiple_of=cp_size`.

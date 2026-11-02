@@ -61,8 +61,13 @@ def _weight_read(*_args, **_kwargs):
 
 
 @functools.cache
-def _materialized(name: str):
-    return tiny_family_model(ROSTER[name])
+def _materialized(name: str, attn_implementation: str | None = None):
+    """``name``'s tiny model, built at ``attn_implementation`` when given: remote code may pick its attention
+    class by the label (Ling 2.0's flash class)."""
+    if attn_implementation is None:
+        return tiny_family_model(ROSTER[name])
+    with _host("hopper"):
+        return tiny_family_model(ROSTER[name], overrides={"_attn_implementation": attn_implementation})
 
 
 @contextlib.contextmanager
@@ -103,7 +108,6 @@ def _gate_outcome(name: str, tmp_path, host: str = "hopper", **pc_fields) -> str
                 "org/x",
                 parallelism_config=make_parallelism_config(world_size=2, gpus_per_node=2, **pc_fields),
                 trust_remote_code=family.trust_remote_code,
-                attn_implementation=family.cp_attn_implementation if pc_fields.get("cp_size", 1) > 1 else None,
                 model_class=family.load_class,
             )
         except _PastTheGate:
@@ -135,9 +139,11 @@ def test_cp_refuses_a_family_before_its_load_exactly_where_the_roster_says_ulyss
 
 @pytest.mark.parametrize("name", ROSTER)
 def test_tp_refuses_a_family_before_its_load_with_the_loaded_models_verdict(name, tmp_path):
-    """Selective TP on the shell refuses what sharding the loaded model would refuse, before the whole-model load."""
+    """Selective TP on the shell refuses what sharding the loaded model would refuse, before the whole-model load.
+    A remote-code model is loaded at the label the gate's host resolves."""
+    label = HOSTS["hopper"][2] if ROSTER[name].trust_remote_code else None
     assert _gate_outcome(name, tmp_path, tp_size=2) == _post_load_outcome(
-        reject_unshardable_tp_model, _materialized(name), 2
+        reject_unshardable_tp_model, _materialized(name, label), 2
     )
 
 

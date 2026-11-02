@@ -266,8 +266,7 @@ def main():
     # makes is ordered main-rank-first.
     reject_multimodal_model_without_seq_cls_head(model_config)
 
-    # ClassificationTrainer's DataCollatorWithPadding right-pads every batch — keep those shapes off
-    # the auto-selected FA4's slow varlen path.
+    # ClassificationTrainer's DataCollatorWithPadding right-pads every batch.
     model, tokenizer = load_model_and_tokenizer(
         context,
         classification_config,

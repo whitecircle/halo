@@ -1,28 +1,58 @@
-"""The SFT collator option combinations no collator can serve, refused before one is selected."""
+"""The SFT collator option combinations no collator, or no attention kernel on its rows, can serve, refused before
+one is selected."""
 
 import logging
 
 from halo.data.turn_markers import reject_unusable_response_marker
+from halo.models.attention.layout import has_mrope_rotary
 from halo.models.attention.selection import (
     VARLEN_ATTN_IMPLEMENTATIONS,
     effective_attn_implementation,
+    fa4_varlen_backward_refusal,
     is_flash_attn_implementation,
 )
 from halo.models.segment_markers import (
     has_dense_packing_leak,
     reject_compressed_kv_rows,
+    reject_pipeline_packed_rows,
+    reject_unmarked_linear_attention_rows,
     require_segment_aware_kernels,
-    segment_markers_for,
 )
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
 
-def _reject_dense_attention_rows(model_config, *, padding_free: bool, packing: bool) -> None:
-    """Refuse (or warn about) a multi-document row on a model whose decoder (read through a VLM wrapper's
-    text sub-config) resolved to a dense kernel."""
-    attn_impl = effective_attn_implementation(model_config)
+def rows_reach_varlen_kernel(*, packing: bool, padding_free: bool, per_device_train_batch_size: int) -> bool:
+    """Whether a training batch reaches FlashAttention's varlen call: packed and padding-free rows hold several
+    documents, and transformers unpads any batch holding a padding token, which more than one row per batch does."""
+    return packing or padding_free or per_device_train_batch_size > 1
+
+
+def reject_fa4_varlen_training(model_config, *, varlen_rows: bool, attn_impl: str | None = None) -> None:
+    """Refuse FA4 on training rows that reach its varlen call (``varlen_rows``) when its varlen backward refuses the
+    model's attention (:func:`fa4_varlen_backward_refusal`): the first backward would raise. ``attn_impl`` is the
+    backend the load resolves, read off ``model_config`` when omitted."""
+    if attn_impl is None:
+        attn_impl = effective_attn_implementation(model_config)
+    if attn_impl != "flash_attention_4" or not varlen_rows:
+        return
+    refused = fa4_varlen_backward_refusal(model_config)
+    if refused is None:
+        return
+    raise ValueError(
+        f"attn_implementation='flash_attention_4' cannot train this model on packed, padding-free or padded rows: "
+        f"they reach FA4's varlen kernel, whose backward takes no {refused}, so the first backward would raise. "
+        f"Leave attn_implementation unset (these rows then take flash_attention_2) or set flash_attention_2, or "
+        f"train unpacked at per_device_train_batch_size: 1, whose rows run FA4's dense kernel."
+    )
+
+
+def reject_dense_attention_rows(model_config, attn_impl: str | None, *, padding_free: bool, packing: bool) -> None:
+    """Refuse the multi-document rows a model whose decoder runs the dense kernel ``attn_impl`` cannot serve: a
+    padding-free row, whose ``cu_seq_lens`` only a varlen kernel reads, and a packed row on a family whose dense
+    forward attends across its documents. ``attn_impl`` is the loaded model's backend, or the one a script
+    resolves for its checkpoint before the load."""
     if model_config is None or is_flash_attn_implementation(attn_impl):
         return
     if padding_free:
@@ -40,9 +70,18 @@ def _reject_dense_attention_rows(model_config, *, padding_free: bool, packing: b
             f"model_type={getattr(model_config, 'model_type', None)!r}: this family's forward does not pass "
             f"position_ids into its mask construction, so the packed row runs as ONE dense "
             f"causal sequence and documents attend across each other — silently. Use a varlen "
-            f"attention implementation ({list(VARLEN_ATTN_IMPLEMENTATIONS)}, the family's "
-            f"production path), or disable packing."
+            f"attention implementation ({list(VARLEN_ATTN_IMPLEMENTATIONS)}) where the family has "
+            f"one, or disable packing."
         )
+
+
+def _reject_dense_attention_rows(model_config, *, padding_free: bool, packing: bool) -> None:
+    """Refuse (or warn about) a multi-document row on a model whose decoder (read through a VLM wrapper's
+    text sub-config) resolved to a dense kernel."""
+    attn_impl = effective_attn_implementation(model_config)
+    if model_config is None or is_flash_attn_implementation(attn_impl):
+        return
+    reject_dense_attention_rows(model_config, attn_impl, padding_free=padding_free, packing=packing)
     if packing and is_global_main_process():
         logger.warning(
             "packing=True on attn_implementation=%r: this backend materializes a dense mask "
@@ -56,6 +95,19 @@ def _reject_dense_attention_rows(model_config, *, padding_free: bool, packing: b
             "document boundaries on every backend are listed in agent-docs/data/collators.md.",
             attn_impl,
         )
+
+
+def reject_mrope_padding_free(model_config, *, padding_free: bool) -> None:
+    """Refuse ``padding_free`` on a decoder that rotates by M-RoPE (:func:`has_mrope_rotary`), on every backend:
+    its flattened row faults the flash varlen kernels, and no dense kernel serves one."""
+    if not padding_free or model_config is None or not has_mrope_rotary(model_config):
+        return
+    raise ValueError(
+        f"padding_free is refused for model_type={getattr(model_config, 'model_type', None)!r}: its decoder "
+        f"rotates by M-RoPE, and a flattened M-RoPE row faults the flash varlen kernels (cudaErrorIllegalAddress "
+        f"under flash_attention_2), while the dense backends take no cu_seqlens at all. Set padding_free: false; "
+        f"under SFT, packing: true keeps the documents apart on the same kernels."
+    )
 
 
 def reject_padding_free_conflicts(*, padding_free: bool, packing: bool, use_context_parallel: bool) -> None:
@@ -88,6 +140,7 @@ def reject_unsupported_collator_options(
     model_config,
     per_device_train_batch_size: int,
     keeps_packed_rows: bool,
+    allow_cross_document_linear_attention: bool = False,
 ) -> None:
     """Refuse (or warn about) the option combinations no collator can serve, reading only the caller's
     arguments, the model's attention backend and its segment markers."""
@@ -107,6 +160,13 @@ def reject_unsupported_collator_options(
             per_device_train_batch_size,
         )
     _reject_dense_attention_rows(model_config, padding_free=padding_free, packing=packing)
+    reject_mrope_padding_free(model_config, padding_free=padding_free)
+    reject_fa4_varlen_training(
+        model_config,
+        varlen_rows=rows_reach_varlen_kernel(
+            packing=packing, padding_free=padding_free, per_device_train_batch_size=per_device_train_batch_size
+        ),
+    )
     reject_unusable_response_marker(
         tokenizer, assistant_message_template, train_on_completions_only, "select_data_collator"
     )
@@ -116,14 +176,11 @@ def reject_unsupported_collator_options(
         mode = "packing" if packing else "padding_free"
         reject_compressed_kv_rows(model_config, mode)
         require_segment_aware_kernels(model_config, mode)
-    if packing and segment_markers_for(model_config).cu_seq_lens and keeps_packed_rows:
-        raise ValueError(
-            "packing under pipeline parallelism is not supported for the GatedDeltaNet families "
-            "(Qwen3.5/3.6, Qwen3-Next): PP keeps the packed rows (no flattening), and the varlen "
-            "cu_seq_lens the delta rule needs have no per-row convention — the conv would isolate "
-            "while the delta rule silently crossed document boundaries. Disable packing for this "
-            "run, or drop pipeline parallelism."
+        reject_unmarked_linear_attention_rows(
+            model_config, mode, allow_cross_document_linear_attention=allow_cross_document_linear_attention
         )
+    if packing and keeps_packed_rows:
+        reject_pipeline_packed_rows(model_config)
     if use_context_parallel and packing:
         raise ValueError(
             "packing is not supported with Context Parallelism: the CP attention path has no "

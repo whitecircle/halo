@@ -180,8 +180,10 @@ def _pooling_config(pad_token_id: int | None) -> PretrainedConfig:
 def test_the_fixed_shape_helpers_accept_what_the_pipeline_can_take():
     """Anti-vacuity for the shape refusals below: each one passes the input a pipeline does take."""
     tokenizer = _right_padded_tokenizer()
-    reject_pp_collator(DataCollatorWithPacking(tokenizer), per_device_train_batch_size=2, n_microbatches=2)
-    reject_pp_collator(object(), per_device_train_batch_size=4, n_microbatches=2)
+    reject_pp_collator(
+        DataCollatorWithPacking(tokenizer), per_device_train_batch_size=2, n_microbatches=2, model_config=None
+    )
+    reject_pp_collator(object(), per_device_train_batch_size=4, n_microbatches=2, model_config=None)
     assert require_pad_token_id(tokenizer, "why") == tokenizer.pad_token_id
     assert require_pooling_pad_id(_pooling_config(1), tokenizer_pad_id=1) == 1
     assert require_pooling_pad_id(_pooling_config(1), tokenizer_pad_id=None) == 1
@@ -203,7 +205,7 @@ def test_the_fixed_shape_helpers_accept_what_the_pipeline_can_take():
             r"torch_compile .* the schedule captures the stage module at setup",
         ),
         (
-            lambda: reject_pp_collator(None, per_device_train_batch_size=1, n_microbatches=1),
+            lambda: reject_pp_collator(None, per_device_train_batch_size=1, n_microbatches=1, model_config=None),
             r"requires a data collator; the trainer has none",
         ),
         (
@@ -211,12 +213,16 @@ def test_the_fixed_shape_helpers_accept_what_the_pipeline_can_take():
                 DataCollatorWithFlattening(tokenizer=_right_padded_tokenizer()),
                 per_device_train_batch_size=1,
                 n_microbatches=1,
+                model_config=None,
             ),
             r"DataCollatorWithFlattening \(padding-free\) .* summed document length",
         ),
         (
             lambda: reject_pp_collator(
-                DataCollatorWithPacking(_right_padded_tokenizer()), per_device_train_batch_size=2, n_microbatches=1
+                DataCollatorWithPacking(_right_padded_tokenizer()),
+                per_device_train_batch_size=2,
+                n_microbatches=1,
+                model_config=None,
             ),
             r"one packed row per microbatch, .* leaks attention across documents",
         ),

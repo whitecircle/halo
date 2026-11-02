@@ -7,8 +7,9 @@ logits, language-model loss and gradients it gets when packed flat, at fewer tok
 
 ![Three rows that share a prefix, packed flat with the prefix repeated per row and packed as a tree with the prefix once and one branch per row, each branch continuing the prefix's positions; in the tree row a token attends the prefix and its own branch, never a sibling](../assets/diagrams/tree_packing_layout.png)
 
-SFT only (`scripts/training/sft.py`), on GPT-OSS, Qwen3 and Qwen3.5/3.6 (dense and MoE), raw (not
-pre-processed) text datasets, `flash_attention_4` or `flash_attention_2`.
+SFT only (`scripts/training/sft.py`), raw (not pre-processed) text datasets: GPT-OSS, Qwen3 and
+Qwen3.5/3.6 (dense and MoE) on `flash_attention_4` or `flash_attention_2`, and GLM-5 Next on its SDPA
+backend.
 
 ```yaml
 packing: true
@@ -56,7 +57,7 @@ The collator (`halo/data/collators/tree_packing.py`) concatenates the batch's pa
 tree from two per-token columns (position along the token's own path, depth of its node) and puts the
 index tensors each layer needs under the `tree_attention` batch key (`halo/models/attention/tree_plan.py`).
 `halo/models/attention/tree.py` installs the readers on the family's own modeling module; nothing else in
-the model changes. A softmax layer runs the stock packed path on a batch with no branch.
+the model changes. A flash softmax layer runs the stock packed path on a batch with no branch.
 
 - **Sliding-window layers** gather, per tree node, the last `sliding_window - 1` prefix tokens ahead
   of the node's own. FlashAttention aligns the causal mask bottom-right when a sequence has more
@@ -70,15 +71,42 @@ the model changes. A softmax layer runs the stock packed path on a batch with no
   well; the gathered keys grow with fan-out × prefix length, so a layer whose row gathers more than
   2^19 keys (`GATHER_KEYS_PER_CALL` in `halo/models/attention/tree_plan.py`) attends in several calls of
   whole nodes. That bounds the GQA backward, which expands key and value gradients to every query head.
-- **GatedDeltaNet layers** (Qwen3.5/3.6): the causal convolution runs each node behind the last
-  `linear_conv_kernel_dim - 1` tokens of its path, and the delta-rule recurrence runs one tree depth
-  at a time, each node starting from its parent's final state.
+- **GatedDeltaNet and KDA layers** (Qwen3.5/3.6, GLM-5 Next): the causal convolution runs each node
+  behind the last `linear_conv_kernel_dim - 1` tokens of its path, and the delta-rule recurrence runs
+  one tree depth at a time, each node starting from its parent's final state. Each scan input is
+  permuted into depth order once and every depth reads a view of it, so the backward is one inverse
+  permutation per input instead of a gather's zero-filled, scattered gradient per depth. The plan
+  carries each depth's varlen bounds as host integers as well, which reach fla as `cu_seqlens_cpu`, so
+  building its chunk indices costs no host sync per depth and layer.
+- **DeepSeek sparse attention layers** (GLM-5 Next) read the plan in their own forward
+  (`halo/models/attention/tree_sparse.py`), never at the attention interface:
+  - **Pools.** The indexer's pools of `index_kpool` tokens run along each token's own path: a pool is
+    a token and its predecessors there. The pool straddling a branch point is one pool per branch.
+  - **Selection.** A query's candidates are the pools whose last token precedes it on its path, plus
+    the incomplete pool it sits in. The indexer takes no gradient, so it is scored a chunk of queries
+    at a time; the stock form holds `[T, heads, T / index_kpool]` fp32 scores. A tie at the cut goes to
+    the earlier pool on the path.
+  - **Attention.** It runs on the MLA latent, with the key projection folded into the query and the
+    value projection applied after, so a query reads only its selected latent rows. Under autocast it
+    reads the folded query and the latent in the autocast dtype and keeps its fp32 scores outside
+    autocast. The fold reads `kv_b_proj`'s weight and takes no dropout, so an adapter on `kv_b_proj`,
+    a quantized load and a training-time `attention_dropout` are refused before the model loads: from
+    the config (its `quantization_config` included), the run's `load_in_4bit`/`load_in_8bit`, and from
+    `lora_target_modules` where it names `kv_b_proj` (or `self_attn.kv_b_proj`) or is `all-linear`.
+    The first tree batch checks the loaded layers again, which catches a regex target.
+  - **Plain documents.** The plan's `sparse` part (per token: path predecessor, subtree end, path
+    position, tree start) comes with every batch, so plain documents in one packed row stay apart in
+    these layers too.
 
-A model on `flash_attention_2` sets `tree_full_attention: gather`. Qwen3.5/3.6 pins
-`attn_implementation: flash_attention_2`, since FA4 falls the family back to SDPA ([Qwen3.5](../models/qwen3_5.md)),
-and its GatedDeltaNet layers need the `fla` and `causal_conv1d` kernels the images ship. On Hopper, pin
-`flash_attention_2` too: auto-selection picks FA3, which tree packing refuses. The backend is checked before any
-weight loads, against the one the loader resolves for the config, dtype and GPU, and again on the loaded model.
+A model on `flash_attention_2` sets `tree_full_attention: gather`, and so does one whose heads run FA4's
+head_dim-256 kernel, which takes no log-sum-exp gradient. Qwen3.5/3.6 is such a model: on Blackwell an unset
+`attn_implementation` resolves to `flash_attention_2`, its packed-row default
+([Qwen3.5](../models/qwen3_5.md#configs)), and its GatedDeltaNet layers need the `fla` and `causal_conv1d` kernels
+the images ship. On Hopper, pin `flash_attention_2`: auto-selection picks FA3, which tree packing refuses. The
+backend is checked before any weight loads, against the one the loader resolves for the config, dtype and GPU, and
+again on the loaded model. GLM-5 Next is held to none of these backends and does not read `tree_full_attention`:
+under a plan neither of its layer types reaches the attention interface. Its KDA layers need the same `fla` and
+`causal_conv1d` kernels.
 
 The `split` form and the state-passing recurrence add kernel variants to the
 [warm-up](flash-attention.md), compiled on every rank at startup of a multi-rank run.
@@ -115,8 +143,13 @@ truncated, split or reordered tree row raises at collation, and a model whose la
 the `tree_attention` key is refused at startup.
 
 `tests/cpu/data/test_tree_rows.py` holds the data path to this (tree and flat packing of one dataset
-yield the same examples and labels), `tests/cpu/models/test_tree_attention_oracle.py` and
-`tests/gpu/kernels/test_fa4_tree_attention.py` the forward and gradients of every admitted family.
+yield the same examples and labels). `tests/cpu/models/test_tree_attention_oracle.py` and
+`tests/gpu/kernels/test_fa4_tree_attention.py` hold the forward and gradients of every admitted flash
+family. `tests/cpu/models/test_tree_sparse_attention.py` holds GLM-5 Next's: every example of a tree row
+against its run alone, the selection against the stock indexer on every path, and the latent attention
+against the dense masked softmax; `tests/gpu/kernels/test_tree_sparse_attention.py` its CUDA kernels. Both CPU
+suites train a tree row of every admitted family under gradient checkpointing, reentrant and not, to the
+logits and gradients of the run without it.
 
 ## What differs from flat packing
 
@@ -144,6 +177,7 @@ Expert parallelism and FSDP2 data parallelism never slice a row and run tree row
 EP+ETP are admitted but unverified on tree rows.
 
 Families are admitted one by one (`TREE_FAMILIES` in `halo/models/attention/tree.py`), each by passing
-the per-example oracle test; every other family is refused before the model loads. GLM-5 Next is among
-those: its sparse-attention indexer selects keys over the whole row and takes no per-sequence bounds.
-Backends are admitted the same way, by the GPU kernel test: `flash_attention_3` is refused.
+the per-example oracle test; every other family is refused before the model loads. Backends are admitted
+the same way, by the GPU kernel test: `flash_attention_3` is refused. GLM-5 Next additionally refuses an
+adapter on `kv_b_proj`, a quantized load and a training-time `attention_dropout`, before the model loads (see
+[Attention](#attention)).

@@ -10,8 +10,8 @@ initial state per varlen sequence and a gradient through both states, and its co
 gathered row.
 
 One tiny bf16 model per kernel shape — GPT-OSS (live sinks, a window shorter than the branches),
-Qwen3 MoE (no sink, no window), Qwen3.5 MoE at its release head shapes (FA2 only, GatedDeltaNet
-layers) — runs a three-level tree row in every form its backends allow. Checked against the fp32
+Qwen3 MoE (no sink, no window), Qwen3.5 MoE at its release head shapes (FA4's head_dim-256 kernel, gather only,
+and FA2; GatedDeltaNet layers) — runs a three-level tree row in every form its backends allow. Checked against the fp32
 stock forward of each example on its own: hidden states and mixer gradients; the same row without
 its plan as a negative control; root tokens of the split form bit-identical to the plain packed
 forward after the first layer (the stock call is untouched for them); the recurrence warm-up running
@@ -31,7 +31,10 @@ from transformers import modeling_flash_attention_utils as flash_utils
 from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.models.attention.backend_setup import patch_transformers_flash_varlen_int_seqlen
+from halo.models.attention.backend_setup import (
+    install_fa4_contiguous_dedicated_head_inputs,
+    patch_transformers_flash_varlen_int_seqlen,
+)
 from halo.models.attention.tree import (
     TREE_ATTN_IMPLEMENTATIONS,
     TREE_FAMILIES,
@@ -73,11 +76,11 @@ FAMILIES = {
     },
 }
 # The forms checked per backend. FA2 returns no log-sum-exp gradient and drops GPT-OSS's live sinks;
-# FA4's backward is unusable at Qwen3.5's head shape.
+# FA4's head_dim-256 kernel (Qwen3.5) takes no log-sum-exp gradient either.
 BACKENDS = {
     "gpt_oss": {"flash_attention_4": ("split", "gather")},
     "qwen3_moe": {"flash_attention_4": ("split", "gather"), "flash_attention_2": ("gather",)},
-    "qwen3_5_moe_text": {"flash_attention_2": ("gather",)},
+    "qwen3_5_moe_text": {"flash_attention_4": ("gather",), "flash_attention_2": ("gather",)},
 }
 _MIXERS = ("self_attn", "linear_attn")
 # (takes a state, returns one, normalizes query and key itself) of the recurrence calls along a
@@ -258,7 +261,7 @@ def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
         recurrence_states.clear()
         warm_recurrent_mixer_kernels(model, dtype=torch.bfloat16)
         checks[f"{name}_recurrence_warm_up_runs_every_state_variant"] = recurrence_states == RECURRENCE_STATE_VARIANTS
-    if "flash_attention_4" not in BACKENDS[name]:
+    if "split" not in BACKENDS[name].get("flash_attention_4", ()):
         return checks
 
     # A root has no ancestors, so the split form leaves its tokens to the stock packed call: the
@@ -287,6 +290,7 @@ def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
 def run(ctx):
     ensure_fa4_kernel_cache_env()
     patch_transformers_flash_varlen_int_seqlen()
+    install_fa4_contiguous_dedicated_head_inputs()
     row = _tree_row(torch.Generator().manual_seed(0))
     table = build_node_table(row[POSITION_COLUMN].cpu(), row[DEPTH_COLUMN].cpu())
     log(f"  row: {len(row['input_ids'])} tokens, {len(table.starts)} nodes, depth {int(row[DEPTH_COLUMN].max())}")

@@ -1,4 +1,4 @@
-"""Tests for checkpoint-resume detection and the output_dir overwrite guard
+"""Tests for checkpoint-resume detection, the output_dir overwrite guard and the pre-load run setup
 (halo/entrypoints/run_setup.py), single-process (no torch.distributed init).
 
 Run: python -m pytest tests/cpu/config/test_training_environment.py
@@ -7,14 +7,17 @@ Run: python -m pytest tests/cpu/config/test_training_environment.py
 import json
 import logging
 from types import SimpleNamespace
+from unittest import mock
 
 import pytest
-from transformers import TrainerState
+from transformers import Qwen3NextConfig, TrainerState, TrainingArguments
 
 from halo.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME
-from halo.entrypoints.run_setup import _validate_output_dir, resume_checkpoint_from_config
+from halo.entrypoints import run_setup
+from halo.entrypoints.run_setup import _validate_output_dir, configure_training_run, resume_checkpoint_from_config
 from halo.entrypoints.script import run_trainer
 from halo.log import RUN_LOG_DIR_NAME
+from halo.models.attention.selection import supports_fa4_backward
 
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
 from halo.runtime.filesystem import FS_PROBE_PREFIX
@@ -237,6 +240,33 @@ def test_a_resumed_run_logs_its_checkpoint_once(tmp_path, caplog):
         run_trainer(trainer, context, method_name="SFT")
     lines = [record.getMessage() for record in caplog.records if "Resuming from checkpoint" in record.getMessage()]
     assert lines == [f"Resuming from checkpoint: {ckpt}"]
+
+
+# Run setup before the model load
+
+
+@pytest.mark.parametrize("full_determinism", [True, False])
+def test_full_determinism_reaches_the_attention_choice_before_the_load(tmp_path, monkeypatch, full_determinism):
+    """HF's Trainer turns ``FLASH_ATTENTION_DETERMINISTIC`` on only in its ``__init__``, after the model load picked
+    the attention backend; set later, a head_dim-256 family keeps FA4 and its first backward asserts."""
+    # Recorded, so the variables the setup writes are restored after the test.
+    for name in ("FLASH_ATTENTION_DETERMINISTIC", "HF_DATASETS_CACHE"):
+        monkeypatch.setenv(name, "0")
+    monkeypatch.setattr(run_setup.datasets.config, "HF_DATASETS_CACHE", run_setup.datasets.config.HF_DATASETS_CACHE)
+    config = TrainingArguments(output_dir=str(tmp_path), full_determinism=full_determinism, use_cpu=True, report_to=[])
+    with (
+        mock.patch.object(run_setup, "ensure_fa4_kernel_cache_env"),
+        mock.patch.object(run_setup, "anchor_jit_cache_dir"),
+        mock.patch.object(run_setup, "configure_float32_matmul_precision"),
+        mock.patch.object(run_setup, "ensure_cache_dir", return_value=str(tmp_path / "datasets")),
+        mock.patch.object(run_setup.transformers.logging, "set_verbosity_info"),
+        mock.patch.object(run_setup.transformers.logging, "set_verbosity_error"),
+        mock.patch.object(run_setup, "_configure_tracking_env_vars"),
+        mock.patch.object(run_setup, "set_seed"),
+        mock.patch.object(run_setup, "barrier"),
+    ):
+        configure_training_run(SimpleNamespace(), config, "sft-test", overwrite_output_dir=True)
+    assert supports_fa4_backward(Qwen3NextConfig()) is not full_determinism
 
 
 if __name__ == "__main__":

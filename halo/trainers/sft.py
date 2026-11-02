@@ -21,7 +21,12 @@ from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.ctor_slots import get_ctor_arg, get_ctor_config, resolve_ctor_positions
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.trainer_rules import reject_compressed_kv_collator, reject_cp_packed_collator
+from halo.trainers.trainer_rules import (
+    reject_compressed_kv_collator,
+    reject_cp_packed_collator,
+    reject_mrope_padding_free_collator,
+    reject_unmarked_linear_attention_collator,
+)
 from halo.trainers.world_metrics import WorldMetrics
 
 logger = logging.getLogger(__name__)
@@ -105,6 +110,8 @@ class DistributedSFTTrainer(DistributedTrainerMixin, SFTTrainer):
         reject_cp_packed_collator(collator, is_cp_mode=self.parallelism_config.is_cp_mode)
         model = get_ctor_arg(args, kwargs, "model", _CTOR_POSITIONS)
         reject_compressed_kv_collator(collator, getattr(model, "config", None))
+        reject_mrope_padding_free_collator(collator, getattr(model, "config", None))
+        reject_unmarked_linear_attention_collator(collator, getattr(model, "config", None))
         super().__init__(*args, **kwargs)
         if self.parallelism_config.is_cp_mode:
             # The CP loss is its own mean: HF's num_items_in_batch scaling would inflate it cp_size x.

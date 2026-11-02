@@ -15,7 +15,12 @@ import torch.nn.functional as F
 
 from halo.data.collators.smpo import DataCollatorForSMPO
 from halo.models.segment_markers import SegmentMarkers
-from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tiny_models import (
+    TINY_DENSE_FAMILIES,
+    TINY_MOE_FAMILIES,
+    TINY_UNWRAPPED_MOE_FAMILY,
+    tiny_family_model,
+)
 
 PAD_ID = 0
 SEED = 1234
@@ -29,9 +34,10 @@ PAIRS = (
     ([11, 4], [7, 19, 33], [50, 2, 44, 21, 6]),
     ([25, 38, 14, 60], [13, 27], [9, 45, 31]),
 )
+# GatedDeltaNet runs through Qwen3-Next: the Qwen3.5/3.6 decoders rotate by M-RoPE, which refuses padding_free.
 FAMILIES = {
     "lfm2": TINY_MOE_FAMILIES["lfm2_moe"],
-    "qwen3_5": TINY_DENSE_FAMILIES["qwen3_5"],
+    "qwen3_next": TINY_UNWRAPPED_MOE_FAMILY,
     "qwen3": TINY_DENSE_FAMILIES["qwen3"],
 }
 # Marker subsets under which a family's row must leak, proving the isolation is the markers' doing.
@@ -39,7 +45,7 @@ FAMILIES = {
 # cu_seq_lens could not hide under the isolation tolerance. Dense Qwen3 reads no marker.
 LEAK_CONTROLS = {
     "lfm2": {"unmarked": SegmentMarkers()},
-    "qwen3_5": {"unmarked": SegmentMarkers(), "conv_only": SegmentMarkers(seq_idx=True)},
+    "qwen3_next": {"unmarked": SegmentMarkers(), "conv_only": SegmentMarkers(seq_idx=True)},
     "qwen3": {},
 }
 

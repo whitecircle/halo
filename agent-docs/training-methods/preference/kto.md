@@ -45,7 +45,7 @@ torchrun --nproc_per_node=8 scripts/training/preference/kto.py \
     examples/preference/qwen3_5/kto-qwen3.5-9b-kto-mix-14k.yaml
 ```
 
-`halo launch kto <config> --nproc 8` builds the same line. That recipe is dense, so it runs plain FSDP2 data parallel; add `--expert_parallel_size=8` on an MoE checkpoint. Like the other padded-batch scripts, `kto.py` defaults `attn_implementation` to `sdpa` under `reset_sinks: true` ([Flash Attention](../../optimization/flash-attention.md#model-specific-handling)).
+`halo launch kto <config> --nproc 8` builds the same line. That recipe is dense, so it runs plain FSDP2 data parallel; add `--expert_parallel_size=8` on an MoE checkpoint. Like the other padded-batch scripts, `kto.py` gives an unset `attn_implementation` the padded-batch default under `reset_sinks: true`: the loader's own pick on Blackwell (SDPA for a remote-code or head_dim-256 checkpoint and for a softcapped policy, which the softcap turns into FA2), SDPA elsewhere ([Flash Attention](../../optimization/flash-attention.md#model-specific-handling)).
 
 ## Vision-language
 

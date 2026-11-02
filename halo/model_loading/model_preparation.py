@@ -19,7 +19,11 @@ import halo.models.seq_cls_heads  # noqa: F401  registers the heads before any A
 from halo.checkpoint.model_card import HUB_TAGS
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
-from halo.models.attention.backend_setup import patch_sdpa_for_wide_heads, patch_transformers_flash_varlen_int_seqlen
+from halo.models.attention.backend_setup import (
+    install_fa4_contiguous_dedicated_head_inputs,
+    patch_sdpa_for_wide_heads,
+    patch_transformers_flash_varlen_int_seqlen,
+)
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
 from halo.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
@@ -53,29 +57,38 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
     Raises:
         ValueError: ``text_only=True`` for a family with no text-only CausalLM sibling: no
             ``AutoModelForCausalLM`` entry at all (glm5_next ships only the conditional-generation
-            wrapper), or an ``auto_map`` entry pointing that key at the multimodal class itself
-            (step3p7). Accepting it would load the remote-code VLM as the text-only model.
+            wrapper), or an entry naming the multimodal class itself, native (gemma4) or in the
+            ``auto_map`` (step3p7). Accepting it would load the VLM as the text-only model.
     """
     if text_only:
         model_type = getattr(model_config, "model_type", None)
-        has_native_sibling = model_type in MODEL_FOR_CAUSAL_LM_MAPPING_NAMES
         auto_map = getattr(model_config, "auto_map", None) or {}
-        remote_target = _auto_map_class_name(auto_map, "AutoModelForCausalLM")
-        # A CausalLM entry naming the multimodal class itself is that class re-declared for pre-VLM loaders.
-        vision_targets = {
+        remote_vision = {
             name
             for key in ("AutoModelForImageTextToText", "AutoModelForVision2Seq")
             if (name := _auto_map_class_name(auto_map, key))
         }
-        masquerading = remote_target is not None and (
-            remote_target.endswith("ForConditionalGeneration") or remote_target in vision_targets
-        )
-        has_remote_sibling = remote_target is not None and not masquerading
-        if not (has_native_sibling or has_remote_sibling):
+        # (source, class name, the multimodal class names it must not be) per CausalLM entry.
+        entries = [
+            ("its auto_map", _auto_map_class_name(auto_map, "AutoModelForCausalLM"), remote_vision),
+            (
+                "transformers' CausalLM mapping",
+                MODEL_FOR_CAUSAL_LM_MAPPING_NAMES.get(model_type),
+                {MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES.get(model_type)},
+            ),
+        ]
+        declared = [(source, target, vision) for source, target, vision in entries if target is not None]
+        # A CausalLM entry naming the multimodal class itself is that class re-declared for pre-VLM loaders.
+        masquerades = [
+            (source, target)
+            for source, target, vision in declared
+            if target.endswith("ForConditionalGeneration") or target in vision
+        ]
+        if len(masquerades) == len(declared):
             detail = (
-                f"its auto_map points AutoModelForCausalLM at {remote_target!r} — the multimodal "
+                f"{masquerades[0][0]} points AutoModelForCausalLM at {masquerades[0][1]!r} — the multimodal "
                 f"conditional-generation class itself, not a text-only sibling"
-                if masquerading
+                if masquerades
                 else "transformers maps no text-only *ForCausalLM class for this family"
             )
             raise ValueError(
@@ -126,13 +139,15 @@ def apply_family_patches(model_config, attn_implementation: str) -> str:
     # packed path never engages and packed documents attend across each other.
     if is_flash_attn_implementation(attn_implementation) and model_type_matches(model_config, "mistral4"):
         patch_mistral4_flash_packed_position_ids()
-    # Load recording for the native balancing buffer, the GC refusal, and (on flash) the same
-    # position_ids plumbing as Mistral4, since Zaya's model forward never passes the tensor down.
+    # Load recording for the native balancing buffer, the GC refusal, and the packed-document plumbing
+    # its model forward lacks (it never passes position_ids down to attention or the CCA convs).
     if model_type_matches(model_config, "zaya"):
-        apply_zaya_patches(attn_implementation)
-    # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor.
+        apply_zaya_patches()
+    # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor, and its
+    # head_dim-256 forward misreads a head-major q/k.
     if attn_implementation == "flash_attention_4":
         patch_transformers_flash_varlen_int_seqlen()
+        install_fa4_contiguous_dedicated_head_inputs()
     return resolve_flex_sliding_attn_implementation(model_config, attn_implementation)
 
 

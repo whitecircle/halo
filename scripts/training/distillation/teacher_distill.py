@@ -7,11 +7,12 @@ Usage: torchrun --nproc_per_node=8 scripts/training/distillation/teacher_distill
 
 import logging
 
-from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizerBase
+from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, PreTrainedModel, PreTrainedTokenizerBase
 
 from halo.configs.distillation import TeacherDistillationConfig, TeacherDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.collator_rules import reject_fa4_varlen_training, rows_reach_varlen_kernel
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
 from halo.entrypoints.data_setup import (
@@ -49,11 +50,12 @@ from halo.trainers.distillation.teacher_distillation import DistributedTeacherDi
 logger = logging.getLogger(__name__)
 
 
-def _load_distill_teacher(*, args, model_config, training_config, is_vlm: bool, local_rank: int) -> PreTrainedModel:
+def _load_distill_teacher(
+    *, args, model_config, training_config, requested_attn: str | None, is_vlm: bool, local_rank: int
+) -> PreTrainedModel:
     """Load the frozen teacher at ``teacher_model_revision`` (the student's pin names a commit in another repo), in
-    the run's dtype, on the shared padded-workload backend request, which under live sinks falls back to
+    the run's dtype, on the request the student loads under, which under live sinks falls back to
     auto-detection: a sink-dropping teacher would shift every logprob it scores against its student."""
-    requested_attn = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
     return load_frozen_auxiliary_model(
         args.teacher_model,
         # The teacher's logits are the target the student is fit to, so it loads in the run's own
@@ -71,10 +73,8 @@ def _load_distill_teacher(*, args, model_config, training_config, is_vlm: bool, 
     )
 
 
-def _load_teacher_tokenizer(*, args, model_config, student_config, student_tokenizer) -> PreTrainedTokenizerBase:
-    """The teacher repo's own tokenizer, at the teacher's pin, checked with its config against the
-    student's token ids and logit rows before any teacher weight loads (the trainer checks again).
-    """
+def _load_teacher_metadata(*, args, model_config) -> tuple[PreTrainedTokenizerBase, PretrainedConfig]:
+    """The teacher repo's own tokenizer and config, at the teacher's pin."""
 
     def fetch(local_files_only: bool):
         kwargs = {
@@ -87,9 +87,7 @@ def _load_teacher_tokenizer(*, args, model_config, student_config, student_token
             AutoConfig.from_pretrained(args.teacher_model, **kwargs),
         )
 
-    teacher_tokenizer, teacher_config = hub_metadata_main_first("teacher_metadata", fetch)
-    resolve_shared_vocab_width(student_config, teacher_config, student_tokenizer, teacher_tokenizer)
-    return teacher_tokenizer
+    return hub_metadata_main_first("teacher_metadata", fetch)
 
 
 def _text_distill_collator(args, tokenizer, model_config):
@@ -124,30 +122,36 @@ def main():
     ds, dataset_presharded = load_script_datasets(args, parallelism_config, conversation_field=args.conversation_field)
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
-    # Same padded-workload request the teacher load makes: the two forwards are compared token by
-    # token, so a backend split between them biases the distillation targets.
-    policy = load_policy_model(
-        context,
-        training_config,
-        model_config,
-        args,
-        vlm_run=is_vlm,
-        attn_default=default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks),
+    teacher_tokenizer, teacher_config = _load_teacher_metadata(args=args, model_config=model_config)
+    # One request for both loads, decided on both checkpoints, so the two forwards compared token by
+    # token take the same backend wherever both models accept it.
+    attn_default = default_padded_attn_implementation(
+        model_config, sinks_reset=args.reset_sinks, companion_configs=(teacher_config,)
     )
+    policy = load_policy_model(context, training_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
     student_model = policy.model
+    # Before the teacher loads: more than one padded row per batch reaches the varlen call.
+    reject_fa4_varlen_training(
+        student_model.config,
+        varlen_rows=rows_reach_varlen_kernel(
+            packing=False,
+            padding_free=False,
+            per_device_train_batch_size=training_config.per_device_train_batch_size,
+        ),
+    )
     tokenizer = apply_max_length(training_config, args, student_model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = configure_adapter_training(args, student_model, model_config, "CAUSAL_LM")
 
-    teacher_tokenizer = _load_teacher_tokenizer(
-        args=args, model_config=model_config, student_config=student_model.config, student_tokenizer=tokenizer
-    )
+    # Before any teacher weight loads (the trainer checks again).
+    resolve_shared_vocab_width(student_model.config, teacher_config, tokenizer, teacher_tokenizer)
     teacher_model = _load_distill_teacher(
         args=args,
         model_config=model_config,
         training_config=training_config,
+        requested_attn=attn_default,
         is_vlm=policy.is_vlm,
         local_rank=context.local_rank,
     )

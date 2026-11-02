@@ -74,7 +74,7 @@ def main():
         reject_unsupported_args("SMPO VLM mode", tools_field=args.tools_field)
 
     # --- Model (class follows the checkpoint); padded preference takes the shared padded-workload
-    # backend (SDPA, dropped under live sinks and under CP) ---
+    # request (dropped under live sinks and under CP) ---
     policy = load_policy_model(
         context,
         smpo_config,

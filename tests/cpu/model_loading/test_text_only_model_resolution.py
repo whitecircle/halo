@@ -41,6 +41,18 @@ def test_text_only_refuses_a_family_with_no_causal_lm_sibling():
         resolve_auto_model_class(config, text_only=True)
 
 
+def test_text_only_refuses_a_native_causal_lm_entry_naming_the_vlm_class():
+    """transformers maps ``gemma4`` to ``Gemma4ForConditionalGeneration`` in its CausalLM mapping too, so
+    the flag would load the full VLM, vision tower included, while claiming to drop it. The text-only
+    ``gemma4_text`` checkpoint keeps its genuine sibling."""
+    with pytest.raises(ValueError, match="gemma4.*CausalLM mapping.*Gemma4ForConditionalGeneration"):
+        resolve_auto_model_class(SimpleNamespace(model_type="gemma4"), text_only=True)
+    # Fuyu's CausalLM entry is its image-text-to-text class under a *ForCausalLM name.
+    with pytest.raises(ValueError, match="fuyu.*FuyuForCausalLM"):
+        resolve_auto_model_class(SimpleNamespace(model_type="fuyu"), text_only=True)
+    assert resolve_auto_model_class(SimpleNamespace(model_type="gemma4_text"), text_only=True) is AutoModelForCausalLM
+
+
 def test_text_only_accepts_a_remote_code_causal_lm_sibling():
     """A remote-code family is absent from the static mapping but loads through its ``auto_map``
     entry — the refusal must not close that door."""

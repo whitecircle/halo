@@ -65,9 +65,8 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 - **Router balancing.** `auto` picks `bias_update`, which updates the router's own `balancing_biases`
   after each step, so the final bias ships in every checkpoint. `router_balancing_rate` sets the step
   size. ZAYA1 has no auxiliary loss, which is why the recipes set `output_router_logits: false`.
-- **Packing.** The recipes pack. Attention stays within each packed document, but the CCA convolution
-  and the delayed value projection still mix neighboring documents. Add `--packing=false` where that
-  mixing is not acceptable.
+- **Packing.** The recipes pack, and each packed document stays isolated: attention, the CCA
+  convolution and the delayed value projection all restart at every document boundary.
 
 ## Limits
 

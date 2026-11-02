@@ -45,6 +45,7 @@ import httpx
 import pytest
 import torch
 from openai import AsyncOpenAI
+from transformers import Qwen3Config
 
 from halo.entrypoints import reward_scoring
 from halo.inference.endpoints import DEFAULT_LOCAL_BASE_URL
@@ -128,6 +129,9 @@ def test_reward_model_loader_applies_the_requested_dtype(monkeypatch, requested,
         reward_scoring,
         "AutoTokenizer",
         types.SimpleNamespace(from_pretrained=lambda *a, **k: types.SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        reward_scoring, "AutoConfig", types.SimpleNamespace(from_pretrained=lambda *a, **k: Qwen3Config())
     )
     monkeypatch.setattr(reward_scoring, "from_pretrained_verified", lambda *a, **k: _Model())
 

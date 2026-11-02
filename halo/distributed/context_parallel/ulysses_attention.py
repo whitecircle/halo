@@ -16,7 +16,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from halo.distributed.context_parallel.all_to_all import heads_to_sequence, sequence_to_heads
-from halo.models.attention.selection import flash_kernel, is_fa4_backward_nan_prone, preferred_flash_impl
+from halo.models.attention.backend_setup import install_fa4_contiguous_dedicated_head_inputs
+from halo.models.attention.selection import (
+    flash_attention_deterministic,
+    flash_kernel,
+    preferred_flash_impl,
+    supports_fa4_backward,
+)
 
 # The hub flash-attn2 build the kernel probe falls back to; also an accepted attn_implementation.
 HUB_FLASH_ATTN2_KERNEL = "kernels-community/flash-attn2"
@@ -51,6 +57,9 @@ def _flash_attn_func(allow_fa4: bool = True):
     # Hopper (sm_90) cannot take the FA2 path: the image stubs out the split-K kernels that FA2's
     # non-varlen forward (the one CP calls) selects by occupancy heuristic, so it would raise.
     preferred = preferred_flash_impl(allow_fa4=allow_fa4)
+    # Whatever the config's label, so its head_dim-256 kernel never sees the strided K/V the all-to-all splits off.
+    if preferred == "flash_attention_4":
+        install_fa4_contiguous_dedicated_head_inputs()
     if preferred != "flash_attention_2":
         with contextlib.suppress(ImportError):
             return _adapt_to_fa2_contract(flash_kernel(preferred, varlen=False))
@@ -129,7 +138,7 @@ class UlyssesAttention(nn.Module):
         self.local_q_heads = self.num_q_heads // cp_size
         self.local_kv_heads = self.num_kv_heads // cp_size
 
-        self._allow_fa4 = not is_fa4_backward_nan_prone(self.config)
+        self._allow_fa4 = supports_fa4_backward(self.config)
 
     def _resolve_scaling(self) -> float:
         """The softmax scale; ``self.head_dim`` is already set when this runs."""
@@ -193,7 +202,8 @@ class UlyssesAttention(nn.Module):
 
     def _attend(self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor) -> torch.Tensor:
         """Flash attention over the full sequence for this rank's heads, ``[B, S, H, D]`` with native GQA. The
-        sliding window follows the HF convention: applied only past its own length, minus 1 for the diagonal."""
+        sliding window follows the HF convention: applied only past its own length, minus 1 for the diagonal;
+        ``deterministic`` is the one transformers passes its own flash calls."""
         window = self.sliding_window
         return _flash_attn_func(self._allow_fa4)(
             query,
@@ -203,6 +213,7 @@ class UlyssesAttention(nn.Module):
             softmax_scale=self.scaling,
             causal=self.is_causal,
             window_size=(window - 1, window - 1) if window and key.shape[1] > window else (-1, -1),
+            deterministic=flash_attention_deterministic(),
         )
 
     def _post_attention(self, attn_output: torch.Tensor, *extras: torch.Tensor) -> torch.Tensor:

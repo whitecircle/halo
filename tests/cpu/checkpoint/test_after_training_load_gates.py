@@ -35,6 +35,7 @@ from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassifi
 
 from halo.checkpoint.tools import adapter_merge, bf16_conversion
 from halo.model_loading import model_preparation
+from halo.model_loading.parallel import whole_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
@@ -264,6 +265,27 @@ def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights
     assert order == ["shims", "load"], order
 
 
+def test_a_pinned_backend_reads_its_config_after_the_shims(causal_lm_checkpoint):
+    """A pinned ``attn_implementation`` sends the string-path loader to the config for the family patches
+    before its build, and that fetch can already import a remote modeling file."""
+    order: list[str] = []
+    real_from_pretrained = model_preparation.AutoConfig.from_pretrained
+
+    def recording_from_pretrained(*args, **kwargs):
+        order.append("config")
+        return real_from_pretrained(*args, **kwargs)
+
+    args = SimpleNamespace(model_init_kwargs={"dtype": torch.float32, "attn_implementation": "eager"})
+    with (
+        patch.object(whole_model, REMOTE_CODE_SHIMS, lambda: order.append("shims")),
+        patch.object(model_preparation, REMOTE_CODE_SHIMS, lambda: order.append("shims")),
+        patch.object(model_preparation.AutoConfig, "from_pretrained", recording_from_pretrained),
+    ):
+        resolve_trainer_model(causal_lm_checkpoint, args, parallelism_config=None)
+
+    assert order[:2] == ["shims", "config"], order
+
+
 def _calls_name(func: ast.FunctionDef, name: str) -> bool:
     return any(
         isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == name
@@ -271,13 +293,14 @@ def _calls_name(func: ast.FunctionDef, name: str) -> bool:
     )
 
 
-# Every module that owns a from-a-path loader: the Auto*-class seam on the utils side and the frozen
-# teacher/reference loader are the two that materialize weights themselves; the dispatcher and
+# Every module that owns a from-a-path loader: the Auto*-class seam on the utils side, the frozen
+# teacher/reference loader and the reward-model scorer materialize weights themselves; the dispatcher and
 # ``resolve_trainer_model`` reach the shims through the first.
 LOADER_MODULES = [
     REPO_ROOT / "halo/model_loading/model_preparation.py",
     REPO_ROOT / "halo/model_loading/parallel/loader.py",
     REPO_ROOT / "halo/model_loading/parallel/frozen_models.py",
+    REPO_ROOT / "halo/entrypoints/reward_scoring.py",
 ]
 # Public entry points only: the private per-mode helpers inside the dispatcher are reached through it,
 # and it applies the shims once for all of them.

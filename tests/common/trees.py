@@ -4,13 +4,15 @@ The dense keep-masks state what tree attention means — a token attends its own
 nothing else — independently of any kernel plan, so every plan and every forward is tested against
 them. :func:`reference_varlen` is the kernel contract tree attention relies on, in plain torch: it
 stands in for the CUDA kernels on the CPU tier and is pinned to them on the GPU tier. The other
-helpers turn token paths into a tree row and a recovered node table back into the examples it holds.
+helpers turn token paths into a tree row and a recovered node table back into the examples it holds, and
+compare a training step with gradient checkpointing against the same step without it.
 """
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 import numpy as np
 import torch
+from transformers.modeling_layers import GradientCheckpointingLayer
 
 from halo.data.tree_layout import (
     DEPTH_COLUMN,
@@ -142,6 +144,48 @@ def randomize_sinks(model: torch.nn.Module) -> None:
         for module in model.modules():
             if hasattr(module, "sinks"):
                 module.sinks.normal_(0.0, 1.0)
+
+
+def randomize_indexer_pools(model: torch.nn.Module) -> None:
+    """Give every DSA indexer's pool compression (slot embedding and gate) values of its own: initialized to
+    zero, it weighs a pool's tokens alike, so a pool assembled in the wrong order scores the same."""
+    with torch.no_grad():
+        for module in model.modules():
+            if hasattr(module, "index_kpool_compress_ape"):
+                module.index_kpool_compress_ape.normal_(0.0, 0.5)
+                module.index_kpool_compress_gate.normal_(0.0, 0.5)
+
+
+def checkpointing_gaps(
+    model: torch.nn.Module, step: Callable[[], torch.Tensor], *, use_reentrant: bool
+) -> tuple[float, float]:
+    """``(logit gap, gradient gap)``: the largest difference in the logits and in any parameter's gradient between one
+    training step without gradient checkpointing and the same step with it. ``step`` runs the forward and its loss's
+    backward and returns the logits. The checkpointed step must run every decoder layer a second time, or the two
+    steps compare nothing."""
+    layers = [module for module in model.modules() if isinstance(module, GradientCheckpointingLayer)]
+    passes = []
+    hooks = [layer.register_forward_pre_hook(lambda *_: passes.append(None)) for layer in layers]
+    runs = []
+    model.train()
+    try:
+        for checkpointing in (False, True):
+            if checkpointing:
+                model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
+            passes.clear()
+            model.zero_grad(set_to_none=True)
+            logits = step()
+            grads = {name: p.grad.clone() for name, p in model.named_parameters() if p.grad is not None}
+            runs.append((logits, grads, len(passes)))
+    finally:
+        model.gradient_checkpointing_disable()
+        for hook in hooks:
+            hook.remove()
+    (logits, grads, plain_passes), (checkpointed_logits, checkpointed_grads, checkpointed_passes) = runs
+    assert layers and checkpointed_passes == 2 * plain_passes, "the checkpointed step recomputed no decoder layer"
+    assert checkpointed_grads.keys() == grads.keys()
+    gradient_gap = max((checkpointed_grads[name] - grad).abs().max().item() for name, grad in grads.items())
+    return (checkpointed_logits - logits).abs().max().item(), gradient_gap
 
 
 def concat_columns(trees: list[dict[str, torch.Tensor]]) -> dict[str, torch.Tensor]:

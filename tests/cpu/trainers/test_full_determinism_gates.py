@@ -5,8 +5,8 @@ the mode on.
 Both refusals come from the shared ``_init_distributed_config``, which runs before ``super().__init__``:
 
 * Once the flex-sliding warm-up compiled its graphs without the mode. Dynamo guards on it, so the
-  sliding-layer graphs ``warm_flex_sliding_kernels`` compiled at load would recompile rank by rank at
-  each rank's first long sliding call, mid-forward, with EP peers waiting in DeepEP's dispatch. A
+  FlexAttention graphs ``warm_flex_sliding_kernels`` compiled at load would recompile rank by rank at
+  each rank's first long masked call, mid-forward, with EP peers waiting in DeepEP's dispatch. A
   process that warmed nothing (a single-rank run, or ``HALO_FLEX_SLIDING=0``), one whose warm-up already
   ran deterministic, and a run without ``full_determinism`` construct normally.
 * On an EP group spanning NVLink domains, whose DeepEP dispatch has no deterministic mode. The entry
@@ -93,13 +93,13 @@ def test_runs_that_keep_the_warmed_mode_construct(warmed_deterministic, full_det
 
 
 def test_a_warmup_that_compiles_nothing_records_no_mode(monkeypatch):
-    """A wide-head model with no sliding layer is built with the flex-sliding implementation, but its warm-up
-    has no graph to compile, so it must leave nothing for ``full_determinism`` to be refused over."""
+    """A model whose only layers are wide-head global ones is built with the flex-sliding implementation, but
+    its warm-up has no graph to compile, so it must leave nothing for ``full_determinism`` to be refused over."""
     monkeypatch.setattr(sdpa_flex_sliding, "_warmed_deterministic", None)
     config = Gemma4TextConfig(**TINY_GEMMA4_WIDE_HEAD_CONFIG, layer_types=["full_attention", "full_attention"])
     config._attn_implementation = sdpa_flex_sliding.register_flex_sliding_attention()
     model = Gemma4ForCausalLM(config)
-    assert sdpa_flex_sliding.sliding_attention_calls(model) == set()  # premise: no sliding layer
+    assert sdpa_flex_sliding.flex_attention_calls(model) == set()  # premise: no layer FlexAttention serves
     sdpa_flex_sliding.warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
     assert sdpa_flex_sliding._warmed_deterministic is None
     with pytest.raises(_SetupDone):

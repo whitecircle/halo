@@ -43,13 +43,14 @@ def _segmented_conv1d(torch_function, hidden_states, *args, **kwargs):
 def _segmented_chunk_gated_delta_rule(torch_function, query, key, value, **kwargs):
     """Run the torch chunked delta rule per packed document: it swallows ``cu_seqlens`` and would carry
     recurrent state across documents. Each document starts from a fresh state, or from its own row of
-    ``initial_state``, which then holds one state per document as the CUDA kernel takes it."""
-    cu_seqlens = kwargs.pop("cu_seqlens", None)
+    ``initial_state``, which then holds one state per document as the CUDA kernel takes it. The bounds are
+    read from ``cu_seqlens_cpu``, the kernel's host copy of them, where the caller passes one."""
+    cu_seqlens, cu_seqlens_cpu = kwargs.pop("cu_seqlens", None), kwargs.pop("cu_seqlens_cpu", None)
     if cu_seqlens is None:
         return torch_function(query, key, value, **kwargs)
     g, beta, initial_state = kwargs.pop("g"), kwargs.pop("beta"), kwargs.pop("initial_state", None)
     outputs, states = [], []
-    edges = cu_seqlens.tolist()
+    edges = (cu_seqlens if cu_seqlens_cpu is None else cu_seqlens_cpu).tolist()
     if initial_state is not None and initial_state.shape[0] != len(edges) - 1:
         raise ValueError(
             f"initial_state holds {initial_state.shape[0]} states for {len(edges) - 1} segments: with "
@@ -75,6 +76,7 @@ def _segmented_chunk_gated_delta_rule(torch_function, query, key, value, **kwarg
 _CPU_FALLBACK_FIXUPS = {
     "causal_conv1d_fn": _segmented_conv1d,
     "chunk_gated_delta_rule": _segmented_chunk_gated_delta_rule,
+    "chunk_kda": _segmented_chunk_gated_delta_rule,  # KDA: the same scan contract, its gate per channel
 }
 
 

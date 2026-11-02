@@ -376,3 +376,19 @@ class ModelInitKwargsArguments:
             "programmatically with the model as a path string."
         },
     )
+
+
+@dataclass
+class CrossDocumentLinearAttentionArguments:
+    """The opt-in of the configs whose multi-document rows (``packing``, ``padding_free``) are refused on
+    linear-attention layers no document boundary reaches
+    (:func:`~halo.models.segment_markers.reject_unmarked_linear_attention_rows`)."""
+
+    allow_cross_document_linear_attention: bool = field(
+        default=False,
+        metadata={
+            "help": "Train multi-document rows (packing, padding_free) on a model whose linear-attention layers "
+            "receive no document boundary (Ring's Lightning Attention-2): their recurrent state then carries from "
+            "each document of a row into the next. Off, such a run is refused."
+        },
+    )

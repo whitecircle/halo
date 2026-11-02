@@ -29,6 +29,7 @@ from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from halo.models.attention.backend_setup import patch_sdpa_for_wide_heads
 from halo.models.attention.sdpa_flex_sliding import flex_sliding_attention
+from tests.common.attention_stubs import causal_attention
 
 LAYERS = {"sliding": (256, 8, 1024), "global": (512, 2, None)}
 HEADS = 16
@@ -70,9 +71,7 @@ def main():
             (torch.softmax(scores.float(), -1).to(q.dtype) @ vv).backward(grad)
     elif args.backend == "halo":
         patch_sdpa_for_wide_heads()  # the Gemma 4 loader's process-wide SDPA pin
-        module = torch.nn.Module()
-        module.is_causal = True
-        module.num_key_value_groups = HEADS // kv_heads
+        module = causal_attention(HEADS, kv_heads, head_dim)
         # The masks the ``sdpa`` rows use: the dense window on a sliding layer, none (causal) on a global one.
         pos = torch.arange(seq, device="cuda")
         mask = ((pos[None] <= pos[:, None]) & (pos[:, None] - pos[None] < window))[None, None] if window else None

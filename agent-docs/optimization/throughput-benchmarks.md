@@ -114,7 +114,7 @@ The Megatron-LM, Laguna and LFM2.5 rows are from the Halo research page (whiteci
 
 All metrics computed by `EfficiencyCallback` (`halo/callbacks/efficiency.py`).
 
-**Achieved TFLOPS** = `(tokens_per_gpu × (6·N_trainable + 4·N_frozen) + attention_score_flops / tp_size) / step_time`
+**Achieved TFLOPS** = `(rank_tokens × (6·N_trainable + 4·N_frozen) + attention_score_flops / tp_size) / step_time`
 (PaLM/Megatron FLOP count).
 
 The linear-projection term is `6·N` for trainable params (2N forward + 4N backward) and `4·N` for frozen ones
@@ -122,8 +122,9 @@ The linear-projection term is `6·N` for trainable params (2N forward + 4N backw
 `N_frozen = 0` and it is the usual `6·N_local`. `N` counts all params physically on this GPU (DTensor-aware
 for TP).
 
-`tokens_per_gpu` = `num_input_tokens_seen / world_size`, further divided by `cp_size` (each CP rank receives
-the full `input_ids`; the wrapper splits inside forward).
+`rank_tokens`, the tokens this rank computes over, = `num_input_tokens_seen / world_size`, further divided by
+`cp_size` (each CP rank receives the full `input_ids`; the wrapper splits inside forward). It equals tok/s/GPU ×
+step time only where no batch is shared: a TP, expert-TP or pipeline group runs one batch on every member.
 
 The attention-score term costs each decoder layer at `6 × keys × heads·(d_qk + d_v)` per token (QKᵀ and Attn·V,
 forward + backward; `12·S·H` for standard heads). Full attention is costed at every key (the PaLM convention,
@@ -165,10 +166,12 @@ If top-k is not detected the sparsity factor stays 1.0 and S-MFU silently collap
 Compare configs with tok/s/GPU and achieved TFLOPS; reach for S-MFU only when you need a roofline fraction
 (see [Why MoE utilization reads low](#why-moe-utilization-reads-low)).
 
-**Cluster throughput** = `per_gpu_tps × dp_actual × cp_size`, where `dp_actual` is
-`ParallelismConfig.data_parallel_size` ([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)).
-`ep_size` does not shrink it (EP ⊥ DP, each EP rank processes a distinct batch); `expert_tp_size`
-does (its ranks share one input).
+**Cluster throughput** counts each of the `ParallelismConfig.data_parallel_size` replicas' batches once
+([Stacking the dimensions](../parallelism/README.md#stacking-the-dimensions)), and **tok/s/GPU** is it over
+`world_size`. A TP, expert-TP or CP group and a pipeline chain share one batch, so they count it once; `ep_size`
+does not shrink the replica count (EP ⊥ DP, each EP rank processes a distinct batch). MFU is the exception: it
+charges each rank every token it runs through its own parameter slice (the whole batch under TP, expert-TP and
+PP, `1/cp_size` of it under CP).
 
 ## GPT-OSS-20B (8× B300)
 
@@ -213,15 +216,15 @@ Achieved TFLOPS rises with sequence length (longer sequences amortize the Ulysse
 
 TP shards attention (Q/K/V/O) via DTensor; EP distributes experts. **EP+TP requires `ep_size` to be a multiple of `tp_size`**: each EP group must span whole TP groups (the validator rejects `ep_size % tp_size != 0`).
 
-On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all valid); `ep2tp8`/`ep4tp8` are rejected (ep < tp). The table below is `ep8tp8` (one TP group of 8). DP=1, so tok/s/GPU equals cluster throughput.
+On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all valid); `ep2tp8`/`ep4tp8` are rejected (ep < tp). The table below is `ep8tp8` (one TP group of 8): DP=1, so all eight GPUs share each batch and the cluster runs 8× the tok/s/GPU.
 
 | SeqLen | tok/s/GPU | TFLOPS | peak mem | step |
 |--------|-----------|--------|----------|------|
-| 4,096 | 10,212 | 226 | 32.5 GiB | 0.40s |
-| 16,384 | 13,107 | 301 | 68.5 GiB | 1.25s |
-| 32,768 | 14,236 | 345 | 118.7 GiB | 2.30s |
+| 4,096 | 1,277 | 226 | 32.5 GiB | 0.40s |
+| 16,384 | 1,638 | 301 | 68.5 GiB | 1.25s |
+| 32,768 | 1,780 | 345 | 118.7 GiB | 2.30s |
 
-Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). TP width moves throughput by a few percent: at s4096 the three widths spread 4.2%, `ep8tp8` leading (10,212 vs `ep8tp2` 10,012, `ep8tp4` 9,798 tok/s/GPU); at s16384 they sit within 3.9% (`ep8tp8` 13,107, `ep8tp4` 12,984, `ep8tp2` 12,611), inside the 5.5% spread of the `ep8tp8` arm's two runs.
+Achieved TFLOPS rises with sequence length (amortizes the TP all-gather/reduce-scatter). The step time moves by a few percent across TP widths, so tok/s/GPU falls nearly in proportion to the width, which divides the replicas: at s4096 `ep8tp2` runs 5,006, `ep8tp4` 2,450 and `ep8tp8` 1,277 tok/s/GPU; at s16384 6,306, 3,246 and 1,638. Use TP for a model whose layers do not fit, not for throughput.
 
 ### Why MoE utilization reads low
 
@@ -331,7 +334,7 @@ GC-off: communication ≈93% @ s4096 → ≈88% @ s16384). Compute–comm overla
 
 ## Qwen3.5-35B-A3B MoE (8× B300)
 
-**Model**: `Qwen/Qwen3.5-35B-A3B` (35B total, 256 experts, top_k=8, ~3B active). liger on, grouped-GEMM on, AdamWBF16/bf16, GC on. Attention runs **SDPA**: the FA4 backward emits NaN gradients on Qwen3.5's head_dim-256 partial-rotary attention (QK-norm + output gate), so `load_distributed_model` auto-falls back to SDPA — see [Flash Attention](flash-attention.md#model-specific-handling). Both tables: 8× B300, Blackwell image.
+**Model**: `Qwen/Qwen3.5-35B-A3B` (35B total, 256 experts, top_k=8, ~3B active). liger on, grouped-GEMM on, AdamWBF16/bf16, GC on. Attention runs **SDPA** in both tables ([Flash Attention](flash-attention.md#model-specific-handling) has the family's backends). Both tables: 8× B300, Blackwell image.
 
 ### EP scaling (seq 4096)
 

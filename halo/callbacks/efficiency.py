@@ -42,7 +42,6 @@ class _RunState:
     step_start_tokens_seen: int = 0
     elapsed_time: float = 0.0
     step_times: list[float] = field(default_factory=list)
-    elapsed_tokens_seen: int = 0  # per GPU
     elapsed_cluster_tokens: int = 0  # cluster-wide unique
     total_flops: float = 0.0
     total_active_flops: float = 0.0
@@ -56,7 +55,7 @@ class StepTimeMetrics:
 
 @dataclass
 class ThroughputMetrics:
-    """Per-GPU tokens (what MFU divides) and the unique tokens the cluster processed, per second."""
+    """The unique tokens the cluster processed per second, and their per-GPU share (cluster over world size)."""
 
     step_tokens_per_second: float = 0.0
     avg_tokens_per_second: float = 0.0
@@ -179,9 +178,12 @@ def _detect_precision(model: torch.nn.Module | None, training_args, lowp_precisi
 class EfficiencyCallback(transformers.TrainerCallback):
     """Step time, token throughput, MFU / S-MFU and GPU memory, merged into the logs dict.
 
-    Token accounting: HF gathers ``num_input_tokens_seen`` summed across ranks, so the per-rank count
-    divides by ``world_size`` (not by ``ep_size``: EP is orthogonal to DP, and each EP rank sees a
-    distinct batch) and again by ``cp_size``, since CP splits the sequence inside ``forward()``.
+    Token accounting: HF gathers ``num_input_tokens_seen`` summed across ranks, and every rank counts the
+    batch its data-parallel replica shares. The rank's own tokens, what MFU multiplies by its local
+    FLOPs per token, divide that sum by ``world_size`` and by ``cp_size``, since CP splits the sequence
+    inside ``forward()``; TP, expert-TP and pipeline ranks each run every token of the batch through their
+    parameter slice. Throughput per GPU is the cluster's unique tokens over ``world_size``, so no axis
+    counts a shared batch twice (EP is orthogonal to DP: each EP rank sees a distinct batch).
 
     Args:
         parallelism_config: the run's validated axis sizes; every divisor here is read off it.
@@ -252,7 +254,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         measured_attention_flops = self._drain_measured_attention_flops()
         if not self._is_warmup_step(state):
             step_time = self._record_step_time()
-            step_tokens_seen = self._record_token_throughput(state, step_time)
+            rank_tokens = self._record_token_throughput(state, step_time)
             flops = self.flops_model
             dense_per_token = active_per_token = mfu_ratio = smfu_ratio = None
             if flops is not None:
@@ -261,7 +263,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
                     mfu_ratio = flops.params_ratio
                 if flops.full_active_params > flops.local_active_params > 0:
                     smfu_ratio = flops.full_active_params / flops.local_active_params
-            step = (step_tokens_seen, step_time, measured_attention_flops)
+            step = (rank_tokens, step_time, measured_attention_flops)
             report, self._run.total_flops = self._record_utilization(
                 dense_per_token, self._run.total_flops, mfu_ratio, *step
             )
@@ -401,7 +403,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         return step_time
 
     def _record_token_throughput(self, state, step_time: float) -> int:
-        """Record per-GPU and cluster token throughput; returns the per-GPU step tokens."""
+        """Record cluster and per-GPU token throughput; returns the tokens this rank computed over."""
         parallelism = self._parallelism_config
         world_size = get_global_world_size()
         if state.num_input_tokens_seen is not None:
@@ -418,22 +420,21 @@ class EfficiencyCallback(transformers.TrainerCallback):
             step_tokens_cluster = self._fallback_step_tokens(world_size, None)
 
         # Under CP the Trainer counts the full sequence (CP splits inside forward()).
-        step_tokens_seen = step_tokens_cluster // world_size // parallelism.cp_size
-        self._run.elapsed_tokens_seen += step_tokens_seen
+        rank_tokens = step_tokens_cluster // world_size // parallelism.cp_size
         # Only ranks sharing one batch are non-independent (TP/ETP, CP and a pipeline chain's pp_size
         # ranks); EP is orthogonal to DP, so data_parallel_size does not divide ep_size.
-        step_cluster_tokens = step_tokens_seen * parallelism.data_parallel_size * parallelism.cp_size
+        step_cluster_tokens = rank_tokens * parallelism.data_parallel_size * parallelism.cp_size
         self._run.elapsed_cluster_tokens += step_cluster_tokens
         self.tps = ThroughputMetrics(
-            round(step_tokens_seen / step_time, _DISPLAY_DECIMALS),
-            round(self._run.elapsed_tokens_seen / self._run.elapsed_time, _DISPLAY_DECIMALS),
+            round(step_cluster_tokens / world_size / step_time, _DISPLAY_DECIMALS),
+            round(self._run.elapsed_cluster_tokens / world_size / self._run.elapsed_time, _DISPLAY_DECIMALS),
             round(step_cluster_tokens / step_time, _DISPLAY_DECIMALS),
             round(self._run.elapsed_cluster_tokens / self._run.elapsed_time, _DISPLAY_DECIMALS),
         )
-        return step_tokens_seen
+        return rank_tokens
 
     def _nominal_step_tokens(self) -> int:
-        """PER-GPU tokens a step would carry with every sequence padded to the length bound."""
+        """Tokens one rank's batch would carry in a step with every sequence padded to the length bound."""
         args = self.training_args
         return int(args.per_device_train_batch_size * args.gradient_accumulation_steps * self._max_seq_len)
 
@@ -465,7 +466,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
         per_token: float | None,
         total_flops: float,
         ratio: float | None,
-        step_tokens_seen: int,
+        rank_tokens: int,
         step_time: float,
         measured_attention_flops: float | None,
     ) -> tuple[_Utilization, float]:
@@ -473,10 +474,10 @@ class EfficiencyCallback(transformers.TrainerCallback):
         differ only in the per-token figure and the full-model ratio."""
         if not (per_token and self.gpu_peak_flops):
             return _UNKNOWN_UTILIZATION, total_flops
-        step_flops = step_tokens_seen * per_token
+        step_flops = rank_tokens * per_token
         attention_per_token = self.flops_model.attention_flops_per_token
         if measured_attention_flops is not None:
-            step_flops = step_flops - step_tokens_seen * attention_per_token + measured_attention_flops
+            step_flops = step_flops - rank_tokens * attention_per_token + measured_attention_flops
         elif not self._noted_attention_fallback and attention_per_token:
             self._noted_attention_fallback = True
             logger.info(

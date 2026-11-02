@@ -24,8 +24,7 @@ fp32_grad_reduce: true                # fp32 grad reduction for many-rank / cros
 # Experts stay bf16 (AdamWBF16, 6 B/param) — fp32 masters plus moments cost 16 B/param and OOM at 122B.
 
 # --- Attention & kernels ---
-# FA2 is pinned for packing. Left unset, the resolver auto-detects FA4 on Blackwell and then falls
-# back to SDPA for this family — the FA4 backward NaNs at head_dim 256 with partial rotary.
+# FA2 is pinned for packing. Left unset, packed rows take FA2 on Blackwell too (FA3 on Hopper).
 attn_implementation: flash_attention_2
 packing: true                         # fixed-length only — never padding_free (M-RoPE varlen crash)
 max_length: 16384                     # CP unavailable; single-rank activation ceiling — drop to 8192 if OOM

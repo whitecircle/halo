@@ -4,8 +4,10 @@ reference."""
 
 import logging
 import os
+from collections.abc import Sequence
 from typing import Any, NamedTuple
 
+import torch
 from huggingface_hub import hf_hub_download, is_offline_mode
 from huggingface_hub.errors import LocalEntryNotFoundError, RemoteEntryNotFoundError
 from transformers import (
@@ -16,9 +18,11 @@ from transformers import (
     PreTrainedTokenizer,
     PreTrainedTokenizerBase,
 )
+from transformers.utils import is_flash_attn_2_available
 
 from halo.checkpoint.format import PROCESSOR_FILES
 from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.collator_rules import rows_reach_varlen_kernel
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.entrypoints.script import ScriptContext
 from halo.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
@@ -28,6 +32,14 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.model_source import fetch_checkpoint_config, probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
+from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
+from halo.models.attention.selection import (
+    declares_attention_backends,
+    fa4_varlen_backward_refusal,
+    flash_attention_2_in_place_of_fa4,
+    preferred_flash_impl,
+    uses_fa4_dedicated_head_dim,
+)
 from halo.models.context_window import is_bounded_length, resolve_length_to_context
 from halo.models.modality import is_vlm_model
 from halo.models.seq_cls_heads import multimodal_sequence_classification_model_types
@@ -48,20 +60,95 @@ class PolicyLoad(NamedTuple):
 
 
 def default_padded_attn_implementation(
-    model_config, *, sinks_reset: bool, context_parallel: bool = False
+    model_config,
+    *,
+    sinks_reset: bool,
+    context_parallel: bool = False,
+    checkpoint_config=None,
+    companion_configs: Sequence = (),
 ) -> str | None:
-    """Attention implementation for a script that forwards right-padded (non-varlen) batches.
+    """Attention implementation for a script that forwards right-padded batches, when the YAML pins none.
 
-    SDPA when the YAML pins none: the auto-detected FA4 runs padded shapes through its slow varlen
-    path. ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks live) drops the default, since only
-    a sink-carrying impl is accepted there; pass the run's own ``reset_sinks``. ``context_parallel``
-    drops it too: Ulysses calls FlashAttention itself, so the loader's hardware-aware pick names it.
+    On Blackwell ``None``, the loader's own pick: FA4 where it applies, which outruns SDPA on these batches.
+    SDPA there when a checkpoint this request loads rules that pick out, and on every other GPU: a
+    remote-code class the resolver cannot read (Bailing's refuses every flash label at build), and a
+    head_dim-256 attention (:func:`uses_fa4_dedicated_head_dim`), whose dedicated FA4 kernel these scripts' padded
+    batches have not been measured on. The policy's own attention rules it out too where FA4's varlen backward refuses it
+    (:func:`fa4_varlen_backward_refusal`: Gemma 2's softcap, which then refuses SDPA and lands on FA2), since a
+    padded batch unpads to that call; the forward-only companions run it. ``checkpoint_config`` is the policy's
+    config; omitted, it is fetched (COLLECTIVE). ``companion_configs`` are those of the further models loaded on
+    the same request (a distillation teacher). ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks live)
+    drops the default, since only a sink-carrying impl is accepted there; pass the run's own ``reset_sinks``.
+    ``context_parallel`` drops it too: Ulysses calls FlashAttention itself, so the loader's hardware-aware
+    pick names it.
     """
     if model_config.attn_implementation:
         return model_config.attn_implementation
-    if context_parallel:
+    if context_parallel or not sinks_reset:
         return None
-    return "sdpa" if sinks_reset else None
+    if preferred_flash_impl() != "flash_attention_4":
+        return "sdpa"
+    if checkpoint_config is None:
+        checkpoint_config = fetch_checkpoint_config(model_config, tag="padded_attn_default")
+    loaded = (checkpoint_config, *companion_configs)
+    if fa4_varlen_backward_refusal(checkpoint_config) is None and all(
+        declares_attention_backends(config) and not uses_fa4_dedicated_head_dim(config) for config in loaded
+    ):
+        return None
+    return "sdpa"
+
+
+def default_training_rows_attn_implementation(
+    model_config: ModelArguments,
+    *,
+    packing: bool,
+    padding_free: bool,
+    per_device_train_batch_size: int,
+    dtype: torch.dtype,
+    checkpoint_config=None,
+) -> str | None:
+    """Attention implementation for a script that knows the shape of its training rows (SFT, self-distillation,
+    embedding), when the YAML pins none: ``flash_attention_2`` where the load would resolve FA4 (the GPU's own pick,
+    at a half-precision ``dtype``) on rows that reach its varlen call (:func:`rows_reach_varlen_kernel`) and one of
+    two kernel limits applies, else ``None``, the loader's pick.
+
+    - FA4's varlen backward refuses the checkpoint's attention (:func:`fa4_varlen_backward_refusal`: Gemma 2's
+      softcap); raises where no FA2 build imports. One unpadded row per batch runs FA4's dense kernel, which takes
+      the softcap.
+    - The rows hold several documents (``packing``, ``padding_free``) on a decoder with GatedDeltaNet layers
+      (:func:`has_gated_delta_net_layers`: the Qwen3.5/3.6 recipes pack on FA2, Qwen3-Next shares their attention)
+      whose heads run FA4's dedicated head_dim-256 kernel (:func:`uses_fa4_dedicated_head_dim`): that kernel is no
+      faster than FA2 on packed rows, and a deterministic run, whose backward it cannot take, would demote FA4 to
+      SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per query head. Not for
+      ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`: Qwen3.5/3.6, text-only checkpoints
+      included), whose varlen path faults FA2 there, and not without an FA2 build, where FA4 stands.
+
+    ``checkpoint_config`` omitted is fetched (COLLECTIVE), past the checks that need no config only.
+    """
+    if model_config.attn_implementation:
+        return model_config.attn_implementation
+    varlen_rows = rows_reach_varlen_kernel(
+        packing=packing, padding_free=padding_free, per_device_train_batch_size=per_device_train_batch_size
+    )
+    if not varlen_rows or dtype == torch.float32 or preferred_flash_impl() != "flash_attention_4":
+        return None
+    if checkpoint_config is None:
+        checkpoint_config = fetch_checkpoint_config(model_config, tag="training_rows_attn_default")
+    refused = fa4_varlen_backward_refusal(checkpoint_config)
+    if refused is not None:
+        return flash_attention_2_in_place_of_fa4(
+            f"FlashAttention-4's varlen backward takes no {refused}, and this run trains on rows that reach it "
+            f"(packed, padding-free or padded)"
+        )
+    if (
+        (packing or padding_free)
+        and is_flash_attn_2_available()
+        and uses_fa4_dedicated_head_dim(checkpoint_config)
+        and has_gated_delta_net_layers(checkpoint_config)
+        and not (padding_free and has_mrope_rotary(checkpoint_config))
+    ):
+        return "flash_attention_2"
+    return None
 
 
 def reject_multimodal_model_without_seq_cls_head(model_config: ModelArguments) -> None:
@@ -357,8 +444,8 @@ def load_preference_models(
     """Load a DPO/KTO run's policy and its reference under one attention binding, set up its adapter, pin
     the window and install the tokenizer.
 
-    Both loads take the shared padded-workload backend (SDPA, dropped under live sinks): a logratio whose
-    halves came from different attention kernels is biased.
+    Both loads take the shared padded-workload request (:func:`default_padded_attn_implementation`): a logratio
+    whose halves came from different attention kernels is biased.
     """
     attn_default = default_padded_attn_implementation(model_config, sinks_reset=args.reset_sinks)
     policy = load_policy_model(context, config, model_config, args, vlm_run=vlm_run, attn_default=attn_default)

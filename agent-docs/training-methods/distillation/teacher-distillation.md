@@ -11,7 +11,7 @@ Both models sit on every rank — the student with its optimizer states, the tea
 ```yaml
 model_name_or_path: Qwen/Qwen3.5-9B          # student
 teacher_model: Qwen/Qwen3.6-35B-A3B          # teacher, same tokenizer/vocab
-attn_implementation: sdpa                    # the script's default under reset_sinks: true
+attn_implementation: sdpa                    # what unset requests for these head_dim-256 checkpoints
 
 distill_loss: kl_divergence
 distill_alpha: 0.5                           # 0.5 = even split with CLM
@@ -34,7 +34,7 @@ output_dir: checkpoints/distill-qwen3.5-9b-from-qwen3.6-35b-a3b
 
 `distill_alpha` weighs the distillation term and `1 − distill_alpha` the CLM term (`1.0` drops CLM), and `distill_temperature` reaches only the four losses that declare it. `apply_hard_labels` scales the distillation term per token by `(1 − student_prob[label]) · teacher_prob[label]`, a detached weight that carries no gradient of its own; `slim`, which weights by its own gold-token rule, refuses it. `teacher_model_revision` pins the teacher repo, since the student's `model_revision` names a commit elsewhere. Over-length conversations are **dropped**, not truncated. Types and defaults: [TeacherDistillationConfig](../../reference/configuration-reference.md#teacherdistillationconfig) and [TeacherDistillScriptArguments](../../reference/configuration-reference.md#teacherdistillscriptarguments).
 
-The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teacher fits rounded targets) and under the run's `trust_remote_code`. Student and teacher make the same padded-workload attention request, so the two compared forwards cannot split across kernels — but it resolves against the **teacher's** config, so the teacher's per-family kernel limits apply (DeepSeek-V4 eager-only, Gemma 4 head_dim 512).
+The teacher loads in the run's own dtype (an fp32 run scored against a bf16 teacher fits rounded targets) and under the run's `trust_remote_code`. Student and teacher load on one padded-workload attention request, decided on both checkpoints (SDPA when either rules out the loader's pick on Blackwell), so the two compared forwards take the same backend wherever both models accept it. Each model resolves that request against its own config, so the teacher's per-family kernel limits apply to the teacher (DeepSeek-V4 eager-only, Gemma 4 head_dim 512). A pinned `flash_attention_4` the load keeps for a softcapped student (Gemma 2 27B) is refused before the teacher loads at more than one row per batch: those padded batches reach FA4's varlen backward, which takes no softcap ([Flash Attention](../../optimization/flash-attention.md#model-specific-handling)).
 
 Each term is one mean over the micro-batch's supervised tokens, so a short row's tokens weigh what a long row's do.
 

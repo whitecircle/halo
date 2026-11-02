@@ -142,6 +142,7 @@ _EXPECTED = {
         "images_field": "None",
     },
     "SFTScriptArguments": {
+        "allow_cross_document_linear_attention": "False",
         "assistant_message_template": "None",
         "conversation_field": "'prompt'",
         "generate_eval_examples": "False",
@@ -163,6 +164,7 @@ _EXPECTED = {
         "num_eval_examples": "50",
     },
     "SelfDistillScriptArguments": {
+        "allow_cross_document_linear_attention": "False",
         "assistant_message_template": "None",
         "confidence_field": "None",
         "confidence_power": "4.0",

@@ -4,9 +4,9 @@
 ``apply_family_patches`` keys the family patches on the resolved backend (``sdpa`` for Gemma 4, whose
 wide heads need the SDPA pin) and returns the implementation to build with (its variant, ``sdpa_flex_sliding``).
 The policy loader and the frozen reference/teacher loader both build and finalize the model with that return
-value. A frozen model built on plain ``sdpa`` would score every logprob of the objective's other half through a
-different attention than the policy it anchors, and a loader holding its own copy of the backend-to-variant step
-can drift into exactly that.
+value, and a trainer handed its model as a path string with a pinned backend builds with it. A frozen model built
+on plain ``sdpa`` would score every logprob of the objective's other half through a different attention than the
+policy it anchors, and a loader holding its own copy of the backend-to-variant step can drift into exactly that.
 
     python tests/cpu/models/test_frozen_model_attention_variant.py
 """
@@ -21,7 +21,7 @@ import torch
 from transformers import Gemma4TextConfig
 
 from halo.model_loading import model_preparation
-from halo.model_loading.parallel import frozen_models
+from halo.model_loading.parallel import frozen_models, whole_model
 from halo.model_loading.parallel import loader as model_loading
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.models.attention.sdpa_flex_sliding import SDPA_FLEX_SLIDING
@@ -31,6 +31,7 @@ from tests.common.repo import REPO_ROOT
 
 VARIANT_RESOLVER = "resolve_flex_sliding_attn_implementation"
 SEAM_MODULE = "halo/model_loading/model_preparation.py"
+AGREED_COMMIT = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _wide_gemma4_config() -> Gemma4TextConfig:
@@ -52,8 +53,22 @@ def test_the_seam_pins_the_backend_and_returns_the_build_implementation(opt_out,
     assert pins == [1], "the wide-head SDPA pin must apply whatever the model is built with"
 
 
+def _recording_seam(seen):
+    """An ``apply_family_patches`` stand-in that records the backend it was handed and returns a variant of it."""
+
+    def seam(model_config, attn_implementation):
+        seen["patched"] = attn_implementation
+        return f"{attn_implementation}_variant"
+
+    return seam
+
+
 class _Finalized(Exception):
     """Stops the policy loader once it has finalized the model."""
+
+
+class _Built(Exception):
+    """Stops the trainer load at its build call."""
 
 
 def _load_policy(config, seam, seen) -> None:
@@ -109,13 +124,39 @@ def _load_frozen(config, seam, seen) -> None:
 def test_each_loader_builds_with_what_the_seam_returns(load):
     """Each loader hands the seam the resolved backend, then builds and finalizes with its return value."""
     seen = {}
-
-    def seam(model_config, attn_implementation):
-        seen["patched"] = attn_implementation
-        return f"{attn_implementation}_variant"
-
-    load(_wide_gemma4_config(), seam, seen)
+    load(_wide_gemma4_config(), _recording_seam(seen), seen)
     assert seen == {"patched": "sdpa", "build": "sdpa_variant", "finalize": "sdpa_variant"}
+
+
+def test_the_trainer_path_load_builds_with_what_the_seam_returns():
+    """A trainer handed its model as a path string (SMPO, offline GRPO, a teacher-distillation student) hands the
+    seam the backend its ``model_init_kwargs`` pin, read off the config at the agreed commit, and builds with the
+    return value; the caller's kwargs keep the backend it pinned."""
+    seen = {}
+    config = _wide_gemma4_config()
+
+    def build(*args, **kwargs):
+        seen["build"] = kwargs["attn_implementation"]
+        raise _Built
+
+    args = SimpleNamespace(model_init_kwargs={"attn_implementation": "sdpa"}, gradient_checkpointing=False)
+    with (
+        patch.object(
+            whole_model, "resolve_model_source", lambda path, revision, **k: ModelSource(path, AGREED_COMMIT, path)
+        ),
+        patch.object(whole_model, "apply_remote_code_compat_shims"),
+        patch.object(
+            whole_model,
+            "AutoConfig",
+            SimpleNamespace(from_pretrained=lambda *a, **k: seen.update(config_revision=k.get("revision")) or config),
+        ),
+        patch.object(whole_model, "apply_family_patches", _recording_seam(seen)),
+        patch.object(whole_model, "auto_load_model", build),
+        pytest.raises(_Built),
+    ):
+        whole_model.resolve_trainer_model("org/policy", args, parallelism_config=None)
+    assert seen == {"config_revision": AGREED_COMMIT, "patched": "sdpa", "build": "sdpa_variant"}
+    assert args.model_init_kwargs["attn_implementation"] == "sdpa"
 
 
 def test_no_loader_resolves_the_variant_itself():

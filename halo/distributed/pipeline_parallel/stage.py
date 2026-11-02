@@ -27,6 +27,7 @@ from halo.distributed.pipeline_parallel.families import require_pp_attr, resolve
 from halo.distributed.pipeline_parallel.model_rules import reject_unsupported_pp_model
 from halo.distributed.pipeline_parallel.partition import resolve_layer_partition, validate_partition
 from halo.distributed.pipeline_parallel.stage_losses import FusedHeadLossFn
+from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM, HeadTransform, resolve_head_transform
 from halo.models.model_classes import REMOTE_CODE_MODEL_CLASS_ATTR, remote_code_model_class
 from halo.models.module_tree import (
@@ -37,6 +38,7 @@ from halo.models.module_tree import (
     module_path,
     split_layer_path,
 )
+from halo.models.segment_markers import packed_row_varlen_kwargs, segment_markers_for
 
 logger = logging.getLogger(__name__)
 
@@ -302,6 +304,28 @@ class PipelineStageModule(nn.Module):
             name_map[global_name] = local
         return name_map
 
+    def _flash_varlen_kwargs(
+        self, hidden_states: torch.Tensor, attention_mask: torch.Tensor | None, position_ids: torch.Tensor | None
+    ) -> dict[str, torch.Tensor | int]:
+        """A packed microbatch's varlen set on a flash run, built once per microbatch from one host read.
+
+        The schedule microbatches only batch-dim tensors, so the set cannot ride in with the batch; without it
+        every attention layer derives it from ``position_ids`` (a packed-row check, a ``nonzero`` and a max
+        length, each a host sync), and again in the recompute. Empty wherever transformers would not take that
+        path (a masked or multi-row microbatch, a non-flash backend), and on a family whose own mixers read the
+        set (:func:`~halo.models.segment_markers.segment_markers_for`), whose computation it would change.
+        """
+        config = getattr(self, "config", None)
+        if (
+            attention_mask is not None
+            or position_ids is None
+            or hidden_states.shape[0] != 1
+            or not is_flash_attn_implementation(effective_attn_implementation(config))
+            or segment_markers_for(config).cu_seq_lens
+        ):
+            return {}
+        return packed_row_varlen_kwargs(position_ids)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -316,7 +340,11 @@ class PipelineStageModule(nn.Module):
         """
         activation = {"input_ids" if self.is_first else "inputs_embeds": hidden_states}
         hidden = self.model(
-            **activation, attention_mask=attention_mask, position_ids=position_ids, use_cache=False
+            **activation,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            use_cache=False,
+            **self._flash_varlen_kwargs(hidden_states, attention_mask, position_ids),
         ).last_hidden_state
         if isinstance(hidden, DTensor):
             # torch's pipelining is DTensor-unaware: its boundary buffer is a plain torch.empty.

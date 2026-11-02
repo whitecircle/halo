@@ -18,7 +18,7 @@ An optional `margin` column widens the target gap per row.
 model_name_or_path: Qwen/Qwen3.5-9B
 dataset: Skywork/Skywork-Reward-Preference-80K-v0.2
 test_size: 0.05
-attn_implementation: sdpa          # the script's own default under reset_sinks: true
+attn_implementation: sdpa          # what unset requests for this head_dim-256 checkpoint
 
 max_length: 4096
 per_device_train_batch_size: 2
@@ -33,7 +33,7 @@ output_dir: checkpoints/rm-qwen3.5-9b-skywork-pref80k
 
 `max_length: null` resolves to the model's context window. `learning_rate` defaults to TRL's `1e-4`, high for a full fine-tune. A `chat_template_kwargs` column is splatted into the template too.
 
-The script defaults `attn_implementation` to `sdpa` for its right-padded batches when the YAML pins none, and requests nothing under `reset_sinks: false`, where only a sink-carrying backend is accepted ([padded workloads](../optimization/flash-attention.md#model-specific-handling)). `text_only_model` and `log_decoded_samples` are refused, not silently ignored.
+Left unpinned, `attn_implementation` takes the padded-batch default: the loader's own pick on Blackwell (SDPA for a remote-code or head_dim-256 checkpoint and for a softcapped policy, which the softcap turns into FA2), SDPA elsewhere, and nothing under `reset_sinks: false`, where only a sink-carrying backend is accepted ([padded workloads](../optimization/flash-attention.md#model-specific-handling)). `text_only_model` and `log_decoded_samples` are refused, not silently ignored.
 
 Where the tokenizer pads with eos (DeepSeek-V4), an INFO line names the cost: the recorded `config.pad_token_id` binds `nn.Embedding(padding_idx=<eos id>)` on the next load, masking that row's input-embedding gradient. Give such a base its own `pad_token:` to keep the EOS embedding training on the input side.
 

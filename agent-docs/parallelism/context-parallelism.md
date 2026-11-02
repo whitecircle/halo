@@ -83,16 +83,19 @@ on NVLink. `cp_size=3` on an 8-GPU domain is rejected at config time, before the
 `CPConfigError` for any `_attn_implementation` outside `SUPPORTED_ATTN_IMPLEMENTATIONS` (FA2,
 FA3, FA4, community kernel paths): `eager` and `sdpa` are rejected, and `flex_attention` is
 auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrapper declaring
-`REQUIRES_FLASH_ATTN_LABEL = False` waives the check for modeling code that cannot carry a flash
-label at all (Bailing; see [bailing.md](../models/bailing.md#cp-wrapper)).
+`REQUIRES_FLASH_ATTN_LABEL = False` waives the check (Bailing; see
+[bailing.md](../models/bailing.md#cp-wrapper)).
 
-That check reads the *declared* implementation. The kernel CP calls is arch-matched with an FA4 veto
-for the FA4-backward-NaN families
-([Flash Attention → Supported backends](../optimization/flash-attention.md#supported-backends)), and
-under CP the loader labels such a family with that kernel (FA2 on Blackwell, for GLM-4 MoE Lite) where
+That check reads the *declared* implementation. The kernel CP calls is arch-matched, with FA4 refused where
+the run cannot train the model on it (`supports_fa4_backward`: a deterministic run at head_dim 256,
+[Flash Attention → Supported backends](../optimization/flash-attention.md#supported-backends)), and
+under CP the loader labels such a model with that kernel (FA2 on Blackwell, for GLM-4 MoE Lite) where
 it would otherwise fall back to SDPA, so the auto-detected default passes the check. Leave
-`attn_implementation` at it. Bailing is the exception — it needs an explicit `sdpa`, since
-transformers refuses the auto-detected FA4 at model build.
+`attn_implementation` at it.
+
+The Ulysses call hands that kernel the `deterministic` flag transformers passes its own flash calls
+(`FLASH_ATTENTION_DETERMINISTIC`, which `full_determinism` sets before the load), so a deterministic run
+gets the kernel's deterministic backward under CP too.
 
 **Head divisibility** — `cp_size` must divide both the Q and the KV head count. GPT-OSS (64 Q, 8 KV):
 CP=8 → 8 Q / 1 KV; CP=4 → 16 Q / 2 KV; CP=3 rejected.
@@ -245,7 +248,7 @@ alone OOMs at long sequences (it shards experts, not activations) — that is th
 |---|---|---|
 | `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `halo/data/collators/factory.py`; `reject_cp_packed_collator` re-checks a hand-built collator |
 | left-padded batches | rejected on **every** forward (not cached — a prompt-left-padding collator pads only its ragged batches) | `context_parallel/ulysses_model.py` |
-| `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on the `sdpa` label its model build forces | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `reject_unsupported_ulysses_model` |
+| `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on any label | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `reject_unsupported_ulysses_model` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `reject_unsupported_model`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `reject_cp_trainer_args` |

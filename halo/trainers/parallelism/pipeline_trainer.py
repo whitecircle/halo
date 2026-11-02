@@ -216,6 +216,7 @@ class PipelineTrainerMixin:
             collator,
             per_device_train_batch_size=self.args.per_device_train_batch_size,
             n_microbatches=self._pp_n_microbatches,
+            model_config=self.model.config,
         )
         if isinstance(collator, DataCollatorWithPacking):
             # The collator flattens [B, L] -> [1, B*L] for transformers' batch-size-1 packed path;

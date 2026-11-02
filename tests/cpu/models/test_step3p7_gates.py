@@ -37,7 +37,7 @@ from halo.distributed.tensor_parallel.parallelize_attention import (
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks
 from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
-from halo.models.attention.selection import is_fa4_backward_nan_prone, resolve_attn_implementation
+from halo.models.attention.selection import resolve_attn_implementation, supports_fa4_backward
 from halo.models.config_access import get_config_field
 from halo.models.modality import config_declares_multimodality, is_vlm_model
 from halo.models.moe.balancing import resolve_balancing_mode
@@ -97,9 +97,9 @@ def test_attention_resolution_lands_on_sdpa():
     """``Step3p7ForConditionalGeneration._supports_flash_attn = False`` — resolved through the
     ImageTextToText mapping, since no CausalLM sibling exists — must divert every flash request to
     sdpa at resolve time; returning flash defers the failure to transformers' model build, after
-    the whole checkpoint has been fetched. Not an FA4-NaN entry: the refusal derives from the class
+    the whole checkpoint has been fetched. Not the FA4 backward refusal: this one derives from the class
     flag and covers FA2/FA3 too."""
-    assert is_fa4_backward_nan_prone(_composite_config()) is False
+    assert supports_fa4_backward(_composite_config()) is True
     expected = {
         None: "sdpa",
         "flash_attention_4": "sdpa",

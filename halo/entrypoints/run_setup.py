@@ -24,6 +24,7 @@ from halo.data.pipeline.coordinated_map import ensure_cache_dir
 from halo.kernels.jit_cache import anchor_jit_cache_dir, ensure_fa4_kernel_cache_env
 from halo.log import KEY_PREVIEW_COUNT, RUN_LOG_DIR_NAME, RUN_LOG_FILE
 from halo.model_loading.dtype import configure_float32_matmul_precision
+from halo.models.attention.selection import FLASH_ATTENTION_DETERMINISTIC_ENV
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.filesystem import FS_PROBE_PREFIX, is_fs_load_rank, is_fs_save_rank
@@ -138,6 +139,9 @@ def configure_training_run(args, training_config, script_name: str, *, overwrite
     logger.setLevel(training_config.get_process_log_level())
     _configure_tracking_env_vars(args, training_config, script_name)
 
+    # HF's Trainer sets it only in __init__, after the model load picked its attention backend by it.
+    if training_config.full_determinism:
+        os.environ[FLASH_ATTENTION_DETERMINISTIC_ENV] = "1"
     set_seed(training_config.seed)
     barrier()
 

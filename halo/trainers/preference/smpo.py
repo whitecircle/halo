@@ -35,6 +35,7 @@ from transformers.trainer_utils import EvalLoopOutput
 
 from halo.callbacks.variable_scheduler import VariableSchedulerCallback
 from halo.configs.preference import SMPOConfig
+from halo.data.collators.collator_rules import reject_mrope_padding_free
 from halo.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.preferences import VLM_SMPO_FEATURES, tokenize_preference_row, tokenize_vlm_preference_row
@@ -49,6 +50,7 @@ from halo.models.segment_markers import (
     document_ids,
     flattened_document_positions,
     reject_compressed_kv_rows,
+    reject_unmarked_linear_attention_rows,
     require_segment_aware_kernels,
     segment_marker_kwargs,
     segment_markers_for,
@@ -410,7 +412,13 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         if args.padding_free:
             reject_compressed_kv_rows(model.config, "padding_free")
             reject_padding_free_without_varlen(model.config)
+            reject_mrope_padding_free(model.config, padding_free=True)
             require_segment_aware_kernels(model.config, "padding_free")
+            reject_unmarked_linear_attention_rows(
+                model.config,
+                "padding_free",
+                allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+            )
         # position_ids alone keep the padding-free row's documents apart in attention; these are the
         # segment markers this family's conv / linear-attention mixers read on top.
         self._segment_markers = segment_markers_for(model.config)

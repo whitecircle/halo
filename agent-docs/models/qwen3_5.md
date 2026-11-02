@@ -2,7 +2,7 @@
 
 A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSparseMoeBlock`, `Qwen3_5MoeAttention`). Three traits drive parallelism: a sigmoid-gated shared expert, a double-width `q_proj` fusing query with a sigmoid gate, and a hybrid `layer_types` scheme interleaving full attention with `Qwen3_5MoeGatedDeltaNet` linear-attention layers.
 
-Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, no packing (the GatedDeltaNet rows carry no per-row `cu_seq_lens`), and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, no packing (a stage's forward passes the GatedDeltaNet layers no segment marker), and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 
@@ -18,7 +18,7 @@ Each decoder layer is *either* full softmax attention *or* a linear-attention bl
 | RoPE | Partial — only the first `head_dim * partial_rotary_factor` channels rotate (default `0.25`) |
 | Heads | 16 Q heads, 2 KV heads (GQA factor 8), which caps TP at `tp_size=2` |
 
-> **FlashAttention-4 is unsupported for this family on Blackwell.** FA4's backward emits NaN gradients for the combination head_dim 256 + partial RoPE + output gate + GQA 16:2. `is_fa4_backward_nan_prone` (`halo/models/attention/selection.py`) demotes the load to SDPA: the MoE family declares it on its spec (`fa4_backward_nan_prone`), the dense and Qwen3-Next towers are keyed on the `qwen3_5*` / `qwen3_next*` `model_type` prefixes. Qwen3.6 is covered by those: it reuses the 3.5 classes and ships under the 3.5 types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower).
+> **FlashAttention-4 runs this family on Blackwell through its dedicated head_dim-256 kernel.** The partial-rotary `torch.cat` leaves q/k head-major, which that kernel misreads in flash-attn-4 4.0.0b16; the loader hands it contiguous q/k/v ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The kernel's backward has no deterministic mode, so a `full_determinism` run demotes FA4 to SDPA (`supports_fa4_backward`, `halo/models/attention/selection.py`). SFT multi-document rows take FA2 in any run ([Configs](#configs)). The verdict reads the head widths, so Qwen3.6, which reuses the 3.5 classes and types (`Qwen/Qwen3.6-35B-A3B` declares `qwen3_5_moe` with a `qwen3_5_moe_text` tower), and Qwen3-Next resolve alike.
 
 On Hopper the standard detector picks FA3 when installed, else FA2.
 
@@ -95,7 +95,7 @@ ETP is supported: the routed experts use the fused-GLU contiguous-halves layout,
 
 The shipped EP config trains Qwen3.5/3.6 35B-A3B (40 layers = 10 full + 30 linear, 256 routed experts, top-k=8) at 33K max length under EP=8 (32 experts/rank); set `fp32_non_ep_params: true` for stable long context.
 
-Pin `attn_implementation: flash_attention_2` with `packing: true` (fixed-length): the M-RoPE varlen path crashes FA2 with `cudaErrorIllegalAddress`, so do not set `padding_free: true` without revalidating. SDPA reaches parity at `b=1`.
+SFT with `packing: true` (fixed-length) loads `flash_attention_2` on Blackwell when `attn_implementation` is unset: FA4's head_dim-256 kernel is no faster on packed rows, and under `full_determinism` the SDPA demotion would run a packed row as one dense mask with K/V repeated per query head ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). Unpacked rows keep FA4; the shipped recipes pin FA2. `padding_free: true` is refused at collator selection on every backend: the M-RoPE varlen path crashes FA2 with `cudaErrorIllegalAddress`, and every Qwen3.5/3.6 decoder runs it, text towers and `text_only_model` loads included ([Collators](../data/collators.md#factory-select_data_collator)). SDPA matches FA2 at `b=1` on unpacked rows only.
 
 Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeGatedDeltaNet` receives its boundaries from the collators and SMPO's padding-free forward, which emit `seq_idx` (its causal conv) and `cu_seq_lens_q` (its chunked delta rule) for the family, the two kwargs upstream reads and nothing model-side derives ([Document isolation](../data/collators.md#document-isolation-under-packing)). The same holds for Qwen3-Next.
 

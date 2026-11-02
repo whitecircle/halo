@@ -3,9 +3,10 @@
 
 ``_forward_padding_free`` runs the chosen ⧺ rejected batch as one ``[1, total]`` row. Attention keeps
 its documents apart through the resetting ``position_ids``; LFM2's ShortConv and the GatedDeltaNet
-conv + chunked delta rule (Qwen3.5/3.6, Qwen3-Next) only through the segment markers their forward
-reads from kwargs. So every document's mean log-prob from that one forward must equal the same
-document run alone, and a family that reads no marker must get exactly the base kwargs.
+conv + chunked delta rule (Qwen3-Next) only through the segment markers their forward reads from kwargs;
+the Qwen3.5/3.6 decoders rotate by M-RoPE, whose flattened row the trainer refuses. So every document's
+mean log-prob from that one forward must equal the same document run alone, and a family that reads no
+marker must get exactly the base kwargs.
 
 The CPU forward runs the torch fallbacks, which honor the markers through the device-aware dispatch
 fixups (``halo/kernels/hub_kernel_dispatch.py``); the CUDA kernels are covered by
@@ -21,8 +22,10 @@ import torch
 from transformers.models.deepseek_v4 import DeepseekV4Config, DeepseekV4ForCausalLM
 
 from halo.configs.preference import SMPOConfig
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models import segment_markers
 from halo.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.preference.preference_rules import reject_padding_free_without_varlen
 from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.models import TINY_DSV4_CONFIG
@@ -35,6 +38,12 @@ from tests.common.segment_isolation import (
     tiny_model,
 )
 from tests.common.smpo_trainer import smpo_trainer
+from tests.common.tiny_models import (
+    TINY_BAILING_RING_FAMILY,
+    TINY_DENSE_FAMILIES,
+    TINY_MOE_FAMILIES,
+    tiny_family_model,
+)
 
 # Same tokens, same weights: only the matmul reduction order differs between the flattened row and a
 # lone document, so fp32 agreement is at rounding level.
@@ -45,6 +54,11 @@ LEAK_FLOOR = 1e-3
 # The forward kwargs every flattened row carries.
 BASE_FORWARD_KWARGS = {"input_ids", "position_ids", "use_cache"}
 VARLEN_KWARGS = {"cu_seq_lens_q", "cu_seq_lens_k", "max_length_q", "max_length_k"}
+# Ring's Lightning Attention-2 layers read no segment marker; Qwen3 has softmax layers only.
+CROSSING_MODELS = {
+    "ring": lambda: tiny_family_model(TINY_BAILING_RING_FAMILY),
+    "qwen3": lambda: tiny_model("qwen3", "flash_attention_2"),
+}
 
 
 def _model(family: str):
@@ -102,7 +116,7 @@ def test_without_markers_the_mixers_leak(family, control):
 
 @pytest.mark.parametrize(
     ("family", "extra_kwargs"),
-    [("qwen3", set()), ("lfm2", {"seq_idx"}), ("qwen3_5", {"seq_idx"} | VARLEN_KWARGS)],
+    [("qwen3", set()), ("lfm2", {"seq_idx"}), ("qwen3_next", {"seq_idx"} | VARLEN_KWARGS)],
 )
 def test_forward_receives_only_the_family_markers(family, extra_kwargs):
     """Family-gated: a family reading no marker gets the base call alone."""
@@ -118,12 +132,43 @@ def test_gdn_padding_free_refused_without_segment_aware_kernels(monkeypatch, tmp
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", patched)
     with pytest.raises(ValueError, match="padding_free") as excinfo:
         SMPOTrainer(
-            model=tiny_model("qwen3_5", "flash_attention_2"),
+            model=tiny_model("qwen3_next", "flash_attention_2"),
             args=SMPOConfig(output_dir=str(tmp_path), padding_free=True, bf16=False, report_to="none"),
             processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),
             is_vlm=False,
         )
     assert missing in str(excinfo.value)
+
+
+def _smpo_trainer(model, tmp_path, *, padding_free: bool) -> SMPOTrainer:
+    return SMPOTrainer(
+        model=model,
+        args=SMPOConfig(output_dir=str(tmp_path), padding_free=padding_free, bf16=False, report_to="none"),
+        processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),
+        parallelism_config=ParallelismConfig(),
+        is_vlm=False,
+    )
+
+
+@pytest.mark.parametrize("family", ["qwen3_5", "qwen3_5_moe_text"])
+def test_padding_free_is_refused_on_an_m_rope_decoder(monkeypatch, tmp_path, family):
+    """A flattened M-RoPE row faults the flash varlen kernels, so the trainer refuses it on a varlen backend
+    with the segment-aware kernels present, as the SFT collator does; padded rows on the same model build."""
+    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla", lambda: True),))
+    model = tiny_family_model({**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}[family])
+    model.config._attn_implementation = "flash_attention_2"
+    with pytest.raises(ValueError, match="padding_free is refused .* rotates by M-RoPE") as excinfo:
+        _smpo_trainer(model, tmp_path, padding_free=True)
+    # The remedy must be one SMPOConfig accepts: it has no packing field, so naming only that one strands the user.
+    assert "packing" not in SMPOConfig.__dataclass_fields__
+    assert "padding_free: false" in str(excinfo.value)
+    _smpo_trainer(model, tmp_path, padding_free=False)
+
+
+def test_padding_free_builds_on_a_gated_delta_net_decoder_without_m_rope(monkeypatch, tmp_path):
+    """Anti-vacuity: Qwen3-Next (GatedDeltaNet, plain RoPE) clears every padding_free gate on the same backend."""
+    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla", lambda: True),))
+    assert _smpo_trainer(tiny_model("qwen3_next", "flash_attention_2"), tmp_path, padding_free=True).args.padding_free
 
 
 def test_padding_free_is_refused_on_compressed_kv_layers(tmp_path):
@@ -134,6 +179,50 @@ def test_padding_free_is_refused_on_compressed_kv_layers(tmp_path):
         SMPOTrainer(
             model=model,
             args=SMPOConfig(output_dir=str(tmp_path), padding_free=True, bf16=False, report_to="none"),
+            processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),
+            is_vlm=False,
+        )
+
+
+class _PolicyLoaded(Exception):
+    """Raised at the distributed setup, which follows the policy load and its padding-free gates."""
+
+
+@pytest.mark.parametrize(
+    ("name", "padding_free", "allow_crossing", "refused"),
+    [
+        ("ring", True, False, True),
+        ("ring", True, True, False),
+        ("ring", False, False, False),
+        ("qwen3", True, False, False),
+    ],
+)
+def test_padding_free_is_refused_where_linear_attention_crosses(
+    monkeypatch, tmp_path, name, padding_free, allow_crossing, refused
+):
+    """On a flash label the flattened row's softmax layers isolate and nothing else refuses, so a
+    linear-attention layer would carry state across its documents silently: refused at the policy load,
+    as on the SFT collators, unless allow_cross_document_linear_attention is set."""
+
+    def stop(*_args, **_kwargs):
+        raise _PolicyLoaded
+
+    monkeypatch.setattr(DistributedTrainerMixin, "_init_distributed_config", stop)
+    model = CROSSING_MODELS[name]()
+    model.config._attn_implementation = "flash_attention_2"
+    args = SMPOConfig(
+        output_dir=str(tmp_path),
+        padding_free=padding_free,
+        allow_cross_document_linear_attention=allow_crossing,
+        bf16=False,
+        report_to="none",
+    )
+    expected = ValueError if refused else _PolicyLoaded
+    match = "allow_cross_document_linear_attention" if refused else None
+    with pytest.raises(expected, match=match):
+        SMPOTrainer(
+            model=model,
+            args=args,
             processing_class=SimpleNamespace(pad_token_id=PAD_ID, eos_token_id=1),
             is_vlm=False,
         )

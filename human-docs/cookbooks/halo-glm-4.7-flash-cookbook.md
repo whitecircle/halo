@@ -79,8 +79,8 @@ the trainer.
 
 ## Settings that matter
 
-- **Attention.** The recipe pins `flash_attention_2`. FA4's backward produces NaN gradients on GLM's
-  attention shape, so Halo replaces an FA4 pick with SDPA, or with FA2 under CP. CP refuses an explicit
+- **Attention.** The recipe pins `flash_attention_2`. Unpinned, Blackwell runs FA4 at GLM's 256-wide
+  heads; under `full_determinism` Halo replaces it with SDPA, or with FA2 under CP. CP refuses an explicit
   `sdpa` label.
 - **Router balancing.** The recipe sets `moe_balancing: bias_update`, which `auto` also picks. It updates
   the router's own `e_score_correction_bias`, so the trained bias ships in every checkpoint and the

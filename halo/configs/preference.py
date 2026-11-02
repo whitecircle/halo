@@ -8,6 +8,7 @@ from transformers import TrainingArguments
 from halo.config_validation import ValidatedConfig, present, require_finite, require_int
 from halo.configs.script_arguments import (
     CommonScriptArguments,
+    CrossDocumentLinearAttentionArguments,
     DatasetNumProcArguments,
     GenerationEvalArguments,
     ModelInitKwargsArguments,
@@ -80,7 +81,13 @@ class SMPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
 
 
 @dataclass
-class SMPOConfig(DatasetNumProcArguments, ModelInitKwargsArguments, ValidatedConfig, TrainingArguments):
+class SMPOConfig(
+    CrossDocumentLinearAttentionArguments,
+    DatasetNumProcArguments,
+    ModelInitKwargsArguments,
+    ValidatedConfig,
+    TrainingArguments,
+):
     """Config for SMPOTrainer (SMPO): a reference-model-free, margin-based preference
     method with optional SFT loss. Per-field docs are in each field's ``help`` metadata."""
 

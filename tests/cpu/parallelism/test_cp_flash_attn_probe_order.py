@@ -83,18 +83,18 @@ def test_off_blackwell_and_hopper_it_still_falls_back_to_fa2():
 
 
 @pytest.mark.skipif(not (HAS_FA2 and HAS_FA4), reason="needs both flash_attn and flash_attn.cute installed")
-def test_a_nan_prone_family_vetoes_fa4_and_gets_fa2():
-    """Qwen3.5 / Qwen3-Next / GLM-4-Lite must not reach FA4 through CP.
+def test_a_refused_fa4_gets_fa2():
+    """Where FA4 cannot train the model (``supports_fa4_backward``: a deterministic run on its head_dim-256
+    kernel, whose backward has no deterministic mode), CP must not reach it.
 
-    Their FA4 backward emits NaN gradients, which `resolve_attn_implementation` avoids by demoting
-    the request to SDPA. CP cannot use that escape: it rejects SDPA outright, and this probe
-    overrides the configured label anyway — so a user who sets `attn_implementation:
-    flash_attention_2` to make CP accept the model (a pattern several shipped configs use) would
-    otherwise get FA4 regardless, and NaN out. The veto is the only thing standing there.
+    `resolve_attn_implementation` demotes such a request to SDPA. CP cannot use that escape: it rejects SDPA
+    outright, and this probe overrides the configured label anyway, so a run labelled `flash_attention_2` would
+    otherwise get FA4 regardless and assert in its first backward. ``allow_fa4=False`` is the only thing
+    standing there.
     """
     func = _resolve(blackwell=True, hopper=False, allow_fa4=False)
     assert "cute" not in _module_of(func), (
-        f"a NaN-prone family resolved {_module_of(func)!r} on Blackwell; the FA4 veto did not hold"
+        f"a refused FA4 resolved {_module_of(func)!r} on Blackwell; allow_fa4=False did not hold"
     )
     assert _module_of(func).startswith("flash_attn"), f"expected the FA2 entry point, got {_module_of(func)!r}"
 

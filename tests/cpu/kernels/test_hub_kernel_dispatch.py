@@ -76,6 +76,22 @@ def test_cpu_delta_rule_restarts_recurrent_state_per_document():
     assert leaked[0, :, 0].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
 
+def test_cpu_delta_rule_segments_by_the_host_bounds_and_consumes_them():
+    """The tree recurrence hands fla's ``cu_seqlens_cpu`` along with the device bounds. The fallback reads
+    the segments off that host copy (the device copy is on the meta device here, which a read would fault)
+    and passes it no further: the torch body takes no such argument."""
+    ensure_device_aware_kernel_dispatch()
+
+    @hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
+    def probe(query, key, value, g=None, beta=None, initial_state=None):
+        return value.cumsum(dim=1), value.new_zeros(1)
+
+    v = torch.ones(1, 6, 2)
+    device_bounds = torch.tensor([0, 2, 6], device="meta")
+    out, _ = probe(v, v, v, g=v, beta=v, cu_seqlens=device_bounds, cu_seqlens_cpu=torch.tensor([0, 2, 6]))
+    assert out[0, :, 0].tolist() == [1.0, 2.0, 1.0, 2.0, 3.0, 4.0]
+
+
 def test_cuda_capture_resolves_a_submodule_only_package_kernel():
     """``fla`` exports nothing at root, so a decoration that resolved only off a bare package import
     would silently capture the torch body — every CUDA forward then running the naive scan at ~10x

@@ -12,29 +12,29 @@ from __future__ import annotations
 
 import sys
 import types
+from collections import defaultdict
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
 from transformers import Glm4MoeLiteConfig, PretrainedConfig, Qwen3Config
+from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteAttention
 
 from halo import hardware
 from halo.distributed.context_parallel import ulysses_attention as cp_base_layer
+from halo.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention
 from halo.model_loading.parallel import loader as model_loading
 from halo.models.attention import selection as attention_mod
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
-# Every ``model_type`` transformers actually registers for an FA4-NaN attention stack. Listed
-# literally, NOT splatted from the family specs' ``model_types``: those declare which MoE block an
-# EP layer handles for checkpoint merging, which is a different question from which attention stack
-# NaNs, and the two sets are in no subset relation (qwen3_next and dense qwen3_5 NaN with no EP
-# layer; ten wrapped families must keep FA4). Qwen3.6 ships under the 3.5 types — Qwen/Qwen3.6-35B-A3B
-# declares ``qwen3_5_moe`` — so there is no separate 3.6 spelling to cover.
-FA4_NAN_PRONE_MODEL_TYPES = (
+# Every spelling of the families whose attention runs FA4's dedicated head_dim-256 kernel. Qwen3.6 ships under
+# the 3.5 types (Qwen/Qwen3.6-35B-A3B declares ``qwen3_5_moe``), so there is no separate 3.6 spelling to cover.
+FA4_HEAD_DIM_256_MODEL_TYPES = (
     "qwen3_5",
     "qwen3_5_moe",
     "qwen3_5_moe_text",
@@ -148,6 +148,29 @@ def test_context_parallelism_resolves_fa4_over_the_same_capability_range(capabil
         cp_base_layer._flash_attn_func.cache_clear()
 
 
+@pytest.mark.parametrize(("allow_fa4", "installs"), [(True, True), (False, False)])
+def test_context_parallelism_hands_fa4_contiguous_head_dim_256_inputs(allow_fa4, installs):
+    """Ulysses runs FA4 whatever the config's label, on K/V split off one fused all-to-all (strided at every head
+    width), so its kernel probe installs the head_dim-256 contiguity fix itself rather than relying on the
+    loader's FA4-labelled path."""
+    cp_base_layer._flash_attn_func.cache_clear()
+
+    def kernel(q, k, v, **kwargs):
+        return q
+
+    try:
+        with (
+            patch.object(cp_base_layer.torch.cuda, "is_available", lambda: True),
+            patch.object(cp_base_layer.torch.cuda, "get_device_capability", lambda *a, **k: (10, 0)),
+            patch.object(cp_base_layer, "flash_kernel", lambda impl, varlen: kernel),
+            patch.object(cp_base_layer, "install_fa4_contiguous_dedicated_head_inputs") as install,
+        ):
+            cp_base_layer._flash_attn_func(allow_fa4)
+        assert install.called is installs
+    finally:
+        cp_base_layer._flash_attn_func.cache_clear()
+
+
 @pytest.mark.parametrize(
     ("capability", "allow_fa4", "preferred"),
     [
@@ -167,11 +190,11 @@ def test_the_preferred_flash_backend_follows_the_architecture(capability, allow_
 
 
 @pytest.mark.parametrize(
-    ("hopper", "nan_prone", "label"), [(True, False, "flash_attention_3"), (False, True, "flash_attention_2")]
+    ("hopper", "fa4_trains", "label"), [(True, True, "flash_attention_3"), (False, False, "flash_attention_2")]
 )
-def test_the_cp_flex_fallback_labels_the_kernel_ulysses_runs(hopper, nan_prone, label):
+def test_the_cp_flex_fallback_labels_the_kernel_ulysses_runs(hopper, fa4_trains, label):
     """The loader's CP flex→flash label and ``_flash_attn_func`` read one preference: FA3 on Hopper, and FA2
-    for a family whose FA4 backward NaNs on Blackwell, where Ulysses vetoes FA4."""
+    for a model FA4 cannot train on Blackwell, where Ulysses refuses FA4."""
     config = Qwen3Config(
         num_hidden_layers=1, hidden_size=64, intermediate_size=128, num_attention_heads=4, num_key_value_heads=2
     )
@@ -179,7 +202,7 @@ def test_the_cp_flex_fallback_labels_the_kernel_ulysses_runs(hopper, nan_prone, 
     with (
         patch.object(attention_mod, "is_hopper_gpu", lambda: hopper),
         patch.object(attention_mod, "is_blackwell_gpu", lambda: not hopper),
-        patch.object(model_loading, "is_fa4_backward_nan_prone", lambda model_config: nan_prone),
+        patch.object(model_loading, "supports_fa4_backward", lambda model_config: fa4_trains),
         patch.object(model_loading, "logger"),
     ):
         resolved = model_loading._resolve_run_attention(
@@ -213,21 +236,40 @@ def _resolve_on_blackwell(config, requested, dtype=torch.bfloat16, **pc_fields) 
         )
 
 
+# GLM-4.7-Flash's MLA at its release widths: 192 + 64 query/key, 256 value, so FA4 runs its head_dim-256 kernel.
+_GLM4_FLASH_MLA = {**TINY_GLM4_MOE_LITE_CONFIG, "qk_nope_head_dim": 192, "qk_rope_head_dim": 64, "v_head_dim": 256}
+
+
 @pytest.mark.parametrize("requested", [None, "flash_attention_4"])
-def test_cp_labels_the_flash_kernel_ulysses_runs_for_an_fa4_nan_family(requested):
-    """Ulysses vetoes FA4 for an FA4-backward-NaN family and runs FA2 on Blackwell, so under CP the label is FA2;
-    the SDPA the resolver picks without CP is a label Ulysses refuses after the whole load."""
-    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG), requested, cp_size=2) == (
-        "flash_attention_2"
-    )
-    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG), requested) == "sdpa"
+def test_cp_labels_the_flash_kernel_ulysses_runs_where_fa4_cannot_train(requested, monkeypatch):
+    """A deterministic run refuses FA4's head_dim-256 kernel, Ulysses then runs FA2 on Blackwell, so under CP the
+    label is FA2; the SDPA the resolver picks without CP is a label Ulysses refuses after the whole load."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
+    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), requested, cp_size=2) == "flash_attention_2"
+    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), requested) == "sdpa"
 
 
-def test_cp_keeps_the_half_precision_refusal_for_an_fa4_nan_family():
-    """Only the NaN demotion takes the CP kernel's label: an fp32 run has no flash kernel at all, under CP or not."""
-    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG), None, torch.float32, cp_size=2) == (
-        "sdpa"
+@pytest.mark.parametrize("cp_size", [1, 2])
+@pytest.mark.parametrize("requested", [None, "flash_attention_4"])
+def test_a_head_dim_256_family_keeps_fa4_outside_a_deterministic_run(requested, cp_size, monkeypatch):
+    monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
+    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), requested, cp_size=cp_size) == (
+        "flash_attention_4"
     )
+
+
+@pytest.mark.parametrize(("deterministic", "allow_fa4"), [("1", False), ("0", True)])
+def test_the_ulysses_wrapper_refuses_fa4_where_the_loader_does(deterministic, allow_fa4, monkeypatch):
+    """The wrapper picks its own kernel, so it must read the same verdict as the loader's CP label."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
+    attention = Glm4MoeLiteAttention(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), layer_idx=0)
+    assert Glm4MoeLiteUlyssesAttention(attention, cp_group=None, cp_size=2)._allow_fa4 is allow_fa4
+
+
+def test_cp_keeps_the_half_precision_refusal_where_fa4_cannot_train(monkeypatch):
+    """Only the FA4 refusal takes the CP kernel's label: an fp32 run has no flash kernel at all, under CP or not."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
+    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), None, torch.float32, cp_size=2) == "sdpa"
 
 
 def test_detect_attn_impl_on_cpu_host_is_silent_fa2():
@@ -328,33 +370,48 @@ def test_unmapped_config_never_opens_the_sdpa_sinks_escape_hatch():
     assert resolved != "sdpa", "unmapped sinks config must not resolve to the sink-dropping sdpa"
 
 
-@pytest.mark.parametrize("model_type", FA4_NAN_PRONE_MODEL_TYPES)
-def test_fa4_is_demoted_to_sdpa_for_every_nan_prone_model_type(model_type):
-    """Each spelling of an FA4-backward-NaN family must leave the resolver on sdpa.
-
-    The failure is silent by construction: FA4's forward is finite and only the first backward goes
-    non-finite, so a spelling that escapes the demote costs a whole run before anything says why.
-    The warning is asserted too — a config can reach sdpa for unrelated reasons (fp32, Gemma4's
-    head_dim), and only this warning proves the NaN gate is what moved it.
+@pytest.mark.parametrize("model_type", FA4_HEAD_DIM_256_MODEL_TYPES)
+def test_a_deterministic_run_demotes_fa4_to_sdpa_at_head_dim_256(model_type, monkeypatch):
+    """Each spelling of a head_dim-256 family must leave a deterministic run's resolver on sdpa: that kernel's
+    backward asserts ``not deterministic``, so a run that kept FA4 would stop at its first step. The warning is
+    asserted too — a config can reach sdpa for unrelated reasons (fp32, Gemma4's head_dim), and only this
+    warning proves the determinism gate is what moved it.
     """
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
     with patch.object(attention_mod.logger, "warning") as warn, patch.object(attention_mod.logger, "info"):
         resolved = attention_mod.resolve_attn_implementation(
-            SimpleNamespace(model_type=model_type),
-            "flash_attention_4",
-            torch.bfloat16,
-            sinks_policy=SinksPolicy.NEUTRALIZED,
+            CONFIG_MAPPING[model_type](), "flash_attention_4", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )
-    assert resolved == "sdpa", f"{model_type} kept FA4, whose backward emits NaN gradients"
-    assert any("NaN gradients" in call.args[0] for call in warn.call_args_list)
+    assert resolved == "sdpa", f"{model_type} kept FA4, whose head_dim-256 backward has no deterministic mode"
+    assert any("no deterministic backward" in call.args[0] for call in warn.call_args_list)
+
+
+@pytest.mark.parametrize("model_type", FA4_HEAD_DIM_256_MODEL_TYPES)
+def test_a_head_dim_256_family_keeps_fa4_in_an_ordinary_run(model_type, monkeypatch):
+    monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
+    with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
+        resolved = attention_mod.resolve_attn_implementation(
+            CONFIG_MAPPING[model_type](), "flash_attention_4", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+    assert resolved == "flash_attention_4"
+
+
+@pytest.mark.parametrize("value", ["1", "0", "", "true", "True", "yes", "on", "2"])
+def test_the_determinism_read_is_the_one_transformers_hands_its_flash_kernels(value, monkeypatch):
+    """The FA4 head_dim-256 demote must follow transformers' own read of the variable (only ``"1"`` turns
+    ``deterministic`` on): a looser parse demotes FA4 on runs whose kernel never asks for a deterministic
+    backward, a stricter one keeps FA4 into that backward's assertion."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", value)
+    flash_kwargs = flash_utils._process_flash_attention_kwargs(
+        query_length=4, key_length=4, is_causal=True, supports_mapping=defaultdict(bool, deterministic=True)
+    )
+    assert attention_mod.flash_attention_deterministic() is flash_kwargs["deterministic"]
 
 
 @pytest.mark.parametrize("model_type", ["llama", "qwen3", "qwen3_moe", "glm4_moe"])
-def test_fa4_survives_for_families_outside_the_nan_gate(model_type):
-    """Anti-vacuity: the demote is keyed on the family, not applied to everything.
-
-    ``qwen3_moe`` and ``glm4_moe`` are the near misses — a prefix widened to ``qwen3``/``glm4``
-    would strip FA4 from two families that run it correctly.
-    """
+def test_fa4_survives_a_deterministic_run_at_other_head_widths(model_type, monkeypatch):
+    """Anti-vacuity: the demote is keyed on the head widths, not applied to every deterministic run."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
         resolved = attention_mod.resolve_attn_implementation(
             CONFIG_MAPPING[model_type](), "flash_attention_4", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
@@ -398,7 +455,7 @@ def test_an_attention_free_config_resolves_without_a_head_geometry(requested):
 
 
 def test_a_head_at_the_flash_cap_keeps_flash():
-    """The cap is inclusive: Qwen3-Next's 256-wide heads are within it (its FA4 demote is the NaN gate's)."""
+    """The cap is inclusive: Qwen3-Next's 256-wide heads are within it."""
     config = CONFIG_MAPPING["qwen3_next"]()
     assert attention_mod.resolve_head_dim(config) == attention_mod.FLASH_MAX_HEAD_DIM
     assert not attention_mod.has_head_dim_beyond_flash(config)
@@ -428,15 +485,12 @@ def test_a_config_rejecting_every_candidate_raises():
         attention_mod.validate_attn_implementation(_RejectingConfig(), "sdpa")
 
 
-def test_fa4_demote_reads_the_multimodal_text_tower_model_type():
-    """A VLM wrapper keeps the text stack's ``model_type`` on its text sub-config only.
-
-    The wrapper's own type is the vision-bearing composite, so a demote that read the top level
-    alone would hand the NaN-prone text tower FA4.
-    """
+def test_fa4_demote_reads_the_multimodal_text_tower_head_widths(monkeypatch):
+    """A VLM wrapper keeps the text stack's head geometry on its text sub-config only, so a demote that read
+    the top level alone would hand a deterministic run's text tower FA4."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
     config = SimpleNamespace(
-        model_type="some_multimodal_wrapper",
-        get_text_config=lambda: SimpleNamespace(model_type="qwen3_5_moe_text"),
+        model_type="some_multimodal_wrapper", get_text_config=lambda: CONFIG_MAPPING["qwen3_5_moe_text"]()
     )
     with patch.object(attention_mod.logger, "warning"), patch.object(attention_mod.logger, "info"):
         resolved = attention_mod.resolve_attn_implementation(

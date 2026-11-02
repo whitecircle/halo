@@ -69,7 +69,7 @@ multimodal is EP/ETP-only.
 
 `examples/sft/inkling/inkling-small-multinode-ep16.yaml` (EP=16 across 2 nodes, 256 experts → 16/rank). Two settings are load-bearing beyond the loading overrides above:
 
-- `attn_implementation: sdpa` — no Inkling FA dispatch; the Blackwell auto-select would fall back per-rank.
+- `attn_implementation: sdpa` — no Inkling FA dispatch; the Blackwell auto-select would fall back per-rank. Every attention call carries the dense relative bias, which the class declares by not being backend-compatible, so the sliding layers stay on SDPA rather than `sdpa_flex_sliding`.
 - `pad_token: "<|unused|>"` — the tokenizer ships no pad token; id 199998 is a dedicated special that never appears in text.
 
 Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP and head stay eager: `InklingMLP` scales its output by a trained `global_scale`, and the head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` before the loss. There is no rotary to fuse: position enters as a learned relative-logit bias.

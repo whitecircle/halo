@@ -9,6 +9,7 @@ from halo.data.vlm_detection import VLM_IMAGE_COLUMNS, dataset_image_evidence
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.stage import reject_reentrant_checkpointing
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.models.segment_markers import reject_pipeline_packed_rows
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, optim_name
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.filesystem import is_output_shared_filesystem
@@ -217,8 +218,10 @@ def reject_uncovered_pp_ep_layers(config: ParallelismConfig, ep_layers) -> None:
     reject_across_ranks(reason, "PP stage EP coverage")
 
 
-def reject_pp_collator(collator, *, per_device_train_batch_size: int, n_microbatches: int) -> None:
-    """Reject a collator whose batches cannot take the pipeline's fixed shape, frozen after the first step."""
+def reject_pp_collator(collator, *, per_device_train_batch_size: int, n_microbatches: int, model_config) -> None:
+    """Reject a collator whose batches cannot take the pipeline's fixed shape, frozen after the first step, or
+    whose packed rows ``model_config``'s mixers cannot keep apart
+    (:func:`~halo.models.segment_markers.reject_pipeline_packed_rows`)."""
     if collator is None:
         raise ValueError("Pipeline parallelism requires a data collator; the trainer has none.")
     if isinstance(collator, DataCollatorWithFlattening):
@@ -230,7 +233,9 @@ def reject_pp_collator(collator, *, per_device_train_batch_size: int, n_microbat
             f"the pipeline's P2P buffers are frozen after the first. Use packing instead "
             f"(`packing: true`), whose packed rows are a fixed shape."
         )
-    if isinstance(collator, DataCollatorWithPacking) and per_device_train_batch_size != n_microbatches:
+    if not isinstance(collator, DataCollatorWithPacking):
+        return
+    if per_device_train_batch_size != n_microbatches:
         raise ValueError(
             f"Packing under pipeline parallelism needs one packed row per microbatch, but "
             f"per_device_train_batch_size={per_device_train_batch_size} and the "
@@ -238,6 +243,7 @@ def reject_pp_collator(collator, *, per_device_train_batch_size: int, n_microbat
             f"leaks attention across documents under FlashAttention. Set "
             f"per_device_train_batch_size equal to the microbatch count."
         )
+    reject_pipeline_packed_rows(model_config)
 
 
 def require_pad_token_id(processing_class, why: str) -> int:

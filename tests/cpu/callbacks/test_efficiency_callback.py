@@ -11,6 +11,7 @@ import torch
 from halo.callbacks import efficiency, factory
 from halo.callbacks.efficiency import EfficiencyCallback, MFUMetrics, StepTimeMetrics, ThroughputMetrics
 from halo.callbacks.model_flops import RankFlopsModel, _is_expert_param, estimate_rank_flops
+from halo.distributed.parallelism_rules import SUPPORTED_AXIS_SETS
 from halo.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
 from halo.kernels.lowp.spec import LowpSpec
 from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
@@ -135,9 +136,11 @@ def _precision(model, args) -> str:
     return cb.precision
 
 
-def _peaked(flops: RankFlopsModel | None = _DENSE_FLOPS, peak: float | None = 1.0e15) -> EfficiencyCallback:
-    """A callback measuring every step against ``peak``, with ``flops`` as its FLOPs model."""
-    cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=0)
+def _peaked(
+    flops: RankFlopsModel | None = _DENSE_FLOPS, peak: float | None = 1.0e15, parallelism=_NO_PARALLELISM
+) -> EfficiencyCallback:
+    """A callback on ``parallelism`` measuring every step against ``peak``, with ``flops`` as its FLOPs model."""
+    cb = EfficiencyCallback(parallelism, n_warmup_steps=0)
     cb.flops_model, cb.gpu_peak_flops = flops, peak
     return cb
 
@@ -450,28 +453,52 @@ def test_smfu_sparse_value(monkeypatch):
     assert cb.smfu.step_smfu_tflops_per_sec == pytest.approx(3.0, abs=1e-6)
 
 
-def test_token_throughput_per_gpu_and_cluster(monkeypatch):
-    """Per-GPU tokens = cluster/world; cluster tokens = per_gpu * data_parallel_size * cp."""
-    cb = EfficiencyCallback(make_parallelism_config(tp_size=2, world_size=4, gpus_per_node=4), n_warmup_steps=0)
-    # Pretend world_size is 4 (no real dist init → patch the helper).
-    monkeypatch.setattr(efficiency, "get_global_world_size", lambda: 4)
-    _measured_step(monkeypatch, cb, tokens=8000, step_time=2.0)
-    # cluster delta = 8000; per-gpu = 8000 / world(4) = 2000; per-GPU TPS = 2000 / 2.0s = 1000.
-    assert cb.tps.step_tokens_per_second == pytest.approx(1000.0, abs=1e-6)
-    # data_parallel_size = 4 / max(tp=2) = 2; cluster tokens = 2000 * 2 * cp(1) = 4000.
-    # cluster TPS = 4000 / 2.0 = 2000.
-    assert cb.tps.step_cluster_tokens_per_second == pytest.approx(2000.0, abs=1e-6)
+# Each axis as (config fields, world size, GPUs per node, data-parallel replicas, ranks splitting one sequence),
+# the replicas and the split counted by hand: a batch is shared by the ranks of one TP, expert-TP or CP group and
+# of one pipeline chain, while every EP rank draws its own.
+_AXES = {
+    "dp": ({}, 4, 4, 4, 1),
+    "ep": ({"ep_size": 4}, 4, 4, 4, 1),
+    "tp": ({"tp_size": 2}, 4, 4, 2, 1),
+    "cp": ({"cp_size": 2}, 4, 4, 2, 2),
+    "etp": ({"expert_tp_size": 2}, 4, 4, 2, 1),
+    "ep_tp": ({"ep_size": 2, "tp_size": 2}, 4, 4, 2, 1),
+    "ep_cp": ({"ep_size": 4, "cp_size": 4}, 4, 4, 1, 4),
+    "ep_etp": ({"ep_size": 2, "expert_tp_size": 2}, 4, 4, 2, 1),
+    "pp": ({"pp_size": 2}, 4, 2, 2, 1),
+    "pp_etp": ({"pp_size": 2, "expert_tp_size": 2}, 8, 4, 2, 1),
+    "pp_ep": ({"pp_size": 2, "ep_size": 2}, 4, 2, 2, 1),
+}
 
 
-def test_token_throughput_cp_divides_per_gpu(monkeypatch):
-    """Under CP the Trainer over-counts (full sequence per rank) → divide by cp_size."""
-    cb = EfficiencyCallback(make_parallelism_config(cp_size=2, world_size=4, gpus_per_node=4), n_warmup_steps=0)
-    monkeypatch.setattr(efficiency, "get_global_world_size", lambda: 4)  # dp = 4 / cp(2) = 2
-    _measured_step(monkeypatch, cb, tokens=8000, step_time=1.0)
-    # per-gpu raw = 8000/4 = 2000; CP halves it → 1000.
-    assert cb.tps.step_tokens_per_second == pytest.approx(1000.0, abs=1e-6)
-    # cluster = per_gpu(1000) * data_parallel_size(2) * cp(2) = 4000 (reconstructs full seq).
-    assert cb.tps.step_cluster_tokens_per_second == pytest.approx(4000.0, abs=1e-6)
+def _axis_config(axis: str):
+    fields, world, gpus_per_node, _, _ = _AXES[axis]
+    return make_parallelism_config(world_size=world, gpus_per_node=gpus_per_node, **fields)
+
+
+def test_the_throughput_rows_cover_every_supported_axis_set():
+    assert {_axis_config(axis).active_axes for axis in _AXES} == SUPPORTED_AXIS_SETS
+
+
+@pytest.mark.parametrize("axis", sorted(_AXES))
+def test_token_throughput_counts_each_shared_batch_once(monkeypatch, axis):
+    """Every rank counts the batch its replica shares into HF's world-summed counter. The cluster figure is each
+    replica's batch once, tokens/s/GPU is that over the world size, and MFU charges the rank every token it
+    runs through its parameter slice: the whole batch under TP, expert-TP and PP, its 1/cp share under CP."""
+    _, world, _, replicas, sequence_split = _AXES[axis]
+    batch_tokens, step_time = 8000, 2.0
+    cb = _peaked(parallelism=_axis_config(axis))
+    monkeypatch.setattr(efficiency, "get_global_world_size", lambda: world)
+    _measured_step(monkeypatch, cb, tokens=batch_tokens * world, step_time=step_time)
+
+    cluster = batch_tokens * replicas / step_time
+    assert cb.tps.step_cluster_tokens_per_second == pytest.approx(cluster)
+    assert cb.tps.step_tokens_per_second == pytest.approx(cluster / world)
+    assert cb.tps.avg_tokens_per_second == cb.tps.step_tokens_per_second, "one step: the average is the step"
+    rank_tokens = batch_tokens / sequence_split
+    assert cb.mfu.step_tflops_per_sec == pytest.approx(
+        rank_tokens * _DENSE_FLOPS.model_flops_per_token / step_time / 1e12
+    )
 
 
 @pytest.mark.parametrize("report_mfu_diagnostics", [False, True])

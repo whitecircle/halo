@@ -42,10 +42,10 @@ from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import patch_flex_attention_compile
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.models.attention.selection import (
-    is_fa4_backward_nan_prone,
     is_flash_attn_implementation,
     preferred_flash_impl,
     resolve_attn_implementation,
+    supports_fa4_backward,
     validate_attn_implementation,
 )
 from halo.models.config_access import apply_config_overrides
@@ -70,17 +70,17 @@ def resolve_policy_attn_implementation(
     *,
     sinks_policy: SinksPolicy,
     init_from_scratch: bool,
-    fa4_nan_fallback: str = "sdpa",
+    fa4_fallback: str = "sdpa",
 ) -> str:
     """The attention backend :func:`load_distributed_model` resolves for a policy from its config, dtype and GPU,
-    before the Context Parallelism swap: what a run can check before any weight loads. ``fa4_nan_fallback`` is
+    before the Context Parallelism swap: what a run can check before any weight loads. ``fa4_fallback`` is
     :func:`resolve_attn_implementation`'s."""
     return resolve_attn_implementation(
         model_config,
         requested,
         dtype,
         sinks_policy=_backend_sinks_policy(sinks_policy, init_from_scratch),
-        fa4_nan_fallback=fa4_nan_fallback,
+        fa4_fallback=fa4_fallback,
     )
 
 
@@ -96,15 +96,15 @@ def _resolve_run_attention(
 ) -> str:
     """The attention implementation the model is built with: resolved against this model and dtype,
     swapped to FlashAttention under CP, and passed through the family patches."""
-    # The kernel Ulysses runs, whatever the label: it vetoes FA4 for the FA4-backward-NaN families itself.
-    cp_flash = preferred_flash_impl(allow_fa4=not is_fa4_backward_nan_prone(model_config)) if pc.is_cp_mode else None
+    # The kernel Ulysses runs, whatever the label: it refuses FA4 where supports_fa4_backward does, itself.
+    cp_flash = preferred_flash_impl(allow_fa4=supports_fa4_backward(model_config)) if pc.is_cp_mode else None
     attn_implementation = resolve_policy_attn_implementation(
         model_config,
         requested,
         dtype,
         sinks_policy=sinks_policy,
         init_from_scratch=init_from_scratch,
-        fa4_nan_fallback=cp_flash or "sdpa",
+        fa4_fallback=cp_flash or "sdpa",
     )
 
     # CP (Ulysses) always runs flash_attn_func; label the config with the kernel it will actually use.

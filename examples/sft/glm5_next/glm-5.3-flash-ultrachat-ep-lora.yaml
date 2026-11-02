@@ -57,14 +57,14 @@ merge_expert_lora_on_save: true       # fold both halves into the base at every 
                                       #   merge_peft_adapters.py refuses it
 
 # --- Attention & sequence ---
-# Packing note: the KDA conv/scan crosses packed document boundaries on every backend (accepted
-# mixer class, as Zaya/Ling) — pack only where a little cross-document mixing is acceptable.
-packing: true
+# Padded rows: flat packing is refused for this family. On SDPA its DSA layers read only the padding
+# mask and its KDA conv/scan carries state, so a packed row would cross its documents in both. Tree
+# packing isolates both (agent-docs/models/glm5-next.md, Tree packing).
+packing: false
 max_length: 16384                     # starting point; raise after measuring free memory on the node
 
 # --- Training schedule ---
-per_device_train_batch_size: 1        # SDPA takes no cu_seqlens — batch>1 flattens into one wider row
-                                      #   and the 11 quadratic DSA layers pay for it; scale with GA
+per_device_train_batch_size: 1        # one padded row per step; scale the batch with GA
 per_device_eval_batch_size: 1
 gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
 num_train_epochs: 1.0

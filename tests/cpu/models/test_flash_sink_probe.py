@@ -26,13 +26,14 @@ import types
 
 import pytest
 import torch
-from transformers import LlamaConfig
+from transformers import Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, LlamaConfig, LlamaForCausalLM
 from transformers import modeling_flash_attention_utils as flash_utils
 
 import halo.model_loading.parallel.whole_model as warmup_mod
 from halo.model_loading.parallel.whole_model import warm_attention_kernels
 from halo.models.attention.backend_setup import warm_fa4_kernels
 from halo.models.attention.selection import FLASH_SINK_PARAM_NAMES, _attn_impl_handles_sinks, flash_kernel
+from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 
 # The probed entry point must stay the one transformers reads
 
@@ -124,10 +125,13 @@ class _RecordingCute(types.ModuleType):
         return call
 
 
-def _fa4_model() -> types.SimpleNamespace:
-    config = LlamaConfig(num_hidden_layers=1, hidden_size=64, num_attention_heads=4, num_key_value_heads=2)
-    config._attn_implementation = "flash_attention_4"
-    return types.SimpleNamespace(config=config)
+def _fa4_model() -> LlamaForCausalLM:
+    config = LlamaConfig(
+        vocab_size=64, num_hidden_layers=1, hidden_size=64, num_attention_heads=4, num_key_value_heads=2
+    )
+    model = LlamaForCausalLM(config)
+    model.config._attn_implementation = "flash_attention_4"
+    return model
 
 
 @pytest.fixture
@@ -160,6 +164,36 @@ def test_the_warmup_compiles_the_runs_dtype(warmed):
     assert warmed.calls
     for call in warmed.calls:
         assert {call[side].dtype for side in ("q", "k", "v")} == {torch.float16}
+
+
+@pytest.mark.parametrize(
+    ("qk_nope_head_dim", "qk_rope_head_dim", "v_head_dim"),
+    [(192, 64, 256), (128, 64, 128)],
+    ids=["glm-4.7-flash-256", "qk-wider-than-v"],
+)
+def test_the_warmup_compiles_the_mla_head_widths(warmed, qk_nope_head_dim, qk_rope_head_dim, v_head_dim):
+    """The kernel is keyed by the q/k and v widths. MLA's ``head_dim`` is only its RoPE slice (GLM-4.7-Flash: 64
+    against 256-wide q/k/v), so a warm-up sized off it leaves the run's kernel to JIT-compile on every rank during
+    the first step, outside the fence. transformers' flash path pads a narrower value up to the q/k width, so that
+    is the value width the run's kernel sees."""
+    config = Glm4MoeLiteConfig(
+        **{
+            **TINY_GLM4_MOE_LITE_CONFIG,
+            "num_hidden_layers": 1,
+            "qk_nope_head_dim": qk_nope_head_dim,
+            "qk_rope_head_dim": qk_rope_head_dim,
+            "v_head_dim": v_head_dim,
+        }
+    )
+    model = Glm4MoeLiteForCausalLM(config)
+    model.config._attn_implementation = "flash_attention_4"
+    warm_fa4_kernels(model, dtype=torch.bfloat16, device=torch.device("cpu"))
+
+    qk_width = qk_nope_head_dim + qk_rope_head_dim
+    assert len(warmed.calls) == 2
+    for call in warmed.calls:
+        assert (call["q"].shape[-1], call["k"].shape[-1], call["v"].shape[-1]) == (qk_width, qk_width, qk_width)
+        assert call["kwargs"]["softmax_scale"] == qk_width**-0.5
 
 
 def test_the_warmup_stays_inert_for_another_backend(warmed):

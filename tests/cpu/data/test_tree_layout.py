@@ -106,20 +106,25 @@ def _assert_stateful_parts(plan: dict, table, kernel: int) -> None:
     assert conv["index"][conv["own"]].tolist() == list(range(size)), "every token's own output, once, in row order"
 
     above: list[int] = []
+    depth_order = plan["depth_order"].tolist()
     for depth, level in enumerate(plan["levels"]):
         nodes = [node for node, node_depth in enumerate(depths) if node_depth == depth]
-        assert level["index"].tolist() == [
+        # The depth's slice of the depth order is its nodes' tokens, node after node.
+        first = sum(lengths[node] for node, node_depth in enumerate(depths) if node_depth < depth)
+        assert depth_order[first : first + sum(lengths[node] for node in nodes)] == [
             row for node in nodes for row in range(starts[node], starts[node] + lengths[node])
         ]
         assert level["cu_seqlens"].diff().tolist() == [lengths[node] for node in nodes]
+        # Python ints, which a batch transport leaves on the host for the kernel's chunk indices.
+        assert level["cu_seqlens_host"] == tuple(level["cu_seqlens"].tolist())
+        assert all(type(bound) is int for bound in level["cu_seqlens_host"])
         if depth:
             assert [above[slot] for slot in level["parent"].tolist()] == [parents[node] for node in nodes]
         else:
             assert "parent" not in level
         above = nodes
-    assert len(plan["levels"]) == max(depths) + 1
-    in_level_order = torch.cat([level["index"] for level in plan["levels"]])
-    assert in_level_order[plan["restore"]].tolist() == list(range(size))
+    assert len(plan["levels"]) == max(depths) + 1 and len(depth_order) == size
+    assert plan["depth_order"][plan["restore"]].tolist() == list(range(size))
 
 
 @pytest.mark.parametrize("seed", range(120))
@@ -186,6 +191,25 @@ def test_every_leaf_is_its_flat_example_and_plans_match_the_dense_mask(seed):
     kernel = rng.choice([2, 4])
     stateful = build_tree_attention_plan(table, sliding_window=window, full_form="gather", conv_kernel=kernel)
     _assert_stateful_parts(stateful, table, kernel)
+
+    sparse = build_tree_attention_plan(table, sliding_window=None, full_form="gather", sparse_attention=True)
+    assert "full" not in sparse and "sliding" not in sparse
+    _assert_path_links(sparse["sparse"], positions, full)
+
+
+def _assert_path_links(links: dict, positions: torch.Tensor, full: torch.Tensor) -> None:
+    """The one-comparison visibility test is the dense keep-mask, and walking a token's predecessors
+    visits exactly its path at its path positions, ending at its tree's first token."""
+    order = torch.arange(len(positions))
+    assert torch.equal((order[None, :] <= order[:, None]) & (order[:, None] < links["subtree_end"][None, :]), full)
+    assert torch.equal(links["position"], positions)
+    for token in range(len(positions)):
+        chain = [token]
+        while int(links["predecessor"][chain[-1]]) >= 0:
+            chain.append(int(links["predecessor"][chain[-1]]))
+        assert chain[::-1] == torch.nonzero(full[token]).flatten().tolist()
+        assert positions[chain[::-1]].tolist() == list(range(len(chain)))
+        assert int(links["tree_start"][token]) == chain[-1]
 
 
 @pytest.mark.parametrize("seed", range(60))

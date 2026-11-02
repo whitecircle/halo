@@ -11,7 +11,7 @@ import logging
 from peft import inject_adapter_in_model
 from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Normalize, Pooling
-from transformers import AutoModel
+from transformers import AutoConfig, AutoModel
 from trl import get_quantization_config
 
 from halo.checkpoint.model_card import HUB_TAGS
@@ -19,9 +19,10 @@ from halo.config_validation import reject_non_default_args, reject_unsupported_a
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
+from halo.data.collators.collator_rules import reject_fa4_varlen_training, rows_reach_varlen_kernel
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets
-from halo.entrypoints.model_setup import load_model_and_tokenizer
+from halo.entrypoints.model_setup import default_training_rows_attn_implementation, load_model_and_tokenizer
 from halo.entrypoints.script import (
     ScriptContext,
     configure_balancing_and_build_callbacks,
@@ -34,9 +35,10 @@ from halo.entrypoints.script import (
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import full_weights_on_every_rank
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
-from halo.model_loading.model_preparation import apply_run_model_policies
+from halo.model_loading.model_preparation import apply_family_patches, apply_run_model_policies
 from halo.model_loading.parallel.model_source import resolve_model_source
 from halo.model_loading.parallel.peft_setup import build_peft_config
+from halo.model_loading.parallel.whole_model import warm_attention_kernels
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.context_window import resolve_length_to_context
@@ -120,13 +122,24 @@ def _assemble_preloaded_pipeline(
     args: EmbeddingScriptArguments,
 ) -> SentenceTransformer:
     """The EP/TP pipeline: the parallel loader's backbone, its pooling and normalization from the config."""
+    # sentence-transformers pads each text column's batch: more than one row per batch reaches the varlen call.
+    rows = {
+        "packing": False,
+        "padding_free": False,
+        "per_device_train_batch_size": embedding_config.per_device_train_batch_size,
+    }
+    varlen_rows = rows_reach_varlen_kernel(**rows)
     backbone, tokenizer = load_model_and_tokenizer(
         context,
         embedding_config,
         model_config,
         args,
+        attn_default=default_training_rows_attn_implementation(
+            model_config, **rows, dtype=resolve_training_dtype(embedding_config)
+        ),
         model_class=AutoModel,
     )
+    reject_fa4_varlen_training(backbone.config, varlen_rows=varlen_rows)
 
     transformer_module = PreloadedTransformer(auto_model=backbone, tokenizer=tokenizer)
     transformer_module.max_seq_length = resolve_embedding_max_length(embedding_config, transformer_module)
@@ -163,8 +176,6 @@ def _load_sentence_transformer(
     config's pooling, normalization and length."""
     parallelism_config = context.parallelism_config
     model_kwargs: dict = {"dtype": resolve_training_dtype(embedding_config)}
-    if model_config.attn_implementation:
-        model_kwargs["attn_implementation"] = model_config.attn_implementation
 
     # The parallel loader's two seams, since sentence-transformers loads the backbone itself: the
     # source fetched once per scope and agreed across ranks (revision threaded as on the EP/TP
@@ -174,6 +185,13 @@ def _load_sentence_transformer(
     revision = resolve_model_source(
         context.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
     ).revision
+    # Pinned, the backend takes the family patches the parallel loader applies, keyed on the backbone's
+    # own config; unset, transformers picks it at the build.
+    if model_config.attn_implementation:
+        backbone_config = AutoConfig.from_pretrained(
+            context.model_source, revision=revision, trust_remote_code=model_config.trust_remote_code
+        )
+        model_kwargs["attn_implementation"] = apply_family_patches(backbone_config, model_config.attn_implementation)
     with (
         joined_node_load(
             f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
@@ -200,6 +218,9 @@ def _load_sentence_transformer(
         sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
         attn_implementation=model_kwargs.get("attn_implementation"),
     )
+    # Every rank builds the pipeline here, so the FA4 and flex-sliding compiles run fenced now rather than
+    # at one rank's first forward while its peers wait in a collective.
+    warm_attention_kernels(backbone, dtype=model_kwargs["dtype"])
     # The checkpoint's modules.json decides pooling/normalization/length here while the EP/TP branch
     # builds them from the config; align them or those three knobs are inert on the default path.
     align_st_pipeline_to_config(st_model, embedding_config)

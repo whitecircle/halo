@@ -60,8 +60,6 @@ class MoEFamilySpec:
     weight_sync_refusal: str | None = None
     # Why the family runs eager attention only; ``None`` where its class's declared backends all run.
     eager_only_attention: str | None = None
-    # The FA4 backward emits NaN gradients on its 256-wide, partially rotated query/key heads.
-    fa4_backward_nan_prone: bool = False
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
     # one causal sequence.
     dense_packing_leaks: bool = False
@@ -79,6 +77,7 @@ _E_SCORE_CORRECTION_BIAS = NativeBalancingSlot(("gate.e_score_correction_bias",)
 # Ling-mini-2.0, Ring-mini-linear-2.0 and Ling-3.0 share one MoE block.
 BAILING = MoEFamilySpec(
     model_types=("bailing_moe", "bailing_moe_linear", "bailing_hybrid"),
+    dense_packing_leaks=True,
     expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
     balancing_slot=NativeBalancingSlot(("gate.expert_bias",)),
     shared_expert_attrs=("shared_experts",),
@@ -120,11 +119,10 @@ GLM4 = MoEFamilySpec(
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     experts_container_attrs=("experts", "routed_experts"),
     shared_expert_attrs=("shared_experts", "shared_expert"),
-    # MLA: qk_nope_head_dim 192 + qk_rope_head_dim 64, rope on the 64-wide split.
-    fa4_backward_nan_prone=True,
 )
 GLM5_NEXT = MoEFamilySpec(
     model_types=("glm5_next", "glm5_next_text"),
+    dense_packing_leaks=True,
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
@@ -198,7 +196,6 @@ QWEN3_5 = MoEFamilySpec(
     model_types=("qwen3_5_moe", "qwen3_5_moe_text"),
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
-    fa4_backward_nan_prone=True,
 )
 STEP3P7 = MoEFamilySpec(
     model_types=("step3p7", "step3p5"),

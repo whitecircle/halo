@@ -1,7 +1,9 @@
 """Tree attention: every token of a tree-packed row sees exactly its own root-to-leaf path. Each sequence mixer of
 an admitted family reads its part of the collator's plan (:mod:`halo.models.attention.tree_plan`): softmax
-attention at the flash interface, in the gather or split form; a GatedDeltaNet layer at its causal convolution
-and its delta-rule scan. Only backends whose kernels are pinned against every example run alone are admitted."""
+attention at the flash interface, in the gather or split form; a GatedDeltaNet or KDA layer at its causal
+convolution and its delta-rule scan; a key-selecting softmax layer (GLM-5 Next's DeepSeek sparse attention) in its
+own forward, never at the flash interface (:mod:`halo.models.attention.tree_sparse`). Only backends whose kernels
+are pinned against every example run alone are admitted."""
 
 import copy
 import functools
@@ -13,6 +15,7 @@ import numpy as np
 import torch
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.integrations.flash_attention import get_target_dtype
+from transformers.models.glm5_next import modeling_glm5_next
 from transformers.models.gpt_oss import modeling_gpt_oss
 from transformers.models.qwen3 import modeling_qwen3
 from transformers.models.qwen3_5 import modeling_qwen3_5
@@ -23,7 +26,11 @@ from halo.models.attention.backend_setup import WARMUP_MIN_SEQ_LEN
 from halo.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
 from halo.models.attention.layout import resolve_head_dim, resolve_num_key_value_heads
 from halo.models.attention.packed_position_ids import FlashInterfaceViewBase
-from halo.models.attention.selection import effective_attn_implementation
+from halo.models.attention.selection import (
+    FA4_DEDICATED_HEAD_DIM,
+    effective_attn_implementation,
+    uses_fa4_dedicated_head_dim,
+)
 from halo.models.attention.tree_plan import (
     GATHER_KEYS_PER_CALL,
     TREE_ATTENTION_KEY,
@@ -31,9 +38,10 @@ from halo.models.attention.tree_plan import (
     NodeTable,
     build_tree_attention_plan,
 )
+from halo.models.attention.tree_sparse import reject_unfoldable_tree_options, tree_sparse_forward
 from halo.models.config_access import text_config
 from halo.models.module_tree import backbone_with_layers, decoder_layers
-from halo.models.segment_markers import require_segment_aware_kernels
+from halo.models.segment_markers import require_linear_attention_kernels
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 
@@ -48,7 +56,7 @@ TREE_ATTN_IMPLEMENTATIONS = (_SPLIT_FORM_IMPLEMENTATION, "flash_attention_2")
 
 # The arguments a delta-rule scan takes its state and segments through, and the flag that has it
 # normalize query and key itself, with the epsilon it then uses.
-_RECURRENCE_STATE_ARGS = ("initial_state", "output_final_state", "cu_seqlens")
+_RECURRENCE_STATE_ARGS = ("initial_state", "output_final_state", "cu_seqlens", "cu_seqlens_cpu")
 _RECURRENCE_L2NORM_FLAG = "use_qk_l2norm_in_kernel"
 _RECURRENCE_L2NORM_EPS = 1e-6
 
@@ -63,23 +71,28 @@ class _StatefulMixer:
     """Where a linear-attention layer keeps state along the sequence, as its modeling module spells it.
 
     ``conv`` and ``recurrence`` are the module-level functions the causal convolution and the
-    delta-rule scan run through, ``layer_attr`` the decoder-layer attribute holding the mixer and
-    ``conv_kernel_field`` the config field with the convolution's width.
+    delta-rule scan run through, ``layer_attr`` the decoder-layer attribute holding the mixer,
+    ``conv_kernel_field`` the config field with the convolution's width, and ``mixer_class`` the
+    mixer's class where ``layer_attr`` also holds the family's softmax layers.
     """
 
     conv: str
     recurrence: str
     layer_attr: str
     conv_kernel_field: str
+    mixer_class: type | None = None
 
 
 @dataclass(frozen=True)
 class TreeFamily:
     """How one family reads a tree row: the modeling module whose attention registry takes the view,
-    and the stateful mixer its linear-attention layers are, where it has any."""
+    the stateful mixer its linear-attention layers are, where it has any, and the class of its
+    key-selecting softmax layers (``sparse``), which read the plan in their own forward instead of at
+    the attention interface."""
 
     module: ModuleType
     stateful: _StatefulMixer | None = None
+    sparse: type | None = None
 
 
 _GATED_DELTA_NET = _StatefulMixer(
@@ -89,9 +102,20 @@ _GATED_DELTA_NET = _StatefulMixer(
     conv_kernel_field="linear_conv_kernel_dim",
 )
 
-# Families whose forward is verified against every example run alone (the CPU tree-attention oracle sweeps
-# this table), keyed by the decoder's exact model type.
+_KIMI_DELTA_ATTENTION = _StatefulMixer(
+    conv="causal_conv1d_fn",
+    recurrence="chunk_kimi_delta_attention",
+    layer_attr="self_attn",
+    conv_kernel_field="linear_conv_kernel_dim",
+    mixer_class=modeling_glm5_next.Glm5NextTextLinearAttention,
+)
+
+# Families whose forward is verified against every example run alone (the CPU tree-attention oracle and the
+# sparse-attention test sweep this table), keyed by the decoder's exact model type.
 TREE_FAMILIES = {
+    "glm5_next_text": TreeFamily(
+        modeling_glm5_next, _KIMI_DELTA_ATTENTION, sparse=modeling_glm5_next.Glm5NextTextAttention
+    ),
     "gpt_oss": TreeFamily(modeling_gpt_oss),
     "qwen3": TreeFamily(modeling_qwen3),
     "qwen3_moe": TreeFamily(modeling_qwen3_moe),
@@ -122,6 +146,23 @@ class _GatherTokens(torch.autograd.Function):
             piece = index[start : start + GATHER_KEYS_PER_CALL]
             summed.index_add_(ctx.dim, piece, grad.narrow(ctx.dim, start, piece.numel()).float())
         return summed.to(ctx.dtype), None, None
+
+
+class _PermuteTokens(torch.autograd.Function):
+    """``index_select`` by a permutation of the token axis, whose backward is the inverse permutation's
+    ``index_select``. Each token is read once, so there is nothing to sum; the stock backward of a gather
+    zero-fills a full-size gradient and scatters into it instead."""
+
+    @staticmethod
+    def forward(ctx, states, order, inverse, dim):
+        ctx.save_for_backward(inverse)
+        ctx.dim = dim
+        return states.index_select(dim, order)
+
+    @staticmethod
+    def backward(ctx, grad):
+        (inverse,) = ctx.saved_tensors
+        return grad.index_select(ctx.dim, inverse), None, None, None
 
 
 class _L2Norm(torch.autograd.Function):
@@ -269,6 +310,11 @@ class TreeAttentionRegistry(FlashInterfaceViewBase):
         @functools.wraps(fn)
         def with_tree_plan(module, query, key, value, attention_mask, **kwargs):
             plan = kwargs.pop(TREE_ATTENTION_KEY, None)
+            if plan is not None and "sparse" in plan:
+                # A sparse family's plan carries no flash parts: a flash layer would run it as one sequence.
+                raise ValueError(
+                    f"a sparse-attention tree plan reached the flash interface of {type(module).__name__}"
+                )
             if plan is None or "full" not in plan:
                 return fn(module, query, key, value, attention_mask, **kwargs)
             if kwargs.get("sliding_window") is not None:
@@ -297,6 +343,13 @@ def _tree_conv(conv):
     return with_tree_plan
 
 
+@functools.lru_cache(maxsize=1)
+def _host_bounds(bounds: tuple[int, ...]) -> torch.Tensor:
+    """A level's varlen bounds as the host tensor fla takes. Cached, so a one-level plan hands every layer the same
+    bounds objects, which fla's single-entry chunk-index cache keys on."""
+    return torch.tensor(bounds)
+
+
 def _tree_recurrence(recurrence):
     """A delta-rule scan that runs a tree row one depth at a time, each node from its parent's final state."""
 
@@ -311,22 +364,31 @@ def _tree_recurrence(recurrence):
             # compile on the token count it normalizes, which a depth changes on every call.
             query, key = (_L2Norm.apply(states, _RECURRENCE_L2NORM_EPS) for states in (query, key))
             kwargs[_RECURRENCE_L2NORM_FLAG] = False
-        levels, outputs, state = plan["levels"], [], None
+        levels, order, restore = plan["levels"], plan["depth_order"], plan["restore"]
+        # One permutation per input and a view of it per depth, instead of a gather per depth.
+        sizes = [level["cu_seqlens_host"][-1] for level in levels]
+        queries, keys, values, gates, betas = (
+            _PermuteTokens.apply(states, order, restore, 1).split(sizes, dim=1)
+            for states in (query, key, value, g, beta)
+        )
+        outputs, state = [], None
         for depth, level in enumerate(levels):
-            index = level["index"]
             out, state = recurrence(
-                query.index_select(1, index),
-                key.index_select(1, index),
-                value.index_select(1, index),
-                g=g.index_select(1, index),
-                beta=beta.index_select(1, index),
+                queries[depth],
+                keys[depth],
+                values[depth],
+                g=gates[depth],
+                beta=betas[depth],
                 initial_state=None if state is None else state.index_select(0, level["parent"]),
                 output_final_state=depth + 1 < len(levels),
                 cu_seqlens=level["cu_seqlens"],
+                # fla builds its chunk indices from host bounds when given them, instead of reading the
+                # device copy back: a host sync per depth per layer.
+                cu_seqlens_cpu=_host_bounds(level["cu_seqlens_host"]),
                 **kwargs,
             )
             outputs.append(out)
-        return torch.cat(outputs, dim=1).index_select(1, plan["restore"]), None
+        return _PermuteTokens.apply(torch.cat(outputs, dim=1), restore, order, 1), None
 
     return with_tree_plan
 
@@ -343,42 +405,64 @@ def _require_tree_family(model_config) -> TreeFamily:
     return family
 
 
-def resolve_tree_plan_options(model_config) -> dict[str, int | None]:
+def resolve_tree_plan_options(model_config) -> dict[str, int | bool | None]:
     """The model-dependent arguments of :func:`~halo.models.attention.tree_plan.build_tree_attention_plan`."""
-    stateful, config = _require_tree_family(model_config).stateful, text_config(model_config)
+    family, config = _require_tree_family(model_config), text_config(model_config)
     return {
         "sliding_window": getattr(config, "sliding_window", None),
-        "conv_kernel": getattr(config, stateful.conv_kernel_field) if stateful else None,
+        "conv_kernel": getattr(config, family.stateful.conv_kernel_field) if family.stateful else None,
+        "sparse_attention": family.sparse is not None,
     }
 
 
-def _decoder_layer_modules(model, attr: str) -> list[torch.nn.Module]:
-    """The ``attr`` module of every decoder layer that has one, under any wrapper."""
+def _decoder_layer_modules(model, attr: str, of_class: type | None = None) -> list[torch.nn.Module]:
+    """The ``attr`` module of every decoder layer that has one, under any wrapper; of ``of_class`` only, where
+    given."""
     backbone = backbone_with_layers(base_transformers_model(model))
     layers = decoder_layers(backbone) if backbone is not None else ()
-    return [getattr(layer, attr) for layer in layers if hasattr(layer, attr)]
+    modules = [getattr(layer, attr) for layer in layers if hasattr(layer, attr)]
+    return [module for module in modules if of_class is None or isinstance(module, of_class)]
 
 
 def reject_unsupported_tree_attention(
-    model_config, attn_implementation: str | None, full_form: FullAttentionForm
+    model_config,
+    attn_implementation: str | None,
+    full_form: FullAttentionForm,
+    lora_target_modules: str | list[str] | None = None,
+    quantization_config=None,
 ) -> None:
     """Refuse, from the config and the attention backend it resolves to, what tree attention cannot run: a family
-    outside :data:`TREE_FAMILIES`, a backend with no tree form, the split form off FA4, and linear-attention kernels
-    that ignore segments. Needs no weights, so a run checks it before the load; :func:`install_tree_attention`
-    repeats it on the loaded model."""
-    _require_tree_family(model_config)
-    if attn_implementation not in TREE_ATTN_IMPLEMENTATIONS:
-        raise ValueError(
-            f"tree packing is verified on {list(TREE_ATTN_IMPLEMENTATIONS)}, but this model resolved to "
-            f"attn_implementation={attn_implementation!r}. Set attn_implementation to one of them."
-        )
-    if full_form == "split" and attn_implementation != _SPLIT_FORM_IMPLEMENTATION:
-        raise ValueError(
-            f"tree_full_attention='split' reads the attention kernel's log-sum-exp, which only "
-            f"{_SPLIT_FORM_IMPLEMENTATION} returns with a gradient; this model resolved to "
-            f"{attn_implementation!r}. Set tree_full_attention: gather."
-        )
-    require_segment_aware_kernels(model_config, "tree_packing")
+    outside :data:`TREE_FAMILIES`, a backend with no tree form, the split form off FA4 or on its head_dim-256
+    kernel, and linear-attention kernels that ignore segments. A family with key-selecting softmax layers
+    (``family.sparse``) attends in their own forward on whatever backend the model resolved to, so neither the
+    backend nor ``full_form`` applies to it; what that forward would skip or misread is refused instead: a
+    training-time ``attention_dropout``, an adapter on the projection it folds under ``lora_target_modules`` (the
+    run's adapter targets, ``None`` for no adapter), and that projection quantized, by the run's
+    ``quantization_config`` or the checkpoint's own. Needs no weights, so a run checks it before the load;
+    :func:`install_tree_attention` repeats it on the loaded model, ahead of the adapters."""
+    family = _require_tree_family(model_config)
+    if family.sparse is None:
+        if attn_implementation not in TREE_ATTN_IMPLEMENTATIONS:
+            raise ValueError(
+                f"tree packing is verified on {list(TREE_ATTN_IMPLEMENTATIONS)}, but this model resolved to "
+                f"attn_implementation={attn_implementation!r}. Set attn_implementation to one of them."
+            )
+        if full_form == "split" and attn_implementation != _SPLIT_FORM_IMPLEMENTATION:
+            raise ValueError(
+                f"tree_full_attention='split' reads the attention kernel's log-sum-exp, which only "
+                f"{_SPLIT_FORM_IMPLEMENTATION} returns with a gradient; this model resolved to "
+                f"{attn_implementation!r}. Set tree_full_attention: gather."
+            )
+        if full_form == "split" and uses_fa4_dedicated_head_dim(model_config):
+            raise ValueError(
+                f"tree_full_attention='split' backpropagates through the attention kernel's log-sum-exp, and "
+                f"{_SPLIT_FORM_IMPLEMENTATION}'s head_dim-{FA4_DEDICATED_HEAD_DIM} kernel, which this model's "
+                f"heads run, takes no gradient for it. Set tree_full_attention: gather."
+            )
+    if family.stateful is not None:
+        require_linear_attention_kernels(getattr(text_config(model_config), "model_type", None), "tree_packing")
+    if family.sparse is not None:
+        reject_unfoldable_tree_options(model_config, lora_target_modules, quantization_config)
 
 
 def install_tree_attention(model, full_form: FullAttentionForm) -> None:
@@ -406,8 +490,11 @@ def install_tree_attention(model, full_form: FullAttentionForm) -> None:
     if family.stateful is not None:
         for name, wrap in ((family.stateful.conv, _tree_conv), (family.stateful.recurrence, _tree_recurrence)):
             setattr(module, name, wrap(getattr(module, name)))
+    if family.sparse is not None:
+        family.sparse.forward = tree_sparse_forward(family.sparse.forward)
     if is_global_main_process():
-        logger.info(f"Installed tree attention on {module.__name__} (full layers: {full_form})")
+        full_layers = f"{family.sparse.__name__} selects on each path" if family.sparse else full_form
+        logger.info(f"Installed tree attention on {module.__name__} (full layers: {full_layers})")
 
 
 def _on_device(plan, device: torch.device):
@@ -456,7 +543,7 @@ def warm_recurrent_mixer_kernels(model, *, dtype: torch.dtype) -> None:
     if stateful is None:
         return
     config = text_config(model.config)
-    mixer = copy.deepcopy(_decoder_layer_modules(model, stateful.layer_attr)[0]).to(dtype)
+    mixer = copy.deepcopy(_decoder_layer_modules(model, stateful.layer_attr, stateful.mixer_class)[0]).to(dtype)
     device = next(mixer.parameters()).device
     plan = _warmup_plan(
         _RECURRENCE_WARMUP_DEPTH, device, full_form="gather", conv_kernel=getattr(config, stateful.conv_kernel_field)
@@ -476,7 +563,7 @@ def warm_tree_kernels(model, *, dtype: torch.dtype, full_form: FullAttentionForm
     runs the flash kernels the stock warm-up already compiled.
     """
     try:
-        if full_form == "split":
+        if full_form == "split" and _require_tree_family(model.config).sparse is None:
             warm_split_form_kernels(model.config, dtype=dtype)
         warm_recurrent_mixer_kernels(model, dtype=dtype)
         if is_global_main_process():

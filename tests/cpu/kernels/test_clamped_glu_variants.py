@@ -33,6 +33,7 @@ from halo.kernels.fused_glu import (
     resolve_clamped_glu_mul,
     silu_then_clamp_mul_eager,
 )
+from tests.common.fake_cuda import CudaLike
 
 ALPHA = 1.702  # GptOss's; the only variant whose sigmoid is scaled
 
@@ -154,13 +155,6 @@ _VARIANTS = [
 ]
 
 
-class _CudaLike(torch.Tensor):
-    """A combine branches on ``is_cuda`` alone, so shadowing it routes a CPU tensor down the fused
-    branch — the only way to observe the kernel arguments on a machine with no free GPU."""
-
-    is_cuda = True
-
-
 def _expected_combine(kernel_args: tuple) -> GluCombine:
     return GluCombine(fused_glu._CLAMPED_SILU, *kernel_args)
 
@@ -200,7 +194,7 @@ def test_combine_hands_the_kernel_the_argument_tuple_of_its_variant(variant, lim
     recorder = _RecordedKernel()
     monkeypatch.setattr(fused_glu, "_FusedGLU", recorder)
     gate, up = _grid(limit)
-    fused = variant.combine(limit)(gate.as_subclass(_CudaLike), up.as_subclass(_CudaLike))
+    fused = variant.combine(limit)(gate.as_subclass(CudaLike), up.as_subclass(CudaLike))
     assert recorder.calls == [_expected_combine(variant.kernel_args(limit))]
     torch.testing.assert_close(fused, variant.eager(gate, up, *variant.numeric_args(limit)), rtol=0, atol=1e-13)
 
@@ -215,8 +209,8 @@ def test_packed_form_hands_the_kernel_the_same_combine_as_the_separate_halves(va
     monkeypatch.setattr(fused_glu, "_FusedPackedGLU", fused_rec)
     gate, up = _grid(limit)
     combine = variant.combine(limit)
-    expected = combine(gate.as_subclass(_CudaLike), up.as_subclass(_CudaLike))
-    got = combine.packed(torch.cat([gate, up], dim=-1).as_subclass(_CudaLike))
+    expected = combine(gate.as_subclass(CudaLike), up.as_subclass(CudaLike))
+    got = combine.packed(torch.cat([gate, up], dim=-1).as_subclass(CudaLike))
     assert fused_rec.calls == separate.calls and len(separate.calls) == 1
     torch.testing.assert_close(got, expected, rtol=0, atol=0)
 

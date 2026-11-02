@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Policies the model-patch layer DERIVES rather than lists, and the one it deliberately does not.
 
-Each of these decides something silent when it is wrong — a NaN-producing attention backend, a
+Each of these decides something silent or late when it is wrong — an attention backend a run cannot train on, a
 recompute dtype mismatch, a norm quantized to bf16, a RoPE table left as load garbage — so the pins
 here are on the derivation itself, not on a call reaching some branch:
 
-* ``is_fa4_backward_nan_prone`` stays a per-family verdict, and the config numbers show why a
-  ``head_dim == 256`` derivation cannot replace it;
+* FA4's head_dim-256 refusal reads the query/key width, MLA's split included (transformers pads the value
+  head up to it), and holds only where transformers asks for a deterministic backward;
 * the FSDP2 ``cast_forward_inputs`` policy reads a CLASS attribute the Zaya load patch stamps,
   with no model_type list in the wrap;
 * the PEFT bf16 cast classifies norms by class, not by a substring of the module path;
@@ -22,12 +22,14 @@ import pytest
 import torch
 import torch.nn as nn
 import transformers
+from transformers.integrations import flash_attention
 from transformers.models.zaya import modeling_zaya
 
 from halo.distributed.fsdp import _should_cast_forward_inputs
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.parallel.peft_setup import _peft_module_casting_to_bf16
-from halo.models.attention.selection import is_fa4_backward_nan_prone
+from halo.models.attention.layout import resolve_qk_v_head_dims
+from halo.models.attention.selection import supports_fa4_backward
 from halo.models.zaya import patch_zaya_fp32_interlayer_residual
 
 
@@ -35,37 +37,70 @@ def _config(model_type: str):
     return transformers.CONFIG_MAPPING[model_type]()
 
 
-@pytest.mark.parametrize("model_type", ["qwen3_next", "qwen3_5_moe", "glm4_moe_lite"])
-def test_the_fa4_nan_families_are_all_refused(model_type):
-    """Every family whose FA4 backward emits NaN gradients must be refused the backend.
-
-    Missing one is silent: the run trains, the loss goes to NaN some steps later, and the cause is a
-    kernel choice nothing logged.
-    """
-    assert is_fa4_backward_nan_prone(_config(model_type)) is True
+# The families whose attention runs FA4's dedicated head_dim-256 kernel, MLA (GLM-4.7-Flash) included.
+_FA4_HEAD_DIM_256_MODEL_TYPES = ("qwen3_next", "qwen3_5", "qwen3_5_moe", "glm4_moe_lite", "gemma3_text")
 
 
-@pytest.mark.parametrize("model_type", ["qwen3", "llama", "gpt_oss"])
-def test_clean_families_keep_fa4(model_type):
-    """The refusal must stay narrow — it costs 2-3x on the attention kernel for every model it hits."""
-    assert is_fa4_backward_nan_prone(_config(model_type)) is False
+@pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES)
+def test_a_deterministic_run_refuses_fa4_at_head_dim_256(model_type, monkeypatch):
+    """The dedicated kernel's backward asserts ``not deterministic``, which transformers passes under
+    ``FLASH_ATTENTION_DETERMINISTIC``: such a run would stop at its first backward."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
+    assert supports_fa4_backward(_config(model_type)) is False
 
 
-def test_the_nan_trigger_is_not_derivable_from_the_declared_head_dim():
-    """Pins WHY the predicate is a family verdict instead of ``head_dim == 256 and partial rotary``.
+@pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES)
+def test_head_dim_256_keeps_fa4_outside_a_deterministic_run(model_type, monkeypatch):
+    """With q/k/v made contiguous for that kernel, nothing else refuses it."""
+    monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
+    assert supports_fa4_backward(_config(model_type)) is True
 
-    The two families spell the same physical shape in vocabularies that do not overlap: Qwen3-Next
-    declares it directly, GLM-4 MoE Lite is MLA and declares a 64-wide ``head_dim`` with the 256
-    split across ``qk_nope_head_dim``/``qk_rope_head_dim`` and no partial-rotary field at all. A
-    numeric derivation would therefore read GLM-4 MoE Lite as clean and hand it back to FA4.
-    """
-    qwen = _config("qwen3_next")
-    assert qwen.head_dim == 256 and qwen.rope_parameters["partial_rotary_factor"] < 1.0
 
-    glm = _config("glm4_moe_lite")
-    assert glm.head_dim != 256, "GLM-4 MoE Lite now declares head_dim=256 — revisit the derivation"
-    assert glm.qk_nope_head_dim + glm.qk_rope_head_dim == 256
-    assert "partial_rotary_factor" not in glm.rope_parameters
+@pytest.mark.parametrize("model_type", ["qwen3", "llama", "gpt_oss", "mistral4"])
+def test_the_deterministic_refusal_stays_off_other_head_widths(model_type, monkeypatch):
+    """Every other width runs FA4's general kernel, which has a deterministic backward."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
+    assert supports_fa4_backward(_config(model_type)) is True
+
+
+def test_transformers_pads_the_value_head_to_the_query_key_width(monkeypatch):
+    """Premise of the query/key-only verdict: transformers' flash path hands the kernel a value as wide as the
+    query (MLA's narrower value padded) and crops the output back."""
+    widths = []
+
+    def kernel(query, key, value, *args, **kwargs):
+        widths.append((query.shape[-1], key.shape[-1], value.shape[-1]))
+        return torch.zeros_like(value)
+
+    monkeypatch.setattr(flash_attention, "_flash_attention_forward", kernel)
+    module = SimpleNamespace(config=SimpleNamespace(_attn_implementation="flash_attention_4"), is_causal=True)
+    query, key = (torch.zeros(1, 2, 3, 256, dtype=torch.bfloat16) for _ in range(2))
+    value = torch.zeros(1, 2, 3, 128, dtype=torch.bfloat16)
+    out, _ = flash_attention.flash_attention_forward(module, query, key, value, None)
+    assert widths == [(256, 256, 256)]
+    assert out.shape[-1] == 128
+
+
+def test_the_deterministic_refusal_reads_the_query_key_width_alone(monkeypatch):
+    """An MLA with 256-wide q/k and a 128-wide v reaches the dedicated kernel with its value padded to 256, so a
+    deterministic run refuses FA4 there too."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
+    config = transformers.Glm4MoeLiteConfig(v_head_dim=128)
+    assert resolve_qk_v_head_dims(config) == (256, 128)
+    assert supports_fa4_backward(config) is False
+
+
+@pytest.mark.parametrize(
+    ("model_type", "declared_head_dim", "widths"),
+    [("glm4_moe_lite", 64, (256, 256)), ("mistral4", 128, (128, 128)), ("qwen3_next", 256, (256, 256))],
+)
+def test_the_head_widths_count_the_mla_split(model_type, declared_head_dim, widths):
+    """MLA declares a ``head_dim`` that is only its RoPE slice (GLM-4.7-Flash: 64) and the query/key width as
+    ``qk_nope_head_dim + qk_rope_head_dim``, so reading ``head_dim`` alone would hand it back FA4's deterministic
+    assert."""
+    config = _config(model_type)
+    assert config.head_dim == declared_head_dim
+    assert resolve_qk_v_head_dims(config) == widths
 
 
 class _ResidualLayer(nn.Module):

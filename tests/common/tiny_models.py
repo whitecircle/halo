@@ -1,5 +1,6 @@
 """Builders a tiny random-init model needs before it can run: a synthetic on-disk checkpoint, a filled
-routing table, and one tiny model per EP MoE family.
+routing table, one tiny model per EP MoE family, and the configs the multi-document row gates are checked
+against (a release's remote-code config, a hybrid family no detection names).
 
 Kept apart from :mod:`tests.common.models`, the torch-free catalogue of names and configs that the CPU
 tier and the image build scripts import.
@@ -19,12 +20,18 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    Cohere2Config,
+    Cohere2ForCausalLM,
     Cohere2MoeConfig,
     Cohere2MoeForCausalLM,
     Cohere2VisionConfig,
     Cohere2VisionForConditionalGeneration,
     DeepseekV4Config,
     DeepseekV4ForCausalLM,
+    Gemma2Config,
+    Gemma2ForCausalLM,
+    Gemma3ForCausalLM,
+    Gemma3TextConfig,
     Gemma4Config,
     Gemma4ForCausalLM,
     Gemma4ForConditionalGeneration,
@@ -45,10 +52,19 @@ from transformers import (
     Lfm2MoeForCausalLM,
     Lfm2VlConfig,
     Lfm2VlForConditionalGeneration,
+    LlamaConfig,
+    LlamaForCausalLM,
     Mistral3Config,
     Mistral3ForConditionalGeneration,
+    MistralConfig,
+    MistralForCausalLM,
+    Olmo3Config,
+    Olmo3ForCausalLM,
+    PretrainedConfig,
     PreTrainedModel,
     PreTrainedTokenizerFast,
+    Qwen2Config,
+    Qwen2ForCausalLM,
     Qwen3_5ForCausalLM,
     Qwen3_5MoeConfig,
     Qwen3_5MoeForCausalLM,
@@ -71,15 +87,22 @@ from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.param_roles import fp32_pinned_names
+from halo.models.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
 from tests.common.models import (
+    BAILING_LING_3_TINY,
     BAILING_MOE_LING_MINI,
+    BAILING_MOE_RING_MINI,
     MISTRAL3_119B_MOE,
+    TINY_ALTERNATING_SLIDING_CONFIG,
+    TINY_BAILING_LING3_MLA_CONFIG,
     TINY_BAILING_MOE_CONFIG,
+    TINY_BAILING_RING_CONFIG,
     TINY_COHERE2_MOE_CONFIG,
     TINY_DSV4_CONFIG,
     TINY_GEMMA4_MOE_CONFIG,
     TINY_GEMMA4_VISION_CONFIG,
+    TINY_GEMMA4_WIDE_HEAD_CONFIG,
     TINY_GLM4_MOE_LITE_CONFIG,
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
@@ -89,6 +112,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MISTRAL4_CONFIG,
+    TINY_MISTRAL_SLIDING_CONFIG,
     TINY_PIXTRAL_VISION_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
@@ -114,6 +138,10 @@ DSV4_TID2EID_SEED = 1234
 PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
 # The files a synthetic checkpoint copies from its release so ``AutoTokenizer`` loads it offline.
 TOKENIZER_FILE_PREFIXES = ("tokenizer", "special_tokens", "chat_template")
+# A chat template rendering only the turns' contents, for a word-level tokenizer that scores whole conversations.
+CONTENT_ONLY_CHAT_TEMPLATE = "{% for message in messages %}{{ message['content'] }} {% endfor %}"
+# A sliding window shorter than the documents a packed test row carries, so it masks keys inside one.
+TINY_SLIDING_WINDOW = 3
 
 
 def padded_vocab_size(tokenizer) -> int:
@@ -178,6 +206,42 @@ def word_level_tokenizer(words: Sequence[str] = ()) -> PreTrainedTokenizerFast:
     return PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>", eos_token="<eos>", pad_token="<eos>")
 
 
+def build_wide_head_gemma4_reward_checkpoint(path: str, words: Sequence[str], *, seed: int = 0) -> None:
+    """Save a random-init single-score Gemma 4 text classifier at :data:`TINY_GEMMA4_WIDE_HEAD_CONFIG` (one sliding
+    and one 512-wide global layer) with a :func:`word_level_tokenizer` over ``words``, as the reward scorers load
+    one: the shape whose ``sdpa`` takes the wide-head SDPA pin and, on CUDA, the flex-sliding variant."""
+    tokenizer = word_level_tokenizer(words)
+    tokenizer.chat_template = CONTENT_ONLY_CHAT_TEMPLATE
+    torch.manual_seed(seed)
+    config = Gemma4TextConfig(
+        **TINY_GEMMA4_WIDE_HEAD_CONFIG,
+        layer_types=["sliding_attention", "full_attention"],
+        num_labels=1,
+        pad_token_id=tokenizer.pad_token_id,
+    )
+    Gemma4TextForSequenceClassification(config).save_pretrained(path)
+    tokenizer.save_pretrained(path)
+
+
+class UnknownHybridConfig(PretrainedConfig):
+    """A family transformers does not know and no toolkit list names, so a gate must read its linear-attention
+    layers off its declared fields."""
+
+    model_type = "halo_unknown_hybrid"
+
+
+def unknown_hybrid_config() -> PretrainedConfig:
+    """One linear-attention layer before one attention layer, without the GatedDeltaNet head split."""
+    return UnknownHybridConfig(layer_types=["linear_attention", "full_attention"])
+
+
+def remote_config(repo: str, **overrides) -> PretrainedConfig:
+    """Release ``repo``'s config, built by the remote code it ships once the shims restore the names that code
+    imports and transformers 5 dropped."""
+    apply_remote_code_compat_shims()
+    return AutoConfig.from_pretrained(repo, trust_remote_code=True, **overrides)
+
+
 def build_tied_qwen3_checkpoint(target_dir: str, tokenizer, *, moe: bool, seed: int) -> None:
     """Save a random-init :data:`TINY_TIED_QWEN3_CONFIG` model (Qwen3-MoE with ``moe``) at ``tokenizer``'s
     padded vocab, with that tokenizer, as a checkpoint the production loaders read. Rank 0 only."""
@@ -214,9 +278,7 @@ class TinyFamily:
     ``ulysses_cp`` is False where Ulysses CP refuses the family at load (a sequence-axis mixer or
     compressor it cannot shard, or an attention no Ulysses wrapper implements). ``attention_targets`` names the
     attention projections LoRA adapts where the checkpoint index cannot (hub key names that differ
-    from the module tree, or projections not spelled ``*_proj``). ``cp_attn_implementation`` is the
-    label a family loads with under CP where the auto-selected flash label is refused (remote code
-    declaring only the v4 flash flag; the Ulysses wrapper calls flash through its own probe).
+    from the module tree, or projections not spelled ``*_proj``).
     """
 
     build: Callable[[dict], PreTrainedModel]
@@ -225,7 +287,6 @@ class TinyFamily:
     text_overrides: dict = field(default_factory=dict)
     ulysses_cp: bool = True
     attention_targets: tuple[str, ...] = ()
-    cp_attn_implementation: str | None = None
 
 
 def _causal(config_cls: type, model_cls: type, tiny: dict) -> Callable[[dict], PreTrainedModel]:
@@ -263,14 +324,17 @@ def _tiny_zaya(overrides: dict) -> PreTrainedModel:
     return model
 
 
-def _tiny_bailing(overrides: dict) -> PreTrainedModel:
-    """Bailing is remote code: its config and model classes come from the module the release ships,
-    which imports names transformers 5 dropped until the toolkit's shims restore them."""
-    apply_remote_code_compat_shims()
-    config = AutoConfig.from_pretrained(BAILING_MOE_LING_MINI, trust_remote_code=True)
-    for key, value in {**TINY_BAILING_MOE_CONFIG, **overrides}.items():
-        setattr(config, key, value)
-    return AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+def _tiny_bailing(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
+    """Bailing is remote code: its config and model classes come from the module the release ``repo``
+    ships, which imports names transformers 5 dropped until the toolkit's shims restore them."""
+
+    def build(overrides: dict) -> PreTrainedModel:
+        config = remote_config(repo)
+        for key, value in {**tiny, **overrides}.items():
+            setattr(config, key, value)
+        return AutoModelForCausalLM.from_config(config, trust_remote_code=True)
+
+    return build
 
 
 # One entry per EP MoE family (``halo/distributed/expert_parallel/families``), keyed by the ``model_type``
@@ -279,10 +343,9 @@ def _tiny_bailing(overrides: dict) -> PreTrainedModel:
 # family without a tiny model fails there.
 TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "bailing_moe": TinyFamily(
-        _tiny_bailing,
+        _tiny_bailing(BAILING_MOE_LING_MINI, TINY_BAILING_MOE_CONFIG),
         trust_remote_code=True,
         attention_targets=("query_key_value", "dense"),
-        cp_attn_implementation="sdpa",
     ),
     "cohere2_moe": TinyFamily(_causal(Cohere2MoeConfig, Cohere2MoeForCausalLM, TINY_COHERE2_MOE_CONFIG)),
     # The CSA/HCA compressor and indexer pool token windows along the sequence.
@@ -393,14 +456,68 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         ulysses_cp=False,
     ),
 }
+# Dense models with sliding-window layers, keyed by ``model_type``: a window on the config alone (Mistral), NoPE
+# full layers (Cohere2), q/k norm over the whole projection (OLMo 3).
+TINY_SLIDING_DENSE_FAMILIES: dict[str, TinyFamily] = {
+    "cohere2": TinyFamily(_causal(Cohere2Config, Cohere2ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG)),
+    "mistral": TinyFamily(_causal(MistralConfig, MistralForCausalLM, TINY_MISTRAL_SLIDING_CONFIG)),
+    "olmo3": TinyFamily(_causal(Olmo3Config, Olmo3ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG)),
+}
 # The dense model the family sweeps pair with the MoE roster.
 TINY_DENSE_FAMILY = TinyFamily(_causal(Qwen3Config, Qwen3ForCausalLM, TINY_QWEN3_CONFIG))
 # The dense Qwen3.5 text model (gated DeltaNet and attention layers), which the MoE roster does not carry.
 TINY_QWEN35_DENSE_FAMILY = TinyFamily(_causal(Qwen3_5TextConfig, Qwen3_5ForCausalLM, TINY_QWEN35_CONFIG))
 # The dense roster, keyed as the dense rows name it (``--family``).
 TINY_DENSE_FAMILIES: dict[str, TinyFamily] = {"qwen3": TINY_DENSE_FAMILY, "qwen3_5": TINY_QWEN35_DENSE_FAMILY}
+# Ring-mini-linear-2.0: the Bailing EP family's other attention layout (Lightning Attention-2 beside
+# softmax attention), which the roster's Ling 2.0 ``bailing_moe`` model does not carry.
+TINY_BAILING_RING_FAMILY = TinyFamily(
+    _tiny_bailing(BAILING_MOE_RING_MINI, TINY_BAILING_RING_CONFIG),
+    trust_remote_code=True,
+    ulysses_cp=False,
+    attention_targets=("query_key_value", "dense"),
+)
+# Ling-3.0's MLA attention without its KDA layers, at the same shape.
+TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
+    _tiny_bailing(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
+)
 # A MoE family no EP layer class wraps (Qwen3-Next, whose text fields Qwen3.5-MoE kept).
 TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN35_MOE_CONFIG))
+
+# Dense attention variants past the dense roster, at its geometry: plain GQA (Llama, Qwen2), a config-level sliding
+# window (Mistral), Gemma 2's attention and final softcaps over alternating sliding layers, and Gemma 3's sliding/full
+# layer types at the 256-wide head FA4 runs on its dedicated kernel.
+TINY_DENSE_ATTENTION_FAMILIES: dict[str, TinyFamily] = {
+    "llama": TinyFamily(_causal(LlamaConfig, LlamaForCausalLM, TINY_QWEN3_CONFIG)),
+    "mistral": TinyFamily(
+        _causal(MistralConfig, MistralForCausalLM, {**TINY_QWEN3_CONFIG, "sliding_window": TINY_SLIDING_WINDOW})
+    ),
+    "qwen2": TinyFamily(_causal(Qwen2Config, Qwen2ForCausalLM, TINY_QWEN3_CONFIG)),
+    "gemma2": TinyFamily(
+        _causal(
+            Gemma2Config,
+            Gemma2ForCausalLM,
+            {
+                **TINY_QWEN3_CONFIG,
+                "attn_logit_softcapping": 50.0,
+                "final_logit_softcapping": 30.0,
+                "sliding_window": TINY_SLIDING_WINDOW,
+            },
+        )
+    ),
+    "gemma3_text": TinyFamily(
+        _causal(
+            Gemma3TextConfig,
+            Gemma3ForCausalLM,
+            {
+                **TINY_QWEN3_CONFIG,
+                "head_dim": 256,
+                "layer_types": ["sliding_attention", "full_attention"] * (TINY_QWEN3_CONFIG["num_hidden_layers"] // 2),
+                "sliding_window": TINY_SLIDING_WINDOW,
+            },
+        )
+    ),
+}
 
 
 def tiny_family_model(family: TinyFamily, tokenizer=None, *, overrides: dict | None = None) -> PreTrainedModel:

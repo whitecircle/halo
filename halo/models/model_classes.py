@@ -5,6 +5,8 @@ from transformers.modeling_utils import PreTrainedModel
 
 # Set on a module that stands in for a cut model (a pipeline stage), whose own MRO no longer names it.
 REMOTE_CODE_MODEL_CLASS_ATTR = "_halo_remote_code_model_class"
+# The package transformers imports ``trust_remote_code`` modeling and config files under.
+_REMOTE_CODE_PACKAGE = "transformers_modules"
 
 
 def transformers_model_class(model: torch.nn.Module) -> type[PreTrainedModel] | None:
@@ -26,6 +28,11 @@ def transformers_model_class(model: torch.nn.Module) -> type[PreTrainedModel] | 
     )
 
 
+def is_remote_code_class(cls: type) -> bool:
+    """Whether ``cls`` comes from a ``trust_remote_code`` file rather than transformers."""
+    return cls.__module__.startswith(_REMOTE_CODE_PACKAGE)
+
+
 def remote_code_model_class(model: torch.nn.Module) -> type | None:
     """The remote-code class ``model`` was built from (module under ``transformers_modules``), or None.
 
@@ -33,7 +40,7 @@ def remote_code_model_class(model: torch.nn.Module) -> type | None:
     than ``type(model)``, so an FSDP2 in-place class swap still resolves it.
     """
     return getattr(model, REMOTE_CODE_MODEL_CLASS_ATTR, None) or next(
-        (cls for cls in type(model).__mro__ if cls.__module__.startswith("transformers_modules")), None
+        (cls for cls in type(model).__mro__ if is_remote_code_class(cls)), None
     )
 
 

@@ -165,6 +165,12 @@ def test_hybrid_groups_without_layer_types_are_refused_not_costed_as_full():
         attention_layout_from_config(_Config(None, layer_group_size=4))
 
 
+def test_a_layer_group_of_one_is_softmax_attention_throughout():
+    """Each group's last layer is softmax attention, so groups of one hold no linear layer to tell apart."""
+    layout = attention_layout_from_config(_Config(None, layer_group_size=1, sliding_window=None))
+    assert {layer.kind for layer in layout.layers} == {"full"} and len(layout.layers) == DEPTH
+
+
 def test_an_unknown_layer_type_is_refused():
     with pytest.raises(ValueError, match="mystery_attention"):
         attention_layout_from_config(_Config(["mystery_attention"] * DEPTH))

@@ -4,7 +4,7 @@
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
-Its MLA-style attention (256-wide qk/v, 64-dim rope split) triggers the FlashAttention-4 backward NaN on Blackwell, so the loader falls back from FA4 to SDPA (`is_fa4_backward_nan_prone`), or to FA2 under Context Parallelism. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+Its MLA-style attention (192 + 64 = 256-wide query/key, 256-wide value) runs FlashAttention-4's dedicated head_dim-256 kernel on Blackwell, which the loader hands contiguous q/k/v; under `full_determinism` it falls back from FA4 to SDPA (`supports_fa4_backward`), or to FA2 under Context Parallelism. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 ## EP layer
 

@@ -16,7 +16,7 @@ import torch
 from rich.console import Console
 from rich.table import Table
 from tqdm import tqdm
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
+from transformers import AutoConfig, AutoModelForSequenceClassification, AutoTokenizer
 
 from halo.checkpoint.reading import reject_partial_checkpoint
 from halo.data.chat_render import tokenize_rendered
@@ -27,6 +27,8 @@ from halo.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import DTYPE_BY_NAME
+from halo.model_loading.model_preparation import apply_family_patches
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
 
 logger = logging.getLogger(__name__)
 
@@ -92,17 +94,25 @@ def load_reward_model(
     # is randomly initialized, so the scores would be plausible-looking noise.
     reject_partial_checkpoint(model_path)
     logger.info(f"Loading Reward Model from {model_path}...")
+    # Before the config fetch, which can already import a remote modeling file.
+    apply_remote_code_compat_shims()
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
     tokenizer.model_max_length = max_seq_len
 
     device = torch.device(device_str)
+    config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+    # On CUDA, the family patches the training loads take, keyed on this model's config: without them an FA4
+    # head_dim-256 reward model reads its q/k scrambled and scores finite noise. A CPU scorer builds the backend
+    # as given, since the wide-head SDPA pin turns off the backends CPU SDPA runs on.
+    build_attn_impl = apply_family_patches(config, attn_impl) if device.type == "cuda" else attn_impl
     # excuse_task_head=False: scoring consumes the reward head, it never trains one. Pointed at a
     # plain causal-LM directory the head would initialize randomly and every score would be noise.
     model = from_pretrained_verified(
         AutoModelForSequenceClassification,
         model_path,
+        config=config,
         excuse_task_head=False,
-        attn_implementation=attn_impl,
+        attn_implementation=build_attn_impl,
         trust_remote_code=trust_remote_code,
     )
     model.to(dtype=DTYPE_BY_NAME[dtype], device=device).eval()

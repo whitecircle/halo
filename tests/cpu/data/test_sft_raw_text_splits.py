@@ -44,6 +44,7 @@ def _args(generate_eval_examples: bool) -> SimpleNamespace:
         train_on_last_assistant_only=False,
         tree_packing=False,
         generate_eval_examples=generate_eval_examples,
+        allow_cross_document_linear_attention=False,
     )
 
 
@@ -75,7 +76,7 @@ def _prepare(train_messages, test_messages, generate_eval_examples: bool = False
     )
     return _prepare_text_data(
         ds,
-        False,
+        None,
         _args(generate_eval_examples),
         _sft_config(),
         SimpleNamespace(model_name_or_path=QWEN3_0_6B),

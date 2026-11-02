@@ -11,7 +11,9 @@ dense and MoE, whose GatedDeltaNet layers carry a convolution context and a recu
 * the kernel plans, run through the real transformers flash path and the registry view with a
   reference implementation standing in for the CUDA kernel, give the same in both forms;
 * the custom autograd pieces of the seam are exact: the ancestor merge and the query/key
-  normalization against finite differences, the key gather against a plain fp32 scatter.
+  normalization against finite differences, the key gather against a plain fp32 scatter;
+* under gradient checkpointing, reentrant or not, a tree row trains to the logits and gradients it
+  trains to without: the recompute reads the plan as the first pass did.
 
 The CUDA kernels themselves are pinned by ``tests/gpu/kernels/test_fa4_tree_attention.py``.
 
@@ -35,6 +37,8 @@ from halo.models.attention.tree import (
     _GatherTokens,
     _L2Norm,
     _MergeAncestors,
+    _on_device,
+    _tree_recurrence,
     install_tree_attention,
     resolve_tree_plan_options,
 )
@@ -47,6 +51,7 @@ from tests.common.tiny_models import (
 )
 from tests.common.trees import (
     additive_mask,
+    checkpointing_gaps,
     example_rows,
     randomize_sinks,
     reference_varlen,
@@ -68,21 +73,30 @@ FAMILIES = {
 
 
 def test_every_admitted_family_is_swept():
-    assert set(FAMILIES) == set(TREE_FAMILIES)
+    """Families whose softmax layers read the plan at the flash seam; the key-selecting ones are swept
+    by test_tree_sparse_attention.py."""
+    assert set(FAMILIES) == {name for name, family in TREE_FAMILIES.items() if family.sparse is None}
 
 
 def _paths() -> tuple[list[list[int]], list[list[int]]]:
-    """A three-level tree with branches shorter and longer than the window, each ending in an answer."""
+    """A three-level tree with branches shorter and longer than the window, each ending in an answer. The
+    two-level branch opens on token 0, so it sorts first under the trunk and the depth-by-depth order of the
+    row's tokens is not their row order."""
     generator = torch.Generator().manual_seed(0)
 
     def tokens(n: int) -> list[int]:
         return torch.randint(0, VOCAB, (n,), generator=generator).tolist()
 
-    trunk, middle = tokens(11), tokens(4)
+    trunk, middle = tokens(11), [0, *tokens(4)[1:]]
     paths = [trunk + tokens(5), trunk + middle + tokens(3), trunk + middle + tokens(9), trunk + tokens(12)]
     answers = (2, 2, 3, 4)
     labels = [[LABEL_IGNORE_INDEX] * (len(path) - n) + path[-n:] for path, n in zip(paths, answers, strict=True)]
     return paths, labels
+
+
+def _stateful_plan(columns) -> dict:
+    table = build_node_table(columns[POSITION_COLUMN], columns[DEPTH_COLUMN])
+    return build_tree_attention_plan(table, sliding_window=None, full_form="gather", conv_kernel=4)
 
 
 @pytest.fixture(scope="module")
@@ -90,6 +104,10 @@ def tree():
     paths, labels = _paths()
     columns = tree_columns(paths, [[label != LABEL_IGNORE_INDEX for label in path_labels] for path_labels in labels])
     assert int(columns[DEPTH_COLUMN].max()) == 2
+    # A depth order that is its own inverse (the identity included) would hide a recurrence that skips or
+    # misapplies the permutation back to row order.
+    order = _stateful_plan(columns)["depth_order"]
+    assert not torch.equal(order[order], torch.arange(len(order)))
     return paths, labels, columns
 
 
@@ -283,6 +301,32 @@ def test_a_gather_over_the_call_budget_gives_the_one_call_logits_and_gradients(m
     assert max((chunked_grads[name] - grad).abs().max().item() for name, grad in one_grads.items()) <= 1e-6 * scale
 
 
+@pytest.mark.parametrize("use_reentrant", [True, False], ids=["reentrant", "non_reentrant"])
+@pytest.mark.parametrize("form", ["split", "gather"])
+@pytest.mark.parametrize("model_type", sorted(FAMILIES))
+def test_a_tree_row_trains_identically_under_gradient_checkpointing(
+    model_type, form, use_reentrant, tree, monkeypatch
+):
+    """A checkpointed decoder layer runs its forward again in the backward, so the flash view and a stateful family's
+    convolution and scan are handed the plan a second time and must read it as the first pass did."""
+    _, _, columns = tree
+    tiny_family, overrides = FAMILIES[model_type]
+    torch.manual_seed(0)
+    model = tiny_family_model(tiny_family, overrides=overrides)
+    randomize_sinks(model)
+    _install_reference_flash_kernel(monkeypatch, [])
+    _install(model, monkeypatch, form)
+    plan = _plan(model, columns, form)
+
+    def step() -> torch.Tensor:
+        logits = _tree_forward(model, columns, **plan)
+        _loss(logits, columns["labels"]).backward()
+        return logits.detach()
+
+    logit_gap, gradient_gap = checkpointing_gaps(model, step, use_reentrant=use_reentrant)
+    assert logit_gap <= 1e-6 and gradient_gap <= 1e-6
+
+
 def test_a_lora_wrapped_model_reads_the_tree_under_the_adapter(tree, monkeypatch):
     """A PeftModel calls the model it wraps through its own forward and nests the attention layers
     one wrapper down: the plan has to arrive there and the layers have to be found there."""
@@ -357,6 +401,130 @@ def test_a_tree_row_normalizes_query_and_key_once_not_once_per_depth(tree, monke
     assert normalizes == [False] * len(normalizes) and len(normalizes) % depths == 0 and normalizes
 
 
+def test_every_depth_reads_a_view_of_one_permuted_copy_of_each_input(tree):
+    """Each input of the scan is permuted into depth order once and every depth reads a view of that copy, so
+    the backward is one inverse permutation per input. A gather per depth instead zero-fills, scatters and
+    sums a full-size gradient per depth for every input."""
+    _, _, columns = tree
+    plan = _stateful_plan(columns)
+    seen = []
+
+    def scan(query, key, value, *, g, beta, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu):
+        seen.append((query, key, value, g, beta))
+        return value * 2, value.new_zeros(len(cu_seqlens_cpu) - 1, 2)
+
+    tokens = len(columns["input_ids"])
+    states = [torch.randn(1, tokens, 2, 4, requires_grad=True) for _ in range(3)]
+    gates = [torch.randn(1, tokens, 2, requires_grad=True) for _ in range(2)]
+    out, _ = _tree_recurrence(scan)(*states, g=gates[0], beta=gates[1], **{TREE_ATTENTION_KEY: plan})
+    assert len(seen) == len(plan["levels"]) == 3
+    for slot in range(5):
+        permuted = seen[0][slot]._base
+        assert permuted is not None and all(depth[slot]._base is permuted for depth in seen)
+        assert type(permuted.grad_fn).__name__ == "_PermuteTokensBackward"
+    assert type(out.grad_fn).__name__ == "_PermuteTokensBackward"
+
+
+def _per_depth_gathers(scan, plan, query, key, value, g, beta) -> torch.Tensor:
+    """The tree recurrence with every depth gathering its own tokens of every input, as a reference: the form
+    the depth-order permutation replaces."""
+    outputs, state, start = [], None, 0
+    levels = plan["levels"]
+    for depth, level in enumerate(levels):
+        index = plan["depth_order"][start : start + level["cu_seqlens_host"][-1]]
+        start += len(index)
+        out, state = scan(
+            *(states.index_select(1, index) for states in (query, key, value)),
+            g=g.index_select(1, index),
+            beta=beta.index_select(1, index),
+            initial_state=None if state is None else state.index_select(0, level["parent"]),
+            output_final_state=depth + 1 < len(levels),
+            cu_seqlens=level["cu_seqlens"],
+        )
+        outputs.append(out)
+    return torch.cat(outputs, dim=1).index_select(1, plan["restore"])
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+# GatedDeltaNet decays per head, KDA per channel.
+@pytest.mark.parametrize(("model_type", "per_channel_decay"), [("qwen3_5_text", False), ("glm5_next_text", True)])
+def test_the_depth_order_permutation_gives_the_per_depth_gathers_values(tree, model_type, per_channel_decay, dtype):
+    """The same scan calls on the same values, through the family's own delta-rule scan (its CPU fallback here):
+    the output equals the per-depth gathers' bit for bit, and every input's gradient exactly. Gradients compare
+    as values: a gather's zero-filled scatter turns a -0.0 into +0.0, which the permutation keeps."""
+    _, _, columns = tree
+    family = TREE_FAMILIES[model_type]
+    scan = getattr(family.module, family.stateful.recurrence)
+    plan = _stateful_plan(columns)
+    generator = torch.Generator().manual_seed(2)
+    tokens, heads, dim = len(columns["input_ids"]), 2, 8
+    gate_shape = (1, tokens, heads, dim) if per_channel_decay else (1, tokens, heads)
+    query, key, value = (torch.randn(1, tokens, heads, dim, generator=generator) for _ in range(3))
+    log_decay = -torch.randn(gate_shape, generator=generator).abs()
+    beta = torch.randn(1, tokens, heads, generator=generator).sigmoid()
+    inputs = [states.to(dtype) for states in (query, key, value, log_decay, beta)]
+    upstream = torch.randn(1, tokens, heads, dim, generator=generator).to(dtype)
+
+    def run(forward) -> list[torch.Tensor]:
+        leaves = [states.clone().requires_grad_(True) for states in inputs]
+        out = forward(*leaves)
+        out.backward(upstream)
+        return [out.detach(), *(leaf.grad for leaf in leaves)]
+
+    permuted = run(lambda q, k, v, g, b: _tree_recurrence(scan)(q, k, v, g=g, beta=b, **{TREE_ATTENTION_KEY: plan})[0])
+    gathered = run(lambda q, k, v, g, b: _per_depth_gathers(scan, plan, q, k, v, g, b))
+    bits = {torch.float32: torch.int32, torch.bfloat16: torch.int16}[dtype]
+    assert torch.equal(permuted[0].view(bits), gathered[0].view(bits))
+    assert all(grad.abs().sum() > 0 for grad in gathered[1:]), "every input carries a gradient"
+    assert all(torch.equal(mine, reference) for mine, reference in zip(permuted[1:], gathered[1:], strict=True))
+
+
+def test_the_recurrence_hands_the_scan_each_depths_bounds_from_the_host(tree):
+    """fla builds its chunk indices from ``cu_seqlens_cpu`` when given it instead of reading the device bounds
+    back, a host sync per depth per layer. On a plan whose tensors sit on the meta device any device read
+    raises, so the bounds the scan receives come from the plan's host copy."""
+    _, _, columns = tree
+    plan = _stateful_plan(columns)
+    calls = []
+
+    def scan(query, key, value, *, g, beta, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu):
+        calls.append((cu_seqlens, cu_seqlens_cpu))
+        return value, value.new_empty(len(cu_seqlens_cpu) - 1, 2)
+
+    tokens = len(columns["input_ids"])
+    states = [torch.empty(1, tokens, 2, 4, device="meta") for _ in range(3)]
+    gates = [torch.empty(1, tokens, 2, device="meta") for _ in range(2)]
+    meta_plan = _on_device(plan, torch.device("meta"))
+    out, _ = _tree_recurrence(scan)(*states, g=gates[0], beta=gates[1], **{TREE_ATTENTION_KEY: meta_plan})
+    assert out.shape == states[2].shape and len(calls) == len(plan["levels"]) == 3
+    for (device_bounds, host_bounds), level in zip(calls, plan["levels"], strict=True):
+        assert device_bounds.is_meta and host_bounds.device.type == "cpu"
+        assert host_bounds.tolist() == level["cu_seqlens"].tolist()
+
+
+def test_a_one_level_plan_hands_every_layer_the_same_bounds_objects():
+    """fla caches the chunk indices of its last call, keyed on the identity of the bounds it was given. A plan of
+    plain documents has one level, so every layer's scan must receive the same device and host bounds objects to
+    reuse them; a fresh host tensor per call would rebuild the indices in every layer."""
+    positions = torch.cat([torch.arange(length) for length in (7, 12, 5)])
+    table = build_node_table(positions, torch.zeros_like(positions))
+    plan = build_tree_attention_plan(table, sliding_window=None, full_form="gather", conv_kernel=4)
+    calls = []
+
+    def scan(query, key, value, *, g, beta, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu):
+        calls.append((cu_seqlens, cu_seqlens_cpu))
+        return value, None
+
+    tokens = len(positions)
+    states = [torch.randn(1, tokens, 2, 4) for _ in range(3)]
+    gates = [torch.randn(1, tokens, 2) for _ in range(2)]
+    for _layer in range(2):
+        _tree_recurrence(scan)(*states, g=gates[0], beta=gates[1], **{TREE_ATTENTION_KEY: plan})
+    assert len(plan["levels"]) == 1 and len(calls) == 2
+    assert calls[0][0] is calls[1][0] and calls[0][1] is calls[1][1]
+    assert calls[0][1].tolist() == plan["levels"][0]["cu_seqlens"].tolist() == [0, 7, 19, 24]
+
+
 def test_the_key_gather_sums_a_shared_tokens_gradient_in_fp32():
     states = torch.randn(1, 2, 6, 4).to(torch.bfloat16).requires_grad_(True)
     index = torch.tensor([0, 1, 2, 0, 1, 3, 0, 1, 4, 5])
@@ -388,6 +556,20 @@ def test_tree_attention_refuses_what_it_cannot_run(tiny_family, attn, form, matc
     with pytest.raises(ValueError, match=match):
         install_tree_attention(model, form)
     assert all(module.ALL_ATTENTION_FUNCTIONS is registry for module, registry in registries.items())
+
+
+@pytest.mark.parametrize("family", ["gpt_oss", "qwen3_5_moe_text"])
+def test_the_split_form_is_refused_on_fa4s_head_dim_256_kernel(family, monkeypatch):
+    """That kernel's backward asserts on a log-sum-exp gradient, which only the split form produces."""
+    model = tiny_family_model(TINY_MOE_FAMILIES[family], overrides={"head_dim": 256})
+    monkeypatch.setattr(model.config, "_attn_implementation", "flash_attention_4")
+    with pytest.raises(ValueError, match="head_dim-256 kernel"):
+        install_tree_attention(model, "split")
+
+
+@pytest.mark.parametrize("family", ["gpt_oss", "qwen3_5_moe_text"])
+def test_the_gather_form_installs_on_fa4s_head_dim_256_kernel(family, monkeypatch):
+    _install(tiny_family_model(TINY_MOE_FAMILIES[family], overrides={"head_dim": 256}), monkeypatch, "gather")
 
 
 def test_attention_layers_from_another_module_are_refused(monkeypatch):

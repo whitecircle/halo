@@ -50,9 +50,12 @@ RL weight sync is refused at construction on both engines, each for its own load
 
 ## Document isolation under packing
 
-Attention is isolated: the dense backends build a packed mask from `position_ids`, and on flash `patch_zaya_flash_packed_position_ids` (`halo/models/zaya.py`) re-injects them — `ZayaModel.forward` declares `position_ids` but never forwards them to the layers, so without the patch a packed row would run as one dense causal sequence.
+Every mixer is isolated, on every backend. `ZayaModel.forward` declares `position_ids` but never forwards them to the layers, so `patch_zaya_packed_document_isolation` (`halo/models/zaya.py`) stashes them on each attention module and each CCA projection for the duration of the model forward:
 
-The CCA convolution and the delayed-value recurrence still carry state **across packed document boundaries on every backend**, and the effect amplifies with depth. This is the same accepted class as the linear-attention mixers ([Collators](../data/collators.md#document-isolation-under-packing)) — pack Zaya only where a small amount of cross-document mixing is acceptable.
+- **Attention**: the dense backends build a packed mask from `position_ids` at the model level; on flash the patch's registry view re-injects them into the flash interface, without which a packed row runs as one causal sequence.
+- **CCA**: upstream runs the q/k conv pair (depthwise then grouped, kernel 2 each) as two `nn.Conv1d` over the whole row and shifts the delayed value by one token, so a document's first tokens read the previous document's last ones. The patched projection folds the two conv weights into one grouped map per input shift, applies each to the q/k states shifted by that much with the tokens before the document start zeroed, and resets the delayed value to its row-start state at every document start: each document reads as it would alone. On a single-document row it is upstream's arithmetic (equal in fp64, values and gradients); in bf16 it replaces the upstream conv with three small GEMMs at the same error against fp64 (6.8e-3 relative on a ZAYA1-8B projection, as the upstream conv, both measured on CPU), and keeps the two shifted q/k copies for backward: about 3 KiB more activation per token per layer than the upstream conv pair (7.9 against 5 KiB).
+
+Cached decoding keeps upstream's path; a cached prefill takes the patched one and writes the same conv and recurrent state. An adapter on `conv_qk_depthwise` / `conv_qk_grouped` would be bypassed, so the patched forward raises on one.
 
 ## Router balancing
 

@@ -75,18 +75,21 @@ before the process starts. It does not make the racy single-domain multi-group s
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
 `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `DIST_NCCL_TIMEOUT_MINUTES`,
-`DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`. A divergence is a hang,
-not a slow run: the dedup changes how many collectives a rank runs, the grad-bucket size sets the chunk
-boundaries of the bucketed gradient reductions (EP, TP and QLoRA alike), the timeouts decide which rank
-gives up on a join first (the survivors then die on the next collective and blame it) and how long each
-rank looks for the filesystem probe's file, and the rest are wire parameters both ends of the
-all-to-all share.
+`DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`,
+`FLASH_ATTENTION_DETERMINISTIC`. A divergence is a hang, not a slow run: the dedup changes how many
+collectives a rank runs, the grad-bucket size sets the chunk boundaries of the bucketed gradient
+reductions (EP, TP and QLoRA alike), the timeouts decide which rank gives up on a join first (the
+survivors then die on the next collective and blame it) and how long each rank looks for the filesystem
+probe's file, transformers' determinism switch picks a head_dim-256 model's attention backend (FA4 or its
+fallback, [Flash Attention](../optimization/flash-attention.md#model-specific-handling)), and the rest are
+wire parameters both ends of the all-to-all share.
 
 `agree_rank_uniform_env` (`halo/distributed/rank_uniform_env.py`) gathers them after the device bind and
 **before the weight load**, and `load_distributed_model` repeats it as a latched backstop; a mismatch
 raises `Rank-uniform toolkit environment differs across ranks` with rank 0's values. It compares the
 resolved settings, so a knob left unset and one exported at its default are the same; `EP_DISABLE_GIN`,
-which DeepEP reads as a raw string, is compared as one.
+which DeepEP reads as a raw string, is compared as one, and `FLASH_ATTENTION_DETERMINISTIC` by
+transformers' own rule (only `1` turns it on).
 
 The NCCL watchdog (`DIST_NCCL_TIMEOUT_MINUTES`) applies to every group the EP config creates. It does
 **not** bound the dispatch/combine barrier, a GPU spin-wait on DeepEP's own budget,
@@ -309,7 +312,8 @@ dispatch sits ~100× over what that bandwidth predicts). Three consequences:
 - **Fewer cross-node partners per rank is faster.** On 2-node 8× B300 EFA, gpt-oss-20b at **EP=2
   global** (1 cross-node partner) ran ~2.4× the throughput of EP=16 (8 partners): ≈1210 against ≈510
   tok/s/GPU, at 16 experts/GPU. Combine EP=2 with `expert_tp_size` to shard those experts back down
-  ([Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md#process-groups-epetp-combo)).
+  ([Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md#process-groups-epetp-combo));
+  the ETP partners share one batch, so tok/s/GPU falls as the ETP width grows.
 - **At most ~8k tokens/rank per dispatch.** Above that a proxy-Gin dispatch **wedges instead of
   erroring**: on 2× 8× B300, 8,192 tokens/rank trains and 16,384 hangs, at ep8 and ep16, `num_sms` 24
   and 48. The receive counts never arrive, and the run dies in DeepEP's CPU wait (`Dispatch CPU wait ...

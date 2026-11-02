@@ -22,10 +22,11 @@ from halo.models.attention.tree_plan import (
 class DataCollatorWithTreePacking(DataCollatorWithPacking):
     """Collate rows packed from trees (:mod:`halo.data.pipeline.tree_rows`) into one ``[1, total]`` row whose
     labels are the trained tokens, plus the :func:`~halo.models.attention.tree_plan.build_tree_attention_plan`
-    under ``tree_attention`` (skipped for plain documents unless ``conv_kernel`` layers read its segments).
+    under ``tree_attention`` (skipped for plain documents unless ``conv_kernel`` layers or key-selecting
+    ``sparse_attention`` layers read their segments off it).
 
     A packing collator by class, so every trainer gate that matches one applies; ``sliding_window``,
-    ``full_form`` and ``conv_kernel`` are the plan's.
+    ``full_form``, ``conv_kernel`` and ``sparse_attention`` are the plan's.
     """
 
     required_dataset_columns: tuple[str, ...] = (TRAINED_COLUMN, POSITION_COLUMN, DEPTH_COLUMN)
@@ -37,6 +38,7 @@ class DataCollatorWithTreePacking(DataCollatorWithPacking):
         sliding_window: int | None,
         full_form: FullAttentionForm,
         conv_kernel: int | None = None,
+        sparse_attention: bool = False,
     ):
         if full_form not in FULL_ATTENTION_FORMS:
             raise ValueError(f"full_form must be one of {FULL_ATTENTION_FORMS}, got {full_form!r}.")
@@ -44,6 +46,7 @@ class DataCollatorWithTreePacking(DataCollatorWithPacking):
         self.sliding_window = sliding_window
         self.full_form = full_form
         self.conv_kernel = conv_kernel
+        self.sparse_attention = sparse_attention
 
     def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
         if not self.flatten_to_single_row:
@@ -65,8 +68,12 @@ class DataCollatorWithTreePacking(DataCollatorWithPacking):
             )
         labels = input_ids.masked_fill(~trained, LABEL_IGNORE_INDEX)
         batch = {"input_ids": input_ids[None], "labels": labels[None], POSITION_COLUMN: position_ids[None]}
-        if table.has_branches or self.conv_kernel is not None:
+        if table.has_branches or self.conv_kernel is not None or self.sparse_attention:
             batch[TREE_ATTENTION_KEY] = build_tree_attention_plan(
-                table, sliding_window=self.sliding_window, full_form=self.full_form, conv_kernel=self.conv_kernel
+                table,
+                sliding_window=self.sliding_window,
+                full_form=self.full_form,
+                conv_kernel=self.conv_kernel,
+                sparse_attention=self.sparse_attention,
             )
         return batch

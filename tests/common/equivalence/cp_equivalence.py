@@ -108,9 +108,12 @@ class _Captured(Exception):
     """Ends a forward once the first attention layer's inputs are in hand."""
 
 
-def reference_flash_attn(q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1)):
+def reference_flash_attn(
+    q, k, v, dropout_p=0.0, softmax_scale=None, causal=False, window_size=(-1, -1), deterministic=False
+):
     """``flash_attn_func``'s contract in plain torch, for the keywords CP passes: ``[B, S, H, D]`` in and out,
-    native GQA, and the causal mask and sliding window aligned to the bottom right of the score matrix."""
+    native GQA, and the causal mask and sliding window aligned to the bottom right of the score matrix. Plain
+    torch is deterministic either way, so ``deterministic`` asks nothing of it."""
     if dropout_p:
         raise ValueError(f"the reference attention runs no dropout, got dropout_p={dropout_p}")
     groups = q.shape[2] // k.shape[2]
@@ -144,16 +147,6 @@ def gloo_all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=
         output.copy_(chunk.view_as(output))
 
 
-def deterministic_kernels(probe):
-    """``_flash_attn_func`` over ``probe``: the kernel ``probe`` picks for the family, called with
-    ``deterministic=True``, since CP passes no such flag and FA2, FA3 and FA4 all default to an atomic dQ."""
-
-    def _flash_attn_func(allow_fa4: bool = True):
-        return functools.partial(probe(allow_fa4), deterministic=True)
-
-    return _flash_attn_func
-
-
 @contextlib.contextmanager
 def tier_controls(tier: str) -> Iterator[None]:
     """The kernel and transport CP runs on in ``tier``: on GPU its own flash kernel made deterministic under
@@ -167,8 +160,7 @@ def tier_controls(tier: str) -> Iterator[None]:
             yield
         return
     enable_full_determinism(SEED)
-    with patch.object(cp_attention, "_flash_attn_func", deterministic_kernels(cp_attention._flash_attn_func)):
-        yield
+    yield
 
 
 def tiny_model(name: str, tier: str, device, **overrides) -> torch.nn.Module:
@@ -177,9 +169,10 @@ def tiny_model(name: str, tier: str, device, **overrides) -> torch.nn.Module:
     family = FAMILIES[name]
     torch.manual_seed(SEED)
     model = tiny_family_model(family.tiny, overrides={**family.overrides, **overrides})
-    label = family.tiny.cp_attn_implementation or DEFAULT_ATTN_IMPLEMENTATION
-    model.config._attn_implementation = label
-    apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED, attn_implementation=label)
+    model.config._attn_implementation = DEFAULT_ATTN_IMPLEMENTATION
+    apply_sinks_policy(
+        model, model.config, policy=SinksPolicy.NEUTRALIZED, attn_implementation=DEFAULT_ATTN_IMPLEMENTATION
+    )
     return model.to(device=device, dtype=DTYPE[tier])
 
 

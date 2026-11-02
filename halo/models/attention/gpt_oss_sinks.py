@@ -14,9 +14,9 @@ import logging
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
-from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
+from halo.models.attention.fa4_entry_points import wrap_fa4_entry_points
 from halo.models.config_access import text_config
 from halo.models.model_classes import mapped_model_class
 from halo.models.module_tree import backbone_with_layers
@@ -194,60 +194,47 @@ def _set_gpt_oss_sinks_trainable(model: PreTrainedModel, model_config: AutoConfi
     return touched
 
 
+def _sink_trains(sink) -> bool:
+    return sink is not None and torch.is_grad_enabled() and sink.requires_grad
+
+
+def _rescale(out, lse, sink, head_dim: int):
+    # The fp32 gate multiplies the bf16 ``out`` under promotion, so autograd saves the kernel's own
+    # output plus a [heads, tokens] gate rather than an fp32 copy. The lse returned is the sinked one.
+    sink = sink.float().reshape([-1 if d == head_dim else 1 for d in range(lse.dim())])
+    gate = torch.sigmoid(lse - sink)
+    out = (out * gate.movedim(head_dim, -1).unsqueeze(-1)).to(out.dtype)
+    return out, torch.logaddexp(lse, sink)
+
+
+def _with_sink_grad(fn, varlen: bool):
+    """``fn`` (an FA4 entry point) running a grad-requiring sink through :func:`_rescale`."""
+    # lse is [heads, tokens] beside a varlen out [tokens, heads, dim], [batch, heads, seq] beside a dense one.
+    lse_head_dim = 0 if varlen else 1
+
+    @functools.wraps(fn)
+    def wrapped(q, k, v, *args, learnable_sink=None, return_lse=False, **kwargs):
+        if not _sink_trains(learnable_sink):
+            return fn(q, k, v, *args, learnable_sink=learnable_sink, return_lse=return_lse, **kwargs)
+        # return_lse=True makes the backward consume dlse.
+        out, lse = fn(q, k, v, *args, learnable_sink=None, return_lse=True, **kwargs)
+        return _rescale(out, lse, learnable_sink, head_dim=lse_head_dim)
+
+    return wrapped
+
+
 def install_fa4_trainable_sink_rescale() -> bool:
     """Route FA4 calls with a grad-requiring sink through a rescale that carries the sink gradient.
 
     The fused backward returns no sink gradient but consumes ``dlse``, so the sink-less kernel's output
     gated by ``sigmoid(lse - sink)`` in autograd-visible ops gives the identical forward and complete
-    gradients. Wraps both entry points and transformers' cached references. Idempotent; False when
-    ``flash_attn.cute`` is not importable.
+    gradients. Idempotent; False when ``flash_attn.cute`` is not importable.
     """
-    try:
-        import flash_attn.cute as cute  # noqa: PLC0415 — optional, Blackwell-only dependency
-    except ImportError:
-        return False
-    if getattr(cute.flash_attn_varlen_func, _FA4_RESCALE_ATTR, False):
-        return True
-    orig_varlen, orig_dense = cute.flash_attn_varlen_func, cute.flash_attn_func
-
-    def sink_trains(sink) -> bool:
-        return sink is not None and torch.is_grad_enabled() and sink.requires_grad
-
-    def rescale(out, lse, sink, head_dim: int):
-        # The fp32 gate multiplies the bf16 ``out`` under promotion, so autograd saves the kernel's own
-        # output plus a [heads, tokens] gate rather than an fp32 copy. The lse returned is the sinked one.
-        sink = sink.float().reshape([-1 if d == head_dim else 1 for d in range(lse.dim())])
-        gate = torch.sigmoid(lse - sink)
-        out = (out * gate.movedim(head_dim, -1).unsqueeze(-1)).to(out.dtype)
-        return out, torch.logaddexp(lse, sink)
-
-    @functools.wraps(orig_varlen)
-    def varlen_with_sink_grad(q, k, v, *args, learnable_sink=None, return_lse=False, **kwargs):
-        if not sink_trains(learnable_sink):
-            return orig_varlen(q, k, v, *args, learnable_sink=learnable_sink, return_lse=return_lse, **kwargs)
-        # return_lse=True makes the backward consume dlse. lse is [heads, tokens], out [tokens, heads, dim].
-        out, lse = orig_varlen(q, k, v, *args, learnable_sink=None, return_lse=True, **kwargs)
-        return rescale(out, lse, learnable_sink, head_dim=0)
-
-    @functools.wraps(orig_dense)
-    def dense_with_sink_grad(q, k, v, *args, learnable_sink=None, return_lse=False, **kwargs):
-        if not sink_trains(learnable_sink):
-            return orig_dense(q, k, v, *args, learnable_sink=learnable_sink, return_lse=return_lse, **kwargs)
-        # lse is [batch, heads, seq], out [batch, seq, heads, dim].
-        out, lse = orig_dense(q, k, v, *args, learnable_sink=None, return_lse=True, **kwargs)
-        return rescale(out, lse, learnable_sink, head_dim=1)
-
-    for fn in (varlen_with_sink_grad, dense_with_sink_grad):
-        setattr(fn, _FA4_RESCALE_ATTR, True)
-    cute.flash_attn_varlen_func = varlen_with_sink_grad
-    cute.flash_attn_func = dense_with_sink_grad
-    if flash_utils._flash_varlen_fn is orig_varlen:
-        flash_utils._flash_varlen_fn = varlen_with_sink_grad
-    if flash_utils._flash_fn is orig_dense:
-        flash_utils._flash_fn = dense_with_sink_grad
-    if is_global_main_process():
-        logger.info("Installed the FA4 trainable-sink rescale (sink-less kernel + sigmoid(lse - sink) gate)")
-    return True
+    return wrap_fa4_entry_points(
+        _FA4_RESCALE_ATTR,
+        _with_sink_grad,
+        "the trainable-sink rescale (sink-less kernel + sigmoid(lse - sink) gate)",
+    )
 
 
 def apply_sinks_policy(

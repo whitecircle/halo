@@ -141,15 +141,41 @@ def test_a_pipeline_stage_reports_the_layers_it_holds(roster):
                 assert split == pytest.approx(whole.get(metric, 0.0), abs=ROUNDING), (family, pipeline, metric)
 
 
-def test_a_pipeline_chain_counts_its_batch_once(roster):
-    """Four ranks in two-stage chains are two data-parallel replicas, and one under expert TP, whose pair shares a
-    batch: the cluster figure is the rank's times that, not times four."""
-    replicas = {"pp2": 2, "ep2_pp2": 2, "etp2_pp2": 1}
-    for pipeline, count in replicas.items():
-        for stage in ("first", "last"):
-            snapshot = roster[f"{SCENARIO_FAMILY}/{pipeline}_{stage}/default"]["snapshot"]
-            expected = count * snapshot["tokens_per_second"]
-            assert snapshot["cluster_tokens_per_second"] == pytest.approx(expected, rel=1e-9), (pipeline, stage)
+# Data-parallel replicas of each shape, counted by hand: the ranks of one TP, expert-TP or CP group and of one
+# pipeline chain share a batch, every EP rank draws its own.
+REPLICAS = {
+    "single": 1,
+    "ep2": 2,
+    "ep4": 4,
+    "etp2": 1,
+    "ep2_etp2": 2,
+    "tp2": 1,
+    "cp2": 1,
+    "ep2_cp2": 1,
+    "ep2_tp2": 1,
+    "fsdp2": 2,
+    "ep2_fsdp2": 2,
+    "pp2_first": 2,
+    "pp2_last": 2,
+    "ep2_pp2_first": 2,
+    "ep2_pp2_last": 2,
+    "etp2_pp2_first": 1,
+    "etp2_pp2_last": 1,
+}
+
+
+def test_every_shape_counts_each_shared_batch_once(roster):
+    """Every rank's step carries the same scripted batch, so each shape's cluster figure is its replica count times
+    one rank's, and a GPU's share is the cluster over the whole world: a pipeline chain, a TP or expert-TP pair and
+    a CP pair each count their batch once."""
+    assert set(REPLICAS) == set(SHAPES)
+    one_replica = roster[DEFAULT.path]["snapshot"]["cluster_tokens_per_second"]
+    for shape, replicas in REPLICAS.items():
+        snapshot = roster[f"{SCENARIO_FAMILY}/{shape}/default"]["snapshot"]
+        cluster = snapshot["cluster_tokens_per_second"]
+        assert cluster == pytest.approx(replicas * one_replica, rel=1e-9), shape
+        per_gpu = cluster / SHAPES[shape].world_size
+        assert snapshot["tokens_per_second"] == pytest.approx(per_gpu, abs=ROUNDING), shape
 
 
 def test_two_producer_processes_match(tmp_path):

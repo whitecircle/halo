@@ -285,15 +285,14 @@ def run_merged_resume(
 
     def make_trainer(model_source: str, phase_dir: str, *, save: bool):
         """The production load (``split_expert_lora_targets`` → ``load_distributed_model`` →
-        ``configure_adapter_training``) and trainer, and the attention modules PEFT adapts. Ulysses CP runs flash
-        attention (auto-selected, or through its own probe under the family's
-        ``cp_attn_implementation``); the rest stay on eager."""
+        ``configure_adapter_training``) and trainer, and the attention modules PEFT adapts. Ulysses CP runs the
+        auto-selected flash attention; the rest stay on eager."""
         parallelism_config = _parallelism_config(ep_size, cp_size, fp32_masters)
         model, tokenizer, peft_config = load_peft_model(
             ADAPTER_MODES[adapters],
             parallelism_config,
             model_name=model_source,
-            attn_implementation="eager" if cp_size == 1 else tiny.cp_attn_implementation,
+            attn_implementation="eager" if cp_size == 1 else None,
             use_liger_kernel=False,
             lora_target_modules=targets,
         )

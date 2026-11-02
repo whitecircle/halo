@@ -33,6 +33,7 @@ from halo.configs.distillation import SelfDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import TREE_PACKING_FIELDS
+from halo.data.collators.collator_rules import reject_fa4_varlen_training, rows_reach_varlen_kernel
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     SelfDistillVLMDataCollator,
@@ -57,6 +58,7 @@ from halo.entrypoints.data_setup import (
 from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
+    default_training_rows_attn_implementation,
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
@@ -69,6 +71,7 @@ from halo.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
+from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_reference_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.runtime.collectives import barrier
@@ -254,13 +257,16 @@ def _require_reference_token_ids(args, model_config) -> None:
     verify_same_token_ids(*hub_metadata_main_first("reference_tokenizers", fetch))
 
 
-def _load_sdpg_reference(*, args, model_config, sft_config, tokenizer, is_vlm: bool) -> PreTrainedModel | None:
+def _load_sdpg_reference(
+    *, args, model_config, sft_config, tokenizer, is_vlm: bool, attn_default: str | None
+) -> PreTrainedModel | None:
     """Load the frozen reference for the ``L_ref`` KL anchor, or ``None`` when the anchor is off.
 
     It goes through the shared frozen-reference loader for the reason the KL term exists: ``L_ref``
     is a divergence between this model's distribution and the policy's, so a reference on a
     different attention backend, carrying live sinks the policy reset, or missing the special tokens
-    the run added moves the anchor rather than the model. The token-id check ran before any load.
+    the run added moves the anchor rather than the model; ``attn_default`` is the policy's request. The
+    token-id check ran before any load.
     """
     if args.reference_kl_coef <= 0:
         return None
@@ -273,7 +279,7 @@ def _load_sdpg_reference(*, args, model_config, sft_config, tokenizer, is_vlm: b
         ref_path,
         is_vlm=is_vlm,
         reset_sinks=args.reset_sinks,
-        attn_default=None,
+        attn_default=attn_default,
     )
     if is_global_main_process():
         logger.info(f"Loaded frozen reference model from '{ref_path}' (alpha={args.reference_kl_coef})")
@@ -289,8 +295,9 @@ def main():
     # "generate" split and self-distillation keeps the dataset raw. num_eval_examples rides along on
     # the default-comparing form, since its own default (50) is truthy.
     reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
-    # Tree packing lives in the SFT script's data path; the collators here pack nothing as trees.
-    reject_non_default_args("Self-distillation", args, *TREE_PACKING_FIELDS)
+    # Tree packing lives in the SFT script's data path; the collators here pack nothing as trees, and no
+    # multi-document row at all for allow_cross_document_linear_attention to admit.
+    reject_non_default_args("Self-distillation", args, *TREE_PACKING_FIELDS, "allow_cross_document_linear_attention")
 
     # Both only feed the reference term, which is not built at all below this coefficient.
     if args.reference_kl_coef <= 0:
@@ -366,8 +373,19 @@ def main():
     # which requires the checkpoint's processor for an image run.
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
-    policy = load_policy_model(context, sft_config, model_config, args, vlm_run=is_vlm)
+    # One padded row per conversation in each branch: more than one per batch reaches the varlen kernel.
+    rows = {
+        "packing": False,
+        "padding_free": False,
+        "per_device_train_batch_size": sft_config.per_device_train_batch_size,
+    }
+    varlen_rows = rows_reach_varlen_kernel(**rows)
+    attn_default = default_training_rows_attn_implementation(
+        model_config, **rows, dtype=resolve_training_dtype(sft_config)
+    )
+    policy = load_policy_model(context, sft_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
     model = policy.model
+    reject_fa4_varlen_training(model.config, varlen_rows=varlen_rows)
     tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)
@@ -394,6 +412,7 @@ def main():
         sft_config=sft_config,
         tokenizer=tokenizer,
         is_vlm=policy.is_vlm,
+        attn_default=attn_default,
     )
 
     disable_trl_dataset_prep(sft_config)

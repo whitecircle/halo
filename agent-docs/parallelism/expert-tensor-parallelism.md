@@ -145,8 +145,9 @@ Sub-EP (dispatch):  [0,8] [1,9] ... [7,15]        ← cross-node DeepEP, size = 
 
 This is the memory-lean cross-node MoE shape: per-rank expert memory matches a much larger pure-EP
 group. On two 8-GPU B300 nodes over RDMA, gpt-oss-20b at `ep_size=2, expert_tp_size=8` holds ~18 GB
-per rank — the footprint of EP=16 — while the 2-rank cross-node dispatch runs it at roughly 2× the
-EP=16 throughput. Validate convergence on your own config before a long run.
+per rank — the footprint of EP=16. Its eight ETP partners share one batch, so it runs about a quarter
+of EP=16's cluster tok/s: it buys expert memory, not throughput. Validate convergence on your own
+config before a long run.
 
 ## Weight sharding
 

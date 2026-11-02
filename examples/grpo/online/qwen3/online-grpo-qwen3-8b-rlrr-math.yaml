@@ -7,9 +7,8 @@
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-8B
-attn_implementation: flash_attention_2   # explicit: this script already defaults padded workloads
-                                         #   to sdpa (an auto-detected FA4 runs right-padded batches
-                                         #   through its slow varlen path), and FA2 overrides that
+attn_implementation: flash_attention_2   # explicit: overrides the script's padded-batch default
+                                         #   (the loader's pick on Blackwell, sdpa elsewhere)
 
 # --- Dataset ---
 # The DAPO paper's RL corpus repackaged for TRL: plain question in `prompt`, final integer answer in `solution`.

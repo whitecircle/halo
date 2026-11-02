@@ -38,8 +38,8 @@ from halo.distributed.tensor_parallel.parallelize_attention import (
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import (
-    is_fa4_backward_nan_prone,
     resolve_attn_implementation,
+    supports_fa4_backward,
     validate_attn_implementation,
 )
 from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
@@ -160,9 +160,9 @@ def test_tp_shards_zero_layers_and_raises():
 def test_attention_resolution_lands_on_sdpa():
     """``Glm5NextForConditionalGeneration._supports_flash_attn = False`` — the resolver must divert
     every flash request to sdpa itself; returning flash defers the failure to transformers' model
-    build, after the whole checkpoint has been fetched. Not an FA4-NaN entry: the refusal derives
-    from the class flag and covers FA2/FA3 too."""
-    assert is_fa4_backward_nan_prone(Glm5NextConfig()) is False
+    build, after the whole checkpoint has been fetched. Not the FA4 backward refusal: this one
+    derives from the class flag and covers FA2/FA3 too."""
+    assert supports_fa4_backward(Glm5NextConfig()) is True
     expected = {
         None: "sdpa",
         "flash_attention_4": "sdpa",
@@ -184,7 +184,7 @@ def test_attention_flash_gate_reads_the_class_flag_not_a_family_list():
     assert validate_attn_implementation(Qwen3Config(), "flash_attention_2") == "flash_attention_2"
 
 
-# Packing collator — no GDN kwargs, no crash (KDA shares the Zaya/Ling mixer-crossing semantics)
+# Packing: both layer types cross a flat packed row on the dense backends, the only ones the family runs
 
 
 def _tokenizer() -> MagicMock:
@@ -192,31 +192,67 @@ def _tokenizer() -> MagicMock:
     tok.pad_token_id = 0
     tok.eos_token_id = 1
     tok.padding_side = "right"
-
-    def _pad(features, **kwargs):
-        max_len = max(len(f["input_ids"]) for f in features)
-        out = {"input_ids": [], "attention_mask": []}
-        for f in features:
-            ids = list(f["input_ids"])
-            pad = max_len - len(ids)
-            out["input_ids"].append(ids + [tok.pad_token_id] * pad)
-            out["attention_mask"].append([1] * len(ids) + [0] * pad)
-        return {key: torch.tensor(value) for key, value in out.items()}
-
-    tok.pad.side_effect = _pad
     return tok
 
 
-def test_packing_collator_round_trips_without_gdn_kwargs():
-    """glm5_next's modeling reads no ``seq_idx``/``cu_seq_lens`` (the KDA conv and scan cross packed
-    document boundaries by construction — the Zaya/Ling semantics), so the factory must neither
-    emit the markers nor trip the GDN wheel refusal, and the packed batch must build cleanly."""
-    config = Glm5NextConfig(text_config=dict(TINY_GLM5_NEXT_TEXT_CONFIG))
-    config._attn_implementation = "sdpa"
-    collator = select_data_collator(_tokenizer(), train_on_completions_only=False, packing=True, model_config=config)
-    batch = collator.torch_call([{"input_ids": [5, 6, 7], "attention_mask": [1, 1, 1], "seq_lengths": [2, 1]}])
-    assert "seq_idx" not in batch and "cu_seq_lens_q" not in batch
-    assert batch["input_ids"].tolist() == [[5, 6, 7]]
+@pytest.mark.parametrize("attn_impl", ["sdpa", "eager"])
+def test_dsa_layers_leak_across_a_packed_row_on_a_dense_backend(attn_impl):
+    """Defect pin: the forward hands its DSA (``indexed_attention``) layers only the 2D padding mask, so a
+    packed row runs there as one causal sequence and doc B moves when doc A changes. A DSA-only stack keeps the
+    KDA layers' own crossing out of the reading. If the drift ever reads 0, upstream fed ``position_ids`` into
+    the mask: clear ``GLM5_NEXT.dense_packing_leaks`` and retire this pin."""
+    torch.manual_seed(0)
+    config = Glm5NextTextConfig(
+        **{
+            **TINY_GLM5_NEXT_TEXT_CONFIG,
+            "layer_types": ["indexed_attention", "indexed_attention"],
+            "mlp_layer_types": ["dense", "dense"],
+        }
+    )
+    config._attn_implementation = attn_impl
+    model = Glm5NextTextModel(config).eval()
+    lens = (20, 20)
+    input_ids = torch.randint(2, config.vocab_size, (1, sum(lens)), generator=torch.Generator().manual_seed(7))
+    position_ids = torch.cat([torch.arange(n) for n in lens])[None]
+    variant = input_ids.clone()
+    variant[0, : lens[0]] = (variant[0, : lens[0]] + 17) % (config.vocab_size - 2) + 2
+    with torch.no_grad():
+        base, swapped = (
+            model(input_ids=ids, position_ids=position_ids, use_cache=False).last_hidden_state[0, lens[0] :]
+            for ids in (input_ids, variant)
+        )
+    drift = (base - swapped).abs().max().item()
+    assert drift > 1e-3 * base.abs().max().item(), (
+        f"GLM-5 Next {attn_impl} isolated packed documents in its DSA layers: upstream fixed the mask plumbing; "
+        "clear GLM5_NEXT.dense_packing_leaks and retire this defect pin"
+    )
+
+
+@pytest.mark.parametrize("allow_crossing", [False, True], ids=["default", "opted-in"])
+@pytest.mark.parametrize("attn_impl", ["sdpa", "eager"])
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda: Glm5NextConfig(text_config=dict(TINY_GLM5_NEXT_TEXT_CONFIG)),
+        lambda: Glm5NextTextConfig(**TINY_GLM5_NEXT_TEXT_CONFIG),
+    ],
+    ids=["composite", "text"],
+)
+def test_flat_packing_is_refused_on_every_backend_the_family_runs(build, attn_impl, allow_crossing):
+    """Upstream declares no flash support, so every backend GLM-5 Next resolves to is dense, and there the DSA
+    layers leak (above) whatever the linear-attention opt-in admits: flat packing is refused."""
+    config = build()
+    config._attn_implementation = attn_impl
+    with pytest.raises(
+        ValueError, match="packing=True on attn_implementation=.* is refused for model_type='glm5_next"
+    ):
+        select_data_collator(
+            _tokenizer(),
+            train_on_completions_only=False,
+            packing=True,
+            model_config=config,
+            allow_cross_document_linear_attention=allow_crossing,
+        )
 
 
 # Balancing config-field registries

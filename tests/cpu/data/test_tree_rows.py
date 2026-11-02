@@ -22,8 +22,9 @@ import datasets
 import numpy as np
 import pytest
 import torch
+from accelerate.utils import send_to_device
 from datasets import Dataset, DatasetDict
-from transformers import GptOssConfig, Qwen3Config
+from transformers import GptOssConfig, Qwen3Config, Trainer
 
 from halo.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
@@ -49,12 +50,14 @@ from halo.data.tree_layout import (
 )
 from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models import segment_markers
 from halo.models.attention import selection
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table
 from scripts.training import sft as sft_script
 from scripts.training.sft import _prepare_text_data
 from tests.common.models import GPT_OSS_20B
 from tests.common.repo import REPO_ROOT
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tokenizers import load_cached_tokenizer
 from tests.common.trees import example_rows
 
@@ -278,6 +281,56 @@ def test_an_unsupported_backend_is_refused_before_any_weight_loads(tmp_path, mon
         _run_sft_main(tmp_path, "attn_implementation: flash_attention_2\ntree_full_attention: gather\n")
 
 
+def _stop_a_glm5_run_at_the_datasets(monkeypatch, config) -> None:
+    """The SFT script probes ``config`` (a GLM-5 Next one) as its checkpoint's and stops where the datasets load,
+    past every pre-load check; a model load raises."""
+    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
+    monkeypatch.setattr(sft_script, "resolve_training_dtype", lambda config: torch.bfloat16)
+    monkeypatch.setattr(sft_script, "probe_checkpoint", lambda *args, **kwargs: (config, False))
+    monkeypatch.setattr(sft_script, "init_training_script", mock.MagicMock())
+    monkeypatch.setattr(
+        sft_script, "load_script_datasets", mock.Mock(side_effect=AssertionError("past the tree checks"))
+    )
+    monkeypatch.setattr(sft_script, "load_policy_model", mock.Mock(side_effect=AssertionError("the model load ran")))
+
+
+def test_a_glm5_adapter_on_kv_b_proj_is_refused_before_any_weight_loads(tmp_path, monkeypatch):
+    """GLM-5 Next's tree attention folds kv_b_proj into the query, so an adapter there would never apply: the run
+    stops on its LoRA targets before the datasets or the weights load, and without kv_b_proj gets past the check."""
+    _stop_a_glm5_run_at_the_datasets(monkeypatch, tiny_family_model(TINY_MOE_FAMILIES["glm5_next"]).config)
+    adapter = "attn_implementation: sdpa\nuse_peft: true\nlora_target_modules: [q_a_proj, {}]\n"
+    with pytest.raises(ValueError, match="Leave kv_b_proj out of lora_target_modules"):
+        _run_sft_main(tmp_path, adapter.format("kv_b_proj"))
+    with pytest.raises(AssertionError, match="past the tree checks"):
+        _run_sft_main(tmp_path, adapter.format("o_proj"))
+
+
+@pytest.mark.parametrize(
+    ("run_quantization", "checkpoint_quantization"),
+    [
+        ("load_in_4bit: true\n", None),
+        ("load_in_8bit: true\n", None),
+        ("", {"quant_method": "fp8", "weight_block_size": [128, 128]}),
+    ],
+    ids=["4bit", "8bit", "quantized-checkpoint"],
+)
+def test_a_quantized_glm5_tree_run_is_refused_before_the_load(
+    tmp_path, monkeypatch, run_quantization, checkpoint_quantization
+):
+    """GLM-5 Next's tree attention reads kv_b_proj's weight as a plain matrix, which a quantized load holds packed or
+    block-scaled: a run that quantizes the weights, or loads a checkpoint declaring its own quantization (the fp8
+    hub release), stops before the datasets or the weights load; the same run on plain weights gets past the check."""
+    config = tiny_family_model(TINY_MOE_FAMILIES["glm5_next"]).config
+    lora = "attn_implementation: sdpa\nuse_peft: true\nlora_target_modules: [q_a_proj, o_proj]\n"
+    _stop_a_glm5_run_at_the_datasets(monkeypatch, config)
+    with pytest.raises(AssertionError, match="past the tree checks"):
+        _run_sft_main(tmp_path, lora)
+    if checkpoint_quantization is not None:
+        config.quantization_config = checkpoint_quantization
+    with pytest.raises(ValueError, match="which a quantized load does not hold as a plain matrix"):
+        _run_sft_main(tmp_path, lora + run_quantization)
+
+
 def test_a_pad_valued_token_inside_an_answer_stays_untrained_as_the_packing_collator_leaves_it(tokenizer):
     """The LM collator masks every pad-valued label, the one inside a completion included; the span's
     closing token is the only one the packing collator restores."""
@@ -339,6 +392,44 @@ def test_a_stateful_family_gets_its_segments_on_a_batch_of_plain_documents(token
         sum(len(t["input_ids"]) for t in trees),
     ]
     assert plan["conv"]["seq_idx"][0].unique().tolist() == [0, 1] and len(plan["levels"]) == 1
+
+
+class _TrainerTransport:
+    """``Trainer._prepare_input`` on a stand-in trainer whose device is the meta device."""
+
+    args = SimpleNamespace(device=torch.device("meta"))
+    is_deepspeed_enabled = False
+    _prepare_input = Trainer._prepare_input
+
+
+def test_the_recurrence_bounds_stay_on_the_host_through_the_batch_transports(tokenizer):
+    """The accelerate dataloader and the trainer move every tensor of a batch to the device; the levels' host
+    bounds, which the delta-rule kernel builds its chunk indices from without a device read, must arrive as
+    they left the collator."""
+    trees = _process(tokenizer, _conversations()[:4])
+    collator = DataCollatorWithTreePacking(tokenizer, sliding_window=None, full_form="gather", conv_kernel=4)
+    batch = collator(trees)
+    levels = batch[TREE_ATTENTION_KEY]["levels"]
+    host = [level["cu_seqlens_host"] for level in levels]
+    assert len(host) == 3 and host == [tuple(level["cu_seqlens"].tolist()) for level in levels]
+    for moved in (send_to_device(batch, "meta"), _TrainerTransport()._prepare_input(batch)):
+        levels = moved[TREE_ATTENTION_KEY]["levels"]
+        assert all(level["cu_seqlens"].is_meta for level in levels), "the transport moves the plan's tensors"
+        assert [level["cu_seqlens_host"] for level in levels] == host
+
+
+def test_a_key_selecting_family_gets_its_path_links_on_a_batch_of_plain_documents(tokenizer):
+    """A selecting softmax layer reads its candidates off the links, so plain documents carry them too:
+    each a tree of its own, which no selection crosses."""
+    trees = _process(tokenizer, [_conversations()[6], _conversations()[5]])
+    collator = DataCollatorWithTreePacking(tokenizer, sliding_window=None, full_form="gather", sparse_attention=True)
+    plan = collator(trees)[TREE_ATTENTION_KEY]
+    first, total = len(trees[0]["input_ids"]), sum(len(t["input_ids"]) for t in trees)
+    links = plan["sparse"]
+    assert "full" not in plan and "conv" not in plan
+    assert links["predecessor"][[0, first]].tolist() == [-1, -1]
+    assert links["tree_start"].unique().tolist() == [0, first]
+    assert links["subtree_end"].unique().tolist() == [first, total]
 
 
 def test_the_collator_refuses_rows_it_cannot_keep_apart(tokenizer):
@@ -452,6 +543,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             tree_min_shared_tokens=16,
             tree_full_attention="split",
             generate_eval_examples=False,
+            allow_cross_document_linear_attention=False,
         )
         sft_config = SimpleNamespace(
             max_length=MAX_LENGTH,
@@ -466,7 +558,7 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
         )
         train, test, _, collator = _prepare_text_data(
             splits,
-            False,
+            None,
             args,
             sft_config,
             SimpleNamespace(model_name_or_path=GPT_OSS_20B),

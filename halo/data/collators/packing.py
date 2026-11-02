@@ -26,7 +26,7 @@ from halo.data.turn_markers import (
     warn_if_pad_equals_eos,
 )
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.models.segment_markers import SegmentMarkers, segment_marker_kwargs
+from halo.models.segment_markers import SegmentMarkers, positions_restart, segment_marker_kwargs
 
 # Every position-0 reset is a varlen segment the FA4 backward pays for; a ramped pad tail bounds their count.
 PAD_TAIL_SEGMENT_CHUNK = 256
@@ -76,10 +76,16 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
     """Collator for packed rows: position_ids reset at each document, no attention_mask, and the batch
     flattened to one ``[1, total_tokens]`` row (:func:`flatten_packed_batch`).
 
-    Isolation comes from the position_ids alone: flash derives varlen cu_seqlens from them, and eager/SDPA
+    Isolation comes from the document boundaries the position_ids reset at: flash runs its varlen kernel over
+    the ``cu_seq_lens`` handed over below, or derives them from position_ids where none are, and eager/SDPA
     build a packed-sequence mask from them, a dense ``[L, L]`` over the whole flattened batch. Both need the
-    family to plumb position_ids through (the matrix is in ``agent-docs/data/collators.md``). Requires right
+    family to plumb position_ids or the varlen set through (the matrix is in ``agent-docs/data/collators.md``). Requires right
     padding, since leading pads would become an attended document.
+
+    ``return_flash_attn_kwargs`` emits the varlen set (``cu_seq_lens_q/k``, ``max_length_q/k``) on every
+    flattened row, for a mixer that reads it; ``flash_varlen_kwargs`` emits it where transformers would derive
+    the same set from position_ids itself, on a flash run's multi-document row. Handed over, the set spares
+    every attention layer that derivation and its device syncs, and a one-document row keeps the dense kernel.
     """
 
     # Kept through HF's signature-column pruning: without ``seq_lengths`` every row is one document.
@@ -88,6 +94,9 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
     # PP turns this off: its dim-0 microbatch split keeps the rows apart.
     flatten_to_single_row: bool = True
 
+    # The run's opt-in, recorded by the collator factory so a trainer's own check admits what the factory did.
+    allow_cross_document_linear_attention: bool = False
+
     _warned_no_seq_lengths: bool = False
 
     def __init__(
@@ -95,6 +104,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         tokenizer: PreTrainedTokenizerBase,
         return_seq_idx: bool = False,
         return_flash_attn_kwargs: bool = False,
+        flash_varlen_kwargs: bool = False,
     ):
         if getattr(tokenizer, "padding_side", "right") != "right":
             raise ValueError(
@@ -107,6 +117,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         super().__init__(tokenizer=tokenizer, mlm=False, return_tensors="pt")
         self.return_seq_idx = return_seq_idx
         self.return_flash_attn_kwargs = return_flash_attn_kwargs
+        self.flash_varlen_kwargs = flash_varlen_kwargs
 
     def torch_call(self, examples: list[list[int] | Any | dict[str, Any]]) -> dict[str, Any]:
         # Copy mappings before popping seq_lengths/labels — the pops must not mutate the caller's rows.
@@ -137,7 +148,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
                 if isinstance(ex, dict) and seq_lens is not None:
                     ex["seq_lengths"] = seq_lens
             batch["position_ids"] = _packed_position_ids(batch["input_ids"], examples)
-            # Dropping the dense all-ones mask lets FA derive cu_seqlens from position_ids; keeping it leaks.
+            # Dropping the dense all-ones mask lets FA take its varlen path; keeping it leaks.
             batch.pop("attention_mask", None)
             # At a boundary (position_ids==0) the causal shift predicts across blocked attention — noise,
             # not loss. Pad tails are not this line's job; every other route already ignores them.
@@ -146,10 +157,10 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             if self.flatten_to_single_row:
                 batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
             # The varlen set is only defined on the flattened [1, total] row — PP keeps its rows.
-            markers = SegmentMarkers(
-                seq_idx=self.return_seq_idx,
-                cu_seq_lens=self.return_flash_attn_kwargs and self.flatten_to_single_row,
+            varlen = self.return_flash_attn_kwargs or (
+                self.flash_varlen_kwargs and positions_restart(batch["position_ids"])
             )
+            markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=varlen and self.flatten_to_single_row)
             batch.update(segment_marker_kwargs(batch["position_ids"], markers))
 
         return batch
@@ -183,11 +194,13 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         eos_token_ids: frozenset[int] | None = None,
         return_seq_idx: bool = False,
         return_flash_attn_kwargs: bool = False,
+        flash_varlen_kwargs: bool = False,
     ):
         super().__init__(
             tokenizer=tokenizer,
             return_seq_idx=return_seq_idx,
             return_flash_attn_kwargs=return_flash_attn_kwargs,
+            flash_varlen_kwargs=flash_varlen_kwargs,
         )
 
         self.response_prompt_template = response_prompt_template
@@ -261,6 +274,8 @@ class DataCollatorWithFlattening(DefaultDataCollator):
     tokenizer: PreTrainedTokenizerBase = None
     return_flash_attn_kwargs: bool = True
     return_seq_idx: bool = False
+    # The run's opt-in, recorded by the collator factory so a trainer's own check admits what the factory did.
+    allow_cross_document_linear_attention: bool = False
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
         is_labels_provided = "labels" in features[0]

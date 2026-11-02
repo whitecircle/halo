@@ -93,6 +93,8 @@ On a tree with no EP layer (`ep_size=1` with `use_grouped_gemm: false`) nothing 
 
 Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend — pin `attn_implementation: sdpa` (the resolver diverts any flash request there itself).
 
+On CUDA the model is then built as `sdpa_flex_sliding` ([Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa)): the 33 sliding layers, and the 12 full layers on packed or padded rows, run compiled FlexAttention under a block mask of the dense mask, skipping the tiles outside the window and across documents that SDPA computes. A full layer over one unpadded document keeps SDPA's causal kernel. The load-time warm-up compiles each layer type's own head count (64 full, 96 sliding). Because it compiles without deterministic mode, a run at world size > 1 refuses `full_determinism` ([Troubleshooting](../reference/troubleshooting.md)). `HALO_FLEX_SLIDING=0` keeps plain SDPA, which takes it.
+
 ## Limitations
 
 - **CP** — `Step3p7Attention` has no Ulysses wrapper registered, so validation rejects the model as having no supported attention module ([Context Parallelism](../parallelism/context-parallelism.md#supported-model-architectures)). Nothing architectural blocks a wrapper: both head counts (64 full / 96 sliding) and the 8 KV heads divide cp 2/4/8.

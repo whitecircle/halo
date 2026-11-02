@@ -8,7 +8,7 @@ from collections.abc import Callable
 from functools import partial
 
 import torch
-from transformers import PreTrainedModel
+from transformers import AutoConfig, PreTrainedModel
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
@@ -17,9 +17,10 @@ from halo.hardware import current_device
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, normalize_model_init_dtype
-from halo.model_loading.model_preparation import auto_load_model
+from halo.model_loading.model_preparation import apply_family_patches, auto_load_model
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
+from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import warm_fa4_kernels
 from halo.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from halo.models.attention.tree import warm_tree_kernels
@@ -102,12 +103,12 @@ def load_whole_model(
 
 
 def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig | None, model_class=None):
-    """COLLECTIVE-EQUIVALENT for a path string: the model a trainer constructor was handed, loaded from
-    the agreed source and cast when it is a path.
+    """COLLECTIVE for a path string: the model a trainer constructor was handed, loaded from the agreed
+    source, cast and its attention kernels warmed when it is a path.
 
-    The cast keeps stored fp32 values where ``parallelism_config`` (None without one) sets
-    ``fp32_non_ep_params``. ``model_class`` None takes the widest Auto class. An instantiated model must
-    come without ``model_init_kwargs``.
+    A pinned ``attn_implementation`` takes the family patches. The cast keeps stored fp32 values where
+    ``parallelism_config`` (None without one) sets ``fp32_non_ep_params``. ``model_class`` None takes the
+    widest Auto class. An instantiated model must come without ``model_init_kwargs``.
     """
     if not isinstance(model, str):
         if args is not None and getattr(args, "model_init_kwargs", None) is not None:
@@ -119,6 +120,18 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     model_init_kwargs = getattr(args, "model_init_kwargs", None) or {}
     normalize_model_init_dtype(model_init_kwargs)
     revision = resolve_model_source(model_id, model_init_kwargs.get("revision"), tag="trainer_model").revision
+    # Pinned, the backend takes the family patches the policy loader applies, keyed on this model's own config,
+    # fetched after the shims since the fetch can already import a remote modeling file; unset, transformers
+    # picks it at the build.
+    if attn_implementation := model_init_kwargs.get("attn_implementation"):
+        apply_remote_code_compat_shims()
+        config = AutoConfig.from_pretrained(
+            model_id, revision=revision, trust_remote_code=model_init_kwargs.get("trust_remote_code", False)
+        )
+        model_init_kwargs = {
+            **model_init_kwargs,
+            "attn_implementation": apply_family_patches(config, attn_implementation),
+        }
 
     # Run-scoped after the load, never through from_pretrained: a kwarg write lands in the exported
     # config.json and defaults the KV cache off for every downstream consumer.
@@ -133,14 +146,14 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     # An unset or "auto" dtype loads at the checkpoint's own dtype (recorded on the config); the cast
     # unifies the fp32 pins to it.
     requested = model_init_kwargs.get("dtype")
+    run_dtype = requested if isinstance(requested, torch.dtype) else model.config.dtype
     cast_parameters_to_run_dtype(
-        model,
-        requested if isinstance(requested, torch.dtype) else model.config.dtype,
-        keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params,
+        model, run_dtype, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
     )
     finalize_loaded_model(model)
     if run_scoped_cache_off:
         set_config_field_run_scoped(model.config, "use_cache", False)
+    warm_attention_kernels(model, dtype=run_dtype)
     return model
 
 

@@ -67,6 +67,8 @@ that (`docker/sglang/patches/`). Gemma 4 has no routing replay on either engine
 
 Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-only under EP=8 at 32,768 max length. Example: `examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml`. The multimodal class loads either way, but a text-only dataset takes the **text** data path, which is what makes `packing` legal here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
+`text_only_model` is refused for `gemma4`: transformers' CausalLM mapping names `Gemma4ForConditionalGeneration` itself, so no text-only sibling exists to drop the vision tower into (`resolve_auto_model_class`).
+
 Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Either `rollout_backend` takes the weight sync ([Export](#export)).
 
 Gemma 4's bf16 log-probs carry several nats of noise at low-probability tokens on every bf16 path, the engines and the trainer alike (fp32 agrees to 0.001), and that noise enters the importance ratios, so the engine startup probe compares only the positions the model scores confidently ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
@@ -86,7 +88,7 @@ the tower too.
 On CUDA the model is then built with the attention implementation `sdpa_flex_sliding`, which the frozen reference and teacher loader picks too; how it works is in [Flash Attention](../optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa). On Gemma 4 26B-A4B (one B300, `tests/gpu/profiling/benchmark_gemma4_attention.py`, fwd+bwd per layer, Blackwell image):
 
 - **Sliding layers** (head_dim 256, window 1,024) run compiled FlexAttention: 0.55 / 1.91 / 7.86 ms at 2,048 / 8,192 / 32,768 tokens, against 4.65 / 61.8 / 941 ms for mem-efficient SDPA with its dense mask.
-- **Global layers** (head_dim 512) run matmul attention while the layer's saved scores fit the 2 GiB budget (16 heads at 4,096 tokens per row), and mem-efficient SDPA past it: 1.86 / 6.73 ms at 2,048 / 4,096 tokens against 6.53 / 19.7 ms, and the same time as SDPA at 8,192 and beyond, where the layer runs it. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.
+- **Global layers** (head_dim 512) run matmul attention while the layer's saved scores fit the 2 GiB budget (16 heads at 4,096 tokens per row): 1.86 / 6.73 ms at 2,048 / 4,096 tokens against 6.53 / 19.7 ms for mem-efficient SDPA. Past it, a packed row's global layers run mem-efficient attention per document (the same kernel over each document's own tiles, not the full row's), and any other row runs mem-efficient SDPA. FlexAttention only fits shared memory at head_dim 512 with its smallest tiles, and those are slower than SDPA.
 - The vision tower (bidirectional) keeps SDPA. `HALO_FLEX_SLIDING=0` keeps plain SDPA for every layer.
 
 End to end, Gemma 4 26B-A4B full SFT at EP2 on 2× B300 without gradient checkpointing runs 14,980 cluster tok/s at 2,048 tokens and 16,204 at 16,384 in the [framework comparison](../optimization/throughput-benchmarks.md#full-parameter-sft-framework-comparison). Plain SDPA, measured in a separate run set, runs 11,152 and 4,124 (1.34× and 3.93× across the two sets), at 237.6 against 225.0 GiB peak at 16,384.

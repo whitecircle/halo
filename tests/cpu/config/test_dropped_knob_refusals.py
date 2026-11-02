@@ -8,8 +8,12 @@
   nothing, a pre-processed dataset is used as baked, and self-distillation refuses packing outright.
 * Environmental GRPO pins ``max_completion_length`` to ``rollout_max_tokens``; a third value would be
   overwritten. The value equal to either the field default or ``rollout_max_tokens`` stays legal.
-* SFT refuses ``packing`` / ``padding_free`` for a checkpoint with compressed-KV layers off the
-  config its modality probe already read, before the training setup and the model load.
+* SFT refuses ``packing`` / ``padding_free`` for a checkpoint with compressed-KV layers, or with
+  linear-attention layers no document boundary reaches unless ``allow_cross_document_linear_attention``
+  admits them, off the config its modality probe already read, before the training setup and the model
+  load. Tree packing and self-distillation have no such row for that opt-in to admit, so they refuse it.
+  So are the flat rows the attention backend planned for that checkpoint cannot serve: ``padding_free`` on a
+  dense kernel, and ``packing`` there on a family whose dense forward attends across documents.
 
 Each refusal must fire before the training setup and the model load; the anti-over-rejection
 cases reach the first stubbed step past the guards instead.
@@ -26,12 +30,19 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.deepseek_v4 import DeepseekV4Config
+from transformers.models.glm5_next import Glm5NextConfig
 
-from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.models import BAILING_MOE_RING_MINI, TINY_DSV4_CONFIG, TINY_GPTOSS_CONFIG
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import remote_config
 
 _REFUSED = "does not support these config fields"
+_SDPA = "attn_implementation: sdpa\n"
+_FLASH = "attn_implementation: flash_attention_2\n"
+_DENSE_LEAK = "this family's forward does not pass position_ids into its mask construction"
+_UNREAD_SEQ_LENS = "padding_free requires a varlen attention kernel, but this model resolved to"
 
 
 class _PastTheGuards(Exception):
@@ -42,14 +53,14 @@ def _stop(*args, **kwargs):
     raise _PastTheGuards
 
 
-def _run_main(script: str, config_body: str, tmp_path: Path, **stubs) -> None:
+def _run_main(script: str, config_body: str, tmp_path: Path, *, bf16: bool = False, **stubs) -> None:
     """Drive ``scripts/training/<script>:main()`` from a minimal YAML; each stub replaces that name in
-    the script's namespace."""
+    the script's namespace. ``bf16`` keeps a flash request flash (an fp32 run falls back to a dense kernel)."""
     module = load_script_module(f"scripts/training/{script}", "halo_test_dropped_knobs_" + Path(script).stem)
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: stub/qwen3-4b\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
-        f"bf16: false\nuse_cpu: true\n{config_body}"
+        f"bf16: {str(bf16).lower()}\nuse_cpu: true\n{config_body}"
     )
     with contextlib.ExitStack() as stack:
         stack.enter_context(mock.patch("halo.entrypoints.script.install_log_tee"))
@@ -136,9 +147,96 @@ def test_sft_refuses_multi_document_rows_on_compressed_kv_before_the_setup(confi
     if compressed:
         with pytest.raises(ValueError, match="layers pool KV over windows cut at fixed indices"):
             run()
+    elif "padding_free" in config_body:
+        # DeepSeek-V4 runs eager only, so no kernel would read the flattened row's cu_seq_lens.
+        with pytest.raises(ValueError, match=_UNREAD_SEQ_LENS):
+            run()
     else:
         with pytest.raises(_PastTheGuards):
             run()
+
+
+_FLAT_ROWS = {"packing": "packing: true\nmax_length: 64\n", "padding_free": "padding_free: true\n"}
+_TREE_ROWS = "packing: true\nmax_length: 64\ntree_packing: true\ntree_share_markers: ['x']\n"
+_CROSSING_OPT_IN = "allow_cross_document_linear_attention: true\n"
+
+
+@pytest.mark.parametrize(
+    ("config_body", "refusal"),
+    [
+        *((body, "allow_cross_document_linear_attention: true") for body in _FLAT_ROWS.values()),
+        *((body + _CROSSING_OPT_IN, None) for body in _FLAT_ROWS.values()),
+        (_TREE_ROWS, None),
+        (_TREE_ROWS + _CROSSING_OPT_IN, rf"tree_packing on {_REFUSED}.*allow_cross_document_linear_attention"),
+    ],
+    ids=[*_FLAT_ROWS, *(f"{mode}-opted-in" for mode in _FLAT_ROWS), "tree_packing", "tree_packing-opted-in"],
+)
+def test_sft_refuses_unmarked_linear_attention_rows_before_the_setup(config_body, refusal, tmp_path):
+    """Ring's Lightning Attention-2 layers read no document boundary: a flat multi-document row is refused off
+    the config the probe read, on the flash backend that isolates its softmax layers, before the model load,
+    unless the run opts in. A tree row brings its own plan, so tree packing gets past this check without the
+    opt-in (the tree family gate after the setup is what admits the family) and is refused the opt-in it never
+    reads."""
+    run = partial(
+        _run_main,
+        "sft.py",
+        config_body,
+        tmp_path,
+        bf16=True,
+        probe_checkpoint=lambda *args, **kwargs: (remote_config(BAILING_MOE_RING_MINI), False),
+        init_training_script=_stop,
+    )
+    if refusal is None:
+        with pytest.raises(_PastTheGuards):
+            run()
+    else:
+        with pytest.raises(ValueError, match=refusal):
+            run()
+
+
+_GPT_OSS = partial(CONFIG_MAPPING["gpt_oss"], **TINY_GPTOSS_CONFIG)
+_QWEN3 = CONFIG_MAPPING["qwen3"]
+# name -> (builds the checkpoint config the probe read, the run's rows, the refusal or None: past the guards)
+_PLANNED_BACKEND_ROWS = {
+    "gpt_oss-sdpa-packing": (_GPT_OSS, _SDPA + _FLAT_ROWS["packing"], _DENSE_LEAK),
+    "gpt_oss-flash-packing": (_GPT_OSS, _FLASH + _FLAT_ROWS["packing"], None),
+    # Tree packing is checked against its own plan after the setup.
+    "gpt_oss-sdpa-tree_packing": (_GPT_OSS, _SDPA + _TREE_ROWS, None),
+    # A family whose dense forward isolates packs on SDPA; only the dense mask's cost is warned about, later.
+    "qwen3-sdpa-packing": (_QWEN3, _SDPA + _FLAT_ROWS["packing"], None),
+    "qwen3-sdpa-padding_free": (_QWEN3, _SDPA + _FLAT_ROWS["padding_free"], _UNREAD_SEQ_LENS),
+    "qwen3-flash-padding_free": (_QWEN3, _FLASH + _FLAT_ROWS["padding_free"], None),
+    # No flash backend, and its DSA layers read only the padding mask: refused whatever the opt-in says, before
+    # the linear-attention check reads it.
+    "glm5_next-packing": (Glm5NextConfig, _FLAT_ROWS["packing"], _DENSE_LEAK),
+    "glm5_next-packing-opted-in": (Glm5NextConfig, _FLAT_ROWS["packing"] + _CROSSING_OPT_IN, _DENSE_LEAK),
+    "glm5_next-padding_free": (Glm5NextConfig, _FLAT_ROWS["padding_free"], _UNREAD_SEQ_LENS),
+    "glm5_next-padding_free-opted-in": (
+        Glm5NextConfig,
+        _FLAT_ROWS["padding_free"] + _CROSSING_OPT_IN,
+        _UNREAD_SEQ_LENS,
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_PLANNED_BACKEND_ROWS))
+def test_sft_refuses_rows_its_planned_backend_cannot_serve_before_the_setup(case, tmp_path):
+    """The backend comes from the resolution the model load runs (``attn_implementation``, dtype, the family's
+    flash support), so a row the collator factory would refuse only after a minutes-long load is refused off
+    the probed config first, and the rows that backend serves get through."""
+    build_config, config_body, refusal = _PLANNED_BACKEND_ROWS[case]
+    checkpoint_config = build_config()
+    run = partial(
+        _run_main,
+        "sft.py",
+        config_body,
+        tmp_path,
+        bf16=True,
+        probe_checkpoint=lambda *args, **kwargs: (checkpoint_config, False),
+        init_training_script=_stop,
+    )
+    with pytest.raises(ValueError, match=refusal) if refusal else pytest.raises(_PastTheGuards):
+        run()
 
 
 # Self-distillation: before init_training_script.
@@ -156,6 +254,17 @@ def test_sft_refuses_multi_document_rows_on_compressed_kv_before_the_setup(confi
 def test_self_distill_refuses_trl_dataset_prep_knobs(config_body, knob, tmp_path):
     with pytest.raises(ValueError, match=rf"{_REFUSED}.*{knob}"):
         _run_main("distillation/self_distill.py", config_body, tmp_path, init_training_script=_stop)
+
+
+def test_self_distill_refuses_the_cross_document_opt_in(tmp_path):
+    """Inherited from SFTScriptArguments, but self-distillation packs no row for it to admit."""
+    with pytest.raises(ValueError, match=rf"{_REFUSED}.*allow_cross_document_linear_attention"):
+        _run_main(
+            "distillation/self_distill.py",
+            "allow_cross_document_linear_attention: true\n",
+            tmp_path,
+            init_training_script=_stop,
+        )
 
 
 def test_self_distill_accepts_the_defaults(tmp_path):

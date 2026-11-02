@@ -5,7 +5,11 @@ from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
 from halo.config_validation import ValidatedConfig, require_int
-from halo.configs.script_arguments import CommonScriptArguments, GenerationEvalArguments
+from halo.configs.script_arguments import (
+    CommonScriptArguments,
+    CrossDocumentLinearAttentionArguments,
+    GenerationEvalArguments,
+)
 from halo.models.attention.tree_plan import FullAttentionForm
 
 
@@ -104,7 +108,11 @@ TREE_PACKING_FIELDS = tuple(f.name for f in fields(_TreePackingArguments))
 
 @dataclass
 class SFTScriptArguments(
-    _TreePackingArguments, ConversationRenderArguments, GenerationEvalArguments, CommonScriptArguments
+    _TreePackingArguments,
+    CrossDocumentLinearAttentionArguments,
+    ConversationRenderArguments,
+    GenerationEvalArguments,
+    CommonScriptArguments,
 ):
     PROJECT_NAME: ClassVar[str] = "sft-tuning"
 

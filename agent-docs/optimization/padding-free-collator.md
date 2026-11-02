@@ -25,18 +25,28 @@ assistant_message_template: "<|im_start|>assistant\n"
 
 `select_data_collator` gates on the model's **resolved** `_attn_implementation`, not on a family list.
 `padding_free` is **rejected** outside `flash_attention_2` / `_3` / `_4`: the `cu_seq_lens` it exists to emit
-go unread there, so it buys nothing at all.
+go unread there, so it buys nothing at all. The SFT script runs the same gate (`reject_dense_attention_rows`)
+before the model load, against the backend the loader will resolve for the checkpoint.
 
 That catches every model the loader routes off Flash Attention: DeepSeek-V4 (eager-only), Gemma 4
-(`head_dim=512`), the families whose upstream class declares no flash support (Bailing/Ling, GLM-5 Next,
+(`head_dim=512`), the families whose upstream class declares no flash support (Ling 3.0, GLM-5 Next,
 Step-3.7 Flash, Inkling), and Qwen3.5/3.6 and GLM-4 MoE Lite when FA4 falls them back to SDPA. The full map
-is in [Flash Attention](flash-attention.md#choosing-a-backend).
+is in [Flash Attention](flash-attention.md#choosing-a-backend). A softcapped model (Gemma 2) runs both on FA2 on
+Blackwell, since FA4's varlen backward takes no softcap; a pinned `flash_attention_4` the load keeps (Gemma 2 27B)
+is refused there.
+
+`padding_free` is also rejected on an M-RoPE decoder (Qwen3.5/3.6, text towers included, and the Qwen-VL text
+models) on every backend, by the SFT script before the model load, the SFT collator factory, the SFT trainer (for
+a collator handed to it) and the SMPO trainer alike (`reject_mrope_padding_free`): the flattened M-RoPE row faults
+the flash varlen kernels. Turn `padding_free` off there; under SFT, `packing` serves the same rows (SMPO has no
+`packing` field and pads instead).
 
 Use packing or padded batches there: packing raises tokens per row on any kernel, so off a varlen backend it
-only **warns**. gpt-oss is the exception. Its forward never passes the packed `position_ids` into mask
-construction, so the row would run as one dense causal sequence with documents attending across each other,
-and packing off a varlen backend is **rejected** there. DeepSeek-V4 rejects packing too, on every backend: its
-compressors cut KV windows at row indices, so a later packed document reads the row's first windows
+only **warns**. gpt-oss, the Bailing family (Ling 2.0, Ring, Ling 3.0) and GLM-5 Next are the exceptions. Their
+forwards never pass the packed `position_ids` into mask construction, so the row would run as one dense causal
+sequence with documents attending across each other, and packing off a varlen backend is **rejected** there.
+DeepSeek-V4 rejects packing too, on every backend: its compressors cut KV windows at row indices, so a later packed
+document reads the row's first windows
 ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 
 Both collators emit `position_ids` that reset per document; whether a family's forward turns those into an
@@ -81,7 +91,7 @@ The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4
 
 CP requires fixed-length sequences for collective synchronization: padding-free (variable-length output) and packing (the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other) are both rejected by `select_data_collator` when `use_context_parallel=True` — use the standard padded collator with `pad_to_multiple_of=cp_size` ([Context Parallelism](../parallelism/context-parallelism.md)).
 
-PP rejects padding-free: its flattened width varies every step, while the pipeline's point-to-point buffers freeze after the first. Packing runs under PP at one packed row per microbatch, except on the GatedDeltaNet families ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
+PP rejects padding-free: its flattened width varies every step, while the pipeline's point-to-point buffers freeze after the first. Packing runs under PP at one packed row per microbatch, except on models whose conv / linear-attention layers need segment markers or read no boundary at all, Qwen3.5 / 3.6 and GLM-5 Next in the PP roster ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
 
 ## When to use each
 

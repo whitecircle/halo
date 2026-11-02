@@ -24,6 +24,7 @@ from datasets import Dataset, DatasetDict
 PartialState()
 
 from halo.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacking, DataCollatorWithPacking
+from halo.data.preprocessed.metadata import load_preprocessed_metadata
 from scripts.training.sft import _prepare_text_data
 
 PAD = 0
@@ -115,6 +116,7 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
             assistant_message_template="<|assistant|>" if train_on_completions_only else None,
             train_on_last_assistant_only=False,
             tree_packing=False,
+            allow_cross_document_linear_attention=False,
         )
         sft_config = SimpleNamespace(max_length=64, packing=False, padding_free=False, per_device_train_batch_size=1)
         model_config = SimpleNamespace(model_name_or_path="stub-model")
@@ -122,7 +124,15 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
 
         tokenizer = make_tokenizer()
         _train, _eval, _gen, collator = _prepare_text_data(
-            ds, True, args, sft_config, model_config, tokenizer, tokenizer, parallelism_config, hf_config=None
+            ds,
+            load_preprocessed_metadata(tmp),
+            args,
+            sft_config,
+            model_config,
+            tokenizer,
+            tokenizer,
+            parallelism_config,
+            hf_config=None,
         )
         return collator
     finally:

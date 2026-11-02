@@ -447,8 +447,8 @@ def main() -> int:
 
         # --- Setup EfficiencyCallback ---
         # The callback reads every divisor off the run's ParallelismConfig: under CP the Trainer counts
-        # the full (pre-split) sequence, so per-GPU tokens divide by cp_size. Matches the production
-        # callback-wiring path.
+        # the full (pre-split) sequence, so the rank's own tokens divide by cp_size. Matches the
+        # production callback-wiring path.
         efficiency_cb = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,

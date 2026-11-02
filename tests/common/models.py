@@ -336,6 +336,26 @@ TINY_BAILING_MOE_CONFIG = {
     "tie_word_embeddings": False,
 }
 
+# Ring-mini-linear-2.0 at the same shape, in hybrid layer groups of two: Lightning Attention-2 in layers 0
+# and 2, softmax attention in 1 and 3.
+TINY_BAILING_RING_CONFIG = {**TINY_BAILING_MOE_CONFIG, "layer_group_size": 2}
+
+# Ling-3.0 at the same shape with every layer MLA (``layer_group_size`` 1, no KDA layer), so a forward shows
+# what its attention mask does alone. ``qk_head_dim`` is derived at config init, so it is set with its parts;
+# the ``rope_scaling`` replacement is the one agent-docs/models/bailing.md prescribes for the release config.
+TINY_BAILING_LING3_MLA_CONFIG = {
+    **TINY_BAILING_MOE_CONFIG,
+    "layer_group_size": 1,
+    "num_key_value_heads": 4,
+    "q_lora_rank": 64,
+    "kv_lora_rank": 64,
+    "qk_nope_head_dim": 32,
+    "qk_rope_head_dim": 16,
+    "qk_head_dim": 48,
+    "v_head_dim": 32,
+    "rope_scaling": {"rope_type": "default", "factor": 1.0, "mscale_all_dim": 0},
+}
+
 # Tiny dense Qwen3.5 (text), the dense roster's ``qwen3_5`` model: 8 layers keep the family's period-4
 # L,L,L,F layer_types pattern intact across a pp2 split (offset 4 = one whole period), so both
 # GatedDeltaNet linear-attention layers and full-attention layers sit on every stage.
@@ -369,6 +389,29 @@ TINY_QWEN3_CONFIG = {
     "head_dim": 32,
     "max_position_embeddings": 512,
     "tie_word_embeddings": False,
+}
+
+# Tiny dense models with sliding-window layers: Mistral windows every layer from the config alone (no
+# ``layer_types``, and its attention modules carry no window), Cohere2 and OLMo 3 alternate sliding and full
+# layers. A 64-token window, which packed rows and padded batches of a few hundred tokens outrun.
+TINY_MISTRAL_SLIDING_CONFIG = {
+    "vocab_size": 256,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "max_position_embeddings": 512,
+    "sliding_window": 64,
+    "pad_token_id": 0,
+    "bos_token_id": 1,
+    "eos_token_id": 2,
+    "tie_word_embeddings": False,
+}
+TINY_ALTERNATING_SLIDING_CONFIG = {
+    **TINY_MISTRAL_SLIDING_CONFIG,
+    "layer_types": ["sliding_attention", "full_attention"],
 }
 
 # The tied two-layer Qwen3 the optimizer-resume suite trains, dense or (with the expert fields below)
@@ -727,8 +770,8 @@ MODEL_CONFIGS = {
     "glm4-flash": {
         "hf_name": GLM4_FLASH,
         "full_params": 30e9,
-        "num_experts": 32,
-        "top_k": 2,
+        "num_experts": 64,
+        "top_k": 4,
     },
     "qwen3.5-moe": {
         "hf_name": QWEN3_5_MOE,

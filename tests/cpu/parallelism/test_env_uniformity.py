@@ -12,12 +12,17 @@ Two things break if it runs only on the DeepEP path:
   known at import, so there is nothing to wait for.
 
 These tests pin the pure divergence verdict, the latch that keeps the loader's backstop free, that every
-distributed load runs that backstop first, and the fact that the bucket knob is part of the compared set.
+distributed load runs that backstop first, and the fact that the bucket knob is part of the compared set. On
+a real gloo group they pin that ranks disagreeing on transformers' ``FLASH_ATTENTION_DETERMINISTIC``, which picks
+a head_dim-256 model's attention backend, are refused, by transformers' own reading of it.
 
     python tests/cpu/parallelism/test_env_uniformity.py
 """
 
+import datetime
 import importlib
+import json
+import os
 from unittest.mock import patch
 
 import pytest
@@ -26,10 +31,20 @@ import torch
 from halo.distributed import rank_uniform_env
 from halo.distributed.expert_parallel.deepep import settings as settings_mod
 from halo.model_loading.parallel import loader as model_loading
+from halo.models.attention.selection import FLASH_ATTENTION_DETERMINISTIC_ENV
 from halo.runtime.consensus import divergent_settings, reject_divergent_settings
+from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import make_parallelism_config
 
 _MOD = "halo.runtime.consensus"
+
+PG_TIMEOUT = datetime.timedelta(seconds=90)
+# Per case, each rank's spelling of transformers' determinism switch (None: unset).
+_DETERMINISM_SPELLINGS = {
+    "one_rank_deterministic": (None, "1"),
+    "zero_and_unset": ("0", None),
+    "both_deterministic": ("1", "1"),
+}
 
 
 def test_an_aligned_world_reports_nothing():
@@ -179,6 +194,36 @@ def test_the_legacy_backend_timeout_warning_gates_on_the_parsed_value(monkeypatc
     finally:
         monkeypatch.delenv("HALO_DEEPEP_GPU_TIMEOUT_SECONDS", raising=False)
         importlib.reload(settings_mod)
+
+
+def _determinism_worker(rank: int, tmp_dir: str) -> None:
+    """Run the seam once per case with this rank's spelling of the switch, recording what it raised."""
+    outcomes = {}
+    for case, spellings in _DETERMINISM_SPELLINGS.items():
+        if spellings[rank] is None:
+            os.environ.pop(FLASH_ATTENTION_DETERMINISTIC_ENV, None)
+        else:
+            os.environ[FLASH_ATTENTION_DETERMINISTIC_ENV] = spellings[rank]
+        rank_uniform_env._env_uniformity_verified = False
+        try:
+            rank_uniform_env.agree_rank_uniform_env()
+            outcomes[case] = None
+        except ValueError as error:
+            outcomes[case] = str(error)
+    with open(os.path.join(tmp_dir, f"rank{rank}.json"), "w") as handle:
+        json.dump(outcomes, handle)
+
+
+def test_ranks_disagreeing_on_flash_attention_determinism_are_refused(tmp_path):
+    """Set on one rank only, the switch would load FA4 there and its fallback on the peer for a head_dim-256
+    model; every rank must raise naming it. ``0`` and unset are one setting to transformers, so they agree."""
+    run_gloo_ranks(_determinism_worker, 2, str(tmp_path), pg_timeout=PG_TIMEOUT)
+    for rank in range(2):
+        outcomes = json.loads((tmp_path / f"rank{rank}.json").read_text())
+        divergence = f"'{FLASH_ATTENTION_DETERMINISTIC_ENV}': ['False', 'True']"
+        assert divergence in (outcomes["one_rank_deterministic"] or ""), f"rank {rank}: {outcomes}"
+        assert outcomes["zero_and_unset"] is None, f"rank {rank}: {outcomes}"
+        assert outcomes["both_deterministic"] is None, f"rank {rank}: {outcomes}"
 
 
 if __name__ == "__main__":

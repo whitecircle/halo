@@ -12,6 +12,7 @@ from halo.data.collators.packing import (
 )
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding, DataCollatorForCompletionOnlyLM
 from halo.data.turn_markers import resolve_eos_token_ids
+from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
 from halo.models.segment_markers import segment_markers_for
 from halo.runtime.ranks import is_global_main_process
 
@@ -31,6 +32,7 @@ def select_data_collator(
     model_config=None,
     per_device_train_batch_size: int = 1,
     keeps_packed_rows: bool = False,
+    allow_cross_document_linear_attention: bool = False,
 ):
     """The data collator matching the training configuration, ``None`` for TRL's own; raises on an option
     combination no collator can serve. ``model_config`` supplies the eos set that ends assistant turns,
@@ -46,6 +48,7 @@ def select_data_collator(
         model_config=model_config,
         per_device_train_batch_size=per_device_train_batch_size,
         keeps_packed_rows=keeps_packed_rows,
+        allow_cross_document_linear_attention=allow_cross_document_linear_attention,
     )
     markers = segment_markers_for(model_config)
     completion_kwargs = {
@@ -56,7 +59,11 @@ def select_data_collator(
     }
     last_only = ", last-only" if train_on_last_assistant_only else ""
     flat_markers = {"return_seq_idx": markers.seq_idx, "return_flash_attn_kwargs": True}
-    packed_markers = {"return_seq_idx": markers.seq_idx, "return_flash_attn_kwargs": markers.cu_seq_lens}
+    packed_markers = {
+        "return_seq_idx": markers.seq_idx,
+        "return_flash_attn_kwargs": markers.cu_seq_lens,
+        "flash_varlen_kwargs": is_flash_attn_implementation(effective_attn_implementation(model_config)),
+    }
     if use_context_parallel and train_on_completions_only:
         # pad_to_multiple_of keeps seqs divisible by cp_size.
         prefix, name = "📊", f"DataCollatorForCompletionOnlyLM (CP mode, pad_to={pad_to_multiple_of}{last_only})"
@@ -83,6 +90,8 @@ def select_data_collator(
         collator = DataCollatorForCompletionOnlyLM(**completion_kwargs)
     else:
         prefix, name, collator = "ℹ️", "None (default TRL behavior)", None
+    if isinstance(collator, DataCollatorWithPacking | DataCollatorWithFlattening):
+        collator.allow_cross_document_linear_attention = allow_cross_document_linear_attention
 
     if is_global_main_process():
         logger.info(f"{prefix} Using {name}")

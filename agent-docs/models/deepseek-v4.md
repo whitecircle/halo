@@ -73,6 +73,10 @@ Example configs under `examples/sft/deepseek_v4/`:
     `DeepseekV4GroupedLinear`, whose block-diagonal forward returns one group's width, so a stock LoRA
     delta added to it is the wrong shape ([PEFT](../optimization/peft.md#targets-peft-cannot-adapt)).
     Its sibling mix-down `o_b_proj` carries the output projection's adapter.
+
+    `q_b_proj` also names each CSA layer's indexer query projection (`compressor.indexer.q_b_proj`, 20 on
+    V4-Flash). The indexer hands attention only its top-k indices, so no gradient reaches those adapters:
+    their delta stays zero and adds nothing to the trained or merged weights.
 - `v4-tiny-random-smoke-ep.yaml` — EP=2 pipeline smoke on a tiny random-init checkpoint (materialization recipe in the file).
 
 The hub checkpoint ships **no chat template** (DeepSeek uses an external message encoder) — one is required for conversational SFT. `jinja-templates/deepseek-v4/deepseek-v4-chat.jinja` renders the tokenizer's native `<｜User｜>`/`<｜Assistant｜>` special tokens; pair it with `assistant_message_template: "<｜Assistant｜>"` and `train_on_completions_only: true` (pad == eos).

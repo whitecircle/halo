@@ -57,7 +57,8 @@ from tests.common.rank_log import log
 from tests.common.training_checks import step_losses
 
 MODEL_NAME = env_str("HALO_TEST_MODEL", GPT_OSS_20B)
-# SDPA is what the DPO script picks for padded preference batches when the sinks are reset.
+# SDPA, the DPO script's padded default off Blackwell under reset sinks; the reference contract checked here
+# holds on every backend, so HALO_TEST_ATTN=flash_attention_4 runs the request it makes on Blackwell.
 ATTN_IMPL = env_str("HALO_TEST_ATTN", "sdpa")
 EP_SIZE = env_int("HALO_TEST_EP", 2)
 MAX_STEPS = 3

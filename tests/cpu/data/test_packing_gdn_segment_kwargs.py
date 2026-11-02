@@ -81,12 +81,12 @@ def test_factory_emits_segment_kwargs_for_gdn_families(monkeypatch):
 
 
 def test_pp_keeps_rows_is_refused(monkeypatch):
-    """PP keeps the packed rows, and the delta rule's cu_seq_lens have no per-row convention —
-    a half-isolated run (conv isolated, delta rule crossing) must be refused, not silently built."""
+    """PP keeps the packed rows, and a stage's forward passes neither seq_idx nor cu_seq_lens, so the
+    conv and the delta rule would cross documents while attention isolates: refused, not silently built."""
     _backends(monkeypatch)  # else the wheel refusal fires first and this would pass for it
     config = Qwen3NextConfig(num_hidden_layers=1)
     config._attn_implementation = "flash_attention_2"
-    with pytest.raises(ValueError, match="GatedDeltaNet"):
+    with pytest.raises(ValueError, match="packing under pipeline parallelism is refused .*seq_idx and cu_seq_lens"):
         select_data_collator(
             make_tokenizer(),
             train_on_completions_only=False,
@@ -97,8 +97,10 @@ def test_pp_keeps_rows_is_refused(monkeypatch):
 
 
 def test_other_families_get_no_segment_kwargs():
+    """Off flash, where the varlen set is attention's (``test_packing_flash_varlen_kwargs.py``), a family
+    whose mixers read no marker gets none."""
     config = Mistral4Config(num_hidden_layers=1)
-    config._attn_implementation = "flash_attention_2"
+    config._attn_implementation = "sdpa"
     collator = select_data_collator(
         make_tokenizer(), train_on_completions_only=False, packing=True, model_config=config
     )

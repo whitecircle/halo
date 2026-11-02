@@ -23,25 +23,12 @@ from halo.model_loading.liger import cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.model_loading.liger.fused_modules import apply_fused_modules_to_model
 from halo.models.head_transform import HeadTransform
-from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG
+from tests.common.models import TINY_ALTERNATING_SLIDING_CONFIG, TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG
 
 # Four times the class default (0.0625), so a head reading a stale default would train a different loss.
 LOGIT_SCALE = 0.25
-_TINY_COHERE2_CONFIG = {
-    key: TINY_COHERE2_MOE_CONFIG[key]
-    for key in (
-        "vocab_size",
-        "hidden_size",
-        "intermediate_size",
-        "num_hidden_layers",
-        "num_attention_heads",
-        "num_key_value_heads",
-        "layer_types",
-        "sliding_window",
-    )
-}
 FAMILIES = {
-    "cohere2": (Cohere2Config, Cohere2ForCausalLM, _TINY_COHERE2_CONFIG),
+    "cohere2": (Cohere2Config, Cohere2ForCausalLM, TINY_ALTERNATING_SLIDING_CONFIG),
     "cohere2_moe": (Cohere2MoeConfig, Cohere2MoeForCausalLM, TINY_COHERE2_MOE_CONFIG),
     "glm4_moe_lite": (Glm4MoeLiteConfig, Glm4MoeLiteForCausalLM, TINY_GLM4_MOE_LITE_CONFIG),
 }

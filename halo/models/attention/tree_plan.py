@@ -151,30 +151,62 @@ def _with_call_chunks(part: dict, node_lengths: np.ndarray) -> dict:
     return {**part, "chunks": chunks}
 
 
-def _levels(runs: list[tuple[int, int]], parents: list[int]) -> tuple[list[dict[str, torch.Tensor]], torch.Tensor]:
-    """The nodes one depth at a time, and the permutation from that order back to row order.
-
-    Each level holds its tokens (``index``), their varlen bounds and, below the roots, every node's
-    ``parent`` slot in the level above.
+def _levels(runs: list[tuple[int, int]], parents: list[int]) -> tuple[list[dict], torch.Tensor, torch.Tensor]:
+    """The nodes one depth at a time: the row's tokens in that order, the permutation from that order back to
+    row order, and per depth its nodes' varlen bounds (``cu_seqlens``, and as python ints ``cu_seqlens_host``,
+    which a batch transport leaves on the host) and, below the roots, every node's ``parent`` slot in the
+    level above.
     """
     depths = resolve_node_depths(parents)
-    levels: list[dict[str, torch.Tensor]] = []
+    levels: list[dict] = []
+    in_depth_order: list[tuple[int, int]] = []
     slots: dict[int, int] = {}
     for depth in range(max(depths) + 1):
         nodes = [node for node, node_depth in enumerate(depths) if node_depth == depth]
-        level = {
-            "index": torch.from_numpy(_expand([runs[node] for node in nodes])),
-            "cu_seqlens": torch.tensor([0, *np.cumsum([runs[node][1] for node in nodes])], dtype=torch.int32),
-        }
+        in_depth_order += [runs[node] for node in nodes]
+        bounds = (0, *np.cumsum([runs[node][1] for node in nodes]).tolist())
+        level = {"cu_seqlens": torch.tensor(bounds, dtype=torch.int32), "cu_seqlens_host": bounds}
         if depth:
             level["parent"] = torch.tensor([slots[parents[node]] for node in nodes])
         levels.append(level)
         slots = {node: slot for slot, node in enumerate(nodes)}
-    return levels, torch.argsort(torch.cat([level["index"] for level in levels]))
+    order = torch.from_numpy(_expand(in_depth_order))
+    return levels, order, torch.argsort(order)
+
+
+def _path_links(table: NodeTable, parents: list[int]) -> dict[str, torch.Tensor]:
+    """Per token: its predecessor on its own path (``-1`` at a root), the row end of its node's subtree,
+    its path position and the row start of its tree. The subtree of a depth-first layout is contiguous,
+    so a key at ``e`` precedes a query at ``q`` on the query's path exactly when ``e <= q < subtree_end[e]``."""
+    starts, lengths = table.starts.astype(np.int64), table.lengths.astype(np.int64)
+    ends = starts + lengths
+    subtree_end, path_start, tree_start = ends.copy(), np.zeros(len(starts), dtype=np.int64), starts.copy()
+    for node in reversed(range(len(parents))):
+        if parents[node] != -1:
+            subtree_end[parents[node]] = max(subtree_end[parents[node]], subtree_end[node])
+    for node, parent in enumerate(parents):
+        if parent != -1:
+            path_start[node] = path_start[parent] + lengths[parent]
+            tree_start[node] = tree_start[parent]
+    total = int(lengths.sum())
+    predecessor = np.arange(total, dtype=np.int64) - 1
+    predecessor[starts] = [-1 if parent == -1 else ends[parent] - 1 for parent in parents]
+    within = np.arange(total, dtype=np.int64) - np.repeat(starts, lengths)
+    return {
+        "predecessor": torch.from_numpy(predecessor),
+        "subtree_end": torch.from_numpy(np.repeat(subtree_end, lengths)),
+        "position": torch.from_numpy(np.repeat(path_start, lengths) + within),
+        "tree_start": torch.from_numpy(np.repeat(tree_start, lengths)),
+    }
 
 
 def build_tree_attention_plan(
-    table: NodeTable, *, sliding_window: int | None, full_form: FullAttentionForm, conv_kernel: int | None = None
+    table: NodeTable,
+    *,
+    sliding_window: int | None,
+    full_form: FullAttentionForm,
+    conv_kernel: int | None = None,
+    sparse_attention: bool = False,
 ) -> dict:
     """The index tensors a model's sequence mixers need to give every token its own path as context.
 
@@ -198,9 +230,15 @@ def build_tree_attention_plan(
 
     - ``conv``: each node behind the last ``conv_kernel - 1`` tokens above it (``index``), the
       gathered sequences kept apart by ``seq_idx``; ``own`` picks the nodes' outputs back out.
-    - ``levels``: per tree depth, its nodes' tokens (``index``), their varlen bounds
-      (``cu_seqlens``) and each node's ``parent`` slot in the level above; ``restore`` returns the
-      depths' concatenated outputs to row order.
+    - ``levels``: per tree depth, its nodes' varlen bounds (``cu_seqlens``, and ``cu_seqlens_host``
+      as python ints for the kernel's host-side chunk indices) and each node's ``parent`` slot in the
+      level above; ``depth_order`` lists the row's tokens depth by depth, and ``restore`` returns that
+      order to row order.
+
+    A family whose softmax layers select their keys per query (``sparse_attention``, GLM-5 Next's
+    DeepSeek sparse attention), on every row and in place of the softmax parts above: ``sparse``, the
+    per-token path links of :func:`_path_links`, from which those layers build their candidates on the
+    device.
 
     Maxima are python ints: a tensor there enters FA4's backward compile key and recompiles it per call.
     """
@@ -220,7 +258,9 @@ def build_tree_attention_plan(
         "max_seqlen_q": int(table.lengths.max()),
         "leaf_count": torch.from_numpy(np.repeat(leaves, table.lengths)),
     }
-    if table.has_branches:
+    if sparse_attention:
+        plan["sparse"] = _path_links(table, parents)
+    elif table.has_branches:
         if sliding_window is not None:
             plan["sliding"] = _with_call_chunks(_behind_tail(ancestors, runs, sliding_window - 1), table.lengths)
         if full_form == "gather":
@@ -244,5 +284,5 @@ def build_tree_attention_plan(
                 _expand([(end - length, length) for end, (_, length) in zip(bounds[1:].tolist(), runs, strict=True)])
             ),
         }
-        plan["levels"], plan["restore"] = _levels(runs, parents)
+        plan["levels"], plan["depth_order"], plan["restore"] = _levels(runs, parents)
     return plan

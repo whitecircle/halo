@@ -12,10 +12,12 @@ from halo.distributed.expert_parallel.deepep.settings import (
 )
 from halo.distributed.grad_reduce import GRAD_BUCKET_MB
 from halo.env import fs_probe_timeout, nccl_timeout, store_timeout
+from halo.models.attention.selection import FLASH_ATTENTION_DETERMINISTIC_ENV, flash_attention_deterministic
 from halo.runtime.consensus import reject_divergent_settings
 from halo.runtime.ranks import has_process_group
 
-# The settings are fixed at import, so one join per process is enough.
+# The settings are fixed at import or later written identically on every rank (``full_determinism`` sets
+# FLASH_ATTENTION_DETERMINISTIC), so one join per process is enough.
 _env_uniformity_verified = False
 
 
@@ -25,7 +27,8 @@ def rank_uniform_settings() -> dict[str, object]:
     Resolved rather than raw: :mod:`halo.env` reads an absent variable and one set to its default
     identically, so raw strings would reject a launcher that exports a default on the head node only.
     ``EP_DISABLE_GIN`` is DeepEP's own and read there as a raw string; unset, the elastic backend
-    derives it from topology identically on every rank of a group.
+    derives it from topology identically on every rank of a group. ``FLASH_ATTENTION_DETERMINISTIC`` is
+    transformers' own, resolved by its rule (:func:`flash_attention_deterministic`).
     """
     return {
         "HALO_EP_CAPACITY_DEDUP": EP_CAPACITY_DEDUP,
@@ -39,6 +42,7 @@ def rank_uniform_settings() -> dict[str, object]:
         "DIST_STORE_TIMEOUT_HOURS": store_timeout() // timedelta(hours=1),
         "DIST_FS_PROBE_TIMEOUT_SECONDS": fs_probe_timeout() // timedelta(seconds=1),
         "EP_DISABLE_GIN": os.environ.get("EP_DISABLE_GIN"),
+        FLASH_ATTENTION_DETERMINISTIC_ENV: flash_attention_deterministic(),
     }
 
 
@@ -60,6 +64,7 @@ def agree_rank_uniform_env() -> None:
         "the chunk boundaries of the bucketed gradient reductions (EP, TP and QLoRA sweeps alike), "
         "DIST_NCCL_TIMEOUT_MINUTES / DIST_STORE_TIMEOUT_HOURS decide which rank gives up on a join "
         "first, DIST_FS_PROBE_TIMEOUT_SECONDS how long every rank looks for the filesystem probe's file, "
-        "and the rest are wire parameters shared by both ends of the all-to-all.",
+        "FLASH_ATTENTION_DETERMINISTIC which attention backend a head_dim-256 model loads (FA4 or its "
+        "fallback), and the rest are wire parameters shared by both ends of the all-to-all.",
     )
     _env_uniformity_verified = has_process_group()
