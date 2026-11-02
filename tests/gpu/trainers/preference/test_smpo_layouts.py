@@ -10,16 +10,23 @@ drops a reduction still trains to finite losses; the run is pinned by value inst
 
   1. step 1's microbatches, as ``compute_loss`` saw them, are scored again by an SMPO trainer over the same
      initial weights under plain FSDP2 data parallelism with the stock experts (no EP layers), and each
-     microbatch loss, the logged step loss and the step-1 gradient of every FSDP2-sharded parameter they share
-     (the attention, norms, embedding and head, which every expert output reaches) match it;
-  2. the layout is read off the model (``parallel_shape_checks``, ``dp_layout_checks``);
-  3. a run checkpointed midway resumes exactly and its final checkpoint serves through
+     microbatch loss, the logged step loss and the step-1 gradient of every parameter they share, which covers
+     every one outside the routers and routed experts (the attention, norms, embedding and head, which every
+     expert output reaches), match it;
+  2. on the MoE layouts the routed path is compared where it is computed, since at this model's random init the
+     routed output barely reaches the loss or those gradients (a halved combine moves the step-1 loss 1e-3
+     relative): the reference's stock blocks route on the picks each EP layer dispatched, and every layer's
+     output, every router gradient and each expert's gate-up and down gradient, gathered across EP and expert TP,
+     match it (:mod:`tests.common.routed_first_step`);
+  3. the layout is read off the model (``parallel_shape_checks``, ``dp_layout_checks``);
+  4. a run checkpointed midway resumes exactly and its final checkpoint serves through
      ``AutoModelForCausalLM`` (:func:`tests.common.resume_export.run_resume_export`).
 
 Run: torchrun --nproc_per_node=2 tests/gpu/trainers/preference/test_smpo_layouts.py --mode ep1
 """
 
 import argparse
+import contextlib
 import os
 
 import torch
@@ -34,9 +41,8 @@ from tests.common.checkpoint_io import save_schedule
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.first_step import (
-    ROUTING_DEPENDENT_PARAM,
+    dense_gradient_checks,
     first_step_checks,
-    first_step_gradient_checks,
     score_first_step,
     train_recording_first_step,
 )
@@ -45,8 +51,8 @@ from tests.common.memory import finish_phase
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.pp_trainers import PAD_ID, tiny_vocab_tokenizer
-from tests.common.rank_log import log
 from tests.common.resume_export import ResumeExportRoute, load_route_model, run_resume_export, save_base_checkpoint
+from tests.common.routed_first_step import pinned_reference_routing, record_routed_first_step, routed_first_step_checks
 from tests.common.training_checks import training_run_checks
 
 # Each layout's world size, model and ParallelismConfig fields; ``None`` fields are HSDP's, sized by the world.
@@ -132,19 +138,6 @@ def smpo_args(output_dir: str, *, max_steps: int = N_STEPS, save_every: int | No
     )
 
 
-def shared_gradient_checks(record, reference) -> tuple[dict[str, bool], dict[str, float]]:
-    """The step-1 gradient over the FSDP2-sharded parameters both runs hold (the EP and expert-TP experts and
-    routers are FSDP-ignored on the layout's side and named apart), after checking that those cover every
-    reference parameter but the routers and routed experts, so the comparison cannot pass on an empty set."""
-    dense = {name for name in reference.grads if not ROUTING_DEPENDENT_PARAM.search(name)}
-    covered = dense <= record.grads.keys()
-    reference.grads = {name: grad for name, grad in reference.grads.items() if name in record.grads}
-    record.grads = {name: grad for name, grad in record.grads.items() if name in reference.grads}
-    checks, metrics = first_step_gradient_checks(record, reference)
-    log(f"  step-1 gradients compared over {len(reference.grads)} params ({len(dense)} outside routing)")
-    return {"step1_grads_cover_every_dense_param": covered and bool(dense)} | checks, metrics
-
-
 @gpu_test_main(exact_world_size=WORLD_SIZE, prefix=f"smpo_layouts_{ARGS.mode}")
 def run(ctx):
     fields = hsdp_layout(ctx.world_size) if FIELDS is None else FIELDS
@@ -178,6 +171,7 @@ def run(ctx):
     )
     ctx.on_teardown(trainer.cleanup_ep)
     checks = parallel_shape_checks(trainer.model, config)
+    routed = record_routed_first_step(trainer) if FAMILY == "moe" else None
     result, record = train_recording_first_step(trainer)
     checks |= training_run_checks(result, trainer, N_STEPS, grad_norms=True)
     checks |= dp_layout_checks(
@@ -200,11 +194,17 @@ def run(ctx):
         processing_class=tokenizer,
         parallelism_config=reference_config,
     )
-    reference = score_first_step(reference_trainer, record)
+    pinning = contextlib.nullcontext() if routed is None else pinned_reference_routing(reference_trainer.model, routed)
+    with pinning as pinned:
+        reference = score_first_step(reference_trainer, record)
     loss_checks, metrics = first_step_checks(record, reference, miscount_factor=MISCOUNT_FACTOR, loss_rtol=LOSS_RTOL)
-    grad_checks, grad_metrics = shared_gradient_checks(record, reference)
+    grad_checks, grad_metrics = dense_gradient_checks(record, reference)
     checks |= loss_checks | grad_checks
     metrics |= grad_metrics
+    if routed is not None:
+        routed_checks, routed_metrics = routed_first_step_checks(routed, pinned, reference.grads, device=ctx.device)
+        checks |= routed_checks
+        metrics |= routed_metrics
     finish_phase(reference_trainer)
 
     phase_checks, phase_metrics = run_resume_export(

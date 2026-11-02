@@ -154,9 +154,10 @@ class EPExpertComputeMixin:
     def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
         """Launch this layer's expert kernels, forward and backward, before its first dispatch: a kernel's first launch
         compiles it (Triton) and loads it (CUDA lazy loading), and inside the span either stalls every peer in DeepEP's
-        barrier. At ``ep_size`` 1, with no barrier, only the grouped GEMM warms (:meth:`_warm_expert_gemm`): its tile
-        follows the rows per expert, which a micro-batch of another token count changes, so a rank can first need one
-        in a later step, holding up the expert-TP reduce or FSDP's next collective."""
+        barrier. The grouped path warms its GEMM (:meth:`_warm_expert_gemm`), routing sort and permute at every
+        ``ep_size``: which GEMM tile and ``index_select`` kernel a step runs follows its receive, at ``ep_size`` 1 its
+        micro-batch's token count, so without a barrier a rank first needing one in a later step still holds up the
+        expert-TP reduce or FSDP's next collective."""
         grouped, dispatched = self._use_grouped_mm, self.ep_size > 1
         if self._activation_warmed or not (grouped or dispatched):
             return
@@ -169,14 +170,13 @@ class EPExpertComputeMixin:
             # Identity saved-tensor hooks: under a non-reentrant checkpoint the backward below would unpack a
             # packed tensor, run the recompute mid-forward and replay a dispatch the original pass has not made.
             with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
-                if grouped:
+                if grouped:  # the routing sort and fused permute run only on the grouped path
                     self._warm_expert_gemm(device, dtype, hidden)
+                    warm_route_sort_kernels(top_k, self.experts_per_rank, device)
+                    warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
                 if dispatched:
                     gate_up = torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype, requires_grad=True)
                     torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
-                if grouped and dispatched:  # the routing sort and fused permute run only on the grouped path
-                    warm_route_sort_kernels(top_k, self.experts_per_rank, device)
-                    warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
             if dispatched:
                 with torch.no_grad():
                     self._warm_expert_activation(torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype))
@@ -184,12 +184,16 @@ class EPExpertComputeMixin:
     def _warm_expert_gemm(self, device: torch.device, dtype: torch.dtype, hidden: int) -> None:
         """Run :meth:`_grouped_expert_ffn`, forward and backward, over zero tokens at one row per local expert and at
         one past :data:`GROUPED_MM_SMALL_TILE_DIM`: torch's bf16 grouped GEMM picks the tile of the forward and the
-        input gradient by the mean rows per group, which change with every receive. The backward computes the weight
-        gradients the run does and discards them; the RNG is restored after, since expert-LoRA dropout draws. The
-        expert adapters run even when the first forward has them off (a reference pass), as training runs them."""
+        input gradient by the mean rows per group, which change with every receive. The backward takes the gradients
+        of the tokens and of every trainable expert parameter, as the training backward does, and discards them: the
+        expert-bias gather's backward, off the tokens' path, runs too, its one-hot GEMM at these two receive sizes only,
+        since cuBLAS picks that kernel by the receive's length. The RNG is restored after, since expert-LoRA dropout
+        draws. The expert adapters run even when the first forward has them off (a reference pass), as training runs
+        them."""
         experts, adapters_enabled = self.experts_per_rank, self._expert_adapters_enabled
         self._expert_adapters_enabled = True
         try:
+            trainable = [param for _, param in self.expert_named_params() if param.requires_grad]
             with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
                 for rows_per_expert in (1, GROUPED_MM_SMALL_TILE_DIM + 1):
                     rows = experts * rows_per_expert
@@ -198,7 +202,7 @@ class EPExpertComputeMixin:
                     expert_ids = torch.arange(rows, device=device) // rows_per_expert
                     with torch.amp.autocast("cuda", dtype=dtype):
                         out = self._grouped_expert_ffn(tokens, offs, expert_ids, dtype)
-                    torch.autograd.grad(out.sum(), tokens)
+                    torch.autograd.grad(out.sum(), [tokens, *trainable], allow_unused=True)
         finally:
             self._expert_adapters_enabled = adapters_enabled
 

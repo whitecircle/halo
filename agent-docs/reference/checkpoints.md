@@ -411,12 +411,26 @@ failure), `tokenizer.*`.
 | **FSDP2** | DTensors (sharded across DP mesh) | Global rank 0 (shared FS) / local rank 0 | Yes |
 | **QLoRA + CP** | Regular tensors (no DTensor adapters) | Save rank | No |
 
-LoRA is rejected at construction under TP / EP+TP. The saver checks for DTensor adapters before the CP
-branch, so non-quantized LoRA+CP routes through the FSDP2 path; only QLoRA+CP takes the collective-free CP
-branch. Under EP the native grouped expert adapters are gathered into the same
-`adapter_model.safetensors`; a directory holding them carries a `peft_type` stock PEFT does not know, so an
-external load raises instead of loading the attention half alone
+LoRA is rejected at construction under TP / EP+TP. The saver checks for DTensor adapters before the CP branch, so
+LoRA+CP, at any data-parallel size, holds FSDP2-sharded DTensor adapters (a CP run is wrapped over the whole rank
+block) and routes through the FSDP2 path; only QLoRA+CP takes the collective-free CP branch. Under EP the native grouped expert
+adapters are gathered into the same `adapter_model.safetensors`; a directory holding them carries a `peft_type`
+stock PEFT does not know, so an external load raises instead of loading the attention half alone
 ([PEFT](../optimization/peft.md#checkpoint-saving)).
+
+A run whose `added_special_tokens` outgrew the checkpoint's embedding (`configure_run_tokenizer` grows it, and an
+untied head, to the tokenizer's length and marks the model) saves the grown embedding and head with its adapters on
+every branch: every selection, a save's and the resume's alike, passes `save_embedding_layers=True` once
+`vocabulary_grown` holds, since PEFT's `"auto"` tells a grown vocabulary only by reading the base config again,
+which it skips offline or without the Hub and which a composite config (its `vocab_size` on the text config alone)
+defeats. The resume's selection matches, so it restores the added rows. An adapter saved before adapter saves
+carried them lacks the frozen embedding and head tensors; its run kept their added rows at the mean-resize init this
+run's grow draws again, so the resume keeps the live ones with a warning, and still refuses any other tensor the file
+lacks. A tied pair is written under one name in the gathered file and under both in the others, each name its own
+copy (`write_adapter_file`: safetensors refuses two keys over one storage); the resume takes a tied tensor's value
+from whichever name the file holds. The PEFT runs whose saves would still drop added rows are refused at
+construction (`reject_unsaved_grown_vocabulary`): accelerate-managed FSDP (the base Trainer saves with PEFT's own
+check), and LoRA on one layer of an untied embedding pair (PEFT then saves only adapted layers' base weights).
 
 Every save reshards the FSDP2 modules first (`save_model`): mid-training they can still hold the transient
 unsharded params a forward registered, which the optimizer never stepped, so every writer would read
@@ -619,9 +633,14 @@ cannot map to FQNs, and the save would hold no optimizer state.
 params (the whole EP module) and their moments are identical across an `expert_replica_group` (gradients
 averaged over it, `AdamWBF16` rounding keyed by step and parameter name). Only the group's **lowest rank**
 keeps them in its shard; its peers read them back from it — at Qwen3.5-397B-A17B on 512 GPUs at `ep64`, 8
-copies become one (~14 TB → ~1.8 TB of EP optimizer state). The dedup needs a shared output filesystem; on a
-per-node one every rank writes its own copy and the save warns once. `expert_replica_size` in the
-fingerprint records how many shards collapsed into one (`1` for every dense run and every default `ep1` run).
+copies become one (~14 TB → ~1.8 TB of EP optimizer state). A peer reads the writer's shard when it tracks
+replicated params and holds state for none of them, an empty shard included (expert-only LoRA leaves a peer
+nothing else; a never-stepped optimizer is saved zero-initialized, not empty); a run with every EP-layer param
+frozen reads none. A stateless optimizer (plain SGD) writes no state on any rank, so its peers read the writer's
+shard too, and a resume where a peer's node lacks it raises (`allow_optimizer_warm_restart: true` loses nothing
+there). The dedup needs a shared output filesystem; on a per-node one every rank writes its own copy and the save
+warns once. `expert_replica_size` in the fingerprint records how many shards collapsed into one
+(`1` for every dense run and every default `ep1` run).
 Both reads of a resume (this rank's shard and, for a follower, the writer's) run under the node's
 `max_concurrent_loading` throttle, which every rank enters
 ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)). So does the save: each rank's
@@ -644,7 +663,8 @@ Every restore verdict is rank-uniform — all ranks restore, warm-restart or rai
   nothing records the sharding that produced those layouts.
 - **FQN drift** — a trainable param the shard neither holds state for nor lists in its `param_groups` —
   raises. A param it tracked without state (never received a gradient: GptOss sinks under a sink-dropping
-  kernel) passes. A replica follower whose writer's shard restores none of the replicated FQNs raises too.
+  kernel) passes. A replica follower whose writer's shard holds state, but none under the replicated FQNs,
+  raises too.
 - **A restore that passes every gate and still fails** on some rank (an unreadable shard, a replica
   writer's shard out of reach, a CUDA OOM inside `set_optimizer_state_dict`, a moment shaped unlike its
   parameter) raises on every rank, naming the failing ranks and the first one's error.

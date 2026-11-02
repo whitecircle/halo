@@ -22,6 +22,9 @@ DEFAULT_ANSWER_FIELD = "answer"
 # Optimizer steps in a row whose gradient norm may be non-finite (each skipped) before the run raises.
 DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS = 3
 
+# Characters a regex spells and a module path does not; PEFT compares a target list's entries to paths verbatim.
+_REGEX_ONLY_CHARACTERS = frozenset("\\*+?()[]{}|^$")
+
 
 @dataclass
 class CheckpointArguments:
@@ -100,13 +103,32 @@ class ModelArguments(ModelConfig):
     """TRL's ``ModelConfig`` with ``trust_remote_code``, which TRL moved onto its own trainer configs.
 
     The toolkit's loaders read it here for every method, including those whose training config is not a TRL
-    one; a YAML key shared with a TRL config reaches both dataclasses.
+    one; a YAML key shared with a TRL config reaches both dataclasses. ``lora_target_modules`` keeps the form it
+    was given: a list names modules at any length, a string is PEFT's own spelling (the ``all-linear``
+    sentinel or a regex fullmatched against each full module path).
     """
 
     trust_remote_code: bool = field(
         default=False,
         metadata={"help": "Trust the checkpoint's remote modeling and tokenizer code when loading it."},
     )
+
+    def __post_init__(self):
+        targets = self.lora_target_modules
+        super().__post_init__()
+        if not isinstance(targets, (list, tuple)):
+            return
+        patterns = [target for target in targets if _REGEX_ONLY_CHARACTERS & set(str(target))]
+        if patterns:
+            raise ValueError(
+                f"lora_target_modules entries {patterns} are regexes, but a list names modules: PEFT compares each "
+                f"entry to module paths verbatim, so they would match nothing. Give a regex as a bare string in the "
+                f"YAML (lora_target_modules: '<regex>'), matched against each full module path, or list the "
+                f"module names."
+            )
+        # TRL collapses a one-entry list to its bare entry, which PEFT reads as a regex: `[o_proj]` would match
+        # no full module path and adapt nothing.
+        self.lora_target_modules = list(targets)
 
 
 @dataclass

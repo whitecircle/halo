@@ -7,12 +7,14 @@ of the step). ``MoEExpertBiasGather`` keeps the gather forward but computes the 
 GEMM (``onehotᵀ @ grad``). This test pins it to the reference:
 
   - forward is byte-identical to ``bias.index_select(0, eids)``;
-  - the bias gradient equals the autograd ``index_select``/``index_add_`` reference — exactly in
-    fp32 (tight tol), within bf16 accumulation noise in bf16;
+  - in fp32 the bias gradient equals the fp64 sum of each expert's rows within fp32 rounding, and two
+    runs agree bit for bit; in bf16 it is within bf16 accumulation noise of the autograd
+    ``index_select``/``index_add_`` reference;
   - an expert with no routed tokens gets exactly zero gradient.
 
-These assertions FAIL if the backward is wired wrong (wrong reduction, wrong dtype, sort assumed),
-so the test is not vacuous. Single GPU; no DeepEP.
+These assertions FAIL if the backward is wired wrong (wrong scale, rows summed into the wrong expert,
+an fp32 gradient summed at lower precision, sums that change run to run), so the test is not vacuous.
+Single GPU; no DeepEP.
 
     torchrun --nproc_per_node=1 tests/gpu/parallelism/ep/test_gptoss_expert_bias_grad.py
 """
@@ -39,6 +41,13 @@ def _case(dtype, device="cuda", empty_expert=None):
     return bias, eids, grad
 
 
+def _fp64_bias_grad(eids, grad):
+    """The fp64 sum of each expert's rows, and the fp32 rounding bound of a sum of that many of them."""
+    want = torch.zeros(E, DIM, device=grad.device, dtype=torch.float64).index_add_(0, eids, grad.double())
+    magnitude = torch.zeros_like(want).index_add_(0, eids, grad.double().abs())
+    return want, eids.numel() * 2**-24 * magnitude
+
+
 def _reference_bias_grad(bias, eids, grad):
     b = bias.clone().requires_grad_(True)
     (b.index_select(0, eids) * grad).sum().backward()
@@ -59,9 +68,11 @@ def test_forward_is_plain_gather():
 
 def test_bias_grad_matches_reference_fp32():
     bias, eids, grad = _case(torch.float32)
-    ref, fix = _reference_bias_grad(bias, eids, grad), _fix_bias_grad(bias, eids, grad)
-    rel = max_abs_rel_err(fix, ref)
-    assert rel < 1e-3, f"fp32 bias-grad rel error {rel:.2e} too large"
+    (want, rounding), fix = _fp64_bias_grad(eids, grad), _fix_bias_grad(bias, eids, grad)
+    assert bool(((fix.double() - want).abs() <= rounding).all()), (
+        f"fp32 bias-grad error {max_abs_rel_err(fix, want):.2e}"
+    )
+    assert torch.equal(fix, _fix_bias_grad(bias, eids, grad)), "two runs of the bias gradient differ"
 
 
 def test_bias_grad_matches_reference_bf16():

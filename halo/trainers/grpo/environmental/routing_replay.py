@@ -23,7 +23,7 @@ from halo.models.module_tree import decoder_layer_index
 from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_routing_replay
-from halo.trainers.grpo.environmental.step_batch import StepRows
+from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, StepRows
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from halo.trainers.world_metrics import world_sums
@@ -410,10 +410,15 @@ class RoutingReplayMixin:
             )
         return masks.to(device)
 
-    def _replay_spans_for(self, inputs: dict) -> list[tuple[int, int]] | None:
-        """Row spans for capture/arm when the dense per-row path trims the forwards; ``None`` on the padded
-        paths, where the mask tiles ``rows × seq`` directly."""
-        if not self._replay_row_spans:
-            return None
-        spans, _ = dense_row_spans(torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1))
-        return spans
+    def _arm_loss_forward_replay(self, inputs: dict) -> None:
+        """Arm the batch's routing mask, if it carries one, over the positions its gradient forward attends; the
+        rest route naturally and stay out of the flip rate. Besides padding, that leaves out the completion of a
+        row dropped from the loss (a degenerate group, an invalid episode, a masked truncation), which this forward
+        reads as attention padding, in a context other than the one its mask was recorded in. The dense per-row
+        path trims those positions off its forwards; the padded paths forward them."""
+        masks = inputs.get(ROUTING_MASKS_KEY)
+        if masks is None:
+            return
+        attended = torch.cat([inputs["prompt_mask"], inputs["completion_mask"]], dim=1)
+        spans = dense_row_spans(attended)[0] if self._replay_row_spans else None
+        self._routing_injector.arm(masks.masked_fill(~attended.bool()[:, :, None, None], -1), row_spans=spans)

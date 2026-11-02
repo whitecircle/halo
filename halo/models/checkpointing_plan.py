@@ -21,6 +21,10 @@ CHECKPOINTING_OFF = 0
 # step, so an EP group plans with more headroom than its measured step showed.
 DENSE_BUDGET_FRACTION = 0.85
 EP_BUDGET_FRACTION = 0.75
+# How a run that cannot take a plan, or resolves divergent ones, goes ahead without it.
+PLAN_OFF_REMEDY = (
+    "Set gradient_checkpointing_plan: off (with gradient_checkpointing_kwargs.every_n_layers for a fixed policy)"
+)
 
 
 @dataclass(frozen=True)
@@ -114,7 +118,10 @@ def reject_unplannable_run(ctx: PlanContext) -> None:
     """Raise ``ValueError`` with every :func:`refusal_reasons` entry when the run cannot take a plan."""
     reasons = refusal_reasons(ctx)
     if reasons:
-        raise ValueError(f"gradient_checkpointing_plan: auto is refused for this run: {'; '.join(reasons)}.")
+        raise ValueError(
+            f"gradient_checkpointing_plan: auto is refused for this run: {'; '.join(reasons)}. {PLAN_OFF_REMEDY}, "
+            "or change what a reason names."
+        )
 
 
 def checkpointed_layer_count(num_layers: int, every_n_layers: int) -> int:

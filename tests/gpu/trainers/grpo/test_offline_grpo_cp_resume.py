@@ -27,6 +27,7 @@ from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.models.attention.gpt_oss_sinks import (
     SinksPolicy,
     apply_sinks_policy,
@@ -166,7 +167,9 @@ def _build_trainer(ctx, source, output_dir, tokenizer, train, evaluation, *, fie
 
 
 def _eager_oracle(source, device="cpu"):
-    """Same sink-free policy as Ulysses, with independent full-row eager attention, through the family's own class."""
+    """Same sink-free policy as Ulysses, with independent full-row eager attention, through the family's own class,
+    finalized on ``device`` as every production load is: a remote-code family's rotary table is otherwise the
+    uninitialized memory transformers 5 leaves in its non-persistent buffers."""
     model, info = TINY.load_class.from_pretrained(
         source,
         dtype=torch.bfloat16,
@@ -175,8 +178,10 @@ def _eager_oracle(source, device="cpu"):
         trust_remote_code=TINY.trust_remote_code,
     )
     assert not loading_problems(info), f"incomplete oracle/export checkpoint: {loading_problems(info)}"
+    model.to(device)
+    finalize_loaded_model(model, source)
     apply_sinks_policy(model, model.config, policy=SinksPolicy.NEUTRALIZED, attn_implementation="eager")
-    return model.to(device).eval()
+    return model.eval()
 
 
 def _sink_checks(model, checkpoint=None):

@@ -7,7 +7,8 @@ The first launch must save both steps complete. The resume must pick ``checkpoin
 before it untouched (a restart from step 0 would rewrite them) and log steps one to three. The run must have had
 a gradient, and the last checkpoint must load as the method's export (``from_pretrained``, or a
 ``SentenceTransformer``) with every weight it should hold, moved off the base model. One manifest row per
-method; the row runs this file as one process (``launcher="python"``), and it starts the ranks.
+method; the row runs this file as one process (``launcher="python"``), and it starts the ranks. ``--family gpt_oss``
+trains a tiny MoE instead of the dense model, which the scripts' defaults put on the grouped-GEMM EP layers.
 
 ``--attn unset`` drops the recipe's attention pin, so the script picks the backend: on Blackwell both launches
 must then log the FA4 kernel warm-up, which runs only on a model loaded on flash_attention_4, once for the policy
@@ -16,6 +17,7 @@ may have been skipped. The row declines on any other GPU, and needs two ranks, b
 
     HALO_TEST_NPROC=2 python tests/gpu/trainers/other/test_entry_scripts.py --method preference/dpo
     HALO_TEST_NPROC=2 python tests/gpu/trainers/other/test_entry_scripts.py --method preference/dpo --attn unset
+    HALO_TEST_NPROC=2 python tests/gpu/trainers/other/test_entry_scripts.py --method embedding --family gpt_oss
 """
 
 from pathlib import Path
@@ -81,7 +83,7 @@ def run(ctx):
     case = CASES[ARGS.method]
     scratch = Path(ctx.output_dir)
     served = case.server_fields is not None
-    model = SERVED_MODEL if served else str(build_tiny_model(scratch / "model"))
+    model = SERVED_MODEL if served else str(build_tiny_model(scratch / "model", ARGS.family))
     dataset_dir = scratch / "data"
     case.rows().save_to_disk(str(dataset_dir))
     config = write_run_config(

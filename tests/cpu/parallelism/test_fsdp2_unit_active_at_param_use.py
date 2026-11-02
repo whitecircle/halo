@@ -387,8 +387,7 @@ def _attention_lora(model: nn.Module, modules_to_save: list[str] | None) -> nn.M
             if type(module) is nn.Linear and name.endswith("_proj") and ".layers." in name and "attn" in name
         }
     )
-    # Over one name, TRL hands PEFT a bare string, which PEFT reads as a regex rather than a name.
-    assert len(targets) > 1, "fewer than two attention projections found — the case would not adapt by name"
+    assert targets, "no attention projection found — the case would adapt nothing"
     model_config = ModelArguments(
         use_peft=True,
         lora_r=2,

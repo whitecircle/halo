@@ -90,12 +90,12 @@ UNCAST_LOADERS = frozenset({("halo/model_loading/parallel/tp.py", "load_tp_model
 # Pipelines assembled around a backbone the parallel loader already cast and finalized.
 ASSEMBLED_FROM_LOADED = frozenset({("scripts/training/embedding.py", "_assemble_preloaded_pipeline")})
 
-# Model builds that are no training or scoring load: the PEFT merge folds an adapter into the base a
+# Model builds that are no training or scoring load: the PEFT adapter load applies an adapter to the base a
 # conversion tool loaded (conversions keep the pins), and the head-transform probe builds an fp32 meta
 # shell that holds no weights.
 NON_TRAINING_BUILDS = frozenset(
     {
-        ("halo/checkpoint/tools/adapter_merge.py", "merge_adapter_into_base"),
+        ("halo/checkpoint/tools/adapter_merge.py", "apply_adapter"),
         ("halo/models/head_transform.py", "_probe_logits"),
     }
 )
@@ -105,7 +105,6 @@ NON_TRAINING_BUILDS = frozenset(
 TOOL_BUILDS = frozenset(
     {
         ("halo/checkpoint/tools/adapter_merge.py", "load_task_base_model"),
-        ("halo/checkpoint/tools/bf16_conversion.py", "_load_adapter_model"),
         ("halo/checkpoint/tools/bf16_conversion.py", "_load_verified"),
         ("halo/checkpoint/tools/deepseek_v4_dequant.py", "convert_deepseek_v4_checkpoint"),
         ("halo/checkpoint/tools/offline_export.py", "load_task_model"),
@@ -557,7 +556,11 @@ def test_the_sentence_transformer_backbone_is_cast_and_finalized(tmp_path):
     build_tiny_family_checkpoint(TINY_MOE_FAMILIES["deepseek_v4"], str(base), load_cached_tokenizer(QWEN3_0_6B))
     runtime = types.SimpleNamespace(
         parallelism_config=types.SimpleNamespace(
-            has_ep_group=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+            has_ep_group=False,
+            is_tp_mode=False,
+            needs_ep_layers=False,
+            fp32_non_ep_params=False,
+            max_concurrent_loading=None,
         ),
         model_source=str(base),
     )

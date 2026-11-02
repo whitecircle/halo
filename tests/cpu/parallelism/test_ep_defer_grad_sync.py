@@ -441,11 +441,11 @@ def test_restore_time_zero_lr_step_does_not_run_the_sweep():
     DistributedTrainerMixin._register_grad_sync_step_hooks(fake)
     assert fake._deferred_ep_grad_sync_hook_registered
 
-    fake._restoring_optimizer_state = True
+    fake._materializing_optimizer_state = True
     fake.optimizer.step()  # the restore-time _init_optim_state step
     assert calls == [], "the sweep must not run during optimizer-state restore"
 
-    fake._restoring_optimizer_state = False
+    fake._materializing_optimizer_state = False
     fake.optimizer.step()  # the first real step (clip disabled -> backstop path)
     assert calls == [1], "the first real step's sweep must still run exactly once"
 

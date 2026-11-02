@@ -20,6 +20,7 @@ from halo.checkpoint.format import RUN_PLAN_FILE
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import detect_gpu_model
 from halo.models.checkpointing_plan import (
+    PLAN_OFF_REMEDY,
     RUN_PLAN_VERSION,
     PlanContext,
     RunPlan,
@@ -169,10 +170,7 @@ def agree_plan(plan: RunPlan) -> None:
     world-reduced before the choice, so a divergence is a resolver bug; under FSDP it would hang, since
     checkpointed and plain layers gather at different times."""
     reject_divergent_settings(
-        asdict(plan),
-        "The resolved gradient-checkpointing plan",
-        "Set gradient_checkpointing_plan: off (with gradient_checkpointing_kwargs.every_n_layers for a fixed policy) "
-        "to bypass the plan.",
+        asdict(plan), "The resolved gradient-checkpointing plan", f"{PLAN_OFF_REMEDY} to bypass the plan."
     )
 
 

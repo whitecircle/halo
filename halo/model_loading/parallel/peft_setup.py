@@ -45,9 +45,9 @@ def split_expert_lora_targets(model_config: ModelArguments) -> ExpertLoraSpec | 
     if not model_config.use_peft:
         return None
     targets = model_config.lora_target_modules
-    # TRL's ModelConfig.__post_init__ collapses a one-element list to a bare string, so a lone expert
-    # target ("experts") would otherwise skip the peel and reach PEFT as a never-matching regex. A
-    # string naming no projection is a sentinel or regex ("all-linear", ".*gate_proj"): peel nothing.
+    # A bare string is PEFT's own spelling: a sentinel or regex ("all-linear", ".*gate_proj") peels
+    # nothing, while one naming an expert projection ("experts"), which as a regex would match no
+    # module, peels as the one-entry list does.
     if isinstance(targets, str):
         targets = [targets] if expert_target_projections(targets) else []
     elif not isinstance(targets, (list, tuple, set)):
@@ -246,8 +246,8 @@ def _exclude_unadaptable_lora_targets(model: torch.nn.Module, peft_config) -> No
 def build_peft_config(model: torch.nn.Module, model_config: ModelArguments) -> object | None:
     """COLLECTIVE: the run's ``LoraConfig``, with the name matches PEFT cannot adapt excluded."""
     targets = model_config.lora_target_modules
-    # PEFT reads its sentinel only as a bare string, case-insensitively; TRL collapses a one-entry YAML
-    # list to that at construction, but a CLI override lands after construction and arrives as a list.
+    # PEFT reads its sentinel only as a bare string, case-insensitively, while a one-entry list stays a
+    # list: ModelArguments keeps one from the YAML or the command line, and the expert peel can leave one.
     if isinstance(targets, (list, tuple, set)) and [str(t).lower() for t in targets] == [
         INCLUDE_LINEAR_LAYERS_SHORTHAND
     ]:

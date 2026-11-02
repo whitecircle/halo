@@ -244,9 +244,9 @@ def _base_weights_unchanged(before: dict, after: dict) -> tuple[bool, str]:
 def _optimizer_state_is_warm_restarted(snapshot: dict) -> tuple[bool, str]:
     """No TRAINED optimizer state survived: every entry is back at its freshly-initialized value.
 
-    Not "the state is empty": ``optimizer.state`` is a defaultdict and ``get_optimizer_state_dict``
-    materializes empty entries through a zero-grad init step, so the discriminating reading is that
-    every moment is zero and no ``step`` counter reached the checkpoint's.
+    Not "the state is empty": ``optimizer.state`` is a defaultdict, so a bare read inserts an empty
+    entry, and an entry torch's zero-LR init step materialized counts that step. The discriminating
+    reading is that every moment is zero and no ``step`` counter reached the checkpoint's.
     """
     carried = [
         f"{fqn}.{key}"
@@ -341,11 +341,9 @@ class _ResumeCapture(TrainerCallback):
 
     The adapters are captured by re-saving them through ``save_model`` — the very writer that
     produced the checkpoint — so the two files are comparable bit for bit and no test-side
-    re-implementation of the adapter key transform can drift away from the real one. Two effects the
-    save carries into the run: ``restore_config_fields`` re-asserts its config snapshot
-    permanently, and on a warm-restarted optimizer the state read below materializes empty state with
-    a zero-grad step. Both are inert here — the offline-GRPO masks come from the collator, and no
-    check downstream of a warm restart compares losses.
+    re-implementation of the adapter key transform can drift away from the real one. The save carries
+    one effect into the run: ``restore_config_fields`` re-asserts its config snapshot permanently,
+    which is inert here, as the offline-GRPO masks come from the collator.
     """
 
     def __init__(self, holder: dict, verify_dir: str):
@@ -355,8 +353,6 @@ class _ResumeCapture(TrainerCallback):
     def on_train_begin(self, args, state, control, **kwargs):
         trainer = self.holder["trainer"]
         trainer.save_model(self.verify_dir)
-        # After the save: get_optimizer_state_dict materializes empty state with a zero-grad init
-        # step, which must not land between the restore and the adapter snapshot above.
         self.holder["restored"] = {
             "optimizer": local_optimizer_state(trainer.model, trainer.optimizer),
             "sched_last_epoch": int(trainer.lr_scheduler.last_epoch),

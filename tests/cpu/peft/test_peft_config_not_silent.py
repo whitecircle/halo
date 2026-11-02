@@ -3,9 +3,8 @@
 
 ``ExpertLoraSpec`` carries r/alpha/dropout/projections/use_rslora and nothing else, so every other
 ``LoraConfig`` knob would reach the attention adapters of a mixed run and silently miss the expert
-half. These tests drive the REAL trl ``ModelConfig`` (not a stand-in) because its ``__post_init__``
-collapses a one-element ``lora_target_modules`` list to a bare string — the exact input a mock
-dataclass cannot reproduce, and the one a list-only peel skips entirely.
+half. These tests drive the real ``ModelArguments`` (not a stand-in): its ``__post_init__`` over TRL's
+decides the form a one-entry ``lora_target_modules`` reaches the peel in.
 
 Run: pytest tests/cpu/peft/test_peft_config_not_silent.py
 """
@@ -62,16 +61,17 @@ def _model_with_ep_layer() -> nn.Module:
     return model
 
 
-# The one-element list trl collapses to a string
+# One entry: a one-entry list and a bare string
 
 
-def test_lone_expert_target_still_peels_despite_trl_string_collapse():
-    """``lora_target_modules: [experts]`` arrives as the string ``"experts"`` — it must still peel.
+@pytest.mark.parametrize("spelling", [["experts"], "experts"], ids=["one-entry-list", "bare-string"])
+def test_a_lone_expert_target_peels(spelling):
+    """A lone expert target peels, written as a one-entry list or as a bare string (which, as the PEFT regex a
+    string is, would fullmatch no module).
 
     Skipping it would leave the spec None (no expert LoRA, and no realized-check to catch that) and
-    hand PEFT a regex that fullmatches no module."""
-    config = _model_config(lora_target_modules=["experts"])
-    assert config.lora_target_modules == "experts", "trl no longer collapses; this test's premise moved"
+    hand PEFT a target that matches nothing."""
+    config = _model_config(lora_target_modules=spelling)
 
     with _as_moe():
         spec = split_expert_lora_targets(config)
@@ -81,13 +81,15 @@ def test_lone_expert_target_still_peels_despite_trl_string_collapse():
     assert config.lora_target_modules == [], "the peel must consume the lone target"
 
 
-def test_all_linear_sentinel_is_left_alone():
-    """``all-linear`` is a PEFT sentinel, not an expert name — it must survive the peel untouched."""
-    config = _model_config(lora_target_modules=["all-linear"])
+@pytest.mark.parametrize("target", ["all-linear", "o_proj"])
+def test_a_lone_non_expert_target_is_left_to_peft(target):
+    """The ``all-linear`` sentinel and a lone attention target name no expert weight: each survives the peel
+    as the one-entry list given, which PEFT adapts by name."""
+    config = _model_config(lora_target_modules=[target])
 
     with _as_moe():
         assert split_expert_lora_targets(config) is None
-    assert config.lora_target_modules == "all-linear"
+    assert config.lora_target_modules == [target]
 
 
 # Knobs that would apply to attention only

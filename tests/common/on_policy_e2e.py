@@ -196,11 +196,6 @@ class PolicyLayout:
         reusing phase 1's object would rebuild its model against phase 1's expert groups."""
         return ParallelismConfig(**self.config_fields())
 
-    @property
-    def replicates_experts(self) -> bool:
-        """The experts are replicated on every rank (no EP, no expert TP)."""
-        return self.ep_size == 1 and self.expert_tp_size == 1
-
 
 def expert_lora_under_etp_refusal(expert_tp_size: int) -> str:
     """``ParallelismConfig``'s refusal of native expert LoRA under expert TP, or ``""`` if it allowed it.

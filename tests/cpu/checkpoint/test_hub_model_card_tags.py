@@ -486,7 +486,11 @@ def test_the_embedding_pipeline_card_carries_the_tag(tmp_path):
     word_level_tokenizer(("hello",)).save_pretrained(base)
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
-            has_ep_group=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+            has_ep_group=False,
+            is_tp_mode=False,
+            needs_ep_layers=False,
+            fp32_non_ep_params=False,
+            max_concurrent_loading=None,
         ),
         model_source=str(base),
     )

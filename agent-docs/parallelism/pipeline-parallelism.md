@@ -214,7 +214,7 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
 
 Pure expert-tensor parallelism (`expert_parallel_size: 1`, `expert_tensor_parallel_size: k`) inside
 each stage: every rank holds every expert, sharded `k`-way along the FFN intermediate dim, and
-`ReduceFromExpertTP` sums the partners' outputs in token space. The stage keeps `stage_world_size / k`
+`SumAcrossGroup` sums the partners' outputs in token space. The stage keeps `stage_world_size / k`
 data-parallel replicas.
 
 - ETP partners hold shards of one expert and consume the same batch, so they are **not** DP

@@ -36,6 +36,14 @@ RESOLVED_SINKS_RESET_ATTR = "_halo_sinks_reset"
 # eager natively. FA3's fused backward returns none, and flex_attention's compiled backward NaNs on it.
 _TRAINABLE_SINK_ATTN_IMPLEMENTATIONS = ("flash_attention_4", "eager")
 
+# The implementations that carry live sinks, as the refusals name them; ``_attn_impl_handles_sinks`` in
+# halo/models/attention/selection.py decides the set.
+SINK_CARRYING_ATTN_HINT = "flash_attention_4 on Blackwell; flex_attention or eager"
+# Why a GptOss teacher must keep its sinks: unlike a student, a frozen teacher never trains back from neutralized ones.
+NEUTRALIZED_TEACHER_SINKS_COST = (
+    "a frozen pretrained teacher without its sinks predicts far from itself (~6 nats/token KL on gpt-oss-20b)"
+)
+
 # Marker on the wrapped ``flash_attn.cute`` entry points.
 _FA4_RESCALE_ATTR = "_halo_trainable_sink_rescale"
 

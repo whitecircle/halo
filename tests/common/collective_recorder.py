@@ -27,7 +27,7 @@ import inspect
 import os
 import sys
 import types
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Collection, Iterator, Mapping
 from unittest.mock import patch
 
 import torch
@@ -208,7 +208,7 @@ class _ModeledCalls:
             c10d.scatter: self.scatter,
             device_mesh.init_device_mesh: self.init_device_mesh,
         }
-        return modeled | {real: self._refusal(name, real) for name, real in _unmodeled(modeled).items()}
+        return modeled | {real: self._refusal(name, real) for name, real in collectives_except(modeled).items()}
 
     def new_group(self, ranks=None, *args, **kwargs):
         self._trace.record("new_group", _WORLD if ranks is None else list(ranks))
@@ -282,16 +282,16 @@ class _ModeledCalls:
         return refuse
 
 
-def _unmodeled(modeled: Mapping[Callable, Callable]) -> dict[str, Callable]:
-    """Every ``torch.distributed`` function outside :data:`_NON_COLLECTIVES` that ``modeled`` does not
-    cover, and every functional collective, by qualified name."""
+def collectives_except(allowed: Collection[Callable]) -> dict[str, Callable]:
+    """Every ``torch.distributed`` function outside :data:`_NON_COLLECTIVES` and ``allowed``, and every
+    functional collective, by qualified name."""
     distributed = {
         f"torch.distributed.{name}": function
         for name in c10d.__all__
         if name not in _NON_COLLECTIVES
         # By type: an attribute read on the deprecated ``reduce_op`` warns.
         and issubclass(type(function := getattr(c10d, name)), (types.FunctionType, types.BuiltinFunctionType))
-        and function not in modeled
+        and function not in allowed
     }
     functional = {
         f"{funcol.__name__}.{name}": function

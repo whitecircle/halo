@@ -33,7 +33,7 @@ tokens, routing weights → SumGradAcrossGroup (identity fwd, all-reduce bwd)
        → dispatch (sub-EP via DeepEP)
        → expert_compute (TP-sharded weights → partial output)
        → combine (sub-EP via DeepEP)
-       → ReduceFromExpertTP (all-reduce SUM fwd, identity bwd) → output
+       → SumAcrossGroup (all-reduce SUM fwd, identity bwd) → output
 ```
 
 The expert-TP all-reduce sits at the layer boundary (token space), **outside** the DeepEP
@@ -45,9 +45,8 @@ It **must** stay outside: an all-reduce between dispatch and combine couples the
 inside DeepEP's intranode combine barrier, and under FSDP2 multi-stream drift they form a circular
 wait and the barrier times out.
 
-The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter half is the toolkit-wide
-`SumGradAcrossGroup` (`halo/distributed/grad_reduce.py`, shared with TP), the gather half
-`ReduceFromExpertTP` (`halo/distributed/expert_parallel/moe_layer/layer.py`):
+The Megatron-LM scatter-gather pattern, a matched autograd pair from `halo/distributed/grad_reduce.py`, both
+shared with TP — the scatter half `SumGradAcrossGroup`, the gather half `SumAcrossGroup`:
 
 - **`SumGradAcrossGroup`** — identity forward; `all_reduce(SUM)` backward over `expert_tp_group`. It is
   applied to **both** the layer input tokens **and** the routing weights.
@@ -57,7 +56,7 @@ The Megatron-LM scatter-gather pattern, a matched autograd pair — the scatter 
     router, and every upstream tensor reached through it, trains on a gradient scaled by
     `1/expert_tp_size`, silently.
 
-- **`ReduceFromExpertTP`** — `all_reduce(SUM)` forward on the combined output to sum the partial
+- **`SumAcrossGroup`** — `all_reduce(SUM)` forward on the combined output to sum the partial
   expert outputs; identity backward, correct because `SumGradAcrossGroup` owns the input-gradient
   reduction and each shard's weight gradient is independently correct.
 
@@ -216,7 +215,7 @@ layer that does the split cannot disagree on which config spelling carries the p
 | online GRPO `rollout_func` | rejected, as under TP — it replaces the generation that hands every ETP partner its leader's completions, so partners would feed different tokens into the expert-TP all-reduce | `reject_unshared_rollout_func` |
 
 The same-token invariant ETP depends on — partners must hold identical batches, since
-`ReduceFromExpertTP` sums element-wise in token space — is maintained by the rank layout, the
+`SumAcrossGroup` sums element-wise in token space — is maintained by the rank layout, the
 DP-rank-sharded dataloader, and the ETP-leader rollout broadcast. **It is never asserted at
 runtime**: a custom data path that bypasses those would sum unrelated tokens with no error.
 

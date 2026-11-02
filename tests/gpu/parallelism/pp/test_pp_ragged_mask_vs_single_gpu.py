@@ -31,6 +31,7 @@ from transformers.models.qwen3_5.modeling_qwen3_5 import Qwen3_5ForCausalLM
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_min
+from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main, skip_unless_blackwell
 from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN35_CONFIG
 from tests.common.rank_log import log, log_all
@@ -106,6 +107,8 @@ def run(ctx):
 
     # Baseline: unsplit model, full batch, same attention implementation and dtype.
     model = build_model(device)
+    # fla autotunes per batch size, so the full batch and its microbatches would run on separately timed picks.
+    pin_fla_autotune_first_fit(ctx)
     kwargs = {"position_ids": position_ids} if EXPLICIT_POSITIONS else {}
     logits = model(input_ids=input_ids, attention_mask=attention_mask, **kwargs).logits
     ref_loss = ppeq.causal_lm_loss(logits, labels, reduction="sum") / global_count

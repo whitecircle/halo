@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 
 import datasets.config
@@ -24,6 +25,7 @@ from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.runtime import filesystem, process_group
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.ranks import get_global_rank, get_global_world_size, get_local_rank
+from tests.common.numerics import max_or_nan
 from tests.common.scratch import SCRATCH_DIR_TAG
 
 
@@ -257,6 +259,13 @@ def group_max_abs_diff(tensor: torch.Tensor, group: dist.ProcessGroup | None = N
     gathered = [torch.empty_like(local) for _ in range(dist.get_world_size(group))]
     dist.all_gather(gathered, local, group=group)
     return torch.stack([(g - gathered[0]).abs().max() for g in gathered]).max().item()
+
+
+def max_abs_diff_across(tensors: Iterable[torch.Tensor], group: dist.ProcessGroup | None = None) -> float:
+    """The largest :func:`group_max_abs_diff` of any of ``tensors`` across ``group``: ``0.0`` when every one is
+    bit-identical, NaN when ``tensors`` is empty or any difference is NaN. Collective over ``group`` (default: the
+    world), one gather per tensor, so every rank passes its tensors in the same order."""
+    return max_or_nan((group_max_abs_diff(tensor, group) for tensor in tensors), default=math.nan)
 
 
 def snapshot_full_weights(model) -> dict[str, torch.Tensor]:

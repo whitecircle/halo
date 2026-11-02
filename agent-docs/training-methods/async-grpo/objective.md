@@ -140,6 +140,8 @@ A non-finite mass raises on every rank, knob on or off. The balance raises unles
 
 Both need MoE EP layers; Gemma 4 and Zaya are rejected at construction. The mask costs 2 bytes per token per MoE layer per top-k slot. `routing/replay_flip_rate` is the share of selections the live top-k would have flipped.
 
+The gradient forward replays only the positions it attends, and the flip rate counts only those, in both modes and on every loss path. Padding routes naturally, and so does the completion of a row dropped from the loss (a degenerate group, an invalid episode, a masked truncation): it rides the forward as attention padding, in a context other than the one its mask was recorded in.
+
 Under `rollout`, the step fails on every rank when a trainable batch carries no mask, or when no routed row on some rank matches an engine coverage convention. `routing/rollout_unresolved_frac` is a world share: a rank can fail the step while the share last logged sat below 1.
 
 ## Batch construction

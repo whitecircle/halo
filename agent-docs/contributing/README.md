@@ -87,6 +87,16 @@ the served model and assert the served policy moved, so server and trainer hold 
 per-effort CoT budget, which draws a 400 without a reasoning parser (the target's health guard prints
 the compose line).
 
+The env-GRPO rows train on a native tool call, so the vLLM server also needs the served family's tool
+parser ([Tool parsers are per family](../infrastructure/rollout-servers.md#running-it)). The compose
+default, `hermes`, reads JSON `<tool_call>` calls only. The gpt-oss pass serves the image's parser
+plugins instead (the Makefile's `VLLM_GPTOSS_PARSERS`, which the health guard prints into its gpt-oss
+compose line), and they replace the `qwen3` reasoning parser. A per-family pass
+(`HALO_TEST_ENV_GRPO_MODEL`) takes its family's row of that table. Under a wrong parser every call stays
+text and every episode scores 0, so each env-GRPO row on the draw task (all but the one-process
+`react_math` rows, which send no tool schema) fails `step_1_rewards_spread_within_a_group`.
+SGLang's default parser (`auto`) reads the right one off the chat template.
+
 ```bash
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8
 make train CONFIG=examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
@@ -184,6 +194,10 @@ are enforced by `tests/cpu/conventions/`.
   cache inside a test around a `trust_remote_code` load: transformers puts each cache it copies into on
   `sys.path` and never removes it, so the `transformers_modules` package can stay bound to the test's
   temp dir and break every later local remote-code load in that worker.
+- **An oracle a test loads itself is finalized as production loads are.** `finalize_loaded_model` runs once its
+  weights sit on their device: transformers 5 leaves a remote-code family's rotary table as uninitialized memory,
+  and a bare oracle reads that noise as the parallel run's error. `tests/cpu/model_loading/test_load_finalization.py`
+  fails a load by a family's own `trust_remote_code` in a module that runs a forward without it.
 - **Deterministic, seeded data.** GPU tests generate synthetic problems from a fixed seed; only rank 0
   prints. A seed alone does not fix a chat-templated batch, because `strftime_now` stamps the live date
   (gpt-oss's harmony system message), so build fixed batches through

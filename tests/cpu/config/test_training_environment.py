@@ -1,20 +1,23 @@
-"""Tests for checkpoint-resume detection, the output_dir overwrite guard and the pre-load run setup
-(halo/entrypoints/run_setup.py), single-process (no torch.distributed init).
+"""Tests for checkpoint-resume detection, the output_dir overwrite guard, the pre-load run setup
+(halo/entrypoints/run_setup.py) and the attention switch the parse sets, single-process (no torch.distributed init).
 
 Run: python -m pytest tests/cpu/config/test_training_environment.py
 """
 
 import json
 import logging
+from dataclasses import fields
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
+import torch
+import yaml
 from transformers import Qwen3NextConfig, TrainerState, TrainingArguments
 
 from halo.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME, RUN_PLAN_FILE
-from halo.entrypoints import run_setup
-from halo.entrypoints.run_setup import _validate_output_dir, configure_training_run, resume_checkpoint_from_config
+from halo.cli import training_methods
+from halo.entrypoints import script
+from halo.entrypoints.run_setup import _validate_output_dir, resume_checkpoint_from_config
 from halo.entrypoints.script import run_trainer
 from halo.log import RUN_LOG_DIR_NAME
 from halo.models.attention.selection import supports_fa4_backward
@@ -22,6 +25,10 @@ from halo.models.attention.selection import supports_fa4_backward
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
 from halo.runtime.filesystem import FS_PROBE_PREFIX
 from tests.common.parallelism import make_parallelism_config
+from tests.common.repo import REPO_ROOT
+from tests.cpu.config.test_examples_parse import TRAINING_ROOT, parser_for
+
+_TRAINING_SCRIPTS = sorted(set(training_methods(REPO_ROOT).values()))
 
 
 def _config(output_dir, resume=None):
@@ -239,6 +246,7 @@ def test_a_resumed_run_logs_its_checkpoint_once(tmp_path, caplog):
     trainer = SimpleNamespace(
         callback_handler=SimpleNamespace(callbacks=[]),
         state=TrainerState(max_steps=5),
+        model=torch.nn.Module(),
         train=lambda resume_from_checkpoint=None: None,
         cleanup_ep=lambda: None,
     )
@@ -260,6 +268,20 @@ def test_a_resumed_run_logs_its_checkpoint_once(tmp_path, caplog):
     assert lines == [f"Resuming from checkpoint: {ckpt}"]
 
 
+def _banner_trainer(model: torch.nn.Module) -> SimpleNamespace:
+    return SimpleNamespace(
+        callback_handler=SimpleNamespace(callbacks=[]),
+        state=TrainerState(max_steps=0),
+        model=model,
+        train=lambda resume_from_checkpoint=None: None,
+        cleanup_ep=lambda: None,
+    )
+
+
+def _banner_context(parallelism_config) -> SimpleNamespace:
+    return SimpleNamespace(parallelism_config=parallelism_config, mode_suffix="test", resume_checkpoint=None)
+
+
 @pytest.mark.parametrize(
     ("gpus_per_node", "axes", "lines"),
     [
@@ -274,42 +296,71 @@ def test_the_start_banner_names_each_axis_the_run_uses(caplog, gpus_per_node, ax
     """The banner is where a user confirms the run has the shape they asked for, so every axis the run uses is
     named beside the DP size it leaves (PP stages sit on NVLink-domain boundaries, hence two 2-GPU nodes)."""
     parallelism_config = make_parallelism_config(world_size=4, gpus_per_node=gpus_per_node, **axes)
-    trainer = SimpleNamespace(
-        callback_handler=SimpleNamespace(callbacks=[]),
-        state=TrainerState(max_steps=0),
-        train=lambda resume_from_checkpoint=None: None,
-        cleanup_ep=lambda: None,
-    )
-    context = SimpleNamespace(parallelism_config=parallelism_config, mode_suffix="test", resume_checkpoint=None)
     with caplog.at_level(logging.INFO):
-        run_trainer(trainer, context, method_name="SFT")
+        run_trainer(_banner_trainer(torch.nn.Module()), _banner_context(parallelism_config), method_name="SFT")
     assert [record.getMessage().strip() for record in caplog.records if " size: " in record.getMessage()] == lines
+
+
+@pytest.mark.parametrize(
+    ("recorded", "lines"),
+    [
+        ("flash_attention_2", ["Attention: flash_attention_2"]),
+        (None, []),
+        ("no config", []),
+    ],
+)
+def test_the_start_banner_names_the_attention_backend_the_policy_was_built_with(caplog, recorded, lines):
+    """The detection line names only the GPU's default, which the model-level checks may move a model off, so the
+    banner names the backend the policy's config records; a model that records none, or has no config, adds no
+    line."""
+    model = torch.nn.Module()
+    if recorded != "no config":
+        model.config = Qwen3NextConfig()
+        model.config._attn_implementation = recorded
+    with caplog.at_level(logging.INFO):
+        run_trainer(
+            _banner_trainer(model),
+            _banner_context(make_parallelism_config(world_size=1, gpus_per_node=1)),
+            method_name="SFT",
+        )
+    assert [record.getMessage().strip() for record in caplog.records if "Attention:" in record.getMessage()] == lines
 
 
 # Run setup before the model load
 
 
+def _required_values(dataclass_types) -> dict:
+    """The fields a script's configs refuse to construct without: the distillation teacher."""
+    declared = {field.name for config in dataclass_types for field in fields(config)}
+    return {"teacher_model": "org/teacher"} if "teacher_model" in declared else {}
+
+
 @pytest.mark.parametrize("full_determinism", [True, False])
-def test_full_determinism_reaches_the_attention_choice_before_the_load(tmp_path, monkeypatch, full_determinism):
+@pytest.mark.parametrize("entry_script", _TRAINING_SCRIPTS, ids=lambda path: path.stem)
+def test_full_determinism_reaches_the_attention_choice_as_the_config_is_parsed(
+    tmp_path, monkeypatch, entry_script, full_determinism
+):
     """HF's Trainer turns ``FLASH_ATTENTION_DETERMINISTIC`` on only in its ``__init__``, after the model load picked
-    the attention backend; set later, a head_dim-256 family keeps FA4 and its first backward asserts."""
-    # Recorded, so the variables the setup writes are restored after the test.
-    for name in ("FLASH_ATTENTION_DETERMINISTIC", "HF_DATASETS_CACHE"):
-        monkeypatch.setenv(name, "0")
-    monkeypatch.setattr(run_setup.datasets.config, "HF_DATASETS_CACHE", run_setup.datasets.config.HF_DATASETS_CACHE)
-    config = TrainingArguments(output_dir=str(tmp_path), full_determinism=full_determinism, use_cpu=True, report_to=[])
-    with (
-        mock.patch.object(run_setup, "ensure_fa4_kernel_cache_env"),
-        mock.patch.object(run_setup, "anchor_jit_cache_dir"),
-        mock.patch.object(run_setup, "configure_float32_matmul_precision"),
-        mock.patch.object(run_setup, "ensure_cache_dir", return_value=str(tmp_path / "datasets")),
-        mock.patch.object(run_setup.transformers.logging, "set_verbosity_info"),
-        mock.patch.object(run_setup.transformers.logging, "set_verbosity_error"),
-        mock.patch.object(run_setup, "_configure_tracking_env_vars"),
-        mock.patch.object(run_setup, "set_seed"),
-        mock.patch.object(run_setup, "barrier"),
-    ):
-        configure_training_run(SimpleNamespace(), config, "sft-test", overwrite_output_dir=True)
+    the attention backend, and a script may plan its rows before its run setup: every training script's own parse
+    turns the switch on, or a head_dim-256 family keeps FA4 in the plan while the load demotes it."""
+    # Recorded, so the variable the parse writes is restored after the test.
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "0")
+    dataclass_types = parser_for(str(entry_script.relative_to(TRAINING_ROOT))).dataclass_types
+    values = {
+        "output_dir": str(tmp_path / "out"),
+        "use_cpu": True,
+        "bf16": False,
+        "full_determinism": full_determinism,
+        **_required_values(dataclass_types),
+    }
+    path = tmp_path / "config.yaml"
+    path.write_text(yaml.safe_dump(values))
+    monkeypatch.setattr(script, "init_distributed", lambda: None)
+    monkeypatch.setattr(script, "install_log_tee", lambda output_dir: None)
+    monkeypatch.setattr("sys.argv", ["train.py", str(path)])
+    parsed = script.parse_script_args(*dataclass_types)
+    (training_config,) = [config for config in parsed if isinstance(config, TrainingArguments)]
+    assert training_config.full_determinism is full_determinism
     assert supports_fa4_backward(Qwen3NextConfig()) is not full_determinism
 
 

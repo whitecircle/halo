@@ -34,14 +34,15 @@ def register_grad_sync_step_hook(
 
     Each sweep lives in the patched ``clip_grad_norm_``, which HF reaches at ``max_grad_norm <= 0`` only through
     its unclipped norm pass; the sweeps are marked once per step, so a backstop acts only on a step that missed
-    that call. Each sits out torch's zero-LR ``_init_optim_state`` step during optimizer-state restore, which
-    carries no gradients. ``enabled`` is a callable so its state reads stay behind the ``optimizer is None`` check.
+    that call. Each sits out torch's zero-LR ``_init_optim_state`` step, which a shard restore or save takes on an
+    optimizer holding no state and which carries no gradients. ``enabled`` is a callable so its state reads stay
+    behind the ``optimizer is None`` check.
     """
     if trainer.optimizer is None or getattr(trainer, flag_attr, False) or not enabled():
         return
 
     def _pre_step_hook(optimizer, args, kwargs):
-        if getattr(trainer, "_restoring_optimizer_state", False):
+        if getattr(trainer, "_materializing_optimizer_state", False):
             return
         action()
 

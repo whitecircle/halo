@@ -63,6 +63,10 @@ The full GPU tier (`make test-gpu-full`) and the two server tiers (`make test-gp
 workflow: run them by hand. A per-family pass of a server tier serves the family's checkpoint and
 points the async GRPO rows at it (`HALO_TEST_ENV_GRPO_MODEL` for vLLM, `HALO_TEST_ENV_GRPO_SGLANG_MODEL`
 for SGLang); the rows move the served policy with an expert-only perturbation as well as a dense one.
+A vLLM pass also serves the family's tool parser
+([Tool parsers are per family](rollout-servers.md#running-it)): under one that cannot read the family's
+calls (the compose default `hermes` reads JSON `<tool_call>` calls only) every draw-task episode scores 0
+and the rows fail `step_1_rewards_spread_within_a_group`.
 
 ### Hub seed
 

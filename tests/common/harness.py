@@ -37,12 +37,13 @@ trainer-scoped — none reachable from a plain ``with`` block, all handled here 
 ``ctx``.
 """
 
+import contextlib
 import functools
 import os
 import random
 import sys
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 
 import torch
 import torch.distributed as dist
@@ -173,6 +174,17 @@ def record_check(checks: dict[str, bool], name: str, fn: Callable[[], None]) -> 
     else:
         checks[name] = True
         log(f"  PASS: {name}")
+
+
+@contextlib.contextmanager
+def cuda_syncs_are_errors() -> Iterator[None]:
+    """CUDA's sync debug mode at ``error`` over the body, so an op that synchronizes the host with the device raises
+    instead of stalling it; back to ``default`` on exit."""
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        yield
+    finally:
+        torch.cuda.set_sync_debug_mode("default")
 
 
 def skip_unless_local_checkpoint(path: str, env_var: str) -> None:

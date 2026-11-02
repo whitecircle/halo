@@ -13,7 +13,6 @@ from collections.abc import Callable
 from typing import ClassVar
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
 from halo.distributed.expert_parallel.config import EPConfig
@@ -24,7 +23,7 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import EPExpertLoraM
 from halo.distributed.expert_parallel.moe_layer.gather import EPGatherMixin
 from halo.distributed.expert_parallel.moe_layer.grad_sync import EPGradSyncMixin
 from halo.distributed.expert_parallel.moe_layer.routing import EPRoutingMixin
-from halo.distributed.grad_reduce import SumGradAcrossGroup
+from halo.distributed.grad_reduce import SumAcrossGroup, SumGradAcrossGroup
 from halo.env import env_flag
 from halo.hardware import current_device
 from halo.models.moe.family_specs import MoEFamilySpec
@@ -35,24 +34,6 @@ logger = logging.getLogger(__name__)
 # Opt-in overlap of the shared-expert FFN with the latency-bound dispatch all-to-all; one stream per device.
 _SHARED_OVERLAP_ENABLED = env_flag("HALO_EP_SHARED_OVERLAP")
 _shared_overlap_streams: dict[int, torch.cuda.Stream] = {}
-
-
-class ReduceFromExpertTP(torch.autograd.Function):
-    """All-reduce SUM forward, identity backward, over the combined MoE output in token space.
-
-    Exact because the combine is linear; the backward is identity because :class:`SumGradAcrossGroup`
-    all-reduces the input grad before the dispatch.
-    """
-
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, group):
-        out = x.clone()
-        dist.all_reduce(out, op=dist.ReduceOp.SUM, group=group)
-        return out
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output, None
 
 
 class EPMoELayerBase(
@@ -393,7 +374,9 @@ class EPMoELayerBase(
             combined = self.dispatcher.combine(output, recv_topk_weights, handle, owner=self)
 
         if self.expert_tp_size > 1:
-            combined = ReduceFromExpertTP.apply(combined, self.expert_tp_group)
+            # The partners' partial outputs summed in token space: exact because the combine is linear, and the
+            # identity backward is right because SumGradAcrossGroup reduces the input grad before the dispatch.
+            combined = SumAcrossGroup.apply(combined.clone(), self.expert_tp_group)
 
         return combined
 

@@ -1,11 +1,13 @@
 #!/usr/bin/env python
 """The counting sort behind the EP grouped-GEMM routing (``halo/kernels/moe_route_sort.py``) against the torch
-construction it replaces at ``ep_size > 1``: every output and the gate-weight gradient bit for bit, over the roster's EP
-shapes (top_k 1 to 10, 1 to 128 local experts, an idle expert, rows with no local slot, a receive with none at all, a
-zero-token rank), at the launch's tiling and at one that spreads each receive over many blocks and scan chunks; and
-every launch's Triton specialization over a sweep of row, block and slot counts against the layer warm-up's, so the
-binaries the warm-up compiles serve every dispatch; and every kernel the gate-weight backward launches over the same
-sweep against the warm-up's, so none is loaded mid-step.
+construction it replaces on CUDA: every output and the gate-weight gradient bit for bit, over the roster's EP shapes
+(top_k 1 to 10, 1 to 128 local experts, an idle expert, rows with no local slot, a receive with none at all, a
+zero-token rank) and at ``ep_size`` 1 (every slot local, no receive counts, 256 and 512 experts), at the launch's tiling
+and at one that spreads each receive over many blocks and scan chunks; and every launch's Triton specialization over a
+sweep of row, block and slot counts, with counts and without, against the layer warm-up's, so the binaries the warm-up
+compiles serve every dispatch; and every kernel the gate-weight backward launches over the same sweep against the
+warm-up's, so none is loaded mid-step. On CUDA every sort is the counting sort, with receive counts or without, and off
+CUDA the torch construction; at ``ep_size`` 1 an id outside the local range raises in both.
 
 The kernels run under Triton's interpreter in a fresh process (``TRITON_INTERPRET`` is read when a kernel is defined).
 The CUDA leg is ``tests/gpu/parallelism/ep/test_ep_sort_sync_free.py``, and
@@ -92,6 +94,27 @@ def test_the_backward_kernel_check_fails_its_negative_control():
     )
     findings = probe_findings(probe, _MARKER)
     assert findings and all("index_select" in finding for finding in findings), findings
+
+
+class _ReportsCuda(torch.Tensor):
+    """A CPU tensor that reports itself on CUDA, so the sort's dispatch takes its CUDA branch without a GPU."""
+
+    @property
+    def is_cuda(self) -> bool:
+        return True
+
+
+@pytest.mark.parametrize("counts", ((2, 0), None), ids=("receive_counts", "ep_size_1"))
+def test_on_cuda_every_sort_is_the_counting_sort(monkeypatch, counts):
+    """The torch construction's argsort picks its kernels by the slot count, so on CUDA the counting sort serves every
+    receive, at ``ep_size`` 1 (no counts) too; off CUDA the torch construction does."""
+    calls = []
+    for name in ("_counting_sort", "_argsort_routing"):
+        monkeypatch.setattr(moe_route_sort, name, lambda *args, _name=name: calls.append((_name, args[3])))
+    experts, weights = torch.zeros(1, 2, dtype=torch.long), torch.rand(1, 2)
+    sort_routing_by_expert(experts.as_subclass(_ReportsCuda), weights, 2, counts)
+    sort_routing_by_expert(experts, weights, 2, counts)
+    assert calls == [("_counting_sort", counts), ("_argsort_routing", counts)]
 
 
 def test_mis_sized_counts_raise():

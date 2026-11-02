@@ -46,11 +46,16 @@ exclusion below — so name the modules; a populated list selects those modules.
 the list, which is what disables attention PEFT. Writing `lora_target_modules: []` yourself names nothing
 at all and is rejected: with no adapter to create, the run would full-finetune at the LoRA learning rate.
 
-A one-entry list is collapsed to a bare string by TRL's `ModelConfig`, so `lora_target_modules: [experts]`
-arrives as `"experts"`. The expert peel handles that; PEFT does not (it reads a lone string as a regex
-matched against full module paths), so an attention-only single target needs `all-linear` or two entries.
-A CLI `--lora_target_modules=all-linear` lands after that collapse as a one-entry list; `build_peft_config`
-restores PEFT's bare-string sentinel.
+The spelling decides how a target matches. A list names modules at any length: `[o_proj]` adapts every
+module whose path is `o_proj` or ends in `.o_proj` (whole trailing segments, so `[proj]` does not reach
+`o_proj`). A bare YAML string is PEFT's own spelling, `all-linear` or a regex fullmatched against each full
+module path (`'.*\.0\.self_attn\.o_proj'`), so a bare `o_proj` matches nothing. The command line always gives
+a list (`--lora_target_modules=o_proj` names the module), so a regex goes in the YAML; a list entry spelling a
+regex (`\ * + ? ( ) [ ] { } | ^ $`) is refused at parse time, `use_peft: false` included, since PEFT compares
+list entries to paths verbatim and it would match nothing, unnoticed beside an entry that does match.
+`ModelArguments` (`halo/configs/script_arguments.py`) keeps a one-entry list a list, where TRL's `ModelConfig`
+collapses it to its bare entry; `build_peft_config` turns `[all-linear]` into PEFT's bare-string sentinel, and
+a lone expert projection (`[experts]`, or a bare `experts`) still goes to the expert peel.
 
 ### Targets PEFT cannot adapt
 
@@ -348,7 +353,7 @@ which also folds in the EP / FSDP2 / TP gathers; the fold is a collective on all
 
 ## Embedding models
 
-The embedding trainer injects LoRA into its backbone in place, on data parallelism only: [Embedding — PEFT / LoRA](../training-methods/embedding.md#peft--lora).
+The embedding trainer injects LoRA into its backbone in place, on data parallelism only, and on a MoE whose family has an EP layer only at `use_grouped_gemm: false` (its stock experts): [Embedding — PEFT / LoRA](../training-methods/embedding.md#peft--lora).
 
 ## Quantized training (QLoRA)
 
@@ -400,6 +405,12 @@ specific to LoRA:
 - An **expert-only** run has no PEFT model at all, so `save_expert_lora_adapters` writes the adapter with a
   synthesized config: `peft_type: EXPERT_LORA`, the base model path, and every field the delta depends on
   (`r`, `lora_alpha`, `lora_dropout`, `use_rslora`, `expert_projections`).
+- A run that **grew its vocabulary** (`added_special_tokens` past the checkpoint's padded rows) saves the grown
+  embedding and an untied head with the adapters, offline included, and resumes them; accelerate-managed FSDP and
+  LoRA on one layer of an untied embedding pair are refused for such a run
+  ([Checkpoints](../reference/checkpoints.md#peft-lora-saving)). An expert-only run has no adapter to carry them:
+  its resume grows the frozen rows again, and `merge_expert_lora_on_save` exports them whole. The merge grows the
+  base to match ([Merging adapters](#merging-adapters)).
 - Under **CP** the adapter keys drop the wrapper's path segments (`.original_attention.`, extra `.model.`) so
   they load onto a non-CP model. The module paths in the written `adapter_config.json` (`exclude_modules`,
   and `target_modules` once `all-linear` made PEFT rewrite it to full paths) are respelled the same way,
@@ -460,6 +471,16 @@ run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the mult
 naming no module of either class are refused — applied to the wrong class, PEFT matches nothing, warns, and
 the tool would write the bare base as a finished model.
 `--fp32_norms` writes every normalization leaf in fp32, the layout `convert_to_bf16.py` writes.
+
+A run whose `added_special_tokens` outgrew the checkpoint's embedding trained on rows no base holds. The merge (and
+`convert_to_bf16.py --check_inference`'s adapter load) grows the base to the adapter directory's tokenizer under the
+run's own rule before PEFT loads the adapter, which carries those rows ([Checkpoint saving](#checkpoint-saving)): only
+when that tokenizer has more ids than the base has rows, and the base's own tokenizer fits them (a checkpoint whose
+tokenizer already outruns its rows loads unchanged). The added rows start as NaN, so none is served from
+uninitialized memory: an adapter saved before adapter saves carried them leaves some unset (the input embedding's,
+or an untied head's), and those are rebuilt with a warning as the mean of the checkpoint's rows. The run drew them by
+transformers' mean resizing and an adapter run keeps them frozen, so the rebuilt rows match the run's to within that
+draw (`apply_adapter`, `halo/checkpoint/tools/adapter_merge.py`).
 
 The merge re-applies the run's training sidecars to the merged model and copies both files into the output:
 the GptOss sinks policy recorded in `training_provenance.json`, and `router_balancing_biases.pt` into the

@@ -18,16 +18,21 @@
 - PEFT wrapping: no script may call bare ``get_peft_model`` — a self-wrapping script must route
   through ``build_peft_model`` (k-bit prep) — and none may call bare ``get_peft_config``, which
   would skip ``build_peft_config``'s exclusion of target-name matches PEFT cannot adapt.
+- TRL's dataset preparation: a script building a trainer derived from TRL's ``SFTTrainer`` runs
+  ``disable_trl_dataset_prep`` on the config it hands over, before the build — TRL refuses the
+  script's packing or padding-free collator under its own ``packing`` / ``padding_free``.
 
 Run: pytest tests/cpu/config/test_training_script_contracts.py
 """
 
 import ast
+import importlib
 import sys
 from pathlib import Path
 from unittest import mock
 
 import pytest
+from trl import SFTTrainer
 
 from halo.cli import training_methods
 from halo.data.collators import padded
@@ -589,6 +594,57 @@ def test_no_script_builds_a_completion_only_collator_directly(script: Path):
         f"{script.relative_to(_TRAINING_DIR)}: constructs {direct} directly, bypassing "
         f"select_data_collator's assistant-marker guards."
     )
+
+
+def _sft_trainer_builds(script: Path) -> list[tuple[ast.FunctionDef, ast.Call]]:
+    """Each construction in ``script`` of a class it imports from ``halo.trainers`` that derives from TRL's
+    ``SFTTrainer``, with the innermost function holding it."""
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    trainers = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("halo.trainers"):
+            module = importlib.import_module(node.module)
+            for alias in node.names:
+                obj = getattr(module, alias.name, None)
+                if isinstance(obj, type) and issubclass(obj, SFTTrainer):
+                    trainers.add(alias.asname or alias.name)
+    functions = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)]
+    builds = []
+    for name in sorted(trainers):
+        for call in _named_calls(tree, name):
+            holder = max((f for f in functions if f.lineno <= call.lineno <= f.end_lineno), key=lambda f: f.lineno)
+            builds.append((holder, call))
+    return builds
+
+
+_SFT_TRAINER_SCRIPTS = [script for script in _TRAINING_SCRIPTS if _sft_trainer_builds(script)]
+
+
+def test_the_sft_trainer_script_roster_is_derived_and_nonempty():
+    assert {script.name for script in _SFT_TRAINER_SCRIPTS} >= {"sft.py", "self_distill.py"}
+
+
+@pytest.mark.parametrize(
+    "script",
+    _SFT_TRAINER_SCRIPTS,
+    ids=[str(p.relative_to(_TRAINING_DIR)) for p in _SFT_TRAINER_SCRIPTS],
+)
+def test_scripts_turn_trl_dataset_prep_off_before_building_an_sft_trainer(script: Path):
+    """TRL's ``SFTTrainer.__init__`` reads ``packing`` and ``padding_free`` again: its ``padding_free``, which its
+    default "bfd" packing turns on, refuses the script's collator, so a script that leaves either on fails every
+    packed or padding-free run at the trainer build."""
+    for function, call in _sft_trainer_builds(script):
+        config = next((kw.value for kw in call.keywords if kw.arg == "args"), None)
+        assert isinstance(config, ast.Name), f"{script.name}:{call.lineno}: pass the trainer's config as args=<name>"
+        seams = [
+            seam
+            for seam in _named_calls(function, "disable_trl_dataset_prep")
+            if seam.lineno < call.lineno and [getattr(arg, "id", None) for arg in seam.args] == [config.id]
+        ]
+        assert seams, (
+            f"{script.name}:{call.lineno}: {function.name}() builds the trainer without "
+            f"disable_trl_dataset_prep({config.id}) before it."
+        )
 
 
 if __name__ == "__main__":

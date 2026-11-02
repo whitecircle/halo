@@ -51,7 +51,9 @@ def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_pa
     monkeypatch.setattr(embedding_script, "resolve_build_config", config)
     monkeypatch.setattr(embedding_script, "SentenceTransformer", build)
     runtime = SimpleNamespace(
-        parallelism_config=SimpleNamespace(has_ep_group=False, is_tp_mode=False, max_concurrent_loading=None),
+        parallelism_config=SimpleNamespace(
+            has_ep_group=False, is_tp_mode=False, needs_ep_layers=False, max_concurrent_loading=None
+        ),
         model_source=REPO,
     )
     with pytest.raises(_BackboneBuilt):
@@ -87,7 +89,11 @@ def test_the_embedding_backbone_is_warmed_after_its_run_policies(monkeypatch, tm
     )
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
-            has_ep_group=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+            has_ep_group=False,
+            is_tp_mode=False,
+            needs_ep_layers=False,
+            fp32_non_ep_params=False,
+            max_concurrent_loading=None,
         ),
         model_source=str(checkpoint),
     )

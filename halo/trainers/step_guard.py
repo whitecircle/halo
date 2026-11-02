@@ -98,9 +98,9 @@ class NonFiniteStepGuardMixin:
         A non-finite step returns transformers' loss accumulator to its value before the step's micro-batches
         (:meth:`get_batch_samples`), on the device under a flag. A host skip discards the gradients through the
         optimizer's own ``zero_grad``, which also drops state it deferred for them (AdamWBF16's clip scale). The
-        zero-LR step that materializes state during an optimizer restore takes neither, and always steps.
+        zero-LR step that materializes state for a shard restore or save takes neither, and always steps.
         """
-        if getattr(self, "_restoring_optimizer_state", False):
+        if getattr(self, "_materializing_optimizer_state", False):
             return False
         if self._device_skip is not None:
             (step, flag), self._device_skip = self._device_skip, None

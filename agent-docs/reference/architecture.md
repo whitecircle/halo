@@ -78,7 +78,9 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 
 `halo/runtime/` therefore holds only what needs a process group or the launcher: rank and node math
 (`ranks.py`), `init_distributed` and the subgroup timeout pin (`process_group.py`), barriers,
-broadcasts and fixed-order group creation (`collectives.py`), the cross-rank rejection/consensus seams
+broadcasts, fixed-order group creation and the rank-0 object gather (`collectives.py`; a ring reduce, since a
+per-peer send connects every peer to rank 0 and NCCL keeps those buffers, about 0.3 GiB per NVLink peer within
+one NVLink domain, for the run), the cross-rank rejection/consensus seams
 and the c10d-store joins (`consensus.py`), the shared-filesystem scope, FS-aware writer ranks,
 main-first ordering and the output-FS probe (`filesystem.py`), the per-node load throttle
 (`load_coordination.py`) and DTensor access (`dtensor.py`); anything a single rank can compute alone

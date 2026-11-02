@@ -33,7 +33,9 @@ Recipes for Qwen3-Embedding, Qwen3.5, GPT-OSS and Gemma 4 ship under `examples/e
 sentence-transformers owns tokenization and the pipeline around the backbone, so the chat-template and
 special-token knobs, the freeze patterns, `tools_field`, `log_decoded_samples`, `text_only_model` and
 `tokenizer_backend: gigatoken` raise at startup. Context and pipeline parallelism are refused, and LoRA
-runs on plain data parallelism only.
+runs on plain data parallelism only, on a MoE at `use_grouped_gemm: false`. Under expert or tensor
+parallelism, and on a MoE at the default `use_grouped_gemm`, a checkpoint whose pipeline carries a module
+past pooling and normalization (a `Dense` head) is refused.
 
 ## What to watch
 

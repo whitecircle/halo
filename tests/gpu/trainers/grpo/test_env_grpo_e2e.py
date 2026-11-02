@@ -40,6 +40,10 @@ Prerequisites (``make test-gpu-vllm`` / ``make test-gpu-sglang`` set these up):
         docker compose -f docker-compose.vllm.yml up -d vllm-server
     # --moe-backend triton is required for MoE: the FLASHINFER/CUTLASS paths repack expert weights
     # and corrupt an update.
+    VLLM_CUDA_DEVICES=7 VLLM_MODEL=unsloth/gpt-oss-20b-BF16 <the Makefile's VLLM_GPTOSS_PARSERS> \
+        docker compose -f docker-compose.vllm.yml up -d vllm-server
+    # the four-rank rows' server: the compose default tool parser (hermes) leaves gpt-oss's calls as
+    # text; another family takes its parser from agent-docs/infrastructure/rollout-servers.md
     SGLANG_CUDA_DEVICES=7 SGLANG_MODEL=unsloth/gpt-oss-20b-BF16 \
         docker compose -f docker-compose.sglang.yml up -d
     # the NCCL-aligned halo:sglang image: upstream's NCCL differs from the training image's and the

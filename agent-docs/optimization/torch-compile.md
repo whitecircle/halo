@@ -12,7 +12,7 @@ A `torch.compile`d combine taking a bound (or `alpha`) as a Python float is re-t
 
 The clamped combines latch into `_fused_glu_mul`, the GLU-combine seam every base expert path reads. DeepSeek-V4 arms its combine only when the block's activation probes as exactly SiLU and falls back to the family's eager clamped GLU otherwise; Step-3.7 takes the same probe but only on a layer whose `swiglu_limit` is finite — its unclamped layers keep the plain fused SiLU combine. GLM-5 Next's experts hardcode clamp-then-SiLU structurally, so its combine runs unconditionally.
 
-The EP routing sort at `ep_size > 1` stays eager too (`torch.compiler.disable` on the counting sort in `halo/kernels/moe_route_sort.py`): its three Triton kernels are already fused, and traced, the dispatch's host-side receive counts would become graph inputs that change every step. A compiled EP layer breaks its graph there.
+The EP routing sort stays eager too (`torch.compiler.disable` on the counting sort in `halo/kernels/moe_route_sort.py`, which every grouped-GEMM path runs on CUDA): its three Triton kernels are already fused, and traced, the slot counts that size it (the dispatch's host-side receive counts) would become graph inputs that change every step. A compiled EP layer breaks its graph there.
 
 The low-precision weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats (mxfp8/mxfp4; nvfp4's weight stays eager), with a permanent eager fallback on any compile or runtime failure — see [Low-Precision MoE](low-precision-moe-kernels.md).
 

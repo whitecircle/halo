@@ -610,12 +610,10 @@ def test_each_node_writes_and_restores_its_own_resume_adapter(tmp_path):
 
 @pytest.fixture(
     scope="module",
-    # (lora_target_modules, other LoRA settings, adapted modules). TRL collapses a one-entry list into a
-    # string, which PEFT reads as a regex, so embedding-only is spelled as a user writes it: the
-    # embedding beside an lm_head the headless backbone lacks.
+    # (lora_target_modules, other LoRA settings, adapted modules).
     params=[
         ((EMBEDDING_TARGET, *TARGET_MODULES), {}, 1 + NUM_LAYERS * len(TARGET_MODULES)),
-        ((EMBEDDING_TARGET, "lm_head"), {}, 1),
+        ((EMBEDDING_TARGET,), {}, 1),
         ((EMBEDDING_TARGET, *TARGET_MODULES), {"use_dora": True}, 1 + NUM_LAYERS * len(TARGET_MODULES)),
     ],
     ids=["embedding-and-attention", "embedding-only", "dora"],

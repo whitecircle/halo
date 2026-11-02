@@ -21,6 +21,8 @@ from transformers import AutoModelForCausalLM
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.kernels.histogram import sync_free_bincount
 from halo.kernels.moe_permute import MoEGatherPermute, build_inv_map
+from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind, to_hub_expert_tensors
+from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.datasets import CHAT_TEMPLATE_NOW
 from tests.common.memory import cleanup_memory
@@ -47,7 +49,8 @@ _LAYER_INDEX = re.compile(r"\.layers\.(\d+)\.")
 _ANY_LAYER = ".layers.*."
 # The check :func:`score_ep_grad_pairs` records under a negligible floor: no parameter kind is negligible on every layer.
 KIND_SCORED_CHECK = "negligible_grads_leave_every_kind_scored"
-# The check a :func:`score_against_bf16_noise` caller records: no parameter is excused at every step it scores.
+# The check a :func:`score_against_bf16_noise` caller records: no parameter is outside the bars at its best resolved
+# step (:func:`parameters_outside_the_bars`).
 NOISE_SCORED_CHECK = "noise_excuses_leave_every_parameter_scored"
 # Per step, each parameter's ``name -> (gradient, bf16 reference, fp32 reference)``: what that scoring reads.
 GradSteps = list[dict[str, tuple[torch.Tensor | None, torch.Tensor, torch.Tensor]]]
@@ -90,6 +93,30 @@ def ep_layers(model) -> list:
     return [layer for _name, layer in named_ep_layers(model)]
 
 
+def live_routers(layers: list) -> list[torch.nn.Module | None]:
+    """Each of the EP ``layers``' own router module, resolved now so a PEFT ``modules_to_save`` copy is the one
+    returned; None for a family whose router sits outside its EP layers (Gemma 4's sibling router)."""
+    return [layer._live_router_module() for layer in layers]
+
+
+def router_parameters(layers: list) -> list[torch.nn.Parameter]:
+    """Every parameter of the EP ``layers``' own routers (:func:`live_routers`)."""
+    return [param for router in live_routers(layers) if router is not None for param in router.parameters()]
+
+
+def routed_parameters(layers: list) -> list[torch.nn.Parameter]:
+    """Every parameter of the EP ``layers``' routed path: their expert weights (native expert adapters included) and
+    their own routers (:func:`router_parameters`)."""
+    experts = [param for layer in layers for _, param in layer.expert_named_params()]
+    return experts + router_parameters(layers)
+
+
+def router_parameter_names(model) -> set[str]:
+    """The trainable parameters of every EP layer's own router (:func:`router_parameters`), by name."""
+    routers = {id(param) for param in router_parameters(ep_layers(model)) if param.requires_grad}
+    return {name for name, param in model.named_parameters() if id(param) in routers}
+
+
 def sweep_ep_grads(model: torch.nn.Module) -> None:
     """COLLECTIVE where its legs reduce: the trainer's post-backward EP sweep over ``model``'s EP layers, as a
     test driving the layers without a trainer runs it once per optimizer step after the backward."""
@@ -108,21 +135,37 @@ def sweep_ep_grads(model: torch.nn.Module) -> None:
 
 
 @contextmanager
-def captured_picks(model) -> Iterator[list[list[torch.Tensor]]]:
-    """Each of ``model``'s EP layers' top-k picks over the body, in :func:`ep_layers` order: one ``[T, top_k]`` tensor
-    of global expert ids per forward, in call order, so a backward's recomputes follow every forward."""
-    layers = ep_layers(model)
-    captured: list[list[torch.Tensor]] = [[] for _ in layers]
-    for layer in layers:
+def armed_routing_capture(
+    named_layers: list[tuple[str, EPMoELayerBase]],
+    sinks: list[list[torch.Tensor]],
+    convert: Callable[[torch.Tensor], torch.Tensor],
+) -> Iterator[None]:
+    """The EP layers' routing capture armed over the body; on exit each layer's picks are appended to its entry of
+    ``sinks`` through ``convert``: one ``[T, top_k]`` tensor of global expert ids per forward, in call order, so a
+    backward's recomputes follow every forward. Refuses a layer another reader has armed, whose picks the two would
+    split."""
+    for path, layer in named_layers:
+        if layer._capture_routing or layer._captured_routing_chunks:
+            raise RuntimeError(f"{path}: routing capture is already armed by another reader")
+    for _, layer in named_layers:
         layer._capture_routing = True
-        layer._captured_routing_chunks = []
     try:
-        yield captured
+        yield
     finally:
-        for layer, picks in zip(layers, captured, strict=True):
-            picks.extend(chunk.long() for chunk in layer._captured_routing_chunks)
+        for (_, layer), sink in zip(named_layers, sinks, strict=True):
             layer._capture_routing = False
+            sink.extend(convert(chunk) for chunk in layer._captured_routing_chunks)
             layer._captured_routing_chunks = []
+
+
+@contextmanager
+def captured_picks(model) -> Iterator[list[list[torch.Tensor]]]:
+    """Each of ``model``'s EP layers' top-k picks over the body (:func:`armed_routing_capture`), in :func:`ep_layers`
+    order."""
+    named_layers = named_ep_layers(model)
+    captured: list[list[torch.Tensor]] = [[] for _ in named_layers]
+    with armed_routing_capture(named_layers, captured, torch.Tensor.long):
+        yield captured
 
 
 @dataclass(frozen=True)
@@ -145,10 +188,16 @@ class PinnedRoute:
     tokens: int
 
 
-def _top_k_shortfall(logits: torch.Tensor, picks: torch.Tensor) -> torch.Tensor:
+def top_k_shortfall(logits: torch.Tensor, picks: torch.Tensor) -> torch.Tensor:
     """Per token, how far the weakest of ``picks`` sits below the ``picks.shape[-1]``-th largest of ``logits``."""
     kth = logits.topk(picks.shape[-1], dim=-1).values[:, -1]
     return kth - logits.gather(-1, picks).min(dim=-1).values
+
+
+def duplicate_pick_tokens(picks: torch.Tensor) -> int:
+    """The tokens whose ``[T, top_k]`` ``picks`` name one expert more than once, which :func:`top_k_shortfall` cannot
+    see: a repeated top pick falls short by nothing."""
+    return int((picks.sort(dim=-1).values.diff(dim=-1) == 0).any(dim=-1).sum())
 
 
 def _pinned_route(layer, mask: torch.Tensor, logits: list[torch.Tensor], own: list[torch.Tensor]) -> PinnedRoute:
@@ -162,13 +211,12 @@ def _pinned_route(layer, mask: torch.Tensor, logits: list[torch.Tensor], own: li
             f"{layer._forced_consumed_total} picks of a {mask.shape[0]}-token mask: the picks do not tile its forwards"
         )
     ranked = logits.topk(mask.shape[-1] + 1, dim=-1).values
-    sorted_mask = mask.sort(dim=-1).values
     return PinnedRoute(
-        regret=_top_k_shortfall(logits, mask).max().item(),
-        own_regret=_top_k_shortfall(logits, own).max().item(),
+        regret=top_k_shortfall(logits, mask).max().item(),
+        own_regret=top_k_shortfall(logits, own).max().item(),
         next_regret=(ranked[:, -2] - ranked[:, -1]).max().item(),
-        duplicated=int((sorted_mask.diff(dim=-1) == 0).any(dim=-1).sum()),
-        flipped=int((sorted_mask != own.sort(dim=-1).values).any(dim=-1).sum()),
+        duplicated=duplicate_pick_tokens(mask),
+        flipped=int((mask.sort(dim=-1).values != own.sort(dim=-1).values).any(dim=-1).sum()),
         tokens=mask.shape[0],
     )
 
@@ -178,7 +226,7 @@ def routing_can_be_pinned(model, input_ids: torch.Tensor) -> bool:
     replay (``_replay_router_choice``) the logits of a router module returning HF's ``(logits, scores, indices)``. Read
     off one no-grad forward over ``input_ids``."""
     layers = ep_layers(model)
-    routers = [layer._live_router_module() for layer in layers]
+    routers = live_routers(layers)
     if not layers or any(router is None for router in routers):
         return False
     outputs: dict[int, object] = {}
@@ -241,8 +289,7 @@ def routing_pinned(model, picks: list[torch.Tensor]) -> Iterator[list[PinnedRout
 
     handles, routes = [], []
     try:
-        for index, (layer, mask) in enumerate(zip(layers, picks, strict=True)):
-            router = layer._live_router_module()
+        for index, (layer, router, mask) in enumerate(zip(layers, live_routers(layers), picks, strict=True)):
             if router is None:
                 raise AssertionError(f"{type(layer).__name__} routes through no router module of its own")
             handles.append(router.register_forward_hook(record(index)))
@@ -282,6 +329,20 @@ def full_grad(param: torch.nn.Parameter) -> torch.Tensor:
     if hasattr(grad, "full_tensor"):
         grad = grad.full_tensor()
     return grad.detach().float().clone()
+
+
+def gathered_expert_grads(layer) -> dict[str, torch.Tensor]:
+    """COLLECTIVE over the layer's expert-TP and EP groups, and an FSDP2-sharded bank's mesh: its expert gradients
+    as the stock container's full banks (``[E, 2M, H]`` gate-up and ``[E, H, M]`` down, or GPT-OSS's interleaved
+    banks and biases), a rank whose experts no token reached contributing zeros."""
+    local = {
+        name: materialize_dtensor(torch.zeros_like(param) if param.grad is None else param.grad)
+        for name, param in layer.expert_named_params()
+    }
+    interleaved = layer.FAMILY.expert_layout.kind is ExpertLayoutKind.INTERLEAVED_GLU
+    layout = ExpertLayout(ExpertLayoutKind.INTERLEAVED_GLU if interleaved else ExpertLayoutKind.FUSED, key_prefix="")
+    device = next(iter(local.values())).device
+    return to_hub_expert_tensors(layout, layer.gather_expert_tensors(local), device=device)
 
 
 def compare_grad(got: torch.Tensor, reference: torch.Tensor, label: str) -> tuple[float, float]:
@@ -462,7 +523,12 @@ class NoisyPairScore:
     cosine: float
     norm_in_band: bool
     direction_in_bars: bool
-    # The bf16 reference's norm over the largest one in its decoder layer (:func:`per_layer_grad_floors`).
+    # How far inside the bars the pair sits, as a factor: the least of the norm ratio's to each end of the band and
+    # ``1 - cos_min`` over ``1 - cosine``; under 1 outside them.
+    bar_margin: float
+    # The fp32 reference's norm, and the bf16 reference's over the largest one in its decoder layer
+    # (:func:`per_layer_grad_floors`).
+    fp32_norm: float
     layer_fraction: float
     # Distance from the fp32 reference's gradient (inf for a missing or misshapen gradient), and the parameter's noise.
     fp32_error: float
@@ -477,11 +543,17 @@ class NoisyPairScore:
     def matches(self) -> bool:
         return self.in_bars or self.excused
 
+    @property
+    def noise_multiple(self) -> float:
+        """The distance from the fp32 reference in multiples of the noise, what the excuse holds to its factor."""
+        return self.fp32_error / self.noise if self.noise > 0 else math.inf
+
 
 def score_against_bf16_noise(
     steps: GradSteps,
     *,
     cos_min: float,
+    routed: frozenset[str] = frozenset(),
     ratio_band: tuple[float, float] = TOL.ep_grad_norm_ratio_band,
     noise_factor: float = TOL.bf16_noise_excuse_factor,
     excusable_fraction: float = TOL.bf16_noise_excusable_layer_fraction,
@@ -490,12 +562,13 @@ def score_against_bf16_noise(
     the bf16 reference, excusing a near-cancelled pair outside them that sits within ``noise_factor`` of the
     parameter's bf16 noise from the fp32 reference.
 
-    Only a pair whose bf16 reference is under ``excusable_fraction`` of the largest bf16 reference gradient in its
-    decoder layer is near-cancelled: the fp32 reference also routes some tokens differently, which puts a router's or an
-    expert bank's measured noise at a fifth or more of its norm, where the factor would excuse a halved gradient. A
-    parameter's noise is the bf16 reference's largest distance from the fp32 one over the steps: a near-cancelled
-    vector's rounding follows the size of the terms it sums rather than their sum, and one step's draw of a few-element
-    error can land near zero. A missing or misshapen gradient is never excused.
+    A ``routed`` parameter (a router's or an expert bank's) is never excused: an fp32 reference that cannot route on the
+    policy's picks routes some tokens differently, which puts their measured noise at a fifth or more of their norm,
+    where the factor would excuse a halved gradient. Only a pair whose bf16 reference is under ``excusable_fraction`` of
+    the largest bf16 reference gradient in its decoder layer is near-cancelled. A parameter's noise is the bf16
+    reference's largest distance from the fp32 one over the steps: a near-cancelled vector's rounding follows the size of
+    the terms it sums rather than their sum, and one step's draw of a few-element error can land near zero. A missing or
+    misshapen gradient is never excused.
     """
     noise: dict[str, float] = defaultdict(float)
     for pairs in steps:
@@ -509,28 +582,52 @@ def score_against_bf16_noise(
         for name, (got, bf16, fp32) in pairs.items():
             ratio, cosine = compare_ep_grad(got, bf16, f"step{step}/{name}")
             norm_in_band, direction_in_bars = low < ratio < high, cosine > cos_min
+            direction_margin = (1 - cos_min) / (1 - cosine) if cosine < 1 else math.inf
             layer_fraction = bf16.float().norm().item() / largest[name]
             shaped = got is not None and got.shape == fp32.shape
             error = (got.float() - fp32.float()).norm().item() if shaped else math.inf
             excused = (
                 not (norm_in_band and direction_in_bars)
+                and name not in routed
                 and layer_fraction < excusable_fraction
                 and error <= noise_factor * noise[name]
             )
             scores[name] = NoisyPairScore(
-                ratio, cosine, norm_in_band, direction_in_bars, layer_fraction, error, noise[name], excused
+                ratio=ratio,
+                cosine=cosine,
+                norm_in_band=norm_in_band,
+                direction_in_bars=direction_in_bars,
+                bar_margin=min(ratio / low, high / ratio, direction_margin),
+                fp32_norm=fp32.float().norm().item(),
+                layer_fraction=layer_fraction,
+                fp32_error=error,
+                noise=noise[name],
+                excused=excused,
             )
         scored.append(scores)
     return scored
 
 
+def best_resolved_scores(scored: list[dict[str, NoisyPairScore]]) -> dict[str, NoisyPairScore]:
+    """Each parameter's score at its best resolved step, where its fp32 reference gradient is largest: a cancellation
+    shrinks the sum it draws, and a bf16 reference's own rounding can inflate it at a cancelled step past the step that
+    resolves it."""
+    resolved: dict[str, NoisyPairScore] = {}
+    for scores in scored:
+        for name, score in scores.items():
+            if name not in resolved or score.fp32_norm > resolved[name].fp32_norm:
+                resolved[name] = score
+    return resolved
+
+
 def parameters_outside_the_bars(scored: list[dict[str, NoisyPairScore]]) -> list[str]:
-    """The parameters no step of which lands inside the bars. Per parameter across steps, not per kind across layers: a
-    near-cancellation is one step's draw, while a fault on one layer's parameter persists through every step, and its
-    kind's other layers would score it inside the bars."""
-    return groups_never_scored(
-        ((name, score.in_bars) for scores in scored for name, score in scores.items()), lambda name: name
-    )
+    """The parameters outside the bars at their best resolved step (:func:`best_resolved_scores`). Per parameter, not
+    per kind across layers, since a fault on one layer's parameter persists through every step while its kind's other
+    layers score inside the bars; and at that step, since at a cancelled one a doubled gradient can land inside the bars
+    while the noise excuses it at the others. A doubled or dropped sync moves the pair at its best resolved step by its
+    factor, which leaves the bars unless the pair's own rounding already sits that close to a bar: such a parameter is
+    held through its kind's other members, which a sync fault on the kind reaches as well."""
+    return sorted(name for name, score in best_resolved_scores(scored).items() if not score.in_bars)
 
 
 def fault_passes_bf16_noise_scoring(
@@ -544,9 +641,9 @@ def fault_passes_bf16_noise_scoring(
     excusable_fraction: float = TOL.bf16_noise_excusable_layer_fraction,
 ) -> bool:
     """Whether parameter ``kind``'s pairs in ``steps``, each gradient replaced by ``fault(step, name, gradient)``, still
-    match under :func:`score_against_bf16_noise` with each of them scored inside the bars at some step: a negative
-    control, which must not. The other pairs stay in the scoring, as their layers' largest gradients set the kind's
-    excusable fractions."""
+    match under :func:`score_against_bf16_noise` with none of them outside the bars at its best resolved step
+    (:func:`parameters_outside_the_bars`): a negative control, which must not. The other pairs stay in the scoring, as
+    their layers' largest gradients set the kind's excusable fractions."""
     faulty = [
         {
             name: (fault(step, name, got) if got is not None and parameter_kind(name) == kind else got, bf16, fp32)

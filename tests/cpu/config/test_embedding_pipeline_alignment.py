@@ -1,11 +1,11 @@
 #!/usr/bin/env python
 """Tests that the embedding config's pipeline knobs reach a hub-loaded SentenceTransformer.
 
-``pooling_mode`` / ``normalize_embeddings`` / ``max_length`` are applied when the EP/TP branch
-builds the pipeline from scratch. On the standard (default) data-parallel branch the pipeline comes
-from the checkpoint, so the same knobs must be re-applied there or they parse and do nothing — a
-bare causal LM training mean pooling while the YAML says ``lasttoken``. These tests fail if that
-alignment drops.
+``pooling_mode`` / ``normalize_embeddings`` / ``max_length`` build the Pooling and Normalize modules
+only when the parallel loader's pipeline wraps a bare backbone. Every other pipeline comes from the
+checkpoint, on sentence-transformers' own load as on the parallel loader's rebuild, so the same knobs
+must be re-applied there or they parse and do nothing — a bare causal LM training mean pooling while
+the YAML says ``lasttoken``. These tests fail if that alignment drops.
 
 Run: pytest tests/cpu/config/test_embedding_pipeline_alignment.py
 """

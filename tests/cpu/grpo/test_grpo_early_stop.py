@@ -17,6 +17,7 @@ import textwrap
 import types
 
 import pytest
+import torch
 from transformers import TrainerControl, TrainerState
 
 from halo.callbacks.early_stop import StopsTrainingEarly
@@ -93,6 +94,7 @@ class _StoppableTrainer:
     def __init__(self, logs: list[dict], max_steps: int | None = None):
         self.callback_handler = types.SimpleNamespace(callbacks=[GRPOEarlyStopCallback(BAND, LOGRATIO_MEAN_KEY)])
         self.state = TrainerState(max_steps=len(logs) if max_steps is None else max_steps)
+        self.model = torch.nn.Module()
         self.events: list[str] = []
         self._logs = logs
 
@@ -148,6 +150,7 @@ def test_the_runner_exits_on_any_callback_that_stopped_the_run():
     trainer = types.SimpleNamespace(
         callback_handler=types.SimpleNamespace(callbacks=[_AnyMethodsStop()]),
         state=TrainerState(max_steps=5),
+        model=torch.nn.Module(),
         train=lambda resume_from_checkpoint=None: None,
         cleanup_ep=lambda: None,
     )

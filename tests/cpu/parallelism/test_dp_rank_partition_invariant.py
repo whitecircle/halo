@@ -94,7 +94,7 @@ def test_ranks_that_must_share_a_batch_do(world, gpn, kwargs):
 
     Each for a different reason, all silent if broken: CP partners hold chunks of the SAME sequence,
     TP partners hold shards of one matmul over the SAME tokens, expert-TP partners' outputs are
-    summed element-wise in token space by ``ReduceFromExpertTP``, and a pipeline chain passes one
+    summed element-wise in token space by the expert-TP SUM (``SumAcrossGroup``), and a pipeline chain passes one
     microbatch's activations down the stages (stage 0 reads ``input_ids``, the last reads ``labels``).
     """
     configs = [_config(rank, world, gpn, **kwargs) for rank in range(world)]

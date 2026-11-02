@@ -202,7 +202,7 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 
 | Flag | Scope | Effect |
 |---|---|---|
-| `fp32_router` | Router/gate weights | FP32 master. The routing matmul runs at the dtype the router weight holds at the forward: FP32 wherever no FSDP2 group casts it (`ep_group_size > 1`, `fsdp_shard_ep1_experts: false`, a frozen router whose dtype no trainable parameter shares, which the wrap leaves out of its shard groups, and any run FSDP2 does not wrap: one rank, TP or CP at `data_parallel_size == 1`, an unwrapped copy); BF16 under FSDP2's `param_dtype` where FSDP2 wraps an `ep_group_size == 1` router under `fsdp_shard_ep1_experts`, which takes its own shard group |
+| `fp32_router` | Router/gate weights | FP32 master. The routing matmul runs at the dtype the router weight holds at the forward: FP32 wherever no FSDP2 group casts it (`ep_group_size > 1`, `fsdp_shard_ep1_experts: false`, a frozen router whose dtype no trainable parameter shares, which the wrap leaves out of its shard groups, and any run FSDP2 does not wrap: one rank, TP at `data_parallel_size == 1`, an unwrapped copy); BF16 under FSDP2's `param_dtype` where FSDP2 wraps an `ep_group_size == 1` router under `fsdp_shard_ep1_experts`, which takes its own shard group |
 | `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — set `fsdp_shard_ep1_experts: false` for fp32 expert masters there |
 | `fp32_non_ep_params` | Attention, embed, norm | FP32 master, BF16 compute |
 
@@ -406,22 +406,26 @@ measurable on top of it on EP MoE ([torch.compile](../optimization/torch-compile
 Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size > 1`) traces it on
 its **first forward, before that forward's dispatch** (`_warm_activation_graphs`): one grad-enabled
 pass with a backward and one under `no_grad`, outside inference mode, so a first forward under
-`torch.inference_mode()` still warms the backward kernels a later training forward runs. Where the fused permute runs (every grouped-GEMM path), the
-same pass runs the routing sort, forward and backward, at the layer's `top_k` and local expert count
+`torch.inference_mode()` still warms the backward kernels a later training forward runs. Every grouped-GEMM path,
+at any `ep_size`, also runs the routing sort, forward and backward, at the layer's `top_k` and local expert count
 (`warm_route_sort_kernels`, `halo/kernels/moe_route_sort.py`), the permute's backward and the weighted unpermute's
-forward and backward (`warm_permute_kernels`, `halo/kernels/moe_permute.py`). One token count
-covers every dispatch size: the kernels take their row, block and slot counts with `do_not_specialize`, so
-Triton compiles no separate binary per class of them (1, a multiple of 16, neither). The weighted unpermute's
-backward takes its routing-weight-gradient switch the same way, so the one warm compile also serves
-routing weights that need no gradient. A first launch also loads its kernel (CUDA lazy loading). `index_select`
-takes a separate kernel for an index of up to 16 rows, so the routing sort's backward reads the gate-weight
-gradient through `gather`, one kernel at every receive size. The token permute and GptOss's expert-bias gather run
-`index_select`, so the permute warm-up also launches it with an index of one row and of seventeen, at the run dtype
-and at fp32, the expert biases' dtype under `fp32_experts` (`_warm_index_select`). The bf16 grouped GEMM's forward
-and input gradient take one of two CUTLASS tiles by the mean rows per local expert, which follow the routing, small at
-128 or fewer ([Grouped GEMM](../optimization/grouped-gemm.md#tile-selection)), so the same pass runs the layer's own
-expert FFN, forward and backward, at one row per local expert and at 129 (`_warm_expert_gemm`), with the expert
-adapters on even when that first forward has them off.
+forward and backward (`warm_permute_kernels`, `halo/kernels/moe_permute.py`). One token count covers every dispatch
+size: the kernels take their row, block and slot counts with `do_not_specialize`, so Triton compiles no separate
+binary per class of them (1, a multiple of 16, neither). The routing sort is the counting sort at every `ep_size`
+on CUDA, sized by the receive counts or, at `ep_size` 1, by every slot: the torch construction's argsort picks its
+kernels by the slot count. The weighted unpermute's backward takes its routing-weight-gradient switch the same way, so the one warm
+compile also serves routing weights that need no gradient. A first launch also loads its kernel (CUDA lazy loading).
+`index_select` takes a separate kernel for an index of up to 16 rows, so the routing sort's backward reads the
+gate-weight gradient through `gather`, one kernel at every receive size. The token permute and GptOss's expert-bias
+gather run `index_select`, so the permute warm-up also launches it with an index of one row and of seventeen, at the
+run dtype and at fp32, the expert biases' dtype under `fp32_experts` (`_warm_index_select`). The bf16 grouped GEMM's
+forward and input gradient take one of two CUTLASS tiles by the mean rows per local expert, which follow the routing,
+small at 128 or fewer ([Grouped GEMM](../optimization/grouped-gemm.md#tile-selection)), so the same pass runs the
+layer's own expert FFN, forward and backward, at one row per local expert and at 129 (`_warm_expert_gemm`), with the
+expert adapters on even when that first forward has them off. Its backward takes the gradients of the expert
+parameters as well as the tokens', so it also runs the expert-bias gather's backward, which sits off the tokens'
+path: the one-hot GEMM ([Grouped GEMM](../optimization/grouped-gemm.md#the-duplicate-index-gather-trap)), at those two
+receive sizes ([Limitations](#limitations)).
 
 The inputs are zeros rather than a draw, and the backward runs under identity saved-tensor hooks. The expert FFN's
 LoRA dropout draws, so the GEMM warm-up restores the RNG after it, and its backward leaves no gradient.
@@ -430,9 +434,10 @@ entry and whose non-reentrant form would otherwise recompute the whole block mid
 
 Without the warm-up, a cold kernel compiles or loads between `dispatch` and `combine`, where every peer
 of the group is already inside DeepEP's barrier, and that barrier's budget bounds rank *skew*, not
-idle time. At `ep_size == 1` the dispatcher is a no-op, so there is no barrier to stall, and only the grouped GEMM
-warms: its rows per expert follow the micro-batch's token count, so a rank first loading the other tile in a later
-step holds up the expert-TP reduce or FSDP's next collective.
+idle time. At `ep_size == 1` the dispatcher is a no-op and there is no barrier, but the grouped path still warms
+whole: its receive is the micro-batch's tokens, whose count picks the GEMM tile and the `index_select` kernel, so a
+rank first loading one in a later step holds up the expert-TP reduce or FSDP's next collective. Only the separate
+activation pass is left to a dispatch group, since the GEMM warm-up's expert FFN runs the activation.
 
 ## Model loading
 
@@ -579,6 +584,17 @@ dense model under EP or pure ETP is rejected.
 
 **Axis combinations.** EP composes with one of TP, CP or ETP; the allowlist and the topology rules
 on top of it: [Supported combinations](README.md#supported-combinations).
+
+**Kernel warm-up.** GptOss's expert-bias gradient is one cuBLAS GEMM contracting over the receive, whose kernel cuBLAS
+picks by the receive's length, so the [warm-up](#kernels) runs it at its own receive sizes only and a rank can still
+load another kernel for it mid-step the first time its receive falls in a new size class.
+
+**Replica start.** With more than one EP group, the copies the groups hold of a parameter (the expert shards, and
+under [deferred DP](multi-node.md#deferred-cross-replica-sync) the non-expert shards too) are not broadcast at
+startup, as HSDP's replicas are ([Data Parallelism → HSDP](data-parallelism.md#hsdp-hybrid-sharded-data-parallel)).
+Weights read from the checkpoint load identical everywhere; a value each rank draws from its own RNG (a LoRA adapter,
+native expert LoRA included, or an added embedding row) starts identical only because every rank is seeded alike, as
+the training scripts seed it. A Python-API run that seeds ranks differently trains those copies apart.
 
 **Knobs.** Everything below raises unless the verdict says otherwise.
 

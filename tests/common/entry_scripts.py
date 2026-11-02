@@ -16,12 +16,12 @@ import torch
 import yaml
 from datasets import Dataset, DatasetDict
 from sentence_transformers import SentenceTransformer
-from transformers import AutoModelForCausalLM, AutoModelForSequenceClassification
+from transformers import AutoModel, AutoModelForCausalLM, AutoModelForSequenceClassification
 
 from halo.cli import TRAINING_ROOT, training_methods
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import REPO_ROOT
-from tests.common.tiny_models import TINY_DENSE_FAMILY, build_tiny_family_checkpoint
+from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, build_tiny_family_checkpoint
 from tests.common.tokenizers import load_cached_tokenizer
 
 RECIPES_DIR = REPO_ROOT / "tests" / "common" / "recipes"
@@ -40,6 +40,10 @@ FA4_WARMUP_SKIPPED_LOG = "FA4 kernel warmup skipped"
 ATTENTION_SETTINGS = ("recipe", "unset")
 # Decoder layers of the tiny model a run trains, at the Qwen3 tokenizer's vocabulary.
 TINY_LAYERS = 2
+# The tiny families a row's model can be (``--family``), the dense one by default: a MoE takes the grouped-GEMM
+# EP layers at the scripts' defaults.
+TINY_FAMILIES = {"qwen3": TINY_DENSE_FAMILY, "gpt_oss": TINY_MOE_FAMILIES["gpt_oss"]}
+DEFAULT_FAMILY = "qwen3"
 # The checkpoint the dense vLLM tier serves, which a method generating through it must train.
 SERVED_MODEL = QWEN3_0_6B
 
@@ -180,9 +184,11 @@ CASES: dict[str, EntryScriptCase] = {
 
 
 def row_parser(description: str | None = None) -> argparse.ArgumentParser:
-    """The arguments of an entry-script row: its method and its attention (:data:`ATTENTION_SETTINGS`)."""
+    """The arguments of an entry-script row: its method, its attention (:data:`ATTENTION_SETTINGS`) and its tiny
+    model's family (:data:`TINY_FAMILIES`)."""
     parser = argparse.ArgumentParser(description=description)
     parser.add_argument("--method", choices=sorted(CASES), required=True)
+    parser.add_argument("--family", choices=sorted(TINY_FAMILIES), default=DEFAULT_FAMILY)
     parser.add_argument(
         "--attn",
         choices=ATTENTION_SETTINGS,
@@ -299,10 +305,14 @@ def had_a_learning_signal(checkpoint: Path) -> bool:
     return any(entry.get("grad_norm", 0.0) > 0.0 for entry in _log_history(checkpoint))
 
 
-def build_tiny_model(path: Path) -> Path:
-    """The tiny dense Qwen3 every run trains, with the Qwen3 tokenizer and chat template, saved at ``path``."""
+def build_tiny_model(path: Path, family: str) -> Path:
+    """The tiny model of ``family`` (:data:`TINY_FAMILIES`) a run trains, with the Qwen3 tokenizer and chat template,
+    saved at ``path``."""
     build_tiny_family_checkpoint(
-        TINY_DENSE_FAMILY, str(path), load_cached_tokenizer(QWEN3_0_6B), overrides={"num_hidden_layers": TINY_LAYERS}
+        TINY_FAMILIES[family],
+        str(path),
+        load_cached_tokenizer(QWEN3_0_6B),
+        overrides={"num_hidden_layers": TINY_LAYERS},
     )
     return path
 
@@ -316,7 +326,11 @@ def export_checks(export: type, checkpoint: Path, base: str, *, learned: bool) -
         # The backbone is the causal model's decoder, whose names the causal model nests under ``model.``.
         trained = {f"model.{name}": tensor for name, tensor in backbone.state_dict().items()}
         decoder = {name for name in base_state if name.startswith("model.")}
-        complete = set(trained) == decoder
+        # The pipeline builds its backbone whatever the files hold; the files must hold every key of it.
+        _, info = AutoModel.from_pretrained(checkpoint, output_loading_info=True)
+        complete = set(trained) == decoder and not (
+            info["missing_keys"] or info["unexpected_keys"] or info["mismatched_keys"]
+        )
     else:
         model, info = export.from_pretrained(checkpoint, output_loading_info=True)
         trained = model.state_dict()

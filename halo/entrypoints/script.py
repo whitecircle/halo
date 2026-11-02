@@ -29,6 +29,8 @@ from halo.entrypoints.run_setup import configure_training_run, install_log_tee, 
 from halo.env import nccl_timeout
 from halo.log import configure_training_logging
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
+from halo.models.attention.selection import effective_attn_implementation, enable_flash_attention_deterministic
+from halo.models.unwrapping import base_transformers_model
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import raise_rank0_failure
 from halo.runtime.filesystem import verify_input_filesystem_sharing, verify_output_filesystem_sharing
@@ -76,10 +78,20 @@ def _reject_ddp_timeout(parsed: Sequence[Any]) -> None:
             )
 
 
+def _set_flash_switch_from_config(parsed: Sequence[Any]) -> None:
+    """Turn transformers' deterministic flash switch on for a ``full_determinism`` config as it is parsed: every
+    attention choice reads it (a script's row plan, which may run before :func:`init_training_script`, the loader's
+    resolver, the kernels), and HF's Trainer sets it only in ``__init__``, after the load."""
+    if any(isinstance(args, TrainingArguments) and args.full_determinism for args in parsed):
+        enable_flash_attention_deterministic()
+
+
 def parse_script_args(*dataclass_types: type) -> Any:
     """COLLECTIVE: raise the root logger to INFO, probe the HF caches against the declared input sharing, parse
     the command line into ``dataclass_types``, returned in order (the instance alone for one type), and tee the
-    console into the run's ``output_dir``. A ``ddp_timeout`` the parsed config sets is refused.
+    console into the run's ``output_dir``. A ``ddp_timeout`` the parsed config sets is refused, and a
+    ``full_determinism`` one turns transformers' deterministic flash switch on
+    (:func:`_set_flash_switch_from_config`).
 
     The process group comes up before any dataclass is built: constructing a TrainingArguments touches
     ``self.device``, which makes accelerate initialize the default process group without ``device_id``,
@@ -100,6 +112,7 @@ def parse_script_args(*dataclass_types: type) -> Any:
         values["output_dir"] = broadcast_from_rank0(expand_strftime_directives(values["output_dir"]))
     output = parser.parse_dict(values)
     _reject_ddp_timeout(output)
+    _set_flash_switch_from_config(output)
     install_log_tee(
         next((obj.output_dir for obj in output if isinstance(getattr(obj, "output_dir", None), str)), None)
     )
@@ -246,8 +259,9 @@ def run_trainer(
     method_name: str,
     extra_start_log: Sequence[str] | None = None,
 ) -> None:
-    """Train, between the start log (mode, axis sizes, ``extra_start_log``) and the EP cleanup; a run
-    the early stop ended raises :class:`EarlyStopExit` on every rank."""
+    """Train, between the start log (mode, axis sizes, the attention backend the policy was built with,
+    ``extra_start_log``) and the EP cleanup; a run the early stop ended raises :class:`EarlyStopExit` on every
+    rank."""
     # Integrations add themselves at the HEAD and would consume `logs` before our callbacks' on_log.
     reorder_integration_callbacks_last(trainer)
 
@@ -265,6 +279,9 @@ def run_trainer(
         if parallelism_config.is_pp_mode:
             logger.info(f"  PP size: {parallelism_config.pp_size}")
         logger.info(f"  DP size: {parallelism_config.data_parallel_size}")
+        policy_config = getattr(base_transformers_model(trainer.model), "config", None)
+        if (attn_implementation := effective_attn_implementation(policy_config)) is not None:
+            logger.info(f"  Attention: {attn_implementation}")
         for line in extra_start_log or ():
             logger.info(f"  {line}")
 

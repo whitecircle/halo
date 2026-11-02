@@ -4,9 +4,9 @@ reach FA4's varlen call, and refuse a pinned FA4 there.
 
 A softcap stays off FA4's varlen kernels (not validated there), and packed, padding-free and padded rows (more than one
 per batch) all reach them, so Gemma 2 27B (head_dim 128, which FA4's general kernel otherwise runs) trains on FA4 only
-one unpadded row per batch. Driven through ``main()`` (the embedding EP/TP pipeline through its builder) on a Blackwell
-host up to the policy load: the request must be decided on the rows the collator will build (a pre-processed corpus
-as it was baked), before any weight loads, and reach every model the run loads on it.
+one unpadded row per batch. Driven through ``main()`` (the embedding parallel loader's pipeline through its builder)
+on a Blackwell host up to the policy load: the request must be decided on the rows the collator will build (a
+pre-processed corpus as it was baked), before any weight loads, and reach every model the run loads on it.
 
 Run: pytest tests/cpu/config/test_sft_softcap_attn_default.py
 """
@@ -284,7 +284,7 @@ def test_the_self_distillation_policy_and_reference_loads_share_one_request():
     assert len(set(requests.values())) == 1, requests
 
 
-# --- embedding (the EP/TP pipeline) -----------------------------------------------------------------------------
+# --- embedding (the parallel loader's pipeline) ------------------------------------------------------------------
 
 
 def _embedding_backbone_loads(
@@ -310,16 +310,20 @@ def _embedding_backbone_loads(
     with (
         _blackwell(module, dtype),
         mock.patch.object(model_setup, "fetch_checkpoint_config", return_value=_gemma2(head_dim)),
+        mock.patch.object(module, "read_source_pipeline", return_value=module.SourcePipeline([], [], {}, {})),
         mock.patch.object(module, "load_model_and_tokenizer", side_effect=load),
         mock.patch.object(module, "PreloadedTransformer", side_effect=_PolicyLoadReached),
         contextlib.suppress(_PolicyLoadReached),
     ):
         module._assemble_preloaded_pipeline(
-            None,
+            types.SimpleNamespace(model_source=_MODEL_ID),
             types.SimpleNamespace(
-                per_device_train_batch_size=batch_size, per_device_eval_batch_size=8, eval_strategy=eval_strategy
+                per_device_train_batch_size=batch_size,
+                per_device_eval_batch_size=8,
+                eval_strategy=eval_strategy,
+                full_determinism=False,
             ),
-            types.SimpleNamespace(attn_implementation=pinned, model_name_or_path=_MODEL_ID),
+            types.SimpleNamespace(attn_implementation=pinned, model_name_or_path=_MODEL_ID, model_revision=None),
             types.SimpleNamespace(reset_sinks=True, train_sinks=False),
         )
     return loads

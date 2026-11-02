@@ -364,6 +364,6 @@ nvcc needs ninja and the host compiler on `PATH`; use the full `PATH` export abo
 
 Under EP+ETP the EP group splits into `expert_tp_size` dispatch groups coupled by the strided expert-TP
 all-reduce, which must stay in **token space** (`SumGradAcrossGroup` before dispatch,
-`ReduceFromExpertTP` after combine): a cross-group all-reduce between dispatch and combine deadlocks the
+`SumAcrossGroup` after combine): a cross-group all-reduce between dispatch and combine deadlocks the
 coupled groups under FSDP2's multi-stream execution
 ([Expert-Tensor Parallelism](../parallelism/expert-tensor-parallelism.md)).

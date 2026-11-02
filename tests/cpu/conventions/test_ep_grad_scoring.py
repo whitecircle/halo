@@ -8,9 +8,14 @@ per-layer negligible floor the TP family suite scores with, a reference under it
 absolute error, while a dropped TP reduce on the same parameter of another layer and a kind left wholly under the
 floor still fail. Under ``score_against_bf16_noise``, which the reentrant FSDP2 suite scores with, only a near-cancelled
 pair (its reference under a fraction of its layer's largest) whose distance from the fp32 reference stays within its
-parameter's measured bf16 noise is excused outside the bars. A router or expert bank halved on one layer, whose noise
-against an fp32 reference that routes differently would cover it, a small vector halved on one layer, a doubled or
-dropped sync on an excused kind, a missing gradient and a parameter excused on every step still fail.
+parameter's measured bf16 noise is excused outside the bars, and never a routed one. A router or expert bank halved on
+one layer, whose noise against an fp32 reference that routes differently would cover it, a small vector halved on one
+layer, a doubled or dropped sync on an excused kind, a missing gradient and a parameter excused on every step still
+fail, as does DeepSeek-V4's head hc_base doubled on its GPU numbers, which the factor excuses wherever it leaves the
+bars and which lands inside them at a cancelled step: it fails at its best resolved step. A pair's bar margin is its
+closest bar as a factor, and on GLM-5 Next's GPU numbers the closest at a best resolved step is layer 3's attn_hc.scale,
+which doubled alone lands inside the bars there, while a doubled sync on its kind fails through the kind's other layers.
+``router_parameter_names`` reads each EP layer's own router, Zaya's router MLP included.
 
 ``pair_step_grads``, which feeds that scoring, holds None and exact zeros as one gradient-less state (an EP rank keeps
 None for experts no token reached, the unsharded reference sums zeros), while a gradient only one side holds still
@@ -25,6 +30,7 @@ Run: python tests/cpu/conventions/test_ep_grad_scoring.py
 """
 
 import contextlib
+import math
 
 import pytest
 import torch
@@ -34,7 +40,9 @@ from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from tests.common.ep_reference import (
     KIND_SCORED_CHECK,
     MISSING_GRAD_SCORE,
+    best_resolved_scores,
     captured_picks,
+    decoder_layer_index,
     ep_layers,
     fault_passes_bf16_noise_scoring,
     groups_never_scored,
@@ -43,6 +51,7 @@ from tests.common.ep_reference import (
     parameters_outside_the_bars,
     per_layer_grad_floors,
     random_token_batch,
+    router_parameter_names,
     routing_can_be_pinned,
     routing_pinned,
     score_against_bf16_noise,
@@ -53,6 +62,7 @@ from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
 
+LOW, HIGH = TOL.ep_grad_norm_ratio_band
 REFERENCE = torch.randn(4, 16, 8, generator=torch.Generator().manual_seed(0)).to(torch.bfloat16)
 A_LOG = torch.randn(4, generator=torch.Generator().manual_seed(1))
 # Two decoder layers shaped like the tiny Qwen3.5's: a projection gradient and a per-head GatedDeltaNet A_log one,
@@ -358,12 +368,195 @@ def test_a_halved_parameter_inside_its_noise_on_every_step_fails_on_the_paramete
     )
 
 
+@pytest.mark.parametrize("name", [L1_GATE, L1_EXPERTS], ids=["router", "expert_bank"])
+def test_a_routed_parameter_is_never_excused(name):
+    """Every pair counted near-cancelled, the size rule off: a router or bank halved on step 1 sits within the factor of
+    the noise an fp32 reference routing other tokens gives it, so only its being routed fails it."""
+    steps = _scaled(name, 0.5, (1,))
+    loose = score_against_bf16_noise(steps, cos_min=TOL.ep_grad_cosine_min, excusable_fraction=math.inf)
+    assert loose[1][name].excused, "premise: the halved gradient sits inside the noise factor"
+    routed = score_against_bf16_noise(
+        steps, cos_min=TOL.ep_grad_cosine_min, excusable_fraction=math.inf, routed=frozenset({L1_GATE, L1_EXPERTS})
+    )
+    assert not routed[1][name].matches
+    assert [
+        (step, other) for step, scores in enumerate(routed) for other, score in scores.items() if not score.matches
+    ] == [(1, name)]
+
+
 def test_a_parameter_the_noise_excuses_on_every_step_fails_the_parameter_check():
     """The head base cancelled on every step: each pair is excused, so no step scores it."""
     cancelled = {**HC_FP32, **{(step, HC_BASE): HC_FP32[0, HC_BASE] for step in range(HC_STEPS)}}
     scored = _scored(_hc_steps(fp32=cancelled))
     assert all(scored[step][HC_BASE].excused for step in range(HC_STEPS))
     assert parameters_outside_the_bars(scored) == [HC_BASE]
+
+
+# DeepSeek-V4's head hc_base (2 elements) on the GPU ep_multi row, per step: its fp32 reference gradient's norm, and the
+# bf16 reference's and the policy's (norm ratio, angle in degrees) against it. Cancelled on step 0 and best resolved on
+# step 1; on step 2 the bf16 reference misses fp32 by 29% of its norm, so the policy sits at 0.72 of it.
+GPU_HC_BASE = (
+    (4.871e-6, (4.1972, 27.3), (1.3256, 61.7)),
+    (1.930e-4, (0.8960, 3.34), (0.8076, -1.15)),
+    (6.653e-5, (1.2902, 7.2), (0.9328, 5.9)),
+)
+
+
+def _planar(norm: float, ratio: float, degrees: float) -> torch.Tensor:
+    angle = torch.tensor(degrees).deg2rad()
+    return ratio * norm * torch.stack([angle.cos(), angle.sin()])
+
+
+def _gpu_hc_base_steps(scale: float = 1.0) -> list[dict]:
+    """The hc_base steps beside a head gradient that sets its excusable fraction, its policy gradient times ``scale``."""
+    head = _vector((16, 8), 2.0, 700)
+    return [
+        {
+            HC_BASE: (scale * _planar(norm, *policy), _planar(norm, *bf16), _planar(norm, 1.0, 0.0)),
+            HEAD: (head, head, head),
+        }
+        for norm, bf16, policy in GPU_HC_BASE
+    ]
+
+
+def test_a_doubled_hc_base_fails_at_its_best_resolved_step():
+    """The policy's own: excused at the cancelled step 0, inside the bars at steps 1 and 2. Doubled, it leaves the bars at
+    step 1 within the factor of its noise, so every pair still matches, and at step 2 it lands inside them (2 x 0.72):
+    only the bars at step 1, where its fp32 reference is largest, fail it."""
+    clean = _scored(_gpu_hc_base_steps())
+    assert [scores[HC_BASE].excused for scores in clean] == [True, False, False]
+    assert [scores[HC_BASE].in_bars for scores in clean] == [False, True, True]
+    assert not parameters_outside_the_bars(clean)
+    doubled = _scored(_gpu_hc_base_steps(scale=2.0))
+    assert all(scores[HC_BASE].matches for scores in doubled), "premise: the factor excuses every doubled pair"
+    assert doubled[2][HC_BASE].in_bars and not doubled[1][HC_BASE].in_bars
+    assert parameters_outside_the_bars(doubled) == [HC_BASE]
+    assert not fault_passes_bf16_noise_scoring(
+        _gpu_hc_base_steps(), HC_BASE, lambda step, name, grad: 2 * grad, cos_min=TOL.ep_grad_cosine_min
+    )
+
+
+# A GLM-5 Next ffn_hc.base on the CPU calibration's two-replica rows, per step: its fp32 reference gradient's norm, and
+# the bf16 reference's and the policy's (norm ratio, angle in degrees) against it. The bf16 reference misses fp32 by
+# 0.7-1.0 of its norm on every step, inflating it past the fp32 peak at step 2; the fp32 reference peaks at step 1, where
+# the policy lands inside the bars.
+INFLATED_HC = "model.layers.1.ffn_hc.base"
+INFLATED_HC_STEPS = (
+    (2.4e-4, (0.5, 70.0), (1.0, -20.0)),
+    (6.94e-4, (0.41, 40.0), (0.418, 40.0)),
+    (4.24e-4, (1.7, 30.0), (1.0, 0.0)),
+)
+
+
+def test_the_best_resolved_step_is_the_fp32_references_largest():
+    """Scored at the bf16 reference's largest step, step 2, the parameter would land outside the bars; at the fp32
+    reference's, step 1, it lands inside them, and the noise excuses it elsewhere."""
+    bank = _vector((4, 8, 6), 1.0, 701)
+    steps = [
+        {
+            INFLATED_HC: (_planar(norm, *policy), _planar(norm, *bf16), _planar(norm, 1.0, 0.0)),
+            L1_EXPERTS: (bank, bank, bank),
+        }
+        for norm, bf16, policy in INFLATED_HC_STEPS
+    ]
+    bf16_norms = [pairs[INFLATED_HC][1].norm().item() for pairs in steps]
+    assert bf16_norms.index(max(bf16_norms)) == 2, "premise: the bf16 reference peaks at step 2"
+    scored = _scored(steps)
+    assert [scores[INFLATED_HC].in_bars for scores in scored] == [False, True, False]
+    assert all(scores[INFLATED_HC].matches for scores in scored)
+    assert not parameters_outside_the_bars(scored)
+
+
+# GLM-5 Next's attn_hc.scale (3 elements) on its four layers on the GPU ep_multi row, per step: its fp32 reference
+# gradient's norm, and the bf16 reference's and the policy's (norm ratio, angle in degrees) against it. Each layer's
+# largest gradient sits at 0.25. Layer 3 is best resolved on step 2, where the policy sits at 0.72 of the bf16
+# reference: of the row's hc vectors, the closest to a bar at its best resolved step.
+GLM5N_LAYER = "model.language_model.layers.{}.{}"
+GLM5N_HC_SCALE = (
+    (
+        (4.959e-4, (0.7920, 2.1), (0.5767, 7.2)),
+        (1.119e-3, (0.9752, 0.0), (1.0093, 0.0)),
+        (1.617e-3, (1.1232, 0.0), (1.0713, 0.0)),
+    ),
+    (
+        (1.517e-4, (0.8162, 18.6), (0.8547, 13.9)),
+        (1.708e-4, (0.7672, 68.5), (0.7319, 66.4)),
+        (4.938e-4, (0.9933, 0.8), (1.0232, 0.0)),
+    ),
+    (
+        (2.231e-4, (1.1344, 1.4), (1.0864, -0.8)),
+        (6.005e-5, (1.1232, 13.0), (1.2001, 16.4)),
+        (2.994e-4, (0.9893, 0.0), (1.0653, 1.4)),
+    ),
+    (
+        (1.105e-4, (0.5465, 20.0), (0.6316, 11.9)),
+        (3.323e-5, (1.4343, 12.8), (1.4274, 12.2)),
+        (2.713e-4, (1.1263, 0.8), (0.8061, 3.9)),
+    ),
+)
+GLM5N_SCALES = [GLM5N_LAYER.format(layer, "attn_hc.scale") for layer in range(len(GLM5N_HC_SCALE))]
+
+
+def _glm5n_hc_scale_steps(doubled: tuple[int, ...] = ()) -> list[dict]:
+    """The attn_hc.scale steps, the policy's gradient doubled on the ``doubled`` layers, beside each layer's largest."""
+    steps = []
+    for step in range(HC_STEPS):
+        pairs = {}
+        for layer, per_step in enumerate(GLM5N_HC_SCALE):
+            norm, bf16, policy = per_step[step]
+            scale = 2.0 if layer in doubled else 1.0
+            pairs[GLM5N_SCALES[layer]] = (
+                scale * _planar(norm, *policy),
+                _planar(norm, *bf16),
+                _planar(norm, 1.0, 0.0),
+            )
+            largest = _vector((16, 8), 0.25, 800 + layer)
+            pairs[GLM5N_LAYER.format(layer, "self_attn.o_proj.weight")] = (largest, largest, largest)
+        steps.append(pairs)
+    return steps
+
+
+def test_the_best_step_bar_margin_is_the_closest_bar_at_the_fp32_largest_step():
+    resolved = best_resolved_scores(_scored(_glm5n_hc_scale_steps()))
+    closest = resolved[GLM5N_SCALES[3]]
+    assert closest.fp32_norm == pytest.approx(GLM5N_HC_SCALE[3][2][0])
+    assert closest.bar_margin == pytest.approx(0.8061 / 1.1263 / LOW, rel=1e-4)
+    assert min(resolved.values(), key=lambda score: score.bar_margin) is closest
+
+
+@pytest.mark.parametrize(
+    ("ratio", "degrees", "margin"),
+    [
+        (0.8, 0.0, 0.8 / LOW),
+        (1.25, 0.0, HIGH / 1.25),
+        (1.0, 25.0, (1 - TOL.ep_grad_cosine_min) / (1 - math.cos(math.radians(25)))),
+        (0.5, 0.0, 0.5 / LOW),
+    ],
+    ids=["low_end", "high_end", "direction", "outside"],
+)
+def test_the_bar_margin_is_the_closest_bar_as_a_factor(ratio, degrees, margin):
+    reference = _vector((2,), 1e-2, 801)
+    angle = math.radians(degrees)
+    turned = torch.tensor([[math.cos(angle), -math.sin(angle)], [math.sin(angle), math.cos(angle)]])
+    score = _scored([{HEAD: (ratio * turned @ reference, reference, reference)}])[0][HEAD]
+    assert score.bar_margin == pytest.approx(margin, rel=1e-4)
+    assert score.in_bars == (score.bar_margin > 1)
+
+
+def test_a_doubling_inside_the_bars_at_its_best_step_is_held_by_its_kind():
+    """Layer 3's attn_hc.scale doubled alone leaves the bars only at the steps cancelled enough for the noise to excuse it
+    and lands inside them at its best resolved step (2 x 0.72), so one vector's doubled sync passes. A doubled sync on
+    the kind fails at layers 0-2's best resolved steps."""
+    clean = _glm5n_hc_scale_steps()
+    assert not parameters_outside_the_bars(_scored(clean))
+    alone = _scored(_glm5n_hc_scale_steps(doubled=(3,)))
+    assert all(score.matches for scores in alone for score in scores.values()), "premise: the noise excuses the rest"
+    assert alone[2][GLM5N_SCALES[3]].in_bars and not parameters_outside_the_bars(alone)
+    every_layer = tuple(range(len(GLM5N_HC_SCALE)))
+    assert parameters_outside_the_bars(_scored(_glm5n_hc_scale_steps(doubled=every_layer))) == GLM5N_SCALES[:3]
+    assert not fault_passes_bf16_noise_scoring(
+        clean, parameter_kind(GLM5N_SCALES[3]), lambda step, name, grad: 2 * grad, cos_min=TOL.ep_grad_cosine_min
+    )
 
 
 # An EP rank holding experts 2-3 of a 4-expert bank, and a replicated norm.
@@ -482,6 +675,23 @@ def _ep_model(family: str, dtype: torch.dtype = torch.bfloat16) -> torch.nn.Modu
 
 
 @pytest.mark.parametrize(
+    ("family", "router"),
+    [("qwen3_moe", ".mlp.gate."), ("gpt_oss", ".mlp.router."), ("zaya", ".mlp.gate."), ("gemma4_text", None)],
+)
+def test_router_parameter_names_are_each_ep_layers_own_router(family, router):
+    """Every trainable parameter of each EP layer's own router module, by name (Zaya's an MLP of eight or nine); Gemma
+    4's router is a sibling of its EP layers."""
+    model = _ep_model(family)
+    names = router_parameter_names(model)
+    assert names == {
+        name
+        for name, param in model.named_parameters()
+        if router is not None and router in name and param.requires_grad
+    }
+    assert router is None or len({decoder_layer_index(name) for name in names}) == len(ep_layers(model))
+
+
+@pytest.mark.parametrize(
     ("family", "pinnable"),
     [
         ("qwen3_moe", True),
@@ -535,6 +745,16 @@ def test_captured_picks_are_each_forwards_top_k(ep_models):
     assert len(captured) == len(layers) and all(len(chunks) == ROWS for chunks in captured)
     assert all(chunk.shape == (ROW_TOKENS, layers[0].top_k) for chunks in captured for chunk in chunks)
     assert not any(layer._capture_routing or layer._captured_routing_chunks for layer in layers)
+
+
+def test_a_capture_of_layers_another_reader_armed_is_refused(ep_models):
+    bf16, _, rows = ep_models
+    with captured_picks(bf16) as captured, torch.no_grad():
+        with pytest.raises(RuntimeError, match="already armed by another reader"), captured_picks(bf16):
+            pass
+        _rows_loss(bf16, rows[:1])
+    assert all(len(chunks) == 1 for chunks in captured)
+    assert not any(layer._capture_routing or layer._captured_routing_chunks for layer in ep_layers(bf16))
 
 
 def test_routing_pinned_on_its_own_picks_changes_nothing(ep_models):

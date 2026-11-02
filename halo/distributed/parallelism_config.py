@@ -404,7 +404,7 @@ class ParallelismConfig:
     def get_data_parallel_rank(self) -> int:
         """The batch this rank processes, shared by its TP/CP/expert-TP partners and its pipeline chain."""
         if self.expert_tp_size > 1:
-            # ETP partners share dispatch_ep_rank, so ReduceFromExpertTP sums matching tokens.
+            # ETP partners share dispatch_ep_rank, so the expert-TP SUM adds matching tokens.
             layout = self.ep_layout
             ep_rank, ep_group_idx = layout.rank_and_group(self.stage_local_rank)
             dispatch_ep_rank, _ = layout.etp_partition(ep_rank, self.ep_size, self.expert_tp_size)

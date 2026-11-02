@@ -45,6 +45,7 @@ from halo.distributed.expert_parallel.moe_layer.expert_lora import (
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.log import KEY_PREVIEW_COUNT
+from halo.model_loading.tokenizer_setup import vocabulary_grown
 from halo.models.param_roles import persistent_buffers
 from halo.models.unwrapping import (
     PEFT_BASE_MODEL_PREFIX,
@@ -54,7 +55,7 @@ from halo.models.unwrapping import (
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
 )
-from halo.runtime.consensus import barrier_on_exit, reject_across_ranks
+from halo.runtime.consensus import agree_across_ranks, barrier_on_exit, reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor, full_cpu_tensor
 from halo.runtime.filesystem import fs_aware_makedirs
 from halo.runtime.ranks import is_global_main_process
@@ -66,6 +67,15 @@ def _is_adapter_relevant(name: str) -> bool:
     # Superset of every param name PEFT may serialize into an adapter file: LoRA tensors,
     # modules_to_save clones, and the embed/lm_head pair save_embedding_layers can add.
     return any(marker in name for marker in ("lora_", "modules_to_save", "embed", "lm_head"))
+
+
+def _saves_embedding_layers(peft_model: PeftModel) -> bool | str:
+    """PEFT's ``save_embedding_layers`` for every selection of ``peft_model``'s adapter tensors, a save's and the resume's
+    alike: ``True`` once the run grew its vocabulary (:func:`~halo.model_loading.tokenizer_setup.vocabulary_grown`),
+    whose added rows no base checkpoint holds. PEFT's ``"auto"`` tells a grown vocabulary only by reading the base
+    config again, which it skips offline or without the Hub and which a composite config, holding ``vocab_size`` on
+    its text config alone, defeats; it still decides a vocabulary the run left alone."""
+    return True if vocabulary_grown(peft_model) else "auto"
 
 
 def gather_adapter_state(peft_model: PeftModel) -> dict:
@@ -80,7 +90,9 @@ def gather_adapter_state(peft_model: PeftModel) -> dict:
         for name, t in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
         if _is_adapter_relevant(name)
     }
-    return get_peft_model_state_dict(peft_model, state_dict=full_state)
+    return get_peft_model_state_dict(
+        peft_model, state_dict=full_state, save_embedding_layers=_saves_embedding_layers(peft_model)
+    )
 
 
 def _cp_normalized_config(peft_config):
@@ -148,8 +160,9 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     if mixed or gathered:
         state = gather_adapter_state(peft_model)
     elif is_cp_mode:
-        # CP without DTensors (QLoRA+CP) still needs the manual write for its changed key paths.
-        state = get_peft_model_state_dict(peft_model)
+        # CP without DTensors (QLoRA+CP, or a CP group spanning the world) still needs the manual write for its
+        # changed key paths.
+        state = get_peft_model_state_dict(peft_model, save_embedding_layers=_saves_embedding_layers(peft_model))
     if state is not None and is_cp_mode:
         state = {plain_adapter_key(key): tensor for key, tensor in state.items()}
         peft_config = _cp_normalized_config(peft_config)
@@ -172,7 +185,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     with barrier_on_exit(f"Writing the PEFT adapters to {output_dir}"):
         if ctx.is_save_rank:
             if state is None:
-                peft_model.save_pretrained(output_dir)
+                peft_model.save_pretrained(output_dir, save_embedding_layers=_saves_embedding_layers(peft_model))
                 apply_umask_mode(os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
             elif mixed:
                 write_mixed_adapter_config(
@@ -257,7 +270,9 @@ def saved_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
     parameters (a tie under each of its names) and persistent buffers, as its ``state_dict()`` holds them. An FSDP2
     DTensor stays as it is, so its ``shape`` is the saved full one."""
     live = dict(itertools.chain(peft_model.named_parameters(remove_duplicate=False), persistent_buffers(peft_model)))
-    return get_peft_model_state_dict(peft_model, state_dict=live)
+    return get_peft_model_state_dict(
+        peft_model, state_dict=live, save_embedding_layers=_saves_embedding_layers(peft_model)
+    )
 
 
 def _with_tied_aliases(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> dict:
@@ -273,6 +288,47 @@ def _with_tied_aliases(saved_tensors: dict[str, torch.Tensor], attn_state: dict)
         if key not in attn_state and id(tensor) in held
     }
     return {**attn_state, **aliases}
+
+
+def _without_unsaved_grown_rows(
+    peft_model: PeftModel, saved_tensors: dict[str, torch.Tensor], attn_state: dict, checkpoint: str
+) -> dict[str, torch.Tensor]:
+    """COLLECTIVE when the run grew its vocabulary. ``saved_tensors`` without the frozen embedding and head tensors of
+    a grown vocabulary that no key of ``attn_state`` holds (under a tied name either): an adapter saved before
+    adapter saves carried them, whose run kept them frozen at their mean-resize init, which this run's grow drew
+    again. Their live values stand, with a warning.
+
+    The keys left out are agreed across ranks, since each kept key is a copy, and a DTensor copy a mesh collective.
+    """
+    if not vocabulary_grown(peft_model):
+        return saved_tensors
+    model = base_transformers_model(peft_model)
+    frozen = {
+        id(param)
+        for module in (model.get_input_embeddings(), model.get_output_embeddings())
+        if module is not None
+        for param in module.parameters()
+        if not param.requires_grad
+    }
+    held = {id(saved_tensors[key]) for key in attn_state if key in saved_tensors}
+    unsaved = sorted(
+        key
+        for key, tensor in saved_tensors.items()
+        if key not in attn_state and id(tensor) in frozen and id(tensor) not in held
+    )
+    if not agree_across_ranks(unsaved):
+        raise RuntimeError(
+            f"The PEFT adapter at {checkpoint} holds the grown vocabulary's embedding rows on some ranks only: the "
+            f"ranks read different adapter files. Resume from a complete checkpoint."
+        )
+    if unsaved and is_global_main_process():
+        logger.warning(
+            f"The PEFT adapter at {checkpoint} holds no tensor for the grown vocabulary's frozen embedding rows "
+            f"{unsaved[:KEY_PREVIEW_COUNT]}: it was saved before adapter saves carried them. Resuming with the rows "
+            f"this run's grow initialized; the saved run kept its own frozen at that mean-resize init, so they differ "
+            f"only by its random draw. Later saves carry them."
+        )
+    return {key: tensor for key, tensor in saved_tensors.items() if key not in unsaved}
 
 
 def _load_peft_adapter_state(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> None:
@@ -306,7 +362,8 @@ def _attention_adapter_mismatch(saved_tensors: dict | None, attn_state: dict, ch
     mismatch = adapter_layout_mismatch(attn_state, {key: tuple(tensor.shape) for key, tensor in saved_tensors.items()})
     return mismatch and (
         f"The PEFT adapter at {checkpoint} does not match the adapters this model builds: {mismatch}. Resume with "
-        f"the lora_target_modules, lora_r and modules_to_save it was saved with, from a complete checkpoint."
+        f"the lora_target_modules, lora_r, modules_to_save and added_special_tokens it was saved with, from a "
+        f"complete checkpoint."
     )
 
 
@@ -356,6 +413,7 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
         attn_state = remap_cp_adapter_keys_to_live(attn_state, saved_tensors)
     if saved_tensors is not None:
         attn_state = _with_tied_aliases(saved_tensors, attn_state)
+        saved_tensors = _without_unsaved_grown_rows(peft_model, saved_tensors, attn_state, checkpoint)
     # Joined before the expert load, whose own join precedes its first copy: neither population writes until both
     # have matched on every rank.
     reject_across_ranks(

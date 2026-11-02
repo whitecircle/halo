@@ -16,6 +16,7 @@ from transformers import AutoProcessor, AutoTokenizer, PreTrainedModel, PreTrain
 
 from halo.model_loading.tokenizer_backend import resolve_tokenizer_backend
 from halo.models.config_access import set_config_field
+from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 
 if TYPE_CHECKING:
@@ -32,6 +33,10 @@ _PRISTINE_MODEL_MAX_LENGTH_ATTR = "_halo_pristine_model_max_length"
 # Marks a tokenizer whose chat template the run chose (:func:`set_run_chat_template`), which its processor
 # then adopts (:func:`adopt_tokenizer_chat_template`); a template the checkpoint shipped stays each one's.
 _RUN_CHAT_TEMPLATE_ATTR = "_halo_run_chat_template"
+
+# Marks a model whose embeddings the run grew past its checkpoint's rows (:func:`grow_vocabulary`): the rows it
+# added exist in no base checkpoint, so every adapter save of the run carries them (:func:`vocabulary_grown`).
+_GROWN_VOCABULARY_ATTR = "_halo_grown_vocabulary"
 
 
 def load_processing_class(path: str, *, trust_remote_code: bool = False):
@@ -65,10 +70,9 @@ def resolve_tokenizer(processing_class):
     return getattr(processing_class, "tokenizer", processing_class)
 
 
-def resolve_peft_processing_class(
-    adapter_dir: str, base_model_path: str, *, text_only: bool, trust_remote_code: bool = False
-):
-    """Resolve the processing class for a merged / converted PEFT checkpoint.
+def resolve_peft_processing_class(adapter_pc, base_pc, *, text_only: bool):
+    """The processing class a merged / converted PEFT checkpoint ships, of the adapter directory's (``adapter_pc``)
+    and the base's (``base_pc``), each as :func:`load_processing_class` returns it.
 
     The adapter directory holds the run's own processing class, with its chat template, special tokens
     and added vocabulary. ``text_only`` (the adapter addresses a multimodal checkpoint's text-only
@@ -76,11 +80,9 @@ def resolve_peft_processing_class(
     Otherwise the base's full processor wins over an adapter carrying only a tokenizer (a tokenizer-only
     save of a multimodal checkpoint is unloadable), and an adapter's own full processor is kept.
     """
-    adapter_pc = load_processing_class(adapter_dir, trust_remote_code=trust_remote_code)
     if text_only:
-        chosen = adapter_pc or load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
+        chosen = adapter_pc or base_pc
         return None if chosen is None else resolve_tokenizer(chosen)
-    base_pc = load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
     base_is_full = base_pc is not None and not isinstance(base_pc, PreTrainedTokenizerBase)
     adapter_is_full = adapter_pc is not None and not isinstance(adapter_pc, PreTrainedTokenizerBase)
     if base_is_full and not adapter_is_full:
@@ -197,7 +199,14 @@ def configure_run_tokenizer(
                     f"tensor parallelism the embedding is a sharded DTensor that resize_token_embeddings cannot "
                     f"re-shard. Grow the vocabulary before the run with scripts/before_training/patch_vocab.py."
                 )
-            model.resize_token_embeddings(len(tokenizer))
+            rows = model.get_input_embeddings().weight.shape[0]
+            grow_vocabulary(model, len(tokenizer))
+            if is_global_main_process():
+                logger.info(
+                    f"added_special_tokens grew {type(model).__name__}'s vocabulary from {rows} to {len(tokenizer)} "
+                    "rows; a PEFT adapter save of this run carries the input embedding and output head whole, since "
+                    "no base checkpoint holds the added rows."
+                )
     # The tokenizer write is conditional, the MODEL write is not: a script holding a frozen reference
     # runs this seam once per model against the SAME tokenizer, so a shared guard would skip the
     # second sync and leave that model's config on the checkpoint's eos.
@@ -239,6 +248,20 @@ def configure_run_tokenizer(
         set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
 
     return resolve_tokenizer_backend(tokenizer, args.tokenizer_backend)
+
+
+def grow_vocabulary(model: PreTrainedModel, num_tokens: int, *, mean_resizing: bool = True) -> None:
+    """Resize ``model``'s embeddings (and an untied head) up to ``num_tokens`` rows and mark it grown
+    (:func:`vocabulary_grown`), on the plain transformers model under every wrapper, which is what an adapter save
+    reads back. ``mean_resizing=False`` skips the mean-and-covariance init, for a caller that overwrites the rows."""
+    model.resize_token_embeddings(num_tokens, mean_resizing=mean_resizing)
+    setattr(base_transformers_model(model), _GROWN_VOCABULARY_ATTR, True)
+
+
+def vocabulary_grown(model) -> bool:
+    """Whether the run grew ``model``'s vocabulary past its checkpoint's (:func:`grow_vocabulary`), read through every
+    framework, toolkit and PEFT wrapper."""
+    return getattr(base_transformers_model(model), _GROWN_VOCABULARY_ATTR, False)
 
 
 def set_run_chat_template(tokenizer: PreTrainedTokenizerBase, template: str | None) -> None:

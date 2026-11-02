@@ -7,7 +7,9 @@ The kernel comparison runs under Triton's interpreter in a fresh process (``TRIT
 kernel is defined); the CUDA leg, where FMA contraction applies, is ``tests/gpu/optimizers/test_adamw_bf16_fused.py``.
 The compiled-code check builds both kernels for sm_90, sm_100 and sm_103 without a GPU, each under one tensor's launch
 specialization and at the table size that target launches with: the full table on sm_100/103, one tensor elsewhere,
-with and without the step's skip flag.
+with and without the step's skip flag. Every launch takes that one table size whatever count of tensors it steps, so
+the count selects no variant: a step whose set of gradient-bearing tensors changes keys one only for a specialization
+no earlier step launched.
 
 Run: python tests/cpu/optimizers/test_adamw_bf16_fused_launch.py
 """
@@ -15,6 +17,7 @@ Run: python tests/cpu/optimizers/test_adamw_bf16_fused_launch.py
 import collections
 import math
 import re
+import types
 
 import pytest
 import torch
@@ -22,7 +25,7 @@ import torch.nn as nn
 import triton
 from triton.backends.compiler import BaseBackend, GPUTarget
 from triton.compiler import ASTSource
-from triton.runtime.jit import native_specialize_impl
+from triton.runtime.jit import create_function_from_signature, native_specialize_impl
 
 from halo.optimizers import adamw_bf16
 from halo.optimizers.adamw_bf16 import (
@@ -41,9 +44,11 @@ from halo.optimizers.adamw_bf16 import (
     _divisibility,
     _fused_update,
     _FusedUpdate,
+    _launch_fused,
     _launch_tables,
     _specialization,
     _tensors_per_launch,
+    adamw_bf16_optimizer_from_args,
 )
 from halo.optimizers.stochastic_rounding import SR_BLOCK_SIZE, sr_param_index, sr_seed_pair
 from tests.common.adamw_bf16_reference import _per_parameter_kernel
@@ -251,6 +256,17 @@ def test_tables_refuse_tensors_the_kernel_would_misread(grad):
         _launch_tables([good, _update(p, 2, grad=grad)])
 
 
+@pytest.mark.parametrize("table_size", [2, 3], ids=["smaller", "not_a_power_of_two"])
+def test_launch_refuses_a_table_its_lookup_cannot_cover(table_size):
+    """The lookup halves a power-of-two table down to one slot: a tensor past ``table_size`` slots, or past the
+    largest power of two below a table of another size, would resolve to another tensor's slot. Refused before any
+    launch."""
+    updates = [_update(torch.zeros(4, dtype=torch.bfloat16), seed) for seed in range(3)]
+    index, hparams, num_programs = _launch_tables(updates)
+    with pytest.raises(ValueError, match=f"got a table of {table_size} for 3 tensors"):
+        _launch_fused(updates, index, hparams, num_programs, None, None, table_size)
+
+
 def test_group_key_separates_what_one_launch_cannot_mix():
     p = torch.zeros(4, dtype=torch.bfloat16)
     assert _update(p, 1).group_key == _update(torch.zeros(9, dtype=torch.bfloat16), 2).group_key
@@ -343,19 +359,42 @@ def test_only_sm100_and_sm103_launch_many_tensors_at_once(capability, major_mino
     assert _tensors_per_launch(torch.device("cuda", 0)) == expected
 
 
+@pytest.mark.parametrize(
+    ("parameter", "major_minor", "named_step"),
+    [
+        (_CudaParameter, (10, 3), f"(SR, fused Triton step, up to {_MAX_TENSORS_PER_LAUNCH} per launch)"),
+        (_CudaParameter, (9, 0), "(SR, fused Triton step, up to 1 per launch)"),
+        (nn.Parameter, (10, 3), "(SR, eager step)"),
+    ],
+    ids=["sm103", "sm90", "off_cuda"],
+)
+def test_the_build_line_names_the_step_the_bf16_params_take(capability, caplog, parameter, major_minor, named_step):
+    """The launch width moves step time between GPUs, so the build line names it, or the eager step off CUDA."""
+    capability(major_minor)
+    model = nn.Module()
+    model.weight = parameter(torch.zeros(4, 4, dtype=torch.bfloat16))
+    args = types.SimpleNamespace(
+        weight_decay=0.0, learning_rate=1e-3, adam_beta1=0.9, adam_beta2=0.95, adam_epsilon=1e-8
+    )
+    with caplog.at_level("INFO", logger=adamw_bf16.logger.name):
+        adamw_bf16_optimizer_from_args(model, args, ["weight"])
+    (line,) = [record.getMessage() for record in caplog.records if "AdamWBF16 optimizer" in record.getMessage()]
+    assert named_step in line, line
+
+
 @pytest.mark.parametrize("major_minor", [(10, 0), (9, 0)], ids=["sm100", "sm90"])
 def test_step_launches_full_chunks_from_each_steps_tensors(monkeypatch, capability, major_minor):
     """``step()`` sends a launch out once its group key holds as many non-empty updates as one launch steps there
-    (``_MAX_TENSORS_PER_LAUNCH`` on sm_100, one on sm_90), in param order, skips empty shards and a key left empty,
-    hands every launch the deferred clip scale, bumps every fused param's version, and builds each launch's table
-    from that step's local tensors and seeds: grads reallocated between steps (an FSDP2 reshard) are addressed where
-    they now live."""
+    (``_MAX_TENSORS_PER_LAUNCH`` on sm_100, one on sm_90), in param order, over a table of that width whatever its
+    count, skips empty shards and a key left empty, hands every launch the deferred clip scale, bumps every fused
+    param's version, and builds each launch's table from that step's local tensors and seeds: grads reallocated between
+    steps (an FSDP2 reshard) are addressed where they now live."""
     capability(major_minor)
     launches = []
     monkeypatch.setattr(
         adamw_bf16,
         "_launch_fused",
-        lambda updates, index, _, __, scale, ___: launches.append((updates[:], index, scale)),
+        lambda updates, index, _, __, scale, ___, table_size: launches.append((updates[:], index, scale, table_size)),
     )
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
     # Two full launches of the aligned key go out mid-step and leave it empty; the odd-sized key ends partial.
@@ -388,12 +427,14 @@ def test_step_launches_full_chunks_from_each_steps_tensors(monkeypatch, capabili
             expected = [aligned[:cap], aligned[cap : 2 * cap], odd]
         else:
             expected = [[id(p)] for p, n in zip(params, sizes, strict=True) if n]
-        assert [[id(update.param) for update in updates] for updates, _, _ in launches] == expected, step
+        assert [[id(update.param) for update in updates] for updates, _, _, _ in launches] == expected, step
+        width = _MAX_TENSORS_PER_LAUNCH if major_minor == (10, 0) else 1
+        assert {table_size for *_, table_size in launches} == {width}, "every launch searches the device's full table"
         assert all(
-            launched is None if scale is None else torch.equal(launched, scale) for _, _, launched in launches
+            launched is None if scale is None else torch.equal(launched, scale) for _, _, launched, _ in launches
         ), "every launch, the ones sent mid-step included, takes the step's deferred scale"
         assert [p._version for p in params] == [v + 1 for v in versions], "every fused param's version moves"
-        for updates, index, _ in launches:
+        for updates, index, _, _ in launches:
             rows = index.tolist()
             assert rows[_ROW_SEED] == [update.seed for update in updates]
             for row, role in zip(_ROLE_ROWS, range(4), strict=True):
@@ -404,6 +445,58 @@ def test_step_launches_full_chunks_from_each_steps_tensors(monkeypatch, capabili
             assert [update.tensors[1].data_ptr() for update in updates] == [
                 update.param.grad.data_ptr() for update in updates
             ]
+
+
+@pytest.mark.parametrize("deferred", [False, True], ids=["plain", "clip_and_guard"])
+def test_a_changing_set_of_gradients_compiles_one_variant_per_specialization(monkeypatch, capability, deferred):
+    """An EP rank whose local experts in a layer receive no tokens holds no gradient for them that step, so the count
+    of tensors a launch steps moves from step to step: here through a lone tensor, a multiple of 16 and a full
+    launch's remainder on either side of a power of two, with and without the clip scale and skip flag the EP clip and
+    step guard hand every step. Keyed as Triton's launcher keys them (its own binder over the kernel's parameters),
+    the launches of every step run one variant per specialization, the ones the first step compiled. Run on sm_103:
+    elsewhere every launch steps one tensor, so the count never moves."""
+    capability((10, 3))
+    monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
+    kernel = adamw_bf16._adam_bf16_sr_kernel
+    bind = create_function_from_signature(kernel.signature, kernel.params, BaseBackend)
+    count_arg = kernel.arg_names.index("num_tensors")
+    launches: list[tuple[int, int, tuple]] = []
+    step = 0
+
+    class _Launcher:
+        def __getitem__(self, grid):
+            def launch(*args, **kwargs):
+                _, specialization, options = bind(*args, **kwargs)
+                launches.append((step, args[count_arg], (tuple(specialization), tuple(sorted(options.items())))))
+
+            return launch
+
+    monkeypatch.setattr(adamw_bf16, "_adam_bf16_sr_kernel", _Launcher())
+    sizes = [32] * 300 + [33] * 5
+    params = [_CudaParameter(torch.zeros(n, dtype=torch.bfloat16)) for n in sizes]
+    optimizer = AdamWBF16([(f"w{i}", p) for i, p in enumerate(params)], lr=1e-2)
+    # The 32-element key steps 300, 272, 257, 300 and 200 tensors (a full launch beside 44, 16, 1 and 44, then one
+    # launch of 200), the 33-element key 5, 5, 5, 1 and 2.
+    with_grads = [range(305), range(28, 305), range(43, 305), range(301), [*range(100, 300), 303, 304]]
+    for step, indices in enumerate(with_grads, start=1):
+        for p in params:
+            p.grad = None
+        for i in indices:
+            params[i].grad = torch.ones_like(params[i])
+        if deferred:
+            optimizer.defer_grad_scale(torch.tensor(0.5))
+            optimizer.skip_next_step_if(torch.tensor(False))
+        optimizer.step()
+        if deferred:
+            optimizer.settle_step(False)
+
+    counts = [sorted(n for at, n, _ in launches if at == s) for s in range(1, len(with_grads) + 1)]
+    assert len({tuple(c) for c in counts}) == len(with_grads), f"the launches did not change between steps: {counts}"
+    first = {key for at, _, key in launches if at == 1}
+    later = {key for at, _, key in launches if at > 1} - first
+    assert len(first) == 2 and not later, (
+        f"{len(first)} variants for the step's 2 specializations, and later steps key {len(later)} more"
+    )
 
 
 @pytest.mark.parametrize("target", _TARGETS, ids=lambda target: f"sm{target.arch}")

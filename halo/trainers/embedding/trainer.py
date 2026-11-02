@@ -243,7 +243,11 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         reject_modules_outside_backbone(
             self._top_level_model(), backbone, saves_rank_locally=self._saves_rank_locally()
         )
-        reject_injected_lora_parallelism(self.parallelism_config, has_injected_lora=has_injected_lora(backbone))
+        reject_injected_lora_parallelism(
+            self.parallelism_config,
+            has_injected_lora=has_injected_lora(backbone),
+            has_ep_layers=bool(self._ep_layers()),
+        )
         # Structural, so an adapter the save cannot fold raises here on every rank rather than on the save
         # rank alone at the first checkpoint, where its peers would block in the save's next collective.
         lora_fold_targets(backbone)
@@ -466,8 +470,9 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
 
     def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
         """Write the backbone through :meth:`_save_distributed_embedding_model` where ST's own writer cannot:
-        EP/TP and mixin-managed FSDP2 DTensors it would write un-gathered, and injected-LoRA adapter keys that
-        reload as random base weights. Every other run takes the mixin's payload, whose fallback is ST's."""
+        EP/TP and mixin-managed FSDP2 DTensors it would write un-gathered, EP layers' experts, which only the
+        ladder's EP saver writes in the hub layout, and injected-LoRA adapter keys that reload as random base
+        weights. Every other run takes the mixin's payload, whose fallback is ST's."""
         if self._saves_rank_locally() or has_injected_lora(self._backbone_model()):
             self._save_distributed_embedding_model(ctx, output_dir, _internal_call=_internal_call)
         else:
@@ -484,9 +489,9 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
 
     def _saves_rank_locally(self) -> bool:
         """Whether the backbone saves through the distributed ladder, which writes the other pipeline modules
-        rank-locally: FSDP2, TP or EP."""
+        rank-locally: FSDP2, TP, EP, and EP layers on one process."""
         config = self.parallelism_config
-        return self._fsdp_wrapped or config.is_tp_mode or config.has_ep_group
+        return self._fsdp_wrapped or config.is_tp_mode or config.has_ep_group or bool(self._ep_layers())
 
     def _save_distributed_embedding_model(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool = False):
         """COLLECTIVE. Save the backbone through the ``save_checkpoint`` ladder, or, under injected LoRA (no

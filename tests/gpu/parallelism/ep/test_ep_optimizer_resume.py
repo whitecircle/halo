@@ -467,12 +467,11 @@ def run(ctx):
         capture = trainer_ref["capture"]
         checks["mismatch_capture_fired"] = capture is not None
         if capture is not None:
-            # Warm restart: no TRAINED moments may carry over — every state entry must still be at
-            # its freshly-initialized value. Asserting "state is empty" would be wrong on two counts:
-            # ``optimizer.state`` is a defaultdict (a bare read inserts an empty entry) and
-            # ``get_optimizer_state_dict`` itself materializes empty state via a zero-grad init step.
-            # That init step is also why ``step`` is excluded from the zero test and asserted against
-            # the saved step instead; a wrongly loaded shard shows non-zero moments AND the saved step.
+            # Warm restart: no TRAINED moments may carry over — every state entry there is must still
+            # be at its freshly-initialized value. Not "state is empty": ``optimizer.state`` is a
+            # defaultdict, so a bare read inserts an empty entry. ``step`` is held to the saved step
+            # rather than to zero, since an entry torch's zero-LR init step materialized counts that
+            # step; a wrongly loaded shard shows non-zero moments AND the saved step.
             carried = _snapshot_values(capture["snapshot"])
             carried_moments = sorted(
                 key for key, value in carried if torch.is_tensor(value) and bool(value.abs().sum() > 0)

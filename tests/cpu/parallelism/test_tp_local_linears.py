@@ -168,7 +168,7 @@ def _neighbour_shard(x, rank, world):
 # Each breaks one collective of the local path; the comparison must report it.
 _BREAKS = {
     "input_grad_sum": ("SumGradAcrossGroup", _Identity),
-    "output_sum": ("_SumAcrossGroup", _Identity),
+    "output_sum": ("SumAcrossGroup", _Identity),
     "neighbour_shard": ("_last_dim_shard", _neighbour_shard),
     "own_values": ("distribute_tensor", functools.partial(distribute_tensor, src_data_rank=None)),
 }

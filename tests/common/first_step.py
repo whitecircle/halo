@@ -6,26 +6,32 @@ be compared. :func:`train_recording_first_step` runs ``trainer.train()`` and rec
 optimizer step consumed, off the trainer's own seams: each microbatch ``compute_loss`` saw with the
 loss it returned, the logged step loss, the gradients handed to the optimizer, and every backward that
 reached PyTorch's c10d autograd fallback. :func:`score_first_step` runs those microbatches through a
-reference trainer on the initial weights as the training step would; :func:`first_step_checks` and
-:func:`first_step_gradient_checks` compare the two. :func:`parameter_gradient_checks` grades one backward
-against a reference per parameter.
+reference trainer on the initial weights as the training step would; :func:`first_step_checks`,
+:func:`first_step_gradient_checks` and :func:`dense_gradient_checks` compare the two.
+:func:`parameter_gradient_checks` grades one backward against a reference per parameter.
 
-Gradients are compared on the FSDP2-sharded (DTensor) parameters, which FSDP2 and the trainer's clip
-seam finalize the same way on both sides. EP experts and routers are FSDP-ignored and live in a
-layout-specific form, so they are left out.
+Gradients are compared whole on every trainable parameter whatever holds it (an FSDP2 or TP DTensor, a
+TP hand-sliced shard, a plain replica), as the trainer's clip seam has finalized it. The routers and
+experts an EP layer holds as plain tensors are FSDP-ignored and live in the layer's own EP or expert-TP
+layout, so they are left out; :mod:`tests.common.routed_first_step` compares them.
 """
 
 import contextlib
+import dataclasses
 import math
 import re
 import warnings
 from dataclasses import dataclass, field
 
 import torch
-from torch.distributed.tensor import DTensor
+from torch.distributed.tensor import DTensor, Shard
 from transformers import TrainerCallback
 
+from halo.distributed.mesh import model_tp_mesh
+from halo.distributed.tensor_parallel.plain_params import hand_sliced_dims
+from halo.runtime.dtensor import materialize_dtensor
 from tests.common.distributed import world_mean
+from tests.common.ep_reference import ep_layers, routed_parameters
 from tests.common.numerics import cos_sim, max_or_nan
 from tests.common.rank_log import log
 from tests.common.tolerances import TOL
@@ -50,19 +56,35 @@ class FirstStep:
     autograd_fallbacks: list[str] = field(default_factory=list)
 
 
-def _sharded_grads(model) -> dict[str, torch.Tensor]:
-    """Every FSDP2-sharded parameter's gradient, unsharded to fp32 on the host. Collective.
+def _plain_routed_param_ids(model) -> set[int]:
+    """Ids of the router and expert parameters ``model``'s EP layers hold as plain tensors."""
+    return {id(param) for param in routed_parameters(ep_layers(model)) if not isinstance(param, DTensor)}
 
-    Selected by the parameter rather than its gradient, so every rank reaches the same ``full_tensor``
-    calls in the same order.
+
+def _step_grads(model) -> dict[str, torch.Tensor]:
+    """Every trainable parameter's gradient, whole and in fp32 on the host, save the routed ones an EP layer holds
+    plain. Collective.
+
+    A DTensor's is unsharded, a TP hand-sliced one's gathered over the TP group along its slice dim, and any other
+    plain one is a replica (the norms, embedding and head under TP at DP 1). Selected by the parameter rather than
+    its gradient, so every rank reaches the same collectives in the same order.
     """
+    routed = _plain_routed_param_ids(model)
+    sliced = hand_sliced_dims(model)
+    tp_mesh = model_tp_mesh(model)
+    if sliced and tp_mesh is None:
+        raise AssertionError(f"{type(model).__name__} registers hand-sliced {sorted(sliced)} but carries no TP mesh")
     grads = {}
     for name, param in model.named_parameters():
-        if not (param.requires_grad and isinstance(param, DTensor)):
+        if not param.requires_grad or id(param) in routed:
             continue
         if param.grad is None:
             raise AssertionError(f"{name} carries no gradient at the optimizer step")
-        grads[name] = param.grad.full_tensor().float().cpu()
+        grad = materialize_dtensor(param.grad)
+        shard_dim = next((dim for suffix, dim in sliced.items() if name.endswith(suffix)), None)
+        if shard_dim is not None:
+            grad = DTensor.from_local(grad, tp_mesh, [Shard(shard_dim)], run_check=False).full_tensor()
+        grads[name] = grad.float().cpu()
     return grads
 
 
@@ -95,7 +117,7 @@ class _FirstStepRecorder(TrainerCallback):
 
     def on_pre_optimizer_step(self, args, state, control, **kwargs):
         if self._gradients and state.global_step == 0:
-            self._record.grads = _sharded_grads(self._model)
+            self._record.grads = _step_grads(self._model)
 
 
 @contextlib.contextmanager
@@ -118,7 +140,7 @@ def recording_autograd_fallbacks(sink: list[str]):
 def train_recording_first_step(trainer, *, gradients: bool = True):
     """``trainer.train()``, returning its result and the :class:`FirstStep` it took.
 
-    ``gradients`` records the step's sharded gradients too, an all-gather of each onto the host.
+    ``gradients`` records the step's gradients too, each gathered whole onto the host.
     """
     record = FirstStep()
     _FirstStepRecorder(trainer, record, gradients=gradients)
@@ -133,7 +155,8 @@ def score_first_step(trainer, record: FirstStep) -> FirstStep:
 
     Mirrors the training step outside the loop: ``compute_loss`` under the trainer's loss context and,
     when ``record`` carries gradients, each loss divided by the microbatch count, backpropagated through
-    the accelerator and finalized by the clip seam HF runs before the optimizer step. The result carries
+    the accelerator with its FSDP2 post-backward completed, and finalized by the clip seam HF runs before
+    the optimizer step. The result carries
     the losses, the step loss HF would log and those gradients. Only a trainer whose loss is its own
     mean is mirrored: HF skips the division when it normalizes by the batch's item count instead.
     """
@@ -150,12 +173,13 @@ def score_first_step(trainer, record: FirstStep) -> FirstStep:
             loss = trainer.compute_loss(trainer.model, inputs)
         if record.grads:
             trainer.accelerator.backward(loss / len(record.batches))
+            trainer._finish_fsdp2_backward(trainer.model)
         scored.losses.append(float(loss))
     if record.grads:
         # HF's clip, or its norm-only pass when clipping is off: where the EP, TP and QLoRA syncs run.
         grad_norm = trainer._clip_grad_norm(trainer.model) if trainer.args.max_grad_norm > 0 else None
         trainer._get_grad_norm(trainer.model, grad_norm=grad_norm)
-        scored.grads = _sharded_grads(trainer.model)
+        scored.grads = _step_grads(trainer.model)
     # HF logs the world mean of the per-rank step losses.
     scored.logged_loss = world_mean(sum(scored.losses) / len(scored.losses), trainer.accelerator.device)
     return scored
@@ -245,6 +269,22 @@ def first_step_gradient_checks(
         f"norm ratio {norm_ratio:.5f} (tol {norm_rtol})"
     )
     return checks, {"step1_grad_cosine": cosine, "step1_grad_norm_ratio": norm_ratio}
+
+
+def dense_gradient_checks(record: FirstStep, reference: FirstStep) -> tuple[dict[str, bool], dict[str, float]]:
+    """:func:`first_step_gradient_checks` over the parameters both steps captured, after checking that ``record``
+    covers every reference parameter outside :data:`ROUTING_DEPENDENT_PARAM`, so the comparison cannot pass on an
+    empty set. The routing-dependent ones are :mod:`tests.common.routed_first_step`'s: a run's EP layers hold them
+    plain, which the capture leaves out, or under the layer's own names."""
+    dense = {name for name in reference.grads if not ROUTING_DEPENDENT_PARAM.search(name)}
+    covered = dense <= record.grads.keys()
+    shared = [name for name in reference.grads if name in record.grads]
+    checks, metrics = first_step_gradient_checks(
+        dataclasses.replace(record, grads={name: record.grads[name] for name in shared}),
+        dataclasses.replace(reference, grads={name: reference.grads[name] for name in shared}),
+    )
+    log(f"  step-1 gradients compared over {len(shared)} params ({len(dense)} outside routing)")
+    return {"step1_grads_cover_every_dense_param": covered and bool(dense)} | checks, metrics
 
 
 def parameter_gradient_checks(

@@ -147,7 +147,9 @@ def test_the_embedding_path_refuses_a_backbone_with_external_tables(flash_next_c
     """sentence-transformers reads the backbone's config itself, so the stamp the family patches set never reaches
     its build: the load refuses before it, rather than train the table as an embedding on every rank."""
     runtime = types.SimpleNamespace(
-        parallelism_config=types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, max_concurrent_loading=None),
+        parallelism_config=types.SimpleNamespace(
+            has_ep_group=False, is_tp_mode=False, needs_ep_layers=False, max_concurrent_loading=None
+        ),
         model_source=flash_next_checkpoint,
     )
     with pytest.raises(ValueError, match="external tables"):

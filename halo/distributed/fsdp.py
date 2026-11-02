@@ -16,6 +16,7 @@ from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState, _cast_fp_tensor, is_bw
 from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 from torch.distributed.fsdp._fully_shard._fsdp_state import disable_if_config_true
+from torch.distributed.tensor import DTensor
 from torch.distributed.utils import _apply_to_tensors
 from transformers.modeling_utils import PreTrainedModel
 
@@ -28,6 +29,8 @@ from halo.models.module_tree import (
 )
 from halo.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR, fp32_pinned_names
 from halo.models.unwrapping import base_transformers_model
+from halo.runtime.collectives import nccl_safe_broadcast
+from halo.runtime.dtensor import to_local
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -415,6 +418,44 @@ def _require_single_device_params(model: nn.Module) -> None:
         )
 
 
+def _broadcast_from_first_coordinate(tensor: torch.Tensor, mesh: DeviceMesh, dims: list[int]) -> None:
+    """COLLECTIVE over ``mesh``'s groups along ``dims``, in that order: ``tensor`` takes, in place, the copy of each
+    group's first rank, so after every dim of the mesh it holds the copy at the mesh's first coordinate."""
+    wire = tensor if tensor.is_contiguous() else tensor.contiguous()
+    for dim in dims:
+        group = mesh.get_group(dim)
+        nccl_safe_broadcast(wire, src=dist.get_global_rank(group, 0), group=group)
+    if wire is not tensor:
+        tensor.copy_(wire)
+
+
+def _start_replicas_identical(model: nn.Module, dp_mesh: DeviceMesh, replicated: IdentityParamSet) -> int:
+    """COLLECTIVE over ``dp_mesh``: every parameter more than one DP rank holds a copy of takes the first copy;
+    returns how many parameters this rank broadcast.
+
+    FSDP2, unlike DDP, broadcasts no module state, and those copies only average their gradients, so a tensor the
+    ranks drew from their own RNG streams (a LoRA adapter, a new head or embedding row) would keep each rank's draw
+    for the whole run. A shard takes the copy at index 0 of each mesh dim it is replicated over (``dp_replicate``
+    under HSDP); a parameter in ``replicated``, an FSDP-ignored whole copy on every rank, takes DP rank 0's.
+    """
+    broadcast = 0
+    with torch.no_grad():
+        for param in model.parameters():
+            data = param.data
+            if isinstance(data, DTensor) and data.device_mesh == dp_mesh:
+                tensor = to_local(data)
+                dims = [dim for dim, placement in enumerate(data.placements) if placement.is_replicate()]
+            elif param in replicated:
+                tensor, dims = data, list(range(dp_mesh.ndim))
+            else:
+                continue
+            # A group shares its shard index, so an empty shard (dim 0 narrower than the shard group) is empty on each.
+            if dims and tensor.numel():
+                _broadcast_from_first_coordinate(tensor, dp_mesh, dims)
+                broadcast += 1
+    return broadcast
+
+
 def apply_fsdp2_for_dp(
     model: nn.Module,
     dp_size: int,
@@ -426,11 +467,14 @@ def apply_fsdp2_for_dp(
     reshard_after_forward: bool = False,
     fp32_master_weights: bool = False,
     dp_replicate_size: int = 1,
+    ignored_params_replicated: bool = False,
 ) -> bool:
     """Apply FSDP2 per unit of decoder layers for data-parallel grad sync in place; returns whether it ran.
 
-    ``ignored_params`` (EP-module params, frozen params of a dtype no trainable one shares) stay out.
-    ``dp_replicate_size > 1`` shards within an NVLink domain and replicates across domains (HSDP).
+    ``ignored_params`` (EP-module params, frozen params of a dtype no trainable one shares) stay out;
+    ``ignored_params_replicated`` declares each a whole copy on every rank of the DP group (no expert distributed).
+    ``dp_replicate_size > 1`` shards within an NVLink domain and replicates across domains (HSDP). Every copy the
+    wrap leaves on more than one rank, an HSDP shard or a replicated ignored parameter, starts from the first one.
     """
     if dp_size <= 1:
         if is_global_main_process():
@@ -439,9 +483,10 @@ def apply_fsdp2_for_dp(
 
     _require_single_device_params(model)
 
+    dp_mesh = build_dp_mesh(dp_size, dp_replicate_size=dp_replicate_size, dp_group=dp_group)
     _apply_fsdp2(
         model,
-        build_dp_mesh(dp_size, dp_replicate_size=dp_replicate_size, dp_group=dp_group),
+        dp_mesh,
         compute_dtype=compute_dtype,
         fp32_reduce=fp32_reduce,
         topology=(
@@ -453,6 +498,10 @@ def apply_fsdp2_for_dp(
         reshard_after_forward=reshard_after_forward,
         fp32_master_weights=fp32_master_weights,
     )
+    replicated = IdentityParamSet((ignored_params or ()) if ignored_params_replicated else ())
+    broadcast = _start_replicas_identical(model, dp_mesh, replicated)
+    if broadcast and is_global_main_process():
+        logger.info(f"  ✓ {broadcast} replicated parameters start from their first copy")
     return True
 
 

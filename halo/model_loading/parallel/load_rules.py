@@ -170,7 +170,7 @@ def reject_unsupported_model(
             "\n"
             "  1. Launch with torchrun (keeps the grouped-GEMM speedup, no EP needed):\n"
             "       torchrun --nproc_per_node=<N> \\\n"
-            "           scripts/training/sft.py <config>\n"
+            "           <training script> <config>\n"
             "\n"
             "  2. Train this MoE under 'accelerate launch' without grouped GEMM:\n"
             "       set `use_grouped_gemm: false` in the YAML (or pass --use_grouped_gemm=false)\n"

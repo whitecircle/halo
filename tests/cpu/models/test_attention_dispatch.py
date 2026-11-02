@@ -88,6 +88,40 @@ def test_detect_attn_impl_stays_quiet_when_fa4_is_merely_absent():
 
 
 @pytest.mark.parametrize(
+    ("capability", "probe", "detected", "line"),
+    [
+        ((8, 0), None, "flash_attention_2", "flash_attention_2 is this GPU's flash backend;"),
+        (
+            (10, 0),
+            None,
+            "flash_attention_4",
+            "flash_attention_4 is this GPU's flash backend (flash_attn.cute installed)",
+        ),
+        (
+            (10, 0),
+            ImportError("absent"),
+            "flash_attention_2",
+            "flash_attention_2 is this GPU's flash backend (flash_attn.cute not installed)",
+        ),
+        ((10, 0), RuntimeError("broken"), "flash_attention_2", "flash_attn.cute IS present but unusable"),
+    ],
+    ids=["fa2_gpu", "fa4_installed", "fa4_absent", "fa4_broken"],
+)
+def test_one_detection_logs_one_line_naming_the_gpu_default(caplog, capability, probe, detected, line):
+    """One decision, one line, worded as the GPU's default rather than the run's backend: the model-level checks
+    after it may move a model off it, and the start banner names the backend the policy was built with."""
+    with (
+        patch.object(attention_mod.torch.cuda, "is_available", lambda: True),
+        patch.object(attention_mod.torch.cuda, "get_device_capability", lambda *a, **k: capability),
+        patch.object(attention_mod, "flash_kernel", side_effect=probe),
+        caplog.at_level("INFO", logger=attention_mod.logger.name),
+    ):
+        assert attention_mod._detect_attention_impl() == detected
+    messages = [record.getMessage() for record in caplog.records if record.name == attention_mod.logger.name]
+    assert len(messages) == 1 and messages[0].startswith(line), messages
+
+
+@pytest.mark.parametrize(
     ("capability", "is_blackwell", "is_hopper"),
     [((9, 0), False, True), ((10, 0), True, False), ((10, 3), True, False), ((11, 0), True, False)],
 )

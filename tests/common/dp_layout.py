@@ -11,10 +11,11 @@ from collections.abc import Callable, Mapping
 import torch
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
-from halo.distributed.fsdp import fsdp2_modules, fsdp2_param_groups, reshard_fsdp2_modules
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.fsdp import fsdp2_param_groups, reshard_fsdp2_modules
 from halo.distributed.mesh import MeshDim, has_tp_dim, mesh_dim_names
 from halo.runtime.dtensor import to_local
-from tests.common.distributed import group_max_abs_diff
+from tests.common.distributed import group_max_abs_diff, max_abs_diff_across
 from tests.common.ep_reference import ep_layers
 from tests.common.numerics import max_or_nan
 from tests.common.rank_log import log
@@ -26,9 +27,18 @@ PROBE_FORWARD_TOKENS = 8
 
 def probe_forward(model, device: torch.device) -> None:
     """One tiny no-grad forward of ``model``, which takes every FSDP2 group through its unshard and post-forward
-    reshard (FULL_SHARD) or leaves it gathered (SHARD_GRAD_OP), the state a training step's forward ends in."""
+    reshard (FULL_SHARD) or leaves it gathered (SHARD_GRAD_OP), the state a training step's forward ends in.
+    ``model`` is the module the run forwards: the root's own pre-forward unshards the root's group, so a forward
+    entering below the root meets its parameters (an embedding the root holds) as sharded DTensors."""
     with torch.no_grad():
         model(input_ids=torch.ones(1, PROBE_FORWARD_TOKENS, dtype=torch.long, device=device))
+
+
+def probe_pipeline_forward(pipeline, device: torch.device) -> None:
+    """:func:`probe_forward` through a SentenceTransformer ``pipeline``, whose forward takes the tokenized features."""
+    input_ids = torch.ones(1, PROBE_FORWARD_TOKENS, dtype=torch.long, device=device)
+    with torch.no_grad():
+        pipeline({"input_ids": input_ids, "attention_mask": torch.ones_like(input_ids)})
 
 
 def fsdp2_groups_sharded(model) -> bool:
@@ -37,50 +47,56 @@ def fsdp2_groups_sharded(model) -> bool:
     return bool(groups) and all(group.is_sharded for group in groups)
 
 
-def _non_root_groups(model) -> list:
-    """The parameter groups of every FSDP2 module below the root, which FULL_SHARD reshards after its forward
-    (the root keeps its parameters gathered for the backward even at FULL_SHARD). The root is the outermost
-    wrapped module, the first ``modules()`` yields."""
-    modules = fsdp2_modules(model)
-    if not modules:
-        return []
-    root = modules[0]._get_fsdp_state()._fsdp_param_group
-    return [group for group in fsdp2_param_groups(model) if group is not root]
-
-
 def full_shard_checks(model, forward) -> dict[str, bool]:
-    """FULL_SHARD (ZeRO-3) engaged: after ``forward`` every FSDP2 group below the root is back on its shards.
+    """FULL_SHARD (ZeRO-3) engaged: after ``forward`` every FSDP2 group, the root's included, is back on its shards.
 
-    SHARD_GRAD_OP leaves every group gathered after a forward until its backward, so a run whose config lost
-    ``fsdp_reshard_after_forward`` fails here. Starts from the sharded state; ``forward`` is any no-grad forward.
-    No collective beyond the forward's own.
+    The wrap passes ``reshard_after_forward`` explicitly, so FSDP2 reshards the root after its forward too (only an
+    unset value keeps the root gathered for the backward); a wrap whose one group is the root's (a SentenceTransformer)
+    is held to it like any other. SHARD_GRAD_OP leaves every group gathered after a forward until its backward, so a
+    run whose config lost ``fsdp_reshard_after_forward`` fails here. Starts from the sharded state; ``forward`` is any
+    no-grad forward of the module the run forwards. No collective beyond the forward's own.
     """
     reshard_fsdp2_modules(model)
     forward()
-    groups = _non_root_groups(model)
+    groups = fsdp2_param_groups(model)
     gathered = sum(1 for group in groups if not group.is_sharded)
     ok = bool(groups) and gathered == 0
-    log(f"  FULL_SHARD: {len(groups) - gathered}/{len(groups)} non-root FSDP2 groups resharded after a forward")
+    log(f"  FULL_SHARD: {len(groups) - gathered}/{len(groups)} FSDP2 groups resharded after a forward")
     reshard_fsdp2_modules(model)
     return {"fsdp_groups_resharded_after_forward": ok}
+
+
+def _expert_params(model) -> list[tuple[EPMoELayerBase, torch.nn.Parameter]]:
+    """``(layer, param)`` for every expert weight and native expert adapter of ``model``'s EP layers, in
+    ``parameters()`` order, the same on every rank: the adapter accessors iterate a frozenset of names, whose order
+    differs across processes, so a collective per tensor in that order would pair different tensors."""
+    experts = []
+    for layer in ep_layers(model):
+        expert_ids = {id(param) for _, param in layer.expert_named_params()}
+        experts += [(layer, param) for param in layer.parameters() if id(param) in expert_ids]
+    return experts
 
 
 def ep1_expert_checks(model, *, sharded: bool) -> dict[str, bool]:
     """Where ep1 experts live, against what the run asked for: FSDP2 shards (DTensors) when ``sharded``
     (``fsdp_shard_ep1_experts``), so FSDP's reduce-scatter is their sync; whole plain tensors holding every
-    expert when not, synced by the EP layer's own all-reduce. Read with the groups resharded. No collective."""
+    expert when not, synced by the EP layer's own all-reduce, and then bit-identical on every rank, native
+    expert adapters included. Read with the groups resharded. COLLECTIVE when not ``sharded`` (one gather per
+    expert tensor over the world, the DP scope ep1 replicates them across)."""
     reshard_fsdp2_modules(model)
-    experts = [(layer, param) for layer in ep_layers(model) for _, param in layer.expert_named_params()]
+    experts = _expert_params(model)
     if sharded:
         name = "ep1_experts_fsdp_sharded"
         ok = bool(experts) and all(isinstance(param.data, DTensor) for _, param in experts)
-    else:
-        name = "ep1_experts_whole_plain_tensors"
-        ok = bool(experts) and all(
-            not isinstance(param.data, DTensor) and param.shape[0] == layer.num_experts for layer, param in experts
-        )
-    log(f"  {name}: {'PASS' if ok else 'FAIL'} ({len(experts)} expert tensors)")
-    return {name: ok}
+        log(f"  {name}: {'PASS' if ok else 'FAIL'} ({len(experts)} expert tensors)")
+        return {name: ok}
+    name = "ep1_experts_whole_plain_tensors"
+    ok = bool(experts) and all(
+        not isinstance(param.data, DTensor) and param.shape[0] == layer.num_experts for layer, param in experts
+    )
+    worst = max_abs_diff_across(param.data for _, param in experts)
+    log(f"  {name}: {'PASS' if ok else 'FAIL'} ({len(experts)} expert tensors), replica max|Δ| {worst:.2e}")
+    return {name: ok, "ep1_whole_expert_replicas_identical": worst == 0.0}
 
 
 def hsdp_params(model) -> list[tuple[str, DTensor]]:
@@ -128,14 +144,8 @@ def expert_replica_checks(model, ep_config) -> dict[str, bool]:
     built no EP groups. COLLECTIVE over each replica group."""
     groups = 0 if ep_config is None else ep_config.num_ep_groups
     engaged = groups > 1 and len(ep_config.expert_replica_ranks) == groups
-    experts = [to_local(param) for layer in ep_layers(model) for _, param in layer.expert_named_params()]
-    worst = (
-        max_or_nan(
-            (group_max_abs_diff(param, ep_config.expert_replica_group) for param in experts), default=float("nan")
-        )
-        if engaged
-        else float("nan")
-    )
+    experts = [to_local(param) for _, param in _expert_params(model)]
+    worst = max_abs_diff_across(experts, ep_config.expert_replica_group) if engaged else float("nan")
     log(f"  EP groups: {groups}, expert replica max|Δ| {worst:.2e}")
     return {"ep_groups_replicate_experts": engaged and bool(experts), "expert_replicas_identical": worst == 0.0}
 

@@ -147,7 +147,14 @@ TRAINER_CUDA_DEVICES ?= 0,1,2,3,4,5,6
 #   MoE:   SERVER_TIER='moe and not gptoss' with VLLM_MODEL=Qwen/Qwen3-30B-A3B-Instruct-2507, and
 #          SERVER_TIER='moe and gptoss' with VLLM_MODEL / SGLANG_MODEL=unsloth/gpt-oss-20b-BF16
 #   The Step-3.7 sync suite serves its own checkpoint (see its script header) and skips without HALO_TEST_STEP3P7_MODEL.
+# The vLLM compose default parses tool calls with hermes, which reads JSON <tool_call> calls only: the
+# gpt-oss pass serves with VLLM_GPTOSS_PARSERS below, and a per-family pass (HALO_TEST_ENV_GRPO_MODEL) with
+# its family's parser from agent-docs/infrastructure/rollout-servers.md. Under a wrong one every tool call
+# stays text, every draw episode scores 0 and the env-GRPO rows fail step_1_rewards_spread_within_a_group.
+# SGLang's default parser (auto) reads the right one off the chat template.
 SERVER_TIER ?= not moe
+VLLM_GPTOSS_PARSERS = VLLM_TOOL_PARSER_PLUGIN=/opt/gpt_oss_text_tool_parser.py VLLM_TOOL_PARSER=gpt_oss_text \
+  VLLM_REASONING_PARSER_PLUGIN=/opt/gpt_oss_reasoning_parser.py VLLM_REASONING_PARSER=openai_gptoss
 # The trainer↔server weight-transfer group is NCCL between two containers. Without EFA=1 both ends
 # use the socket recipe the compose bases default to (InfiniBand off, socket net; NCCL_SOCKET_IFNAME
 # keeps it off Docker's bridge and the per-container veth pairs, which NCCL otherwise enumerates and
@@ -161,6 +168,8 @@ test-gpu-vllm: ## pytest the vLLM-server GPU tier (server on a GPU outside TRAIN
 	  GPU the trainer does not use: make build-vllm (or set VLLM_IMAGE), then \
 	  HALO_SCRATCH=$(HALO_SCRATCH) VLLM_CUDA_DEVICES=7 VLLM_REASONING_PARSER=qwen3 docker compose -f docker-compose.vllm.yml up -d vllm-server \
 	  (the benchmarks need the reasoning parser: their per-effort CoT budget draws a 400 without one; \
+	  the gpt-oss pass serves VLLM_MODEL=unsloth/gpt-oss-20b-BF16 $(VLLM_GPTOSS_PARSERS) in its place, \
+	  another family its parsers from agent-docs/infrastructure/rollout-servers.md; \
 	  EFA=1: add -f docker-compose.vllm.efa.yml)"; exit 1; }
 	$(DOCKER_RUN) bash -lc "pytest -m 'gpu and vllm_server and ($(SERVER_TIER))' $(GPU_TEST_DIR) $(PYTEST_ARGS)"
 

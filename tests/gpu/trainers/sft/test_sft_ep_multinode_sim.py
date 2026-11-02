@@ -12,7 +12,7 @@ cross-domain expert-replica groups. It exercises the membership math in
 ``num_ep_groups > 1`` replica-grad-sync path — the parts that only run when there is more than one
 EP group, i.e. only in multi-node.
 
-Validates, on GptOss-20B (32 experts):
+``--mode full_ft`` validates, on GptOss-20B (32 experts):
 1. Topology: 2 node-local EP groups with a deferred cross-replica sync (asserted on the config before
    the load), the experts split ``ep_size``-way on the model, and the non-expert params FSDP-sharded
    over the EP group.
@@ -24,30 +24,55 @@ Validates, on GptOss-20B (32 experts):
    replica equally wrong, the loss finite and the curve decreasing.
 4. Training is healthy: loss finite and decreasing.
 
+``--mode expert_lora_resume`` saves and resumes expert-only LoRA on a tiny Qwen3-MoE in the same
+topology. Every trainable param is an expert adapter on the EP layer, so each replica group's lowest
+rank writes the adapters' optimizer moments for the group and the other ranks' shards hold no state
+at all. Every rank is seeded before each load, as the entry scripts seed it, so the replicas' adapters
+start bit-identical. The resume must still restore every rank's moments bit for bit before the first
+resumed step, log the restore with no warm restart, keep the replicas' adapters bit-identical through
+the resumed steps and replay the unbroken run's losses.
+
 Run with 4 or 8 GPUs (simulates 2 domains of world//2):
-    torchrun --nproc_per_node=4 \
-        tests/gpu/trainers/sft/test_sft_ep_multinode_sim.py
+    torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_ep_multinode_sim.py --mode full_ft
+    torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_ep_multinode_sim.py --mode expert_lora_resume
 """
+
+import argparse
+import os
 
 import torch
 import torch.distributed as dist
 from torch.distributed.tensor import DTensor
-from transformers import AutoTokenizer
+from transformers import AutoTokenizer, set_seed
 from trl import SFTConfig
 
+import halo.checkpoint.parallel.optimizer as optimizer_store
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import supports_grouped_mm
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.adapters import assert_only_adapters_trainable, is_expert_lora_active, load_peft_model, unwrap
+from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.datasets import create_sft_dataset
-from tests.common.distributed import ensure_model_downloaded, group_max_abs_diff
+from tests.common.distributed import (
+    ensure_model_downloaded,
+    group_max_abs_diff,
+    pin_deterministic_ep_dispatch,
+    shared_output_dir,
+    world_all,
+)
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
-from tests.common.models import GPT_OSS_20B
+from tests.common.memory import finish_phase
+from tests.common.models import GPT_OSS_20B, QWEN3_0_6B
 from tests.common.numerics import max_or_nan
+from tests.common.optimizer_state import optimizer_state_matches
 from tests.common.parallel_shape import parallel_shape_checks
-from tests.common.rank_log import log
-from tests.common.training_checks import training_run_checks
+from tests.common.rank_log import log, logged_messages
+from tests.common.resume_export import restore_log_checks
+from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
+from tests.common.tolerances import TOL
+from tests.common.training_checks import resumed_loss_deltas, step_losses, training_run_checks
 
 MODEL_NAME = GPT_OSS_20B
 NUM_TRAIN_SAMPLES = 32
@@ -60,6 +85,31 @@ SEED = 42
 # The sweep reduces through bucketed fp32-optional kernels while the probe re-reduces the whole
 # tensor in one call, so only the reduction ORDER differs; a wrong divisor is a factor of 2.
 SWEEP_DIVISOR_REL_TOL = 2e-2
+# The expert-LoRA resume row: a tiny random-init MoE, a checkpoint midway, and a LoRA learning rate.
+LORA_FAMILY = TINY_MOE_FAMILIES["qwen3_moe"]
+LORA_TOTAL_STEPS = 6
+LORA_SAVE_STEP = 3
+LORA_BATCH_SIZE = 2
+LORA_MAX_SEQ_LENGTH = 256
+LORA_LEARNING_RATE = 2e-3
+LORA_NUM_TRAIN_SAMPLES = 64
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--mode", choices=("full_ft", "expert_lora_resume"), required=True)
+ARGS = parser.parse_args()
+
+
+def _simulated_two_domain_config(world_size: int) -> ParallelismConfig:
+    """Node-local EP with one EP group per simulated domain of ``world_size // 2`` GPUs and the cross-domain
+    replica average deferred to the post-backward sweep. Fresh per phase: ``ep_config`` caches the groups it
+    builds on the config."""
+    domain = world_size // 2
+    return ParallelismConfig(
+        ep_size=domain,
+        gpus_per_node=domain,
+        ep_scope="node",
+        use_grouped_gemm=supports_grouped_mm(),
+    )
 
 
 def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
@@ -141,11 +191,131 @@ def _check_replica_consistency(model, ep_config) -> bool:
     return ok
 
 
-@gpu_test_main(min_world_size=4, prefix="sft_ep_multinode_sim")
-def run(ctx):
-    if ctx.world_size % 2 != 0:
-        raise ValueError(f"Need an even world size to simulate 2 domains; got {ctx.world_size}")
+def _replica_adapter_max_diff(model, replica_group) -> float:
+    """Largest ``|Δ|`` of any trainable EP-layer param (the expert adapters) between the ranks of
+    ``replica_group``; ``0.0`` is bit-identical, NaN when nothing on the EP layer trains. Collective over the
+    group."""
+    params = [param for layer in ep_layers(model) for param in layer.parameters() if param.requires_grad]
+    return max_or_nan((group_max_abs_diff(param, replica_group) for param in params), default=float("nan"))
 
+
+def _expert_lora_sft_config(output_dir: str, *, save: bool) -> SFTConfig:
+    return SFTConfig(
+        output_dir=output_dir,
+        max_steps=LORA_TOTAL_STEPS,
+        per_device_train_batch_size=LORA_BATCH_SIZE,
+        learning_rate=LORA_LEARNING_RATE,
+        lr_scheduler_type="constant",
+        bf16=True,
+        gradient_checkpointing=False,
+        logging_steps=1,
+        save_strategy="steps" if save else "no",
+        save_steps=LORA_SAVE_STEP,
+        report_to="none",
+        logging_nan_inf_filter=False,
+        max_length=LORA_MAX_SEQ_LENGTH,
+        dataloader_drop_last=True,
+        dataloader_num_workers=0,
+        use_liger_kernel=False,
+        seed=SEED,
+    )
+
+
+def _run_expert_lora_resume(ctx) -> dict:
+    """Expert-only LoRA saved midway and resumed on the simulated two-domain topology: every rank's optimizer
+    state at ``on_train_begin`` against its own at the save, the replicas' adapters after the resumed steps,
+    and the resumed losses against the unbroken run's."""
+    # A replay compares two runs, which DeepEP's atomic receive order would part by rounding alone.
+    pin_deterministic_ep_dispatch()
+    checks: dict[str, bool] = {}
+    metrics: dict[str, float] = {}
+    train_out = os.path.join(shared_output_dir(ctx), "train_out")
+    checkpoint = os.path.join(train_out, f"checkpoint-{LORA_SAVE_STEP}")
+    base_dir = shared_tiny_family_checkpoint(
+        ctx, LORA_FAMILY, "sft_ep_multinode_sim_expert_lora_base", AutoTokenizer.from_pretrained(QWEN3_0_6B), SEED
+    )
+
+    def make_trainer(*, save: bool) -> tuple[DistributedSFTTrainer, ParallelismConfig]:
+        """The production expert-LoRA load and trainer over a fresh config."""
+        # The load draws expert lora_A from each rank's own RNG, so the replicas start bit-identical only when
+        # every rank is seeded first, as the entry scripts do.
+        set_seed(SEED)
+        config = _simulated_two_domain_config(ctx.world_size)
+        model, tokenizer, peft_config = load_peft_model(
+            "expert_lora", config, model_name=base_dir, attn_implementation="eager", use_liger_kernel=False
+        )
+        trainer = DistributedSFTTrainer(
+            model=model,
+            args=_expert_lora_sft_config(train_out, save=save),
+            train_dataset=create_sft_dataset(LORA_NUM_TRAIN_SAMPLES, tokenizer, seed=SEED),
+            processing_class=tokenizer,
+            parallelism_config=config,
+            peft_config=peft_config,
+        )
+        ctx.on_teardown(trainer.cleanup_ep)
+        return trainer, config
+
+    log(f"\n[1/2] Unbroken {LORA_TOTAL_STEPS}-step expert-LoRA run, checkpoint at step {LORA_SAVE_STEP}...")
+    trainer, config = make_trainer(save=True)
+    ep_config = config.ep_config()
+    checks["two_ep_groups_with_deferred_replica_sync"] = config.num_ep_groups == 2 and ep_config.is_deferred_dp
+    checks["expert_lora_active"] = is_expert_lora_active(unwrap(trainer.model))
+    adapters_only, detail = assert_only_adapters_trainable(unwrap(trainer.model))
+    log(f"  {detail}")
+    checks["only_adapters_trainable"] = adapters_only
+    build_diff = _replica_adapter_max_diff(trainer.model, ep_config.expert_replica_group)
+    log(f"  replica adapters at build: max|Δ| = {build_diff:.3e}")
+    checks["replica_adapters_bit_identical_at_build"] = world_all(build_diff == 0.0, ctx.device)
+    saved = RestorePointSnapshot("save", trainer, capture_optimizer=True)
+    trainer.add_callback(saved)
+    trainer.train()
+    unbroken_losses = step_losses(trainer)
+    finish_phase(trainer)
+    saved.trainer = None
+    ctx.barrier()
+
+    # The premise this row exists for: the dedup left the followers' shards no state at all.
+    shard = torch.load(
+        os.path.join(checkpoint, f"optimizer_shard_{ctx.rank:05d}.pt"), map_location="cpu", weights_only=False
+    )
+    writer = ctx.rank == min(ep_config.expert_replica_ranks)
+    log(f"  rank {ctx.rank} ({'writer' if writer else 'follower'}): shard holds {len(shard['state'])} state entries")
+    checks["only_replica_writers_shards_hold_state"] = world_all(bool(shard["state"]) == writer, ctx.device)
+
+    log(f"\n[2/2] Resuming from {checkpoint}...")
+    resumed, config = make_trainer(save=False)
+    restored = RestorePointSnapshot("train_begin", resumed, capture_optimizer=True)
+    resumed.add_callback(restored)
+    with logged_messages(optimizer_store.logger) as messages:
+        resumed.train(resume_from_checkpoint=checkpoint)
+    resumed_losses = step_losses(resumed)
+    replica_diff = _replica_adapter_max_diff(resumed.model, config.ep_config().expert_replica_group)
+    finish_phase(resumed)
+    restored.trainer = None
+
+    saved_state, restored_state = saved.captured or {}, restored.captured or {}
+    exact, why = optimizer_state_matches(
+        saved_state.get("optimizer") or {"state": {}}, restored_state.get("optimizer") or {"state": {}}
+    )
+    if not exact:
+        log(f"  rank {ctx.rank} optimizer restore: {why}")
+    checks["optimizer_restored_bit_exact_on_every_rank"] = world_all(exact, ctx.device)
+    checks["step_restored"] = restored_state.get("global_step") == LORA_SAVE_STEP
+    log(f"  replica adapters after the resumed steps: max|Δ| = {replica_diff:.3e}")
+    checks["replica_adapters_bit_identical_after_resume"] = world_all(replica_diff == 0.0, ctx.device)
+    deltas = resumed_loss_deltas(
+        unbroken_losses, resumed_losses, save_step=LORA_SAVE_STEP, total_steps=LORA_TOTAL_STEPS
+    )
+    checks["resumed_ran_remaining_steps"] = deltas is not None
+    if deltas is not None:
+        metrics["resume_loss_max_delta"] = max_or_nan(deltas)
+        checks["resumed_losses_replay_unbroken"] = metrics["resume_loss_max_delta"] <= TOL.replayed_resume_loss_abs
+    checks |= ctx.broadcast_checks(restore_log_checks(messages, checkpoint) if ctx.rank == 0 else {})
+    return {"checks": checks, "metrics": metrics}
+
+
+def _run_full_ft(ctx) -> dict:
+    """The GptOss-20B full fine-tune and its four checks above."""
     simulated_gpus_per_node = ctx.world_size // 2  # ep_size per domain
 
     log(f"\n{'#' * 70}")
@@ -167,12 +337,7 @@ def run(ctx):
     # post-backward sweep (is_deferred_dp) — this is the production multi-node MoE shape. HSDP is
     # deliberately NOT used: for multi-group EP it is a no-op (the deferred sync already shards
     # within-domain + replicates cross-domain) and ParallelismConfig rejects hsdp+EP.
-    parallelism_config = ParallelismConfig(
-        ep_size=simulated_gpus_per_node,
-        gpus_per_node=simulated_gpus_per_node,
-        ep_scope="node",
-        use_grouped_gemm=supports_grouped_mm(),
-    )
+    parallelism_config = _simulated_two_domain_config(ctx.world_size)
     log(f"Config: {parallelism_config.summary()}")
     # The whole point — confirm we got the multi-group (multi-node) deferred-DP topology.
     assert parallelism_config.num_ep_groups == 2, (
@@ -250,6 +415,13 @@ def run(ctx):
         "sweep_divisor": sweep_verdict.get("sweep_divisor", False),
     }
     return {"checks": checks}
+
+
+@gpu_test_main(min_world_size=4, prefix=f"sft_ep_multinode_sim_{ARGS.mode}")
+def run(ctx):
+    if ctx.world_size % 2 != 0:
+        raise ValueError(f"Need an even world size to simulate 2 domains; got {ctx.world_size}")
+    return _run_full_ft(ctx) if ARGS.mode == "full_ft" else _run_expert_lora_resume(ctx)
 
 
 if __name__ == "__main__":

@@ -145,7 +145,7 @@ def test_regex_target_string_still_selects_by_pattern():
     """A regex target is matched with PEFT's own matcher, so the scan neither widens nor narrows it."""
     model = _Multimodal(_ClippableAttention())
 
-    peft_config = build_peft_config(model, _model_config(targets=[r"language_model\.q_proj"]))
+    peft_config = build_peft_config(model, _model_config(targets=r"language_model\.q_proj"))
 
     assert peft_config.exclude_modules is None
     assert _adapted_modules(get_peft_model(model, peft_config)) == {"base_model.model.language_model.q_proj"}
@@ -225,13 +225,13 @@ def test_preset_exclusions_are_kept_alongside_the_found_ones():
 
 
 @pytest.mark.parametrize("spelling", ["all-linear", "All-Linear"])
-def test_the_all_linear_sentinel_survives_a_cli_list_override(spelling):
-    """A CLI override lands after ``ModelConfig.__post_init__``, so ``--lora_target_modules=all-linear``
-    arrives as a one-entry list; PEFT reads its sentinel only as a bare string, case-insensitively, and
-    would otherwise look for a module named ``all-linear``."""
+def test_the_all_linear_sentinel_survives_a_one_entry_list(spelling):
+    """``ModelArguments`` keeps a one-entry list as given, so ``lora_target_modules: [all-linear]`` and
+    ``--lora_target_modules=all-linear`` arrive as a list; PEFT reads its sentinel only as a bare string,
+    case-insensitively, and would otherwise look for a module named ``all-linear``."""
     model = _Multimodal(_PlainAttention())
-    model_config = _model_config()
-    model_config.lora_target_modules = [spelling]  # after __post_init__, as the parser's override lands
+    model_config = _model_config([spelling])
+    assert model_config.lora_target_modules == [spelling]
 
     peft_config = build_peft_config(model, model_config)
 

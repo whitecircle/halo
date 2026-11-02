@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Five seams that keep packed-batch inputs intact on their way into a trainer.
+"""Six seams that keep packed-batch inputs intact on their way into a trainer.
 
 1. Column pruning: ``seq_lengths`` is a collator input, not a model-forward parameter, so HF's
    signature-based pruning drops it unless the trainer's signature set names it. TRL's SFT trainer
@@ -17,6 +17,9 @@
    trainer too: a KDA or Lightning Attention-2 layer carries state across a multi-document row's documents. A
    collator the factory built under the run's ``allow_cross_document_linear_attention`` carries the opt-in, so the
    trainer admits what the factory did; a tree collator's plan segments those layers.
+6. TRL's own ``padding_free`` and ``packing`` must be off on the config the SFT script hands the trainer beside its
+   packing / padding-free collator (``disable_trl_dataset_prep``): TRL refuses a custom collator under its
+   ``padding_free``, which its default "bfd" packing forces, so without the seam no such run constructs.
 
 Run: python tests/cpu/trainers/test_packing_column_and_cp_seams.py
 """
@@ -26,9 +29,11 @@ import types
 from unittest import mock
 
 import pytest
+from datasets import Dataset
+from transformers import Qwen3Config, Qwen3ForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.deepseek_v4 import DeepseekV4Config
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.packing import (
@@ -37,10 +42,13 @@ from halo.data.collators.packing import (
     DataCollatorWithPacking,
 )
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
+from halo.entrypoints.data_setup import disable_trl_dataset_prep
 from halo.models import segment_markers
 from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
-from tests.common.models import TINY_DSV4_CONFIG
+from tests.common.models import TINY_DSV4_CONFIG, TINY_QWEN3_CONFIG
+from tests.common.offline_grpo import make_offline_tokenizer
+from tests.common.parallelism import make_parallelism_config
 from tests.common.tiny_models import unknown_hybrid_config
 
 
@@ -210,6 +218,47 @@ def test_a_tree_collator_is_left_to_its_plan():
     packing refuses the opt-in, so its collator never carries one."""
     model = types.SimpleNamespace(config=CONFIG_MAPPING["glm5_next_text"]())
     _construct_sft(cp=False, model=model, collator=object.__new__(DataCollatorWithTreePacking))
+
+
+def _script_built_sft(tmp_path, mode: str, *, seam: bool):
+    """The SFT script's trainer for ``mode`` rows on a tiny Qwen3 on FA2, built for real: the factory's collator, and
+    ``disable_trl_dataset_prep`` on the config only where ``seam``; returns ``(trainer, collator)``."""
+    model = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
+    # After the build, which refuses a flash backend on a CPU host.
+    _on_flash(model.config)
+    tokenizer = make_offline_tokenizer()
+    args = SFTConfig(
+        output_dir=str(tmp_path), use_cpu=True, bf16=False, use_liger_kernel=False, report_to="none", **{mode: True}
+    )
+    collator = select_data_collator(
+        tokenizer,
+        train_on_completions_only=False,
+        model_config=model.config,
+        padding_free=args.padding_free,
+        packing=args.packing,
+    )
+    if seam:
+        disable_trl_dataset_prep(args)
+    trainer = DistributedSFTTrainer(
+        model=model,
+        args=args,
+        train_dataset=Dataset.from_dict({"input_ids": [[5, 6, 7]]}),
+        processing_class=tokenizer,
+        data_collator=collator,
+        parallelism_config=make_parallelism_config(world_size=1, gpus_per_node=1),
+    )
+    return trainer, collator
+
+
+@pytest.mark.parametrize(
+    ("mode", "root"), [("padding_free", DataCollatorWithFlattening), ("packing", DataCollatorWithPacking)]
+)
+def test_the_scripts_trainer_trains_on_the_factory_collator(tmp_path, mode, root):
+    """With the seam the trainer keeps the factory's collator; without it TRL refuses the collator."""
+    trainer, collator = _script_built_sft(tmp_path, mode, seam=True)
+    assert isinstance(collator, root) and trainer.data_collator is collator
+    with pytest.raises(ValueError, match="custom data collator is not supported"):
+        _script_built_sft(tmp_path, mode, seam=False)
 
 
 if __name__ == "__main__":

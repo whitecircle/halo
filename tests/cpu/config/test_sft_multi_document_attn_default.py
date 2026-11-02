@@ -9,11 +9,15 @@ which consumes the ``cu_seq_lens`` those rows already carry: on an unpinned Gate
 any family whose FA4 the deterministic run demotes, a pinned FA4 included; rows of one document keep the loader's pick.
 Every arm is silent when it breaks — a wrong verdict either keeps the slower path or hands FA2 a shape it faults on —
 so the selection is held per (family, collator, arch, determinism, request), through the resolver the loader runs,
-and through ``sft.py:main()``. Tests run deterministic unless they say otherwise.
+and through ``sft.py:main()``, where ``full_determinism`` set in the YAML must reach the row plan the script makes
+before its run setup, so that the plan and the load resolve one backend. Tests run deterministic unless they say
+otherwise.
 
 Run: python tests/cpu/config/test_sft_multi_document_attn_default.py  (or pytest)
 """
 
+import copy
+import os
 import sys
 import types
 from unittest import mock
@@ -22,11 +26,13 @@ import pytest
 import torch
 from datasets import Dataset, DatasetDict
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+from trl import SFTConfig
 
 from halo.configs.script_arguments import ModelArguments
 from halo.data.collators.collator_rules import reject_unsupported_collator_options
-from halo.entrypoints import model_setup
-from halo.entrypoints.model_setup import default_training_rows_attn_implementation
+from halo.entrypoints import model_setup, run_setup
+from halo.entrypoints.model_setup import default_training_rows_attn_implementation, plan_training_rows
+from halo.model_loading.parallel.loader import resolve_policy_attn_implementation
 from halo.models import segment_markers
 from halo.models.attention import selection
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
@@ -361,6 +367,19 @@ def test_a_pinned_fa4_moved_to_fa2_says_why(caplog):
     assert "not validated with a deterministic backward" in caplog.text and "several documents" in caplog.text
 
 
+@pytest.mark.usefixtures("determinism")
+@pytest.mark.parametrize(("model_type", "moved"), [("qwen3_5_moe", True), ("qwen3", False)])
+def test_an_unpinned_gated_delta_net_moved_to_fa2_says_why(caplog, model_type, moved):
+    """The packed GatedDeltaNet default names its reason and the pin that keeps FA4, in either run; a family it
+    leaves alone logs nothing."""
+    with caplog.at_level("INFO"):
+        request = _default(model_type, "b300", padding_free=False)
+    lines = [record.getMessage() for record in caplog.records if "GatedDeltaNet" in record.getMessage()]
+    assert request == ("flash_attention_2" if moved else None)
+    assert len(lines) == int(moved)
+    assert all("under 5%" in line and "attn_implementation: flash_attention_4" in line for line in lines)
+
+
 class _Stop(Exception):
     """Raised by a stubbed seam: ``main()`` runs only as far as it."""
 
@@ -368,13 +387,39 @@ class _Stop(Exception):
 _TEXT_TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
 
 
-def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_packed: bool | None = None) -> dict:
-    """What ``sft.py:main()`` hands its seams for a ``model_type`` checkpoint on a B300 whose own pick is FA4: the
-    ``attn_implementation`` the policy load passes ``load_distributed_model`` (the request the script makes, through
-    the YAML's pin), or the backend the tree-packing pre-check is given.
+def _run_setup_stubs(tmp_path) -> list:
+    """Patches for the steps of ``configure_training_run`` that reach past the test process's environment (kernel
+    caches, matmul precision, the datasets cache, verbosity, the seed), so the rest runs as the script runs it."""
+    return [
+        mock.patch.object(run_setup, "ensure_fa4_kernel_cache_env"),
+        mock.patch.object(run_setup, "anchor_jit_cache_dir"),
+        mock.patch.object(run_setup, "configure_float32_matmul_precision"),
+        mock.patch.object(run_setup, "ensure_cache_dir", return_value=str(tmp_path / "datasets")),
+        mock.patch.object(run_setup.datasets.config, "HF_DATASETS_CACHE", run_setup.datasets.config.HF_DATASETS_CACHE),
+        mock.patch.object(run_setup.transformers.logging, "set_verbosity_info"),
+        mock.patch.object(run_setup.transformers.logging, "set_verbosity_error"),
+        mock.patch.object(run_setup, "set_seed"),
+    ]
+
+
+def _run_sft_main(
+    tmp_path,
+    model_type: str,
+    yaml_body: str,
+    *,
+    preprocessed_packed: bool | None = None,
+    checkpoint_config=None,
+) -> dict:
+    """What ``sft.py:main()`` decides for a ``model_type`` checkpoint (or ``checkpoint_config``) on a B300 whose own
+    pick is FA4, with the run setup ``init_training_script`` runs in its place:
+
+    - ``planned_attn``: the backend the loader resolver gives the row plan's request when the plan is made;
+    - ``load_attn``: the ``attn_implementation`` the policy load passes ``load_distributed_model`` (the request the
+      script makes, through the YAML's pin), and ``loaded_attn`` what the loader resolves it to at the load;
+    - ``tree_attn``: the backend the tree-packing pre-check is given.
 
     ``preprocessed_packed`` stands the dataset in for a pre-processed corpus baked packed (True) or unpacked
-    (False); ``None`` keeps it raw.
+    (False); ``None`` keeps it raw. The process environment is restored afterwards.
     """
     module = load_script_module("scripts/training/sft.py", f"halo_test_sft_attn_{model_type}")
     config_file = tmp_path / "config.yaml"
@@ -382,7 +427,8 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
         f"model_name_or_path: stub/model\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
         f"bf16: false\nuse_cpu: true\nmax_length: 512\n{yaml_body}"
     )
-    checkpoint_config = CONFIG_MAPPING[model_type]()
+    if checkpoint_config is None:
+        checkpoint_config = CONFIG_MAPPING[model_type]()
     rows = {"prompt": [_TEXT_TURNS]}
     dataset = DatasetDict({"train": Dataset.from_dict(rows), "test": Dataset.from_dict(rows)})
     runtime = types.SimpleNamespace(
@@ -395,8 +441,32 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
     )
     captured = {}
 
+    def init_training_script(args, training_config, *_args, **_kwargs):
+        run_setup.configure_training_run(
+            args, training_config, "sft-test", overwrite_output_dir=args.overwrite_output_dir
+        )
+        return runtime
+
+    def plan_rows(model_config, training_args, **kwargs):
+        plan = model_setup.plan_training_rows(model_config, training_args, **kwargs)
+        captured["planned_attn"] = resolve_policy_attn_implementation(
+            copy.deepcopy(checkpoint_config),
+            plan.attn_default,
+            torch.bfloat16,
+            sinks_policy=kwargs["sinks_policy"],
+            init_from_scratch=kwargs["init_from_scratch"],
+        )
+        return plan
+
     def load_distributed(**kwargs):
         captured["load_attn"] = kwargs["attn_implementation"]
+        captured["loaded_attn"] = resolve_policy_attn_implementation(
+            copy.deepcopy(checkpoint_config),
+            kwargs["attn_implementation"],
+            kwargs["dtype"],
+            sinks_policy=SinksPolicy.from_flags(reset_sinks=kwargs["reset_sinks"], train_sinks=kwargs["train_sinks"]),
+            init_from_scratch=kwargs["init_from_scratch"],
+        )
         raise _Stop
 
     def check_tree_attention(_config, attn_implementation, _full_attention, **_tree_options):
@@ -406,6 +476,7 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
     metadata = types.SimpleNamespace(packed=preprocessed_packed, is_vlm=False)
     on_arch, capability = _on_arch("b300")
     patches = [
+        mock.patch.dict(os.environ),
         on_arch,
         capability,
         mock.patch.object(model_setup, "is_flash_attn_2_available", return_value=True),
@@ -417,7 +488,9 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
             return_value=(checkpoint_config, is_vlm_model("stub/model", checkpoint_config)),
         ),
         mock.patch.object(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _SEGMENT_AWARE_KERNELS_PRESENT),
-        mock.patch.object(module, "init_training_script", return_value=runtime),
+        mock.patch.object(module, "plan_training_rows", side_effect=plan_rows),
+        mock.patch.object(module, "init_training_script", side_effect=init_training_script),
+        *_run_setup_stubs(tmp_path),
         mock.patch.object(module, "resolve_training_dtype", return_value=torch.bfloat16),
         mock.patch.object(model_setup, "resolve_training_dtype", return_value=torch.bfloat16),
         mock.patch.object(module, "reject_unsupported_tree_attention", side_effect=check_tree_attention),
@@ -476,7 +549,7 @@ def test_sft_main_hands_the_policy_load_the_default(tmp_path, model_type, yaml_b
     """``sft.py`` must ask for the default exactly when its collator will build multi-document rows: a pre-processed
     corpus by how it was baked, a raw one by ``packing`` / ``padding_free``."""
     captured = _run_sft_main(tmp_path, model_type, yaml_body, preprocessed_packed=preprocessed_packed)
-    assert captured == {"load_attn": expected}
+    assert captured["load_attn"] == expected
 
 
 @pytest.mark.usefixtures("determinism")
@@ -493,7 +566,7 @@ def test_sft_main_moves_a_pinned_fa4_on_packed_rows_off_the_deterministic_demoti
     """``attn_implementation: flash_attention_4`` on packed rows reaches the policy load as FA2 in a deterministic run,
     not as the pin the loader would demote to SDPA, and as the pin outside one."""
     captured = _run_sft_main(tmp_path, model_type, "packing: true\nattn_implementation: flash_attention_4\n")
-    assert captured == {"load_attn": "flash_attention_2" if determinism else "flash_attention_4"}
+    assert captured["load_attn"] == ("flash_attention_2" if determinism else "flash_attention_4")
 
 
 def test_an_unpacked_row_outside_a_deterministic_run_loads_fa4(tmp_path, monkeypatch):
@@ -501,7 +574,7 @@ def test_an_unpacked_row_outside_a_deterministic_run_loads_fa4(tmp_path, monkeyp
     FA4, the faster kernel on long unpacked rows of these families."""
     monkeypatch.delenv(_DETERMINISTIC_ENV)
     captured = _run_sft_main(tmp_path, "qwen3_5_moe", "")
-    assert captured == {"load_attn": None}
+    assert captured["load_attn"] is None
     with mock.patch.object(selection, "_detect_attention_impl", return_value="flash_attention_4"):
         resolved = selection.resolve_attn_implementation(
             CONFIG_MAPPING["qwen3_5_moe"](),
@@ -528,7 +601,105 @@ def test_the_tree_packing_pre_check_sees_the_backend_the_load_takes(tmp_path, ya
     """The tree-attention check runs before any weight loads, against the backend the loader will resolve: on an
     unpinned Qwen3.5 run that is the FA2 default, deterministic or not, which the check accepts, not the SDPA a
     deterministic run's demotion picks without it (which tree packing refuses)."""
-    assert _run_sft_main(tmp_path, "qwen3_5_moe", yaml_body) == {"tree_attn": expected}
+    assert _run_sft_main(tmp_path, "qwen3_5_moe", yaml_body)["tree_attn"] == expected
+
+
+# A checkpoint per attention rule both the row plan and the loader apply: the kernel classes above, a softcap FA4's
+# varlen kernels are not validated with, and GptOss sinks.
+_ATTENTION_RULES = {
+    **_KERNEL_CLASSES,
+    "softcap": lambda: CONFIG_MAPPING["gemma2"](**_GEMMA2_27B, num_hidden_layers=2),
+    "sinks": lambda: CONFIG_MAPPING["gpt_oss"](),
+}
+_ROWS_YAML = {
+    "packed": "packing: true\n",
+    "padding_free": "padding_free: true\n",
+    "padded": "per_device_train_batch_size: 2\n",
+}
+
+
+def _determinism_yaml(rows: str, *, full_determinism: bool, pinned: str | None) -> str:
+    """A run's YAML lines for ``rows``, ``full_determinism`` and the attention pin (none for ``None``)."""
+    pin = f"attn_implementation: {pinned}\n" if pinned else ""
+    return f"{_ROWS_YAML[rows]}full_determinism: {str(full_determinism).lower()}\n{pin}"
+
+
+@pytest.mark.parametrize(
+    ("rule", "pinned"),
+    [("gated_delta_net_hd256_mrope", "flash_attention_4"), ("hd256", "flash_attention_4"), ("hd256", None)],
+    ids=["qwen3_5_moe_pinned_fa4", "hd256_pinned_fa4", "hd256_unpinned"],
+)
+def test_full_determinism_set_in_the_config_moves_packed_rows_to_fa2(tmp_path, monkeypatch, rule, pinned):
+    """``full_determinism: true`` in the YAML with transformers' switch off at launch: the row plan, made before the run
+    setup, asks for FA2 and the load keeps it. A plan reading the run as non-deterministic would hand the loader an
+    FA4 that it demotes to SDPA, which runs every packed row as one dense mask."""
+    monkeypatch.setenv(_DETERMINISTIC_ENV, "0")
+    yaml_body = _determinism_yaml("packed", full_determinism=True, pinned=pinned)
+    captured = _run_sft_main(tmp_path, rule, yaml_body, checkpoint_config=_ATTENTION_RULES[rule]())
+    assert (captured["planned_attn"], captured["load_attn"], captured["loaded_attn"]) == ("flash_attention_2",) * 3
+
+
+def _refused_before_the_load(rule: str, rows: str, pinned: str | None) -> bool:
+    """The runs ``main()`` refuses before any weight loads, each held by its own test: ``padding_free`` on an M-RoPE
+    decoder, and a pinned FA4 on the softcap its varlen kernels are not validated with."""
+    return (rule == "gated_delta_net_hd256_mrope" and rows == "padding_free") or (rule == "softcap" and pinned)
+
+
+@pytest.mark.parametrize(
+    ("rule", "rows", "pinned", "full_determinism"),
+    [
+        pytest.param(
+            rule,
+            rows,
+            pinned,
+            full_determinism,
+            id=f"{rule}-{rows}-{pinned or 'unpinned'}-{'deterministic' if full_determinism else 'nondeterministic'}",
+        )
+        for rule in sorted(_ATTENTION_RULES)
+        for rows in sorted(_ROWS_YAML)
+        for pinned in (None, "flash_attention_4")
+        for full_determinism in (True, False)
+        if not _refused_before_the_load(rule, rows, pinned)
+    ],
+)
+def test_the_row_plan_and_the_load_resolve_one_backend(tmp_path, monkeypatch, rule, rows, pinned, full_determinism):
+    """Per attention rule, row shape, request and ``full_determinism`` setting: the backend the plan's request resolves
+    to when the plan is made is the one the load resolves, and no row holding several documents lands on SDPA."""
+    monkeypatch.setenv(_DETERMINISTIC_ENV, "0")
+    yaml_body = _determinism_yaml(rows, full_determinism=full_determinism, pinned=pinned)
+    captured = _run_sft_main(tmp_path, rule, yaml_body, checkpoint_config=_ATTENTION_RULES[rule]())
+    assert captured["planned_attn"] == captured["loaded_attn"]
+    if rows != "padded":
+        assert captured["loaded_attn"] != "sdpa"
+
+
+def test_a_row_plan_refuses_a_full_determinism_config_the_switch_has_not_reached(tmp_path, monkeypatch):
+    """A config built without ``parse_script_args`` leaves transformers' switch as launched: the plan refuses it rather
+    than plan a non-deterministic run, and plans the deterministic one once the switch is on."""
+    sft_config = SFTConfig(output_dir=str(tmp_path), full_determinism=True, use_cpu=True, bf16=False, report_to=[])
+    on_arch, capability = _on_arch("b300")
+
+    def plan():
+        return plan_training_rows(
+            ModelArguments(model_name_or_path="stub/model", attn_implementation="flash_attention_4"),
+            sft_config,
+            sinks_policy=SinksPolicy.NEUTRALIZED,
+            packing=True,
+            checkpoint_config=CONFIG_MAPPING["qwen3_next"](),
+        )
+
+    with (
+        on_arch,
+        capability,
+        mock.patch.object(model_setup, "is_flash_attn_2_available", return_value=True),
+        mock.patch.object(selection, "is_flash_attn_2_available", return_value=True),
+        mock.patch.object(model_setup, "resolve_training_dtype", return_value=torch.bfloat16),
+    ):
+        monkeypatch.setenv(_DETERMINISTIC_ENV, "0")
+        with pytest.raises(RuntimeError, match="full_determinism is set but FLASH_ATTENTION_DETERMINISTIC is not"):
+            plan()
+        monkeypatch.setenv(_DETERMINISTIC_ENV, "1")
+        assert plan().attn_default == "flash_attention_2"
 
 
 if __name__ == "__main__":

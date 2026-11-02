@@ -86,7 +86,7 @@ changes.
 | `halo/checkpoint/parallel/reading.py` | `agent-docs/reference/architecture.md`, `agent-docs/reference/checkpoints.md` |
 | `halo/checkpoint/parallel/optimizer.py`, `halo/checkpoint/parallel/optimizer_meta.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`, `agent-docs/data/filesystem-handling.md` |
 | `halo/checkpoint/config_export.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/models/README.md` |
-| `halo/checkpoint/tools/adapter_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md` |
+| `halo/checkpoint/tools/adapter_merge.py` | `agent-docs/reference/model-merging.md`, `agent-docs/reference/scripts-reference.md`, `agent-docs/optimization/peft.md` |
 | `halo/checkpoint/model_card.py` | `agent-docs/reference/checkpoints.md`, `human-docs/checkpoints.md` |
 | `halo/checkpoint/parallel/writing.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/data-parallelism.md` |
 | `halo/models/unwrapping.py`, `halo/models/param_roles.py`, `halo/models/model_classes.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |
@@ -115,7 +115,7 @@ changes.
 | `halo/models/external_tables.py`, `halo/model_loading/external_tables.py`, `halo/checkpoint/external_tables.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/models/qwen4_exp.md` |
 | `halo/model_loading/parallel/loader.py`, `halo/model_loading/parallel/load_rules.py`, `halo/model_loading/parallel/whole_model.py`, `halo/model_loading/model_preparation.py`, `halo/model_loading/remote_code.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page; `agent-docs/optimization/flash-attention.md` |
 | `halo/models/seq_cls_heads.py` | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/reward-modeling.md` |
-| `halo/model_loading/tokenizer_setup.py`, `halo/models/context_window.py` | `agent-docs/reference/configuration-reference.md` |
+| `halo/model_loading/tokenizer_setup.py`, `halo/models/context_window.py` | `agent-docs/reference/configuration-reference.md`; the vocabulary grow also `agent-docs/reference/checkpoints.md`, `agent-docs/optimization/peft.md` |
 | `halo/model_loading/buffer_repair.py`, `halo/model_loading/finalization.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/kernels/hub_kernel_dispatch.py` | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
 | `halo/kernels/fla_launch.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/models/bailing.md`, `agent-docs/models/glm5-next.md`, `agent-docs/reference/configuration-reference.md` |

@@ -1,6 +1,8 @@
 """Hand-built collectives over the default group: the backend's tensor device, barriers, broadcasts,
 fixed-order group creation and the rank-0 gather and combine of per-rank Python objects."""
 
+import itertools
+import pickle
 from collections.abc import Callable
 from typing import Any, TypeVar
 
@@ -13,6 +15,9 @@ from halo.runtime.ranks import has_process_group, is_multi_rank_run
 
 # NCCL has no 16-bit-integer type; such tensors ride the wire as a lossless uint8 bit view.
 _NCCL_UNSUPPORTED_DTYPES = (torch.int16, torch.uint16)
+# The most bytes one round of :func:`gather_on_rank0` holds on each rank's collective device: a larger
+# gather takes more rounds rather than a buffer as large as every rank's payloads together.
+_GATHER_WINDOW_BYTES = 64 * 1024 * 1024
 
 _Combined = TypeVar("_Combined")
 
@@ -89,13 +94,35 @@ def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.P
 
 def gather_on_rank0(payload: Any) -> list[Any] | None:
     """COLLECTIVE: every rank's ``payload`` in rank order on rank 0, None on the others; ``[payload]`` without a
-    process group."""
+    process group.
+
+    The pickles are laid end to end in rank order and SUM-reduced to rank 0, each rank filling only its own span
+    of zeros, at most :data:`_GATHER_WINDOW_BYTES` a round. A reduce rides the ring the communicator already
+    holds; ``gather_object`` is a send per peer under NCCL, which connects every peer to rank 0 point to point,
+    those buffers (about 0.3 GiB per NVLink peer within one NVLink domain) held for the communicator's lifetime.
+    """
     if not has_process_group():
         return [payload]
-    # Non-None on rank 0 alone, as ``gather_object`` requires.
-    gathered: list[Any] | None = [None] * dist.get_world_size() if dist.get_rank() == 0 else None
-    dist.gather_object(payload, gathered, dst=0)
-    return gathered
+    rank, world = dist.get_rank(), dist.get_world_size()
+    device = collective_device()
+    mine = torch.frombuffer(bytearray(pickle.dumps(payload)), dtype=torch.uint8)
+    sizes = torch.empty(world, dtype=torch.int64, device=device)
+    dist.all_gather_into_tensor(sizes, torch.tensor([mine.numel()], dtype=torch.int64, device=device))
+    offsets = list(itertools.accumulate(sizes.tolist(), initial=0))
+    begin, end, total = offsets[rank], offsets[rank + 1], offsets[-1]
+    received = memoryview(bytearray(total)) if rank == 0 else None
+    window = torch.empty(min(total, _GATHER_WINDOW_BYTES), dtype=torch.uint8, device=device)
+    for start in range(0, total, _GATHER_WINDOW_BYTES):
+        span = window[: min(_GATHER_WINDOW_BYTES, total - start)].zero_()
+        low, high = max(begin, start), min(end, start + span.numel())
+        if low < high:
+            span[low - start : high - start].copy_(mine[low - begin : high - begin])
+        dist.reduce(span, dst=0)
+        if received is not None:
+            received[start : start + span.numel()] = span.cpu().numpy()
+    if received is None:
+        return None
+    return [pickle.loads(received[offsets[peer] : offsets[peer + 1]]) for peer in range(world)]
 
 
 def combine_across_ranks(payload: Any, combine: Callable[[list[Any]], _Combined], *, what: str) -> _Combined:

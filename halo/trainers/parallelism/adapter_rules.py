@@ -2,9 +2,11 @@
 
 from peft import PeftModel
 
+from halo.checkpoint.parallel.adapters import saved_adapter_tensors
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.log import KEY_PREVIEW_COUNT
+from halo.model_loading.tokenizer_setup import vocabulary_grown
 from halo.models.peft_adapters import lora_fold_targets, tuner_adapter_param_ids
 from halo.models.unwrapping import find_peft_model
 
@@ -61,6 +63,41 @@ def reject_expert_lora_peft_conflicts(model, expert_lora) -> None:
             + "\n\nThe grouped adapters express r / lora_alpha / lora_dropout / use_rslora. Drop the "
             "setting, or drop the expert projections from lora_target_modules and LoRA the attention "
             "modules alone."
+        )
+
+
+def reject_unsaved_grown_vocabulary(model, *, accelerate_manages_fsdp: bool) -> None:
+    """Refuse a PEFT adapter run that grew its vocabulary where its adapter saves would leave added rows out.
+
+    Those rows exist in no base checkpoint, so the adapter carries them for an exact resume and a complete merge.
+    Under accelerate-managed FSDP the base Trainer's save writes the adapter with PEFT's own embedding check, which
+    skips offline; and PEFT's selection, once a LoRA adapts one embedding layer, saves only adapted layers' base
+    weights and drops an untied plain partner. The last is read off the live selection a save makes
+    (:func:`~halo.checkpoint.parallel.adapters.saved_adapter_tensors`), by identity. An expert-only LoRA run has no
+    PEFT adapter: its resume grows the frozen rows again, and ``merge_expert_lora_on_save`` exports them whole.
+    """
+    if not vocabulary_grown(model):
+        return
+    peft_model = find_peft_model(model)
+    if peft_model is None:
+        return
+    if accelerate_manages_fsdp:
+        raise ValueError(
+            "added_special_tokens grew the vocabulary of an adapter run under accelerate-managed FSDP, whose adapter "
+            "saves the base Trainer writes with PEFT's own check for a resized embedding, which reads the base config "
+            "again and skips it offline or without the Hub: the added rows, which no base checkpoint has, would be "
+            "left out. Launch with torchrun (toolkit FSDP2), or grow the vocabulary before the run with "
+            "scripts/before_training/patch_vocab.py."
+        )
+    selected = {id(tensor) for tensor in saved_adapter_tensors(peft_model).values()}
+    layers = {"input embedding": peft_model.get_input_embeddings(), "output head": peft_model.get_output_embeddings()}
+    unsaved = [role for role, layer in layers.items() if layer is not None and id(layer.weight) not in selected]
+    if unsaved:
+        raise ValueError(
+            f"added_special_tokens grew the vocabulary, but PEFT's adapter selection leaves out the {' and '.join(unsaved)}: "
+            f"once lora_target_modules adapts one layer of an untied embedding pair, PEFT saves only the adapted "
+            f"layers' base weights, so those added rows would reach no checkpoint. Adapt both embedding layers or "
+            f"neither, or grow the vocabulary before the run with scripts/before_training/patch_vocab.py."
         )
 
 

@@ -109,6 +109,12 @@ WEIGHT_DUMP_DIRS = ("original", "consolidated", "metal")
 # The dumps as Hub-download patterns: a checkpoint tool's fetch skips them as the aux copy does.
 WEIGHT_DUMP_IGNORE_PATTERNS = tuple(f"{name}/*" for name in WEIGHT_DUMP_DIRS)
 
+# A sentence-transformers checkpoint's pipeline: its modules in order, and its model-level settings.
+ST_MODULES_FILE = "modules.json"
+ST_MODEL_SETTINGS_FILE = "config_sentence_transformers.json"
+# The model-level settings the embedding trainer writes back and the parallel embedding loader carries over.
+ST_CARRIED_MODEL_SETTINGS = ("prompts", "default_prompt_name", "similarity_fn_name")
+
 
 def ep_shard_filename(rank: int, world_size: int) -> str:
     """Filename of one rank's slice of a per-rank EP save: 0-based and always suffixed, since an

@@ -6,7 +6,7 @@ from __future__ import annotations
 import contextlib
 import inspect
 import logging
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from functools import cached_property
 
 import torch
@@ -25,6 +25,7 @@ from halo.log import warn_once
 from halo.model_loading.liger.cross_entropy import FusedHeadLossUnavailable, fused_head_loss
 from halo.model_loading.liger.dispatch import LIGER_CP_FUSED_LOSS_ATTR
 from halo.models.config_access import config_sources, get_config_field
+from halo.models.forward_capture import capturing_forward_outputs
 from halo.models.moe.config_fields import require_router_aux_loss_coef
 from halo.models.unwrapping import base_transformers_model, strip_cp_attention_level, unwrap_framework_wrappers
 from halo.runtime.ranks import is_global_main_process
@@ -90,7 +91,15 @@ class UlyssesModel(nn.Module):
         if head_loss is not None:
             kwargs["logits_to_keep"] = 1
         # labels=None: the boundary-aware loss below replaces the model's.
-        with self._captured_backbone_output(head_loss is not None) as captured:
+        # The final hidden states the verified head path projects, captured off the backbone for the fused loss.
+        capture = (
+            capturing_forward_outputs(
+                base_transformers_model(self.model).base_model, lambda out: out.last_hidden_state
+            )
+            if head_loss is not None
+            else contextlib.nullcontext([])
+        )
+        with capture as captured:
             outputs = self.model(
                 input_ids=local_input_ids,
                 attention_mask=self._backbone_attention_mask(local_attention_mask, kwargs),
@@ -263,22 +272,6 @@ class UlyssesModel(nn.Module):
                     f"scores its chunk from fp32 logits instead."
                 )
             return None
-
-    @contextlib.contextmanager
-    def _captured_backbone_output(self, enabled: bool) -> Iterator[list[torch.Tensor]]:
-        """The ``last_hidden_state`` of each backbone call inside the block, when ``enabled``: the tensor the
-        verified head path projects."""
-        captured: list[torch.Tensor] = []
-        if not enabled:
-            yield captured
-            return
-        handle = base_transformers_model(self.model).base_model.register_forward_hook(
-            lambda _module, _args, output: captured.append(output.last_hidden_state)
-        )
-        try:
-            yield captured
-        finally:
-            handle.remove()
 
     def _compute_fused_cp_loss(
         self, head_loss: Callable, captured: list[torch.Tensor], labels: torch.Tensor

@@ -17,6 +17,7 @@ from halo.distributed.mesh import tp_local_rank
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import has_packed_quantized_params, resolve_training_dtype
 from halo.models.unwrapping import find_peft_model
+from halo.runtime.collectives import nccl_safe_broadcast
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.parallelism.ep_layers import require_ep_config
@@ -293,8 +294,25 @@ class ModeSetupMixin:
         reject_fsdp_knobs_under_qlora(self.parallelism_config)
         self._qlora_grad_sync = True
         self._install_qlora_clip()
+        broadcast = self._start_qlora_replicas_identical()
         if is_global_main_process():
-            logger.info(f"✓ QLoRA gradient sync for {mode} (FSDP2 skipped: quantized 4-bit base weights)")
+            logger.info(
+                f"✓ QLoRA gradient sync for {mode} (FSDP2 skipped: quantized 4-bit base weights), "
+                f"{broadcast} floating-point parameters starting from rank 0's copy"
+            )
+
+    def _start_qlora_replicas_identical(self) -> int:
+        """COLLECTIVE over the world, the group ``_sync_qlora_grads`` averages over: every floating-point parameter,
+        a whole copy on every rank, takes rank 0's; returns how many.
+
+        The sync averages gradients only, so an adapter the ranks drew from their own RNG streams would keep each
+        rank's draw for the whole run. The packed 4-bit weights come from the checkpoint, alike on every rank.
+        """
+        params = [param for param in self._top_level_model().parameters() if param.is_floating_point()]
+        with torch.no_grad():
+            for param in params:
+                nccl_safe_broadcast(param.data, src=0)
+        return len(params)
 
     def _apply_dp_fsdp2(
         self,
@@ -318,6 +336,8 @@ class ModeSetupMixin:
             reshard_after_forward=config.fsdp_reshard_after_forward,
             fp32_master_weights=config.fp32_non_ep_params,
             dp_replicate_size=dp_replicate_size,
+            # No expert is distributed, so whatever the wrap leaves out is a whole copy on every DP rank.
+            ignored_params_replicated=config.ep_group_size == 1,
         ):
             self._fsdp_wrapped = True
 

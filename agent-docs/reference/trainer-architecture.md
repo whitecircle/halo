@@ -296,7 +296,9 @@ trainable one nothing else syncs ([Data Parallelism](../parallelism/data-paralle
 
 QLoRA skips FSDP2 on both the plain-DP and the CP path (`fully_shard` cannot wrap bnb's non-float
 `Params4bit`). `_install_qlora_grad_sync` sets a flag rather than per-parameter hooks, whose
-rank-local firing would hang a job whose microbatch touches different adapters per rank.
+rank-local firing would hang a job whose microbatch touches different adapters per rank, and gives
+every floating-point parameter rank 0's copy: the sync averages gradients only, so adapters the ranks
+drew from their own RNG streams would otherwise stay apart for the whole run.
 
 The sync is one bucketed all-reduce over every trainable grad per optimizer step, with membership
 agreed by a grad-presence mask so no rank reduces alone. It is ordered ahead of clipping (otherwise
@@ -385,7 +387,10 @@ that norm. `create_optimizer` also registers three step-pre-hooks (`_register_gr
 backstops for a step that misses the call: the TP replicated-grad sync, the multi-group-EP cross-replica
 sweep, and the QLoRA DP sweep. Each sweep is marked once per step, so a hook acts only when the clip did
 not run it: the TP hook no-ops when `max_grad_norm > 0`, and the EP hook gates on whether the sweep
-already ran this step, never on `max_grad_norm`. See [BF16 Optimizer](../optimization/bf16-optimizer.md).
+already ran this step, never on `max_grad_norm`. Every hook sits out the zero-LR step torch takes to
+materialize an empty optimizer's state, which a shard restore takes and a shard save takes for an optimizer
+that keeps none (plain SGD): a sweep there would claim the step the next one owns. See
+[BF16 Optimizer](../optimization/bf16-optimizer.md).
 
 ## Non-finite steps
 
@@ -413,7 +418,7 @@ update, so no later step is applied and a final non-finite step is reported befo
 The skip is installed in `create_optimizer` on the optimizer that steps (the one inside accelerate's wrapper), so
 every trainer gets it: before the LR scheduler wraps its `step`, or over the scheduler's wrapper when the caller
 passes a pre-built pair (`optimizers=(optimizer, scheduler)`), in which case a skipped step still counts as taken
-for the scheduler. The zero-LR step that materializes state during an optimizer restore always steps.
+for the scheduler. The zero-LR step that materializes optimizer state for a shard restore or save always steps.
 
 A skipped step's loss is discarded with its gradients: transformers' loss accumulator returns to its value
 before the step's first micro-batch (by a device-side select on the device path), so none of the step's

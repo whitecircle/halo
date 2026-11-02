@@ -29,10 +29,11 @@ A near-cancelled gradient outside the direction and norm bars (its reference und
 ``TOL.bf16_noise_excusable_layer_fraction`` of its layer's largest) is excused when it sits within
 ``TOL.bf16_noise_excuse_factor`` of its parameter's measured bf16 noise from an fp32 copy of the reference
 (``score_against_bf16_noise``): the 1-8 element hyper-connection vectors of DeepSeek-V4 and GLM-5 Next cancel so
-far that the bf16 reference itself misses fp32 by more than the bars. Each pair outside the bars is logged with its
-numbers, every parameter must land inside the bars at some step, and on every kind with an excused pair the same
-scoring must fail that kind's gradients doubled (a sync summed twice) and, over several DP replicas, one replica's
-own (a dropped sync).
+far that the bf16 reference itself misses fp32 by more than the bars. A router's or an expert bank's gradient is
+never excused. Each pair outside the bars is logged with its numbers, every parameter must land inside the bars at
+the step its fp32 reference gradient is largest (the closest of them to a bar there recorded as
+``min_best_step_bar_margin``), and on every kind with an excused pair the same scoring must fail that kind's gradients
+doubled (a sync summed twice) and, over several DP replicas, one replica's own (a dropped sync).
 
 Each backward's leftovers are read before the trainer completes them. A one-module group a backward recomputes more
 than once (each layer under ZeRO-3, a nested fp32-router group, the one-layer unit an odd layer count leaves under
@@ -82,11 +83,13 @@ from tests.common.dp_layout import fsdp2_groups_sharded, hsdp_layout
 from tests.common.ep_reference import (
     NOISE_SCORED_CHECK,
     PinnedRoute,
+    best_resolved_scores,
     captured_picks,
     fault_passes_bf16_noise_scoring,
     pair_step_grads,
     parameter_kind,
     parameters_outside_the_bars,
+    router_parameter_names,
     routing_can_be_pinned,
     routing_pinned,
     score_against_bf16_noise,
@@ -366,7 +369,8 @@ def record_pinned_routes(
 
 def record_scores(scored: list[dict], checks: dict, metrics: dict) -> None:
     """Each step's direction and norm checks, every pair outside the bars logged with the numbers that excused or
-    failed it, and every parameter scored inside the bars at some step."""
+    failed it, and every parameter scored inside the bars at its best resolved step, the closest to a bar there logged
+    with its margin."""
     for step, scores in enumerate(scored):
         for name, score in scores.items():
             if not score.in_bars:
@@ -374,8 +378,9 @@ def record_scores(scored: list[dict], checks: dict, metrics: dict) -> None:
                 log_all(
                     f"  step {step} {name}: {verdict} (cos {score.cosine:.4f}, norm ratio {score.ratio:.4f}; "
                     f"reference at {score.layer_fraction:.2e} of its layer's largest, excusable under "
-                    f"{TOL.bf16_noise_excusable_layer_fraction:g}; |grad - fp32 grad| {score.fp32_error:.3e} against "
-                    f"{TOL.bf16_noise_excuse_factor:g} x its bf16 noise {score.noise:.3e})"
+                    f"{TOL.bf16_noise_excusable_layer_fraction:g}; |grad - fp32 grad| {score.fp32_error:.3e} is "
+                    f"{score.noise_multiple:.2f}x its bf16 noise {score.noise:.3e}, excusable to "
+                    f"{TOL.bf16_noise_excuse_factor:g}x)"
                 )
         values = scores.values()
         checks[f"step{step}_grad_norms_match_reference"] = all(s.norm_in_band or s.excused for s in values)
@@ -384,12 +389,23 @@ def record_scores(scored: list[dict], checks: dict, metrics: dict) -> None:
         metrics[f"step{step}_min_ratio"] = min((s.ratio for s in values), default=float("nan"))
         metrics[f"step{step}_max_ratio"] = max((s.ratio for s in values), default=float("nan"))
         metrics[f"step{step}_min_cos"] = min((s.cosine for s in values), default=float("nan"))
-    excused = [s.layer_fraction for scores in scored for s in scores.values() if s.excused]
-    metrics["max_noise_excused_layer_fraction"] = max(excused, default=0.0)
+    excused = [s for scores in scored for s in scores.values() if s.excused]
+    metrics["max_noise_excused_layer_fraction"] = max((s.layer_fraction for s in excused), default=0.0)
+    metrics["max_noise_excused_multiple"] = max((s.noise_multiple for s in excused), default=0.0)
+    closest = min(best_resolved_scores(scored).items(), key=lambda item: item[1].bar_margin, default=None)
+    if closest is not None:
+        name, score = closest
+        metrics["min_best_step_bar_margin"] = score.bar_margin
+        log_all(
+            f"  closest to a bar at its best resolved step: {name}, {score.bar_margin:.3f}x inside (cos "
+            f"{score.cosine:.4f}, norm ratio {score.ratio:.4f})"
+        )
     unscored = parameters_outside_the_bars(scored)
     checks[NOISE_SCORED_CHECK] = not unscored
     if unscored:
-        log_all(f"  GRAD MISMATCH: {unscored} land outside the bars at every step")
+        log_all(
+            f"  GRAD MISMATCH: {unscored} land outside the bars at the step their fp32 reference gradient is largest"
+        )
 
 
 def by_dp_replica(gathered: list[tuple]) -> dict[int, list[tuple]]:
@@ -577,7 +593,8 @@ def run(ctx):
     ]
     if experts:
         checks["this_rank_scores_an_expert_gradient"] = scores_any(steps, experts)
-    scored = score_against_bf16_noise(steps, cos_min=TOL.ep_grad_cosine_min)
+    routed = frozenset(experts | router_parameter_names(policy))
+    scored = score_against_bf16_noise(steps, cos_min=TOL.ep_grad_cosine_min, routed=routed)
     record_scores(scored, checks, metrics)
     excused = sorted({parameter_kind(name) for scores in scored for name, score in scores.items() if score.excused})
     metrics["noise_excused_kinds"] = len(excused)

@@ -32,9 +32,11 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.model_setup import PolicyLoad
 from halo.entrypoints.script import ScriptContext
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.trainers.distillation.divergences import place_frozen_scorer, require_divergence
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.models import QWEN3_0_6B
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tokenizers import load_cached_tokenizer
 
 VOCAB = 11
@@ -128,7 +130,7 @@ def _oracle(trainer, *, gate: bool = False, slim: bool = False):
     return ALPHA * distill + (1 - ALPHA) * clm, distill, clm
 
 
-def _construct(args, *, peft_config=None):
+def _construct(args, *, peft_config=None, teacher_model=None):
     """The real ``__init__`` with the model loads, the distributed setup and HF's Trainer stubbed."""
 
     def init_config(self, kwargs, **explicit):
@@ -145,7 +147,7 @@ def _construct(args, *, peft_config=None):
     ):
         return DistributedTeacherDistillationTrainer(
             student_model=nn.Linear(2, 2),
-            teacher_model=nn.Linear(2, 2),
+            teacher_model=teacher_model if teacher_model is not None else nn.Linear(2, 2),
             teacher_tokenizer=_Tokenizer(TOKENS),
             args=args,
             processing_class=_Tokenizer(TOKENS),
@@ -261,6 +263,22 @@ def test_the_trainer_wraps_peft_through_prepare_policy_model_and_keeps_its_cast_
     assert prepare.call_args.kwargs["disable_dropout"] is False
     assert trainer.model is wrapped
     assert trainer._peft_has_been_casted_to_bf16 is True
+
+
+@pytest.mark.parametrize("policy", [SinksPolicy.NEUTRALIZED, SinksPolicy.LIVE, None], ids=str)
+def test_a_teacher_loaded_with_neutralized_sinks_is_refused(policy):
+    """A frozen teacher never trains back from neutralized sinks, so the trainer refuses one whatever built it; a
+    teacher loaded under a live policy, or by a loader that stamps none, keeps its sinks and constructs."""
+    torch.manual_seed(0)
+    teacher = tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"])
+    if policy is not None:
+        apply_sinks_policy(teacher, teacher.config, policy=policy)
+    args = types.SimpleNamespace(distill_loss="kl_divergence", apply_hard_labels=False)
+    if policy is SinksPolicy.NEUTRALIZED:
+        with pytest.raises(ValueError, match="loaded with its attention sinks neutralized"):
+            _construct(args, teacher_model=teacher)
+    else:
+        assert _construct(args, teacher_model=teacher).teacher_model is teacher
 
 
 def test_the_teacher_tokenizer_is_keyword_only_so_positional_callers_keep_their_slots():

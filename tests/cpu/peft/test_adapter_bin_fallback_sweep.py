@@ -15,6 +15,7 @@ import os
 
 import pytest
 import torch
+from safetensors.torch import load_file
 
 import halo.checkpoint.adapters as adapters_mod
 from halo.checkpoint.format import ADAPTER_BIN_FILE, ADAPTER_SAFETENSORS_FILE
@@ -46,6 +47,19 @@ def test_a_non_contiguous_adapter_tensor_still_writes_safetensors(tmp_path):
 
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).exists()
     assert not (tmp_path / ADAPTER_BIN_FILE).exists(), "a view fell back to the .bin format"
+
+
+def test_tensors_sharing_a_storage_still_write_safetensors(tmp_path):
+    """A tied embedding saved under both of its names is one storage under two keys, which safetensors refuses:
+    a grown tied vocabulary's CP save would cost the whole adapter the ``.bin`` fallback. Each key reads back its
+    own copy of the shared values."""
+    shared = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+    adapters_mod.write_adapter_file({"embed": shared, "head": shared, "lora": torch.ones(2)}, str(tmp_path))
+
+    assert (tmp_path / ADAPTER_SAFETENSORS_FILE).exists()
+    assert not (tmp_path / ADAPTER_BIN_FILE).exists(), "a tied pair fell back to the .bin format"
+    read = load_file(tmp_path / ADAPTER_SAFETENSORS_FILE)
+    assert torch.equal(read["embed"], shared) and torch.equal(read["head"], shared)
 
 
 def test_bin_fallback_sweep_failure_is_loud_and_keeps_the_bin(tmp_path, monkeypatch, caplog):

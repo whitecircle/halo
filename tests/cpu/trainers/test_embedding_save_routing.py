@@ -334,6 +334,22 @@ def test_a_plain_save_is_the_mixins_save_alone(monkeypatch, tmp_path):
     assert host._model_save_collectives_done
 
 
+def test_a_one_process_save_of_ep_layers_writes_the_pipeline_config_beside_the_ladder(monkeypatch, tmp_path):
+    """The grouped-GEMM EP layers on one process are not FSDP2-wrapped, yet only the ladder's EP saver writes their
+    experts in the hub layout, and the mixin's payload writes no pipeline config beside a ladder save: the export
+    would load as a bare backbone, mean-pooled and unnormalized. The save takes the distributed payload."""
+    host, backbone, _ = _host()
+    backbone.add_module("moe", _SharedExpertEPLayer())
+    host._fsdp_wrapped = False
+    host.args.should_save = False
+    calls = _record_save_steps(host, monkeypatch)
+    monkeypatch.setattr(checkpointing_mod, "save_checkpoint", lambda ctx, output_dir: calls.append("ladder") or True)
+
+    EmbeddingTrainer.save_model(host, str(tmp_path))
+
+    assert calls == ["reshard", "sidecar", "distributed"]
+
+
 def test_a_distributed_save_writes_through_the_mixins_payload_hook(monkeypatch, tmp_path):
     """EP/TP/FSDP2 and injected LoRA replace only the payload: the mixin's save keeps the reshard, the
     sidecar and the fence mark, each once, and ST's writer never runs."""

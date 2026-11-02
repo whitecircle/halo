@@ -27,7 +27,10 @@ Two comparisons, both against the stock Hugging Face model built from the same w
   seed, log-decay down to -25 per token): an fp32 chunked backward gets its decay gradient to ~1e-2
   only (``fla``'s and transformers' torch path alike), ``fla`` re-draws that error under any round-off
   change of its inputs, and the parameters reached only through the decay (``A_log``, ``dt_bias``,
-  ``in_proj_a``) move by ~1e-3 in cosine within the stock model itself.
+  ``in_proj_a``) move by ~1e-3 in cosine within the stock model itself. How large that error comes out
+  depends on the autotune config, so every ``fla`` kernel runs its first launchable one
+  (``pin_fla_autotune_first_fit``): a pick timed per launch carries Qwen3-Next's first-layer ``A_log``
+  norm across its bound on some launches.
 * bf16 against the fp32 stock model: the stack's bf16 loss error, and its median per-parameter gradient
   error, must stay within a small multiple of the stock model's own bf16 error, since two correct bf16
   implementations already differ. A per-parameter bound would not hold: the hyper-connection scales of
@@ -67,6 +70,7 @@ from halo.model_loading.liger.dispatch import apply_liger_kernel
 from halo.models.config_access import text_config
 from halo.models.moe.config_fields import require_expert_count
 from tests.common.ep_merge_oracle import post_process_merged_weights
+from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import cos_sim, fro_rel_err
 from tests.common.parallelism import single_process_ep_config
@@ -178,15 +182,16 @@ def _round_off_spread(model_cls: type, config, state: dict, input_ids, ref_grads
     }
 
 
-def run_family(model_type: str, seed: int = SEED) -> dict:
+def run_family(ctx, model_type: str, seed: int = SEED) -> dict:
     """The stock fp32 reference and its round-off spread, and the stock bf16 reference, first; then the
-    applier, then the stack in fp32 and bf16."""
+    applier, then the stack in fp32 and bf16, every fla kernel on its first launchable autotune config."""
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
     family = TINY_MOE_FAMILIES[model_type]
     torch.manual_seed(seed)
     reference = tiny_family_model(family).cuda().float()
     finalize_loaded_model(reference)
+    pin_fla_autotune_first_fit(ctx)
     fixed_nb_launches = _fixed_nb_launches()
     model_cls, config = type(reference), reference.config
     vocab = text_config(config).vocab_size
@@ -292,7 +297,7 @@ def run(ctx) -> dict:
     if args.fla_fixed_nb:
         os.environ[FIXED_NB_FLAG] = "1"
     checks: dict[str, bool] = {}
-    result = run_family(model_type)
+    result = run_family(ctx, model_type)
     if args.fla_fixed_nb:
         launches = result["fixed_nb_launches"]
         log(f"{model_type}: fixed-NB launches before the first forward {launches}")

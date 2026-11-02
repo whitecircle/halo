@@ -26,6 +26,7 @@ Run: ``python tests/cpu/parallelism/test_ep_receive_counts.py`` (or ``pytest -m 
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -36,6 +37,7 @@ import halo.distributed.expert_parallel.config as ep_config_module
 from halo.distributed.expert_parallel.deepep.backends import _ElasticBackend, _LegacyBackend
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE
 from tests.common.ep_reference import (
     GroupedSortLayer,
     grouped_sort_mismatches,
@@ -116,7 +118,7 @@ def test_a_count_that_disagrees_with_the_received_ids_raises(shift):
     counts[0] += shift
     layer = GroupedSortLayer(ep_size=8, experts_per_rank=4)
     tokens = torch.randn(experts.shape[0], 8)
-    with pytest.raises(RuntimeError, match="receive counts disagree"):
+    with pytest.raises(RuntimeError, match=re.escape(RECEIVE_COUNTS_DISAGREE)):
         EPMoELayerBase._sort_tokens_for_grouped_mm(
             layer, tokens, experts, torch.rand(experts.shape), recv_counts=tuple(counts)
         )
@@ -270,7 +272,7 @@ def test_a_loop_count_that_disagrees_with_the_received_ids_raises(change):
         counts.reverse()
     else:
         counts[0] += 1 if change == "one_too_many" else -1
-    with pytest.raises(RuntimeError, match="receive counts disagree"):
+    with pytest.raises(RuntimeError, match=re.escape(RECEIVE_COUNTS_DISAGREE)):
         layer._compute_experts(tokens, experts, weights, tokens.dtype, recv_counts=tuple(counts))
 
 

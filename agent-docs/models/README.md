@@ -56,7 +56,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹¹ Tiny-model GPU tests only: no Qwen3-Next checkpoint is trained at full scale here.
 
-¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains and exports the release cut to four layers under EP8 (its exact resume has no GPU run), and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
+¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains, exactly resumes and exports the release cut to four layers under EP8, and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
 
 ## MoE knobs
 

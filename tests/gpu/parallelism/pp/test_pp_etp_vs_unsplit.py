@@ -4,7 +4,7 @@
 pp2 × etp2, at world 4 (one ETP group per stage, dp1) or world 8 (two ETP groups per stage, dp2 —
 the shape that also drives the deferred cross-replica expert sweep). ``ep_size`` is 1 throughout:
 every rank holds every expert, sharded ``expert_tp_size``-way along the FFN intermediate dim, and
-``ReduceFromExpertTP`` sums the partners' outputs in token space.
+``SumAcrossGroup`` sums the partners' outputs in token space.
 
 What the composition has to get right, and what each check pins:
 

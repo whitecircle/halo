@@ -53,6 +53,10 @@ Notes on the ones that cause trouble:
   TP and the transformers default otherwise. Per-family exceptions are in the
   [Supported matrix](supported-matrix.md#attention-backends).
 - **`model_revision`** pins a Hub commit.
+- **`lora_target_modules`**: a list names modules, one entry or many (`[o_proj]`
+  adapts every `o_proj`). A bare string is `all-linear` or a regex matched
+  against the full module path; write a regex in the YAML, since the command
+  line always gives a list.
 - **`max_concurrent_loading`** caps how many ranks per node load weights at once.
   Set `1` on a host short on CPU RAM.
 - **`vllm_*` fields** parse on both online RL trainers, which share TRL's GRPO

@@ -278,9 +278,11 @@ teacher-distillation student included) and every frozen reference or teacher loa
 - A source some ranks cannot see raises on every rank and names them. The usual cause is a local
   checkpoint present on some nodes only; a shared input declaration over node-local `HF_HOME` is
   refused earlier, by the startup cache probe ([storage](#shared-vs-node-local-storage)).
-- The config, tokenizer and processor reads ahead of the load query the Hub once per filesystem
-  scope; the scope's other ranks read the cache its main rank filled. A Hub dataset resolves once per
-  scope as well ([Filesystem Handling](../data/filesystem-handling.md#where-it-is-applied)).
+- The config read and a multimodal checkpoint's processor and tokenizer reads ahead of the load query
+  the Hub once per filesystem scope; the scope's other ranks read the cache its main rank filled. A
+  text model's tokenizer is read on every rank by the loader itself (`load_distributed_model`), at the
+  agreed commit, so at large world sizes stage the snapshot and set `HF_HUB_OFFLINE=1`. A Hub dataset
+  resolves once per scope ([Filesystem Handling](../data/filesystem-handling.md#where-it-is-applied)).
 - A per-rank EP-sharded directory (`save_sharded_ep` output) is refused as a source on every rank,
   naming `merge_ep_shards.py`.
 - A Hub source loads its weights at the commit the ranks agreed on, straight from the cache, with no

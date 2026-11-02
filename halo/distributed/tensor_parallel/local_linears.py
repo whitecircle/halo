@@ -17,7 +17,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor, Placement, Replicate, Shard, distribute_tensor
 from transformers.distributed.tensor_parallel import _get_parameter_plan
 
-from halo.distributed.grad_reduce import SumGradAcrossGroup
+from halo.distributed.grad_reduce import SumAcrossGroup, SumGradAcrossGroup
 from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
 
 
@@ -46,20 +46,6 @@ LINEAR_TP_STYLES: dict[str, LinearTPStyle] = {
     "rowwise": LinearTPStyle(colwise=False, full_width=False),
     "rowwise_split_input": LinearTPStyle(colwise=False, full_width=True),
 }
-
-
-class _SumAcrossGroup(torch.autograd.Function):
-    """In-place SUM all-reduce forward, identity backward: a rowwise linear's partial output."""
-
-    @staticmethod
-    def forward(ctx, x: torch.Tensor, group):
-        dist.all_reduce(x, group=group)
-        ctx.mark_dirty(x)
-        return x
-
-    @staticmethod
-    def backward(ctx, grad):
-        return grad, None
 
 
 def _gather_last_dim(x: torch.Tensor, group, world: int) -> torch.Tensor:
@@ -123,7 +109,7 @@ def _rowwise_forward(name: str, matmul, group, rank: int, world: int, split: boo
     def forward(linear: nn.Linear, x: torch.Tensor) -> torch.Tensor:
         if split:
             x = _SplitLastDim.apply(x, group, rank, world)
-        out = _SumAcrossGroup.apply(matmul(x, _tp_shard(linear.weight, name), None), group)
+        out = SumAcrossGroup.apply(matmul(x, _tp_shard(linear.weight, name), None), group)
         # In the matmul's dtype, as a biased F.linear returns it under autocast.
         return out if linear.bias is None else out + _tp_shard(linear.bias, name).to(out.dtype)
 

@@ -4,7 +4,8 @@
 The HSDP, multi-node EP and TP replicated-gradient suites gate "the replicas stayed bit-identical" on
 this probe and run only on the GPU tiers. Two real gloo ranks pin it: identical tensors read 0.0, a
 difference on one rank reads that difference on every rank, and a NaN on one rank reads NaN, which a
-``== 0.0`` verdict fails.
+``== 0.0`` verdict fails. ``max_abs_diff_across`` over several tensors reads the largest difference, and
+NaN for a NaN behind a larger difference or for no tensors at all.
 
 Run: python tests/cpu/conventions/test_group_max_abs_diff.py
 """
@@ -15,7 +16,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
-from tests.common.distributed import group_max_abs_diff
+from tests.common.distributed import group_max_abs_diff, max_abs_diff_across
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -35,6 +36,10 @@ def _worker(rank: int) -> None:
     if rank == 1:
         poisoned[0, 0] = math.nan
     assert math.isnan(group_max_abs_diff(poisoned)), "a NaN on one rank must not read as agreement"
+
+    assert max_abs_diff_across([base, shifted]) == SHIFT, "the largest difference of the tensors"
+    assert math.isnan(max_abs_diff_across([shifted, poisoned])), "a NaN after a larger difference still reads NaN"
+    assert math.isnan(max_abs_diff_across([])), "no tensors compared must not read as agreement"
 
 
 def test_group_max_abs_diff_reads_identity_difference_and_nan():

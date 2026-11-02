@@ -8,9 +8,9 @@ instead.
 The wrap decision keys on the **wrap width** each mode passes: the rank block for plain DP, CP and
 EP, the EP group under deferred DP, and the mesh's DP dimension (`data_parallel_size`) only under TP.
 A CP run at `data_parallel_size == 1` is still wrapped over the whole rank block; a single GPU and
-pure TP skip the wrap. QLoRA skips FSDP2 and averages its trainable gradients in one bucketed
-all-reduce sweep per optimizer step (`HALO_GRAD_BUCKET_MB`,
-[Configuration](../reference/configuration-reference.md#environment-variables)).
+pure TP skip the wrap. QLoRA skips FSDP2, starts every floating-point parameter from rank 0's
+copy, and averages its trainable gradients in one bucketed all-reduce sweep per optimizer step
+(`HALO_GRAD_BUCKET_MB`, [Configuration](../reference/configuration-reference.md#environment-variables)).
 
 ## Two launchers
 
@@ -240,7 +240,9 @@ faster than replicated experts on gpt-oss-20b at batch 1 and 4
 
 Set it `false` to keep a full replicated copy on every DP rank (EP modules become FSDP
 `ignored_params`) — what `fp32_non_ep_params` and `fp32_experts` need at ep1 (the first raises on a
-MoE at `true`, the second is skipped with a warning). No effect when `ep_group_size>1`.
+MoE at `true`, the second is skipped with a warning). No effect when `ep_group_size>1`. The wrap
+broadcasts those copies, the router and native expert LoRA adapters included, from DP rank 0, so
+adapters each rank drew from its own RNG stream start identical.
 
 `false` raises at config time under TP or CP, whose setup paths FSDP-shard ep1 experts
 unconditionally. The flag is honored only on the pure-DP path.
@@ -279,6 +281,13 @@ Enable with `--use_hsdp`. The layout is derived from topology — no shard-size 
 `nvlink_domain_size`, replica count = `num_nvlink_domains`. `apply_fsdp2_for_dp()` applies FSDP2 over
 the 2D `(dp_replicate, dp_shard)` mesh built by `build_dp_mesh` (`halo/distributed/mesh.py`);
 grad-norm sums shard norms over the `dp_shard` sub-group only.
+
+The wrap then gives every replica the first replica's shard of every parameter in FSDP2's shard
+groups, frozen ones included, and DP rank 0's copy of every FSDP-ignored parameter, each a whole copy
+on every rank since HSDP runs no expert distribution. FSDP2, unlike DDP, broadcasts no module state,
+and the replicas share only their gradient average, so anything a rank drew from its own RNG stream
+(LoRA adapters, a resized vocabulary's new rows, a fresh head) would otherwise stay different on each
+replica for the whole run while every loss looks normal.
 
 - **Scope:** pure DP and CP only; every other mode rejects `use_hsdp` at config time
   (`parallelism_rules._reject_hsdp`).

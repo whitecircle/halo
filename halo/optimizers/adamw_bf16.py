@@ -53,8 +53,7 @@ _ROW_STEP_SIZE = tl.constexpr(2)
 _ROW_BC2_SQRT = tl.constexpr(3)
 _ROW_EPS = tl.constexpr(4)
 _ROW_WD_FACTOR = tl.constexpr(5)
-# Each program binary-searches its launch's first-program row, one probe per halving: the cap bounds that search
-# at 8 probes and the TABLE_SIZE variants a run compiles.
+# Each program binary-searches its launch's first-program row, one probe per halving: 8 probes at this cap.
 _MAX_TENSORS_PER_LAUNCH = 256
 # The compute capabilities (B200, B300) the multi-tensor launch is measured on. Elsewhere each launch steps one tensor
 # at TABLE_SIZE 1, which compiles to a lone tensor's per-element code.
@@ -106,7 +105,7 @@ def _program_blocks(
     return tensor, n_elements, first, tl.minimum(first + BLOCKS_PER_PROGRAM, tl.cdiv(n_elements, BLOCK_SIZE))
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tensors"])
 def _adam_bf16_sr_kernel(
     p_base,
     grad_base,
@@ -139,6 +138,8 @@ def _adam_bf16_sr_kernel(
     ``*_ALIGNED`` flags (:func:`_divisibility`) restore what the table loads hide from the compiler: the divisibility a launch
     over one of these tensors alone would specialize on. The compiled per-element code depends on it, the FMA
     association of each element included, so a tensor matches its lone launch bit for bit only under its own flags.
+    ``TABLE_SIZE`` is the device's launch width and ``num_tensors`` is unspecialized, so how many tensors a launch
+    steps selects no variant: only a grad dtype, divisibility or clip/skip mode no earlier step launched compiles one.
     """
     # One Philox call per lane of four elements: its 4 x 32 bits give each element two 16-bit draws
     # (high half for the second moment, low half for the weight). A call per element would make the
@@ -317,8 +318,15 @@ def _launch_fused(
     num_programs: int,
     grad_scale: Tensor | None,
     skip: Tensor | None,
+    table_size: int,
 ) -> None:
-    """Launch :func:`_adam_bf16_sr_kernel` over non-empty ``updates`` with their :func:`_launch_tables` on device."""
+    """Launch :func:`_adam_bf16_sr_kernel` over non-empty ``updates`` with their :func:`_launch_tables` on device,
+    searching a table of ``table_size`` slots, a power of two no smaller than the count of ``updates``."""
+    if len(updates) > table_size or table_size & (table_size - 1):
+        raise ValueError(
+            f"a fused AdamWBF16 launch searches a power-of-two table no smaller than its tensors: got a table of "
+            f"{table_size} for {len(updates)} tensors"
+        )
     p, grad, exp_avg, exp_avg_sq = updates[0].tensors
     _adam_bf16_sr_kernel[(num_programs,)](
         p,
@@ -332,7 +340,7 @@ def _launch_fused(
         skip if skip is not None else grad,
         HAS_GRAD_SCALE=grad_scale is not None,
         HAS_SKIP=skip is not None,
-        TABLE_SIZE=triton.next_power_of_2(len(updates)),
+        TABLE_SIZE=table_size,
         BLOCKS_PER_PROGRAM=_BLOCKS_PER_PROGRAM,
         BLOCK_SIZE=SR_BLOCK_SIZE,
         num_warps=_ADAM_NUM_WARPS,
@@ -352,13 +360,13 @@ def _tensors_per_launch(device: torch.device) -> int:
 
 def _fused_adam_bf16_step(updates: Sequence[_FusedUpdate], grad_scale: Tensor | None, skip: Tensor | None) -> None:
     """Step non-empty ``updates``, at most :func:`_tensors_per_launch` sharing a :attr:`_FusedUpdate.group_key`, in one
-    kernel launch."""
+    kernel launch over a table of that width."""
     index, hparams, num_programs = _launch_tables(updates)
     device = updates[0].tensors[0].device
     # Pinned and non-blocking: a pageable copy would synchronize the stream at the step's head.
     index = index.pin_memory().to(device, non_blocking=True)
     hparams = hparams.pin_memory().to(device, non_blocking=True)
-    _launch_fused(updates, index, hparams, num_programs, grad_scale, skip)
+    _launch_fused(updates, index, hparams, num_programs, grad_scale, skip, _tensors_per_launch(device))
 
 
 def _scaled_grad(grad: Tensor, grad_scale: Tensor | None) -> Tensor:
@@ -556,10 +564,18 @@ def adamw_bf16_optimizer_from_args(model: torch.nn.Module, args: Any, decay_para
         weight_decay=args.weight_decay,
     )
     if is_global_main_process():
-        bf16_count = sum(p.numel() for g in grouped for p in g["params"] if p.dtype == torch.bfloat16)
+        bf16_params = [p for g in grouped for p in g["params"] if p.dtype == torch.bfloat16]
+        bf16_count = sum(p.numel() for p in bf16_params)
         fp32_count = sum(p.numel() for g in grouped for p in g["params"] if p.dtype == torch.float32)
+        # The step's own per-param choice: bf16 on CUDA takes the fused launch, whose width is per device.
+        launch_device = next((p.device for p in bf16_params if p.is_cuda), None)
+        bf16_step = (
+            "eager step"
+            if launch_device is None
+            else f"fused Triton step, up to {_tensors_per_launch(launch_device)} per launch"
+        )
         logger.info(
-            f"✓ AdamWBF16 optimizer: {bf16_count / 1e6:.1f}M bf16 params (SR), "
+            f"✓ AdamWBF16 optimizer: {bf16_count / 1e6:.1f}M bf16 params (SR, {bf16_step}), "
             f"{fp32_count / 1e6:.1f}M fp32 params (standard)"
         )
     return optimizer

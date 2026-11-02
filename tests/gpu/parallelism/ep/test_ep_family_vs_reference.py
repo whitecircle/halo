@@ -2,20 +2,21 @@
 """A tiny ``TINY_MOE_FAMILIES`` model under EP=2 against the stock model it was copied from: loss, and every
 gradient of every MoE block, the experts through the export's own gather and layout transform.
 ``--expert-tp-size 2`` splits each expert FFN two ways as well (ep2 x etp2 on four ranks, pure ETP on two).
-A family in ``REFERENCE_ROUTING_PINS`` runs its stock model on the EP model's top-k picks, which must be the stock
-router's own up to bf16 near-ties.
+A family in ``PINNED_ROUTING_FAMILIES`` runs its stock model on the EP model's top-k picks
+(:func:`tests.common.routed_first_step.pinned_reference_routing`), which must be the stock router's own up to bf16
+near-ties and name each expert of a token once.
 
     torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family qwen3_moe
 """
 
 import argparse
+import contextlib
 import copy
 import math
 from operator import attrgetter
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import AutoConfig
 from transformers.dynamic_module_utils import get_class_from_dynamic_module
 
@@ -23,14 +24,9 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.moe.balancing import resolve_balancing_mode
-from halo.models.moe.expert_layout import (
-    SEPARATE_GLU_PROJECTIONS,
-    ExpertLayout,
-    ExpertLayoutKind,
-    to_hub_expert_tensors,
-)
+from halo.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS
 from tests.common.distributed import world_spread
-from tests.common.ep_reference import random_token_batch, score_ep_grad_pairs, sweep_ep_grads
+from tests.common.ep_reference import gathered_expert_grads, random_token_batch, score_ep_grad_pairs, sweep_ep_grads
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
     BAILING_LING_3_TINY,
@@ -41,6 +37,7 @@ from tests.common.models import (
 from tests.common.numerics import cos_sim
 from tests.common.rank_log import log
 from tests.common.rosters import ep_layer_class_by_model_type
+from tests.common.routed_first_step import RoutedStep, capturing_routed_forwards, pinned_reference_routing
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.tolerances import TOL
 
@@ -98,19 +95,6 @@ def _stock_expert_grads(experts: nn.Module) -> dict[str, torch.Tensor | None]:
     return {"gate_up_proj": torch.cat([banks["gate_proj"], banks["up_proj"]], dim=1), "down_proj": banks["down_proj"]}
 
 
-def _gathered_expert_grads(layer) -> dict[str, torch.Tensor]:
-    """COLLECTIVE over the layer's expert-TP and EP groups: its expert gradients as the full banks
-    :func:`_stock_expert_grads` returns, a rank whose experts no token reached contributing zeros."""
-    local = {
-        name: torch.zeros_like(param) if param.grad is None else param.grad
-        for name, param in layer.expert_named_params()
-    }
-    interleaved = layer.FAMILY.expert_layout.kind is ExpertLayoutKind.INTERLEAVED_GLU
-    layout = ExpertLayout(ExpertLayoutKind.INTERLEAVED_GLU if interleaved else ExpertLayoutKind.FUSED, key_prefix="")
-    device = next(iter(local.values())).device
-    return to_hub_expert_tensors(layout, layer.gather_expert_tensors(local), device=device)
-
-
 def _compare_blocks(model, reference, ep_cls: type, ep_size: int, metrics: dict, *, cos_min: float) -> dict[str, bool]:
     """COLLECTIVE (the expert gradient gather). ``model``'s EP layers against the stock blocks of ``reference`` they
     replaced: one ``ep_cls`` layer per block, nothing else changed, the bank split ``ep_size`` ways, every gradient
@@ -148,7 +132,7 @@ def _compare_blocks(model, reference, ep_cls: type, ep_size: int, metrics: dict,
             etp_unsharded_on_rank0.append(
                 all(name in layer.EXPERT_TP_SHARD_DIMS for name, _ in layer.expert_named_params())
             )
-        gathered = _gathered_expert_grads(layer)
+        gathered = gathered_expert_grads(layer)
         for key, grad in _stock_expert_grads(experts).items():
             if grad is not None and (key in gathered or layer.expert_tp_rank == 0):
                 pairs[".".join(filter(None, (path, prefix, key)))] = (gathered.get(key), grad)
@@ -238,32 +222,12 @@ FAMILY_CHECKS = {
 }
 
 
-def _pin_gpt_oss_routing(reference, picks: list[torch.Tensor], regrets: list[float]) -> list:
-    """Hooks making each stock ``GptOssTopKRouter`` of ``reference`` select ``picks`` (``[T, top_k]`` global ids per
-    MoE block, in module order) under its own gate, the softmax over the selected logits. Each firing appends to
-    ``regrets`` how far the block's weakest pinned pick sits below the router's own k-th logit: 0 where the picks
-    are the router's, a bf16 near-tie where reduction order flipped one."""
-
-    def pin(block_picks):
-        def hook(module, args, output):
-            logits = output[0]
-            selected = logits.gather(-1, block_picks)
-            with torch.no_grad():
-                kth = logits.float().topk(block_picks.shape[-1], dim=-1).values[:, -1]
-                regrets.append((kth - selected.float().min(dim=-1).values).max().item())
-            return logits, F.softmax(selected, dim=1, dtype=selected.dtype), block_picks
-
-        return hook
-
-    blocks = [block for _, block in ep_claimed_blocks(reference)]
-    return [block.router.register_forward_hook(pin(p)) for block, p in zip(blocks, picks, strict=True)]
-
-
-# Families whose stock model runs on the EP model's top-k picks: ``(reference, picks, regrets) -> hook handles``.
-# The tiny GptOss's random-init routers hold exact bf16 logit ties (top-2 of 8), so EP's and expert TP's reduction
-# order flips a few picks per block and moves whole tokens' router and expert gradients (router bias cosine down to
-# 0.70 at ep2 x etp2) with no parallelism bug; pinned, both models route alike and only the gradient math differs.
-REFERENCE_ROUTING_PINS = {"gpt_oss": _pin_gpt_oss_routing}
+# Families whose stock model runs on the EP model's top-k picks, each router's gate in
+# tests.common.routed_first_step.PINNED_GATE_WEIGHTS. The tiny GptOss's random-init routers hold exact bf16 logit ties
+# (top-2 of 8), so EP's and expert TP's reduction order flips a few picks per block and moves whole tokens' router and
+# expert gradients (router bias cosine down to 0.70 at ep2 x etp2) with no parallelism bug; pinned, both models route
+# alike and only the gradient math differs.
+PINNED_ROUTING_FAMILIES = frozenset({"gpt_oss"})
 
 
 def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dict:
@@ -278,7 +242,7 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
     vocab = reference.get_input_embeddings().num_embeddings
     input_ids, labels = random_token_batch(vocab, BATCH, SEQ, ctx.device, seed=SEED)
     layers = [layer for _, layer in named_ep_layers(model)]
-    pin = REFERENCE_ROUTING_PINS.get(family)
+    pinned_routing = family in PINNED_ROUTING_FAMILIES
 
     def train_step(module) -> float:
         module.train()
@@ -287,19 +251,13 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
         return out.loss.item()
 
     # The EP model first, so a pinned reference can route on the picks it captured.
-    for layer in layers:
-        layer._capture_routing = pin is not None
-    ep_loss = train_step(model)
-    hooks, regrets = [], []
-    if pin is not None:
-        picks = [torch.cat(layer._captured_routing_chunks).long() for layer in layers]
-        for layer in layers:
-            layer._capture_routing = False
-            layer._captured_routing_chunks.clear()
-        hooks = pin(reference, picks, regrets)
-    ref_loss = train_step(reference)
-    for hook in hooks:
-        hook.remove()
+    routed = RoutedStep()
+    capturing = capturing_routed_forwards(model, routed) if pinned_routing else contextlib.nullcontext()
+    with capturing:
+        ep_loss = train_step(model)
+    pinning = pinned_reference_routing(reference, routed) if pinned_routing else contextlib.nullcontext()
+    with pinning as pinned:
+        ref_loss = train_step(reference)
     # Every rank ran the same batch: the trainer's sweep divides the combine's world-wide expert sum back down.
     sweep_ep_grads(model)
     log(f"reference loss {ref_loss:.6f}, EP loss {ep_loss:.6f} (|Δ| {abs(ep_loss - ref_loss):.2e})")
@@ -313,13 +271,16 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
             for knob, value in ADOPTED_KNOBS.get(family, {}).items()
         },
     }
-    if pin is not None:
-        regret = metrics["pinned_pick_regret_max"] = max(regrets, default=math.nan)
+    if pinned_routing:
+        regret = metrics["pinned_pick_regret_max"] = max(pinned.regrets, default=math.nan)
         log(f"pinned picks: worst shortfall below the stock router's k-th logit {regret:.3e}")
         # Every block pinned once, each pick the stock router's own or a near-tie of it; a wrong selection falls short
         # by a whole top-k gap.
-        every_block_pinned = len(regrets) == len(layers)
+        every_block_pinned = len(pinned.regrets) == len(layers) and not any(pinned.unconsumed.values())
         checks["ep_picks_are_reference_near_ties"] = every_block_pinned and regret <= TOL.router_near_tie_logit_abs
+        # A token naming one expert twice falls short by nothing, so its duplicates are counted apart.
+        duplicated = metrics["pinned_duplicate_pick_tokens"] = routed.duplicate_pick_tokens()
+        checks["ep_picks_are_distinct_experts"] = duplicated == 0
     ep_cls = ep_layer_class_by_model_type()[family]
     checks |= _compare_blocks(model, reference, ep_cls, pc.ep_size, metrics, cos_min=cos_min)
     if family in FAMILY_CHECKS:

@@ -40,6 +40,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
 from halo.models.attention.selection import (
     FA4_DEDICATED_HEAD_DIM,
+    FLASH_ATTENTION_DETERMINISTIC_ENV,
     declares_attention_backends,
     declares_flash_attention,
     fa4_varlen_refusal,
@@ -189,6 +190,14 @@ def default_training_rows_attn_implementation(
         and uses_fa4_dedicated_head_dim(checkpoint_config)
         and has_gated_delta_net_layers(checkpoint_config)
     ):
+        # A default, not a fallback: info, where the two kernel limits around it warn.
+        if is_global_main_process():
+            logger.info(
+                f"Multi-document rows on a GatedDeltaNet decoder whose attention FlashAttention-4 trains on its "
+                f"head_dim-{FA4_DEDICATED_HEAD_DIM} kernel, where it gains under 5% over FlashAttention-2: requesting "
+                "attn_implementation='flash_attention_2'. Pin attn_implementation: flash_attention_4 to keep "
+                "FlashAttention-4 outside full_determinism."
+            )
         return "flash_attention_2"
     if declares_flash_attention(checkpoint_config) and is_fa4_demoted_by_determinism(checkpoint_config):
         return flash_attention_2_in_place_of_fa4(
@@ -239,7 +248,16 @@ def plan_training_rows(
     """For a script that shapes its own rows (``packing``, ``padding_free``, ``training_args``' batch sizes): the
     request :func:`default_training_rows_attn_implementation` makes for them and whether they reach FlashAttention's
     varlen call, evaluation batches included, refusing a pinned FA4 there before any weight loads
-    (:func:`reject_fa4_varlen_request`). COLLECTIVE where ``checkpoint_config`` is omitted and a check needs it."""
+    (:func:`reject_fa4_varlen_request`). COLLECTIVE where ``checkpoint_config`` is omitted and a check needs it.
+
+    Raises on a ``full_determinism`` config whose deterministic flash switch is still off: the request reads the
+    switch, as the loader does, and :func:`~halo.entrypoints.script.parse_script_args` sets it from the config."""
+    if training_args.full_determinism and not flash_attention_deterministic():
+        raise RuntimeError(
+            f"full_determinism is set but {FLASH_ATTENTION_DETERMINISTIC_ENV} is not, so this row plan would pick the "
+            "attention of a non-deterministic run for flash kernels the trainer then runs deterministic. "
+            "parse_script_args sets it as it parses the config; set it before planning a config built another way."
+        )
     rows = {
         "packing": packing,
         "padding_free": padding_free,

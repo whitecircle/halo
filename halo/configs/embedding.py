@@ -75,8 +75,9 @@ class EmbeddingConfig(ValidatedConfig, SentenceTransformerTrainingArguments):
         default="mean",
         metadata={
             "help": "Pooling strategy for generating fixed-size embeddings from token outputs. "
-            "Applied on both load paths: the EP/TP branch builds the Pooling module from it, and "
-            "the standard path overrides the checkpoint's own modules.json setting with it."
+            "Applied on both load paths: each overrides a sentence-transformers checkpoint's own Pooling setting "
+            "with it, and the parallel loader (EP, TP, or the grouped-GEMM EP layers at expert_parallel_size 1) "
+            "builds the Pooling module from it over a bare backbone."
         },
     )
     normalize_embeddings: bool = field(default=True, metadata={"help": "Whether to L2-normalize output embeddings."})

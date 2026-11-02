@@ -13,12 +13,15 @@ relies on it; (2) that every load path reaches the seam, swept from the per-mode
 calls so a NEW loader that forgets it fails here rather than in a silently-NoPE run; and
 (3) the trainer backstop: a buffer still meta at device placement is uninitialized memory and must
 raise, not be allocated as ``torch.empty``; (4) the ``scripts/`` tool surface, where a loader
-that hands its model to a forward must finalize it and the save-only ones are pinned as such; and
-(5) that no trainer loads a model of its own, since every model it holds arrives from a loader above.
+that hands its model to a forward must finalize it and the save-only ones are pinned as such;
+(5) that no trainer loads a model of its own, since every model it holds arrives from a loader above; and
+(6) the test tree's oracles: a test-side load by a family's own ``trust_remote_code`` in a module that
+runs a forward finalizes, or the suite scores the parallel run against an uninitialized rotary table.
 
 Run: python tests/cpu/model_loading/test_load_finalization.py  (or pytest)
 """
 
+import ast
 import functools
 import re
 import types
@@ -111,6 +114,13 @@ CONVERSION_TOOL_LOADERS = (
 
 # How a file betrays that it runs the model it loaded, for the save-only half of the split above.
 _FORWARD_MARKERS = (".generate(", ".logits", "last_hidden_state")
+
+# The test tree, swept for its oracles. A load passing a family's own ``trust_remote_code`` rather than a literal is
+# roster-generic, so it takes the remote-code families whose ``_init_weights`` repairs no buffer; a literal flag loads
+# the one checkpoint its caller names.
+TEST_ROOT = "tests"
+# The offline-GRPO CP suite's eager oracle, which loads every Ulysses family, Bailing among them, by its own flag.
+CP_RESUME_ORACLE = ("tests/gpu/trainers/grpo/test_offline_grpo_cp_resume.py", "_eager_oracle")
 
 
 def _rotary_with_reference(theta: float = 1_000_000.0) -> tuple[Qwen3RotaryEmbedding, torch.Tensor]:
@@ -315,17 +325,47 @@ def test_every_inference_tool_loader_finalizes(rel, function):
     )
 
 
+def _runs_a_forward(rel: str) -> bool:
+    return any(marker in (REPO_ROOT / rel).read_text(encoding="utf-8") for marker in _FORWARD_MARKERS)
+
+
 def test_conversion_tools_still_run_no_forward():
     """The save-only half of the split is a claim about the file, so it is checked against the file:
     a conversion tool that starts generating or scoring must be reclassified, not left on a bare load."""
-    forwarding = sorted(
-        rel
-        for rel, _ in CONVERSION_TOOL_LOADERS
-        if any(marker in (REPO_ROOT / rel).read_text(encoding="utf-8") for marker in _FORWARD_MARKERS)
-    )
+    forwarding = sorted(rel for rel, _ in CONVERSION_TOOL_LOADERS if _runs_a_forward(rel))
     assert not forwarding, (
         f"{forwarding} now run the model they load: move them to INFERENCE_TOOL_LOADERS and call "
         f"{SEAM} on the load, once the weights sit on their final device."
+    )
+
+
+def _loads_by_family_flag(call: ast.Call) -> bool:
+    """A model build whose ``trust_remote_code`` is not a literal: the flag of whichever family its caller holds."""
+    return builds_a_model(call) and any(
+        keyword.arg == "trust_remote_code" and not isinstance(keyword.value, ast.Constant) for keyword in call.keywords
+    )
+
+
+@functools.cache
+def _test_oracle_loaders() -> dict[tuple[str, str], frozenset[str]]:
+    """(test module, function) -> the names it calls, for every function under ``tests/`` that loads by a family's
+    flag in a module running a forward."""
+    loaders = functions_calling((TEST_ROOT,), _loads_by_family_flag)
+    return {key: names for key, names in loaders.items() if _runs_a_forward(key[0])}
+
+
+def test_the_test_oracle_sweep_sees_the_roster_oracle():
+    """Anti-vacuity: a predicate or forward marker that stopped matching would pass every test-side oracle."""
+    assert CP_RESUME_ORACLE in _test_oracle_loaders(), f"the sweep found {sorted(_test_oracle_loaders())}"
+
+
+def test_every_test_side_oracle_finalizes():
+    """An oracle loaded bare holds a remote-code family's rotary table as transformers-5's uninitialized memory, so
+    the suite reads launch-to-launch noise, or NaN, as the parallel run's error."""
+    unfinalized = sorted(f"{rel}:{name}" for (rel, name), names in _test_oracle_loaders().items() if SEAM not in names)
+    assert not unfinalized, (
+        f"{unfinalized} load a model by its family's trust_remote_code and hand it to a forward without calling "
+        f"{SEAM}. Call it once the weights sit on their final device, as every production loader does."
     )
 
 

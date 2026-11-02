@@ -7,23 +7,25 @@ clamped SwiGLUs, GptOss), as are the routing-sort and permute kernels, and Trito
 call. Left cold it compiles BETWEEN the two collectives, while every peer of the EP group spins in DeepEP's
 barrier — whose budget bounds rank SKEW, not idle time.
 
-Asserted here: the warmup runs to completion before the first dispatch on a real dispatch group
-(``ep_size > 1``), exactly once per layer, in both grad modes AND with a real backward (the backward kernel is a
-separate compilation, built only when a grad is first requested), even when that first forward runs under
-inference mode; it warms the routing-sort and permute kernels wherever the compute path runs them; the
-kernels take their row count unspecialized, so one warm count covers every dispatch size; every gather of the grouped
-compute, at any receive size, launches an index_select kernel the warm-up launched (index_select picks one of two by
-index length, and CUDA loads a kernel on its first launch); and each family's own warm hook reaches the callable its compute
-path actually calls, with the operands that path produces.
+Asserted here: the warmup runs to completion before the first dispatch on a real dispatch group (``ep_size > 1``),
+exactly once per layer, in both grad modes AND with a real backward (the backward kernel is a separate compilation,
+built only when a grad is first requested), even when that first forward runs under inference mode; it warms the
+routing-sort and permute kernels wherever the compute path runs them, the grouped path at every ``ep_size``; the kernels
+take their row count unspecialized, so one warm count covers every dispatch size; every gather of the grouped compute,
+at any receive size, off a padded receive or a plain one, launches an index_select kernel the warm-up launched
+(index_select picks one of two by index length, and CUDA loads a kernel on its first launch); and each family's own warm
+hook reaches the callable its compute path actually calls, with the operands that path produces.
 
-The grouped GEMM warms at every ``ep_size`` (at ``ep_size == 1`` the dispatcher is a no-op and nothing else warms):
-torch's bf16 grouped GEMM picks one of two CUTLASS tiles by the rows per expert, so every grouped GEMM the expert
-compute of a real layer launches, forward and backward, over receives of one row per expert to past the switch,
-is a kernel class the warm-up launched, for GptOss's de-interleaved pair with biases, Qwen3's separate halves and
-Qwen3.5's fused pair, at ep1, ep2, pure expert TP and ep4 x etp2, with fp32 expert masters, expert LoRA and
-fake-quantized mxfp8, and after a first forward with the expert adapters off. The warm-up runs each of those GEMMs at
-one row per expert and at one past the switch, leaves the RNG its LoRA dropout draws from where it was, and leaves no
-gradient.
+The grouped path warms at every ``ep_size``: without a barrier at ``ep_size == 1`` or under pure expert TP, a rank
+first loading a kernel in a later step still holds up its peers' next collective. Torch's bf16 grouped GEMM picks one
+of two CUTLASS tiles by the rows per expert, so every grouped GEMM the expert compute of a real layer launches,
+forward and backward, over receives of one row per expert to past the switch, is a kernel class the warm-up launched,
+for GptOss's de-interleaved pair with biases, Qwen3's separate halves and Qwen3.5's fused pair, at ep1, ep2, pure
+expert TP and ep4 x etp2, with fp32 expert masters, expert LoRA and fake-quantized mxfp8, and after a first forward
+with the expert adapters off. The warm-up runs each of those GEMMs at one row per expert and at one past the switch,
+leaves the RNG its LoRA dropout draws from where it was, and leaves no gradient. Every permute and bias-gather
+backward the expert compute runs, the warm-up ran first, at every one of those rank layouts: the weighted unpermute's,
+and GptOss's expert-bias gather's, which its backward reaches by taking the expert parameters' gradients.
 
 Run: pytest tests/cpu/parallelism/test_ep_activation_warmup.py
 """
@@ -173,10 +175,10 @@ def test_warmup_backward_leaves_no_gradient_on_expert_params():
     assert layer.down_proj.grad is None
 
 
-def test_without_a_dispatch_group_only_the_grouped_gemm_warms():
-    """``ep_size == 1`` runs the no-op dispatcher, with no barrier for a cold activation, sort or permute kernel to
-    stall. The grouped GEMM still warms, at one row per expert and at one past the tile switch: which tile a step runs
-    follows its rows per expert, so a rank could load one in any step and hold up the next collective."""
+def test_without_a_dispatch_group_the_activation_warms_within_the_gemm_warm_up():
+    """``ep_size == 1`` runs the no-op dispatcher and no activation pass of its own: the grouped GEMM's warm-up runs the
+    expert FFN, its activation with it, at one row per expert and at one past the tile switch, since which tile a step
+    runs follows its rows per expert, and a rank loading one in a later step holds up the next collective."""
     layer = _RecordingLayer(ep_size=1)
     _run_forward(layer)
     assert layer.events == [
@@ -251,8 +253,14 @@ def _record_permute_backwards(monkeypatch) -> list[tuple[str, str]]:
 
 @pytest.mark.parametrize(
     ("top_k", "ep_size", "grouped_mm", "warmed"),
-    ((2, 2, True, True), (1, 2, True, True), (2, 2, False, False)),
-    ids=("fused_permute", "fused_permute_top_k_below_ep_size", "per_expert_loop"),
+    ((2, 2, True, True), (1, 2, True, True), (2, 1, True, True), (2, 2, False, False), (2, 1, False, False)),
+    ids=(
+        "fused_permute",
+        "fused_permute_top_k_below_ep_size",
+        "fused_permute_without_a_dispatch_group",
+        "per_expert_loop",
+        "per_expert_loop_without_a_dispatch_group",
+    ),
 )
 def test_the_routing_sort_and_permute_kernels_are_warmed_where_the_compute_path_runs_them(
     monkeypatch, top_k, ep_size, grouped_mm, warmed
@@ -269,7 +277,9 @@ def test_the_routing_sort_and_permute_kernels_are_warmed_where_the_compute_path_
     monkeypatch.setattr(compute, "warm_route_sort_kernels", lambda *args: sorts.append(args[:2]) or real_warm(*args))
     layer = _RecordingLayer(ep_size=ep_size)
     layer._use_grouped_mm = grouped_mm
-    layer._warm_activation_graphs(torch.device("cpu"), torch.float32, HIDDEN, top_k=top_k)
+    flat = torch.randn(3, HIDDEN)
+    experts = torch.zeros(3, top_k, dtype=torch.long)
+    layer._dispatch_compute_combine(flat, experts, torch.ones(3, top_k), torch.float32)
     assert set(calls) == (_PERMUTE_BACKWARDS if warmed else set())
     assert sorts == ([(top_k, LOCAL_EXPERTS)] if warmed else [])
 
@@ -295,12 +305,13 @@ def test_a_first_forward_under_inference_mode_warms_every_kernel(monkeypatch):
     assert [event[0] for event in layer.events] == ["dispatch", "compute", "combine"]
 
 
-def _gather_kernels(top_k: int, local_slots: int) -> set[tuple]:
+def _gather_kernels(top_k: int, local_slots: int, padded: bool) -> set[tuple]:
     """The kernels the grouped compute's gathers launch for a receive of ``local_slots`` local slots over rows of
-    ``top_k``: the permute's at bf16 off the padded receive's row-strided view, and the expert-bias gather's at bf16 and
-    at fp32 masters."""
+    ``top_k``: the permute's at bf16, off the padded receive's row-strided view under a dispatch group (``padded``) or
+    off the plain tokens without one, and the expert-bias gather's at bf16 and at fp32 masters."""
     rows = -(-local_slots // top_k)
-    tokens = torch.zeros(rows, padded_wire_hidden(HIDDEN), dtype=torch.bfloat16)[:, :HIDDEN]
+    width = padded_wire_hidden(HIDDEN) if padded else HIDDEN
+    tokens = torch.zeros(rows, width, dtype=torch.bfloat16)[:, :HIDDEN]
     token_idx = torch.arange(local_slots) % rows
     inv_map = torch.zeros(rows, top_k, dtype=torch.long)
     expert_ids = torch.arange(local_slots) % LOCAL_EXPERTS
@@ -312,22 +323,24 @@ def _gather_kernels(top_k: int, local_slots: int) -> set[tuple]:
     return launches.kernels
 
 
-def _gathers_left_cold(top_k: int) -> set[tuple]:
+def _gathers_left_cold(top_k: int, padded: bool = True) -> set[tuple]:
     """The kernels the grouped compute's gathers launch, over receives of one local slot to past the index_select
     cut-off, that the permute warm-up at ``top_k`` did not."""
     with KernelLaunches() as warm:
         moe_permute.warm_permute_kernels(_WARMUP_TOKENS, HIDDEN, top_k, torch.device("cpu"), torch.bfloat16)
     slots = range(1, 2 * INDEX_SELECT_SMALL_INDEX_ROWS + 2)
-    return set().union(*(_gather_kernels(top_k, local_slots) for local_slots in slots)) - warm.kernels
+    return set().union(*(_gather_kernels(top_k, local_slots, padded) for local_slots in slots)) - warm.kernels
 
 
+@pytest.mark.parametrize("padded", (True, False), ids=("dispatched", "without_a_dispatch_group"))
 @pytest.mark.parametrize("top_k", (1, 4, 8))
-def test_every_gather_of_the_grouped_compute_launches_a_kernel_the_warm_up_launched(top_k):
+def test_every_gather_of_the_grouped_compute_launches_a_kernel_the_warm_up_launched(top_k, padded):
     """index_select reads an index of up to 16 rows with a kernel of its own, and a gather's index is as long as the
     receive's local slots, which the routing sets: from one slot to past the cut-off, the permute's gather of bf16
     tokens and GptOss's expert-bias gather (bf16, or fp32 masters under ``fp32_experts``) launch only kernels the
-    permute warm-up launched, at ``top_k`` 1 too, where the warm-up's own permute reads exactly 16 rows."""
-    assert _gathers_left_cold(top_k) == set()
+    permute warm-up launched, at ``top_k`` 1 too, where the warm-up's own permute reads exactly 16 rows, and off the
+    plain tokens of a layer without a dispatch group as off a padded receive."""
+    assert _gathers_left_cold(top_k, padded) == set()
 
 
 @pytest.mark.parametrize("top_k", (1, 4))
@@ -404,6 +417,77 @@ def test_the_grouped_gemm_check_fails_with_one_row_per_expert_only(monkeypatch, 
     monkeypatch.setattr(compute, "GROUPED_MM_SMALL_TILE_DIM", 0)
     cold = compute_kernels - _warm_up_launches(gemm_layer(family, layout, "defaults")).kernels
     assert cold and {kernel[3] for kernel in cold} == {"large"}, cold
+
+
+# The autograd Functions of the grouped compute whose backward runs a kernel of its own (the weighted unpermute's, the
+# permute's gather-reduce, the expert-bias one-hot GEMM).
+_GROUPED_COMPUTE_FUNCTIONS = (
+    moe_permute.MoEGatherPermute,
+    moe_permute.MoEWeightedUnpermute,
+    moe_permute.MoEExpertBiasGather,
+)
+
+
+def _record_backwards(monkeypatch) -> list[str]:
+    """Wrap each :data:`_GROUPED_COMPUTE_FUNCTIONS` backward, on the class every call site shares, so each run appends
+    the Function's name to the returned list."""
+    calls = []
+    for function in _GROUPED_COMPUTE_FUNCTIONS:
+        backward = function.backward
+
+        def recording(ctx, *grads, _name=function.__name__, _backward=backward):
+            calls.append(_name)
+            return _backward(ctx, *grads)
+
+        monkeypatch.setattr(function, "backward", staticmethod(recording))
+    return calls
+
+
+def _cold_backwards(monkeypatch, layer, warm_up=None) -> set[str]:
+    """The :data:`_GROUPED_COMPUTE_FUNCTIONS` whose backward ``layer``'s expert compute runs, over receives of
+    :data:`SWEPT_ROWS_PER_EXPERT` local slots per local expert, that its warm-up (``warm_up``, the layer's own by
+    default) did not run."""
+    calls = _record_backwards(monkeypatch)
+    (warm_up or _warm_up_launches)(layer)
+    warm = set(calls)
+    calls.clear()
+    _compute_gemm_kernels(layer)
+    assert calls, "the expert compute ran none of the grouped compute's backwards"
+    return set(calls) - warm
+
+
+@pytest.mark.parametrize("layout", tuple(GEMM_LAYOUTS))
+@pytest.mark.parametrize("family", tuple(GEMM_FAMILIES))
+def test_every_backward_of_the_grouped_compute_runs_in_the_warm_up(monkeypatch, family, layout):
+    """At every rank layout, with a dispatch group or without one, the permute's gather-reduce, the weighted
+    unpermute's and GptOss's expert-bias gather's backward run in the warm-up before the expert compute runs them: the
+    bias gather sits off the tokens' path, and the warm-up's backward reaches it by taking the expert parameters'
+    gradients."""
+    assert _cold_backwards(monkeypatch, gemm_layer(family, layout, "defaults")) == set()
+
+
+@pytest.mark.parametrize("layout", ("ep1", "etp2"))
+def test_the_backward_check_fails_without_the_permute_warm_up(monkeypatch, layout):
+    """Without the permute warm-up a layer with no dispatch group warms only its GEMM, whose expert FFN runs no permute:
+    the gather-reduce and the weighted unpermute's backward are left to the first step."""
+    monkeypatch.setattr(compute, "warm_permute_kernels", lambda *args: None)
+    cold = _cold_backwards(monkeypatch, gemm_layer("qwen3_5_moe", layout, "defaults"))
+    assert cold == {"MoEGatherPermute", "MoEWeightedUnpermute"}, cold
+
+
+def test_the_backward_check_fails_with_the_tokens_gradient_only(monkeypatch):
+    """A warm-up backward that takes the tokens' gradient alone never reaches GptOss's expert-bias gather, whose input
+    is the bias parameter."""
+    layer = gemm_layer("gpt_oss", "ep2", "defaults")
+
+    def without_parameters(warmed):
+        warmed.expert_named_params = lambda: []
+        try:
+            _warm_up_launches(warmed)
+        finally:
+            del warmed.expert_named_params
+
+    assert _cold_backwards(monkeypatch, layer, without_parameters) == {"MoEExpertBiasGather"}
 
 
 def _adapters_off_warm_up_kernels(layer) -> set[tuple]:

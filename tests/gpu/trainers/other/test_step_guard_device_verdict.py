@@ -25,7 +25,7 @@ from types import SimpleNamespace
 import torch
 
 from halo.optimizers.adamw_bf16 import AdamWBF16
-from tests.common.harness import gpu_test_main, record_check
+from tests.common.harness import cuda_syncs_are_errors, gpu_test_main, record_check
 from tests.common.rank_log import log
 from tests.common.step_guard import Guarded, guarded, guarded_step
 
@@ -99,12 +99,9 @@ def check_device_path_adds_no_host_sync():
         me = _device_guard(dtype)
         _warm_up(me)
 
-        torch.cuda.set_sync_debug_mode("error")
-        try:
+        with cuda_syncs_are_errors():
             for _ in range(2):
                 _step_and_pass(me, 0.5)
-        finally:
-            torch.cuda.set_sync_debug_mode("default")
 
         assert me._verdict_norm.is_pinned(), "the verdict buffer is pageable: its non-blocking copy stalls the host"
         assert me._unread_verdict is not None, f"premise ({dtype}): the last step's verdict is left to a late read"
@@ -120,15 +117,13 @@ def check_host_path_read_trips_the_sync_check():
     norm = torch.nn.utils.clip_grad_norm_(me.model.parameters(), float("inf"))
     torch.cuda.synchronize()
 
-    torch.cuda.set_sync_debug_mode("error")
-    try:
-        me._get_grad_norm(me.model, grad_norm=norm)
-    except RuntimeError as error:
-        assert "synchronizing" in str(error), error
-    else:
-        raise AssertionError("the host path's read passed the sync check: the check is blind")
-    finally:
-        torch.cuda.set_sync_debug_mode("default")
+    with cuda_syncs_are_errors():
+        try:
+            me._get_grad_norm(me.model, grad_norm=norm)
+        except RuntimeError as error:
+            assert "synchronizing" in str(error), error
+        else:
+            raise AssertionError("the host path's read passed the sync check: the check is blind")
 
 
 @gpu_test_main(exact_world_size=1, prefix="test_step_guard_device_verdict", partial_state=False)

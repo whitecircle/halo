@@ -3,16 +3,17 @@
 
 ``combine_across_ranks`` gathers the weight map to rank 0 rather than ``all_gather_object``-ing it,
 which would leave EVERY rank holding one fragment per rank of a map only the index writer ever reads — at 512
-ranks, 512 copies of the entire key space on each of 512 ranks, for a file one of them writes.
+ranks, 512 copies of the entire key space on each of 512 ranks, for a file one of them writes. The gather's
+own contract (rank order, rank 0 alone unpickling, no point-to-point operation) is
+``tests/cpu/runtime/test_rank0_gather.py``'s.
 
 Gathering to rank 0 moves the merge off the peers, which puts the collision check somewhere only one
 rank can see it. So the merged result AND the merge's verdict both have to come back over the
 broadcast: a collision that raised on rank 0 alone would strand every peer in the barrier that
 follows the exchange — a job-wide hang whose traceback names the barrier, not the duplicated key.
 
-What these tests pin: non-zero ranks never allocate the gather list, the merged index is identical
-on every rank, a planted collision raises on ALL of them with the diagnostic naming the key, and a
-non-contributing rank still joins both collectives.
+What these tests pin: the merged index is identical on every rank, a planted collision raises on ALL
+of them with the diagnostic naming the key, and a non-contributing rank still joins both collectives.
 
 Run: pytest tests/cpu/checkpoint/test_shard_index_exchange.py
 """
@@ -21,6 +22,7 @@ import pytest
 import torch.distributed as dist
 
 from halo.checkpoint.writing import merge_shard_index
+from halo.runtime import collectives
 from halo.runtime.collectives import combine_across_ranks
 
 WORLD_SIZE = 4
@@ -34,13 +36,12 @@ def _exchange(payload, combine=merge_shard_index):
 class _FakeWorld:
     """One process standing in for ``WORLD_SIZE`` ranks exchanging the index with ``combine_across_ranks``.
 
-    Every rank's payload is known up front, so ``gather_object`` can serve rank 0 the whole table
+    Every rank's payload is known up front, so ``gather_on_rank0`` can serve rank 0 the whole table
     while the peers only announce that they joined. ``broadcast_object_list`` routes through one box
     the way the real collective routes through the wire, which is what lets the peers observe exactly
     what rank 0 published — including a raise.
 
-    ``gather_lists`` records the ``object_gather_list`` each rank passed, the direct evidence that a
-    peer allocated nothing: torch requires it to be ``None`` anywhere but the destination.
+    ``gathered_by`` records the ranks that entered the gather.
     """
 
     def __init__(self, payloads: list[tuple[dict[str, str], int] | None], combine=merge_shard_index):
@@ -48,14 +49,14 @@ class _FakeWorld:
         self.combine = combine
         self.rank = 0
         self.box: list[object] = [None]
-        self.gather_lists: dict[int, list | None] = {}
+        self.gathered_by: list[int] = []
 
     def install(self, monkeypatch) -> None:
         monkeypatch.setattr(dist, "is_available", lambda: True)
         monkeypatch.setattr(dist, "is_initialized", lambda: True)
         monkeypatch.setattr(dist, "get_world_size", lambda group=None: WORLD_SIZE)
         monkeypatch.setattr(dist, "get_rank", lambda group=None: self.rank)
-        monkeypatch.setattr(dist, "gather_object", self._gather_object)
+        monkeypatch.setattr(collectives, "gather_on_rank0", self._gather_on_rank0)
         monkeypatch.setattr(dist, "broadcast_object_list", self._broadcast_object_list)
         # Regression guard: an all-gather form must fail
         # here rather than quietly pass because the merged map still comes out right.
@@ -64,15 +65,10 @@ class _FakeWorld:
     def _banned_all_gather(self, *args, **kwargs):
         raise AssertionError("combine_across_ranks must gather to rank 0, not all-gather to everyone")
 
-    def _gather_object(self, obj, object_gather_list=None, dst=0, group=None):
-        del group
-        assert dst == 0, f"the index writer is rank 0, but the gather targeted {dst}"
-        assert obj == self.payloads[self.rank], "a rank contributed something other than its own fragment"
-        self.gather_lists[self.rank] = object_gather_list
-        if self.rank == 0:
-            assert object_gather_list is not None, "the destination rank must supply the output list"
-            object_gather_list[:] = list(self.payloads)
-        return None
+    def _gather_on_rank0(self, payload):
+        assert payload == self.payloads[self.rank], "a rank contributed something other than its own fragment"
+        self.gathered_by.append(self.rank)
+        return list(self.payloads) if self.rank == 0 else None
 
     def _broadcast_object_list(self, object_list, src=0, group=None):
         del group
@@ -131,23 +127,6 @@ def test_every_rank_returns_the_same_merged_index(monkeypatch):
         assert outcome == expected, f"rank {rank} returned {outcome!r}, not the merged index"
 
 
-def test_only_rank_zero_allocates_the_gather_list(monkeypatch):
-    """The memory the rank-0 gather exists to save: a peer must hold no per-rank copy of the map.
-
-    ``object_gather_list`` is the allocation — one slot per rank, each filled with a whole fragment.
-    Rank 0 needs it to merge; anywhere else it is N copies of a map that rank never reads.
-    """
-    world = _FakeWorld(_stage_payloads())
-    world.install(monkeypatch)
-
-    world.run_all()
-
-    assert world.gather_lists[0] is not None, "rank 0 must collect the fragments it merges"
-    assert len(world.gather_lists[0]) == WORLD_SIZE, "the destination list must be sized to the world"
-    for rank in range(1, WORLD_SIZE):
-        assert world.gather_lists[rank] is None, f"rank {rank} allocated a {WORLD_SIZE}-slot gather list"
-
-
 def test_a_non_writer_still_joins_both_collectives(monkeypatch):
     """A ``None`` payload is a rank that wrote nothing, not a rank that sits the exchange out.
 
@@ -160,7 +139,7 @@ def test_a_non_writer_still_joins_both_collectives(monkeypatch):
     outcomes = world.run_all()
 
     for rank in (1, 3):
-        assert rank in world.gather_lists, f"non-writer rank {rank} never entered the gather"
+        assert rank in world.gathered_by, f"non-writer rank {rank} never entered the gather"
         assert isinstance(outcomes[rank], tuple), f"non-writer rank {rank} never received the merged index"
         assert outcomes[rank][0], "a non-writer must still learn the keys its peers wrote"
 

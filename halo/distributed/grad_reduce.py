@@ -59,6 +59,22 @@ def reduce_grad(
         grad.copy_(t)
 
 
+class SumAcrossGroup(torch.autograd.Function):
+    """In-place SUM all-reduce of ``x`` over ``group`` in forward, identity backward: the dual of
+    :class:`SumGradAcrossGroup`, for a partial output each rank of ``group`` holds a share of (a rowwise TP
+    linear's, expert-TP's combined MoE output). Hand it a tensor nothing else reads."""
+
+    @staticmethod
+    def forward(ctx, x: torch.Tensor, group):
+        dist.all_reduce(x, group=group)
+        ctx.mark_dirty(x)
+        return x
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad, None
+
+
 class SumGradAcrossGroup(torch.autograd.Function):
     """Identity forward; SUM all-reduce of the gradient over ``group`` in backward, for an activation
     whose consumers are sharded over ``group`` (expert-TP's MoE input, TP's MLA rope rows). At the

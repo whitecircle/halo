@@ -13,6 +13,7 @@ from datasets import Dataset, DatasetDict, Sequence
 from datasets import Image as HFImage
 from PIL import Image, ImageDraw
 
+from halo.data.chat_render import tokenize_rendered
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from tests.common.models import QWEN3_0_6B
@@ -109,6 +110,13 @@ def create_sft_dataset(
         text = _apply_chat_template(tokenizer, messages)
         data.append({"text": text})
     return Dataset.from_list(data)
+
+
+def create_tokenized_sft_dataset(num_samples: int, tokenizer, seed: int = 42) -> Dataset:
+    """:func:`create_sft_dataset`'s rows tokenized as the SFT script tokenizes a rendered conversation, unpadded: the
+    rows its packing pass and its padding-free collator take."""
+    rows = create_sft_dataset(num_samples, tokenizer, seed=seed)
+    return rows.map(lambda row: dict(tokenize_rendered(tokenizer, row["text"])), remove_columns=rows.column_names)
 
 
 # Single-turn SFT dataset. Separate from ``create_sft_dataset`` because the multi-turn rows change

@@ -98,9 +98,17 @@ def write_adapter_file(state: dict, output_dir: str) -> None:
     """Write adapter tensors as ``adapter_model.safetensors``, or as ``adapter_model.bin`` where
     safetensors refuses them."""
     st_path = os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE)
-    # safetensors refuses a view (a gathered DTensor adapter, a ``modules_to_save`` clone), which would
-    # send the whole adapter to the .bin fallback.
-    state = {key: tensor.contiguous() for key, tensor in state.items()}
+    # safetensors refuses a view (a gathered DTensor adapter, a ``modules_to_save`` clone) and two keys over one
+    # storage (a tied embedding saved under both names), either of which would send the whole adapter to the .bin
+    # fallback; a later key over a storage takes a copy, as PEFT's own ``save_pretrained`` writes it.
+    storages: set[int] = set()
+    contiguous: dict[str, torch.Tensor] = {}
+    for key, tensor in state.items():
+        tensor = tensor.contiguous()
+        storage = tensor.untyped_storage().data_ptr()
+        contiguous[key] = tensor.clone() if storage in storages else tensor
+        storages.add(storage)
+    state = contiguous
     try:
         save_safetensors_file(state, st_path)
     except Exception as e:

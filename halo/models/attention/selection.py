@@ -20,6 +20,7 @@ from halo.hardware import is_blackwell_gpu, is_hopper_gpu
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.models.attention.gpt_oss_sinks import (
     RESOLVED_SINKS_RESET_ATTR,
+    SINK_CARRYING_ATTN_HINT,
     SinksPolicy,
     holds_unneutralized_sinks,
     install_sdpa_for_reset_sinks,
@@ -107,21 +108,20 @@ def preferred_flash_impl(*, allow_fa4: bool = True) -> str:
 
 
 def _detect_attention_impl() -> str:
-    """:func:`preferred_flash_impl` when its build imports, else FA2. A broken (not absent) build warns
-    before degrading, since nothing else would report the slower kernel."""
+    """:func:`preferred_flash_impl` when its build imports, else FA2, in one line naming it this GPU's flash backend,
+    which the model-level checks may still move. A broken (not absent) build warns instead, since nothing else would
+    report the slower kernel."""
     if not torch.cuda.is_available():
         return "flash_attention_2"  # CPU host; the choice is re-validated against the model downstream
     preferred = preferred_flash_impl()
+    detected, build_note = preferred, ""
     if preferred != "flash_attention_2":
         build = _FLASH_KERNEL_MODULES[preferred][-1]
         try:
             flash_kernel(preferred)
-            if is_global_main_process():
-                logger.info(f"Using {preferred} ({build} installed)")
-            return preferred
+            build_note = f" ({build} installed)"
         except ImportError:
-            if is_global_main_process():
-                logger.info(f"{build} not installed, using FlashAttention-2")
+            detected, build_note = "flash_attention_2", f" ({build} not installed)"
         except Exception as e:
             if is_global_main_process():
                 logger.warning(
@@ -129,9 +129,10 @@ def _detect_attention_impl() -> str:
                     f"FlashAttention-2, which is correct but slower on attention. Repair the {build} install "
                     f"to regain {preferred}."
                 )
+            return "flash_attention_2"
     if is_global_main_process():
-        logger.info("Using FlashAttention-2")
-    return "flash_attention_2"
+        logger.info(f"{detected} is this GPU's flash backend{build_note}; model-level checks may move a model off it.")
+    return detected
 
 
 def effective_attn_implementation(model_config) -> str | None:
@@ -202,6 +203,12 @@ def flash_attention_deterministic() -> bool:
     """Whether transformers calls its flash kernels with ``deterministic=True``, by its own read of
     :data:`FLASH_ATTENTION_DETERMINISTIC_ENV` (only ``"1"`` turns it on)."""
     return os.environ.get(FLASH_ATTENTION_DETERMINISTIC_ENV, "0") == "1"
+
+
+def enable_flash_attention_deterministic() -> None:
+    """Turn :data:`FLASH_ATTENTION_DETERMINISTIC_ENV` on, in the spelling :func:`flash_attention_deterministic` and
+    transformers read."""
+    os.environ[FLASH_ATTENTION_DETERMINISTIC_ENV] = "1"
 
 
 def supports_fa4_backward(model_config) -> bool:
@@ -289,16 +296,16 @@ def validate_attn_implementation(
         raise ValueError(
             f"attn_implementation='{attn_impl}' is not installed in this environment (no build provides its "
             f"kernels), so it cannot carry the learnable attention sinks that reset_sinks=false keeps live. Use "
-            f"a sink-carrying implementation this image has (flash_attention_4 on Blackwell; flex_attention or "
-            f"eager on Hopper), or set reset_sinks: true for off-policy fine-tuning."
+            f"a sink-carrying implementation this image has ({SINK_CARRYING_ATTN_HINT} on Hopper), or set "
+            f"reset_sinks: true for off-policy fine-tuning."
         )
     if live_sinks and not _attn_impl_handles_sinks(attn_impl):
         raise ValueError(
             f"attn_implementation='{attn_impl}' silently drops the learnable attention sinks that "
             f"reset_sinks=false keeps live — every training logprob would shift by nats vs the served "
-            f"policy. Use a sink-carrying implementation (flash_attention_4 on Blackwell; flex_attention "
-            f"or eager on Hopper — the stock Hopper flash_attention_3 build lacks s_aux, so FA3 works "
-            f"only with a build exposing it), or set reset_sinks: true for off-policy fine-tuning."
+            f"policy. Use a sink-carrying implementation ({SINK_CARRYING_ATTN_HINT} on Hopper — the stock "
+            f"Hopper flash_attention_3 build lacks s_aux, so FA3 works only with a build exposing it), or set "
+            f"reset_sinks: true for off-policy fine-tuning."
         )
 
     # Fallback chain: sinks and softcap models prefer flash over flex, whose compile path is unusable under EP; on
@@ -369,8 +376,8 @@ def verify_live_sinks_carried(model) -> None:
     raise ValueError(
         f"This GptOss model runs attn_implementation={attn_impl!r}, which drops its attention sinks, while the "
         f"sinks are live: every logprob would shift by nats against the served model. Use a sink-carrying "
-        f"implementation (flash_attention_4 on Blackwell; flex_attention or eager), or neutralize the sinks first "
-        f"(reset_sinks: true for a training run)."
+        f"implementation ({SINK_CARRYING_ATTN_HINT}), or neutralize the sinks first (reset_sinks: true for a "
+        f"training run)."
     )
 
 

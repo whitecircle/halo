@@ -187,7 +187,9 @@ def _load_reward_model(checkpoint, tmp_path, monkeypatch, build) -> None:
 def _load_sentence_transformer(checkpoint, tmp_path, monkeypatch, build) -> None:
     monkeypatch.setattr(embedding_script, "SentenceTransformer", lambda path, **kwargs: build(kwargs["model_kwargs"]))
     runtime = types.SimpleNamespace(
-        parallelism_config=types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, max_concurrent_loading=None),
+        parallelism_config=types.SimpleNamespace(
+            has_ep_group=False, is_tp_mode=False, needs_ep_layers=False, max_concurrent_loading=None
+        ),
         model_source=checkpoint,
     )
     embedding_script.build_sentence_transformer(
@@ -244,7 +246,9 @@ def test_an_unpinned_embedding_load_takes_the_backend_independent_family_patches
 
     monkeypatch.setattr(embedding_script, "SentenceTransformer", lambda path, **kwargs: build(kwargs["model_kwargs"]))
     runtime = types.SimpleNamespace(
-        parallelism_config=types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, max_concurrent_loading=None),
+        parallelism_config=types.SimpleNamespace(
+            has_ep_group=False, is_tp_mode=False, needs_ep_layers=False, max_concurrent_loading=None
+        ),
         model_source=qwen3_5_text_checkpoint,
     )
     with pytest.raises(_Built):

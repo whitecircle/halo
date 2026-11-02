@@ -307,7 +307,7 @@ def test_a_pending_skip_never_swallows_the_restore_step(optimizer_cls):
     for param in me.model.parameters():
         param.grad = torch.full_like(param, float("nan"))
     me._get_grad_norm(me.model, grad_norm=None)
-    me._restoring_optimizer_state = True
+    me._materializing_optimizer_state = True
     calls = int(me.optimizer.state[next(me.model.parameters())]["step"])
 
     me.optimizer.step()

@@ -493,16 +493,18 @@ class OptimizerShardStore:
 
     def _merge_replicated_state(self, checkpoint: str, osd) -> str | None:
         """Fold the replica writer's expert moments into this rank's shard; why it could not, or None. Rank-local:
-        a failure rides the shard-read verdict. A shard holding state for none of the replicated FQNs was
-        deduplicated (the save strips them all at once); merging none of the FQNs it tracked means the writer
-        spells them differently, which would resume every expert param at zero moments.
+        a failure rides the shard-read verdict. A shard tracking replicated FQNs and holding state for none of
+        them was deduplicated (the save strips them all at once), an empty state included: the save's
+        ``get_optimizer_state_dict`` zero-initializes a never-stepped optimizer, so only a stateless one writes
+        none. Merging none of the tracked FQNs from a writer that holds state means the writer spells them
+        differently, which would resume every expert param at zero moments.
         """
         writer_rank, keys = expert_replica_writer(self.model)
         state = osd.get("state") if isinstance(osd, dict) else None
         if writer_rank == get_global_rank() or not isinstance(state, dict):
             return None
-        # No state at all is a pre-first-step checkpoint, not a deduplicated shard.
-        if not keys or not state or keys & set(state):
+        tracked = keys & _tracked_fqns(osd)
+        if not tracked or keys & set(state):
             return None
         path = os.path.join(checkpoint, optimizer_shard_filename(writer_rank))
         if not os.path.exists(path):
@@ -515,10 +517,10 @@ class OptimizerShardStore:
         writer_osd, failure = self._read_shard(path)
         if failure is not None:
             return failure
-        merged = {key: value for key, value in (writer_osd.get("state") or {}).items() if key in keys}
+        writer_state = writer_osd.get("state") or {}
+        merged = {key: value for key, value in writer_state.items() if key in keys}
         state.update(merged)
-        tracked = keys & _tracked_fqns(osd)
-        if not merged and tracked:
+        if not merged and writer_state:
             return (
                 f"Restored none of the {len(tracked)} replicated expert parameter(s) this shard was deduplicated "
                 f"against from {os.path.basename(path)}: the writer's shard carries no state under any of them "
@@ -549,7 +551,7 @@ class OptimizerShardStore:
         """COLLECTIVE. Write the read state into the live optimizer once every rank's covers its trainable
         params, then restore the LR scheduler."""
         # Trainable FQNs the shard restores nothing for, which strict=False would quietly reinitialize. Tracked
-        # but stateless params (never received a gradient) and an empty state (pre-first-step) are legitimate.
+        # but stateless params (never received a gradient) and an empty state (a stateless optimizer) are legitimate.
         shard = osd if isinstance(osd, dict) else {}
         state_keys = set(shard.get("state") or {})
         trainable = {name for name, param in self.model.named_parameters() if param.requires_grad}

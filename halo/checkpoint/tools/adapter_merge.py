@@ -24,7 +24,12 @@ from halo.checkpoint.tools.offline_export import (
     reject_in_place_conversion,
     save_full_checkpoint,
 )
-from halo.model_loading.tokenizer_setup import resolve_peft_processing_class
+from halo.model_loading.tokenizer_setup import (
+    grow_vocabulary,
+    load_processing_class,
+    resolve_peft_processing_class,
+    resolve_tokenizer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +89,77 @@ def load_base_for_adapter(
     raise ValueError(mismatch)
 
 
+def _embedding_weights(model: torch.nn.Module) -> dict[str, torch.Tensor]:
+    """The weight the input embedding and the output head compute with, by role, a tied pair once; read through a
+    PEFT wrapper, whose ``weight`` is its base layer's or its trained copy's."""
+    weights: dict[str, torch.Tensor] = {}
+    for role, module in (
+        ("input embedding", model.get_input_embeddings()),
+        ("output head", model.get_output_embeddings()),
+    ):
+        if module is not None and all(module.weight is not weight for weight in weights.values()):
+            weights[role] = module.weight
+    return weights
+
+
+def _grown_vocabulary(model: PreTrainedModel, adapter_pc, base_pc) -> int | None:
+    """The length of the adapter directory's tokenizer (``adapter_pc``) where the run grew ``model``'s vocabulary to
+    it, else None; ``base_pc`` is the base's, each as :func:`load_processing_class` returns it.
+
+    :func:`~halo.model_loading.tokenizer_setup.configure_run_tokenizer` grows the embedding when added tokens take the
+    tokenizer past its rows, read here as a tokenizer with more ids than ``model`` has rows over a base whose own
+    tokenizer fits them. A base whose tokenizer already outruns its rows, or a directory without a tokenizer, records
+    no grow.
+    """
+    if adapter_pc is None:
+        return None
+    num_tokens = len(resolve_tokenizer(adapter_pc))
+    rows = model.get_input_embeddings().weight.shape[0]
+    if num_tokens <= rows:
+        return None
+    if base_pc is not None and len(resolve_tokenizer(base_pc)) > rows:
+        return None
+    return num_tokens
+
+
+def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_pc, base_pc, log) -> PeftModel:
+    """The saved adapter loaded onto ``model``, its base (:func:`load_base_for_adapter`), first grown to a vocabulary
+    the run grew (:func:`_grown_vocabulary`, over the adapter directory's and the base's processing classes), which
+    ``log`` reports, since the output then holds more rows than its base.
+
+    The rows a run adds exist in no base checkpoint, so its adapter carries them. They start as NaN, so a row the
+    adapter leaves unset is never served from uninitialized memory: an adapter saved before adapter saves carried a
+    grown vocabulary's rows has them rebuilt, with a warning, as the mean of the checkpoint's rows. The run drew them
+    by transformers' mean resizing (that mean, with 1e-9 of the rows' covariance) and an adapter run keeps them
+    frozen, so the rebuilt rows match the run's to within that draw.
+    """
+    num_tokens = _grown_vocabulary(model, adapter_pc, base_pc)
+    if num_tokens is None:
+        return PeftModel.from_pretrained(model, adapter_dir)
+    rows = model.get_input_embeddings().weight.shape[0]
+    log(
+        f"Growing the base's embeddings from {rows} to {num_tokens} rows, the length of the adapter's tokenizer, "
+        "which the run grew them to."
+    )
+    grow_vocabulary(model, num_tokens, mean_resizing=False)
+    with torch.no_grad():
+        for weight in _embedding_weights(model).values():
+            weight[rows:] = float("nan")
+    peft_model = PeftModel.from_pretrained(model, adapter_dir)
+    unset = {role: weight for role, weight in _embedding_weights(peft_model).items() if weight[rows:].isnan().any()}
+    if unset:
+        logger.warning(
+            f"The adapter at {adapter_dir} was trained on a vocabulary grown from {rows} to {num_tokens} rows (its "
+            f"tokenizer's length) but holds no value for the added rows of the {' and '.join(unset)}: it was saved "
+            f"before adapter saves carried them. Rebuilding them as the mean of the checkpoint's rows: the run drew "
+            f"them by mean resizing and kept them frozen, so they match its rows to within that draw."
+        )
+        with torch.no_grad():
+            for weight in unset.values():
+                weight[rows:] = weight[:rows].mean(dim=0, dtype=torch.float32).to(weight.dtype)
+    return peft_model
+
+
 def adapter_input_gates(adapter_dir: str, output_dir: str) -> PeftConfig:
     """Refuse a saved adapter a tool cannot convert into ``output_dir``, then return its config.
 
@@ -136,13 +212,15 @@ def merge_adapter_into_base(
         excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
         log=log,
     )
+    adapter_pc = load_processing_class(adapter_dir, trust_remote_code=trust_remote_code)
+    base_pc = load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
     # A text-only merge writes what a text_only_model run exports: no multimodal processor files.
-    processing_class = resolve_peft_processing_class(
-        adapter_dir, base_model_path, text_only=base.text_only, trust_remote_code=trust_remote_code
-    )
+    processing_class = resolve_peft_processing_class(adapter_pc, base_pc, text_only=base.text_only)
     if processing_class is None:
         raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
-    merged_model = PeftModel.from_pretrained(base.model, adapter_dir).merge_and_unload()
+    merged_model = apply_adapter(
+        adapter_dir, base.model, adapter_pc=adapter_pc, base_pc=base_pc, log=log
+    ).merge_and_unload()
 
     for action in apply_training_sidecars(merged_model, adapter_dir):
         log(action)

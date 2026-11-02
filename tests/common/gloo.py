@@ -23,6 +23,10 @@ GLOO_JOIN_TIMEOUT_S = 420.0
 STORE_TIMEOUT = datetime.timedelta(seconds=GLOO_JOIN_TIMEOUT_S)
 # The store key a rank sets on reaching a step every rank must reach before any goes past it.
 _STEP_KEY = "run_gloo_ranks/{step}/{rank}"
+# What torchrun exports to every rank of a multi-process node whose launch sets none. Without it accelerate's
+# PartialState sizes a gloo rank's intra-op pool to the node's physical cores over its local ranks, past the
+# toolkit's one thread per rank, and on a loaded xdist host two identical forwards in one rank can disagree.
+TORCHRUN_OMP_NUM_THREADS = "1"
 
 
 def _all_ranks_reach(store: dist.Store, step: str, rank: int, nprocs: int) -> None:
@@ -96,11 +100,14 @@ def run_gloo_ranks(
     Every rank gets the env ``torchrun`` gives a single-node job (``MASTER_ADDR``, ``MASTER_PORT`` from
     :func:`~tests.common.ports.free_port`, ``RANK``, ``WORLD_SIZE``, ``LOCAL_RANK``,
     ``LOCAL_WORLD_SIZE``) with ``env`` applied on top, identically on every rank; a value that has to
-    differ per rank is the worker's to set. The rendezvous store at ``MASTER_PORT`` is served from this
-    process until every rank has exited. The group is initialized before ``worker``, which starts on no
-    rank until every rank has initialized it, and destroyed after it on every exit path. ``pg_timeout``
-    bounds each collective (``None`` keeps torch's default); set it where the test reads what a stuck
-    collective raises. The rendezvous store keeps :data:`STORE_TIMEOUT` either way.
+    differ per rank is the worker's to set. The ranks of a multi-rank run are spawned with
+    :data:`TORCHRUN_OMP_NUM_THREADS` unless this process exports its own ``OMP_NUM_THREADS``; one in
+    ``env`` lands after torch has loaded in the rank, too late for OpenMP to read. The rendezvous store
+    at ``MASTER_PORT`` is served from this process until every rank has exited. The group is
+    initialized before ``worker``, which starts on no rank until every rank has initialized it, and
+    destroyed after it on every exit path. ``pg_timeout`` bounds each collective (``None`` keeps
+    torch's default); set it where the test reads what a stuck collective raises. The rendezvous store
+    keeps :data:`STORE_TIMEOUT` either way.
 
     ``worker`` must be a module-level function, since spawn pickles it by reference. A rank that
     raises or dies fails this call once its peers are stopped (``ProcessRaisedException`` /
@@ -112,13 +119,21 @@ def run_gloo_ranks(
     # peer still has store traffic to send (a main-first waiter leaving its phase), and a store hosted in
     # that rank would go down under the peer.
     store = dist.TCPStore("127.0.0.1", free_port(), is_master=True, timeout=STORE_TIMEOUT, wait_for_workers=False)
-    context = mp.start_processes(
-        _gloo_rank,
-        args=(worker, nprocs, store.port, pg_timeout, dict(env or {}), args),
-        nprocs=nprocs,
-        join=False,
-        start_method="spawn",
-    )
+    # By key rather than patch.dict, which clears and rewrites the whole environment under the store's live thread.
+    exports_omp = nprocs > 1 and "OMP_NUM_THREADS" not in os.environ
+    if exports_omp:
+        os.environ["OMP_NUM_THREADS"] = TORCHRUN_OMP_NUM_THREADS
+    try:
+        context = mp.start_processes(
+            _gloo_rank,
+            args=(worker, nprocs, store.port, pg_timeout, dict(env or {}), args),
+            nprocs=nprocs,
+            join=False,
+            start_method="spawn",
+        )
+    finally:
+        if exports_omp:
+            del os.environ["OMP_NUM_THREADS"]
     deadline = time.monotonic() + GLOO_JOIN_TIMEOUT_S
     while not context.join(timeout=max(0.0, deadline - time.monotonic())):
         if time.monotonic() >= deadline:

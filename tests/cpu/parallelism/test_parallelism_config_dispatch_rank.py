@@ -6,7 +6,7 @@ share a ``dispatch_ep_rank`` and therefore a DP batch, so ``ParallelismConfig.ge
 and ``EPConfig._build_expert_tp_groups`` must derive the SAME dispatch rank from ``ep_rank`` —
 node-local (contiguous dispatch chunks of ``ep_size``) and cross-node (one ETP group per NVLink
 domain) use different formulas. A divergence would give ETP partners different batches and desync
-the token-space ``ReduceFromExpertTP`` all-reduce.
+the token-space ``SumAcrossGroup`` all-reduce.
 
 Drives the REAL ``EPConfig`` group construction with ``torch.distributed`` stubbed (``new_group``
 returns the rank list) and the REAL ``ParallelismConfig`` rank math, for every rank of several

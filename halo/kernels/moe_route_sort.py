@@ -1,6 +1,7 @@
 """Expert-sorted routing for the grouped-GEMM MoE compute: :func:`sort_routing_by_expert` orders a dispatch's local
-expert ids by expert into what the grouped GEMM and the permute read. With the dispatch's host-side receive counts on
-CUDA it is a counting sort in three Triton launches; without them, or off CUDA, the torch construction.
+expert ids by expert into what the grouped GEMM and the permute read. On CUDA it is a counting sort in three Triton
+launches, sized by the dispatch's host-side receive counts or, at ``ep_size`` 1, by every slot; off CUDA the torch
+construction.
 """
 
 from __future__ import annotations
@@ -21,6 +22,9 @@ _LANE_BITS = (_BLOCK_SLOTS - 1).bit_length()
 _SCAN_TILE = 2048
 # Message of the device-side check, on every expert path, that the receive counts match the received ids.
 RECEIVE_COUNTS_DISAGREE = "DeepEP receive counts disagree with the received expert ids"
+# Message of the same check at ep_size 1, where every slot sizes the sort and no dispatch pads: an id outside the local
+# range came from the routing itself.
+NONLOCAL_EXPERT_ID = "An expert id outside the local experts at ep_size 1, where the routing hands over only local ids"
 
 
 @triton.jit
@@ -130,14 +134,16 @@ class _CountingSort(torch.autograd.Function):
     """The counting sort; only the gate weights carry a gradient, each slot's read back at its sorted position."""
 
     @staticmethod
-    def forward(ctx, weights: torch.Tensor, experts: torch.Tensor, num_local_experts: int, counts: tuple[int, ...]):
+    def forward(
+        ctx, weights: torch.Tensor, experts: torch.Tensor, num_local_experts: int, counts: tuple[int, ...] | None
+    ):
         n_rows, top_k = experts.shape
         device = experts.device
         k_pad = triton.next_power_of_2(top_k)
         rows = _BLOCK_SLOTS // k_pad
         e_pad = triton.next_power_of_2(num_local_experts)
         n_blocks = triton.cdiv(n_rows, rows)
-        n_valid = sum(counts)
+        n_valid = n_rows * top_k if counts is None else sum(counts)
         experts, weights = experts.contiguous(), weights.contiguous()
         hist = torch.empty((n_blocks, e_pad), dtype=torch.int32, device=device)
         shift = torch.empty_like(hist)
@@ -155,7 +161,7 @@ class _CountingSort(torch.autograd.Function):
         )
         # Device-side, before the placement: a wrong total would write past the outputs the counts sized, or leave their
         # tail unwritten.
-        torch._assert_async(ok, RECEIVE_COUNTS_DISAGREE)
+        torch._assert_async(ok, NONLOCAL_EXPERT_ID if counts is None else RECEIVE_COUNTS_DISAGREE)
         _place_kernel[(n_blocks,)](
             experts,
             weights,
@@ -192,7 +198,9 @@ class _CountingSort(torch.autograd.Function):
 # Eager under torch.compile: its kernels are already fused, and traced, the host counts would become graph inputs
 # that change every step.
 @torch.compiler.disable
-def _counting_sort(experts: torch.Tensor, weights: torch.Tensor, num_local_experts: int, counts: tuple[int, ...]):
+def _counting_sort(
+    experts: torch.Tensor, weights: torch.Tensor, num_local_experts: int, counts: tuple[int, ...] | None
+):
     return _CountingSort.apply(weights, experts, num_local_experts, counts)
 
 
@@ -205,9 +213,12 @@ def _argsort_routing(
     flat_experts = experts.reshape(-1)
     flat_weights = weights.reshape(-1)
     flat_token_idx = torch.arange(n_rows, device=experts.device).unsqueeze(1).expand(-1, top_k).reshape(-1)
-    if counts is not None:
+    valid = (flat_experts >= 0) & (flat_experts < num_local_experts)
+    if counts is None:
+        # An id outside the range would be sorted in as an expert of its own, misaligning the groups.
+        torch._assert_async(valid.all(), NONLOCAL_EXPERT_ID)
+    else:
         num_valid = sum(counts)
-        valid = (flat_experts >= 0) & (flat_experts < num_local_experts)
         # Device-side: a count that disagrees with the received ids would silently truncate or -1-pad the compaction.
         torch._assert_async(valid.sum() == num_valid, RECEIVE_COUNTS_DISAGREE)
         valid_idx = torch.nonzero_static(valid, size=num_valid).squeeze(1)
@@ -230,19 +241,22 @@ def sort_routing_by_expert(
     expert ids and gate weights: each local expert's slots in slot order, expert after expert, ids outside
     ``[0, num_local_experts)`` (DeepEP's ``-1``) dropped, ``offs`` the int32 group ends and ``inv_map`` the permute's
     (:func:`build_inv_map`). ``counts[e]`` is the host-side number of slots routed to expert ``e``, None when every id
-    is local; their sum sizes the outputs, and a sum that disagrees with the ids' local slots trips a device-side
-    assert. Only ``sorted_weights`` carries a gradient.
+    is local; their sum, or every slot, sizes the outputs, and a size that disagrees with the ids' local slots trips a
+    device-side assert (:data:`RECEIVE_COUNTS_DISAGREE`, or :data:`NONLOCAL_EXPERT_ID` without counts). Only
+    ``sorted_weights`` carries a gradient.
 
-    With ``counts`` on CUDA it is a counting sort: a per-block histogram, one scan over the blocks that also writes the
-    group ends, and a placement that also builds ``inv_map``. Nothing is read back from the device and no chain of
-    small aten ops runs between the dispatch and the first grouped GEMM. The kernels take only launch scalars from the
-    host: a copy of the counts per sort would stage through a pinned host block held until the copy lands, so the
-    pinned pool would grow, one page-locked allocation at a time, whenever the host ran further ahead of the device
-    than before. Otherwise it is the torch construction: a ``nonzero_static`` compaction sized by the counts where they
-    exist, a stable argsort, a histogram and :func:`build_inv_map`. Both return the same integers in the same order."""
+    On CUDA it is a counting sort: a per-block histogram, one scan over the blocks that also writes the group ends,
+    and a placement that also builds ``inv_map``. Nothing is read back from the device and no chain of small aten ops
+    runs between the dispatch and the first grouped GEMM. The kernels take only launch scalars from the host, none of
+    them specialized on a size, so the binaries one sort compiles serve every receive; the torch construction's
+    argsort instead picks its kernels by the slot count. A copy of the counts per sort would stage through a pinned
+    host block held until the copy lands, so the pinned pool would grow, one page-locked allocation at a time, whenever
+    the host ran further ahead of the device than before. Off CUDA it is the torch construction: a ``nonzero_static``
+    compaction sized by the counts where they exist, a stable argsort, a histogram and :func:`build_inv_map`. Both
+    return the same integers in the same order."""
     if counts is not None and len(counts) != num_local_experts:
         raise ValueError(f"{len(counts)} receive counts for {num_local_experts} local experts")
-    if counts is not None and experts.is_cuda:
+    if experts.is_cuda:
         return _counting_sort(experts, weights, num_local_experts, counts)
     return _argsort_routing(experts, weights, num_local_experts, counts)
 
@@ -251,7 +265,8 @@ def warm_route_sort_kernels(top_k: int, num_local_experts: int, device: torch.de
     """Sort one synthetic receive on ``device`` with counts, forward and backward; call with grad enabled. On CUDA that
     compiles the counting sort's kernels for this ``top_k`` and expert count, which take their row, block and slot
     counts unspecialized, and loads the backward's gather, one kernel at every slot count: one call covers every
-    dispatch size. The ids and weights carry the dtypes DeepEP hands back: ``topk_idx_t`` (int64) and fp32."""
+    receive size, with counts or without. The ids and weights carry the dtypes the expert compute is handed: int64
+    (DeepEP's ``topk_idx_t``, the routers' top-k) and fp32 (DeepEP's, and every family's routing casts to it)."""
     experts = torch.zeros((1, top_k), dtype=torch.long, device=device)
     weights = torch.zeros((1, top_k), dtype=torch.float32, device=device, requires_grad=True)
     counts = (top_k,) + (0,) * (num_local_experts - 1)

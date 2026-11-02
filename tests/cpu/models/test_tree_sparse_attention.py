@@ -68,6 +68,7 @@ SPARSE_FAMILIES = {
 # resolves only against the loaded module tree, which the first tree batch checks.
 TARGET_SPELLINGS = {
     "listed": (["q_a_proj", "kv_b_proj"], True, True),
+    "listed alone": (["kv_b_proj"], True, True),
     "layer-relative path": (["o_proj", "self_attn.kv_b_proj"], True, True),
     "all-linear": ("all-linear", True, True),
     "all-linear as a list": (["ALL-LINEAR"], True, True),
@@ -458,13 +459,19 @@ def test_adapter_targets_on_kv_b_proj_are_refused_before_the_load(spelling, monk
     family, overrides = SPARSE_FAMILIES["glm5_next_text"]
     model = tiny_family_model(family, overrides=overrides)
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
+    # The SFT script checks the targets as the parsed ModelArguments holds them.
+    model_config = ModelArguments(use_peft=True, lora_r=4, lora_target_modules=targets)
     if refused:
         with pytest.raises(ValueError, match="Leave kv_b_proj out of lora_target_modules"):
-            reject_unsupported_tree_attention(model.config, "sdpa", "gather", lora_target_modules=targets)
+            reject_unsupported_tree_attention(
+                model.config, "sdpa", "gather", lora_target_modules=model_config.lora_target_modules
+            )
     else:
-        reject_unsupported_tree_attention(model.config, "sdpa", "gather", lora_target_modules=targets)
+        reject_unsupported_tree_attention(
+            model.config, "sdpa", "gather", lora_target_modules=model_config.lora_target_modules
+        )
 
-    peft_config = build_peft_config(model, ModelArguments(use_peft=True, lora_r=4, lora_target_modules=targets))
+    peft_config = build_peft_config(model, model_config)
     layers = _sparse_layers(get_peft_model(model, peft_config))
     assert layers and [isinstance(layer.kv_b_proj, BaseTunerLayer) for layer in layers] == [wrapped] * len(layers)
 

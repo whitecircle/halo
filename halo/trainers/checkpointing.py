@@ -5,6 +5,7 @@ Its zero-arg ``super()`` calls must resolve past every sibling mixin to the base
 
 import logging
 import os
+from contextlib import contextmanager
 from functools import partial
 
 import torch.nn as nn
@@ -128,13 +129,21 @@ class CheckpointingMixin:
         load), through :func:`~halo.checkpoint.parallel.reading.consensus_read`; nothing by default."""
 
     def _load_optimizer_and_scheduler(self, checkpoint: str | None) -> None:
-        """Optimizer and LR-scheduler resume through the shard store, with the step-pre-hooks muted: the
-        restore's zero-LR init step would otherwise run the deferred EP sweep and trip the first step's guard."""
-        self._restoring_optimizer_state = True
-        try:
+        """Optimizer and LR-scheduler resume through the shard store, under :meth:`_optimizer_state_materialization`."""
+        with self._optimizer_state_materialization():
             return self._optimizer_store().load(checkpoint)
+
+    @contextmanager
+    def _optimizer_state_materialization(self):
+        """Mute the step-pre-hooks and the non-finite step guard around a shard restore or save. Both reach torch's
+        zero-LR ``_init_optim_state`` step on an optimizer holding no state (one about to be restored, or a stateless
+        one such as plain SGD at every save), which carries no gradients. Unmuted, a grad sweep runs there and claims
+        the current step: the next step's deferred EP sweep then raises, and its TP or QLoRA sweep is skipped."""
+        self._materializing_optimizer_state = True
+        try:
+            yield
         finally:
-            self._restoring_optimizer_state = False
+            self._materializing_optimizer_state = False
 
     def _optimizer_store(self) -> OptimizerShardStore:
         """The per-rank optimizer shard store over the current load context."""
@@ -193,7 +202,8 @@ class CheckpointingMixin:
             save_lr_scheduler(self.lr_scheduler, output_dir)
         self._persist_trainer_sidecars(output_dir)
         if store is not None and store.writes_shards:
-            store.save(output_dir)
+            with self._optimizer_state_materialization():
+                store.save(output_dir)
         self._publish_checkpoint(output_dir, trial)
 
     def _save_optimizer_and_scheduler(self, output_dir: str) -> None:

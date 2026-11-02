@@ -31,6 +31,7 @@ from transformers import (
 from halo.distributed.parallelism_config import ParallelismConfig
 from tests.common import pp_equivalence as ppeq
 from tests.common.distributed import world_min
+from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.models import TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_GLM5_VISION_CONFIG
 from tests.common.rank_log import log
@@ -97,6 +98,8 @@ def run(ctx):
     assert config.stage_world_size == 2 and config.pp_rank == ctx.rank // 2
 
     vocab = build_model(device).config.get_text_config().vocab_size
+    # fla autotunes per batch size, so the full batch and its microbatches would run on separately timed picks.
+    pin_fla_autotune_first_fit(ctx)
     torch.cuda.empty_cache()
     input_ids, labels = ppeq.build_unmasked_batch(vocab, GLOBAL_BATCH, device=device)
     ref_loss, _, ref_grads = ppeq.baseline_grads(build_model(device), input_ids, labels)

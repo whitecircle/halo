@@ -75,23 +75,29 @@ def reject_batch_sampler_on_toolkit_loader(args: EmbeddingConfig | None, *, tool
     )
 
 
-def reject_injected_lora_parallelism(parallelism_config: ParallelismConfig, *, has_injected_lora: bool) -> None:
-    """Refuse in-place-injected LoRA under EP: the save folds the adapters over the backbone's own parameters,
-    which there hold this rank's expert shards under their local names. The mixin's LoRA gate refuses TP."""
-    if not parallelism_config.has_ep_group or not has_injected_lora:
+def reject_injected_lora_parallelism(
+    parallelism_config: ParallelismConfig, *, has_injected_lora: bool, has_ep_layers: bool
+) -> None:
+    """Refuse in-place-injected LoRA under EP and on a backbone carrying EP layers (``has_ep_layers``: the
+    grouped-GEMM layers at ``expert_parallel_size`` 1 too): the save folds the adapters over the backbone's own
+    parameters, which there hold the EP layers' expert tensors in the layers' own layout and names (this rank's
+    shards under EP). The mixin's LoRA gate refuses TP."""
+    if not has_injected_lora or not (parallelism_config.has_ep_group or has_ep_layers):
         return
     raise ValueError(
-        "LoRA for embedding training is not supported with Expert Parallelism (EP or expert-TP): the "
-        "save folds the adapters over the backbone's own parameters, which there hold this rank's "
-        "expert shards under their local names, so the checkpoint would load nowhere. Drop "
-        "--expert_parallel_size / --expert_tensor_parallel_size, or full fine-tune this model."
+        "LoRA for embedding training is not supported with Expert Parallelism (EP or expert-TP) or on the "
+        "grouped-GEMM EP layers (use_grouped_gemm, the default, puts them on a MoE backbone at "
+        "expert_parallel_size 1): the save folds the adapters over the backbone's own parameters, which "
+        "there hold the EP layers' expert tensors in the layers' own layout and names (this rank's shards "
+        "under EP), so the checkpoint would load nowhere. Drop --expert_parallel_size / "
+        "--expert_tensor_parallel_size and set use_grouped_gemm: false, or full fine-tune this model."
     )
 
 
 def reject_modules_outside_backbone(model: nn.Module, backbone: nn.Module, *, saves_rank_locally: bool) -> None:
     """Refuse what the save and resume cannot carry outside the ``auto_model`` backbone: any tuner layer, and
-    where the save writes the other modules rank-locally (``saves_rank_locally``: FSDP2, TP or EP), a
-    parameter that trains or that FSDP2 sharded."""
+    where the save writes the other modules rank-locally (``saves_rank_locally``: FSDP2, TP, EP or the
+    grouped-GEMM EP layers), a parameter that trains or that FSDP2 sharded."""
     backbone_modules = {id(module) for module in backbone.modules()}
     tuners = [
         name
@@ -115,8 +121,8 @@ def reject_modules_outside_backbone(model: nn.Module, backbone: nn.Module, *, sa
     if outside:
         raise ValueError(
             f"Parameters outside the SentenceTransformer's transformer backbone that train or that FSDP2 "
-            f"shards ({outside[:KEY_PREVIEW_COUNT]}) are not supported under FSDP2 (torchrun), TP or EP: "
-            f"the save writes their modules rank-locally, so a sharded one is saved as this rank's shard, "
-            f"and resume restores the backbone alone. Train this pipeline on a single GPU or with DDP "
-            f"(accelerate launch with a MULTI_GPU config)."
+            f"shards ({outside[:KEY_PREVIEW_COUNT]}) are not supported under FSDP2 (torchrun), TP, EP or the "
+            f"grouped-GEMM EP layers: the save writes their modules rank-locally, so a sharded one is saved "
+            f"as this rank's shard, and resume restores the backbone alone. Train this pipeline on a single "
+            f"GPU or with DDP (accelerate launch with a MULTI_GPU config), with use_grouped_gemm: false on a MoE."
         )

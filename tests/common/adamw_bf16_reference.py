@@ -41,9 +41,9 @@ EPS = 1e-8
 # (element count, optimizer step, weight decay, aligned): empty, sub-block, block-boundary and multi-block tensors at
 # mixed steps, as a resumed run can hold them, and one tensor of three programs, the last one short. ``aligned``
 # starts all four of a tensor's roles on 16-byte boundaries; otherwise its grad, and every second param, sits at an
-# odd element offset. The launches split by specialization: the three aligned tensors (a padded table), five with
-# only the param and moments aligned (the three-program one among them), two with only the moments, and the unaligned
-# 1024-element one alone (its element count is a multiple of 16).
+# odd element offset. The launches split by specialization, each over a table padded to the cap: the three aligned
+# tensors, five with only the param and moments aligned (the three-program one among them), two with only the
+# moments, and the unaligned 1024-element one alone (its element count is a multiple of 16).
 CASE = (
     (0, 1, 0.0, False),
     (1, 1, 0.1, False),
@@ -238,8 +238,8 @@ def _case_tensors(device: str) -> list[list[Tensor]]:
 
 def fused_kernel_mismatches(device: str, *, seed_shift: int = 0) -> list[str]:
     """Step :data:`CASE` three times (grad scale off, on, off) through the fused kernel, one launch per
-    specialization as ``step()`` groups them, and through the oracle; name each differing output and each tensor
-    whose divisibility is not what :data:`CASE` placed.
+    specialization as ``step()`` groups them, each over the full table an sm_100/103 launch searches, and through the
+    oracle; name each differing output and each tensor whose divisibility is not what :data:`CASE` placed.
 
     ``seed_shift`` offsets the fused launch's seeds: a comparison that still reports nothing then is blind to the
     rounding noise.
@@ -264,7 +264,9 @@ def fused_kernel_mismatches(device: str, *, seed_shift: int = 0) -> list[str]:
             )
         for live in launches.values():
             index, hparams, num_programs = _launch_tables(live)
-            _launch_fused(live, index.to(device), hparams.to(device), num_programs, grad_scale, None)
+            _launch_fused(
+                live, index.to(device), hparams.to(device), num_programs, grad_scale, None, _MAX_TENSORS_PER_LAUNCH
+            )
         for role, name in enumerate(("param", "grad", "exp_avg", "exp_avg_sq")):
             for i, (expected, got) in enumerate(zip(oracle[role], fused[role], strict=True)):
                 if not torch.equal(expected, got):

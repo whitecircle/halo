@@ -83,7 +83,7 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
         "EP+TP or EP+CP."
     ),
     frozenset({"etp", "cp"}): (
-        "expert-TP partners hold shards of one expert and must see the SAME tokens — ReduceFromExpertTP "
+        "expert-TP partners hold shards of one expert and must see the SAME tokens — the expert-TP all-reduce "
         "sums their outputs element-wise in token space — but CP hands each rank a different sequence "
         "chunk, so that sum would add unrelated tokens. get_data_parallel_rank keys on the expert-TP "
         "layout alone, so it also stops agreeing with data_parallel_size once context_parallel_size "
@@ -107,8 +107,9 @@ AXIS_SET_MECHANISMS: dict[frozenset[str], str] = {
         "small with no error raised. Use PP without CP, or CP without PP."
     ),
     frozenset({"pp", "ep", "etp"}): (
-        "ReduceFromExpertTP.backward is model math, not gradient sync, so it CANNOT be deferred the "
-        "way the DP sweep defers its all-reduce: it runs inside every microbatch backward. At "
+        "the expert-TP all-reduce of the MoE input and routing-weight gradients is model math, not "
+        "gradient sync, so it CANNOT be deferred the way the DP sweep defers its all-reduce: it runs "
+        "inside every microbatch backward. At "
         "expert_parallel_size > 1 that strided expert-TP all-reduce interleaves with the DeepEP "
         "combine the same backward is inside, and the two orderings are not guaranteed to agree "
         "across ranks. At expert_parallel_size == 1 (PP+ETP) the dispatch group is width 1, so "

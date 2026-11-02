@@ -289,6 +289,8 @@ def test_qlora_grad_sync_threads_fp32_grad_reduce(fp32_flag):
     calls: list[dict] = []
 
     trainer._install_qlora_clip = lambda: None
+    # One process: the install's start broadcast has no group to run over.
+    trainer._start_qlora_replicas_identical = lambda: 0
     with patch.object(mode_setup_mod, "reject_fsdp_knobs_under_qlora"):
         trainer._install_qlora_grad_sync("data parallel")
     assert getattr(trainer, "_qlora_grad_sync", False), "the sweep was never enabled — the test is vacuous"

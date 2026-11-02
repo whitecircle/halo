@@ -575,11 +575,11 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_ep_buffer_gc_safety.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe"), timeout=300
     ),
-    # Six fresh-interpreter lazy-load probes on top of the in-process checks.
+    # Eleven fresh-interpreter lazy-load probes on top of the in-process checks.
     "parallelism/ep/test_ep_sort_sync_free.py": TestSpec(
         nproc=1,
         markers=("gpu", "core", "1gpu", "ep", "moe", *_family_markers(("gpt_oss", "qwen3_5_moe_text", "qwen3_moe"))),
-        timeout=900,
+        timeout=1500,
     ),
     # Every tiny family on real DeepEP dispatch: the grouped path on each transport backend, the per-expert loop,
     # GptOss's grouped path under expert TP (ep2 x etp2), and at ep8 every family whose expert count 8 divides.
@@ -1545,14 +1545,17 @@ MANIFEST: dict[str, TestSpec] = {
                 nproc=4,
                 markers=("gpu", "full", "4gpu", "tp", "moe", "qwen3", "gptoss"),
             ),
-            # FULL_SHARD, the ep1 EP layers (experts sharded or whole) and the expert-parallel shapes past EP2,
-            # full fine-tunes and, where the shape takes them, adapters; HSDP and the four-rank shapes below.
+            # FULL_SHARD, the ep1 EP layers (experts sharded or whole, a full fine-tune under checkpointing too)
+            # and the expert-parallel shapes past EP2, full fine-tunes and, where the shape takes them, adapters
+            # (the EP layers refuse them); the EP layers on one process, HSDP and the four-rank shapes below.
             *_rows(
                 (
                     "--family qwen3 --mode zero3",
                     "--family qwen3 --mode zero3 --lora off",
                     "--family gpt_oss --mode zero3 --lora off",
+                    "--family gpt_oss --mode ep1",
                     "--family gpt_oss --mode ep1 --lora off",
+                    "--family gpt_oss --mode ep1 --lora off --gradient-checkpointing",
                     "--family gemma4 --mode ep1 --lora off",
                     "--family gpt_oss --mode ep1_unsharded",
                     "--family gpt_oss --mode ep1_unsharded --lora off",
@@ -1564,9 +1567,16 @@ MANIFEST: dict[str, TestSpec] = {
                 timeout=1200,
             ),
             *_rows(
+                ("--family gpt_oss --mode ep1_single --lora off",),
+                nproc=1,
+                markers=("gpu", "full", "1gpu", "lora", "moe", "gptoss"),
+                timeout=1200,
+            ),
+            *_rows(
                 (
                     "--family qwen3 --mode hsdp",
                     "--family qwen3 --mode hsdp --lora off",
+                    "--family gpt_oss --mode hsdp",
                     "--family gpt_oss --mode epetp --lora off",
                     "--family gpt_oss --mode ep2dp2 --lora off",
                     "--family gpt_oss --mode ep2x2dom --lora off",
@@ -1761,6 +1771,8 @@ MANIFEST: dict[str, TestSpec] = {
                 (
                     "--mode lora_ep_etp",
                     "--mode hsdp",
+                    "--mode expert_lora_ep1_hsdp --per-rank-adapters",
+                    "--mode expert_lora_ep1_unsharded_hsdp --per-rank-adapters",
                     "--mode full_tp2 --world 4",
                     "--mode lora_ep --world 4",
                     "--mode lora_ep --world 4 --gpus-per-node 2",
@@ -1771,7 +1783,7 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=1500,
     ),
-    # A tied model's grown vocabulary saved with the adapters and restored under both tied names, then exported.
+    # A grown vocabulary saved with the adapters offline, restored (a tied pair under both names) and exported.
     "trainers/lora/test_lora_tied_vocab_resume.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "qwen3"),
@@ -1779,6 +1791,8 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--mode single", nproc=1, markers=("gpu", "full", "1gpu", "lora", "qwen3")),
             "--mode fsdp",
             Row("--mode cp2", markers=("gpu", "full", "2gpu", "cp", "lora", "qwen3")),
+            "--mode qlora",
+            Row("--mode ep2", markers=("gpu", "full", "2gpu", "ep", "moe", "lora", "qwen3"), timeout=2400),
         ),
         timeout=900,
     ),
@@ -1880,6 +1894,7 @@ MANIFEST: dict[str, TestSpec] = {
             "--method distillation/self-distill",
             "--method distillation/teacher-distill",
             "--method embedding",
+            Row("--method embedding --family gpt_oss", markers=("gpu", "full", "2gpu", "moe", "gptoss")),
             "--method grpo/offline",
             "--method preference/dpo",
             "--method preference/kto",
@@ -2106,9 +2121,24 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/other/test_self_distillation_text.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600
     ),
-    "trainers/sft/test_sft_hsdp.py": TestSpec(nproc=4, markers=("gpu", "core", "4gpu", "hsdp", "qwen3"), timeout=900),
+    "trainers/sft/test_sft_hsdp.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "core", "4gpu", "hsdp", "qwen3"),
+        args_matrix=(
+            "",
+            Row("--lora", markers=("gpu", "full", "4gpu", "hsdp", "lora", "qwen3")),
+            Row("--lora --cp-size 2", markers=("gpu", "full", "4gpu", "hsdp", "cp", "lora", "qwen3")),
+        ),
+        timeout=900,
+    ),
     "trainers/sft/test_sft_ep_multinode_sim.py": TestSpec(
-        nproc=4, markers=("gpu", "full", "4gpu", "ep", "moe", "gptoss"), timeout=1200
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "ep", "moe", "gptoss"),
+        args_matrix=(
+            "--mode full_ft",
+            Row("--mode expert_lora_resume", markers=("gpu", "full", "4gpu", "ep", "lora", "moe", "qwen3")),
+        ),
+        timeout=1200,
     ),
     "trainers/sft/test_fsdp2_pretrain_eval_then_train.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=900

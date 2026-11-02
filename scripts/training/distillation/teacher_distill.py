@@ -42,7 +42,12 @@ from halo.entrypoints.script import (
 from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
+from halo.models.attention.gpt_oss_sinks import (
+    NEUTRALIZED_TEACHER_SINKS_COST,
+    SINK_CARRYING_ATTN_HINT,
+    SinksPolicy,
+    uses_gpt_oss_sinks,
+)
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process
@@ -79,15 +84,14 @@ def _reject_neutralized_teacher_sinks(teacher_config: PretrainedConfig, *, reset
     """Refuse ``reset_sinks: true`` with a GptOss teacher, before any weight loads.
 
     The flag neutralizes the sinks of both models. A student fine-tunes away from them, but a frozen teacher never
-    trains back: pretrained gpt-oss-20b with its sinks neutralized predicts ~6 nats/token (KL) from itself, so the
-    student would fit a degenerate distribution.
+    trains back (:data:`~halo.models.attention.gpt_oss_sinks.NEUTRALIZED_TEACHER_SINKS_COST`), so the student would
+    fit a degenerate distribution.
     """
     if reset_sinks and uses_gpt_oss_sinks(teacher_config):
         raise ValueError(
-            "reset_sinks: true would neutralize the attention sinks of the GptOss teacher too, and a frozen "
-            "pretrained teacher without its sinks predicts far from itself (~6 nats/token KL on gpt-oss-20b). Set "
-            "reset_sinks: false: both models keep the sinks their checkpoints hold, frozen, on a sink-carrying "
-            "attention implementation (flash_attention_4 on Blackwell; flex_attention or eager)."
+            f"reset_sinks: true would neutralize the attention sinks of the GptOss teacher too, and "
+            f"{NEUTRALIZED_TEACHER_SINKS_COST}. Set reset_sinks: false: both models keep the sinks their checkpoints "
+            f"hold, frozen, on a sink-carrying attention implementation ({SINK_CARRYING_ATTN_HINT})."
         )
 
 

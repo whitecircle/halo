@@ -33,6 +33,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.dtensor import materialize_dtensor
 from tests.common import pp_equivalence as ppeq
 from tests.common.ep_reference import KIND_SCORED_CHECK, per_layer_grad_floors, score_ep_grad_pairs
+from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
@@ -85,9 +86,10 @@ def run(ctx):
     base = tiny_family_model(TINY_MOE_FAMILIES[ARGS.family], overrides=overrides).to(DTYPE)
     rows, labels = ppeq.build_ragged_batch(dp_size * PER_DEVICE_BATCH)
 
-    # Both runs sum each token's two weighted expert outputs alike, so they route alike.
+    # Both runs sum each token's two weighted expert outputs alike and launch fla's kernels on the same configs, so
+    # they route alike.
     ppeq.pin_unfused_expert_sum(ctx)
-    ppeq.pin_fla_autotune_first_fit(ctx)
+    pin_fla_autotune_first_fit(ctx)
     twin = ppeq.apply_single_process_ep1(copy.deepcopy(base), ctx.rank, use_grouped_gemm=not FP32).to(ctx.device)
     reference = ppeq.run_unsplit_reference(twin, rows, labels, ctx.device, dp_size)
     del twin

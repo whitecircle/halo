@@ -15,7 +15,7 @@ from halo.checkpoint.atomic import save_safetensors_file
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA
 from halo.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
 from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
-from halo.checkpoint.tools.adapter_merge import adapter_input_gates, load_base_for_adapter
+from halo.checkpoint.tools.adapter_merge import adapter_input_gates, apply_adapter, load_base_for_adapter
 from halo.checkpoint.tools.offline_export import (
     ADAPTER_TASKS,
     TASK_MODEL_CLASSES,
@@ -74,7 +74,14 @@ def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
         excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
         log=logger.info,
     )
-    return PeftModel.from_pretrained(base.model, adapter_dir)
+    trust_remote_code = load_kwargs.get("trust_remote_code", False)
+    return apply_adapter(
+        adapter_dir,
+        base.model,
+        adapter_pc=load_processing_class(adapter_dir, trust_remote_code=trust_remote_code),
+        base_pc=load_processing_class(peft_config.base_model_name_or_path, trust_remote_code=trust_remote_code),
+        log=logger.info,
+    )
 
 
 def load_model(model_path, task, is_peft=False, **load_kwargs):

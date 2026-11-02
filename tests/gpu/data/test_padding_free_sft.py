@@ -4,9 +4,14 @@
 The padding-free collator (``DataCollatorWithFlattening``) concatenates a microbatch into one row whose
 ``position_ids`` restart at every document, from which the varlen flash kernel takes each document's bounds; the
 padded collator keeps one row per document behind padding. Both score the same next tokens, so a run's first step
-must agree between them: each microbatch loss, the logged loss and the gradient of every FSDP2-sharded parameter,
-by direction and norm (:mod:`tests.common.first_step`). A document whose positions ran on from the previous one
-would attend across the boundary and move the loss and gradients off the padded run's.
+must agree between them: each microbatch loss, the logged loss and the gradient of every parameter but the routers and
+experts the EP layers hold plain, by direction and norm (:mod:`tests.common.first_step`). A document whose positions
+ran on from the previous one would attend across the boundary and move the first step off the padded run's: the loss
+and the gradients on Qwen3-0.6B, the gradient direction alone on the tiny MoE, whose loss barely moves.
+
+Both runs build the trainer as ``scripts/training/sft.py`` does: the collator the factory selects, rows tokenized as
+the script tokenizes a rendered conversation, and TRL's own ``padding_free`` and dataset preparation turned off
+(``disable_trl_dataset_prep``), without which TRL refuses the collator.
 
 Modes: ``dense`` (Qwen3-0.6B, FSDP2), ``tp2`` (Qwen3-0.6B, TP2), ``ep2`` (a tiny Qwen3-MoE, EP2), on two ranks, each
 on the attention backend the loader resolves for its host.
@@ -24,9 +29,10 @@ from trl import SFTConfig
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.packing import DataCollatorWithFlattening
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints.data_setup import disable_trl_dataset_prep
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.datasets import create_sft_dataset
+from tests.common.datasets import create_tokenized_sft_dataset
 from tests.common.first_step import first_step_checks, first_step_gradient_checks, train_recording_first_step
 from tests.common.harness import gpu_test_main
 from tests.common.memory import finish_phase
@@ -55,38 +61,47 @@ def _train(source: str, tokenizer, output_dir: str, *, padding_free: bool):
     """One run's trainer over ``source`` with the padded or the padding-free collator; returns its first step."""
     pc = ParallelismConfig(**MODES[ARGS.mode])
     model, _ = load_distributed_model(source, pc, torch.bfloat16, trust_remote_code=False, use_liger_kernel=False)
-    collator = select_data_collator(
-        tokenizer, train_on_completions_only=False, padding_free=padding_free, model_config=model.config
+    config = SFTConfig(
+        output_dir=output_dir,
+        max_steps=STEPS,
+        per_device_train_batch_size=BATCH_SIZE,
+        learning_rate=1e-5,
+        # Off, so the recorded gradient is the backward's own.
+        max_grad_norm=0.0,
+        bf16=True,
+        gradient_checkpointing=False,
+        use_liger_kernel=False,
+        padding_free=padding_free,
+        max_length=MAX_LENGTH,
+        logging_steps=1,
+        save_strategy="no",
+        report_to=[],
+        logging_nan_inf_filter=False,
+        dataloader_drop_last=True,
+        dataloader_num_workers=0,
+        seed=SEED,
     )
+    collator = select_data_collator(
+        tokenizer,
+        train_on_completions_only=False,
+        padding_free=config.padding_free,
+        model_config=model.config,
+        per_device_train_batch_size=config.per_device_train_batch_size,
+        emit_varlen_one_document=True,
+    )
+    disable_trl_dataset_prep(config)
     trainer = DistributedSFTTrainer(
         model=model,
-        args=SFTConfig(
-            output_dir=output_dir,
-            max_steps=STEPS,
-            per_device_train_batch_size=BATCH_SIZE,
-            learning_rate=1e-5,
-            # Off, so the recorded gradient is the backward's own.
-            max_grad_norm=0.0,
-            bf16=True,
-            gradient_checkpointing=False,
-            use_liger_kernel=False,
-            padding_free=padding_free,
-            max_length=MAX_LENGTH,
-            logging_steps=1,
-            save_strategy="no",
-            report_to=[],
-            logging_nan_inf_filter=False,
-            dataloader_drop_last=True,
-            dataloader_num_workers=0,
-            seed=SEED,
-        ),
-        train_dataset=create_sft_dataset(64, tokenizer, seed=SEED),
+        args=config,
+        train_dataset=create_tokenized_sft_dataset(64, tokenizer, seed=SEED),
         processing_class=tokenizer,
         data_collator=collator,
         parallelism_config=pc,
     )
     checks = parallel_shape_checks(trainer.model, pc)
-    checks["collator_is_the_arms_own"] = isinstance(trainer.data_collator, DataCollatorWithFlattening) == padding_free
+    checks["collator_is_the_arms_own"] = trainer.data_collator is collator and (
+        isinstance(collator, DataCollatorWithFlattening) == padding_free
+    )
     _, record = train_recording_first_step(trainer)
     finish_phase(trainer)
     return record, checks

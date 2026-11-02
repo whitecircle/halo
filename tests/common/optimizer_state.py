@@ -20,8 +20,15 @@ def local_optimizer_state(model, optimizer) -> dict:
     forward the FSDP2 modules still carry their transient unsharded params, and
     ``get_optimizer_state_dict`` then maps no optimizer param to an FQN (``KeyError: 0``, or an empty
     state).
+
+    An optimizer holding no state (a restore that loaded none, a warm restart) reads as an empty
+    state. ``get_optimizer_state_dict`` would first fill it with a zero-LR step, which runs the
+    trainer's step-pre-hooks outside the restore's mute (the deferred EP sweep then claims the step
+    the next clip claims, and raises) and leaves zero moments in the live optimizer.
     """
     reshard_fsdp2_modules(model)
+    if not optimizer.state:
+        return {"state": {}}
     osd = get_optimizer_state_dict(
         unwrap_toolkit_wrappers(model),
         optimizer,

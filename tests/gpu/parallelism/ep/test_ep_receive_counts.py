@@ -55,7 +55,7 @@ from tests.common.ep_reference import (
     random_token_batch,
     where_expert_loop,
 )
-from tests.common.harness import gpu_test_main
+from tests.common.harness import cuda_syncs_are_errors, gpu_test_main
 from tests.common.rank_log import log, log_all
 from tests.common.route_sort_reference import compiled_sort_binaries, receive_counts
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
@@ -64,15 +64,6 @@ SEED = 42
 BATCH, SEQ = 2, 64
 
 _COMPUTE = EPMoELayerBase._compute_experts
-
-
-@contextlib.contextmanager
-def sync_is_an_error():
-    torch.cuda.set_sync_debug_mode("error")
-    try:
-        yield
-    finally:
-        torch.cuda.set_sync_debug_mode("default")
 
 
 def audit(layer, tokens, experts, weights, output_dtype, recv_counts) -> dict:
@@ -96,7 +87,7 @@ def audit(layer, tokens, experts, weights, output_dtype, recv_counts) -> dict:
     with torch.no_grad():
         torch.cuda.synchronize()
         try:
-            with sync_is_an_error():
+            with cuda_syncs_are_errors():
                 if path == "grouped":
                     got = EPMoELayerBase._sort_tokens_for_grouped_mm(
                         layer, tokens, experts, weights, recv_counts=recv_counts

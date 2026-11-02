@@ -45,7 +45,7 @@ the flags you typed and the mechanism from `AXIS_SET_MECHANISMS` that would brea
 
 - **TP+CP** — TP shards attention over a DTensor `(dp, tp)` mesh while CP's Ulysses groups partition the same ranks a second, incompatible way.
 - **TP+ETP**, with or without EP — attention TP and expert TP would shard the same ranks along two different axes. Use EP+TP or pure ETP.
-- **ETP+CP** — expert-TP partners hold shards of one expert and must see the **same** tokens (`ReduceFromExpertTP` sums their outputs element-wise in token space), but CP hands each rank a different sequence chunk, so that sum would add unrelated tokens.
+- **ETP+CP** — expert-TP partners hold shards of one expert and must see the **same** tokens (`SumAcrossGroup` sums their outputs element-wise in token space), but CP hands each rank a different sequence chunk, so that sum would add unrelated tokens.
 - **PP with anything but EP or pure ETP** — the full PP refusal list: [Pipeline Parallelism → Rejected combinations](pipeline-parallelism.md#rejected-combinations).
 
 ### Topology rules

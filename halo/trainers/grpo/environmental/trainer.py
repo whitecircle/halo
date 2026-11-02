@@ -31,7 +31,7 @@ from halo.trainers.grpo.environmental.reasoning import ReasoningBudgetMixin, rea
 from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
 from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
-from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, BatchBuildFence, StepBatchMixin
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
 from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
 from halo.trainers.grpo.logprob_scoring import ChunkedGRPOLogprobsMixin, LogitsWidth, ProtectedTokenEntropyMixin
@@ -286,10 +286,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
         """Arm the routing-replay mask for this microbatch's gradient forward, then defer to TRL. It stays armed
         through the backward, whose reentrant-GC recompute reads it; :meth:`training_step` disarms."""
-        if self._routing_injector is not None and model.training:
-            masks = inputs.get(ROUTING_MASKS_KEY) if isinstance(inputs, dict) else None
-            if masks is not None:
-                self._routing_injector.arm(masks, row_spans=self._replay_spans_for(inputs))
+        if self._routing_injector is not None and model.training and isinstance(inputs, dict):
+            self._arm_loss_forward_replay(inputs)
         return super().compute_loss(
             model, inputs, return_outputs=return_outputs, num_items_in_batch=num_items_in_batch
         )

@@ -24,6 +24,7 @@ from halo.environments.registry import build_environment
 from halo.trainers.grpo.environmental.environmental_rules import reject_unread_grpo_knobs
 from tests.common.entry_scripts import (
     CASES,
+    DEFAULT_FAMILY,
     FIRST_STEPS,
     RECIPES_DIR,
     RESUMED_STEPS,
@@ -46,12 +47,13 @@ _GROUP_PORT = 29517
 _CPU_ONLY = ["--use_cpu=true", "--bf16=false"]
 
 
-def _rows() -> list[tuple[str, str, tuple]]:
-    """Each entry-script row's method, attention setting and markers, read through the row's own parser."""
+def _rows() -> list[tuple[str, str, bool, tuple]]:
+    """Each entry-script row's method, attention setting, whether it trains the default tiny family, and markers,
+    read through the row's own parser."""
     rows = []
     for args, spec in MANIFEST[_ENTRY_SCRIPT_ROWS].launches():
         parsed = row_parser().parse_args(shlex.split(args))
-        rows.append((parsed.method, parsed.attn, spec.markers))
+        rows.append((parsed.method, parsed.attn, parsed.family == DEFAULT_FAMILY, spec.markers))
     return rows
 
 
@@ -60,16 +62,16 @@ def test_every_training_method_has_a_case_a_recipe_and_a_gpu_row():
     assert methods, "the method index came back empty, so nothing below would be checked"
     assert set(CASES) == methods
     assert set(RECIPES_DIR.rglob("*.yaml")) == {recipe_path(method) for method in methods}
-    assert sorted(method for method, attn, _ in _rows() if attn == "recipe") == sorted(methods)
+    assert sorted(method for method, attn, default, _ in _rows() if attn == "recipe" and default) == sorted(methods)
 
 
 def test_the_engine_driven_rows_need_the_live_server_and_the_rest_gate_merges():
     """A row with its attention unset trains on the GPU's own pick, which only Blackwell resolves to FA4, so it
-    gates no merge."""
-    for method, attn, markers in _rows():
+    gates no merge; nor does a row on a tiny family past the default."""
+    for method, attn, default, markers in _rows():
         served = CASES[method].server_fields is not None
         assert ("vllm_server" in markers) is served, method
-        assert ("full" if served or attn == "unset" else "core") in markers, (method, attn)
+        assert ("full" if served or attn == "unset" or not default else "core") in markers, (method, attn)
 
 
 def _script_arguments(method: str) -> tuple[type, ...]:

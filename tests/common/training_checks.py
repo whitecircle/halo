@@ -1,17 +1,24 @@
 """Checks of a finished training run: its per-step losses, the loss band and the finite-run verdicts the SFT
-and LoRA suites share, the loss deltas of a resumed run, and the trainable parameters a run moved."""
+and LoRA suites share, the loss deltas of a resumed run, and the trainable parameters a run stepped and moved."""
 
 import math
+from collections.abc import Collection
 
 import torch
 from accelerate.utils import extract_model_from_parallel
 from torch.distributed.tensor import DTensor
 
-from tests.common.rank_log import log
+from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.runtime.dtensor import to_local
+from tests.common.rank_log import log, log_all
 
 # Where a trained causal-LM loss lands: the floor catches a collapsed or masked-away objective, the ceiling
 # an untrained or garbage forward. Finiteness alone passes both.
 LM_TRAINING_LOSS_BAND = (0.05, 20.0)
+# Elements one update must be able to move before a tensor a run leaves bit-identical fails the run. Each moves on that
+# update under nearest rounding and with probability over one half under stochastic rounding, so all of them staying
+# put is out of reach of chance.
+MIN_MOVABLE_ELEMENTS = 64
 
 
 def step_losses(trainer) -> list[float]:
@@ -104,3 +111,64 @@ def snapshot_trainable(model: torch.nn.Module) -> dict[str, torch.Tensor]:
             data = param.data.full_tensor() if isinstance(param.data, DTensor) else param.data
             snapshot[name] = data.detach().cpu().clone()
     return snapshot
+
+
+def movable_elements(tensor: torch.Tensor, step: float) -> int:
+    """How many elements of ``tensor`` an update of size ``step`` moves off their stored value under nearest rounding:
+    those whose spacing to the next value of larger magnitude in ``tensor``'s dtype is under ``2 * step``."""
+    finfo = torch.finfo(tensor.dtype)
+    _, exponent = torch.frexp(tensor.detach().float().abs().clamp_min(finfo.tiny))
+    spacing = torch.ldexp(torch.full(exponent.shape, finfo.eps, device=exponent.device), exponent - 1)
+    return int((spacing < 2 * step).sum())
+
+
+def movable_tensors(tensors: dict[str, torch.Tensor], step: float) -> set[str]:
+    """The names in ``tensors`` holding at least :data:`MIN_MOVABLE_ELEMENTS` elements one update of size ``step``
+    moves: a run whose first update has that size must change each of them. Adam's first update is the learning rate
+    itself; at ``1e-5`` a bf16 element moves only below ``2**-8``, so norm gains near 1 stay bit-identical."""
+    return {name for name, tensor in tensors.items() if movable_elements(tensor, step) >= MIN_MOVABLE_ELEMENTS}
+
+
+def stepped_parameters(model: torch.nn.Module, optimizer, names: Collection[str]) -> set[str]:
+    """The ``names`` among ``model``'s parameters that this rank's AdamW-family ``optimizer`` stepped with a gradient:
+    those it holds a non-zero local first moment (``exp_avg``) for. A parameter outside the optimizer has no state,
+    and one no gradient reached keeps its moment at zero. FSDP2 modules are resharded first, so the registered
+    parameters are the shards the optimizer holds. Rank-local."""
+    reshard_fsdp2_modules(model)
+    wanted = set(names)
+    stepped = set()
+    for name, param in model.named_parameters():
+        exp_avg = optimizer.state.get(param, {}).get("exp_avg") if name in wanted else None
+        if exp_avg is not None and bool(to_local(exp_avg).ne(0).any()):
+            stepped.add(name)
+    return stepped
+
+
+def weight_update_checks(
+    model: torch.nn.Module,
+    optimizer,
+    before: dict[str, torch.Tensor],
+    moved: Collection[str],
+    learning_rate: float,
+) -> dict[str, bool]:
+    """A full fine-tune's verdict on the tensors in ``before`` (this rank's copies from before the run, by registered
+    name), given the names in ``moved`` that the run changed bit for bit.
+
+    ``weights_stepped``: ``optimizer`` stepped every one of them (:func:`stepped_parameters`), the only signal on a
+    tensor whose stored values a few updates at ``learning_rate`` cannot change. ``movable_weights_moved``: every one
+    that a single update at ``learning_rate`` moves (:func:`movable_tensors`) changed, which a zero rate or an update
+    that misses the parameter fails. Logs what each check misses. Rank-local.
+    """
+    names = set(before)
+    stepped = stepped_parameters(model, optimizer, names)
+    movable = movable_tensors(before, learning_rate)
+    unmoved = movable - set(moved)
+    log_all(
+        f"  stepped {len(stepped)}/{len(names)} (not stepped: {sorted(names - stepped)}), moved "
+        f"{len(movable) - len(unmoved)}/{len(movable)} within one update's reach (unmoved: {sorted(unmoved)}; beyond "
+        f"it: {sorted(names - movable)})"
+    )
+    return {
+        "weights_stepped": bool(names) and stepped == names,
+        "movable_weights_moved": bool(movable) and not unmoved,
+    }

@@ -212,7 +212,8 @@ class MoEExpertBiasGather(torch.autograd.Function):
 
     The default index_add_ backward is a bf16 atomic scatter that serialises, since all of an expert's
     tokens hit the same bias row. ``grad_bias`` is instead a per-expert grad sum via one GEMM
-    ``onehot(eids)ᵀ @ grad_out``: tensor-core fp32 accum, no atomics, order-independent."""
+    ``onehot(eids)ᵀ @ grad_out``, accumulated in fp32 (on the tensor cores for a bf16 bias), no atomics,
+    order-independent."""
 
     @staticmethod
     def forward(ctx, bias: torch.Tensor, eids: torch.Tensor):

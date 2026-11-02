@@ -1,28 +1,31 @@
-"""The PP equivalence tests' FLA autotune pin (``pin_fla_autotune_first_fit``): every fla kernel runs the first of its
-configs that launches, whatever the timings or the disk cache say, and a config the device cannot launch is skipped.
+"""The FLA autotune pin (``pin_fla_autotune_first_fit``, ``tests/common/fla_autotune.py``): every fla kernel runs the
+first of its configs that launches, whatever the timings or the disk cache say, and a config the device cannot launch
+is skipped.
 
 FLA's delta-rule backward state launcher runs on CPU tensors over the kernel's GPU config list, with Triton's launch
 stubbed: the stub raises Triton's ``OutOfResources`` for the configs a test marks unlaunchable and records every other
 launch. ``_FP32_UNLAUNCHABLE`` are the two configs whose shared memory exceeds sm_90 and sm_10x's 232,448 bytes in
 fp32 at the tiny Qwen3.5-MoE head dims (the first needs 271,116), so the single-config pin raised there. These fail if
 the pin launches an unlaunchable config, lets the timings or a disk-cached pick choose, hides a kernel none of whose
-configs launch, or leaves the autotuners changed after teardown.
+configs launch, misses an fla autotuner the process holds, or leaves the autotuners changed after teardown.
 
-Run: python tests/cpu/parallelism/test_pp_fla_autotune_pin.py
+Run: python tests/cpu/kernels/test_fla_autotune_pin.py
 """
 
+import gc
 from types import SimpleNamespace
 
 import pytest
 import torch
 import triton
 from fla.ops.common import chunk_delta_h
+from fla.ops.utils import cumsum
 from triton.runtime.autotuner import Autotuner
 from triton.runtime.errors import OutOfResources
 from triton.runtime.jit import JITFunction
 
 from halo.kernels.fla_launch import triton_autotuner
-from tests.common import pp_equivalence as ppeq
+from tests.common import fla_autotune
 
 _KERNEL = "chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64"
 # The kernel's configs on a device with Ampere-class shared memory or more; a CPU import builds a shorter list.
@@ -73,7 +76,7 @@ def launches(monkeypatch):
 def pinned():
     """The pin applied to every loaded fla autotuner, torn down after the test."""
     finalizers = []
-    ppeq.pin_fla_autotune_first_fit(SimpleNamespace(on_teardown=finalizers.append))
+    fla_autotune.pin_fla_autotune_first_fit(SimpleNamespace(on_teardown=finalizers.append))
     yield
     for finalize in reversed(finalizers):
         finalize()
@@ -140,13 +143,32 @@ def test_a_kernel_with_no_launchable_config_still_raises(launches, pinned):
         _launch_kernel()
 
 
+def test_the_pin_reaches_every_fla_autotuner_the_process_holds(pinned):
+    """The pin finds kernels through fla's module namespaces; every fla autotuner alive, found through the garbage
+    collector instead, runs first-fit off the disk cache, the decay cumsums of the gated delta rule (scalar) and KDA
+    (vector) among them."""
+    alive = {
+        id(obj): obj
+        for obj in gc.get_objects()
+        if issubclass(type(obj), Autotuner) and obj.base_fn.__module__.startswith("fla.")
+    }
+    decay = (cumsum.chunk_local_cumsum_scalar_kernel, cumsum.chunk_local_cumsum_vector_kernel)
+    assert {id(triton_autotuner(kernel)) for kernel in decay} <= alive.keys()
+    unpinned = [
+        tuner.base_fn.__name__
+        for tuner in alive.values()
+        if vars(tuner).get("do_bench") is not fla_autotune._launch_once or tuner.cache_results
+    ]
+    assert not unpinned, f"fla autotuners the pin missed: {sorted(unpinned)}"
+
+
 def test_teardown_restores_every_autotuner():
-    tuners = ppeq._loaded_fla_autotuners()
+    tuners = fla_autotune._loaded_fla_autotuners()
     assert _tuner() in tuners
     before = [(tuner.cache, tuner.cache_results, "do_bench" in vars(tuner)) for tuner in tuners]
     finalizers = []
-    ppeq.pin_fla_autotune_first_fit(SimpleNamespace(on_teardown=finalizers.append))
-    assert all(vars(tuner)["do_bench"] is ppeq._launch_once for tuner in tuners)
+    fla_autotune.pin_fla_autotune_first_fit(SimpleNamespace(on_teardown=finalizers.append))
+    assert all(vars(tuner)["do_bench"] is fla_autotune._launch_once for tuner in tuners)
     for finalize in finalizers:
         finalize()
     after = [(tuner.cache, tuner.cache_results, "do_bench" in vars(tuner)) for tuner in tuners]

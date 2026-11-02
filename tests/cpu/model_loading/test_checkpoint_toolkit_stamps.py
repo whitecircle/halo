@@ -160,7 +160,11 @@ def test_the_embedding_backbone_drops_every_checkpoint_stamp(family, tmp_path):
     path = _stamped_checkpoint(tmp_path / "checkpoint", family)
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
-            has_ep_group=False, is_tp_mode=False, fp32_non_ep_params=False, max_concurrent_loading=None
+            has_ep_group=False,
+            is_tp_mode=False,
+            needs_ep_layers=False,
+            fp32_non_ep_params=False,
+            max_concurrent_loading=None,
         ),
         model_source=path,
     )

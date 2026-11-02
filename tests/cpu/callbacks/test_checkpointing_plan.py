@@ -418,12 +418,15 @@ _CLEAN = PlanContext(
     ],
 )
 def test_each_refusal_fires_alone(change):
+    """Each reason refuses on its own, and the refusal names the setting that runs without a plan, since a reason
+    can be a property of the run the user keeps (unpacked rows, a generation trainer)."""
     assert refusal_reasons(_CLEAN) == []
     reject_unplannable_run(_CLEAN)
     refused = dataclasses.replace(_CLEAN, **change)
     assert len(refusal_reasons(refused)) == 1
-    with pytest.raises(ValueError, match="refused for this run"):
+    with pytest.raises(ValueError, match="refused for this run") as refusal:
         reject_unplannable_run(refused)
+    assert "Set gradient_checkpointing_plan: off" in str(refusal.value)
 
 
 def _consensus_worker(rank: int, out_dir: str):

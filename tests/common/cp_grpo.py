@@ -9,6 +9,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX, loss_token_counts_per_row, next_token_targets
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.trainers.grpo.objective.offline_loss import offline_loss
+from tests.common.ep_reference import routed_parameters
 from tests.common.tolerances import TOL
 
 
@@ -22,11 +23,7 @@ def full_row_loss(logps, shifted_labels, advantages, group_sizes):
 
 def ep_gradient_parameter_names(model, ep_layers):
     """Routed expert/router parameters by identity; shared experts retain the dense CP bounds."""
-    routed_ids = {id(parameter) for layer in ep_layers for _, parameter in layer.expert_named_params()}
-    for layer in ep_layers:
-        router = layer._live_router_module()
-        if router is not None:
-            routed_ids.update(id(parameter) for parameter in router.parameters())
+    routed_ids = {id(parameter) for parameter in routed_parameters(ep_layers)}
     return {name for name, parameter in model.named_parameters() if id(parameter) in routed_ids}
 
 

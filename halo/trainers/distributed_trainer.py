@@ -64,6 +64,7 @@ from halo.trainers.parallelism.adapter_rules import (
     reject_peft_lora_in_ep_layers,
     reject_unmergeable_expert_lora_save,
     reject_unrealized_expert_lora,
+    reject_unsaved_grown_vocabulary,
 )
 from halo.trainers.parallelism.ep_layers import EPLayersMixin, resolve_use_reentrant
 from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
@@ -371,6 +372,7 @@ class DistributedTrainerMixin(
         reject_unsaveable_external_tables(
             self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp
         )
+        reject_unsaved_grown_vocabulary(self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp)
         # FSDP2 needs one dtype per group; before the fp32_non_ep upcast so that mode wins.
         self._cast_peft_params_to_compute_dtype()
         # FP32 master weights before FSDP2 wrapping so it sees fp32 params and produces fp32 grads.
