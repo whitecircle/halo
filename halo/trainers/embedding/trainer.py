@@ -8,8 +8,7 @@ import inspect
 import json
 import logging
 import os
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from collections.abc import Callable
 from functools import partial
 from typing import Any
 
@@ -44,6 +43,7 @@ from halo.configs.script_arguments import DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEP
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import warn_once
+from halo.models.forward_capture import capturing_forward_outputs
 from halo.models.peft_adapters import lora_fold_targets
 from halo.models.unwrapping import unwrap_framework_wrappers
 from halo.runtime.collectives import broadcast_from_rank0
@@ -256,13 +256,19 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         num_items_in_batch: int | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, dict[str, Any]]:
         """The sentence-transformers loss; on every eval batch and before each log step, the embedding metrics
-        of the sentence embeddings the loss forward computed (:meth:`_capturing_sentence_embeddings`)."""
+        of the sentence embeddings the loss forward computed."""
         is_eval = self._in_eval_loop
         group_samples = _group_samples(inputs) if isinstance(inputs, dict) else []
         if not group_samples or not (is_eval or self._should_capture_embedding_metrics()):
             return SentenceTransformerTrainer.compute_loss(self, model, inputs, return_outputs, num_items_in_batch)
 
-        with self._capturing_sentence_embeddings(model) as chunks:
+        # The hook sits on the pipeline's last module, so a forward served from a loss's cache (Matryoshka's smaller
+        # dimensions) adds nothing; sentence-transformers' losses forward the text groups in column order, merged
+        # candidates column-major and cached losses chunk by chunk, so the rows lie group after group.
+        last_module = unwrap_framework_wrappers(model)[-1]
+        with capturing_forward_outputs(
+            last_module, lambda features: features["sentence_embedding"].detach()
+        ) as chunks:
             result = SentenceTransformerTrainer.compute_loss(self, model, inputs, return_outputs, num_items_in_batch)
         if not is_eval:
             self._last_metrics_step = self.state.global_step
@@ -285,21 +291,6 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         else:
             self._embedding_metrics = metrics
         return result
-
-    @contextmanager
-    def _capturing_sentence_embeddings(self, model: SentenceTransformer) -> Iterator[list[torch.Tensor]]:
-        """Yield the list the block's pipeline forwards append their detached sentence embeddings to, in call
-        order. The hook sits on the pipeline's last module, so a forward served from a loss's cache (Matryoshka's
-        smaller dimensions) adds nothing; sentence-transformers' losses forward the text groups in column order,
-        merged candidates column-major and cached losses chunk by chunk, so the rows lie group after group."""
-        chunks: list[torch.Tensor] = []
-        handle = unwrap_framework_wrappers(model)[-1].register_forward_hook(
-            lambda _module, _inputs, features: chunks.append(features["sentence_embedding"].detach())
-        )
-        try:
-            yield chunks
-        finally:
-            handle.remove()
 
     def log(self, logs: dict[str, float], start_time: float | None = None):
         """Inject embedding metrics into logs before delegating to mixin/Trainer."""

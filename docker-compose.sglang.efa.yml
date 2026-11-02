@@ -3,7 +3,9 @@
 #   SGLANG_MODEL=... SGLANG_MODEL_DIR=... docker compose -f docker-compose.sglang.yml \
 #     -f docker-compose.sglang.efa.yml up -d
 # The host supplies the EFA driver and /dev/infiniband, the trainer container the same devices and
-# net (`make ... EFA=1`), plus SGLANG_GROUP_HOST when the default-route NIC is not reachable.
+# net (`make ... EFA=1`). The trainer advertises its address on the route to the server;
+# SGLANG_GROUP_HOST is needed only on an asymmetric route, to name another local address the server
+# can reach.
 
 services:
   sglang-server:

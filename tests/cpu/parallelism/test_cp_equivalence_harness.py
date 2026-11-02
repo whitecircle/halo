@@ -1,8 +1,8 @@
-"""The CP equivalence harness: its roster covers every Ulysses wrapper class, its CPU stand-ins for the flash
-kernel and the list all-to-all keep their contracts, two launches of today's CP code match bit for bit, the
-envelope rule judges a base that does not repeat, each seeded change to the CP path shows up in exactly the
-records it touches, a negative control that raises fails the verdict, a family either tree's roster lacks is
-skipped rather than handed to a producer, and a tree whose harness cannot import fails with its own error.
+"""The CP equivalence harness: its roster covers every Ulysses wrapper class, its CPU stand-in for the flash
+kernel keeps its contract, two launches of today's CP code match bit for bit, the envelope rule judges a base that
+does not repeat, each seeded change to the CP path shows up in exactly the records it touches, a negative control
+that raises fails the verdict, a family either tree's roster lacks is skipped rather than handed to a producer, and
+a tree whose harness cannot import fails with its own error.
 
 Run: python tests/cpu/parallelism/test_cp_equivalence_harness.py
 """
@@ -28,7 +28,6 @@ from tests.common.equivalence.cp_equivalence import (
     FAMILIES,
     LEVELS,
     assess,
-    gloo_all_to_all,
     judge,
     produce,
     record_rank,
@@ -108,16 +107,6 @@ def _changed_cases(baseline: Path, changed: Path) -> set[str]:
     deltas = compare_records(baseline, changed)
     assert all(delta["delta"] == "differs" for delta in deltas)
     return {case_of(delta["path"]) for delta in deltas}
-
-
-def _exchange_worker(rank: int) -> None:
-    """Peer ``j`` receives ``j + 1`` values from each rank, so the split sizes differ per peer."""
-    inputs = [torch.full((peer + 1,), float(10 * rank + peer)) for peer in range(CP_SIZE)]
-    outputs = [torch.empty(rank + 1) for _ in range(CP_SIZE)]
-    gloo_all_to_all(outputs, inputs)
-    assert [output.tolist() for output in outputs] == [
-        [float(10 * peer + rank)] * (rank + 1) for peer in range(CP_SIZE)
-    ]
 
 
 @pytest.fixture(scope="module")
@@ -202,10 +191,6 @@ def test_the_reference_attention_refuses_a_keyword_it_does_not_implement():
     q = torch.randn(1, 4, 2, 8)
     with pytest.raises(TypeError, match="softcap"):
         reference_flash_attn(q, q, q, causal=True, softcap=30.0)
-
-
-def test_the_gloo_all_to_all_delivers_what_the_list_collective_does():
-    run_gloo_ranks(_exchange_worker, CP_SIZE)
 
 
 def test_two_launches_of_every_family_match_bit_for_bit(tmp_path):

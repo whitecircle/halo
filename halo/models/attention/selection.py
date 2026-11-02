@@ -214,6 +214,13 @@ def supports_fa4_backward(model_config) -> bool:
     return not (flash_attention_deterministic() and uses_fa4_dedicated_head_dim(model_config))
 
 
+def fa4_demoted_by_determinism(model_config) -> bool:
+    """Whether the run's deterministic backward alone takes FA4 off this model: its dedicated head_dim-256 kernel
+    trains the attention (:func:`fa4_dedicated_kernel_refusal`, which moves the model to FA2 instead), but not with
+    the deterministic backward the run asks for (:func:`supports_fa4_backward`)."""
+    return fa4_dedicated_kernel_refusal(model_config) is None and not supports_fa4_backward(model_config)
+
+
 def _attn_impl_handles_sinks(attn_impl: str) -> bool:
     """Whether an implementation carries the learnable sink column into the softmax. A flash kernel's
     verdict is read off its signature, so a flash-attn build that adds sink support needs no code change."""
@@ -275,6 +282,13 @@ def validate_attn_implementation(
     sdpa_ok = supports_sdpa and not softcapped and (not has_sinks or recorded_reset is True)
 
     live_sinks = has_sinks and recorded_reset is False
+    if live_sinks and is_flash_attn_implementation(attn_impl) and not _flash_build_imports(attn_impl):
+        raise ValueError(
+            f"attn_implementation='{attn_impl}' is not installed in this environment (no build provides its "
+            f"kernels), so it cannot carry the learnable attention sinks that reset_sinks=false keeps live. Use "
+            f"a sink-carrying implementation this image has (flash_attention_4 on Blackwell; flex_attention or "
+            f"eager on Hopper), or set reset_sinks: true for off-policy fine-tuning."
+        )
     if live_sinks and not _attn_impl_handles_sinks(attn_impl):
         raise ValueError(
             f"attn_implementation='{attn_impl}' silently drops the learnable attention sinks that "
@@ -346,8 +360,8 @@ def resolve_attn_implementation(
     narrowed by the per-family kernel limits (fp32, FA4's head_dim-256 kernel and its unvalidated deterministic
     backward, DeepSeek-V4, heads past the flash cap), then validated. Parallelism-specific overrides stay with the
     caller that knows the topology, among them ``fa4_fallback``, the label taken in place of FA4 where
-    :func:`supports_fa4_backward` refuses it. FA4's varlen limit (:func:`fa4_varlen_refusal`) depends on the
-    rows, so the scripts' requests apply it.
+    :func:`supports_fa4_backward` refuses it. FA4's varlen limit (:func:`fa4_varlen_refusal`) and the kernel taken
+    in place of a deterministic FA4 on multi-document rows depend on the rows, so the scripts' requests apply them.
     """
     attn_implementation = attn_implementation or _detect_attention_impl()
 
@@ -371,7 +385,7 @@ def resolve_attn_implementation(
             f"FlashAttention-4 trains head_dim-{FA4_DEDICATED_HEAD_DIM} attention on a dedicated backward kernel: "
             f"{refused}"
         )
-    elif runs_fa4 and not supports_fa4_backward(model_config):
+    elif runs_fa4 and fa4_demoted_by_determinism(model_config):
         if is_global_main_process():
             logger.warning(
                 "FlashAttention-4's head_dim-256 kernel is not validated with a deterministic backward, which this "

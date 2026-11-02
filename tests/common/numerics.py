@@ -75,6 +75,28 @@ def relative_l2(actual: dict[str, torch.Tensor], reference: dict[str, torch.Tens
     return math.sqrt(num / den) if den else math.inf
 
 
+def worst_relative_l2(actual: dict[str, torch.Tensor], reference: dict[str, torch.Tensor]) -> tuple[float, str | None]:
+    """The largest per-tensor ``||actual - reference|| / ||reference||`` over two tensor dicts (fp64), and its key.
+
+    Per tensor, unlike :func:`relative_l2`: a small tensor's error (a norm weight's gradient summed twice) does not
+    dissolve into a large one's. ``(inf, None)`` when ``reference`` is empty or the two hold different keys, so a
+    comparison of nothing fails a bound; a zero-norm reference counts any nonzero difference as ``inf``. NaN in
+    either operand returns NaN with its key.
+    """
+    if not reference or set(actual) != set(reference):
+        return math.inf, None
+    worst, worst_key = -math.inf, None
+    for key, ref in reference.items():
+        ref = ref.double()
+        error, norm = (actual[key].double() - ref).norm().item(), ref.norm().item()
+        relative = error / norm if norm else (0.0 if error == 0.0 else math.inf)
+        if math.isnan(relative):
+            return math.nan, key
+        if relative > worst:
+            worst, worst_key = relative, key
+    return worst, worst_key
+
+
 def _extreme_or_nan(pick: Callable, values: Iterable[float], default: float | None) -> float:
     values = list(values)
     if any(math.isnan(value) for value in values):

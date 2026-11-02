@@ -253,8 +253,8 @@ def test_gptoss_layer_fails_loud_on_missing_activation_constants():
 
 
 def _grouped_mm_probe(use_grouped_mm: bool, expert_tp_size: int) -> EPGptOssMoELayer:
-    """A layer carrying only what ``_grouped_mm_enabled`` and the summary's combine name read — a real
-    ``__init__`` needs DeepEP groups and a device."""
+    """A layer carrying only what the summary's compute path and combine name read — a real ``__init__`` needs
+    DeepEP groups and a device."""
     layer = EPGptOssMoELayer.__new__(EPGptOssMoELayer)
     layer._use_grouped_mm = use_grouped_mm
     layer.expert_tp_size = expert_tp_size
@@ -262,18 +262,9 @@ def _grouped_mm_probe(use_grouped_mm: bool, expert_tp_size: int) -> EPGptOssMoEL
     return layer
 
 
-@pytest.mark.parametrize("expert_tp_size", [1, 2])
-@pytest.mark.parametrize("use_grouped_mm", [True, False])
-def test_gptoss_runs_the_compute_path_its_run_asks_for(use_grouped_mm, expert_tp_size):
-    """GptOss takes grouped GEMM wherever its run asks for it, expert TP included: the grouped path reads the
-    de-interleaved pair ETP stores under the plain names, as it reads ``*_gmm`` outside ETP."""
-    layer = _grouped_mm_probe(use_grouped_mm=use_grouped_mm, expert_tp_size=expert_tp_size)
-    assert layer._grouped_mm_enabled() is use_grouped_mm
-
-
 @pytest.mark.parametrize("use_grouped_mm", [True, False])
 def test_init_summary_reports_the_effective_grouped_mm_decision(caplog, use_grouped_mm):
-    """The construction-time line reports the compute path the layer runs, read off ``_grouped_mm_enabled``, on a
+    """The construction-time line reports the compute path the layer runs, read off ``_use_grouped_mm``, on a
     GptOss ETP layer as on any other."""
     layer = _grouped_mm_probe(use_grouped_mm=use_grouped_mm, expert_tp_size=2)
     layer.ep_rank, layer.expert_start, layer.expert_end, layer.num_experts = 0, 0, E, E

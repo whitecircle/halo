@@ -86,8 +86,8 @@ footnote(
     0.3,
     0.3,
     11.8,
-    "Exact, not approximate — attention is independent across heads; the layer issues three all-to-alls:"
-    " q, the fused k|v, and the output.",
+    "Exact, not approximate — attention is independent across heads; the layer issues two all-to-alls:"
+    " q, k and v in one buffer, and the output.",
 )
 
 save(fig, "ulysses_attention_flow")

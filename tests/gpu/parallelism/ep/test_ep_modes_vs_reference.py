@@ -2,11 +2,22 @@
 """A real MoE checkpoint under EP, EP+TP or pure ETP against the same checkpoint run undistributed on rank 0: loss,
 router gradient in scale and direction, and a rotated-expert control those comparisons must reject.
 
+Modes: ``ep`` (ep2), ``ep_tp`` (ep2 x tp2 on the same two ranks) and ``etp`` (pure ETP, each expert FFN split over
+both ranks) on two GPUs; ``etp_dp2`` is pure ETP on four, two DP replicas of an expert-TP pair. Under ETP every
+rank's expert-TP group must also be an ``expert_tp_size``-rank group its members agree on, holding each shard
+index once and one DP rank: the comparisons read the identical batch's loss and gradients, not which ranks pair up
+or which batch each would read. With several EP groups (``etp_dp2``) no in-backward hook syncs the router or the
+experts; the trainer's deferred sweep runs after the backward, must hand every expert gradient of the identical
+batch back unchanged, and the router comparisons read the router after it.
+
     torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_modes_vs_reference.py --model gpt_oss_20b --mode ep
+    torchrun --nproc_per_node=4 tests/gpu/parallelism/ep/test_ep_modes_vs_reference.py --model gpt_oss_20b \\
+        --mode etp_dp2
 """
 
 import argparse
 from dataclasses import dataclass, field
+from functools import partial
 
 import torch
 import torch.nn.functional as F
@@ -26,11 +37,13 @@ from tests.common.ep_reference import (
     full_grad,
     named_router_weights,
     roll_expert_banks,
+    sweep_ep_grads,
 )
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory, gpu_peak_mem_gb
 from tests.common.models import GPT_OSS_20B, QWEN3_30B_A3B
-from tests.common.numerics import cos_sim
+from tests.common.numerics import cos_sim, worst_relative_l2
+from tests.common.parallel_shape import expert_tp_group_problems, expert_tp_group_views
 from tests.common.rank_log import log, log_all
 from tests.common.rosters import ep_layer_class_by_model_type
 from tests.common.tolerances import TOL
@@ -42,6 +55,9 @@ LOSS_TOL = TOL.router_pick_flip_loss_abs
 # The EP logits against the no-EP load's, and the share of each side's router gradients that must be non-zero.
 LOGIT_COSINE_MIN = 0.95
 LIVE_GRAD_FRACTION_MIN = 0.5
+# Every DP replica backpropagates the same batch, so the deferred sweep's sum over replicas, divided by their count,
+# hands each expert its own gradient back; a wrong divisor or a missing replica moves it by its own size.
+SWEEP_IDENTITY_REL_TOL = 1e-2
 
 
 @dataclass(frozen=True)
@@ -60,7 +76,22 @@ CHECKPOINTS = {
     "gpt_oss_20b": Checkpoint(GPT_OSS_20B, 128, "eager", {"reset_sinks": False}),
     "qwen3_30b_a3b": Checkpoint(QWEN3_30B_A3B, 256, "flash_attention_2", {"use_liger_kernel": False}),
 }
-MODES = {"ep": {"ep_size": 2}, "ep_tp": {"ep_size": 2, "tp_size": 2}, "etp": {"ep_size": 1, "expert_tp_size": 2}}
+
+
+@dataclass(frozen=True)
+class Mode:
+    """A mode's parallel axes and the world it runs on."""
+
+    axes: dict
+    world_size: int = 2
+
+
+MODES = {
+    "ep": Mode({"ep_size": 2}),
+    "ep_tp": Mode({"ep_size": 2, "tp_size": 2}),
+    "etp": Mode({"ep_size": 1, "expert_tp_size": 2}),
+    "etp_dp2": Mode({"ep_size": 1, "expert_tp_size": 2}, world_size=4),
+}
 
 
 def _router_grads(model) -> dict[str, torch.Tensor | None]:
@@ -107,6 +138,11 @@ def _layout_checks(model, pc: ParallelismConfig) -> dict[str, bool]:
         )
     if pc.expert_tp_size > 1:
         checks["expert_ffn_sharded_etp_way"] = all(layer.expert_tp_size == pc.expert_tp_size for layer in layers)
+        views = expert_tp_group_views(first, pc.get_data_parallel_rank())
+        problems = expert_tp_group_problems(views, pc.expert_tp_size)
+        for problem in problems:
+            log(f"  expert-TP group: {problem}")
+        checks["expert_tp_groups_tile_the_world"] = not problems
     if pc.tp_size > 1:
         # A sharded projection is a DTensor whose local shape is a slice of its global one.
         tp_mesh = model_tp_mesh(model)
@@ -165,6 +201,33 @@ def _reference(ctx, checkpoint: Checkpoint, batch, device: str) -> tuple[float, 
     return broadcast_reference(loss, grad, device, ctx.rank)
 
 
+def _deferred_sweep_checks(model, metrics: dict) -> dict[str, bool]:
+    """COLLECTIVE where the sweep reduces. With several EP groups no in-backward hook syncs the router or the experts:
+    the trainer's deferred sweep does, once per step, and runs here as it would before the optimizer. On the
+    identical batch every replica holds, it must leave each expert gradient as it was; the router comparisons that
+    follow read the router after it."""
+    layers = ep_layers(model)
+    if not layers or not layers[0].ep_config.defer_grad_sync:
+        return {}
+    before = {
+        f"{i}.{name}": param.grad.detach().clone()
+        for i, layer in enumerate(layers)
+        for name, param in layer.expert_named_params()
+        if param.grad is not None
+    }
+    sweep_ep_grads(model)
+    after = {
+        f"{i}.{name}": param.grad.detach()
+        for i, layer in enumerate(layers)
+        for name, param in layer.expert_named_params()
+        if param.grad is not None
+    }
+    worst, name = worst_relative_l2(after, before)
+    log_all(f"  deferred sweep: worst expert-gradient change {worst:.3e} ({name})")
+    metrics["sweep_expert_grad_max_rel_change"] = worst
+    return {"deferred_sweep_keeps_replicated_expert_grads": worst <= SWEEP_IDENTITY_REL_TOL}
+
+
 def _parallel_checks(
     model, batch, ref_loss: float, ref_grad: torch.Tensor, baseline, metrics: dict
 ) -> dict[str, bool]:
@@ -176,12 +239,13 @@ def _parallel_checks(
     log_all(f"  parallel loss={loss:.6f} |Δreference|={abs(loss - ref_loss):.3e}")
     metrics |= {"parallel_loss": loss, "loss_abs_err": abs(loss - ref_loss), "rank_loss_spread": world_spread(loss)}
     outputs.loss.backward()
+    checks = _deferred_sweep_checks(model, metrics)
     router_name, router_weight = find_router_weight(model)
     ratio, cosine = compare_grad(full_grad(router_weight), ref_grad, router_name)
     log_all(f"  router grad ({router_name}) vs reference: norm_ratio={ratio:.4f} cosine={cosine:.4f}")
     metrics |= {"router_grad_norm_ratio": ratio, "router_grad_cosine": cosine}
     expert_grads = [p.grad for layer in ep_layers(model) for _, p in layer.expert_named_params()]
-    checks = {
+    checks |= {
         "losses_agree_across_ranks": TOL.identical_batch_ranks_agree(metrics["rank_loss_spread"]),
         "router_grad_scale_matches_reference": 1 / TOL.grad_norm_ratio_max < ratio < TOL.grad_norm_ratio_max,
         "router_grad_direction_matches_reference": cosine > TOL.grad_direction_cosine_min,
@@ -242,7 +306,7 @@ def run_mode(ctx, checkpoint_key: str, mode_key: str, *, logits: bool = False) -
     }
     baseline = _no_ep_baseline(checkpoint, batch) if logits else None
 
-    pc = ParallelismConfig(**MODES[mode_key])
+    pc = ParallelismConfig(**MODES[mode_key].axes)
     log(f"  {pc.summary()}  ep_group_size={pc.ep_group_size}")
     model, _ = load_distributed_model(
         model_name_or_path=checkpoint.name,
@@ -273,14 +337,16 @@ def run_mode(ctx, checkpoint_key: str, mode_key: str, *, logits: bool = False) -
     return {"checks": checks, "metrics": metrics}
 
 
-@gpu_test_main(exact_world_size=2, prefix="ep_modes_vs_reference")
-def run(ctx):
-    parser = argparse.ArgumentParser()
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--model", choices=sorted(CHECKPOINTS), required=True)
     parser.add_argument("--mode", choices=sorted(MODES), required=True)
-    args = parser.parse_args()
-    return run_mode(ctx, args.model, args.mode)
+    return parser
 
 
 if __name__ == "__main__":
-    run()
+    # Parsed here, not at import: test_ep_vs_no_ep.py imports run_mode and launches with no arguments.
+    ARGS = _parser().parse_args()
+    gpu_test_main(exact_world_size=MODES[ARGS.mode].world_size, prefix="ep_modes_vs_reference")(
+        partial(run_mode, checkpoint_key=ARGS.model, mode_key=ARGS.mode)
+    )()

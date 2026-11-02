@@ -288,9 +288,10 @@ class GradientSyncMixin:
                 and isinstance(p.data, DTensor)
                 and MeshDim.TP in mesh_dim_names(p.data.device_mesh)
             ):
-                # Plan-sharded: the DTensor graph reduces these over the TP mesh itself. A DTensor
-                # without a tp dim is FSDP's dp shard of a TP-replicated param; its reduce-scatter
-                # runs per TP column, so without the AVG below the TP siblings' replicas drift apart.
+                # Plan-sharded: the TP forward's collectives (DTensor's, or the local-shard path's) leave
+                # each rank's gradient complete for its shard. A DTensor without a tp dim is FSDP's dp
+                # shard of a TP-replicated param; its reduce-scatter runs per TP column, so without the
+                # AVG below the TP siblings' replicas drift apart.
                 continue
             candidates.append(p)
         replicated_grads = []
@@ -320,7 +321,7 @@ class GradientSyncMixin:
 
         Registered by :func:`apply_tp_to_attention_only` as names, since FSDP2 replaces Parameter
         objects after TP is applied. Their true gradient is the sum over the TP group: a colwise
-        projection's ``use_local_output=True`` ends the DTensor graph, so nothing else reduces them.
+        projection hands on this rank's heads alone, so nothing else reduces them.
         """
 
         def build() -> set[int]:

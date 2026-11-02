@@ -52,19 +52,21 @@ def tiny_family_checkpoint(ctx, family: str, *, fp32_pins: bool = False) -> str:
     )
 
 
-def load_row_model(base_dir: str, mode: str, pc: ParallelismConfig):
+def load_row_model(base_dir: str, mode: str, pc: ParallelismConfig, *, attn_implementation: str = "eager"):
     """``(model, tokenizer, peft_config)`` through the production loader for ``mode``."""
     if mode == "full":
         model, tokenizer = load_distributed_model(
             model_name_or_path=base_dir,
             parallelism_config=pc,
             dtype=RUN_DTYPE,
-            attn_implementation="eager",
+            attn_implementation=attn_implementation,
             use_liger_kernel=False,
             trust_remote_code=True,
         )
         return model, tokenizer, None
-    return load_peft_model(mode, pc, model_name=base_dir, attn_implementation="eager", use_liger_kernel=False)
+    return load_peft_model(
+        mode, pc, model_name=base_dir, attn_implementation=attn_implementation, use_liger_kernel=False
+    )
 
 
 def base_params_off_run_dtype(model: torch.nn.Module) -> list[str]:

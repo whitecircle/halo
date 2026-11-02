@@ -203,6 +203,26 @@ def _cases() -> tuple[EfficiencyCase, ...]:
 CASES = _cases()
 
 
+class _ScriptedEvent:
+    """A CUDA event the scripted device reaches as it is recorded, at the clock's reading."""
+
+    def __init__(self, device: ScriptedDevice):
+        self.device = device
+        self.at = 0.0
+
+    def record(self, *args, **kwargs) -> None:
+        self.at = self.device.now
+
+    def query(self) -> bool:
+        return True
+
+    def synchronize(self) -> None:
+        pass
+
+    def elapsed_time(self, end: _ScriptedEvent) -> float:
+        return (end.at - self.at) * 1000.0
+
+
 class ScriptedDevice:
     """The CUDA calls the callback makes, answered by a GPU of the scenario's name, and the host clock: its
     readings are set by the driver per hook, not advanced per call."""
@@ -218,6 +238,9 @@ class ScriptedDevice:
     def allocated(self, *args, **kwargs) -> int:
         return int(ALLOCATED_GIB[self.step] * GIB)
 
+    def event(self, *args, **kwargs) -> _ScriptedEvent:
+        return _ScriptedEvent(self)
+
     @contextlib.contextmanager
     def installed(self) -> Iterator[None]:
         with contextlib.ExitStack() as stack:
@@ -226,6 +249,7 @@ class ScriptedDevice:
             if self.name is not None:
                 calls = {
                     "get_device_name": lambda *args, **kwargs: DEVICE_NAME[self.name],
+                    "Event": self.event,
                     "synchronize": lambda *args, **kwargs: None,
                     "reset_peak_memory_stats": lambda *args, **kwargs: None,
                     "memory_allocated": self.allocated,

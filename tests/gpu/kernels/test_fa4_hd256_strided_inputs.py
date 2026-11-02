@@ -2,9 +2,10 @@
 """FA4's head_dim-256 path, called as transformers calls it, is as accurate as FA2 on the strided q/k/v the
 head_dim-256 families hand it.
 
-A head-major q/k (Qwen3.5's partial-rotary ``torch.cat``, GLM-4.7-Flash's MLA) or a v sliced off a fused K/V tensor
-(MLA, the Ulysses all-to-all) reaches the kernel with every stride but the last one unpacked; flash-attn-4 4.0.0b16
-built its head_dim-256 layouts with packed strides and read them scrambled. Against an fp64 reference on those exact
+A head-major q/k (Qwen3.5's partial-rotary ``torch.cat``, GLM-4.7-Flash's MLA), a v sliced off a fused K/V tensor
+(MLA), or q, k and v each sliced off the one buffer a Ulysses all-to-all receives at batch 1 (heads packed, the token
+stride their summed width) reach the kernel with every stride but the last one unpacked; flash-attn-4 4.0.0b16 built
+its head_dim-256 layouts with packed strides and read them scrambled. Against an fp64 reference on those exact
 layouts, dense and varlen, at the Qwen3.5 (16:2) and GLM-4.7-Flash MLA (20:20) head counts: the entry points' output
 and dq/dk/dv must stay within 1.5x of FA2's error, and so must a second backward handed the output gradient
 head-major. Fails on a kernel that misreads any of q, k, v or dout, as 4.0.0b16's does. Also measured, not gated:
@@ -28,16 +29,25 @@ DOCUMENT_LENGTHS = (700, 900, 448)
 S = sum(DOCUMENT_LENGTHS)
 # FA4's error may exceed FA2's (two bf16 kernels, different accumulation order) by this factor; a misread is O(1).
 FA2_ERROR_RATIO = 1.5
+# "head_major": q/k head-major and v off a fused K/V; "one_buffer": the Ulysses all-to-all's received buffer.
+LAYOUTS = ("head_major", "one_buffer")
 
 
-def _strided_inputs(heads: int, kv_heads: int, *, varlen: bool, seed: int):
-    """q and k head-major (``[.., H, S, D]`` transposed to ``[.., S, H, D]``), v the second half of a fused
-    ``[.., S, KV, 2D]`` tensor: last dim contiguous, every other stride not the packed one."""
+def _strided_inputs(heads: int, kv_heads: int, *, varlen: bool, seed: int, layout: str = "head_major"):
+    """q, k and v ``[.., S, H, D]`` with the last dim contiguous and every other stride not the packed one: under
+    ``head_major`` q and k transposed from ``[.., H, S, D]`` and v the second half of a fused ``[.., S, KV, 2D]``
+    tensor; under ``one_buffer`` each a slice of one ``[.., S, (H + 2 KV) D]`` buffer."""
     torch.manual_seed(seed)
     lead = () if varlen else (1,)
-    q = torch.randn(*lead, heads, S, D, device="cuda", dtype=torch.bfloat16).transpose(-3, -2)
-    k = torch.randn(*lead, kv_heads, S, D, device="cuda", dtype=torch.bfloat16).transpose(-3, -2)
-    v = torch.randn(*lead, S, kv_heads, 2 * D, device="cuda", dtype=torch.bfloat16)[..., D:]
+    if layout == "one_buffer":
+        buffer = torch.randn(*lead, S, (heads + 2 * kv_heads) * D, device="cuda", dtype=torch.bfloat16)
+        q, k, v = (
+            part.unflatten(-1, (-1, D)) for part in buffer.split([heads * D, kv_heads * D, kv_heads * D], dim=-1)
+        )
+    else:
+        q = torch.randn(*lead, heads, S, D, device="cuda", dtype=torch.bfloat16).transpose(-3, -2)
+        k = torch.randn(*lead, kv_heads, S, D, device="cuda", dtype=torch.bfloat16).transpose(-3, -2)
+        v = torch.randn(*lead, S, kv_heads, 2 * D, device="cuda", dtype=torch.bfloat16)[..., D:]
     assert q.stride(-1) == k.stride(-1) == v.stride(-1) == 1
     assert not (q.is_contiguous() or k.is_contiguous() or v.is_contiguous())
     return q, k, v
@@ -75,10 +85,10 @@ def _attend(fn, q, k, v, *, varlen: bool, **kwargs):
     return out[0] if isinstance(out, tuple) else out
 
 
-def _errors(fn, heads, kv_heads, *, varlen: bool, head_major_dout: bool = False) -> dict[str, float]:
-    """Output and dq/dk/dv error of ``fn`` against the fp64 reference on the same strided leaves, the output
-    gradient handed to ``fn``'s backward contiguous or, with ``head_major_dout``, head-major."""
-    q, k, v = (t.requires_grad_(True) for t in _strided_inputs(heads, kv_heads, varlen=varlen, seed=0))
+def _errors(fn, heads, kv_heads, *, varlen: bool, layout: str, head_major_dout: bool = False) -> dict[str, float]:
+    """Output and dq/dk/dv error of ``fn`` against the fp64 reference on the same strided leaves of ``layout``, the
+    output gradient handed to ``fn``'s backward contiguous or, with ``head_major_dout``, head-major."""
+    q, k, v = (t.requires_grad_(True) for t in _strided_inputs(heads, kv_heads, varlen=varlen, seed=0, layout=layout))
     out = _attend(fn, q, k, v, varlen=varlen)
     q64, k64, v64 = (t.detach().double().requires_grad_(True) for t in (q, k, v))
     ref = _reference(q64, k64, v64, varlen=varlen)
@@ -120,23 +130,24 @@ def run(ctx):
 
     checks, metrics = {}, {}
     for heads, kv_heads in HEAD_COUNTS:
-        for varlen in (False, True):
-            label = f"{heads}x{kv_heads}_{'varlen' if varlen else 'dense'}"
-            fa4 = cute.flash_attn_varlen_func if varlen else cute.flash_attn_func
-            fa2 = flash_attn.flash_attn_varlen_func if varlen else flash_attn.flash_attn_func
-            fa4_errors = _errors(fa4, heads, kv_heads, varlen=varlen)
-            fa2_errors = _errors(fa2, heads, kv_heads, varlen=varlen)
-            head_major_dout = _errors(fa4, heads, kv_heads, varlen=varlen, head_major_dout=True)
-            log(f"  [{label}] fa4 {fa4_errors}  head-major dout {head_major_dout}  fa2 {fa2_errors}")
-            for name, error in fa4_errors.items():
-                checks[f"{label}_{name}_within_fa2_error"] = error <= FA2_ERROR_RATIO * fa2_errors[name]
-                metrics[f"{label}_{name}_fa4"] = error
-                metrics[f"{label}_{name}_fa2"] = fa2_errors[name]
-            for name in ("dq", "dk", "dv"):
-                checks[f"{label}_{name}_head_major_dout_within_fa2_error"] = (
-                    head_major_dout[name] <= FA2_ERROR_RATIO * fa2_errors[name]
-                )
-                metrics[f"{label}_{name}_fa4_head_major_dout"] = head_major_dout[name]
+        for layout in LAYOUTS:
+            for varlen in (False, True):
+                label = f"{heads}x{kv_heads}_{layout}_{'varlen' if varlen else 'dense'}"
+                fa4 = cute.flash_attn_varlen_func if varlen else cute.flash_attn_func
+                fa2 = flash_attn.flash_attn_varlen_func if varlen else flash_attn.flash_attn_func
+                fa4_errors = _errors(fa4, heads, kv_heads, varlen=varlen, layout=layout)
+                fa2_errors = _errors(fa2, heads, kv_heads, varlen=varlen, layout=layout)
+                head_major_dout = _errors(fa4, heads, kv_heads, varlen=varlen, layout=layout, head_major_dout=True)
+                log(f"  [{label}] fa4 {fa4_errors}  head-major dout {head_major_dout}  fa2 {fa2_errors}")
+                for name, error in fa4_errors.items():
+                    checks[f"{label}_{name}_within_fa2_error"] = error <= FA2_ERROR_RATIO * fa2_errors[name]
+                    metrics[f"{label}_{name}_fa4"] = error
+                    metrics[f"{label}_{name}_fa2"] = fa2_errors[name]
+                for name in ("dq", "dk", "dv"):
+                    checks[f"{label}_{name}_head_major_dout_within_fa2_error"] = (
+                        head_major_dout[name] <= FA2_ERROR_RATIO * fa2_errors[name]
+                    )
+                    metrics[f"{label}_{name}_fa4_head_major_dout"] = head_major_dout[name]
         repeats = _deterministic_backward_repeats(cute.flash_attn_func, heads, kv_heads)
         log(f"  [{heads}x{kv_heads}] deterministic backward bitwise across two calls: {repeats}")
         metrics[f"{heads}x{kv_heads}_deterministic_backward_bitwise"] = repeats

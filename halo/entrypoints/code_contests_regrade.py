@@ -9,7 +9,8 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Any
 
-from halo.environments.eval_runner import GENERATION_ERROR_KEY, load_hf_split
+from halo.data.sources.loading import load_dataset_split
+from halo.environments.eval_runner import GENERATION_ERROR_KEY
 from halo.environments.registry import build_environment
 from halo.environments.tasks.coding.code_contests import (
     DEFAULT_EVAL_PROTOCOL,
@@ -23,6 +24,10 @@ from halo.environments.tasks.coding.program_source import normalized_program
 from halo.environments.tasks.coding.verdicts import FloatTolerance, find_stated_float_tolerance
 from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY
 from halo.environments.tools.definitions import NativeToolCall, ToolArgumentError
+from halo.log import info_logger
+
+# INFO: the report lines are the tool's output, printed under the WARNING root it leaves unconfigured.
+logger = info_logger(__name__)
 
 # Meta keys a re-grade needs: env_type/adapter/dataset/split select the environment and rebuild the
 # hidden tests, model/language name the row of the report. Only eval_code_contests.py stamps the full
@@ -74,7 +79,11 @@ def _load_payloads(
         raise SystemExit(
             f"adapter {adapter_name!r} scores prepared pools only; its raw rows carry no gradable payload"
         )
-    rows = adapter.load(dataset, config, split) if adapter.load else load_hf_split(dataset, config, split)
+    rows = (
+        adapter.load(dataset, config, split)
+        if adapter.load
+        else load_dataset_split(dataset, split=split, config=config)
+    )
     payloads = tuple(adapter.pack_verification(row) for row in adapter.scored_rows(rows, selection))
     if not payloads:
         raise SystemExit(f"{dataset} ({adapter_name}) yielded no gradable problem")
@@ -246,13 +255,11 @@ def regrade_trajectory_files(paths: list[str], workers: int, output_path: str | 
         output = stack.enter_context(open(output_path, "a")) if output_path else None
         for path in paths:
             metrics = regrade_file(path, workers)
-            # print (not logging — third-party imports reconfigure the root logger) and persist each
-            # result as it lands, so progress is visible and partial runs are not lost.
-            print(  # noqa: T201 — the CLI's report line
+            # Reported and persisted as each result lands, so progress is visible and partial runs are not lost.
+            logger.info(
                 f"{metrics['model']:28s} {metrics['adapter']:13s} {display_language(metrics['language']):6s} "
                 f"{metrics['eval_protocol']:11s} n={metrics['n']} s@1={metrics['s@1']:.0%} s@2={metrics['s@2']:.0%} "
-                f"generation_errors={metrics['generation_errors']}",
-                flush=True,
+                f"generation_errors={metrics['generation_errors']}"
             )
             if output:
                 output.write(json.dumps(metrics) + "\n")

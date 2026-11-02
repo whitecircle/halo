@@ -373,8 +373,8 @@ changes both.
 
 ### Tensor parallelism (TP)
 
-HF-native TP (`tp_plan="auto"`, dense) and DTensor TP (`parallelize_module()`, the MoE attention-only path
-incl. EP+TP) both place their sharded params as DTensors, so `save_tp_checkpoint()` reconstructs either
+HF-native TP (`tp_plan="auto"`, dense) and selective TP (`apply_tp_to_attention_only()`, the MoE attention-only
+path incl. EP+TP) both place their sharded params as DTensors, so `save_tp_checkpoint()` reconstructs either
 with one `full_tensor()` walk, plus the plain-tensor all-gather of GptOss `sinks`. One writer per
 filesystem scope (`is_fs_save_rank`, never `tp_rank == 0`) avoids write races between the TP groups a node
 holds. There is no per-rank TP save. A tied embedding/head pair is one vocab-sharded DTensor under

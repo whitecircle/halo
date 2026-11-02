@@ -136,7 +136,13 @@ def test_real_shapes_match_fp64_no_worse_than_sdpa():
         del scores
 
         out, _ = sdpa_flex_sliding.flex_sliding_attention(
-            causal_attention(group, 1, 128, scale), q, k, v, mask[None, None], scaling=scale, sliding_window=window
+            causal_attention(group, 1, 128, scale, window),
+            q,
+            k,
+            v,
+            mask[None, None],
+            scaling=scale,
+            sliding_window=window,
         )
         out.backward(grad)
         flex = _errors(out, (q.grad, k.grad, v.grad), expected, expected_grads)
@@ -164,13 +170,19 @@ def test_documents_are_isolated_bitwise():
         mask = _document_mask(lengths, window)[None, None]
         with torch.no_grad():
             out, _ = sdpa_flex_sliding.flex_sliding_attention(
-                causal_attention(8, 2, 128), q, k, v, mask, scaling=1.0, sliding_window=window
+                causal_attention(8, 2, 128, sliding_window=window), q, k, v, mask, scaling=1.0, sliding_window=window
             )
             q[:, :, :first] += 1.0
             k[:, :, :first] -= 1.0
             v[:, :, :first] *= 2.0
             moved, _ = sdpa_flex_sliding.flex_sliding_attention(
-                causal_attention(8, 2, 128), q, k, v, mask.clone(), scaling=1.0, sliding_window=window
+                causal_attention(8, 2, 128, sliding_window=window),
+                q,
+                k,
+                v,
+                mask.clone(),
+                scaling=1.0,
+                sliding_window=window,
             )
         assert not torch.equal(moved[:, :first], out[:, :first]), "premise: the perturbed document changed"
         assert torch.equal(moved[:, first:], out[:, first:]), f"window={window}: another document moved"
@@ -323,24 +335,26 @@ def _rms_normed(*shape, generator) -> torch.Tensor:
 
 
 def _per_document_reference(q, k, v, rows: list[list[int]], scale: float) -> torch.Tensor:
-    """fp64 causal attention run on each document alone (KV repeated per group), ``[B, S, H, D]``."""
+    """fp64 causal attention run on each document alone (KV repeated per group), ``[B, S, H, D]``. On the math
+    kernel, the only one taking fp64, which the Gemma 4 checks' process-wide SDPA pin turns off."""
     group = q.shape[1] // k.shape[1]
     out = []
-    for row, lengths in enumerate(rows):
-        documents, start = [], 0
-        for n in lengths:
-            span = slice(start, start + n)
-            documents.append(
-                torch.nn.functional.scaled_dot_product_attention(
-                    q[row : row + 1, :, span],
-                    k[row : row + 1, :, span].repeat_interleave(group, 1),
-                    v[row : row + 1, :, span].repeat_interleave(group, 1),
-                    is_causal=True,
-                    scale=scale,
+    with sdpa_kernel([SDPBackend.MATH]):
+        for row, lengths in enumerate(rows):
+            documents, start = [], 0
+            for n in lengths:
+                span = slice(start, start + n)
+                documents.append(
+                    torch.nn.functional.scaled_dot_product_attention(
+                        q[row : row + 1, :, span],
+                        k[row : row + 1, :, span].repeat_interleave(group, 1),
+                        v[row : row + 1, :, span].repeat_interleave(group, 1),
+                        is_causal=True,
+                        scale=scale,
+                    )
                 )
-            )
-            start += n
-        out.append(torch.cat(documents, dim=2))
+                start += n
+            out.append(torch.cat(documents, dim=2))
     return torch.cat(out).transpose(1, 2)
 
 

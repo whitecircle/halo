@@ -1,8 +1,9 @@
 """End-to-end runs of the training entry scripts through ``halo launch``: each method's tiny recipe under
 ``tests/common/recipes/`` (laid out as ``scripts/training``), the data it trains on, the run config the recipe
-becomes, and the launch, resume and export checks a run owes. A method that generates through a live engine
-trains the dense vLLM tier's served checkpoint; every other one a tiny local model."""
+becomes, a row's arguments, and the launch, resume and export checks a run owes. A method that generates through a
+live engine trains the dense vLLM tier's served checkpoint; every other one a tiny local model."""
 
+import argparse
 import json
 import random
 import subprocess
@@ -31,6 +32,12 @@ TRAIN_ROWS, TEST_ROWS = 32, 8
 SEED = 0
 # The line the resume resolution logs on global rank 0 when a run resumes.
 RESUME_LOG = "Resuming from checkpoint: "
+# The line global rank 0 logs after warming a loaded model's FA4 kernels, once per model whose attention resolved to
+# flash_attention_4 (the warm-up runs at world >= 2), and the line every rank logs when that warm-up failed.
+FA4_WARMUP_LOG = "FA4 kernel warmup done"
+FA4_WARMUP_SKIPPED_LOG = "FA4 kernel warmup skipped"
+# A row's attention: the recipe's pinned backend, or none, leaving the script's own default.
+ATTENTION_SETTINGS = ("recipe", "unset")
 # Decoder layers of the tiny model a run trains, at the Qwen3 tokenizer's vocabulary.
 TINY_LAYERS = 2
 # The checkpoint the dense vLLM tier serves, which a method generating through it must train.
@@ -137,7 +144,9 @@ class EntryScriptCase:
     """How one method's run is fed and its export read back.
 
     ``model_fields`` are the recipe fields that name the trained checkpoint (a teacher distills from the same
-    tiny model); ``export`` is the class its last checkpoint loads back as.
+    tiny model); ``export`` is the class its last checkpoint loads back as. ``frozen_models`` counts the frozen
+    models a launch loads beside the policy, on the policy's attention request: a full fine-tune's DPO/KTO
+    reference, the distillation teacher.
     ``server_fields`` names the rollout-server URL and weight-transfer port fields of a method that generates
     through a live engine, which trains :data:`SERVED_MODEL`: the URL rides the run config, a port each launch.
     """
@@ -146,6 +155,7 @@ class EntryScriptCase:
     export: type = AutoModelForCausalLM
     model_fields: tuple[str, ...] = ("model_name_or_path",)
     server_fields: tuple[str, str] | None = None
+    frozen_models: int = 0
 
 
 # Keyed by the ``halo launch`` name of every method under scripts/training.
@@ -153,7 +163,7 @@ CASES: dict[str, EntryScriptCase] = {
     "classification": EntryScriptCase(_labelled_prompts, export=AutoModelForSequenceClassification),
     "distillation/self-distill": EntryScriptCase(lambda: _conversations("prompt", answer_field="answer")),
     "distillation/teacher-distill": EntryScriptCase(
-        lambda: _conversations("messages"), model_fields=("model_name_or_path", "teacher_model")
+        lambda: _conversations("messages"), model_fields=("model_name_or_path", "teacher_model"), frozen_models=1
     ),
     "embedding": EntryScriptCase(_sentence_pairs, export=SentenceTransformer),
     "grpo/environmental": EntryScriptCase(
@@ -161,12 +171,25 @@ CASES: dict[str, EntryScriptCase] = {
     ),
     "grpo/offline": EntryScriptCase(_graded_completions),
     "grpo/online": EntryScriptCase(_answered_prompts, server_fields=("vllm_server_base_url", "vllm_group_port")),
-    "preference/dpo": EntryScriptCase(_preference_pairs),
-    "preference/kto": EntryScriptCase(_unpaired_preferences),
+    "preference/dpo": EntryScriptCase(_preference_pairs, frozen_models=1),
+    "preference/kto": EntryScriptCase(_unpaired_preferences, frozen_models=1),
     "preference/smpo": EntryScriptCase(_preference_pairs),
     "reward/reward-model": EntryScriptCase(_preference_pairs, export=AutoModelForSequenceClassification),
     "sft": EntryScriptCase(lambda: _conversations("prompt")),
 }
+
+
+def row_parser(description: str | None = None) -> argparse.ArgumentParser:
+    """The arguments of an entry-script row: its method and its attention (:data:`ATTENTION_SETTINGS`)."""
+    parser = argparse.ArgumentParser(description=description)
+    parser.add_argument("--method", choices=sorted(CASES), required=True)
+    parser.add_argument(
+        "--attn",
+        choices=ATTENTION_SETTINGS,
+        default="recipe",
+        help="'unset' drops the recipe's attn_implementation, so the run trains on the script's own default",
+    )
+    return parser
 
 
 def method_scripts() -> dict[str, Path]:
@@ -185,13 +208,22 @@ def recipe_path(method: str) -> Path:
 
 
 def write_run_config(
-    method: str, scratch: Path, *, model: str, dataset_dir: str, server_url: str | None = None
+    method: str,
+    scratch: Path,
+    *,
+    model: str,
+    dataset_dir: str,
+    server_url: str | None = None,
+    attention_unset: bool = False,
 ) -> Path:
     """``method``'s recipe plus the run's own settings (the model, its dataset, ``scratch/output`` and, for a
     method generating through an engine, the ``server_url``), written to ``scratch``; returns its path.
-    ``dataset`` cannot be a CLI override, so the run config carries them all."""
+    ``dataset`` cannot be a CLI override, so the run config carries them all. ``attention_unset`` drops the
+    recipe's ``attn_implementation``, which every recipe pins, so the script picks the backend itself."""
     case = CASES[method]
     config = yaml.safe_load(recipe_path(method).read_text())
+    if attention_unset:
+        del config["attn_implementation"]
     config.update(dict.fromkeys(case.model_fields, model))
     config.update(dataset=dataset_dir, output_dir=str(scratch / "output"))
     if case.server_fields is not None:

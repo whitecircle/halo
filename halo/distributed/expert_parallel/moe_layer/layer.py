@@ -306,7 +306,7 @@ class EPMoELayerBase(
             fields.append(f"{self._shared_expert_attr}={'yes' if shared else 'no'}")
         fields += [
             *extras,
-            f"grouped_mm={self._grouped_mm_enabled()}",
+            f"grouped_mm={self._use_grouped_mm}",
             f"glu_combine={self._glu_combine_name()}",
             f"fp32_router={self.fp32_router}",
             f"fp32_experts={self.fp32_experts}",

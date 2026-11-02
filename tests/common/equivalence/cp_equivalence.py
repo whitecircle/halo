@@ -146,29 +146,12 @@ def reference_flash_attn(
     return torch.einsum("bhqk,bkhd->bqhd", probs, v)
 
 
-def gloo_all_to_all(output_tensor_list, input_tensor_list, group=None, async_op=False):
-    """``dist.all_to_all`` over ``dist.all_to_all_single``, the form the gloo backend implements."""
-    if async_op:
-        raise ValueError("the gloo all_to_all stands in for synchronous calls only")
-    input_sizes = [tensor.numel() for tensor in input_tensor_list]
-    output_sizes = [tensor.numel() for tensor in output_tensor_list]
-    flat_input = torch.cat([tensor.reshape(-1) for tensor in input_tensor_list])
-    flat_output = flat_input.new_empty(sum(output_sizes))
-    dist.all_to_all_single(flat_output, flat_input, output_sizes, input_sizes, group=group)
-    for output, chunk in zip(output_tensor_list, flat_output.split(output_sizes), strict=True):
-        output.copy_(chunk.view_as(output))
-
-
 @contextlib.contextmanager
 def tier_controls(tier: str) -> Iterator[None]:
-    """The kernel and transport CP runs on in ``tier``: on GPU its own flash kernel made deterministic under
-    HF's ``full_determinism``; on CPU :func:`reference_flash_attn`, as flash has no CPU build, and
-    :func:`gloo_all_to_all`."""
+    """The kernel CP runs on in ``tier``: on GPU its own flash kernel made deterministic under HF's
+    ``full_determinism``; on CPU :func:`reference_flash_attn`, as flash has no CPU build."""
     if tier == "cpu":
-        with (
-            patch.object(cp_attention, "_flash_attn_func", lambda allow_fa4=True: reference_flash_attn),
-            patch.object(dist, "all_to_all", gloo_all_to_all),
-        ):
+        with patch.object(cp_attention, "_flash_attn_func", lambda allow_fa4=True: reference_flash_attn):
             yield
         return
     enable_full_determinism(SEED)

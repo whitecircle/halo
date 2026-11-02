@@ -1,18 +1,18 @@
 #!/usr/bin/env python
 """CPU tests for the expert-kernel warmup that precedes the first DeepEP dispatch.
 
-The expert activation and the fused permute/unpermute are the lazily-compiled callables inside the
-dispatch→combine span: every expert combine on the roster is a Triton kernel (the fused GLUs, the clamped
-SwiGLUs, GptOss), as are the permute kernels, and Triton compiles one on its first call. Left cold it
-compiles BETWEEN the two collectives, while every peer of the EP group spins in DeepEP's barrier — whose
-budget bounds rank SKEW, not idle time.
+The expert activation, the routing sort and the fused permute/unpermute are the lazily-compiled callables
+inside the dispatch→combine span: every expert combine on the roster is a Triton kernel (the fused GLUs, the
+clamped SwiGLUs, GptOss), as are the routing-sort and permute kernels, and Triton compiles one on its first
+call. Left cold it compiles BETWEEN the two collectives, while every peer of the EP group spins in DeepEP's
+barrier — whose budget bounds rank SKEW, not idle time.
 
 Asserted here: the warmup runs to completion before the first dispatch on a real dispatch group
 (``ep_size > 1``; at ``ep_size == 1`` the dispatcher is a no-op with no barrier to stall), exactly
 once per layer, in both grad modes AND with a real backward (the backward kernel is a separate
 compilation, built only when a grad is first requested), even when that first forward runs under
-inference mode; it warms the permute kernels wherever the compute path runs them; the kernels take
-their row count unspecialized, so one warm count covers every dispatch size; and each family's own
+inference mode; it warms the routing-sort and permute kernels wherever the compute path runs them; the
+kernels take their row count unspecialized, so one warm count covers every dispatch size; and each family's own
 warm hook reaches the callable its compute path actually calls, with the operands that path produces.
 
 Run: pytest tests/cpu/parallelism/test_ep_activation_warmup.py
@@ -26,8 +26,9 @@ import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
 from halo.distributed.expert_parallel.families import gpt_oss as gpt_oss_layer
+from halo.distributed.expert_parallel.moe_layer import compute
 from halo.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
-from halo.kernels import fused_glu, moe_permute
+from halo.kernels import fused_glu, moe_permute, moe_route_sort
 from halo.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.ep_stubs import StubEPLayerBase
 
@@ -56,6 +57,7 @@ class _RecordingLayer(StubEPLayerBase):
     def __init__(self, ep_size: int = 2):
         super().__init__()
         self.ep_size = ep_size
+        self.experts_per_rank = LOCAL_EXPERTS
         self.expert_tp_size = 1
         self._capture_routing = False
         self._activation_warmed = False
@@ -161,6 +163,11 @@ def test_the_warmup_draws_no_random_numbers():
         (fused_glu._glu_fwd_kernel, "n_rows"),
         (fused_glu._glu_bwd_kernel, "n_rows"),
         (moe_permute._gather_reduce_kernel, "n_src"),
+        (moe_route_sort._histogram_kernel, "n_rows"),
+        (moe_route_sort._scan_kernel, "n_blocks"),
+        (moe_route_sort._scan_kernel, "n_valid"),
+        (moe_route_sort._place_kernel, "n_rows"),
+        (moe_route_sort._place_kernel, "n_valid"),
     ),
 )
 def test_the_kernels_do_not_specialize_on_the_dispatch_row_count(kernel, row_count):
@@ -195,19 +202,24 @@ def _record_permute_backwards(monkeypatch) -> list[tuple[str, str]]:
     ((2, 2, True, True), (1, 2, True, True), (2, 2, False, False)),
     ids=("fused_permute", "fused_permute_top_k_below_ep_size", "per_expert_loop"),
 )
-def test_the_permute_kernels_are_warmed_where_the_compute_path_runs_them(
+def test_the_routing_sort_and_permute_kernels_are_warmed_where_the_compute_path_runs_them(
     monkeypatch, top_k, ep_size, grouped_mm, warmed
 ):
-    """The grouped path always takes the fused permute, whatever ``top_k`` and ``ep_size``: its gather's
-    backward and the weighted unpermute's forward and backward run inside the span, so the warmup runs
-    them first, forward and backward. ``use_grouped_gemm: false`` runs the per-expert loop, the documented
-    way around these kernels: there is nothing to warm, and a warm-up that ran them anyway would compile
-    the kernels the loop exists to avoid."""
+    """The grouped path always takes the routing sort and the fused permute, whatever ``top_k`` and ``ep_size``:
+    the sort's kernels, its gather's backward and the weighted unpermute's forward and backward run inside the
+    span, so the warmup runs them first, at the layer's ``top_k`` and local expert count, which the sort's kernels
+    compile on. ``use_grouped_gemm: false`` runs the per-expert loop, the documented way around these kernels:
+    there is nothing to warm, and a warm-up that ran them anyway would compile the kernels the loop exists to
+    avoid."""
     calls = _record_permute_backwards(monkeypatch)
+    sorts = []
+    real_warm = compute.warm_route_sort_kernels
+    monkeypatch.setattr(compute, "warm_route_sort_kernels", lambda *args: sorts.append(args[:2]) or real_warm(*args))
     layer = _RecordingLayer(ep_size=ep_size)
     layer._use_grouped_mm = grouped_mm
     layer._warm_activation_graphs(torch.device("cpu"), torch.float32, HIDDEN, top_k=top_k)
     assert set(calls) == (_PERMUTE_BACKWARDS if warmed else set())
+    assert sorts == ([(top_k, LOCAL_EXPERTS)] if warmed else [])
 
 
 def test_a_first_forward_under_inference_mode_warms_every_kernel(monkeypatch):

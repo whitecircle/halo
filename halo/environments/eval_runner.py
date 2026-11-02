@@ -14,10 +14,8 @@ from functools import partial
 from typing import Any
 
 import httpx
-from datasets import Dataset, load_dataset, load_from_disk
 from openai import NOT_GIVEN, APIStatusError, APITimeoutError, AsyncOpenAI
 
-from halo.data.sources.paths import parse_dataset_source, reject_ambiguous_hub_source
 from halo.environments.engine_wire import (
     capture_request_fields,
     generation_control_fields,
@@ -59,29 +57,6 @@ GENERATION_ERROR_KEY = "generation_error"
 _DRIVER_FAULT_KEY = "_driver_fault"
 # The driver's per-episode telemetry, persisted as ``eval_stats``.
 EVAL_STATS_KEY = "_eval_stats"
-
-
-def load_hf_split(dataset: str, config: str | None, split: str) -> Dataset:
-    """Load one split from a local ``save_to_disk`` directory or the HuggingFace Hub, the source classified by
-    :func:`parse_dataset_source`: an existence probe would let a stale directory shadow a Hub id and read a
-    mistyped path as one, so a Hub-shaped path naming a local directory is refused instead."""
-    source_type, _bucket, path = parse_dataset_source(dataset)
-    if source_type == "s3":
-        raise ValueError(
-            f"'{dataset}' is an S3 URI; the eval runner reads a local save_to_disk directory or a "
-            f"Hub dataset id. Download it first, or point --dataset at 'org/name'."
-        )
-    if source_type == "hf_hub":
-        reject_ambiguous_hub_source(dataset)
-        return load_dataset(path, config, split=split)
-
-    ds = load_from_disk(path)
-    # A bare saved Dataset holds one unnamed split; membership would iterate rows, then fail.
-    if isinstance(ds, Dataset):
-        return ds
-    if split not in ds:
-        raise ValueError(f"--split {split!r} is not in {path}, which holds {list(ds)}")
-    return ds[split]
 
 
 def _serialized_message(message: Message) -> dict[str, Any]:

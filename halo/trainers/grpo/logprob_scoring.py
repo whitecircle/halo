@@ -22,9 +22,11 @@ from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_f
 from halo.distributed.context_parallel.ulysses_model import find_ulysses_model
 from halo.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from halo.distributed.tensor_parallel.hf_plan import plan_shards_param
+from halo.distributed.tensor_parallel.local_linears import runs_local_forward
 from halo.kernels.head_logprobs import chunked_head_logprobs
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.selection import effective_attn_implementation
+from halo.models.forward_capture import capturing_forward_outputs
 from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.modality import config_declares_multimodality
 from halo.models.module_tree import embedding_module, find_module_path
@@ -388,15 +390,16 @@ class LogprobScoringMixin:
 
 
 def _tp_gathered_output_head(model) -> torch.nn.Module | None:
-    """The output embedding when a TP plan shards it, else ``None``.
+    """The output embedding when a TP plan shards it and transformers' DTensor forward computes it, else ``None``.
 
     Read off the plan transformers applied rather than off ``is_tp_mode``: the MoE path applies TP to
     attention alone and leaves the head whole, and FSDP2 makes the head's weight a DTensor in every
     mode, so neither the axis flag nor the parameter type separates a gathered head from a plain one.
+    A head on the local-shard forward is left out: its gathered logits are a fresh tensor.
     """
     head = embedding_module(model, "output")
     plan = getattr(model, "_tp_plan", None)
-    if head is None or not plan:
+    if head is None or not plan or runs_local_forward(head):
         return None
     name = find_module_path(model, head)
     return head if name is not None and plan_shards_param(f"{name}.weight", plan) else None
@@ -490,21 +493,18 @@ class ChunkedGRPOLogprobsMixin(LogprobScoringMixin):
         if sink is None:
             yield
             return
-        handle = model.register_forward_hook(
-            lambda _module, _inputs, output: sink.append(output.logits[:, :-1][:, -logits_to_keep:])
-        )
-        try:
+        with capturing_forward_outputs(model, lambda output: output.logits[:, :-1][:, -logits_to_keep:]) as logits:
             yield
-        finally:
-            handle.remove()
+        sink.extend(logits)
 
     @contextmanager
     def _writable_logits(self, model):
         """Let TRL's full-logits path divide the logits in place under TP by cloning a gathered head's output.
 
-        A gathered ``lm_head`` plan (HF's ``colwise_gather_output``) ends in ``DTensor.to_local()``, whose
-        output autograd forbids writing in place, and TRL divides the sliced logits by the temperature in
-        place (``Output 0 of SliceBackward0 is a view and is being modified inplace``).
+        A gathered ``lm_head`` plan (HF's ``colwise_gather_output``) left on transformers' forward (a head class
+        with a forward of its own) ends in ``DTensor.to_local()``, whose output autograd forbids writing in
+        place, and TRL divides the sliced logits by the temperature in place (``Output 0 of SliceBackward0 is
+        a view and is being modified inplace``).
         """
         head = _tp_gathered_output_head(self.accelerator.unwrap_model(model))
         if head is None:

@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""CPU tests for the shared eval runner: dataset loading (``load_hf_split``), trajectory recording
-(``serialize_trajectory`` + ``write_trajectories_jsonl``), the episode driver's failure handling and
-retries (``run_episode``), and the scores (``collect_results`` + ``summarize`` + ``report``).
+"""CPU tests for the shared eval runner: trajectory recording (``serialize_trajectory`` +
+``write_trajectories_jsonl``), the episode driver's failure handling and retries (``run_episode``), and the
+scores (``collect_results`` + ``summarize`` + ``report``).
 
 - A recorded trajectory keeps the conversation and the grading verdict but never the answer key (the
   hidden tests in ``info["_test_cases"]``, the graded ``info["context"]["answer"]`` payload).
@@ -24,7 +24,6 @@ from typing import Any
 
 import httpx
 import pytest
-from datasets import Dataset, DatasetDict
 from openai import (
     NOT_GIVEN,
     APIStatusError,
@@ -39,7 +38,6 @@ import halo.environments.eval_runner as eval_runner
 from halo.environments.episode_keys import EPISODE_ERROR_KEY, REWARD_COMPONENTS_KEY, SOLVE_RATE_KEY
 from halo.environments.eval_runner import (
     collect_results,
-    load_hf_split,
     report,
     run_episode,
     serialize_trajectory,
@@ -459,58 +457,6 @@ async def test_run_episode_cleans_up_on_mid_episode_exception(monkeypatch):
     assert env._trajectories == {}
 
 
-def test_load_hf_split_reads_a_bare_saved_dataset(tmp_path):
-    # save_to_disk on a bare Dataset writes one unnamed split; DatasetDict handling dies on .keys().
-    path = str(tmp_path / "bare")
-    Dataset.from_list([{"prompt": "p", "answer": "a"}]).save_to_disk(path)
-    split = load_hf_split(path, None, "test")
-    assert isinstance(split, Dataset)
-    assert split[0] == {"prompt": "p", "answer": "a"}
-
-
-def test_load_hf_split_refuses_a_hub_id_a_local_directory_shadows(tmp_path, monkeypatch):
-    """``org/name`` beside a directory of that name is refused, neither read off disk nor fetched.
-
-    Classifying by an existence probe reads whatever local copy happens to shadow the id the caller
-    named, while the string rule alone silently reads the Hub for a caller who meant the directory.
-    """
-    shadow = tmp_path / "org" / "name"
-    shadow.mkdir(parents=True)
-    Dataset.from_list([{"prompt": "local-row"}]).save_to_disk(str(shadow))
-    monkeypatch.chdir(tmp_path)
-
-    monkeypatch.setattr(eval_runner, "load_dataset", lambda *a, **k: pytest.fail("a shadowed Hub id was fetched"))
-    monkeypatch.setattr(eval_runner, "load_from_disk", lambda *a, **k: pytest.fail("a Hub id was read off disk"))
-
-    with pytest.raises(ValueError, match=r"'\./org/name'"):
-        load_hf_split("org/name", None, "test")
-
-
-def test_load_hf_split_reads_a_hub_id_from_the_hub(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
-    seen: dict = {}
-
-    def fake_load_dataset(path, config=None, *, split=None, **_kwargs):
-        seen.update(path=path, config=config, split=split)
-        return Dataset.from_list([{"prompt": "hub-row"}])
-
-    monkeypatch.setattr(eval_runner, "load_dataset", fake_load_dataset)
-    monkeypatch.setattr(eval_runner, "load_from_disk", lambda *a, **k: pytest.fail("a Hub id was read off disk"))
-
-    assert load_hf_split("org/name", None, "test")[0]["prompt"] == "hub-row"
-    assert seen == {"path": "org/name", "config": None, "split": "test"}
-
-
-def test_load_hf_split_refuses_an_s3_uri(monkeypatch):
-    """An S3 URI names neither of the two sources this loader reads, and must say so — handed to the
-    Hub loader instead, it fails on the Hub's name for a path the caller spelled correctly."""
-    monkeypatch.setattr(eval_runner, "load_dataset", lambda *a, **k: pytest.fail("an S3 URI reached the Hub loader"))
-    monkeypatch.setattr(eval_runner, "load_from_disk", lambda *a, **k: pytest.fail("an S3 URI was read off disk"))
-
-    with pytest.raises(ValueError, match="S3 URI"):
-        load_hf_split("s3://bucket/key", None, "train")
-
-
 # collect_results — the generation contract every sample is drawn under
 
 
@@ -687,20 +633,6 @@ async def test_eval_driver_keeps_contextvar_writes_across_turns(monkeypatch):
     )
     observations = [m.content for m in traj.messages if m.role == "tool"]
     assert observations[-1] == "persisted", observations
-
-
-def test_load_hf_split_picks_the_named_split_of_a_dataset_dict(tmp_path):
-    path = str(tmp_path / "dict")
-    DatasetDict(
-        {
-            "train": Dataset.from_list([{"prompt": "train-row"}]),
-            "test": Dataset.from_list([{"prompt": "test-row"}]),
-        }
-    ).save_to_disk(path)
-    assert load_hf_split(path, None, "test")[0]["prompt"] == "test-row"
-    # A mistyped split must not quietly evaluate another one (possibly train).
-    with pytest.raises(ValueError, match=r"--split 'validation' is not in .*\['train', 'test'\]"):
-        load_hf_split(path, None, "validation")
 
 
 def test_summarize_empty_results_fails_loud():

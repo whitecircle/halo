@@ -444,7 +444,7 @@ def test_the_eval_leaves_out_and_counts_examples_only_problems_unless_asked(capl
 def test_the_regrader_rebuilds_the_rows_each_run_scored(monkeypatch):
     """The re-grade reads an episode's problem by index, so it rebuilds the eval's sequence from the meta line: a
     run recording the exclusion scored without the examples-only problems, one predating it with them."""
-    monkeypatch.setattr(code_contests_regrade, "load_hf_split", lambda *_: list(_ROWS))
+    monkeypatch.setattr(code_contests_regrade, "load_dataset_split", lambda *_, **__: list(_ROWS))
     code_contests_regrade._load_payloads.cache_clear()
     meta = {"adapter": "codeforces", "dataset": "examples-only/now", "split": "test"}
     current = code_contests_regrade.build_payloads({**meta, "selection": ContestSelection().to_meta()})

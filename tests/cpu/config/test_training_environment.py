@@ -21,6 +21,7 @@ from halo.models.attention.selection import supports_fa4_backward
 
 # The probe's own spelling: the guard's exemption and the sentinel on disk must be the same name.
 from halo.runtime.filesystem import FS_PROBE_PREFIX
+from tests.common.parallelism import make_parallelism_config
 
 
 def _config(output_dir, resume=None):
@@ -244,7 +245,12 @@ def test_a_resumed_run_logs_its_checkpoint_once(tmp_path, caplog):
     with caplog.at_level(logging.INFO):
         context = SimpleNamespace(
             parallelism_config=SimpleNamespace(
-                has_ep_group=False, is_cp_mode=False, is_tp_mode=False, is_expert_tp_mode=False, data_parallel_size=1
+                has_ep_group=False,
+                is_cp_mode=False,
+                is_tp_mode=False,
+                is_expert_tp_mode=False,
+                is_pp_mode=False,
+                data_parallel_size=1,
             ),
             mode_suffix="ddp",
             resume_checkpoint=resume_checkpoint_from_config(_config(out, resume=True), overwrite_output_dir=False),
@@ -252,6 +258,32 @@ def test_a_resumed_run_logs_its_checkpoint_once(tmp_path, caplog):
         run_trainer(trainer, context, method_name="SFT")
     lines = [record.getMessage() for record in caplog.records if "Resuming from checkpoint" in record.getMessage()]
     assert lines == [f"Resuming from checkpoint: {ckpt}"]
+
+
+@pytest.mark.parametrize(
+    ("gpus_per_node", "axes", "lines"),
+    [
+        (4, {"ep_size": 2}, ["EP size: 2", "DP size: 4"]),
+        (4, {"cp_size": 2}, ["CP size: 2", "DP size: 2"]),
+        (4, {"tp_size": 2}, ["TP size: 2", "DP size: 2"]),
+        (4, {"expert_tp_size": 2}, ["EP size: 1", "ETP size: 2", "DP size: 2"]),
+        (2, {"pp_size": 2}, ["PP size: 2", "DP size: 2"]),
+    ],
+)
+def test_the_start_banner_names_each_axis_the_run_uses(caplog, gpus_per_node, axes, lines):
+    """The banner is where a user confirms the run has the shape they asked for, so every axis the run uses is
+    named beside the DP size it leaves (PP stages sit on NVLink-domain boundaries, hence two 2-GPU nodes)."""
+    parallelism_config = make_parallelism_config(world_size=4, gpus_per_node=gpus_per_node, **axes)
+    trainer = SimpleNamespace(
+        callback_handler=SimpleNamespace(callbacks=[]),
+        state=TrainerState(max_steps=0),
+        train=lambda resume_from_checkpoint=None: None,
+        cleanup_ep=lambda: None,
+    )
+    context = SimpleNamespace(parallelism_config=parallelism_config, mode_suffix="test", resume_checkpoint=None)
+    with caplog.at_level(logging.INFO):
+        run_trainer(trainer, context, method_name="SFT")
+    assert [record.getMessage().strip() for record in caplog.records if " size: " in record.getMessage()] == lines
 
 
 # Run setup before the model load

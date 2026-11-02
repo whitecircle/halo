@@ -99,6 +99,29 @@ def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
         raise ValueError(f"Unknown dataset source type: {source_type} for path: {path}")
 
 
+def load_dataset_split(source: str, *, split: str, config: str | None = None) -> Dataset:
+    """One split of ``source``: a Hub dataset id read at ``config`` and ``split``, which name them in place of a
+    ``:config`` / ``@split`` suffix; any other source as :func:`load_dataset_from_source` reads it, a bare saved
+    Dataset and a local data file being their one split and a DatasetDict having to hold ``split``."""
+    source_type, _bucket, path = parse_dataset_source(source)
+    if source_type == "hf_hub":
+        reject_ambiguous_hub_source(source)
+        if hub_repo_id(source) != source:
+            raise ValueError(
+                f"Dataset {source!r} carries a ':config' or '@split' suffix; pass the bare 'org/name' and name the "
+                f"config and split through their own arguments (--config / --split)."
+            )
+        return load_dataset(source, config, split=split)
+    loaded = load_dataset_from_source(source)
+    if isinstance(loaded, Dataset):
+        return loaded
+    if data_file_builder(path) is not None:
+        return loaded["train"]
+    if split not in loaded:
+        raise ValueError(f"split {split!r} is not in {source}, which holds {list(loaded)}")
+    return loaded[split]
+
+
 def _warn_test_size_ignored(path: str, test_size: float | None, kind: str) -> None:
     """Warn that ``test_size`` cannot re-split a sharded or pre-processed dataset, whose split was fixed
     when it was prepared; silent when unset."""

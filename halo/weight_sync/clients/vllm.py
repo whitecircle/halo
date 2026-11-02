@@ -15,10 +15,10 @@ from halo.weight_sync.clients.base import (
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
-    AsyncCall,
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
+from halo.weight_sync.clients.server_calls import AsyncCall
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S
 from halo.weight_sync.transport.packed_broadcast import (
     PACKED_BUFFER_BYTES,

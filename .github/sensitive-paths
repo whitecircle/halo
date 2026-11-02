@@ -16,6 +16,7 @@ halo/runtime/**
 halo/checkpoint/parallel/**
 halo/subclass_registry.py
 halo/kernels/moe_permute.py
+halo/kernels/moe_route_sort.py
 halo/kernels/fused_glu.py
 halo/kernels/lowp/spec.py
 halo/models/gradient_checkpointing.py

@@ -5,8 +5,10 @@ for bit what the device-sized ``nonzero`` / ``torch.where`` give.
 DeepEP's synced dispatch already reports, on the host, how many (token, expert) slots each local expert
 received: V2 on its handle (``num_recv_tokens_per_expert_list``), V1 as its fourth dispatch output. The
 backends hand them on, the dispatcher passes them through, and the expert compute reads nothing back from the
-device to size its indices: the grouped sort compacts with a ``nonzero_static`` of their sum, the per-expert
-loop selects each expert's slots with a ``nonzero_static`` of its own count. Asserted here:
+device to size its indices: the grouped sort (on CPU, the torch construction of ``halo/kernels/moe_route_sort.py``)
+compacts with a ``nonzero_static`` of their sum, the per-expert loop selects each expert's slots with a
+``nonzero_static`` of its own count. On CUDA the grouped sort is a counting sort sized by their sum, held bit for bit
+to this construction by ``tests/cpu/kernels/test_moe_route_sort.py``. Asserted here:
 
 - the sort's six outputs equal the ``nonzero`` sort's bit for bit: padded receives, an idle expert, rows
   whose every slot is local, and a receive with no local slot;
@@ -38,11 +40,11 @@ from tests.common.ep_reference import (
     GroupedSortLayer,
     grouped_sort_mismatches,
     nonzero_grouped_sort,
-    receive_counts,
     received_expert_ids,
     where_expert_loop,
 )
 from tests.common.parallelism import single_process_ep_config
+from tests.common.route_sort_reference import receive_counts
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 # Routing width of the family sweep's synthetic receive; the expert compute takes any width (Gemma 4's router
@@ -150,7 +152,7 @@ def _ep_layer(family: str, *, grouped: bool, expert_tp_size: int = 1) -> EPMoELa
         apply_ep_layers(model, config)
     layer = named_ep_layers(model)[0][1]
     assert layer.expert_tp_size == expert_tp_size
-    assert layer._grouped_mm_enabled() == grouped, f"{family}: not on the expert-compute path this test exercises"
+    assert layer._use_grouped_mm == grouped, f"{family}: not on the expert-compute path this test exercises"
     layer.ep_size = 2
     return layer
 

@@ -31,7 +31,8 @@ def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
         "--dataset",
         type=str,
         required=True,
-        help=f"Local data file ({', '.join(DATA_FILE_BUILDERS)}) or HuggingFace dataset id 'org/name'",
+        help=f"HuggingFace dataset id 'org/name', s3:// URI, local data file ({', '.join(DATA_FILE_BUILDERS)}) "
+        "or save_to_disk directory",
     )
     parser.add_argument(
         "--output_path",
@@ -59,7 +60,13 @@ def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
         "stripping every column.",
     )
     parser.add_argument("--config", type=str, default=None, help="Hub dataset config name (default: none).")
-    parser.add_argument("--split", type=str, default="train", help="Hub dataset split (default: %(default)s).")
+    parser.add_argument(
+        "--split",
+        type=str,
+        default="train",
+        help="Split of a Hub dataset, or of an s3:// or save_to_disk DatasetDict; a data file is its one split "
+        "(default: %(default)s).",
+    )
 
 
 def _add_embedding_args(parser: argparse.ArgumentParser) -> None:
@@ -120,7 +127,9 @@ def _add_run_args(parser: argparse.ArgumentParser) -> None:
         "(default: <output_path>.embeddings.npy)",
     )
     parser.add_argument("--dry_run", action="store_true", help="Perform a dry run without saving the output")
-    parser.add_argument("--sample_size", type=int, default=None, help="Process only the first N rows (default: all).")
+    parser.add_argument(
+        "--sample_size", type=int, default=None, help="Process a seeded random sample of N rows (default: all)."
+    )
     parser.add_argument("--verbose", action="store_true", help="Enable verbose logging")
 
 

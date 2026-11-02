@@ -21,10 +21,10 @@ from halo.weight_sync.clients.base import (
     HTTP_PROBE_TIMEOUT_S,
     POST_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
-    AsyncCall,
     WeightSyncClientBase,
     unservable_bailing_model_types,
 )
+from halo.weight_sync.clients.server_calls import AsyncCall
 from halo.weight_sync.transport.bounded_waits import CHUNK_SYNC_TIMEOUT_S, bounded_event_sync, bounded_stream_sync
 from halo.weight_sync.transport.c10d_group import (
     abort_weight_update_group,

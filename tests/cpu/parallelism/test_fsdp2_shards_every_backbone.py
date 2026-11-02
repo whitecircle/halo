@@ -1,6 +1,6 @@
 """FSDP2 must shard something for every backbone shape, and say so.
 
-``apply_fsdp2_per_layer`` resolves the decoder layer list to build per-layer shard groups. Finding
+``apply_fsdp2_per_layer`` resolves the decoder layer list to build its shard groups. Finding
 none must not issue ZERO ``fully_shard`` calls while the caller still returns success — that sets
 ``_fsdp_wrapped``, which suppresses the DDP fallback. The result is a data-parallel run with no
 gradient synchronization on either path: replicas diverge from step one and whichever rank writes
@@ -20,6 +20,7 @@ the layer-less shapes above keep working.
     python tests/cpu/parallelism/test_fsdp2_shards_every_backbone.py
 """
 
+import math
 from unittest.mock import patch
 
 import pytest
@@ -92,7 +93,10 @@ class _CausalLmLike(nn.Module):
 
 def _shard_calls(model):
     calls = []
-    with patch.object(fsdp, "fully_shard", side_effect=lambda mod, **kw: calls.append(mod)):
+    with (
+        patch.object(fsdp, "fully_shard", side_effect=lambda mod, **kw: calls.append(mod)),
+        patch.object(fsdp, "_install_unit_hooks"),
+    ):
         count = fsdp.apply_fsdp2_per_layer(
             model,
             dp_mesh=None,
@@ -120,22 +124,24 @@ def test_every_backbone_shape_gets_at_least_one_shard_group(factory, label):
     assert len(calls) == count, f"{label}: reported {count} groups but issued {len(calls)} fully_shard calls"
 
 
-def test_layer_list_backbones_shard_per_layer_not_monolithically():
-    """Per-layer groups are the point of FSDP2; one root group all-gathers the whole model.
+def test_layer_list_backbones_shard_in_layer_units_not_monolithically():
+    """Groups of decoder layers are the point of FSDP2; one root group all-gathers the whole model.
 
     Both ``.layers`` and ``.h`` resolve through the same rule as ``backbone_with_layers``, so both
-    must produce a group per layer plus the backbone plus the root.
+    must produce their ZeRO-2 units of decoder layers plus the backbone plus the root.
     """
     for factory, attr in ((_CausalLmLike, ".layers"), (_Gpt2Like, ".h")):
         model = factory()
         count, calls = _shard_calls(model)
-        assert count == 4, f"{attr}: expected 2 layers + backbone + root, got {count}"
         layer_list = getattr(model, "model", None) or model.transformer
         layers = getattr(layer_list, "layers", None)
         if layers is None:
             layers = layer_list.h
+        units = math.ceil(len(layers) / fsdp.layers_per_shard_group(reshard_after_forward=False))
+        assert count == units + 2, f"{attr}: expected {units} layer unit(s) + backbone + root, got {count}"
+        wrapped = [module for call in calls for module in (call if isinstance(call, list) else [call])]
         for layer in layers:
-            assert any(c is layer for c in calls), f"{attr}: decoder layer never sharded"
+            assert any(module is layer for module in wrapped), f"{attr}: decoder layer never sharded in a unit"
 
 
 def test_a_model_with_no_layers_shards_its_root():

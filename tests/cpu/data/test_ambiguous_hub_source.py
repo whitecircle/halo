@@ -16,9 +16,8 @@ import re
 import pytest
 from datasets import Dataset, DatasetDict
 
-from halo.data.sources.loading import load_dataset_from_source, load_datasets_auto
+from halo.data.sources.loading import load_dataset_from_source, load_dataset_split, load_datasets_auto
 from halo.data.sources.paths import reject_ambiguous_hub_source
-from halo.environments.eval_runner import load_hf_split
 from tests.common.datasets import write_prepared_text_dataset
 
 _DOCUMENTS = DatasetDict(
@@ -55,7 +54,7 @@ def test_a_saved_raw_dataset_under_a_hub_shaped_path_is_refused_by_every_reader(
     with pytest.raises(ValueError, match="local directory of that name exists"):
         load_datasets_auto("data/corpus", test_size=None, dataset_ratio=None, conversation_field="text")
     with pytest.raises(ValueError, match="local directory of that name exists"):
-        load_hf_split("data/corpus@train", None, "train")
+        load_dataset_split("data/corpus@train", split="train")
 
     assert load_dataset_from_source("./data/corpus")["train"]["text"] == _DOCUMENTS["train"]["text"]
 

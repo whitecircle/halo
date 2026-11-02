@@ -15,7 +15,7 @@ Per-step traffic that crosses RDMA, by mode:
 
 | Mode | What crosses | Volume |
 |---|---|---|
-| FSDP2 1D full-shard | per-layer param all-gather + grad reduce-scatter | ~2–3× param bytes |
+| FSDP2 1D full-shard | per-shard-group param all-gather + grad reduce-scatter | ~2–3× param bytes |
 | HSDP | one gradient all-reduce | ~1× param bytes, plus a param replica per domain |
 | EP `ep_scope=global` | DeepEP dispatch/combine | sparse token bytes per MoE layer |
 | TP / CP | **forbidden cross-node** | — |

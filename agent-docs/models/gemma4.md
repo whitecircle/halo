@@ -39,7 +39,7 @@ The router's top-k field is spelled `top_k_experts` (not `num_experts_per_tok`) 
 Gemma 4 attention uses two patterns that need bespoke wrappers:
 
 - **KV-shared layers** — the trailing `num_kv_shared_layers` decoder layers reuse an earlier layer's K/V. Naive TP would clone the cache; a CP wrapper would have to track the shared-from layer's sequence slice.
-- **`attention_k_eq_v`** — when set, the K projection is reused as V (one linear), incompatible with the standard ColwiseParallel-on-Q/K/V plan.
+- **`attention_k_eq_v`** — when set, the K projection is reused as V (one linear), incompatible with the standard colwise Q/K/V plan.
 
 No Gemma 4 attention class appears in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`) or in the CP wrapper registry (`halo/distributed/context_parallel/families.py`), so neither mode patches Gemma 4 attention.
 

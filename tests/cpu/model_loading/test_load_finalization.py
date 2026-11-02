@@ -39,6 +39,7 @@ from tests.common.source_sweep import (
     called_names,
     functions_calling,
     functions_in,
+    imported_module_files,
 )
 
 SEAM = finalize_loaded_model.__name__
@@ -76,9 +77,20 @@ TERMINAL_LOADERS = (
     ("halo/model_loading/parallel/pp.py", "_load_stage_lazy"),
 )
 
-# Where the standalone tools' drivers live: the CLIs themselves, the offline checkpoint tools, the
-# reward-model scorer they parse for and the dedup embeddings.
-TOOL_DRIVER_ROOTS = ("scripts", "halo/checkpoint", "halo/entrypoints/reward_scoring.py", "halo/data/deduplication.py")
+# Where the standalone tools' drivers live: the CLIs themselves and every halo module a CLI outside
+# scripts/training imports, directly or through another halo module, so a driver moved to another module
+# stays swept. The training entry points load through the dispatcher swept above.
+TOOL_DRIVER_ROOTS = (
+    "scripts",
+    *imported_module_files(
+        sorted(
+            path.relative_to(REPO_ROOT).as_posix()
+            for path in (REPO_ROOT / "scripts").rglob("*.py")
+            if not path.is_relative_to(REPO_ROOT / "scripts" / "training")
+        ),
+        "halo",
+    ),
+)
 
 # Tool loaders whose model is handed to a FORWARD — reward scores, dedup embeddings, the
 # ``--check_inference`` generation. An uninitialized buffer here becomes numbers the operator acts
@@ -281,6 +293,14 @@ def test_tool_load_surface_is_pinned():
         f"— INFERENCE_TOOL_LOADERS if anything runs the model, CONVERSION_TOOL_LOADERS if it is only "
         f"cast/merged/saved."
     )
+
+
+def test_the_tool_roots_hold_every_halo_module_they_import():
+    """A loader in a module the tools reach only through another halo module is still a tool loader: the roots
+    must be closed under import, or moving a driver one import deeper drops it from the sweep unnoticed."""
+    halo_roots = [root for root in TOOL_DRIVER_ROOTS if root.startswith("halo/")]
+    missing = sorted(set(imported_module_files(halo_roots, "halo")) - set(halo_roots))
+    assert not missing, f"the tool roots import {missing} without sweeping them"
 
 
 @pytest.mark.parametrize("rel,function", INFERENCE_TOOL_LOADERS, ids=[fn for _, fn in INFERENCE_TOOL_LOADERS])

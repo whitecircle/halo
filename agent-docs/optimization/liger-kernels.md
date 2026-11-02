@@ -304,8 +304,8 @@ which EP does not wrap.
 `fused_linear_cross_entropy` is not refused but handed to the Ulysses wrapper, so it is taken out of the patch
 request before the fold and draws no warning.
 
-Under **TP**, `lm_head` is `ColwiseParallel`-sharded into DTensor logits split over the vocab dim, where a
-fused CE would softmax a partial vocab slice and produce a wrong loss.
+Under **TP**, the `lm_head` weight is sharded over the vocab dim, so a fused CE computing from it would
+softmax a partial vocab slice and produce a wrong loss.
 
 **CP** and **PP** compute the loss *outside* the model's forward and never pass labels into it: the
 Ulysses wrapper calls the model with `labels=None` and computes a boundary-aware loss itself, and

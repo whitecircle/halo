@@ -33,6 +33,7 @@ from halo.data.sources.dataset_cache import (
 )
 from halo.data.sources.s3_client import S3Client, build_s3_uri
 from halo.data.sources.s3_client import logger as s3_module_logger
+from halo.data.sources.s3_commands import build_command_client
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 from scripts.before_training import s3 as s3_cli_mod
 from scripts.before_training.s3 import main as s3_cli_main
@@ -612,18 +613,22 @@ def test_a_key_only_path_without_a_configured_bucket_is_refused(monkeypatch):
         S3Client()
 
 
-def test_the_s3_cli_requires_a_bucket_only_without_a_default(monkeypatch, capsys):
-    """``--bucket`` falls back to ``HALO_S3_DEFAULT_BUCKET``; with that unset the CLI refuses at the flag
-    rather than handing the client no bucket."""
-    monkeypatch.setattr(s3_cli_mod, "DEFAULT_BUCKET", "team-bucket")
-    assert s3_cli_mod.build_parser().parse_args(["list"]).bucket == "team-bucket"
+def test_the_s3_cli_requires_a_bucket_only_for_a_bare_key_without_a_default(monkeypatch):
+    """A bare key falls back to ``HALO_S3_DEFAULT_BUCKET``; with that unset the CLI refuses naming ``--bucket``
+    rather than handing the client no bucket, while a full ``s3://`` URI names its own."""
 
-    monkeypatch.setattr(s3_cli_mod, "DEFAULT_BUCKET", None)
-    with pytest.raises(SystemExit) as excinfo:
-        s3_cli_mod.build_parser().parse_args(["list"])
-    assert excinfo.value.code == 2
-    assert "--bucket" in capsys.readouterr().err
-    assert s3_cli_mod.build_parser().parse_args(["list", "--bucket", "my-bucket"]).bucket == "my-bucket"
+    def client_for(argv):
+        return build_command_client(s3_cli_mod.build_parser().parse_args(argv))
+
+    with patch.object(S3Client, "__post_init__"):
+        monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", "team-bucket")
+        assert client_for(["list"]).bucket == "team-bucket"
+
+        monkeypatch.setattr(s3_client_mod, "DEFAULT_BUCKET", None)
+        with pytest.raises(ValueError, match="pass --bucket"):
+            client_for(["list"])
+        assert client_for(["list", "--bucket", "my-bucket"]).bucket == "my-bucket"
+        assert client_for(["list", "s3://uri-bucket/runs"]).bucket == "uri-bucket"
 
 
 def test_s3_cache_dir_derives_from_scratch_root():

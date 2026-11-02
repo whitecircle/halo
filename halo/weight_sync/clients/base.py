@@ -5,7 +5,6 @@ the gathered parameters in byte-bounded chunks; the engine hooks are each client
 import atexit
 import logging
 import socket
-import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping
@@ -24,6 +23,7 @@ from halo.weight_sync.chunking import (
     snapshot_to_sync_device,
     split_co_loaded,
 )
+from halo.weight_sync.clients.server_calls import AsyncCall, wait_for_calls
 from halo.weight_sync.transport.rendezvous import RendezvousListener, open_group_rendezvous
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,8 @@ logger = logging.getLogger(__name__)
 POST_TIMEOUT_S = 60
 HTTP_PROBE_TIMEOUT_S = 10
 GROUP_FORMATION_TIMEOUT_S = 120
-WEIGHT_UPDATE_TIMEOUT_S = 600
+# Closing the update session waits for the engine to finish applying the last chunk.
+SESSION_CLOSE_TIMEOUT_S = 600
 # Cleanup POSTs run on an already-failing path, where a long block only delays the real raise.
 CLEANUP_TIMEOUT_S = 30
 # A re-score is one prefill of a training row: a 250k-token row on a server that is also generating.
@@ -49,55 +50,6 @@ _DEFAULT_RETRY = Retry(
     backoff_factor=2,
     allowed_methods=["POST", "GET"],
 )
-
-
-class AsyncCall:
-    """Run a function in a background thread, join later."""
-
-    def __init__(self, fn, name: str = "server call"):
-        self.error: Exception | None = None
-        self.result = None
-        self.name = name
-        self._thread = threading.Thread(target=self._run, args=(fn,), daemon=True)
-        self._thread.start()
-
-    def _run(self, fn):
-        try:
-            self.result = fn()
-        except Exception as e:
-            self.error = e
-
-    def is_alive(self) -> bool:
-        return self._thread.is_alive()
-
-    def wait(self, timeout: float = WEIGHT_UPDATE_TIMEOUT_S):
-        self._thread.join(timeout=timeout)
-        if self._thread.is_alive():  # join() returns without signalling a timeout
-            raise TimeoutError(f"{self.name} still blocked after {timeout:.0f}s — server wedged?")
-        if self.error:
-            raise self.error
-
-    def join(self, grace: float) -> "AsyncCall":
-        """Wait up to ``grace`` seconds for a call still in flight once the local side failed, which may yet
-        record the server's own rejection or hand back a resource only this handle holds."""
-        self._thread.join(timeout=grace)
-        return self
-
-
-def _wait_for_calls(calls: list[AsyncCall], timeout: float) -> None:
-    """Block until every call returned, raising as soon as one fails. Polled, not joined in turn: the two
-    halves of a group formation complete only together, so a serial join parks once the other side failed."""
-    deadline = time.monotonic() + timeout
-    while True:
-        for call in calls:
-            if call.error is not None:
-                raise call.error
-        if not any(call.is_alive() for call in calls):
-            return
-        if time.monotonic() > deadline:
-            blocked = ", ".join(call.name for call in calls if call.is_alive())
-            raise TimeoutError(f"Weight-transfer setup still blocked after {timeout:.0f}s: {blocked}")
-        time.sleep(0.1)
 
 
 def unservable_bailing_model_types(release: str) -> dict[str, str]:
@@ -336,7 +288,7 @@ class WeightSyncClientBase(ABC):
                 local_call = AsyncCall(
                     self._prepare_local_formation(master_address, listener, world_size), name=self._FORMATION_STEP
                 )
-                _wait_for_calls([server_call, local_call], timeout=GROUP_FORMATION_TIMEOUT_S)
+                wait_for_calls([server_call, local_call], timeout=GROUP_FORMATION_TIMEOUT_S)
                 self._transport = local_call.result
             except Exception as e:
                 # A transport this rank already formed lives only on the call handle; unreleased, it leaks its
@@ -506,7 +458,7 @@ class WeightSyncClientBase(ABC):
     def _end_session(self) -> None:
         """Close the session once the update landed; raises, as the update is then not complete."""
         self.request(
-            "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=WEIGHT_UPDATE_TIMEOUT_S, **self.SESSION_REQUEST
+            "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=SESSION_CLOSE_TIMEOUT_S, **self.SESSION_REQUEST
         )
         self._session_open = False
 

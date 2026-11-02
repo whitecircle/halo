@@ -126,7 +126,8 @@ def load_tp_model(
 
 
 def _apply_attention_only_tp(model: PreTrainedModel, rank: int, tp_size: int, dp_size: int) -> None:
-    """Shard attention via DTensor TP, leaving the MoE experts alone, and stamp the mesh onto the model."""
+    """Shard the attention projections over the TP mesh (selective TP), leaving the MoE experts alone, and stamp
+    the mesh onto the model."""
     device_mesh = build_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
     num_tp_modules = apply_tp_to_attention_only(model, device_mesh)
     if is_global_main_process():

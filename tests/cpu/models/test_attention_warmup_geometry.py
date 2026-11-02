@@ -16,6 +16,10 @@ reaches it through transformers' real flash path. A backward kernel counts only 
 raises on a varlen call with a softcap: FA4's varlen backward takes none, and its varlen forward with one does not
 finish on B300 (Gemma 2's geometry), so FA4 runs a softcapped model's single-document rows only.
 
+The FlexAttention warm-up is held to the same contract on the per-layer-head models and Mistral: Dynamo traces the
+kernel (on its eager backend, which a CPU runs) and raises on any graph the rows add after the warm-up, and each row
+runs FlexAttention on exactly the layers it masks, a packed row's full layers included.
+
     python tests/cpu/models/test_attention_warmup_geometry.py
 """
 
@@ -29,6 +33,8 @@ from unittest import mock
 
 import pytest
 import torch
+from torch.nn.attention import flex_attention as flex_attention_module
+from torch.nn.attention.flex_attention import flex_attention
 from transformers import (
     Gemma2Config,
     Gemma2ForCausalLM,
@@ -47,12 +53,19 @@ from transformers import (
     PreTrainedModel,
 )
 from transformers import modeling_flash_attention_utils as flash_utils
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 from transformers.models.step3p7.modeling_step3p7 import Step3p7TextModel
 
+from halo.models.attention import sdpa_flex_sliding
 from halo.models.attention.backend_setup import WARMUP_MIN_SEQ_LEN, warm_fa4_kernels
 from halo.models.attention.layout import AttentionCall, attention_calls
-from halo.models.attention.sdpa_flex_sliding import flex_attention_calls
+from halo.models.attention.sdpa_flex_sliding import (
+    flex_attention_calls,
+    register_flex_sliding_attention,
+    warm_flex_sliding_kernels,
+)
+from tests.common.flex_sliding import FLEX_ROWS, flex_layers, flex_sliding_on_cpu, no_device_check, train_row
 from tests.common.models import (
     TINY_GEMMA2_CONFIG,
     TINY_GLM4_MOE_LITE_CONFIG,
@@ -349,6 +362,51 @@ def test_the_flex_warmup_reads_per_layer_heads():
         AttentionCall(4, 2, 64, 64, None, 0.125, None),
         AttentionCall(8, 2, 64, 64, 64, 0.125, None),
     }
+
+
+def _traced_flex(calls: list):
+    """The compiled kernel as ``sdpa_flex_sliding`` builds it, on Dynamo's eager backend, appending to ``calls``."""
+    compiled = torch.compile(flex_attention, dynamic=True, backend="aot_eager")
+
+    def kernel(query, key, value, **kwargs):
+        calls.append(1)
+        return compiled(*(t.as_subclass(torch.Tensor) for t in (query, key, value)), **kwargs)
+
+    return kernel
+
+
+@pytest.fixture
+def fresh_dynamo():
+    torch._dynamo.reset()
+    yield
+    torch._dynamo.reset()
+
+
+@pytest.mark.usefixtures("fresh_dynamo")
+@pytest.mark.parametrize("build", [_step3p7, _laguna, _mistral], ids=["step3p7", "laguna", "mistral"])
+def test_a_flex_warmed_model_compiles_nothing_on_its_first_rows(build):
+    """After the FlexAttention warm-up no row traces a graph: a packed one, whose full layers run FlexAttention under
+    the document mask beside the sliding ones, and a single document, trained and forward-only, whose full layers
+    keep SDPA. Each row runs FlexAttention on exactly the layers it masks."""
+    flex = register_flex_sliding_attention()
+    torch.manual_seed(0)
+    model = build().to(torch.bfloat16).train()
+    model.config._attn_implementation = flex
+    calls: list = []
+    with (
+        mock.patch.object(flex_attention_module, "_validate_device", no_device_check),
+        mock.patch.object(sdpa_flex_sliding, "_compiled_flex", _traced_flex(calls)),
+    ):
+        warm_flex_sliding_kernels(model, dtype=torch.bfloat16, device=torch.device("cpu"))
+        assert len(calls) == 2 * len(flex_attention_calls(model))  # premise: each call, training and forward-only
+        with (
+            mock.patch.object(torch._dynamo.config, "error_on_recompile", True),
+            mock.patch.dict(ALL_ATTENTION_FUNCTIONS._global_mapping, {flex: flex_sliding_on_cpu}),
+        ):
+            for lengths, train in FLEX_ROWS:
+                calls.clear()
+                train_row(model, lengths, train=train)
+                assert len(calls) == flex_layers(model, lengths), f"{lengths}: {len(calls)} FlexAttention calls"
 
 
 def test_the_flex_warmup_skips_softcapped_calls():

@@ -14,6 +14,7 @@ family whose keys miss the sink spelling raises instead of copying through as "r
 """
 
 import json
+import logging
 import os
 import time
 
@@ -314,7 +315,7 @@ def test_a_writing_run_still_requires_an_output_dir(tmp_path):
 
 
 @pytest.mark.parametrize("sharded", [False, True], ids=["single_file", "sharded"])
-def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, capsys, sharded):
+def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, caplog, sharded):
     """A sink-holding shard is resident while it is rewritten, so the shared preflight must warn before
     that — silence means the tool stopped calling the helper — and must not abort the reset."""
     monkeypatch.setattr(offline_export, "available_host_ram_bytes", lambda: 1)
@@ -323,8 +324,8 @@ def test_the_reset_preflights_its_resident_shard(tmp_path, monkeypatch, capsys, 
 
     assert reset_sinks(str(source), str(out)) == len(sinks)
 
-    printed = capsys.readouterr().out
-    assert "WARNING: reset_sinks" in printed and "RAM" in printed, printed
+    warned = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert any(m.startswith("reset_sinks: estimated peak host RAM") for m in warned), warned
     _assert_sinks_reset(out, sinks)
 
 

@@ -381,8 +381,9 @@ def test_patch_vocab_preflights_the_full_model_load(monkeypatch, capsys):
         with patch.object(sys, "argv", argv):
             pv.main()
 
-        printed = capsys.readouterr().out
-        assert "WARNING: patch_vocab" in printed and "RAM" in printed, printed
+        # The CLI's own logging setup writes to stderr.
+        printed = capsys.readouterr().err
+        assert "WARNING patch_vocab: estimated peak host RAM" in printed, printed
         assert _weight_files(out) == ["model.safetensors"], "the warn-only preflight aborted the patch"
 
 

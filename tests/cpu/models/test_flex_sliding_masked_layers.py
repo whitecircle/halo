@@ -56,7 +56,8 @@ from halo.models.attention.sdpa_flex_sliding import (
     register_flex_sliding_attention,
     resolve_flex_sliding_attn_implementation,
 )
-from tests.common.fake_cuda import CudaLike
+from tests.common.attention_stubs import causal_attention
+from tests.common.flex_sliding import flex_sliding_on_cpu, no_device_check
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 from tests.common.numerics import fro_rel_err
 from tests.common.tiny_models import (
@@ -282,21 +283,10 @@ def test_a_packed_full_mask_reduces_to_exactly_its_tiles(lengths, pad):
     assert not (partial & full).any()
 
 
-def _attention(heads: int = 4, kv_heads: int = 2, head_dim: int = 64, scaling: float = 0.125) -> torch.nn.Module:
-    """A stand-in causal attention module declaring the call it makes."""
-    module = torch.nn.Module()
-    module.is_causal = True
-    module.num_heads = heads
-    module.num_key_value_groups = heads // kv_heads
-    module.head_dim = head_dim
-    module.scaling = scaling
-    module.sliding_window = None
-    return module
-
-
 def _flex_serves(query, key, mask, window, *, value=None, scaling=0.125, module=None) -> bool:
     value = key if value is None else value
-    return sdpa_flex_sliding._flex_serves(module or _attention(), query, key, value, mask, window, scaling)
+    module = module or causal_attention(scaling=0.125, sliding_window=window)
+    return sdpa_flex_sliding._flex_serves(module, query, key, value, mask, window, scaling)
 
 
 def test_flex_serves_masked_rows_past_a_tile_on_narrow_heads():
@@ -323,7 +313,7 @@ def test_flex_takes_only_the_call_the_warmup_compiles(caplog):
     q = torch.zeros(2, 4, 300, 64)
     k = torch.zeros(2, 2, 300, 64)
     mask = torch.ones(2, 1, 300, 300, dtype=torch.bool)
-    module = _attention()
+    module = causal_attention(scaling=0.125)
     assert flex_attention_calls(module) == {AttentionCall(4, 2, 64, 64, None, 0.125, None)}  # premise: the warm-up's
     assert _flex_serves(q, k, mask, None, module=module)
     with caplog.at_level("WARNING", logger=sdpa_flex_sliding.logger.name):
@@ -367,14 +357,6 @@ def test_full_layer_flex_matches_per_document_attention():
     real = sum(lengths)
     assert fro_rel_err(out[:, :real], torch.cat(expected, dim=2).transpose(1, 2)) < 1e-12
     assert torch.equal(out[:, real:], torch.zeros_like(out[:, real:]))  # a padded query attends nothing
-
-
-def _flex_sliding_on_cpu(module, query, key, value, attention_mask, **kwargs):
-    """The registered function as it serves a CUDA call, the only call it takes."""
-    out, weights = sdpa_flex_sliding.flex_sliding_attention(
-        module, *(t.as_subclass(CudaLike) for t in (query, key, value)), attention_mask, **kwargs
-    )
-    return out.as_subclass(torch.Tensor), weights
 
 
 def _as_the_kernel_reads(block_mask: BlockMask) -> BlockMask:
@@ -476,9 +458,9 @@ def test_the_flex_model_matches_the_sdpa_model(family, batch, lengths):
     inputs = batch(lengths, text_config.vocab_size)
     calls = []
     with (
-        patch.object(flex_attention_module, "_validate_device", lambda *tensors: None),
+        patch.object(flex_attention_module, "_validate_device", no_device_check),
         patch.object(sdpa_flex_sliding, "_compiled_flex", _uncompiled_kernel(calls)),
-        patch.dict(ALL_ATTENTION_FUNCTIONS._global_mapping, {SDPA_FLEX_SLIDING: _flex_sliding_on_cpu}),
+        patch.dict(ALL_ATTENTION_FUNCTIONS._global_mapping, {SDPA_FLEX_SLIDING: flex_sliding_on_cpu}),
     ):
         loss, grads = _loss_and_grads(candidate, inputs)
     ref_loss, ref_grads = _loss_and_grads(reference, inputs)

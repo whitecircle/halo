@@ -1,7 +1,7 @@
 """Both weight-sync clients must release what they already built when the SERVER half of group
 formation fails.
 
-``_wait_for_calls`` raises the moment either half of the handshake errors, so the local half's
+``wait_for_calls`` raises the moment either half of the handshake errors, so the local half's
 product — SGLang's c10d group + rendezvous TCPStore, vLLM's ncclComm — can already exist while the
 client attribute that owns it is still ``None``. Leaking it is not a spare object: c10d keeps the
 process-global registration under the derived group name and the store keeps its listener on the

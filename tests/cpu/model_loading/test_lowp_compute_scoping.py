@@ -80,8 +80,8 @@ def test_a_kept_block_and_the_vision_tower_are_not_block_checked():
 def test_conversion_keeps_module_hooks_and_attributes():
     """The conversion retypes in place; anything attached to the module object must survive.
 
-    Parallelism attaches its state to the module (torch's ``parallelize_module`` registers forward
-    hooks, transformers stamps ``_is_hooked``); a conversion that constructs a replacement drops it,
+    Parallelism attaches its state to the module (forward hooks, the ``_is_hooked`` stamp transformers' TP
+    leaves); a conversion that constructs a replacement drops it,
     and the run trains on unsynced partial sums with a finite, plausible loss.
     """
     model = _Stack(2)

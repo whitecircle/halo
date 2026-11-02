@@ -13,7 +13,9 @@ def add_eval_args(parser: argparse.ArgumentParser) -> None:
     """Register the dataset-source, endpoint and output flags every eval script shares; ``--split`` and the
     task flags stay the runner's own. The sampling flags default to ``None``, so :func:`rollout_config_from_args`
     tells an explicit value from an omitted one: explicit flag > ``--training_config`` > the script's default."""
-    parser.add_argument("--dataset", required=True, help="HF Hub id or local save_to_disk dir.")
+    parser.add_argument(
+        "--dataset", required=True, help="HF Hub id, s3:// URI, local data file or local save_to_disk dir."
+    )
     parser.add_argument("--config", default=None, help="Dataset config (e.g. 'all', 'verifiable', 'taco').")
     add_openai_endpoint_args(parser, model_help="Served/model name.")
     parser.add_argument(

@@ -43,7 +43,7 @@ Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline.
 
 Memory keys take no prefix: `allocated_gb`, `reserved_gb`, `peak_allocated_gb`, `training_peak_allocated_gb`; `num_full_model_params` adds `distributed_efficiency`.
 
-Off by default: utilization misleads for multi-sequence trainers — DPO / SMPO / reward forward both chosen and rejected, distillation also the teacher. Turning it on sets `include_num_input_tokens_seen="all"`: each micro-batch adds its input shape on the host, and the callback's step end, where its step clock waits on the device anyway, sums the step over the world while it reads the step's attention work (HF's own count gathers and syncs on every micro-batch). Without the callback the count is summed at each log and before each save, so it is exact in the logs and in `trainer_state.json` but lags between them in the state a callback sees.
+Off by default: utilization misleads for multi-sequence trainers — DPO / SMPO / reward forward both chosen and rejected, distillation also the teacher. Turning it on sets `include_num_input_tokens_seen="all"`: each micro-batch adds its input shape on the host, and the callback's step end sums the step over the world in the same host read as the step's attention work (HF's own count gathers and syncs on every micro-batch). Without the callback the count is summed at each log and before each save, so it is exact in the logs and in `trainer_state.json` but lags between them in the state a callback sees.
 
 The peak is keyed on `lowp_precision` where low-precision compute is on, since bf16 masters name a peak the GEMMs never run at. S-MFU scales the expert term by `(top_k / num_experts) × ep_size`; `expert_tp_size` already divides the local expert params.
 

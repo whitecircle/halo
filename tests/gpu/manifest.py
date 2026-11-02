@@ -1,14 +1,14 @@
 """Launch specs for the GPU test suite.
 
-GPU tests are external ``torchrun`` scripts, each run through its ``gpu_test_main`` entry except the
-few whose lifecycle the harness cannot express, which keep their own (``_OWN_LIFECYCLE`` in
+GPU tests are external scripts, each run through its ``gpu_test_main`` entry except the few whose
+lifecycle the harness cannot express, which keep their own (``_OWN_LIFECYCLE`` in
 ``tests/cpu/conventions/test_gpu_harness_conventions.py`` names each with its reason). Pytest cannot
 read ``nproc`` / markers / timeout from inside them, so this manifest maps
 each script (path relative to ``tests/gpu/``) to its launch spec; ``tests/gpu/conftest.py``
 reads it and generates one pytest node per ``(script, args)`` with the right markers,
-process count and timeout. The launcher shells out ``torchrun --nproc_per_node=<nproc>``
-and asserts the exit code, parsing the structured result line when the script uses
-``tests.common.harness.gpu_test_main``.
+process count and timeout. Each node runs its spec's launcher (``torchrun --nproc_per_node=<nproc>``,
+or ``python`` for a driver that starts its own ranks) and asserts the exit code, parsing the
+structured result line when the script uses ``tests.common.harness.gpu_test_main``.
 
 To add a test: drop the script under ``tests/gpu/`` and add one ``TestSpec`` line here.
 A script present on disk but missing from the manifest is reported by
@@ -83,7 +83,8 @@ class TestSpec:
     """How to launch one GPU test script.
 
     Attributes:
-        nproc: GPUs ``torchrun`` must launch (``--nproc_per_node``).
+        nproc: the ranks the row runs on, one per GPU (``torchrun``'s ``--nproc_per_node``, or
+            ``HALO_TEST_NPROC`` for a ``python`` driver).
         markers: pytest markers for selection (always includes ``"gpu"``).
         args_matrix: CLI arg-strings, or :class:`Row` entries carrying their own launch values; the
             conftest generates one node per entry, so a multi-mode script (``--mode fsdp`` /
@@ -344,9 +345,9 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_chunked_logprob_precision.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_deepgemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fa4_trainable_sink_rescale.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
-    # 1200s: FA4 JIT-compiles the head_dim-256 forward and backward per shape, dense and varlen.
+    # 1800s: FA4 JIT-compiles the head_dim-256 forward and backward per shape and layout, dense and varlen.
     "kernels/test_fa4_hd256_strided_inputs.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "qwen3", "glm4"), timeout=1200
+        nproc=1, markers=("gpu", "core", "1gpu", "qwen3", "glm4"), timeout=1800
     ),
     "kernels/test_fa4_hd256_family_parity.py": TestSpec(
         nproc=1,
@@ -565,7 +566,8 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_ep_long_context.py": TestSpec(
         nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "gptoss"), timeout=1200
     ),
-    # Each row loads its checkpoint twice: the undistributed reference on rank 0, then the parallel model.
+    # Each row loads its checkpoint twice: the undistributed reference on rank 0, then the parallel model. The
+    # four-rank row runs pure ETP with two DP replicas.
     "parallelism/ep/test_ep_modes_vs_reference.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "ep", "tp", "etp", "moe", "gptoss", "qwen3"),
@@ -574,6 +576,9 @@ MANIFEST: dict[str, TestSpec] = {
             "--model gpt_oss_20b --mode ep_tp",
             "--model gpt_oss_20b --mode etp",
             "--model qwen3_30b_a3b --mode ep",
+            Row(
+                "--model gpt_oss_20b --mode etp_dp2", nproc=4, markers=("gpu", "full", "4gpu", "etp", "moe", "gptoss")
+            ),
         ),
         timeout=1200,
     ),
@@ -1034,9 +1039,13 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_environmental_grpo_benchmarks.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
     ),
-    # FSDP2 ZeRO-3 over two ranks; no rollout server: the round is built in place.
+    # FSDP2 ZeRO-3 over two ranks; no rollout server: the round is built in place. The wall-clock speedup bound
+    # (``--timed``) runs in the full tier only.
     "trainers/grpo/test_env_length_ordered_rows.py": TestSpec(
-        nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=900
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=("", Row("--timed", markers=("gpu", "full", "2gpu", "qwen3"))),
+        timeout=900,
     ),
     "trainers/grpo/test_sglang_weight_sync_e2e.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=900
@@ -1496,7 +1505,8 @@ MANIFEST: dict[str, TestSpec] = {
     # One row per method under scripts/training, which tests/cpu/config/test_entry_script_recipes.py holds them
     # to: `halo launch` on two ranks, a save per step, a resume and the export read back. The script starts
     # the ranks, so each row runs it as one process. The two engine-driven methods train the dense vLLM tier's
-    # served checkpoint against it.
+    # served checkpoint against it. The padded-batch methods without an engine also run with the recipe's attention
+    # unset, where Blackwell's default is FA4.
     "trainers/other/test_entry_scripts.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "qwen3"),
@@ -1514,6 +1524,21 @@ MANIFEST: dict[str, TestSpec] = {
             *_rows(
                 ("--method grpo/environmental", "--method grpo/online"),
                 markers=("gpu", "full", "2gpu", "vllm_server", "qwen3"),
+            ),
+            *_rows(
+                tuple(
+                    f"--method {method} --attn unset"
+                    for method in (
+                        "classification",
+                        "distillation/teacher-distill",
+                        "grpo/offline",
+                        "preference/dpo",
+                        "preference/kto",
+                        "preference/smpo",
+                        "reward/reward-model",
+                    )
+                ),
+                markers=("gpu", "full", "2gpu", "qwen3"),
             ),
         ),
         timeout=1500,
@@ -1774,7 +1799,8 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # A non-finite step skipped on every rank, its verdict read at its own log and a step late, a streak and
     # corrupted weights raising, on every clip and sharding path: ep1 DTensor experts, ep2 plain experts, two EP
-    # groups' deferred sweep, ETP, dense FSDP2, TP, CP, QLoRA and PP.
+    # groups' deferred sweep, ETP, dense FSDP2, TP, CP, QLoRA and PP; in the full tier EP+TP, EP+CP, PP+EP, and
+    # clipping off (`--max-grad-norm 0`, the norm-only pass) on the deferred sweep and the TP sync.
     "trainers/sft/test_sft_nonfinite_step_guard.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "qwen3"),
@@ -1788,6 +1814,16 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--mode cp", markers=("gpu", "core", "2gpu", "cp", "qwen3")),
             Row("--mode qlora", markers=("gpu", "core", "2gpu", "lora", "qwen3")),
             Row("--mode pp", nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3")),
+            Row("--mode ep2_tp2", nproc=4, markers=("gpu", "full", "4gpu", "ep", "tp", "moe", "qwen3")),
+            Row("--mode ep2_cp2", markers=("gpu", "full", "2gpu", "ep", "cp", "moe", "qwen3")),
+            Row("--mode pp_ep", nproc=4, markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss")),
+            Row("--mode ep2_dp2 --max-grad-norm 0", nproc=4, markers=("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
+            Row("--mode tp --max-grad-norm 0", markers=("gpu", "full", "2gpu", "tp", "qwen3")),
+            Row(
+                "--mode ep2_tp2 --max-grad-norm 0",
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "tp", "moe", "qwen3"),
+            ),
         ),
         timeout=1200,
     ),

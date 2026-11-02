@@ -106,10 +106,10 @@ class _StubMCPEnv(NativeMCPClientEnvironment):
     def stub_transport(self) -> _StubTransport:
         return self.transports[0]
 
-    def _transport_context(self, extra_args):
+    def _transport_context(self, scratch_dir):
         session = _StubSession() if self.transports else self.stub_session
-        session.args = list(extra_args)
-        self.transports.append(_StubTransport(session, extra_args))
+        session.args = [scratch_dir] if scratch_dir else []
+        self.transports.append(_StubTransport(session, session.args))
         return self.transports[-1]
 
 
@@ -391,14 +391,127 @@ def test_a_server_that_takes_no_directory_gets_none_and_refuses_episode_scratch(
     """``uvx mcp-server-fetch <dir>`` is an argparse error, so a directory goes only to an allowlist server."""
     env = build_mcp_environment("fetch")
     assert not env.scratch_allowlist and not env.episode_scratch
-    with pytest.raises(ValueError, match=r"takes none .*\['filesystem'\]"):
+    with pytest.raises(ValueError, match=r"takes none .*\['filesystem', 'memory'\]"):
         build_mcp_environment("fetch", episode_scratch=True)
 
 
-@pytest.mark.parametrize("scratch", [{"episode_scratch": True}, {"scratch_allowlist": True}])
+@pytest.mark.parametrize(
+    "scratch", [{"episode_scratch": True}, {"scratch_allowlist": True}, {"scratch_env": {"MEMORY_FILE_PATH": "m"}}]
+)
 def test_a_scratch_directory_refuses_a_transport_that_spawns_nothing(scratch):
     with pytest.raises(ValueError, match="spawns none"):
         NativeMCPClientEnvironment(transport="sse", server_url="http://x/sse", **scratch)
+
+
+class _MemoryServerSession(_StubSession):
+    """``@modelcontextprotocol/server-memory`` as the stdio spawn would run it: entities created land in the file
+    ``MEMORY_FILE_PATH`` names, else in the one file its package keeps (``default_file``), and ``read_graph``
+    returns what that file holds."""
+
+    def __init__(self, params, default_file: str):
+        super().__init__()
+        self.params = params
+        self.graph_file = (params.env or {}).get("MEMORY_FILE_PATH", default_file)
+
+    async def call_tool(self, name, arguments):
+        if name == "create_entities":
+            with open(self.graph_file, "a") as f:
+                f.write(arguments["name"] + "\n")
+            text = "created"
+        elif os.path.exists(self.graph_file):
+            with open(self.graph_file) as f:
+                text = f.read()
+        else:
+            text = ""
+        return types.SimpleNamespace(content=[types.SimpleNamespace(type="text", text=text)], isError=False)
+
+    async def list_tools(self):
+        tools = [
+            types.SimpleNamespace(name="create_entities", description="add", inputSchema={"properties": {"name": {}}}),
+            types.SimpleNamespace(name="read_graph", description="read", inputSchema={}),
+        ]
+        return types.SimpleNamespace(tools=tools)
+
+
+async def test_the_memory_preset_gives_each_episode_its_own_graph(monkeypatch, tmp_path):
+    """Two concurrent episodes (a GRPO group's siblings) must not read each other's memory: each episode's
+    server keeps its graph in a file of its own scratch directory, removed with the episode, never in the one
+    file the package keeps for every episode and run on the host."""
+    default_file = tmp_path / "package-memory.jsonl"
+    default_file.touch()
+    spawned = []
+
+    def _stdio_client(params):
+        session = _MemoryServerSession(params, str(default_file))
+        spawned.append(session)
+        return _StubTransport(session, params.args)
+
+    monkeypatch.setattr(mcp_module, "stdio_client", _stdio_client)
+    env = build_mcp_environment("memory")
+    assert env.episode_scratch
+    ids, _ = await env.reset_async(["task a", "task b"])
+    create = {"id": "c1", "function": {"name": "create_entities", "arguments": '{"name": "alpha"}'}}
+    read = {"id": "c2", "function": {"name": "read_graph", "arguments": "{}"}}
+    await env.step_async(
+        ids, ["writing", "reading"], [{"finish_reason": "tool_calls", "tool_calls": [c]} for c in (create, read)]
+    )
+
+    _discovery, *episode_servers = spawned
+    graph_files = [server.graph_file for server in episode_servers]
+    assert len(set(graph_files)) == 2 and str(default_file) not in graph_files
+    assert all(server.params.args == mcp_module.MCP_SERVERS["memory"]["args"] for server in spawned)
+    reader = env.get_trajectories(ids)[1]
+    assert next(m.content for m in reader.messages if m.role == "tool") == "", "episode b read episode a's graph"
+
+    env.cleanup(ids)
+    await asyncio.gather(*env._background_tasks)
+    await env.disconnect()
+    assert not any(os.path.exists(os.path.dirname(f)) for f in graph_files)
+    assert not build_mcp_environment("memory", episode_scratch=False).episode_scratch
+
+
+@pytest.mark.parametrize("scope", [{}, {"episode_scratch": False}], ids=["preset-scope", "environment-scope"])
+async def test_a_memory_file_env_vars_names_is_the_graph_the_server_reads(monkeypatch, tmp_path, scope):
+    """A seeded graph handed through ``env_vars`` is the file the server reads, served to every episode by one
+    server; the preset's scratch file must not silently replace it."""
+    seeded = tmp_path / "seeded-graph.jsonl"
+    seeded.write_text("seed\n")
+    spawned = []
+
+    def _stdio_client(params):
+        session = _MemoryServerSession(params, str(tmp_path / "package-memory.jsonl"))
+        spawned.append(session)
+        return _StubTransport(session, params.args)
+
+    monkeypatch.setattr(mcp_module, "stdio_client", _stdio_client)
+    env = build_mcp_environment("memory", env_vars={"MEMORY_FILE_PATH": str(seeded)}, **scope)
+    assert not env.episode_scratch
+    ids, _ = await env.reset_async(["task"])
+    read = {"id": "c1", "function": {"name": "read_graph", "arguments": "{}"}}
+    await env.step_async(ids, ["reading"], [{"finish_reason": "tool_calls", "tool_calls": [read]}])
+
+    assert [server.graph_file for server in spawned] == [str(seeded)]
+    reader = env.get_trajectories(ids)[0]
+    assert next(m.content for m in reader.messages if m.role == "tool") == "seed\n"
+    env.cleanup(ids)
+    await asyncio.gather(*env._background_tasks)
+    await env.disconnect()
+
+
+def test_a_seeded_memory_file_refuses_a_server_per_episode():
+    """Per-episode servers over one seeded file would interleave their writes to one graph."""
+    with pytest.raises(ValueError, match=r"env_vars sets \['MEMORY_FILE_PATH'\].*episode_scratch=True"):
+        build_mcp_environment("memory", env_vars={"MEMORY_FILE_PATH": "/data/graph.jsonl"}, episode_scratch=True)
+
+
+def test_a_scratch_file_refuses_a_server_env_that_sets_it():
+    """Both arguments name the variable, so either value would be a silent guess."""
+    with pytest.raises(ValueError, match=r"server_env sets \['MEMORY_FILE_PATH'\]"):
+        NativeMCPClientEnvironment(
+            server_command="npx",
+            server_env={"MEMORY_FILE_PATH": "/data/graph.jsonl"},
+            scratch_env={"MEMORY_FILE_PATH": "memory.jsonl"},
+        )
 
 
 # Factory credential forwarding: MCP_SERVERS[...]["env"] must reach the server
@@ -484,13 +597,18 @@ def test_stdio_transport_merges_credentials_over_sdk_default_env(monkeypatch):
     monkeypatch.setattr(mcp_module, "sse_client", lambda url: "transport-ctx")
 
     env = NativeMCPClientEnvironment(server_command="npx", server_env={"KEY": "v", "PATH": "/custom"})
-    assert env._transport_context([]) == "transport-ctx"
+    assert env._transport_context(None) == "transport-ctx"
     assert captured[0].env == {"PATH": "/custom", "HOME": "/root", "KEY": "v"}
 
-    env_plain = NativeMCPClientEnvironment(server_command="npx", server_args=["-y", "pkg"])
-    env_plain._transport_context(["/scratch"])
+    env_plain = NativeMCPClientEnvironment(server_command="npx", server_args=["-y", "pkg"], scratch_allowlist=True)
+    env_plain._transport_context("/scratch")
     assert captured[1].env is None
-    assert captured[1].args == ["-y", "pkg", "/scratch"], "a spawn's extra args must follow server_args"
+    assert captured[1].args == ["-y", "pkg", "/scratch"], "the allowlist directory must follow server_args"
+
+    env_file = NativeMCPClientEnvironment(server_command="npx", scratch_env={"MEMORY_FILE_PATH": "memory.jsonl"})
+    env_file._transport_context("/scratch")
+    assert captured[2].args == [], "a scratch file goes through the environment, not the arguments"
+    assert captured[2].env == {"PATH": "/usr/bin", "HOME": "/root", "MEMORY_FILE_PATH": "/scratch/memory.jsonl"}
 
 
 if __name__ == "__main__":

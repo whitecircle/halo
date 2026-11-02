@@ -124,13 +124,19 @@ def _expert_params(layer: EPGptOssMoELayer) -> dict[str, nn.Parameter]:
 def _forward_backward(layer, tokens, experts, weights, *, grouped: bool, cotangent):
     """The rank's expert output and its gradients on tokens, routing weights and every expert parameter."""
     layer._use_grouped_mm = grouped
-    assert layer._grouped_mm_enabled() is grouped, "the arm would not run the compute path it is named for"
     layer.zero_grad(set_to_none=True)
     tokens = tokens.clone().requires_grad_(True)
     weights = weights.clone().requires_grad_(True)
-    out = layer._compute_experts(
-        tokens, experts, weights, torch.float32, recv_counts=dispatched_receive_counts(layer, experts)
-    )
+    grouped_calls = []
+    grouped_compute = layer._compute_experts_gmm
+    layer._compute_experts_gmm = lambda *args, **kwargs: grouped_calls.append(1) or grouped_compute(*args, **kwargs)
+    try:
+        out = layer._compute_experts(
+            tokens, experts, weights, torch.float32, recv_counts=dispatched_receive_counts(layer, experts)
+        )
+    finally:
+        del layer._compute_experts_gmm
+    assert bool(grouped_calls) is grouped, "the arm did not run the compute path it is named for"
     out.backward(cotangent)
     grads = {name: param.grad.clone() for name, param in _expert_params(layer).items()}
     return out.detach(), tokens.grad, weights.grad, grads
@@ -154,7 +160,7 @@ def test_etp_runs_the_grouped_gemm_on_its_sharded_weights(monkeypatch, layout):
     """Asked for grouped GEMM, an ETP layer reports and runs it: three grouped projections over this rank's
     ``[E_local, H, M/etp]`` gate and up halves and its ``[E_local, M/etp, H]`` down slice."""
     layer = _rank_layer(_block(), layout, rank=1, grouped_at_build=True)
-    assert layer.expert_tp_size == 2 and layer._grouped_mm_enabled()
+    assert layer.expert_tp_size == 2 and layer._use_grouped_mm
 
     seen = []
     real = compute_module.expert_gemm
@@ -259,7 +265,7 @@ def test_etp_storage_does_not_depend_on_the_compute_path(layout):
     for rank in range(LAYOUTS[layout][0]):
         grouped = _rank_layer(block, layout, rank, grouped_at_build=True)
         loop = _rank_layer(block, layout, rank, grouped_at_build=False)
-        assert grouped._grouped_mm_enabled() and not loop._grouped_mm_enabled()
+        assert grouped._use_grouped_mm and not loop._use_grouped_mm
 
         expected = {*ETP_STORAGE, *(ETP_RANK0_ONLY if grouped.expert_tp_rank == 0 else ())}
         grouped_state, loop_state = grouped.state_dict(), loop.state_dict()

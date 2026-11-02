@@ -1,8 +1,27 @@
 """The S3 folder commands ``scripts/before_training/s3.py`` runs — push, download, list, exists and delete — each
-through the :class:`~halo.data.sources.s3_client.S3Client` built for ``--bucket`` and returning the report the CLI
-prints."""
+through the :class:`~halo.data.sources.s3_client.S3Client` built for ``--bucket``, or for the bucket a full
+``s3://`` URI key names, and returning the report the CLI prints."""
 
-from halo.data.sources.s3_client import S3Client
+from halo.data.sources.s3_client import S3Client, default_bucket
+
+
+def build_command_client(args) -> S3Client:
+    """The client a command runs through: for ``--bucket``, or, when the command's key (``s3_key``, or ``prefix``
+    for ``list``) is a full ``s3://bucket/key`` URI, for that bucket, the key then replacing the URI in ``args``. A
+    URI beside ``--subfolder`` or another ``--bucket`` raises, since it names its whole location itself."""
+    field = "prefix" if hasattr(args, "prefix") else "s3_key"
+    value = getattr(args, field)
+    if not value.startswith("s3://"):
+        return S3Client(bucket=args.bucket or default_bucket(f"the key {value!r}", "pass --bucket or an s3:// URI"))
+    bucket, _, key = value.removeprefix("s3://").partition("/")
+    if not bucket or not (key.strip("/") or field == "prefix"):
+        raise SystemExit(f"✗ {value!r} is not an s3://<bucket>/<key> URI.")
+    if args.subfolder or args.bucket not in (None, bucket):
+        raise SystemExit(
+            f"✗ {value!r} names its bucket and key itself; drop --bucket/--subfolder, or pass the bare key with them."
+        )
+    setattr(args, field, key.strip("/"))
+    return S3Client(bucket=bucket)
 
 
 def push_command(args, client: S3Client) -> str:

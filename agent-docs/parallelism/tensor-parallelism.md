@@ -22,7 +22,8 @@ Two sharding mechanisms are in play — HF-native TP (`tp_plan="auto"`, dense mo
 toolkit's selective attention TP — and both place their sharded params as **DTensors** on the TP
 mesh, so one `full_tensor()` walk reconstructs either. The exception is the params sliced by hand
 (GptOss `sinks`), which stay plain tensors and are load-bearing for gradients and checkpoints. See
-[Gradient sync](#gradient-sync-and-the-grad-norm).
+[Gradient sync](#gradient-sync-and-the-grad-norm). Both run their linears on the local shards
+rather than through DTensor dispatch: [Local-shard linears](#local-shard-linears).
 
 ## Supported models
 
@@ -36,7 +37,7 @@ embedding/lm_head replicated):
 | Model | Notes | Page |
 |---|---|---|
 | GPT-OSS | Attention sinks sharded as non-DTensor, all-gathered at save | [gpt-oss.md](../models/gpt-oss.md) |
-| Qwen3 MoE | ColwiseParallel(Q/K/V) + RowwiseParallel(O) | [qwen3.md](../models/qwen3.md) |
+| Qwen3 MoE | colwise Q/K/V + rowwise O | [qwen3.md](../models/qwen3.md) |
 | Qwen3.5 / Qwen3.6 MoE | Double-width `q_proj` shards uniformly | [qwen3_5.md](../models/qwen3_5.md) |
 | GLM-4 MoE Lite | MLA — of the colwise projections only `q_b_proj` / `kv_b_proj` shard (`o_proj` is still rowwise) | [glm4.md](../models/glm4.md) |
 | LFM-2 MoE | Standard GQA pattern | [lfm2.md](../models/lfm2.md) |
@@ -79,8 +80,8 @@ shards module by module and ties *afterwards* — so both ends land on the same 
 one gradient, one exported key, and half the embedding + head memory per rank at `tp_size=2`.
 
 Sharding the pair makes the vocabulary a TP dimension: `colwise_gather_output` refuses a
-`vocab_size` that `tp_size` does not divide (`ColwiseParallel.validate_param`, loud at load, naming
-the layer), where a replicated pair did not care. Every tied dense model in the roster divides
+`vocab_size` that `tp_size` does not divide (transformers' `ColwiseParallel.validate_param`, loud at
+load, naming the layer), where a replicated pair did not care. Every tied dense model in the roster divides
 evenly (Qwen3 151936, Qwen3.5 248320); a vocab-patched checkpoint that does not must drop `tp_size`
 to a divisor.
 
@@ -109,34 +110,35 @@ straight on its GPU, so host RAM never holds the model. The FP32-master restore 
 ## The selective-TP plan
 
 `apply_tp_to_attention_only` (`halo/distributed/tensor_parallel/parallelize_attention.py`) walks the
-model and builds a per-module DTensor plan:
+model and shards each attention projection under its style (`shard_linear`, rank 0's values
+distributed into DTensor placements):
 
 | Module | Strategy | Notes |
 |--------|----------|-------|
-| `self_attn.{q,k,v}_proj` | `ColwiseParallel` | per-head |
-| `self_attn.{q_b,kv_b}_proj` | `ColwiseParallel` | MLA: only the head-dim expansion shards |
-| `self_attn.{o,out}_proj` | `RowwiseParallel` | the all-reduce point |
+| `self_attn.{q,k,v}_proj` | `colwise` | per-head |
+| `self_attn.{q_b,kv_b}_proj` | `colwise` | MLA: only the head-dim expansion shards |
+| `self_attn.{o,out}_proj` | `rowwise` | the all-reduce point |
 | `self_attn.sinks` | sliced (`shard_sinks_param`) | GptOss, one slice per head shard |
 | per-head norms (`q_norm`/`k_norm`, LFM2 `q_layernorm`/`k_layernorm`) | replicated + grad all-reduce | see below |
 | `embed_tokens` / `lm_head` | replicated | the plan never visits them: DTensor-sharding them faults cuBLAS under EP+TP |
 
 Head divisibility is validated before sharding: `num_attention_heads % tp_size == 0` always, and
-`num_key_value_heads % tp_size == 0` for standard GQA. `ColwiseParallel` splits Q/K/V with no
-knowledge of heads, so an indivisible count would split *within* a head; the guard raises instead.
+`num_key_value_heads % tp_size == 0` for standard GQA. The colwise split of Q/K/V knows nothing of
+heads, so an indivisible count would split *within* a head; the guard raises instead.
 MLA models skip the KV-head check — they shard by query head and keep the KV compression replicated.
 
 **Per-head norm gradients.** A norm applied *after* a colwise projection is a replicated
-`(head_dim,)` parameter shared across heads. `ColwiseParallel` defaults `use_local_output=True`, so
-the DTensor graph ends at the projection and each rank's gradient covers only its own heads: the
-true gradient is the **SUM** over the TP group, not the average a replica gets.
+`(head_dim,)` parameter shared across heads. A colwise projection returns this rank's heads only, so
+each rank's gradient covers only its own heads: the true gradient is the **SUM** over the TP group,
+not the average a replica gets.
 
 `apply_tp_to_attention_only` finds those norms structurally (any unplanned attention child with
 trainable parameters, never a name list), records their names through `register_per_head_norm_params`,
 and `_sync_tp_replicated_grads` sums them once per optimizer step. A name missing from that set is
 AVG-reduced as a plain replica, i.e. `1/tp_size` of its true gradient.
 
-MLA families are exempt: their `q_a`/`kv_a` norms sit *before* the colwise expansion, where
-DTensor's `Replicate` backward already all-reduces. The rope half of their `kv_a_proj_with_mqa`
+MLA families are exempt: their `q_a`/`kv_a` norms sit *before* the colwise expansion, whose input
+gradient is already summed over the TP group. The rope half of their `kv_a_proj_with_mqa`
 output bypasses `kv_b_proj`, so a forward hook (`register_mla_rope_grad_reduction`) sums its
 gradient over the TP group.
 
@@ -162,6 +164,35 @@ overrides `_generate_single_turn` to broadcast the vLLM rollout tuple from the T
 custom trainers, add an `assert_rank_uniform` call (`halo.runtime.consensus`; pass
 `tuple(t.shape)` to compare a shape, `strict=True` to raise instead of warn) at the suspect tensor —
 the toolkit ships no call sites.
+
+## Local-shard linears
+
+Every TP linear of either mechanism computes `F.linear` on its local shards (`weight.to_local()`)
+between explicit c10d collectives instead of dispatching through DTensor, which costs about ten
+dispatches per linear and copies the activation inside every functional all-reduce
+(`halo/distributed/tensor_parallel/local_linears.py`). The parameters stay DTensors in the same
+placements, so FSDP2, checkpoints, export, the optimizer, the clip and the weight sync see the same
+layout. Each style runs the collectives its DTensor redistributes ran, on the same values and group:
+
+| Style | Weight / bias | Forward | Backward |
+|---|---|---|---|
+| `colwise` | `Shard(0)` / `Shard(0)` | local output shard | input gradient SUM |
+| `colwise_gather_output` | `Shard(0)` / `Shard(0)` | output all-gathered on the last dim | this rank's gradient slice; input gradient SUM |
+| `rowwise` | `Shard(1)` / replicated | in-place output SUM, then the bias | identity |
+| `rowwise_split_input` | `Shard(1)` / replicated | this rank's input slice; in-place output SUM, then the bias | input gradient all-gathered |
+
+The HF-native load installs this forward on every planned `nn.Linear` at the load finish
+(`install_planned_local_forwards`, called from `finish_hf_tp_load`); the selective plan shards and installs
+it in one step, and `apply_lowp_compute` re-installs it around the dense MLP projections `lowp_precision`
+retypes, computing their fake-quant matmul on the local shards. Embeddings (`embedding_rowwise`), the MoE
+and activation styles, and a Linear subclass with a forward of its own keep transformers' forward. A
+projection called outside its FSDP unit's forward, with FSDP2's `(dp, tp)` shard still registered, raises
+rather than computing part of its output.
+
+The results are bit-identical to DTensor dispatch with one exception: a rowwise bias is added once after
+the SUM, in the matmul's dtype, where DTensor added `bias / tp_size` to each rank's partial, so GPT-OSS's
+biased `o_proj` differs in the last bit (`tests/cpu/parallelism/test_tp_local_linears.py`: every TP family
+of the tiny roster at TP 2, both plans under FSDP2 at dp 2 × tp 2 and under activation checkpointing).
 
 ## Quick start
 
@@ -278,7 +309,7 @@ reshape, after the whole checkpoint has been pulled and placed on every rank.
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `halo/model_loading/liger/dispatch.py` |
 | `added_special_tokens` that grow the vocab | rejected on a dense **tied** model, whose embedding is a vocab-sharded DTensor that `resize_token_embeddings` cannot re-shard. Patch the vocab offline (`scripts/before_training/patch_vocab.py`) instead | `configure_run_tokenizer` (`is_input_embedding_tp_sharded`) |
 | `gradient_checkpointing`, `packing`, `padding_free`, `lowp_precision`, `moe_balancing` | not gated under TP | — |
-| `torch_compile` | not gated, and no meaningful speedup — DTensor's sharded-op dispatch breaks the graph at every sharded op. Use Liger | — |
+| `torch_compile` | not gated and unmeasured under TP: the local-shard linears and their collectives trace without a graph break ([Graph breaks](../optimization/torch-compile.md#graph-breaks)), but FA4 still breaks it at every attention call. Use Liger | — |
 
 ## Multi-node
 

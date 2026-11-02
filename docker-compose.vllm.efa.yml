@@ -1,8 +1,10 @@
 # EFA overlay for docker-compose.vllm.yml — the weight-sync group and the trainer's other
 # collectives ride the fabric. Layer it after the base:
-#   docker compose -f docker-compose.vllm.yml -f docker-compose.vllm.efa.yml up -d vllm-server
-# The host supplies the EFA driver and /dev/infiniband; a trainer on another node also needs
-# VLLM_GROUP_HOST when the default-route NIC is not the one the server can reach.
+#   HALO_SCRATCH=<large volume> docker compose -f docker-compose.vllm.yml -f docker-compose.vllm.efa.yml \
+#     up -d vllm-server
+# The host supplies the EFA driver and /dev/infiniband. The trainer advertises its address on the
+# route to the server; VLLM_GROUP_HOST is needed only on an asymmetric route, to name another local
+# address the server can reach.
 
 x-efa: &efa
   devices:

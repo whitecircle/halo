@@ -44,9 +44,9 @@ RoPE follows `config.rope_interleave`: rotate-half (`apply_rotary_pos_emb`) or i
 
 Selective TP via `apply_tp_to_attention_only()` — `Mistral4Attention` is in `TP_SHARDABLE_ATTENTION_CLASSES` (`halo/distributed/tensor_parallel/parallelize_attention.py`). MLA reuses GLM-4's compress/expand layout, so the plan applies verbatim:
 
-- **Sharded** (ColwiseParallel): `q_b_proj`, `kv_b_proj` (head-dim expansions).
+- **Sharded** (colwise): `q_b_proj`, `kv_b_proj` (head-dim expansions).
 - **Replicated**: `q_a_proj`, `kv_a_proj_with_mqa`, `q_a_layernorm`, `kv_a_layernorm` — low-rank compressions where sharding produces degenerate per-rank shapes.
-- **Sharded** (RowwiseParallel): `o_proj`.
+- **Sharded** (rowwise): `o_proj`.
 
 MoE blocks (`Mistral4MoE`, `Mistral4Experts`, `Mistral4MLP`) are skipped — they belong to EP, not TP.
 

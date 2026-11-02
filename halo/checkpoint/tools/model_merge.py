@@ -444,7 +444,7 @@ def _copy_aux_files(
                 f"{source_dir} shipped no tokenizer files, so the merged checkpoint in {output_dir} "
                 f"has none and every from_pretrained-based consumer will fail to build a tokenizer. "
                 f"The merged weights are already written — re-run with --tokenizer_source pointing at "
-                f"a directory or Hub id that carries the tokenizer (it is copied verbatim), or pass "
+                f"a local directory that carries the tokenizer (it is copied verbatim), or pass "
                 f"--allow_missing_tokenizer if a tokenizer-less artifact is genuinely what you want."
             )
         logger.warning(f"{source_dir} shipped no tokenizer files (--allow_missing_tokenizer).")

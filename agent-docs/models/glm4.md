@@ -45,8 +45,8 @@ GLM-4 has no llama-4 position scaling, so the base forward is unchanged. RoPE fo
 
 Selective TP via `apply_tp_to_attention_only()` needs a tailored plan for the LoRA-style attention:
 
-- **Sharded** (ColwiseParallel): `q_b_proj`, `kv_b_proj` — the expansion linears.
-- **Sharded** (RowwiseParallel): `o_proj` — reduces back over the head dim the expansions split.
+- **Sharded** (colwise): `q_b_proj`, `kv_b_proj` — the expansion linears.
+- **Sharded** (rowwise): `o_proj` — reduces back over the head dim the expansions split.
 - **Replicated**: `q_a_proj`, `kv_a_proj_with_mqa` and their layer norms — low-rank compressions (often dim ≤ `tp_size × num_heads`) where sharding produces degenerate per-rank shapes.
 
 ## ETP

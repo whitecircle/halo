@@ -2,6 +2,7 @@
 """``halo/data/deduplication.py``: row normalization, the seeded shuffle that decides which member of
 a near-duplicate group survives, and the FAISS passes' surviving indices."""
 
+import json
 import time
 
 import numpy as np
@@ -137,6 +138,21 @@ def test_unset_max_workers_reads_the_usable_cpu_count_at_call_time(monkeypatch):
     monkeypatch.setattr(deduplication, "ThreadPoolExecutor", recording_executor)
     deduplicate_embeddings(DUPLICATED_BASIS, steps_count=2, batch_size=8, similarity_threshold=0.9)
     assert seen == [3, 3]
+
+
+# load_dataset_from_path
+
+
+def test_the_row_sample_is_drawn_with_the_runs_fixed_seed(monkeypatch, tmp_path):
+    """``--sample_size`` decides which rows are deduplicated at all, so it is drawn with the seed the passes use:
+    two runs over one file read the same rows, and the sample follows that seed rather than a literal of its own."""
+    data = tmp_path / "rows.jsonl"
+    data.write_text("".join(json.dumps({"text": f"row {i}"}) + "\n" for i in range(64)))
+    monkeypatch.setattr(deduplication, "DEDUP_SHUFFLE_SEED", 7)
+    sample = deduplication.load_dataset_from_path(str(data), "text", None, "train", sample_size=8)["text"]
+    whole = deduplication.load_dataset_from_path(str(data), "text", None, "train", sample_size=None)
+    assert sample == whole.shuffle(seed=7).select(range(8))["text"]
+    assert sample != whole.shuffle(seed=42).select(range(8))["text"]
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
-"""Selective TP: DTensor ``ColwiseParallel`` / ``RowwiseParallel`` on the attention projections only, for the
-MoE families whose experts EP owns (and pure TP on a MoE, whose experts stay replicated)."""
+"""Selective TP: colwise / rowwise sharding of the attention projections only, for the MoE families whose experts
+EP owns (and pure TP on a MoE, whose experts stay replicated); the projections compute on their local shards."""
 
 from __future__ import annotations
 
@@ -9,11 +9,10 @@ from collections import Counter
 import torch
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
-from torch.distributed.tensor import DTensor
-from torch.distributed.tensor.parallel import ColwiseParallel, RowwiseParallel, parallelize_module
 
 from halo.distributed.grad_reduce import SumGradAcrossGroup
 from halo.distributed.mesh import tp_submesh
+from halo.distributed.tensor_parallel.local_linears import shard_linear
 from halo.distributed.tensor_parallel.plain_params import register_hand_sliced, register_per_head_norm_params
 from halo.models.config_access import get_config_field
 from halo.models.module_tree import DECODER_LAYER_LIST_ATTRS, backbone_with_layers, decoder_layers
@@ -38,14 +37,14 @@ TP_SHARDABLE_ATTENTION_CLASSES = frozenset(
 # Attention projection -> its TP style, in application order. Colwise splits an output that lands on the head
 # dim (the MLA expansions q_b_proj / kv_b_proj included, while its compressions stay replicated); the output
 # projection reduces back over it.
-_ATTENTION_TP_STYLES: dict[str, type] = {
-    "q_proj": ColwiseParallel,
-    "k_proj": ColwiseParallel,
-    "v_proj": ColwiseParallel,
-    "q_b_proj": ColwiseParallel,
-    "kv_b_proj": ColwiseParallel,
-    "o_proj": RowwiseParallel,
-    "out_proj": RowwiseParallel,
+_ATTENTION_TP_STYLES: dict[str, str] = {
+    "q_proj": "colwise",
+    "k_proj": "colwise",
+    "v_proj": "colwise",
+    "q_b_proj": "colwise",
+    "kv_b_proj": "colwise",
+    "o_proj": "rowwise",
+    "out_proj": "rowwise",
 }
 
 
@@ -66,27 +65,20 @@ def _is_mla_attention(attn: nn.Module) -> bool:
     return getattr(attn, "q_b_proj", None) is not None or getattr(attn, "kv_b_proj", None) is not None
 
 
-def _parallelize_or_raise(module: nn.Module, tp_mesh: DeviceMesh, plan: dict, what: str) -> None:
-    """``parallelize_module``, with any failure raised as a ``RuntimeError`` naming ``what``."""
+def _parallelize_or_raise(attn: nn.Module, tp_mesh: DeviceMesh, plan: dict[str, str], what: str) -> None:
+    """Shard each planned projection of ``attn`` under its style, any failure raised as a ``RuntimeError``
+    naming ``what``."""
     try:
-        parallelize_module(module, tp_mesh, plan)
+        for name, style_name in plan.items():
+            shard_linear(getattr(attn, name), style_name, tp_mesh, name=name)
     except Exception as e:
         raise RuntimeError(f"TP sharding failed for {what}: {e}") from e
-
-    # Plan keys resolve against child MODULES: a parameter-keyed plan silently leaves weights full-size.
-    if not any(isinstance(p, DTensor) for p in module.parameters(recurse=True)):
-        logger.warning(
-            f"TP plan for {what} was a no-op: no parameter became a DTensor. Plan keys must name "
-            f"CHILD MODULES, not parameters (a parameter-keyed plan like {{'weight': ...}} on a leaf "
-            f"module is silently skipped by torch). This module stays REPLICATED — correct numerics, "
-            f"but the promised memory saving does not apply."
-        )
 
 
 def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
     """The unplanned trainable children of ``attn``: norms applied after a colwise projection (Qwen3 ``q_norm``,
-    LFM2 ``q_layernorm``), whose replicated gradient covers this rank's heads only, as the projection's local
-    output ends the DTensor graph. MLA's norms sit before the colwise expansion, whose backward all-reduces."""
+    LFM2 ``q_layernorm``), whose replicated gradient covers this rank's heads only, as the projection returns
+    this rank's heads alone. MLA's norms sit before the colwise expansion, whose input gradient is SUMmed."""
     if _is_mla_attention(attn):
         return []
     return [
@@ -96,10 +88,10 @@ def _per_head_norm_modules(attn: nn.Module, plan: dict) -> list[nn.Module]:
     ]
 
 
-def _attention_tp_plan(attn: nn.Module) -> dict:
+def _attention_tp_plan(attn: nn.Module) -> dict[str, str]:
     """The planned projections ``attn`` holds, each with its TP style. ``is not None``: a plan entry naming a
     present-but-None attribute would shard nothing."""
-    return {name: style() for name, style in _ATTENTION_TP_STYLES.items() if getattr(attn, name, None) is not None}
+    return {name: style for name, style in _ATTENTION_TP_STYLES.items() if getattr(attn, name, None) is not None}
 
 
 def _is_tp_shardable(attn: nn.Module | None) -> bool:
@@ -250,10 +242,10 @@ def validate_tp_head_divisibility(text_config, tp_size: int, *, uses_mla: bool |
 def register_mla_rope_grad_reduction(attn: nn.Module, tp_mesh: DeviceMesh, config) -> None:
     """SUM the gradient of the rope half of MLA's ``kv_a_proj_with_mqa`` output over the TP group, in backward.
 
-    The ``kv_lora_rank`` half feeds the colwise ``kv_b_proj``, whose input redistribute already all-reduces it;
-    the rope half is broadcast to this rank's local heads without crossing a DTensor boundary, so its gradient
-    covers those heads only. Reducing at the output (transformers' ``mla_kv_a_proj`` remedy) keeps the weight
-    a plain replica whose gradient is complete on every rank, so the trainer's AVG is idempotent.
+    The ``kv_lora_rank`` half feeds the colwise ``kv_b_proj``, whose input gradient is already SUMmed; the rope
+    half is broadcast to this rank's local heads without passing a TP projection, so its gradient covers those
+    heads only. Reducing at the output (transformers' ``mla_kv_a_proj`` remedy) keeps the weight a plain replica
+    whose gradient is complete on every rank, so the trainer's AVG is idempotent.
     """
     text_config = config.get_text_config() if config is not None else None
     rope_dim = getattr(text_config, "qk_rope_head_dim", None)

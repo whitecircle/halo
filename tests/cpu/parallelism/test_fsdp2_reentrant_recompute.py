@@ -9,15 +9,15 @@ stay in the unsharded gradient, the layer groups stay gathered past the optimize
 gradients survive ``model.zero_grad()``. ``DistributedTrainerMixin.training_step`` completes that
 post-backward after the backward and refuses one still undone.
 
-Two families run through ``apply_fsdp2_per_layer`` and scoped reentrant checkpointing: a tiny dense Qwen3
-(also with its MLPs held in another dtype, so each layer carries a nested shard group) and a tiny Qwen3-MoE
-under EP layers at ep1 with FSDP-sharded experts; the dense one also under HSDP on 4 ranks. Each is trained 3 SGD
-steps beside an unsharded model
-without checkpointing that averages its gradients over the ranks, with HF's step order (backward per
-microbatch, clip, step, ``model.zero_grad()``). At K=1 the step must leave every gradient and weight bit for
-bit what the same step without the completion leaves. The non-finite step guard reads its verdict off the
-completed gradient: a K>1 step whose backward overflows on one rank is skipped everywhere, and nothing of it
-reaches a later step.
+Two families run through ``apply_fsdp2_per_layer`` and scoped reentrant checkpointing, in one-layer groups and in
+the wrap's ZeRO-2 units of several layers (whose K>1 leftovers torch's final callback reduces itself, as it visits a
+unit's state once per module): a tiny dense Qwen3 (also with its MLPs held in another dtype, so each layer carries
+a nested shard group) and a tiny Qwen3-MoE under EP layers at ep1 with FSDP-sharded experts; the dense one also
+under HSDP on 4 ranks. Each is trained 3 SGD steps beside an unsharded model without checkpointing that averages
+its gradients over the ranks, with HF's step order (backward per microbatch, clip, step, ``model.zero_grad()``).
+At K=1 the step must leave every gradient and weight bit for bit what the same step without the completion
+leaves. The non-finite step guard reads its verdict off the completed gradient: a K>1 step whose backward
+overflows on one rank is skipped everywhere, and nothing of it reaches a later step.
 
     python tests/cpu/parallelism/test_fsdp2_reentrant_recompute.py
 """
@@ -90,6 +90,24 @@ HSDP_K_VALUES = (1, 4)
 # The step whose backward overflows on the last rank, and the rows each of its backwards recomputes.
 POISONED_STEP = 1
 POISONED_K = 4
+# Decoder layers per shard group by ``reshard_after_forward``: one-layer groups, and the wrap's own count.
+UNIT_SIZES = {raf: sorted({1, fsdp.layers_per_shard_group(raf)}) for raf in (False, True)}
+# Each trained shape, by name; the dense family also with its MLPs in another dtype.
+SHAPES = {
+    f"{family}-raf{raf}-units{units}-micro{micro}-nested{nested}": {
+        "family": family,
+        "raf": raf,
+        "units": units,
+        "micro": micro,
+        "nested": nested,
+    }
+    for family in FAMILY_OVERRIDES
+    for raf in (False, True)
+    for units in UNIT_SIZES[raf]
+    for micro in (1, GRAD_ACCUM)
+    for nested in ((False, True) if family == "dense" else (False,))
+}
+MAIN = list(SHAPES)
 
 
 def _rows(k: int, step: int, micro: int, rank: int) -> list[torch.Tensor]:
@@ -169,9 +187,10 @@ class _Trainer(DistributedTrainerMixin, _RowsBackward):
 
 
 def _param_groups(model: nn.Module) -> list:
-    """Each FSDP2 module's parameter group, read off torch's own state rather than the code under test."""
+    """Each FSDP2 parameter group once (a unit's modules share one), read off torch's own state rather than the
+    code under test."""
     groups = (module._get_fsdp_state()._fsdp_param_group for module in fsdp2_modules(model))
-    return [group for group in groups if group is not None]
+    return list({id(group): group for group in groups if group is not None}.values())
 
 
 def _is_layer_group(group) -> bool:
@@ -188,16 +207,19 @@ def _build(family: str, ep_config: EPConfig) -> nn.Module:
     return model.train()
 
 
-def _sharded(family: str, ep_config: EPConfig, mesh, *, raf: bool, nested: bool) -> nn.Module:
-    """``family``'s model under scoped reentrant checkpointing and the toolkit's per-layer FSDP2 wrap; ``nested``
-    holds each MLP in float64, which the wrap splits into a shard group inside its layer's."""
+def _sharded(family: str, ep_config: EPConfig, mesh, *, raf: bool, nested: bool, units: int) -> nn.Module:
+    """``family``'s model under scoped reentrant checkpointing and the toolkit's FSDP2 wrap in groups of ``units``
+    decoder layers; ``nested`` holds each MLP in float64, which the wrap splits into a shard group inside its
+    layer's."""
     model = _build(family, ep_config)
     if nested:
         for layer in model.model.layers:
             layer.mlp.to(torch.float64)
     enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     policy = mixed_precision_policy(torch.float32, fp32_reduce=True, cast_forward_inputs=True)
-    apply_fsdp2_per_layer(model, mesh, policy, reshard_after_forward=raf, ignored_params=IdentityParamSet())
+    apply_fsdp2_per_layer(
+        model, mesh, policy, reshard_after_forward=raf, ignored_params=IdentityParamSet(), layers_per_unit=units
+    )
     return model
 
 
@@ -279,6 +301,7 @@ def _train(
     *,
     k: int,
     raf: bool,
+    units: int,
     micro: int,
     nested: bool = False,
     window: dict = NO_WINDOW,
@@ -288,7 +311,7 @@ def _train(
     off runs the same step without the post-backward completion (the K=1 twin). Every collective runs on
     every rank in the same order, before anything is compared."""
     reference = _build(family, ep_config)
-    model = _sharded(family, ep_config, mesh, raf=raf, nested=nested)
+    model = _sharded(family, ep_config, mesh, raf=raf, nested=nested, units=units)
     trainer = _Trainer(model, None if family == "dense" else ep_config, window)
     if not complete:
         trainer._finish_fsdp2_backward = lambda model: None
@@ -357,13 +380,13 @@ def _train(
     return record
 
 
-def _skipped_step_run(mesh) -> dict:
+def _skipped_step_run(mesh, units: int) -> dict:
     """``STEPS`` steps of the dense model at ``POISONED_K`` rows per backward, ``POISONED_STEP``'s backward
     overflowing on the last rank, through the trainer's step and the step guard on its optimizer; the reference
     takes no step there."""
     rank = dist.get_rank()
     reference = _build("dense", None)
-    model = _sharded("dense", None, mesh, raf=False, nested=False)
+    model = _sharded("dense", None, mesh, raf=False, nested=False, units=units)
     trainer = _Trainer(model, None, NO_WINDOW)
     ref_params = list(reference.parameters())
     params = list(model.parameters())
@@ -402,9 +425,10 @@ def _skipped_step_run(mesh) -> dict:
 
 
 def _guard_cases(ep_config: EPConfig, mesh) -> dict:
-    """The guard on a backward the completion cannot finish, and on each leftover injected by hand."""
+    """The guard on a backward the completion cannot finish, and on each leftover injected by hand, in one-layer
+    groups: torch's final callback finishes a unit of several layers itself."""
     out = {}
-    model = _sharded("dense", ep_config, mesh, raf=False, nested=False)
+    model = _sharded("dense", ep_config, mesh, raf=False, nested=False, units=1)
     trainer = _Trainer(model, ep_config=None, window=NO_WINDOW)
     try:
         with patch.object(grad_sync, "complete_fsdp2_post_backward", lambda groups: 0):
@@ -413,7 +437,7 @@ def _guard_cases(ep_config: EPConfig, mesh) -> dict:
     except RuntimeError as error:
         out["uncompleted_backward"] = str(error)
     for injected in ("unreduced", "gathered"):
-        model = _sharded("dense", ep_config, mesh, raf=False, nested=False)
+        model = _sharded("dense", ep_config, mesh, raf=False, nested=False, units=1)
         trainer = _Trainer(model, ep_config=None, window=NO_WINDOW)
         trainer.training_step(model, _rows(1, 0, 0, dist.get_rank()))
         layers = [
@@ -435,24 +459,22 @@ def _guard_cases(ep_config: EPConfig, mesh) -> dict:
 
 def _scenarios() -> dict[str, dict]:
     cases = {}
+    for prefix, shape in SHAPES.items():
+        for k in K_VALUES:
+            cases[f"{prefix}-k{k}"] = {**shape, "k": k}
+        cases[f"{prefix}-k1-twin"] = {**shape, "k": 1, "complete": False}
     for family in FAMILY_OVERRIDES:
-        for raf in (False, True):
-            for micro in (1, GRAD_ACCUM):
-                for nested in (False, True) if family == "dense" else (False,):
-                    shape = {"family": family, "raf": raf, "micro": micro, "nested": nested}
-                    prefix = f"{family}-raf{raf}-micro{micro}-nested{nested}"
-                    for k in K_VALUES:
-                        cases[f"{prefix}-k{k}"] = {**shape, "k": k}
-                    cases[f"{prefix}-k1-twin"] = {**shape, "k": 1, "complete": False}
-        for name, window in WINDOWS.items():
-            for k in WINDOW_K_VALUES:
-                cases[f"{family}-window_{name}-k{k}"] = {
-                    "family": family,
-                    "k": k,
-                    "raf": False,
-                    "micro": GRAD_ACCUM,
-                    "window": window,
-                }
+        for units in UNIT_SIZES[False]:
+            for name, window in WINDOWS.items():
+                for k in WINDOW_K_VALUES:
+                    cases[f"{family}-units{units}-window_{name}-k{k}"] = {
+                        "family": family,
+                        "k": k,
+                        "raf": False,
+                        "units": units,
+                        "micro": GRAD_ACCUM,
+                        "window": window,
+                    }
     return cases
 
 
@@ -483,25 +505,31 @@ def _guard_worker(rank: int, out: str) -> None:
 
 
 def _skip_worker(rank: int, out: str) -> None:
-    try:
-        result = _skipped_step_run(init_device_mesh("cpu", (WORLD,)))
-    except Exception as error:
-        result = {"error": f"{type(error).__name__}: {error}"}
+    mesh = init_device_mesh("cpu", (WORLD,))
+    results = {}
+    for units in UNIT_SIZES[False]:
+        try:
+            results[f"units{units}"] = _skipped_step_run(mesh, units)
+        except Exception as error:
+            results[f"units{units}"] = {"error": f"{type(error).__name__}: {error}"}
     with open(f"{out}.{rank}", "w") as fh:
-        json.dump({"completed": result}, fh)
+        json.dump(results, fh)
 
 
 def _hsdp_worker(rank: int, out: str) -> None:
     """The dense model under HSDP, 2 replicas of 2 shards: a completion's reduce-scatter and all-reduce."""
     mesh = init_device_mesh("cpu", HSDP_MESH, mesh_dim_names=("dp_replicate", "dp_shard"))
     results = {}
-    for k in HSDP_K_VALUES:
-        for complete in (True, False) if k == 1 else (True,):
-            name = f"k{k}" if complete else f"k{k}-twin"
-            try:
-                results[name] = _train("dense", None, mesh, k=k, raf=False, micro=1, complete=complete)
-            except Exception as error:
-                results[name] = {"error": f"{type(error).__name__}: {error}"}
+    for units in UNIT_SIZES[False]:
+        for k in HSDP_K_VALUES:
+            for complete in (True, False) if k == 1 else (True,):
+                name = f"units{units}-k{k}" if complete else f"units{units}-k{k}-twin"
+                try:
+                    results[name] = _train(
+                        "dense", None, mesh, k=k, raf=False, units=units, micro=1, complete=complete
+                    )
+                except Exception as error:
+                    results[name] = {"error": f"{type(error).__name__}: {error}"}
     with open(f"{out}.{rank}", "w") as fh:
         json.dump(results, fh)
 
@@ -541,15 +569,6 @@ def _run(rank_runs: dict, name: str) -> dict:
     if "error" in run:
         pytest.fail(f"{name} raised: {run['error']}")
     return run
-
-
-MAIN = [
-    f"{family}-raf{raf}-micro{micro}-nested{nested}"
-    for family in FAMILY_OVERRIDES
-    for raf in (False, True)
-    for micro in (1, GRAD_ACCUM)
-    for nested in ((False, True) if family == "dense" else (False,))
-]
 
 
 @pytest.mark.parametrize("case", MAIN)
@@ -619,9 +638,10 @@ def test_the_compute_stream_waits_on_every_reduction(runs, case):
             assert all(m["layer_reduces"] == [2] * len(m["layer_reduces"]) for m in run["micro"]), k
 
 
+@pytest.mark.parametrize("units", UNIT_SIZES[False])
 @pytest.mark.parametrize("family", list(FAMILY_OVERRIDES))
 @pytest.mark.parametrize("window", list(WINDOWS))
-def test_accumulation_windows_keep_their_semantics(runs, family, window):
+def test_accumulation_windows_keep_their_semantics(runs, family, window, units):
     """Inside a grad-accum window the completion follows each group's armed flags: a deferred reduce issues no
     reduce-scatter before the window's last backward, nor does the completion; a kept-gathered window keeps
     its layers gathered between microsteps, and every other microstep ends them sharded; the last backward
@@ -629,7 +649,7 @@ def test_accumulation_windows_keep_their_semantics(runs, family, window):
     flags = WINDOWS[window]
     for rank_runs in runs:
         for k in WINDOW_K_VALUES:
-            run = _run(rank_runs, f"{family}-window_{window}-k{k}")
+            run = _run(rank_runs, f"{family}-units{units}-window_{window}-k{k}")
             assert max(run["grad_rel"]) < PARITY_RTOL, (k, run["grad_rel"])
             assert all(run["sharded_after_step"]), k
             assert run["unwaited"] == 0, k
@@ -642,14 +662,15 @@ def test_accumulation_windows_keep_their_semantics(runs, family, window):
                     assert microstep["layer_reduces"] == [1 if k == 1 else 2] * len(microstep["layer_reduces"]), k
 
 
-def test_hsdp_completes_the_reduce_scatter_and_the_replica_all_reduce(hsdp_runs):
+@pytest.mark.parametrize("units", UNIT_SIZES[False])
+def test_hsdp_completes_the_reduce_scatter_and_the_replica_all_reduce(hsdp_runs, units):
     """Under HSDP each completed group reduce-scatters over its shard group and all-reduces over its replicas:
     every segment reaches the gradient, waited on, and K=1 stays bit-identical."""
     for rank_runs in hsdp_runs:
-        run, twin = _run(rank_runs, "k1"), _run(rank_runs, "k1-twin")
+        run, twin = _run(rank_runs, f"units{units}-k1"), _run(rank_runs, f"units{units}-k1-twin")
         assert run["grads"] == twin["grads"] and run["weights"] == twin["weights"]
         for k in HSDP_K_VALUES:
-            run = _run(rank_runs, f"k{k}")
+            run = _run(rank_runs, f"units{units}-k{k}")
             assert max(run["grad_rel"]) < PARITY_RTOL, (k, run["grad_rel"])
             assert run["norm_rel"] and max(run["norm_rel"]) < PARITY_RTOL, (k, run["norm_rel"])
             assert all(run["sharded_after_step"]) and run["logit_rel"] < PARITY_RTOL, k
@@ -658,11 +679,12 @@ def test_hsdp_completes_the_reduce_scatter_and_the_replica_all_reduce(hsdp_runs)
             assert all(m["layer_reduces"] == [expected] * len(m["layer_reduces"]) for m in run["micro"]), k
 
 
-def test_a_recomputed_step_that_overflows_on_one_rank_is_skipped_on_every_rank(skip_runs):
+@pytest.mark.parametrize("units", UNIT_SIZES[False])
+def test_a_recomputed_step_that_overflows_on_one_rank_is_skipped_on_every_rank(skip_runs, units):
     """The step guard's norm is the completed gradient's: the poisoned step leaves every rank's weights bit for
     bit, and the steps around it, the first one after it included, match the reference that never took it."""
     for rank_runs in skip_runs:
-        run = _run(rank_runs, "completed")
+        run = _run(rank_runs, f"units{units}")
         assert run["skipped"] == 1, run["skipped"]
         assert run["weights"][POISONED_STEP] == run["weights"][POISONED_STEP - 1]
         assert max(run["grad_rel"]) < PARITY_RTOL, run["grad_rel"]

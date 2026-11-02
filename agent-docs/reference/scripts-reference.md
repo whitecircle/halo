@@ -35,7 +35,7 @@ Launcher choice: [Two launchers](../parallelism/data-parallelism.md#two-launcher
 
 ## Training scripts
 
-Every training entry script runs the shared skeleton in `halo/entrypoints/`: `parse_script_args` (distributed init, the YAML/CLI parse, the `output_dir` expansion and the `run.log` tee) → `init_training_script` (parallelism config, run setup, resume resolution, returning the run's `ScriptContext`) → DP-shard-aware dataset loading and the modality verdict (`data_setup.py`) → the policy load and window pins (`model_setup.py`) → `configure_balancing_and_build_callbacks` → `run_trainer`, which emits the canonical start log (mode plus EP/CP/TP/ETP/DP sizes) and reorders integration callbacks last so `moe/*` and efficiency keys reach W&B. `with_distributed_teardown(main)()` tears the process group down after a finished or early-stopped run.
+Every training entry script runs the shared skeleton in `halo/entrypoints/`: `parse_script_args` (distributed init, the YAML/CLI parse, the `output_dir` expansion and the `run.log` tee) → `init_training_script` (parallelism config, run setup, resume resolution, returning the run's `ScriptContext`) → DP-shard-aware dataset loading and the modality verdict (`data_setup.py`) → the policy load and window pins (`model_setup.py`) → `configure_balancing_and_build_callbacks` → `run_trainer`, which emits the canonical start log (mode plus EP/CP/TP/ETP/PP/DP sizes) and reorders integration callbacks last so `moe/*` and efficiency keys reach W&B. `with_distributed_teardown(main)()` tears the process group down after a finished or early-stopped run.
 
 Which parallelism axes each trainer takes: [Trainer compatibility](trainer-architecture.md#trainer-compatibility). Launch commands are on each method's page.
 
@@ -72,7 +72,8 @@ In `openai_batched_generation.py`, `--dataset` / `--output_path` name S3 dataset
 `s3://<bucket>/<key>` URI is used as given; a bare key is placed by `build_s3_uri` under `--subfolder`
 (default `datasets`, `None` to skip) in `HALO_S3_DEFAULT_BUCKET`, and raises naming its flag while that
 variable is unset. On `deduplicate_dataset.py`, `--dataset` is a
-local file or a Hub dataset id and `--output_path` a local path.
+Hub dataset id, an `s3://` URI, a local data file or a `save_to_disk` directory, read at `--config`/`--split`
+like the eval CLIs' (`load_dataset_split`), and `--output_path` a local path.
 
 The three async CLIs — `openai_batched_generation.py`, `rejection_sample.py`, `score.py`
 — run under a shared SIGINT/SIGTERM handler
@@ -222,7 +223,7 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
 | Script | Description |
 |--------|-------------|
 | `scripts/before_training/prepare_dataset.py` | Pre-process SFT or raw-text datasets: tokenization, packing, sharding. `--mode chat` (default) applies the chat template; `--mode text` tokenizes `--text_field` directly and appends EOS per document — the (continued) pre-training path. The output holds `train` and `test` (an input with no `test` bakes its `validation` split as `test`); any other input split is left out with a warning. A `--conversation_field` / `--text_field` / `--tools_field` / `--images_field` the run reads but a baked split does not carry is refused before tokenization |
-| `scripts/before_training/s3.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`, required while that is unset). `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
+| `scripts/before_training/s3.py` | CLI over the S3 transport: `push`, `download`, `list`, `exists`, `delete` a folder at a bare key under `--bucket` (default `HALO_S3_DEFAULT_BUCKET`) or at a full `s3://bucket/key` URI. `delete` removes ONE object; `--recursive/-r` is opt-in for a whole prefix. See [S3 Utilities](../data/s3-utilities.md) |
 | `scripts/before_training/patch_vocab.py` | Patch vocabulary with new tokens, reset attention sinks |
 | `scripts/before_training/convert_deepseek_v4_bf16.py` | Dequantize a FineGrained-FP8 DeepSeek-V4 checkpoint to uniform bf16 for training; `--max_shard_size` sizes the output shards (default `5GB`; see [DeepSeek-V4](../models/deepseek-v4.md)) |
 | `scripts/before_training/convert_mistral4_bf16.py` | Dequantize a public FP8 Mistral Small 4 checkpoint to bf16, streaming shard-by-shard (no full-model RAM footprint); `--max_shard_size` caps the output shards (default `5GB`; see [Mistral4](../models/mistral4.md)) |

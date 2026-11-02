@@ -68,7 +68,7 @@ def _stub_module(monkeypatch, module, *, rows, existing, request_impl):
         calls.append(kwargs)
         return request_impl(kwargs["messages"])
 
-    monkeypatch.setattr(module, "load_prompts_with_resume", lambda args: (rows, existing))
+    monkeypatch.setattr(module, "load_prompts_with_resume", lambda args, output_uri: (rows, existing))
     monkeypatch.setattr(module, "build_openai_client", lambda **kwargs: object())
     monkeypatch.setattr(module, "parallel_openai_requests", fake_requests)
     monkeypatch.setattr(module, "build_s3_uri", lambda path, subfolder, *, given_as: f"s3://bucket/{subfolder}/{path}")
@@ -108,6 +108,50 @@ def test_batched_generation_raises_when_every_request_failed(monkeypatch):
     with pytest.raises(RuntimeError, match="No usable result"):
         asyncio.run(batched.main())
     assert pushed == []
+
+
+def test_batched_generation_resolves_its_output_dataset_once(monkeypatch):
+    """The resume read, the push and the empty-run refusal must name one dataset: a second resolution can land
+    elsewhere (a bucket default read again), and the refusal named the bare ``--output_path``, not the URI."""
+    resolved: list[str] = []
+    read_from: list[str] = []
+    pushed_to: list[str] = []
+
+    def numbered_uri(path, subfolder, *, given_as):
+        if given_as == "--output_path":
+            resolved.append(f"s3://bucket/run-{len(resolved)}/{path}")
+            return resolved[-1]
+        return f"s3://bucket/{path}"
+
+    _stub_module(
+        monkeypatch,
+        resumable_generation,
+        rows=_ROWS,
+        existing=[],
+        request_impl=lambda messages: [_response("a")] * len(messages),
+    )
+    monkeypatch.setattr(resumable_generation, "build_s3_uri", numbered_uri)
+    monkeypatch.setattr(
+        resumable_generation,
+        "load_prompts_with_resume",
+        lambda args, output_uri: read_from.append(output_uri) or (_ROWS, []),
+    )
+    monkeypatch.setattr(resumable_generation, "push_dataset_to_s3_uri", lambda dataset, uri: pushed_to.append(uri))
+    monkeypatch.setattr(sys, "argv", list(_BATCHED_ARGV))
+    asyncio.run(batched.main())
+    assert len(resolved) == 1 and read_from == pushed_to == resolved
+
+    resolved.clear()
+    _stub_module(
+        monkeypatch,
+        resumable_generation,
+        rows=_ROWS,
+        existing=[],
+        request_impl=lambda messages: [None] * len(messages),
+    )
+    monkeypatch.setattr(resumable_generation, "build_s3_uri", numbered_uri)
+    with pytest.raises(RuntimeError, match="nothing written to s3://bucket/run-0/"):
+        asyncio.run(batched.main())
 
 
 def test_batched_generation_refuses_a_per_row_response_format(monkeypatch):

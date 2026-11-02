@@ -37,7 +37,7 @@ over. What gets sharded varies:
 |------|----------------|------|
 | No parallelism / CP | All params | CP attention coordinates the sequence split independently |
 | EP / ETP / EP+CP / EP+TP | Non-EP params only | EP modules (router + experts) excluded via `ignored_params`; with one EP group the router syncs through the EP layer's own post-accumulation grad hooks (`halo/distributed/expert_parallel/moe_layer/grad_sync.py`) and the experts through one post-backward sweep, which at `num_ep_groups > 1`, single-node shapes included, takes the router too. **Multi-group EP across nodes** (`is_deferred_dp`) additionally shards non-EP params over the EP group; `ep_size==1` MoE stays on plain world-wide FSDP — see [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync) |
-| TP (DP > 1) | Per-layer, 2D `(dp, tp)` mesh | DTensor-compatible grad sync across the DP dim |
+| TP (DP > 1) | Per [shard group](#shard-groups), 2D `(dp, tp)` mesh | DTensor-compatible grad sync across the DP dim |
 | TP (DP == 1, pure TP) | None | Nothing to sync across DP |
 | PP (alone, or with EP / pure ETP) | The stage's params, over its rank block | As the rows above, scoped to the stage; the schedule reduces once per optimizer step ([PP + EP](pipeline-parallelism.md#pp--ep-moe)) |
 | Single GPU | None | — |
@@ -74,7 +74,36 @@ memory is ~`dp_size` smaller than DDP's full per-rank replication. Setup lives i
 membership, because a plain set's membership test triggers tensor `__eq__` on a hash collision and
 raises when comparing EP's fused 3D expert weights against standard 2D weights.
 
-Groups are one per decoder layer, one for the module that embeds the input ids, and one for the root.
+### Shard groups
+
+Under ZeRO-2 (the default) each shard group is one unit of two consecutive decoder layers (`LAYERS_PER_UNIT`,
+`halo/distributed/fsdp.py`), beside one group for the module that embeds the input ids and one for the root. A
+unit all-gathers its parameters in one collective and reduce-scatters its gradients in one, so it issues half the
+collectives, copy launches and FSDP2 hook calls of one-layer groups, the host work every group adds to a
+host-bound step. A unit ends early where the layers run out (a pipeline stage's odd count included) or where the
+next layer's trainable dtype, outside its nested groups, differs from the unit's. FSDP2 shards each parameter on
+its own, so state-dict keys, shapes and placements, the saved weights and optimizer shards, and the weight sync
+are the same at any unit size, and a run resumes across unit sizes, a switch between ZeRO-2 and ZeRO-3 included.
+
+ZeRO-2 keeps every layer's parameters gathered from its forward to its backward at any unit size, so a unit adds
+gradient memory: until its first layer's backward ends it holds its later layer's unreduced gradients and
+gathered parameters, which a one-layer group would have reduced and freed, and its reduce-scatter buffer, in the
+reduce dtype, spans both layers. ZeRO-3 (`fsdp_reshard_after_forward: true`) keeps one decoder layer per group:
+FSDP2 holds the running group and the one its prefetch gathers, so units of two would gather four layers at the
+backward's peak instead of two, the memory ZeRO-3 is chosen to save.
+
+torch starts a multi-module group at whichever module runs first, and a per-layer reentrant checkpoint
+recomputes a unit's last layer first: the unit would reduce and reshard before its other layers ran their
+backward. The wrap replaces torch's hooks with its own at the unit's two ends (`_install_unit_hooks`,
+`halo/distributed/fsdp.py`), under which a unit reduces from its post-backward hook inside the backward as a
+one-layer group does, with checkpointing off, non-reentrant or reentrant, on every layer or every
+`every_n_layers`, and each layer casts its inputs as its own group would. `tests/cpu/parallelism/test_fsdp2_layer_units.py`
+holds unit sizes 2 and 3 bit for bit to one-layer groups across those shapes, several forwards per backward,
+both ZeRO modes, LoRA, ep1 EP layers, a pipeline stage, HSDP and TP, and pins the FSDP2 members the hooks drive. One
+combination is equal only to rounding: with some layers checkpointed and several forwards per backward, a unit
+reduces each forward's gradients inside the backward where a one-layer group folds the later ones into one
+reduce after it, the same sum added in another order.
+
 `fully_shard` unshards a group from a forward pre-hook, so `embed_tokens` has to sit in a group whose
 `__call__` runs before the lookup: on a multimodal wrapper that is the composite `model.model`, which
 builds `inputs_embeds` itself before handing them to the decoder backbone below it
@@ -109,7 +138,7 @@ Two setups **raise** rather than wrap:
 modes shard gradients and optimizer states across the DP ranks.
 
 - **`false` (default) — ZeRO-2 analog (SHARD_GRAD_OP):** params stay gathered after the forward, so backward skips a re-gather. Faster, higher peak memory.
-- **`true` — ZeRO-3 analog (FULL_SHARD):** params reshard after the forward and re-gather in backward. Lower peak memory, one extra all-gather per layer.
+- **`true` — ZeRO-3 analog (FULL_SHARD):** params reshard after the forward and re-gather in backward. Lower peak memory, one extra all-gather per layer, each decoder layer its own [shard group](#shard-groups).
 
 Set it with `--fsdp_reshard_after_forward`. **Allowed only where the backward re-gather is a plain
 all-gather**: pure DP, CP, TP at `data_parallel_size==1`, and an `ep_group_size==1` MoE (its no-op
@@ -238,7 +267,7 @@ broadcast hangs.
 
 **1D full-shard works on multi-node and is the default — HSDP is a bandwidth optimization, not a
 requirement.** The default DP path 1D-full-shards non-expert params across **every** DP rank, so on
-a multi-node job every per-layer all-gather and reduce-scatter crosses the inter-node fabric, an
+a multi-node job every shard group's all-gather and reduce-scatter crosses the inter-node fabric, an
 order of magnitude below NVLink
 ([bandwidth ladder](../reference/gpu-training-theory.md#interconnect-tiers)).
 
@@ -334,10 +363,13 @@ hooks run inside the checkpoint. A loss that runs a layer more than once before 
 it once per run: env-GRPO scores each turn row in its own forward, and the GRPO log-prob scorers run one
 backbone call per row or chunk. torch's FSDP2 hooks only the first recompute the backward reaches. The
 others find the layer's state mid-backward, re-gather its parameters and accumulate into their
-unsharded gradients, and the root's final callback skips the group as already reduced. Left alone,
+unsharded gradients, and the root's final callback skips a one-layer group as already reduced. Left alone,
 those contributions never reach the sharded gradients the clip and the optimizer read, the group stays
 gathered past the optimizer step (the next forward reads pre-step weights), and its sharded gradient
-survives HF's `model.zero_grad()` into the next step.
+survives HF's `model.zero_grad()` into the next step. A ZeRO-2 [unit](#shard-groups) of two layers sits
+in the callback's state list once per layer, so its later visit finds the group idle and reduces the
+leftovers itself; the one-layer groups left are every decoder-layer group under ZeRO-3, a ZeRO-2 unit at
+the end of an odd layer count, and the nested dtype groups.
 
 After every microstep's backward, `training_step` runs `complete_fsdp2_post_backward`
 (`halo/distributed/fsdp.py`) over every shard group: FSDP2's own `post_backward` on each group left

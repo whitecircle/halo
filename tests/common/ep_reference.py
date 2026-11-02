@@ -20,6 +20,7 @@ from tests.common.datasets import CHAT_TEMPLATE_NOW
 from tests.common.memory import cleanup_memory
 from tests.common.numerics import cos_sim
 from tests.common.rank_log import log_all
+from tests.common.route_sort_reference import receive_counts
 from tests.common.tolerances import TOL
 
 # Router parameter suffixes across the MoE roster: GptOss/DeepSeek-V4 name it ``router``,
@@ -216,13 +217,6 @@ def received_expert_ids(num_tokens: int, top_k: int, experts_per_rank: int, ep_s
     picks = torch.rand(num_tokens, experts_per_rank * ep_size, generator=g).argsort(dim=1)[:, :top_k]
     local = torch.where(picks < experts_per_rank, picks, -1)
     return local[(local >= 0).any(dim=1)]
-
-
-def receive_counts(experts: torch.Tensor, experts_per_rank: int) -> tuple[int, ...]:
-    """The per-local-expert slot counts a DeepEP dispatch reports for the received ids ``experts`` (``-1`` = not
-    this rank's), read back to the host."""
-    local = experts[(experts >= 0) & (experts < experts_per_rank)]
-    return tuple(torch.bincount(local, minlength=experts_per_rank).tolist())
 
 
 def dispatched_receive_counts(layer, experts: torch.Tensor) -> tuple[int, ...] | None:

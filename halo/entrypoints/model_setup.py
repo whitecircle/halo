@@ -34,9 +34,13 @@ from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
 from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
 from halo.models.attention.selection import (
+    FA4_DEDICATED_HEAD_DIM,
     declares_attention_backends,
+    declares_flash_attention,
+    fa4_demoted_by_determinism,
     fa4_varlen_refusal,
     flash_attention_2_in_place_of_fa4,
+    flash_attention_deterministic,
     preferred_flash_impl,
     uses_fa4_dedicated_head_dim,
 )
@@ -106,52 +110,69 @@ def default_training_rows_attn_implementation(
     checkpoint_config=None,
     per_device_eval_batch_size: int = 0,
 ) -> str | None:
-    """Attention implementation for a script that knows the shape of its rows (SFT, self-distillation, embedding),
-    when the YAML pins none: ``flash_attention_2`` where the load would resolve FA4 (the GPU's own pick, at a
-    half-precision ``dtype``) on rows that reach its varlen call (:func:`rows_reach_varlen_kernel`, evaluation batches
-    of ``per_device_eval_batch_size`` rows included) and one of two kernel limits applies, else ``None``, the
-    loader's pick.
+    """Attention request for a script that knows the shape of its rows (SFT, self-distillation, embedding):
+    ``flash_attention_2`` where the load would resolve FA4 (the YAML's pin, or the GPU's own pick when it pins none, at
+    a half-precision ``dtype``) on rows that reach its varlen call (:func:`rows_reach_varlen_kernel`, evaluation
+    batches of ``per_device_eval_batch_size`` rows included) and a kernel limit applies, else the pin (``None``: the
+    loader's pick).
 
     - FA4's varlen kernels are not validated with the checkpoint's attention (:func:`fa4_varlen_refusal`: Gemma 2's
-      softcap); raises where no FA2 build imports. One unpadded row per batch, training and evaluation, runs FA4's
-      dense kernel, which takes the softcap.
+      softcap), FA4 unpinned; raises where no FA2 build imports. One unpadded row per batch, training and
+      evaluation, runs FA4's dense kernel, which takes the softcap. A pinned FA4 there is refused instead.
     - The rows hold several documents (``packing``, ``padding_free``) on a decoder with GatedDeltaNet layers
       (:func:`has_gated_delta_net_layers`: the Qwen3.5/3.6 recipes pack on FA2, Qwen3-Next shares their attention)
-      whose heads FA4 trains on its dedicated head_dim-256 backward (:func:`uses_fa4_dedicated_head_dim`): FA4
-      measured no faster than FA2 on packed rows, and a deterministic run, which that backward is not validated
-      with, would demote FA4 to SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per
-      query head. Not for ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`: Qwen3.5/3.6, text-only
-      checkpoints included), whose varlen path faults FA2 there, and not without an FA2 build, where FA4 stands.
+      whose heads FA4 trains on its dedicated head_dim-256 backward (:func:`uses_fa4_dedicated_head_dim`), FA4
+      unpinned: FA4 measured no faster than FA2 on packed rows.
+    - The rows hold several documents and the run asks for the deterministic backward that kernel is not validated
+      with (:func:`fa4_demoted_by_determinism`, ``full_determinism``), FA4 pinned or not: the loader would demote FA4
+      to SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per query head. Padded rows of
+      one document keep that SDPA.
 
-    ``checkpoint_config`` omitted is fetched (COLLECTIVE), past the checks that need no config only.
+    Neither multi-document rule applies to ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`: Qwen3.5/3.6,
+    text-only checkpoints included), whose varlen path faults FA2 there, nor without an FA2 build, where the loader's
+    pick stands. ``checkpoint_config`` omitted is fetched (COLLECTIVE), past the checks that need no config only.
     """
-    if model_config.attn_implementation:
-        return model_config.attn_implementation
+    pinned = model_config.attn_implementation or None
+    several_documents = packing or padding_free
+    deterministic_fa4_pin = pinned == "flash_attention_4" and several_documents and flash_attention_deterministic()
+    if pinned is not None and not deterministic_fa4_pin:
+        return pinned
     varlen_rows = rows_reach_varlen_kernel(
         packing=packing,
         padding_free=padding_free,
         per_device_train_batch_size=per_device_train_batch_size,
         per_device_eval_batch_size=per_device_eval_batch_size,
     )
-    if not varlen_rows or dtype == torch.float32 or preferred_flash_impl() != "flash_attention_4":
-        return None
+    gpu_picks_fa4 = preferred_flash_impl() == "flash_attention_4"
+    if not varlen_rows or dtype == torch.float32 or (pinned is None and not gpu_picks_fa4):
+        return pinned
     if checkpoint_config is None:
         checkpoint_config = fetch_checkpoint_config(model_config, tag="training_rows_attn_default")
     refused = fa4_varlen_refusal(checkpoint_config)
-    if refused is not None:
+    if pinned is None and refused is not None:
         return flash_attention_2_in_place_of_fa4(
             f"FlashAttention-4's varlen kernels are not validated with {refused}, and this run forwards rows that "
             f"reach them (packed, padding-free or padded, in training or evaluation)"
         )
     if (
-        (packing or padding_free)
-        and is_flash_attn_2_available()
+        not several_documents
+        or not is_flash_attn_2_available()
+        or (padding_free and has_mrope_rotary(checkpoint_config))
+    ):
+        return pinned
+    if (
+        pinned is None
         and uses_fa4_dedicated_head_dim(checkpoint_config)
         and has_gated_delta_net_layers(checkpoint_config)
-        and not (padding_free and has_mrope_rotary(checkpoint_config))
     ):
         return "flash_attention_2"
-    return None
+    if declares_flash_attention(checkpoint_config) and fa4_demoted_by_determinism(checkpoint_config):
+        return flash_attention_2_in_place_of_fa4(
+            f"FlashAttention-4's head_dim-{FA4_DEDICATED_HEAD_DIM} kernel is not validated with a deterministic "
+            "backward, which this run asks for (FLASH_ATTENTION_DETERMINISTIC=1, full_determinism), and its rows hold "
+            "several documents, which SDPA would run as one dense mask"
+        )
+    return pinned
 
 
 def reject_multimodal_model_without_seq_cls_head(model_config: ModelArguments) -> None:
@@ -191,8 +212,10 @@ def load_model_and_tokenizer(
 
     ``model_class`` is the ``Auto*`` class of a non-default head (``AutoModelForSequenceClassification``,
     ``AutoModel``); ``model_config_overrides`` (``num_labels``) merge over the config's ``model_init_kwargs``,
-    which are cleared so TRL does not re-apply them. The Liger flags are captured before the load and replayed
-    on the built model. A Path-B resume reads the weights from the checkpoint at its own precision and keeps
+    which are cleared so TRL does not re-apply them. ``attn_default`` is the script's attention request
+    (:func:`default_padded_attn_implementation`, :func:`default_training_rows_attn_implementation`), which keeps the
+    YAML's pin unless a kernel limit moves it; without one the pin stands. The Liger flags are captured before the
+    load and replayed on the built model. A Path-B resume reads the weights from the checkpoint at its own precision and keeps
     the run's base as ``_name_or_path``, the ``base_model`` TRL's model card names; where the weights were read
     stays on the loader's ``LOADED_WEIGHTS_FROM_ATTR`` stamp.
     """
@@ -206,7 +229,7 @@ def load_model_and_tokenizer(
         parallelism_config=context.parallelism_config,
         dtype=resolve_training_dtype(training_config),
         trust_remote_code=model_config.trust_remote_code,
-        attn_implementation=model_config.attn_implementation or attn_default,
+        attn_implementation=attn_default or model_config.attn_implementation,
         model_config_overrides=overrides,
         use_liger_kernel=use_liger_kernel,
         liger_kernel_config=training_config.liger_kernel_config,
@@ -326,9 +349,9 @@ def load_policy_model(
     """The run's policy in the class its checkpoint declares, with the processing class its data takes.
 
     A multimodal checkpoint loads with its processor when ``vlm_run`` (the run feeds images), a text one
-    with its tokenizer; ``attn_default`` is the backend when the config pins none. ``args.text_only_model``
-    loads a multimodal checkpoint through its text-only CausalLM sibling; it is a rank-uniform YAML key,
-    so every rank takes the same branch.
+    with its tokenizer; ``attn_default`` is the script's attention request (:func:`load_model_and_tokenizer`).
+    ``args.text_only_model`` loads a multimodal checkpoint through its text-only CausalLM sibling; it is a
+    rank-uniform YAML key, so every rank takes the same branch.
     """
     if (
         not args.text_only_model

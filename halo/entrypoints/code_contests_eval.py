@@ -9,6 +9,7 @@ import json
 import logging
 from typing import Any
 
+from halo.data.sources.loading import load_dataset_split
 from halo.entrypoints.eval_contract import (
     DEFAULT_SPLIT,
     load_training_contract,
@@ -18,7 +19,7 @@ from halo.entrypoints.eval_contract import (
     write_eval_outputs,
 )
 from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.eval_runner import collect_results, load_hf_split, report
+from halo.environments.eval_runner import collect_results, report
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import (
@@ -185,7 +186,7 @@ def build_examples(
     rows = (
         adapter.load(args.dataset, args.config, args.split)
         if adapter.load
-        else load_hf_split(args.dataset, args.config, args.split)
+        else load_dataset_split(args.dataset, split=args.split, config=args.config)
     )
     examples = []
     left_out: list[Any] = []

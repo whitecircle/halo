@@ -18,8 +18,8 @@ environment_kwargs:
 | `mcp_server` | `filesystem` | Stdio preset to spawn; read by the factory, not the class |
 | `transport` | `stdio` | `sse` connects to a running server instead |
 | `server_url` | `None` | Required under `sse` |
-| `env_vars` | `{}` | Satisfies or overrides a preset's credentials |
-| `episode_scratch` | `true` for `filesystem` | Scope of the scratch directory a `filesystem` server is jailed to: `true` gives each episode its own server and directory, removed with the episode; `false` one server and directory for the environment, removed when it closes. Refused for a preset that takes no directory |
+| `env_vars` | `{}` | Satisfies or overrides a preset's credentials, or its scratch file (`MEMORY_FILE_PATH`) |
+| `episode_scratch` | `true` for `filesystem` and `memory` | Scope of the scratch directory a `filesystem` server is jailed to, or a `memory` server keeps its graph file in: `true` gives each episode its own server and directory, removed with the episode; `false` one server and directory for the environment, removed when it closes. Refused for a preset that takes no directory |
 
 - A preset's credentials are resolved at construction, so a missing key raises at launch.
 - An `sse` config spawns nothing; passing `mcp_server` or `env_vars` with it raises.
@@ -33,14 +33,17 @@ episode's first tool call starts its own server over its own directory, so concu
 group's siblings among them) never read each other's files; a server that dies mid-episode restarts over
 the same directory, and the server stops and the directory goes when the episode is released.
 
-The `memory` server is given no file of its own, so it keeps one knowledge graph that every episode and
-every run on the host read and write, unlike `filesystem` under `episode_scratch`.
+The `memory` server keeps its knowledge graph in `memory.jsonl` inside the same kind of scratch directory
+(`MEMORY_FILE_PATH`), so under `episode_scratch` each episode starts from an empty graph and no episode
+or run reads another's entities. Like `filesystem`, it then runs one `npx` server per episode in flight.
+A `MEMORY_FILE_PATH` set in `env_vars` replaces the scratch file: one server reads and writes that graph
+for every episode, so `episode_scratch` defaults to `false` and `true` is refused.
 
 | `mcp_server` | Credential | Tools |
 |---|---|---|
 | `filesystem` | — | File operations, jailed to a scratch directory (`episode_scratch`) |
 | `fetch` | — | HTTP fetch for web content (`uvx`) |
-| `memory` | — | Knowledge-graph memory |
+| `memory` | — | Knowledge-graph memory, kept in a scratch directory (`episode_scratch`) |
 | `brave_search` | `BRAVE_API_KEY` | Brave web search |
 | `github` | `GITHUB_PERSONAL_ACCESS_TOKEN` | GitHub API |
 | `slack` | `SLACK_BOT_TOKEN`, `SLACK_TEAM_ID` | Slack messaging |

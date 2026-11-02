@@ -11,6 +11,7 @@ from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_p
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh
+from halo.distributed.tensor_parallel.local_linears import LINEAR_TP_STYLES, install_local_forward
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
@@ -110,9 +111,9 @@ def _require_block_aligned_dense(name: str, linear: nn.Linear, precision: str, q
 
 
 def _convert_dense_linear(linear: nn.Linear, name: str, quant_format: QuantFormat, tp_plan: dict, tp_mesh) -> None:
-    """Retype one dense projection in place, keeping its TP forward transforms: transformers' TP installs them
-    as an instance-level ``forward`` closed over the bound ``nn.Linear.forward``, which a class retype cannot
-    reach, so strip it, retype, and let the plan's own style re-install it."""
+    """Retype one dense projection in place, keeping its TP forward transforms: TP installs them as an
+    instance-level ``forward`` a class retype cannot reach, so strip it, retype, and re-install the local-shard
+    forward (transformers' own for a style it does not cover)."""
     if "forward" not in vars(linear):
         LowPrecisionLinear.convert_(linear, quant_format)
         return
@@ -126,7 +127,10 @@ def _convert_dense_linear(linear: nn.Linear, name: str, quant_format: QuantForma
         )
     del linear.forward
     LowPrecisionLinear.convert_(linear, quant_format)
-    ALL_PARALLEL_STYLES[style_name].install_forward(linear, tp_mesh)
+    if style_name in LINEAR_TP_STYLES:
+        install_local_forward(linear, style_name, name=name)
+    else:
+        ALL_PARALLEL_STYLES[style_name].install_forward(linear, tp_mesh)
 
 
 def _convert_dense_mlps(

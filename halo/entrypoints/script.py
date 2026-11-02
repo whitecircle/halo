@@ -262,6 +262,8 @@ def run_trainer(
             logger.info(f"  TP size: {parallelism_config.tp_size}")
         if parallelism_config.is_expert_tp_mode:
             logger.info(f"  ETP size: {parallelism_config.expert_tp_size}")
+        if parallelism_config.is_pp_mode:
+            logger.info(f"  PP size: {parallelism_config.pp_size}")
         logger.info(f"  DP size: {parallelism_config.data_parallel_size}")
         for line in extra_start_log or ():
             logger.info(f"  {line}")

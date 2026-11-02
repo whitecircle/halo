@@ -11,6 +11,7 @@ Run: python tests/cpu/environments/test_regrade_trajectories.py  (or pytest)
 """
 
 import json
+import logging
 from dataclasses import fields
 from pathlib import Path
 
@@ -288,6 +289,29 @@ def test_a_language_list_in_the_meta_rebuilds_the_choosing_environment():
     env = code_contests_regrade.build_environment("code_contests", {"language": ["python", "cpp"]})
     assert env.chooses_language and env.languages == ("python", "cpp")
     assert env.grading_spec.language == "python", "the contract's language is the set's first"
+
+
+def test_each_regraded_file_is_reported_and_persisted_as_it_lands(monkeypatch, tmp_path, caplog):
+    """The report line is the tool's output: it must reach the log under the WARNING root the package leaves, and
+    each file's metrics land in the output file before the next file grades."""
+    metrics = {
+        "model": "m",
+        "adapter": "cf",
+        "language": "python",
+        "eval_protocol": "single",
+        "n": 2,
+        "s@1": 0.5,
+        "s@2": 1.0,
+        "generation_errors": 0,
+    }
+    monkeypatch.setattr(code_contests_regrade, "regrade_file", lambda path, workers: {**metrics, "model": path})
+    monkeypatch.setattr(logging.getLogger(), "level", logging.WARNING)
+    output = tmp_path / "regraded.jsonl"
+    code_contests_regrade.regrade_trajectory_files(["a.jsonl", "b.jsonl"], 1, str(output))
+    reported = [r.getMessage() for r in caplog.records if r.name == code_contests_regrade.__name__]
+    assert [line.split()[0] for line in reported] == ["a.jsonl", "b.jsonl"]
+    assert "s@1=50% s@2=100%" in reported[0]
+    assert [json.loads(line)["model"] for line in output.read_text().splitlines()] == ["a.jsonl", "b.jsonl"]
 
 
 if __name__ == "__main__":

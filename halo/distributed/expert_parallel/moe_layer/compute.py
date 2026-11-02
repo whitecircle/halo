@@ -13,9 +13,9 @@ from transformers.activations import ACT2FN
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
-from halo.kernels.histogram import sync_free_bincount
 from halo.kernels.lowp.spec import QuantFormat
-from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, build_inv_map, warm_permute_kernels
+from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
+from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -54,7 +54,7 @@ class EPExpertComputeMixin:
         per-expert loop, where the grouped kernels and their fake-quant never run."""
         self._lowp_quant_format = quant_format
         self._lowp_weight_cacheable = weight_cacheable
-        return self._grouped_mm_enabled()
+        return self._use_grouped_mm
 
     def _resolve_activation(self, *sources, original_layer: nn.Module | None = None, default: str = "silu") -> None:
         """Set ``act_fn`` from the first source carrying one, else by name off ``original_layer`` (its
@@ -151,8 +151,8 @@ class EPExpertComputeMixin:
             logger.info(f"{type(self).__name__}: FP32 experts (compute stays BF16)")
 
     def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
-        """Compile this layer's Triton expert and permute kernels, forward and backward, before its first
-        dispatch: compiled inside the span they stall every peer in DeepEP's barrier (no barrier at ep1)."""
+        """Compile this layer's Triton expert, routing-sort and permute kernels, forward and backward, before its
+        first dispatch: compiled inside the span they stall every peer in DeepEP's barrier (no barrier at ep1)."""
         if self._activation_warmed or self.ep_size <= 1:
             return
         self._activation_warmed = True
@@ -166,7 +166,8 @@ class EPExpertComputeMixin:
             with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
                 gate_up = torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype, requires_grad=True)
                 torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
-                if self._grouped_mm_enabled():  # the fused permute runs only on the grouped path
+                if self._use_grouped_mm:  # the routing sort and fused permute run only on the grouped path
+                    warm_route_sort_kernels(top_k, self.experts_per_rank, device)
                     warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
             with torch.no_grad():
                 self._warm_expert_activation(torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype))
@@ -191,15 +192,11 @@ class EPExpertComputeMixin:
         """Expert outputs for the dispatched tokens: grouped GEMM when enabled and non-empty, else the
         per-expert loop. ``experts``/``weights`` are ``[T, top_k]`` local ids and gate weights;
         ``recv_counts`` is the dispatch's host-side count per local expert, None at ``ep_size`` 1."""
-        if self._grouped_mm_enabled() and tokens.shape[0] > 0:
+        if self._use_grouped_mm and tokens.shape[0] > 0:
             return self._compute_experts_gmm(tokens, experts, weights, output_dtype, recv_counts=recv_counts)
         return self._compute_experts_weighted(
             tokens, experts, weights, output_dtype, self._expert_forward, recv_counts=recv_counts
         )
-
-    def _grouped_mm_enabled(self) -> bool:
-        """Whether the grouped-GEMM path runs: the hardware/config flag."""
-        return self._use_grouped_mm
 
     def _compute_experts_gmm(
         self,
@@ -264,43 +261,15 @@ class EPExpertComputeMixin:
         recv_counts: tuple[int, ...] | None,
     ):
         """``(sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map)`` over the valid
-        local assignments, by expert; DeepEP's -1 padding is dropped (it would misalign the groups)."""
-        N = tokens.shape[0]
-        device = tokens.device
-
-        width = experts.shape[1]  # top_k = max local-expert assignments per token → inv_map width
-        flat_indices = experts.reshape(-1)
-        flat_weights = weights.reshape(-1)
-        flat_token_idx = torch.arange(N, device=device).unsqueeze(1).expand(-1, width).reshape(-1)
-
-        # DeepEP pads unfilled slots with -1. The dispatch's host-side counts size the compaction, which a
-        # data-sized nonzero would read back from the device every MoE layer; ep_size 1 has no padding.
-        if self.ep_size > 1:
-            num_valid = sum(self._require_recv_counts(recv_counts))
-            valid_mask = (flat_indices >= 0) & (flat_indices < self.experts_per_rank)
-            # Device-side: a count that disagrees with the received ids would silently truncate or
-            # -1-pad the compaction below.
-            torch._assert_async(
-                valid_mask.sum() == num_valid, "DeepEP receive counts disagree with the received expert ids"
-            )
-            valid_idx = torch.nonzero_static(valid_mask, size=num_valid).squeeze(1)
-            flat_indices = flat_indices[valid_idx]
-            flat_weights = flat_weights[valid_idx]
-            flat_token_idx = flat_token_idx[valid_idx]
-
-        sort_order = torch.argsort(flat_indices, stable=True)
-        sorted_expert_ids = flat_indices[sort_order]
-        sorted_token_idx = flat_token_idx[sort_order]
-        sorted_weights = flat_weights[sort_order]
-
-        # A histogram, not unique_consecutive(return_counts=True): the latter sizes its output from the
-        # run count, a host sync per layer per forward.
-        expert_counts = sync_free_bincount(sorted_expert_ids, self.experts_per_rank, dtype=torch.long)
-        offs = torch.cumsum(expert_counts, dim=0).to(torch.int32)
-
+        local assignments, by expert; DeepEP's -1 padding is dropped (it would misalign the groups). At
+        ``ep_size > 1`` the dispatch's host-side counts size the sort (:func:`sort_routing_by_expert`), so it
+        reads nothing back from the device; ``ep_size`` 1 has no padding and no counts."""
+        counts = self._require_recv_counts(recv_counts) if self.ep_size > 1 else None
+        sorted_token_idx, sorted_weights, sorted_expert_ids, offs, inv_map = sort_routing_by_expert(
+            experts, weights, self.experts_per_rank, counts
+        )
         # Atomic-free in both directions: the bf16 ``index_add_`` of the default gather backward and the
         # scatter-back is a CAS-loop atomic, ~1.5 ms per call on the gpt-oss-20b ep8 shape.
-        inv_map = build_inv_map(sorted_token_idx, N, width)
         sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
         return sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map
 
@@ -360,9 +329,7 @@ class EPExpertComputeMixin:
                 else:
                     # Sized off the host count, where torch.where would read the size back per expert. A
                     # wrong count would drop slots or pad with -1, which indexes the last row.
-                    torch._assert_async(
-                        slots.sum() == counts[local_idx], "DeepEP receive counts disagree with the received expert ids"
-                    )
+                    torch._assert_async(slots.sum() == counts[local_idx], RECEIVE_COUNTS_DISAGREE)
                     top_k_pos, token_idx = torch.nonzero_static(slots, size=counts[local_idx]).unbind(1)
                 if token_idx.numel() == 0:
                     continue

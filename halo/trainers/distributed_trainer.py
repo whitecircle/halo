@@ -183,7 +183,7 @@ class DistributedTrainerMixin(
     TPLeaderBroadcastMixin,
 ):
     """EP/CP/TP/PP machinery for a TRL/HF trainer: call ``_init_distributed_config()`` before ``super().__init__()``
-    and ``_configure_distributed_modes()`` after it. EP, ETP and TP run under every trainer; CP and PP only where
+    and ``_configure_distributed_modes()`` after it. No trainer refuses EP, ETP or TP; CP and PP run only where
     declared below. ``cp_config`` is set only under CP, ``_ep_config`` whenever the model carries EP layers."""
 
     # CP and PP are declare-to-enable: both fail silently on a loss nobody verified under them.
@@ -363,7 +363,7 @@ class DistributedTrainerMixin(
         # scaffold needs it for the bucketed grad sweeps (TP replicated, QLoRA) over groups spanning OS nodes.
         agree_rank_uniform_env()
 
-        # Before any wrapping: adapters sit outside the TP DTensor graph and would train rank-inconsistently.
+        # Before any wrapping: adapters sit outside the TP graph and would train rank-inconsistently.
         if config.is_tp_mode:
             reject_lora_under_tp(self._top_level_model())
         self._disable_inert_router_logits()

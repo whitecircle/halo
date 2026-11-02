@@ -20,7 +20,7 @@ Which MoE families each axis wraps: [Supported Models → Compatibility matrix](
 
 ## Supported combinations
 
-All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignored_params`; their routers sync via EP backward hooks, and their experts (with one EP group) or everything (with more) via the deferred post-backward sweep, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
+All modes use FSDP2 (`fully_shard`, per [unit of decoder layers](data-parallelism.md#shard-groups)). EP expert modules sit in `ignored_params`; their routers sync via EP backward hooks, and their experts (with one EP group) or everything (with more) via the deferred post-backward sweep, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
 
 | Mode | Data Parallel Size | Notes |
 |------|-------------------|-------|
@@ -88,8 +88,8 @@ Inside an allowed set, `reject_invalid_composition` checks the layout against th
 Two ways to group ranks, used where each fits:
 
 - **`DeviceMesh` (DTensor)** for the data-parallel and tensor axes, where sharding is *static* and the
-  collective follows from the tensor layout: `fully_shard` reduce-scatters FSDP params, TP's
-  `ColwiseParallel` / `RowwiseParallel` all-reduce attention weights.
+  collective follows from the tensor layout: `fully_shard` reduce-scatters FSDP params, and TP's
+  linears sum their activations over the `tp` group.
 
     The meshes are built in one place, `halo/distributed/mesh.py`: a 1D `(dp,)` mesh, a 2D HSDP
     `(dp_replicate, dp_shard)` mesh (replicate across NVLink domains, shard within one), and the

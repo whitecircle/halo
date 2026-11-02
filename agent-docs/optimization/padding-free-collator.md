@@ -30,8 +30,8 @@ before the model load, against the backend the loader will resolve for the check
 
 That catches every model the loader routes off Flash Attention: DeepSeek-V4 (eager-only), Gemma 4
 (`head_dim=512`), the families whose upstream class declares no flash support (Ling 3.0, GLM-5 Next,
-Step-3.7 Flash, Inkling), and a pinned `flash_attention_4` on a head_dim-256 model under `full_determinism`,
-which falls back to SDPA (unpinned, Qwen3-Next's multi-document rows load FA2). The full map
+Step-3.7 Flash, Inkling), and, outside SFT, a pinned `flash_attention_4` on a head_dim-256 model under `full_determinism`,
+which falls back to SDPA (SFT's multi-document rows load FA2 there, pinned or not). The full map
 is in [Flash Attention](flash-attention.md#choosing-a-backend). A softcapped model (Gemma 2) runs both on FA2 on
 Blackwell, since a softcap stays off FA4's varlen kernels; a pinned `flash_attention_4` the load keeps (Gemma 2 27B)
 is refused there.

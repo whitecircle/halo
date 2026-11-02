@@ -1,7 +1,7 @@
 """ParallelismConfig: the job's axis sizes, their resolved topology and rank coordinates.
 
-EP is orthogonal to DP; only TP/CP/expert-TP reduce ``data_parallel_size``. The refusals it applies
-live in :mod:`halo.distributed.parallelism_rules`.
+EP is orthogonal to DP; PP divides the world into stages and TP/CP/expert-TP reduce
+``data_parallel_size`` within each. The refusals it applies live in :mod:`halo.distributed.parallelism_rules`.
 """
 
 import logging

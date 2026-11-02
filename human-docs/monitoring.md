@@ -11,7 +11,7 @@ run, that file is your console:
 tail -f checkpoints/sft-qwen3-4b-ultrachat/log/run.log
 ```
 
-The startup banner prints the parallelism mode and its EP/CP/TP/ETP/DP sizes,
+The startup banner prints the parallelism mode and its EP/CP/TP/ETP/PP/DP sizes,
 and a parameter breakdown. With `enable_efficiency_metrics: true` it also prints
 the detected GPU and precision. Check it to confirm the run has the shape you
 intended.

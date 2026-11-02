@@ -69,7 +69,8 @@ def _fake_world(world_size: int = 8):
 def _record_wrap(entry, **kwargs) -> list[tuple[str, int, torch.dtype | None, bool]]:
     """Run one entry point and return, per ``fully_shard`` call, what it wrapped and how.
 
-    Modules are recorded by NAME so runs over two model instances stay comparable.
+    Modules are recorded by NAME (a multi-layer unit's joined by ``+``) so runs over two model instances stay
+    comparable.
     """
     model = _CausalLmLike()
     names = {id(module): name or "<root>" for name, module in model.named_modules()}
@@ -79,7 +80,7 @@ def _record_wrap(entry, **kwargs) -> list[tuple[str, int, torch.dtype | None, bo
         policy = shard_kwargs["mp_policy"]
         calls.append(
             (
-                names[id(module)],
+                "+".join(names[id(each)] for each in module) if isinstance(module, list) else names[id(module)],
                 shard_kwargs["mesh"].size(),
                 None if policy is None else policy.param_dtype,
                 bool(shard_kwargs["reshard_after_forward"]),
@@ -89,6 +90,7 @@ def _record_wrap(entry, **kwargs) -> list[tuple[str, int, torch.dtype | None, bo
     with (
         _fake_world(),
         patch.object(fsdp, "fully_shard", side_effect=fake_fully_shard),
+        patch.object(fsdp, "_install_unit_hooks"),
         patch.object(fsdp, "build_dp_mesh", return_value=_FakeMesh(4)),
         patch.object(fsdp, "build_dp_tp_mesh", return_value=_FakeMesh(4, (MeshDim.DP, MeshDim.TP))),
     ):
@@ -124,8 +126,8 @@ def test_both_entry_points_wrap_the_same_modules_the_same_way():
 
     assert dp_calls, "the DP entry point wrapped nothing"
     assert dp_calls == tp_calls, f"the two entry points diverged:\n  dp={dp_calls}\n  tp={tp_calls}"
-    assert [name for name, *_ in dp_calls] == ["model.layers.0", "model.layers.1", "model", "<root>"], (
-        f"per-layer groups plus backbone plus root is the wrap both paths owe: {dp_calls}"
+    assert [name for name, *_ in dp_calls] == ["model.layers.0+model.layers.1", "model", "<root>"], (
+        f"one two-layer unit plus backbone plus root is the wrap both paths owe: {dp_calls}"
     )
     assert {dtype for _, _, dtype, _ in dp_calls} == {torch.bfloat16}
 
@@ -138,6 +140,9 @@ def test_both_entry_points_carry_the_reshard_and_precision_knobs_into_the_wrap()
     ):
         full_shard = _record_wrap(entry, **_BF16, reshard_after_forward=True, **axis)
         assert all(reshard for *_, reshard in full_shard), f"reshard_after_forward never reached fully_shard: {axis}"
+        assert [name for name, *_ in full_shard] == ["model.layers.0", "model.layers.1", "model", "<root>"], (
+            f"ZeRO-3 keeps one decoder layer per group: {axis} {full_shard}"
+        )
         fp32 = _record_wrap(entry, **_FP32, **axis)
         assert {dtype for _, _, dtype, _ in fp32} == {torch.float32}, (
             f"the compute dtype never reached the policy: {axis}"
@@ -152,6 +157,7 @@ def test_the_tp_entry_point_reuses_the_mesh_the_loader_attached():
     with (
         _fake_world(),
         patch.object(fsdp, "fully_shard"),
+        patch.object(fsdp, "_install_unit_hooks"),
         patch.object(fsdp, "build_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
     ):
         wrapped, mesh = fsdp.apply_fsdp2_for_tp(model, tp_size=2, dp_size=4, **_BF16)
@@ -212,11 +218,13 @@ def test_the_ep_tp_wrap_runs_the_shared_body_with_its_ep_modules_left_out():
     calls = []
 
     def fake_fully_shard(module, **kwargs):
-        calls.append((module, kwargs["mp_policy"], kwargs.get("ignored_params")))
+        modules = module if isinstance(module, list) else [module]
+        calls.append((modules, kwargs["mp_policy"], kwargs.get("ignored_params")))
 
     with (
         _fake_world(),
         patch.object(fsdp, "fully_shard", side_effect=fake_fully_shard),
+        patch.object(fsdp, "_install_unit_hooks"),
         patch.object(fsdp, "build_dp_tp_mesh", side_effect=AssertionError("built a second mesh")),
     ):
         _EPTPHost(model, [expert])._apply_ep_tp_fsdp2()
@@ -225,7 +233,9 @@ def test_the_ep_tp_wrap_runs_the_shared_body_with_its_ep_modules_left_out():
     assert {policy.cast_forward_inputs for _, policy, _ in calls} == {False}, (
         "the fp32 inter-layer residual must keep its dtype across the layer boundary"
     )
-    layer_ignored = next(ignored for module, _, ignored in calls if module is model.model.layers[1])
+    layer_ignored = next(
+        ignored for modules, _, ignored in calls if any(module is model.model.layers[1] for module in modules)
+    )
     assert layer_ignored is not None and expert in layer_ignored, "the EP module was sharded with the layer"
 
 

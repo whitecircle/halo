@@ -3,9 +3,14 @@
 A trainer's ``has_ep_group`` / ``is_tp_mode`` / ``is_cp_mode`` return the ``ParallelismConfig`` it was
 handed, so a check on them passes on a run whose loader silently skipped the axis. These probes read
 what the loader and the trainer's wrap left on the model instead: the EP layers and the expert
-weights they hold, the TP-sharded parameters, the Ulysses attention layers.
+weights they hold, the TP-sharded parameters, the Ulysses attention layers, and the expert-TP groups the
+ranks report.
 """
 
+from collections.abc import Sequence
+from typing import NamedTuple
+
+import torch.distributed as dist
 from torch.distributed.tensor import DTensor
 
 from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
@@ -13,6 +18,15 @@ from halo.distributed.mesh import has_tp_dim
 from halo.models.moe.config_fields import has_routed_experts
 from tests.common.ep_reference import ep_layers
 from tests.common.rank_log import log
+
+
+class ExpertTPMembership(NamedTuple):
+    """One rank's view of its expert-TP group: the group's global ranks (``None`` without a group), the
+    ``expert_tp_rank`` it holds there and the data-parallel rank whose batch it reads."""
+
+    members: tuple[int, ...] | None
+    expert_tp_rank: int
+    dp_rank: int
 
 
 def tp_sharded_param_names(model) -> list[str]:
@@ -80,3 +94,53 @@ def parallel_shape_checks(model, parallelism_config) -> dict[str, bool]:
         checks["cp_attention_wrapped"] = bool(attention) and all(layer.cp_size == pc.cp_size for layer in attention)
         log(f"  Ulysses attention layers: {'PASS' if checks['cp_attention_wrapped'] else 'FAIL'} ({len(attention)})")
     return checks
+
+
+def expert_tp_group_problems(views: Sequence[ExpertTPMembership], expert_tp_size: int) -> list[str]:
+    """What is wrong with the expert-TP groups the world's ranks report, ``views[r]`` being global rank ``r``'s.
+
+    Empty when every rank sits in a group of exactly ``expert_tp_size`` ranks, itself included, that each of its
+    members reports alike, whose members hold the expert-TP ranks ``0 .. expert_tp_size - 1`` once each and read
+    one DP rank's batch, since the partners sum their shards' outputs token by token. Which ranks pair up
+    (contiguous or strided) is the layout's own choice; a group spanning DP replicas, a rank outside its own group,
+    members that disagree on the group, a shard index held twice or partners reading different batches is named.
+    """
+    problems = []
+    for rank, view in enumerate(views):
+        if view.members is None:
+            problems.append(f"rank {rank} reports no expert-TP group")
+            continue
+        members = tuple(sorted(view.members))
+        if len(members) != expert_tp_size:
+            problems.append(f"rank {rank}'s expert-TP group {members} has {len(members)} ranks, not {expert_tp_size}")
+        if rank not in members:
+            problems.append(f"rank {rank} is not in its own expert-TP group {members}")
+        if any(not 0 <= member < len(views) for member in members):
+            problems.append(f"rank {rank}'s expert-TP group {members} names a rank outside the world")
+            continue
+        disagreeing = [
+            member
+            for member in members
+            if views[member].members is None or tuple(sorted(views[member].members)) != members
+        ]
+        if disagreeing:
+            problems.append(f"ranks {disagreeing} do not report rank {rank}'s expert-TP group {members}")
+        shard_ranks = sorted(views[member].expert_tp_rank for member in members)
+        if shard_ranks != list(range(len(members))):
+            problems.append(f"rank {rank}'s expert-TP group {members} holds expert-TP ranks {shard_ranks}")
+        dp_ranks = sorted({views[member].dp_rank for member in members})
+        if len(dp_ranks) != 1:
+            problems.append(f"rank {rank}'s expert-TP group {members} reads the batches of DP ranks {dp_ranks}")
+    return problems
+
+
+def expert_tp_group_views(layer, dp_rank: int) -> list[ExpertTPMembership]:
+    """COLLECTIVE (the world): every rank's :class:`ExpertTPMembership` read off its EP ``layer`` and the ``dp_rank``
+    its config assigns it, in global-rank order. One object gather, which a rank without a group joins as well."""
+    group = layer.expert_tp_group
+    mine = ExpertTPMembership(
+        None if group is None else tuple(dist.get_process_group_ranks(group)), layer.expert_tp_rank, dp_rank
+    )
+    views: list[ExpertTPMembership | None] = [None] * dist.get_world_size()
+    dist.all_gather_object(views, mine)
+    return views

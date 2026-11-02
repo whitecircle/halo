@@ -91,21 +91,6 @@ class MockTrainerState:
         self.num_input_tokens_seen = num_input_tokens_seen
 
 
-class AsyncDevice:
-    """A host clock and a device queue that drains only on ``synchronize``, as CUDA launches do."""
-
-    def __init__(self):
-        self.now = 0.0
-        self.queued = 0.0
-
-    def perf_counter(self) -> float:
-        return self.now
-
-    def synchronize(self) -> None:
-        self.now += self.queued
-        self.queued = 0.0
-
-
 # A dense model whose per-token FLOPs are 6 GFLOP, with no attention term or full-model baseline.
 _DENSE_FLOPS = RankFlopsModel(
     model_flops_per_token=6.0e9,
@@ -146,13 +131,14 @@ def _peaked(
 
 
 def _measured_step(monkeypatch, cb, *, tokens=1000, step_time=0.5, step=1) -> None:
-    """Optimizer step ``step`` through the hooks: ``tokens`` cluster tokens (``None``: uncounted) in
-    ``step_time`` seconds."""
+    """Optimizer step ``step`` through the hooks, then its log, where the callback records it: ``tokens`` cluster
+    tokens (``None``: uncounted) in ``step_time`` seconds."""
     clock = iter((0.0, step_time))
     monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
     cb.training_args = cb.training_args or MockTrainingArgs()
     cb.on_step_begin(cb.training_args, MockTrainerState(global_step=step - 1), None)
     cb.on_step_end(cb.training_args, MockTrainerState(global_step=step, num_input_tokens_seen=tokens), None)
+    cb.on_log(cb.training_args, MockTrainerState(global_step=step), None, logs={})
 
 
 # Tests
@@ -362,33 +348,6 @@ def test_warmup_skipping():
     cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=5)
     cb.on_step_end(MockTrainingArgs(), MockTrainerState(global_step=2, num_input_tokens_seen=1000), None)
     assert cb.time == StepTimeMetrics(), "a warmup step was measured"
-
-
-def test_step_time_covers_the_device_work_of_its_own_step_only(monkeypatch):
-    """No attention source is bound (the SMPO / embedding case), so no other hook syncs the host."""
-    device = AsyncDevice()
-    monkeypatch.setattr(efficiency, "time", device)
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "synchronize", device.synchronize)
-    for name in (
-        "reset_peak_memory_stats",
-        "memory_allocated",
-        "memory_reserved",
-        "max_memory_allocated",
-        "max_memory_reserved",
-    ):
-        monkeypatch.setattr(torch.cuda, name, lambda *args, **kwargs: 0)
-
-    cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=0)
-    cb.training_args = MockTrainingArgs()
-    device.queued = 5.0  # the previous step's tail, still running when this step begins
-    cb.on_step_begin(cb.training_args, MockTrainerState(global_step=0), None)
-    device.now += 0.25  # host time to launch the step
-    device.queued += 2.0  # the step's kernels, still running when on_step_end fires
-    cb.on_step_end(cb.training_args, MockTrainerState(global_step=1, num_input_tokens_seen=1000), None)
-
-    assert cb.time.step_time_seconds == pytest.approx(2.25)
-    assert cb.tps.step_tokens_per_second == pytest.approx(1000 / 2.25, abs=0.01)
 
 
 def test_the_measured_step_times_are_every_step_after_warmup_unrounded(monkeypatch):

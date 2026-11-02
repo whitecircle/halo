@@ -12,24 +12,20 @@ from pathlib import Path
 import faiss
 import numpy as np
 import torch
-from datasets import Dataset, load_dataset
+from datasets import Dataset
 from tqdm.auto import tqdm
 from transformers import AutoModel, AutoTokenizer
 
-from halo.data.sources.paths import (
-    DATA_FILE_BUILDERS,
-    data_file_builder,
-    parse_dataset_source,
-    reject_ambiguous_hub_source,
-)
+from halo.data.sources.loading import load_dataset_split
 from halo.hardware import available_cpu_count
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 
 logger = logging.getLogger(__name__)
 
-# Fixed default seed: the shuffle decides WHICH member of a near-duplicate group survives dedup, so
-# an unseeded global RNG would make two runs over identical data keep different rows.
+# Fixed default seed of the row sample and the pass shuffles: they decide WHICH rows are read and which member
+# of a near-duplicate group survives, so an unseeded global RNG would make two runs over identical data keep
+# different rows.
 DEDUP_SHUFFLE_SEED = 42
 
 # ``--output_format`` -> how the deduplicated dataset is written.
@@ -81,7 +77,7 @@ def embed_texts(texts, batch_size, model, tokenizer, device, normalize=True):
     return embeddings
 
 
-def _deduplicate_block(embeddings: np.ndarray, similarity_threshold=0.9) -> np.ndarray:
+def _deduplicate_block(embeddings: np.ndarray, similarity_threshold: float) -> np.ndarray:
     """Indices of the rows of ``embeddings`` that survive: each kept row drops every neighbor above
     ``similarity_threshold``."""
     index = faiss.IndexFlatIP(embeddings.shape[1])
@@ -111,9 +107,10 @@ def _deduplicate_block(embeddings: np.ndarray, similarity_threshold=0.9) -> np.n
 
 def deduplicate_blocks(
     embeddings: np.ndarray,
+    *,
+    batch_size: int,
+    similarity_threshold: float,
     max_workers: int | None = None,
-    batch_size=100_000,
-    similarity_threshold=0.9,
 ) -> np.ndarray:
     """Indices of the rows that survive deduplication within each ``batch_size`` block of ``embeddings``,
     in batch order, searched on ``max_workers`` threads (every CPU the process may use when unset).
@@ -138,10 +135,11 @@ def deduplicate_blocks(
 
 def deduplicate_embeddings(
     embeddings: np.ndarray,
-    steps_count=3,
+    *,
+    steps_count: int,
+    batch_size: int,
+    similarity_threshold: float,
     max_workers: int | None = None,
-    batch_size=100_000,
-    similarity_threshold=0.9,
     seed: int = DEDUP_SHUFFLE_SEED,
 ) -> tuple[np.ndarray, list[int]]:
     """Indices of the surviving rows of ``embeddings`` after ``steps_count`` reshuffled passes of
@@ -194,43 +192,17 @@ def load_dataset_from_path(
     dataset_split: str,
     sample_size: int | None,
 ) -> Dataset:
-    """Load the input dataset from a local data file or the HuggingFace Hub.
-
-    Classified by :func:`parse_dataset_source` rather than by whether the path exists on this host: an
-    existence probe would read a stale local file shadowing a Hub id, and read a mistyped local path
-    as a Hub id whose failure names the network instead of the typo; a Hub-shaped path naming a local
-    directory is refused. The builder comes from
-    :func:`data_file_builder`, over the same table the classifier and ``halo.data.sources.loading`` read,
-    so an extension accepted as local always has a builder here.
-    """
+    """Load the input split from any dataset source (:func:`~halo.data.sources.loading.load_dataset_split`), with
+    ``text_field`` checked and an optional seeded sample of ``sample_size`` rows."""
     logger.info(f"Loading dataset from: {input_path}")
-
-    source_type, _bucket, path = parse_dataset_source(input_path)
-    if source_type == "s3":
-        raise ValueError(
-            f"'{input_path}' is an S3 URI; this tool reads a local data file or a Hub dataset id. "
-            f"Download it first, or point --dataset at 'org/name'."
-        )
-
-    if source_type == "hf_hub":
-        reject_ambiguous_hub_source(input_path)
-        logger.info(f"Loading dataset from the HuggingFace Hub: {path}")
-        dataset = load_dataset(path, name=dataset_config, split=dataset_split)
-    else:
-        builder = data_file_builder(path)
-        if builder is None:
-            raise ValueError(
-                f"'{input_path}' is neither a data file ({', '.join(DATA_FILE_BUILDERS)}) nor a Hub "
-                f"dataset id 'org/name'."
-            )
-        dataset = load_dataset(builder, data_files=path, split="train")
+    dataset = load_dataset_split(input_path, split=dataset_split, config=dataset_config)
 
     if text_field not in dataset.column_names:
         raise ValueError(f"Text field '{text_field}' not found in dataset. Available fields: {dataset.column_names}")
 
     if sample_size is not None and len(dataset) > sample_size:
         logger.info(f"Sampling {sample_size} examples from {len(dataset)} total")
-        dataset = dataset.shuffle(seed=42).select(range(sample_size))
+        dataset = dataset.shuffle(seed=DEDUP_SHUFFLE_SEED).select(range(sample_size))
 
     logger.info(f"Loaded dataset with {len(dataset)} examples")
     logger.info(f"Dataset columns: {dataset.column_names}")

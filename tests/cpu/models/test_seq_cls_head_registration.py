@@ -8,10 +8,9 @@ text-only artifact writes. Reward modeling and classification both resolve the m
 ``AutoModelForSequenceClassification``, so a missing spelling is a hard failure
 ("Unrecognized configuration class") at load, on a checkpoint that trained fine.
 
-All four go through ``halo.models.seq_cls_heads``, which writes the auto mapping's ``_extra_content``
-directly rather than calling ``register()``: transformers >= 5.12 silently no-ops ``register()`` for
-a config class living under ``transformers.*``, so the shim would appear to apply and then fail far
-away.
+All four go through ``halo.models.seq_cls_heads``, which registers them with ``exist_ok=True``:
+without it ``register()`` silently skips a config class living under ``transformers.*``, so the shim
+would appear to apply and then fail far away.
 
 The registration is an import side effect, which is exactly the kind of thing a refactor drops
 without any test noticing. So this pins, per family and per spelling: the import alone is enough,

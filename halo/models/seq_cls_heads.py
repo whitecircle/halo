@@ -6,8 +6,10 @@ composite wrapper and its text tower); a release that lands a native head takes 
 
 from transformers import AutoModelForSequenceClassification
 from transformers.modeling_layers import GenericForSequenceClassification
-from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-from transformers.models.auto.modeling_auto import MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES
+from transformers.models.auto.modeling_auto import (
+    MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING,
+    MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES,
+)
 from transformers.models.gemma4.configuration_gemma4 import Gemma4TextConfig
 from transformers.models.gemma4.modeling_gemma4 import Gemma4PreTrainedModel
 from transformers.models.qwen3_5_moe import Qwen3_5MoePreTrainedModel, Qwen3_5MoeTextConfig
@@ -18,15 +20,14 @@ from halo.models.modality import config_declares_multimodality
 def _register_sequence_classification_head(model_cls) -> None:
     """Register a seq-cls head transformers does not ship, under the config it declares.
 
-    Not ``register()``: transformers >= 5.12 no-ops it for a config class living under
-    ``transformers.*`` (``_LazyAutoMapping.register``'s anti-shadowing guard), and resolution then
-    fails far away as "Unrecognized configuration class". ``_extra_content`` is the same storage,
-    read identically by ``from_config`` / ``from_pretrained``. A family that gains a native head is
-    already in the mapping, so this becomes a no-op.
+    ``exist_ok=True`` is load-bearing: without it ``register()`` silently skips a config class living
+    under ``transformers.*``, and resolution then fails far away as "Unrecognized configuration class".
+    It would also let the head shadow a native one, so a family whose release ships its own head is
+    skipped here.
     """
     config_cls = model_cls.config_class
     if config_cls.model_type not in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES:
-        AutoModelForSequenceClassification._model_mapping._extra_content[config_cls] = model_cls
+        AutoModelForSequenceClassification.register(config_cls, model_cls, exist_ok=True)
 
 
 class Gemma4ForSequenceClassification(GenericForSequenceClassification, Gemma4PreTrainedModel):
@@ -61,12 +62,10 @@ for _head_cls in GenericForSequenceClassification.__subclasses__():
 
 
 def multimodal_sequence_classification_model_types() -> list[str]:
-    """Model types with both a sequence-classification head (the toolkit's heads above, then
-    transformers' own mapping, read live) and a vision tower, by the
+    """Model types with both a sequence-classification head (transformers' mapping, read live, which
+    holds the toolkit's heads above) and a vision tower, by the
     :func:`~halo.models.modality.config_declares_multimodality` verdict the run-time probe reads, taken
     off each config class so the roster cannot classify a family differently from that probe."""
-    config_classes = list(AutoModelForSequenceClassification._model_mapping._extra_content)
-    config_classes += [
-        CONFIG_MAPPING[name] for name in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING_NAMES if name in CONFIG_MAPPING
-    ]
-    return sorted({cls.model_type for cls in config_classes if config_declares_multimodality(cls)})
+    return sorted(
+        {cls.model_type for cls in MODEL_FOR_SEQUENCE_CLASSIFICATION_MAPPING if config_declares_multimodality(cls)}
+    )

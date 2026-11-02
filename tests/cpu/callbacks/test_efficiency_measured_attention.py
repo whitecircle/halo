@@ -82,11 +82,12 @@ def _callback(parallelism=_NO_PARALLELISM, layout=LAYOUT, attention_share=1.0):
 
 
 def _step_tflops(monkeypatch, callback, tokens: int) -> tuple[float, float]:
-    """The dense and active TFLOP/s one hook-driven step of ``tokens`` tokens reports."""
+    """The dense and active TFLOP/s one hook-driven step of ``tokens`` tokens reports at its log."""
     clock = iter((0.0, STEP_SECONDS))
     monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
     callback.on_step_begin(None, SimpleNamespace(global_step=0, num_input_tokens_seen=0), None)
     callback.on_step_end(None, SimpleNamespace(global_step=1, num_input_tokens_seen=tokens), None)
+    callback.on_log(None, SimpleNamespace(global_step=1), None, logs={})
     return callback.mfu.step_tflops_per_sec, callback.smfu.step_smfu_tflops_per_sec
 
 

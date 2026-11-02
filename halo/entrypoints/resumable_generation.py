@@ -20,15 +20,14 @@ from halo.log import configure_cli_logging
 logger = logging.getLogger(__name__)
 
 
-def load_prompts_with_resume(args) -> tuple[list[dict], list[dict]]:
-    """``(pending rows, rows already written to --output_path)`` for the S3 prompt dataset.
+def load_prompts_with_resume(args, output_uri: str) -> tuple[list[dict], list[dict]]:
+    """``(pending rows, rows already written to output_uri)`` for the S3 prompt dataset.
 
     Ids present in the output dataset are dropped from the input, and the existing rows come back so
     the caller can write them out again alongside the new ones. An empty first element means every
     prompt is already done.
     """
     dataset_uri = build_s3_uri(args.dataset, args.subfolder, given_as="--dataset")
-    output_uri = build_s3_uri(args.output_path, args.subfolder, given_as="--output_path")
     logger.info(f"Loading dataset from S3: {dataset_uri}")
     dataset = load_dataset_from_s3_uri(dataset_uri)
 
@@ -66,8 +65,8 @@ def reject_empty_results(produced: int, pending: int, destination, *, drops: str
     )
 
 
-def save_results_to_s3(existing_results: list[dict], results: list[dict], *, output_path: str, subfolder) -> None:
-    """Push ``existing_results + results`` to the S3 output dataset, with the record keys unioned.
+def save_results_to_s3(existing_results: list[dict], results: list[dict], output_uri: str) -> None:
+    """Push ``existing_results + results`` to the S3 dataset at ``output_uri``, with the record keys unioned.
 
     A resume mixes records reloaded from a previously-saved dataset (carrying every column that run
     wrote) with freshly-built ones, whose optional source columns, or whole output format, may differ.
@@ -77,7 +76,6 @@ def save_results_to_s3(existing_results: list[dict], results: list[dict], *, out
     all_results = existing_results + results
     all_keys = {key for record in all_results for key in record}
     all_results = [{key: record.get(key) for key in all_keys} for record in all_results]
-    output_uri = build_s3_uri(output_path, subfolder, given_as="--output_path")
     logger.info(f"Saving {len(all_results)} results to S3: {output_uri}")
     push_dataset_to_s3_uri(Dataset.from_list(all_results), output_uri)
     logger.info("Done!")
@@ -211,7 +209,9 @@ async def run_batched_generation(args) -> None:
         api_key_override=args.api_key,
     )
 
-    rows, existing_results = load_prompts_with_resume(args)
+    # Resolved once, so the resume read, the empty-run refusal and the push name the same dataset.
+    output_uri = build_s3_uri(args.output_path, args.subfolder, given_as="--output_path")
+    rows, existing_results = load_prompts_with_resume(args, output_uri)
     if not rows:
         logger.info("All prompts already processed.")
         return
@@ -299,8 +299,8 @@ async def run_batched_generation(args) -> None:
     reject_empty_results(
         len(results),
         len(rows),
-        args.output_path,
+        output_uri,
         drops=f" (first-response failures={dropped_first_response})",
         check="--base_url / --model and the endpoint's logs",
     )
-    save_results_to_s3(existing_results, results, output_path=args.output_path, subfolder=args.subfolder)
+    save_results_to_s3(existing_results, results, output_uri)

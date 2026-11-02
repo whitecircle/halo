@@ -2,8 +2,7 @@
 """Per-head attention norms must receive the SUM of their gradient across the TP group — ONCE.
 
 ``q_norm``/``k_norm`` are replicated ``(head_dim,)`` parameters applied AFTER the colwise q/k
-projection. ``ColwiseParallel`` defaults ``use_local_output=True``, so the projection returns a plain
-tensor holding only this rank's heads and the DTensor graph ends there — each rank therefore
+projection, which returns a plain tensor holding only this rank's heads — each rank therefore
 accumulates the norm's gradient over its own heads only, and the true gradient is the SUM over the
 group. Nothing in the TP graph performs it.
 

@@ -1,13 +1,15 @@
 #!/usr/bin/env python
-"""SFT's multi-document rows on a GatedDeltaNet family whose heads run FA4's head_dim-256 kernel load on FA2.
+"""SFT's multi-document rows load on FA2 where FA4's head_dim-256 kernel would run them on a GatedDeltaNet family, or
+would leave them to SDPA.
 
 That kernel is no faster than FA2 on packed rows, and a deterministic run (``FLASH_ATTENTION_DETERMINISTIC``, set by
-``full_determinism``), whose backward it cannot take, demotes an unpinned FA4 to SDPA, which runs a packed row as one
-dense ``[L, L]`` mask with K/V repeated per query head. ``default_training_rows_attn_implementation`` asks for FA2,
-which consumes the ``cu_seq_lens`` those rows already carry, in either run; unpacked rows keep the loader's pick. Every
-arm is silent when it breaks — a wrong verdict either keeps the slower path or hands FA2 a shape it faults on — so
-the selection is held per (family, collator, arch, determinism), through the resolver the loader runs, and through
-``sft.py:main()``. Tests run deterministic unless they say otherwise.
+``full_determinism``), whose backward it cannot take, demotes FA4, pinned or not, to SDPA, which runs a packed row as
+one dense ``[L, L]`` mask with K/V repeated per query head. ``default_training_rows_attn_implementation`` asks for FA2,
+which consumes the ``cu_seq_lens`` those rows already carry: on an unpinned GatedDeltaNet family in either run, and on
+any family whose FA4 the deterministic run demotes, a pinned FA4 included; rows of one document keep the loader's pick.
+Every arm is silent when it breaks — a wrong verdict either keeps the slower path or hands FA2 a shape it faults on —
+so the selection is held per (family, collator, arch, determinism, request), through the resolver the loader runs,
+and through ``sft.py:main()``. Tests run deterministic unless they say otherwise.
 
 Run: python tests/cpu/config/test_sft_multi_document_attn_default.py  (or pytest)
 """
@@ -71,7 +73,12 @@ def _on_arch(arch: str):
 
 def _default_for(config, arch: str, *, padding_free: bool, pinned: str | None = None) -> str | None:
     on_arch, capability = _on_arch(arch)
-    with on_arch, capability, mock.patch.object(model_setup, "is_flash_attn_2_available", return_value=True):
+    with (
+        on_arch,
+        capability,
+        mock.patch.object(model_setup, "is_flash_attn_2_available", return_value=True),
+        mock.patch.object(selection, "is_flash_attn_2_available", return_value=True),
+    ):
         return default_training_rows_attn_implementation(
             ModelArguments(model_name_or_path="stub/model", attn_implementation=pinned),
             packing=not padding_free,
@@ -112,10 +119,12 @@ def test_the_default_per_family_collator_and_arch(model_type, padding_free, arch
     ],
     ids=["gated_delta_net_under_another_name", "qwen3_next_without_linear_layers", "glm4_moe_lite"],
 )
-def test_the_family_gate_reads_gated_delta_net_layers_not_the_model_type(config, expected):
-    """With the heads on FA4's head_dim-256 kernel, the declared GatedDeltaNet layers alone decide: a GatedDeltaNet
-    decoder under a name no list holds takes FA2, while a decoder without such layers (a Qwen3-Next config declaring
-    only full attention, GLM-4.7-Flash's MLA) keeps the loader's pick."""
+def test_the_family_gate_reads_gated_delta_net_layers_not_the_model_type(config, expected, monkeypatch):
+    """With the heads on FA4's head_dim-256 kernel, the declared GatedDeltaNet layers alone decide outside a
+    deterministic run (whose demotion moves any such decoder, held below): a GatedDeltaNet decoder under a name no
+    list holds takes FA2, while a decoder without such layers (a Qwen3-Next config declaring only full attention,
+    GLM-4.7-Flash's MLA) keeps the loader's pick."""
+    monkeypatch.delenv(_DETERMINISTIC_ENV)
     with mock.patch.object(model_setup, "uses_fa4_dedicated_head_dim", return_value=True):
         assert _default_for(config, "b300", padding_free=False) == expected
 
@@ -218,9 +227,9 @@ def test_the_loader_keeps_the_default(model_type, determinism):
     assert (unpinned, defaulted) == ("sdpa" if determinism else "flash_attention_4", "flash_attention_2")
 
 
-@pytest.mark.parametrize("pinned", ["sdpa", "flash_attention_4", "eager"])
+@pytest.mark.parametrize("pinned", ["sdpa", "eager"])
 def test_a_pinned_attn_implementation_is_kept(pinned):
-    """A YAML pin wins over the default on every family and arch."""
+    """A YAML pin of a backend other than FA4 wins over the default on every family and arch."""
     assert _default("qwen3_next", "b300", padding_free=False, pinned=pinned) == pinned
 
 
@@ -286,6 +295,69 @@ def test_one_default_serves_the_softcap_and_the_packed_gated_delta_net_rows(conf
     assert request == expected.get(rows)
 
 
+# One config per kernel class FA4 runs a family's heads on: its head_dim-256 kernel on a GatedDeltaNet decoder, with
+# and without M-RoPE, and on a plain decoder; that kernel refused outright (multi-head latent attention, which the
+# resolver moves to FA2 itself); and FA4's general kernel, which a deterministic run keeps.
+_KERNEL_CLASSES = {
+    "gated_delta_net_hd256_mrope": lambda: CONFIG_MAPPING["qwen3_5_moe"](),
+    "gated_delta_net_hd256": lambda: CONFIG_MAPPING["qwen3_next"](),
+    "hd256": lambda: CONFIG_MAPPING["qwen3"](head_dim=256),
+    "hd256_refused": lambda: CONFIG_MAPPING["glm4_moe_lite"](),
+    "general": lambda: CONFIG_MAPPING["qwen3"](),
+}
+
+
+def _expected_backend(kernel_class: str, rows: str, deterministic: bool, pinned: str | None) -> str:
+    """The backend a B300 run loads: multi-document rows (but ``padding_free`` on M-RoPE, which collator selection
+    refuses) take FA2 off a deterministic run's FA4 demotion, pinned or not, and off an unpinned FA4 on a
+    GatedDeltaNet family; rows of one document keep the demotion to SDPA."""
+    if kernel_class == "general":
+        return "flash_attention_4"
+    if kernel_class == "hd256_refused":
+        return "flash_attention_2"
+    multi_document = rows == "packed" or (rows == "padding_free" and kernel_class != "gated_delta_net_hd256_mrope")
+    if multi_document and (deterministic or (pinned is None and kernel_class.startswith("gated_delta_net"))):
+        return "flash_attention_2"
+    return "sdpa" if deterministic else "flash_attention_4"
+
+
+@pytest.mark.parametrize("pinned", [None, "flash_attention_4"], ids=["unpinned", "pinned_fa4"])
+@pytest.mark.parametrize("rows", sorted(_ROW_SHAPES))
+@pytest.mark.parametrize("kernel_class", sorted(_KERNEL_CLASSES))
+def test_the_loaded_backend_per_kernel_class_rows_determinism_and_request(kernel_class, rows, determinism, pinned):
+    """Through the request and the resolver the loader runs: a deterministic run never hands multi-document rows the
+    SDPA its FA4 demotion would pick, whether the YAML pins FA4 or leaves the pick to the GPU."""
+    packing, padding_free, batch_size = _ROW_SHAPES[rows]
+    config = _KERNEL_CLASSES[kernel_class]()
+    on_arch, capability = _on_arch("b300")
+    with (
+        on_arch,
+        capability,
+        mock.patch.object(model_setup, "is_flash_attn_2_available", return_value=True),
+        mock.patch.object(selection, "is_flash_attn_2_available", return_value=True),
+        mock.patch.object(selection, "_detect_attention_impl", return_value="flash_attention_4"),
+    ):
+        request = default_training_rows_attn_implementation(
+            ModelArguments(model_name_or_path="stub/model", attn_implementation=pinned),
+            packing=packing,
+            padding_free=padding_free,
+            per_device_train_batch_size=batch_size,
+            dtype=torch.bfloat16,
+            checkpoint_config=config,
+        )
+        resolved = selection.resolve_attn_implementation(
+            config, request, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+    assert resolved == _expected_backend(kernel_class, rows, determinism, pinned)
+
+
+def test_a_pinned_fa4_moved_to_fa2_says_why(caplog):
+    """The pin gives way loudly: the warning names the deterministic backward and the multi-document rows."""
+    with caplog.at_level("WARNING", logger=selection.logger.name):
+        assert _default("qwen3_next", "b300", padding_free=False, pinned="flash_attention_4") == "flash_attention_2"
+    assert "not validated with a deterministic backward" in caplog.text and "several documents" in caplog.text
+
+
 class _Stop(Exception):
     """Raised by a stubbed seam: ``main()`` runs only as far as it."""
 
@@ -295,7 +367,8 @@ _TEXT_TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content
 
 def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_packed: bool | None = None) -> dict:
     """What ``sft.py:main()`` hands its seams for a ``model_type`` checkpoint on a B300 whose own pick is FA4: the
-    policy load's ``attn_default``, or the backend the tree-packing pre-check is given.
+    ``attn_implementation`` the policy load passes ``load_distributed_model`` (the request the script makes, through
+    the YAML's pin), or the backend the tree-packing pre-check is given.
 
     ``preprocessed_packed`` stands the dataset in for a pre-processed corpus baked packed (True) or unpacked
     (False); ``None`` keeps it raw.
@@ -319,8 +392,8 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
     )
     captured = {}
 
-    def load_policy(context, *_args, **kwargs):
-        captured["attn_default"] = kwargs.get("attn_default")
+    def load_distributed(**kwargs):
+        captured["load_attn"] = kwargs["attn_implementation"]
         raise _Stop
 
     def check_tree_attention(_config, attn_implementation, _full_attention, **_tree_options):
@@ -333,6 +406,7 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
         on_arch,
         capability,
         mock.patch.object(model_setup, "is_flash_attn_2_available", return_value=True),
+        mock.patch.object(selection, "is_flash_attn_2_available", return_value=True),
         mock.patch.object(selection, "_detect_attention_impl", return_value="flash_attention_4"),
         mock.patch.object(
             module,
@@ -347,7 +421,14 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
             module, "load_script_datasets", return_value=((dataset, preprocessed_packed is not None), False)
         ),
         mock.patch.object(module, "load_preprocessed_metadata", return_value=metadata),
-        mock.patch.object(module, "load_policy_model", side_effect=load_policy),
+        mock.patch.object(
+            model_setup,
+            "probe_checkpoint",
+            return_value=(checkpoint_config, is_vlm_model("stub/model", checkpoint_config)),
+        ),
+        mock.patch.object(model_setup, "load_vlm_processor", return_value=None),
+        mock.patch.object(model_setup, "hub_metadata_main_first", return_value=None),
+        mock.patch.object(model_setup, "load_distributed_model", side_effect=load_distributed),
         mock.patch("halo.entrypoints.script.install_log_tee"),
         mock.patch.object(sys, "argv", ["prog", str(config_file)]),
     ]
@@ -391,7 +472,7 @@ def test_sft_main_hands_the_policy_load_the_default(tmp_path, model_type, yaml_b
     """``sft.py`` must ask for the default exactly when its collator will build multi-document rows: a pre-processed
     corpus by how it was baked, a raw one by ``packing`` / ``padding_free``."""
     captured = _run_sft_main(tmp_path, model_type, yaml_body, preprocessed_packed=preprocessed_packed)
-    assert captured == {"attn_default": expected}
+    assert captured == {"load_attn": expected}
 
 
 @pytest.mark.usefixtures("determinism")
@@ -403,16 +484,24 @@ def test_sft_main_refuses_padding_free_on_an_mrope_decoder_before_the_load(tmp_p
         _run_sft_main(tmp_path, model_type, "padding_free: true\n")
 
 
+@pytest.mark.parametrize("model_type", ["qwen3_5_moe", "qwen3_next"])
+def test_sft_main_moves_a_pinned_fa4_on_packed_rows_off_the_deterministic_demotion(tmp_path, model_type, determinism):
+    """``attn_implementation: flash_attention_4`` on packed rows reaches the policy load as FA2 in a deterministic run,
+    not as the pin the loader would demote to SDPA, and as the pin outside one."""
+    captured = _run_sft_main(tmp_path, model_type, "packing: true\nattn_implementation: flash_attention_4\n")
+    assert captured == {"load_attn": "flash_attention_2" if determinism else "flash_attention_4"}
+
+
 def test_an_unpacked_row_outside_a_deterministic_run_loads_fa4(tmp_path, monkeypatch):
     """A single-document row gets no default: ``main()`` hands the load none, and the resolver keeps the auto-detected
     FA4, the faster kernel on long unpacked rows of these families."""
     monkeypatch.delenv(_DETERMINISTIC_ENV)
     captured = _run_sft_main(tmp_path, "qwen3_5_moe", "")
-    assert captured == {"attn_default": None}
+    assert captured == {"load_attn": None}
     with mock.patch.object(selection, "_detect_attention_impl", return_value="flash_attention_4"):
         resolved = selection.resolve_attn_implementation(
             CONFIG_MAPPING["qwen3_5_moe"](),
-            captured["attn_default"],
+            captured["load_attn"],
             torch.bfloat16,
             sinks_policy=SinksPolicy.NEUTRALIZED,
         )

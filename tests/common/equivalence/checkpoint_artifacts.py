@@ -118,7 +118,8 @@ def _context(model, parallelism_config=None, *, training: bool, **fields):
 
 
 def _shard(model, mesh: DeviceMesh, dtype: torch.dtype, ignored: Iterable = ()) -> None:
-    """FSDP2 per layer under the run's mixed-precision policy, as a run's DP wrap applies it."""
+    """FSDP2 in the wrap's decoder-layer units under the run's mixed-precision policy, as a run's DP wrap applies
+    it."""
     policy = mixed_precision_policy(dtype, fp32_reduce=False, cast_forward_inputs=True)
     apply_fsdp2_per_layer(model, mesh, policy, False, IdentityParamSet(ignored))
 

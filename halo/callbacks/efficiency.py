@@ -33,12 +33,15 @@ _TERA = 10**12
 # Decimals every reported metric is rounded to before it reaches the logs dict.
 _DISPLAY_DECIMALS = 2
 
+# A step boundary: a CUDA event on the current stream, or the host clock without a GPU.
+_BoundaryMark = torch.cuda.Event | float
+
 
 @dataclass
 class _RunState:
     n_warmup_steps: int = 0
     global_start_step: int = 0
-    step_start_time: float = 0.0
+    step_start: _BoundaryMark | None = None
     step_start_tokens_seen: int = 0
     elapsed_time: float = 0.0
     step_times: list[float] = field(default_factory=list)
@@ -99,6 +102,16 @@ class _MemoryMetrics:
     training_peak_allocated_gb: float = 0.0
 
 
+class _PendingStep(NamedTuple):
+    """A measured step whose time is read once its end mark is: its boundary marks and the work it did."""
+
+    start: _BoundaryMark
+    end: _BoundaryMark
+    rank_tokens: int
+    cluster_tokens: int
+    measured_attention_flops: float | None
+
+
 class _Utilization(NamedTuple):
     step_percent: float
     avg_percent: float
@@ -112,12 +125,23 @@ class _Utilization(NamedTuple):
 _UNKNOWN_UTILIZATION = _Utilization(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
-def _step_clock() -> float:
-    """Host time once the device has run everything queued so far: an unsynchronized read at a step
-    boundary would book the previous step's kernel tail to this step and drop its own."""
-    if torch.cuda.is_available():
-        torch.cuda.synchronize()
-    return time.perf_counter()
+def _mark_boundary() -> _BoundaryMark:
+    """A step boundary as the device reaches it: an event recorded behind the work queued so far, which times the
+    step without draining the queue a host clock read would have to wait on."""
+    if not torch.cuda.is_available():
+        return time.perf_counter()
+    event = torch.cuda.Event(enable_timing=True)
+    event.record()
+    return event
+
+
+def _seconds_between(start: _BoundaryMark, end: _BoundaryMark) -> float:
+    """Seconds from ``start`` to ``end``, waiting only for an end event the device has not reached yet."""
+    if isinstance(end, float):
+        return end - start
+    if not end.query():
+        end.synchronize()
+    return start.elapsed_time(end) / 1000.0
 
 
 def _utilization_report(
@@ -217,6 +241,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         self.model_ref = None
         self.training_args = None
         self._run = _RunState(n_warmup_steps)
+        # Measured steps whose time is read at the next step end or log, when their end mark has passed.
+        self._pending_steps: list[_PendingStep] = []
         self._parallelism_config = parallelism_config
         self._full_model_params = num_full_model_params
         self._report_mfu_diagnostics = report_mfu_diagnostics
@@ -246,33 +272,21 @@ class EfficiencyCallback(transformers.TrainerCallback):
 
     def on_step_begin(self, args, state, control, **kwargs):
         self._initialize_once_model_arrives(args, kwargs)
-        self._run.step_start_time = _step_clock()
+        self._run.step_start = _mark_boundary()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
     def on_step_end(self, args, state, control, **kwargs):
+        step_end = _mark_boundary()
         # Before the warmup gate, so a warmup step's work never leaks into the first measured one.
         measured_attention_flops = self._drain_measured_attention_flops()
         if not self._is_warmup_step(state):
-            step_time = self._record_step_time()
-            rank_tokens = self._record_token_throughput(state, step_time)
-            flops = self.flops_model
-            dense_per_token = active_per_token = mfu_ratio = smfu_ratio = None
-            if flops is not None:
-                dense_per_token, active_per_token = flops.model_flops_per_token, flops.active_model_flops_per_token
-                if flops.params_ratio > _DISTRIBUTED_EFFICIENCY_PARAMS_RATIO_MIN:
-                    mfu_ratio = flops.params_ratio
-                if flops.full_active_params > flops.local_active_params > 0:
-                    smfu_ratio = flops.full_active_params / flops.local_active_params
-            step = (rank_tokens, step_time, measured_attention_flops)
-            report, self._run.total_flops = self._record_utilization(
-                dense_per_token, self._run.total_flops, mfu_ratio, *step
+            rank_tokens, cluster_tokens = self._step_tokens(state)
+            # One step later the earlier end marks have passed, so reading them waits on nothing.
+            self._record_pending_steps()
+            self._pending_steps.append(
+                _PendingStep(self._run.step_start, step_end, rank_tokens, cluster_tokens, measured_attention_flops)
             )
-            self.mfu = MFUMetrics(*report)
-            report, self._run.total_active_flops = self._record_utilization(
-                active_per_token, self._run.total_active_flops, smfu_ratio, *step
-            )
-            self.smfu = _SMFUMetrics(*report)
             self._record_memory()
         if state.num_input_tokens_seen is not None:
             self._run.step_start_tokens_seen = state.num_input_tokens_seen
@@ -280,6 +294,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def on_log(self, args, state, control, logs, **kwargs):
         if self._is_warmup_step(state):
             return
+        self._record_pending_steps()
         logs.update(asdict(self.time))
         logs.update(asdict(self.tps))
         logs.update(asdict(self.memory))
@@ -299,6 +314,7 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def measured_step_times(self) -> tuple[float, ...]:
         """Every measured step's time in seconds, unrounded and in order: the distribution behind
         ``avg_step_time_seconds``."""
+        self._record_pending_steps()
         return tuple(self._run.step_times)
 
     def _initialize_once_model_arrives(self, args, kwargs) -> None:
@@ -394,8 +410,35 @@ class EfficiencyCallback(transformers.TrainerCallback):
         as ``global_start_step + 1``: hence the inclusive bound."""
         return state.global_step <= self._run.global_start_step + self._run.n_warmup_steps
 
-    def _record_step_time(self) -> float:
-        step_time = _step_clock() - self._run.step_start_time
+    def _record_pending_steps(self) -> None:
+        """Record every pending step, in step order."""
+        for step in self._pending_steps:
+            self._record_step(step)
+        self._pending_steps.clear()
+
+    def _record_step(self, step: _PendingStep) -> None:
+        """Record a measured step's time, token throughput and utilization."""
+        step_time = self._record_step_time(_seconds_between(step.start, step.end))
+        self._record_token_throughput(step.cluster_tokens, step_time)
+        flops = self.flops_model
+        dense_per_token = active_per_token = mfu_ratio = smfu_ratio = None
+        if flops is not None:
+            dense_per_token, active_per_token = flops.model_flops_per_token, flops.active_model_flops_per_token
+            if flops.params_ratio > _DISTRIBUTED_EFFICIENCY_PARAMS_RATIO_MIN:
+                mfu_ratio = flops.params_ratio
+            if flops.full_active_params > flops.local_active_params > 0:
+                smfu_ratio = flops.full_active_params / flops.local_active_params
+        work = (step.rank_tokens, step_time, step.measured_attention_flops)
+        report, self._run.total_flops = self._record_utilization(
+            dense_per_token, self._run.total_flops, mfu_ratio, *work
+        )
+        self.mfu = MFUMetrics(*report)
+        report, self._run.total_active_flops = self._record_utilization(
+            active_per_token, self._run.total_active_flops, smfu_ratio, *work
+        )
+        self.smfu = _SMFUMetrics(*report)
+
+    def _record_step_time(self, step_time: float) -> float:
         self._run.elapsed_time += step_time
         self._run.step_times.append(step_time)
         self.time = StepTimeMetrics(
@@ -404,8 +447,8 @@ class EfficiencyCallback(transformers.TrainerCallback):
         )
         return step_time
 
-    def _record_token_throughput(self, state, step_time: float) -> int:
-        """Record cluster and per-GPU token throughput; returns the tokens this rank computed over."""
+    def _step_tokens(self, state) -> tuple[int, int]:
+        """``(tokens this rank computed over, the cluster's unique tokens)`` in the step that just ended."""
         parallelism = self._parallelism_config
         world_size = get_global_world_size()
         if state.num_input_tokens_seen is not None:
@@ -425,7 +468,11 @@ class EfficiencyCallback(transformers.TrainerCallback):
         rank_tokens = step_tokens_cluster // world_size // parallelism.cp_size
         # Only ranks sharing one batch are non-independent (TP/ETP, CP and a pipeline chain's pp_size
         # ranks); EP is orthogonal to DP, so data_parallel_size does not divide ep_size.
-        step_cluster_tokens = rank_tokens * parallelism.data_parallel_size * parallelism.cp_size
+        return rank_tokens, rank_tokens * parallelism.data_parallel_size * parallelism.cp_size
+
+    def _record_token_throughput(self, step_cluster_tokens: int, step_time: float) -> None:
+        """Record cluster and per-GPU token throughput for a step of ``step_cluster_tokens`` unique tokens."""
+        world_size = get_global_world_size()
         self._run.elapsed_cluster_tokens += step_cluster_tokens
         self.tps = ThroughputMetrics(
             round(step_cluster_tokens / world_size / step_time, _DISPLAY_DECIMALS),
@@ -433,7 +480,6 @@ class EfficiencyCallback(transformers.TrainerCallback):
             round(step_cluster_tokens / step_time, _DISPLAY_DECIMALS),
             round(self._run.elapsed_cluster_tokens / self._run.elapsed_time, _DISPLAY_DECIMALS),
         )
-        return rank_tokens
 
     def _nominal_step_tokens(self) -> int:
         """Tokens one rank's batch would carry in a step with every sequence padded to the length bound."""

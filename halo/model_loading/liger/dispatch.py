@@ -164,7 +164,6 @@ def liger_parallelism_overrides(
         reason = "EP layers replace the expert FFN Liger would swap"
         overrides["swiglu"] = overrides["geglu"] = reason
     if tp_size > 1:
-        # A ColwiseParallel-sharded lm_head makes the fused CE softmax a partial-vocab slice.
         reason = f"TP (tp_size={tp_size}) shards lm_head, making the fused softmax a partial-vocab slice"
         overrides["cross_entropy"] = overrides["fused_linear_cross_entropy"] = reason
     external_loss = {"CP": cp_size, "PP": pp_size}

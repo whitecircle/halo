@@ -112,7 +112,7 @@ def _layer(
         patch.object(ep_config_module, "supports_grouped_mm", return_value=grouped),
     ):
         layer = wrapper(copy.deepcopy(block), config)
-    assert layer.expert_tp_size == WORLD // ep_size and layer._grouped_mm_enabled() is grouped
+    assert layer.expert_tp_size == WORLD // ep_size and layer._use_grouped_mm is grouped
     return layer
 
 

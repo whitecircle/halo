@@ -200,10 +200,11 @@ reportMissingTypeStubs = false      # third-party libs without py.typed shouldn'
 reportMissingModuleSource = false   # host runs may not have the torch env installed
 
 [tool.pytest.ini_options]
-# CPU tests run inside the image (they import torch); GPU tests are torchrun scripts
-# launched as subprocesses by tests/gpu/conftest.py from tests/gpu/manifest.py — pytest
-# never imports them. Markers are registered in tests/conftest.py (from manifest.ALL_MARKERS)
-# so --strict-markers stays a single source of truth.
+# CPU tests run inside the image (they import torch); GPU tests are scripts each manifest row
+# launches as a subprocess (torchrun, or python for a driver that starts its own ranks) through
+# tests/gpu/conftest.py from tests/gpu/manifest.py — pytest never imports them. Markers are
+# registered in tests/conftest.py (from manifest.ALL_MARKERS) so --strict-markers stays a single
+# source of truth.
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 addopts = "--strict-markers -ra"

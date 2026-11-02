@@ -2,8 +2,8 @@
 """GptOss at ep4 x etp2 trains on grouped GEMM as it trained on the per-expert loop, and resumes a loop-path
 ETP checkpoint exactly (8 GPUs).
 
-The loop arm runs the per-expert loop under ``use_grouped_gemm: true`` (the loop rule patched onto the layer
-class, the config unchanged), the configuration a loop-path ETP checkpoint carries, fingerprint included:
+The loop arm runs the per-expert loop under ``use_grouped_gemm: true`` (every built layer set to the loop, the config
+unchanged), the configuration a loop-path ETP checkpoint carries, fingerprint included:
 
 1. Loop, 20 steps: the reference trajectory, every EP layer on the loop.
 2. Loop, 10 steps and a checkpoint, with this rank's optimizer state and trainable weights snapshotted.
@@ -26,9 +26,7 @@ GptOss (8 experts: two per dispatch rank, each FFN sharded two ways) keeps the r
     torchrun --nproc_per_node=8 tests/gpu/parallelism/combined/test_gptoss_etp_grouped_gemm.py
 """
 
-import contextlib
 import functools
-from unittest.mock import patch
 
 import torch
 import torch.distributed as dist
@@ -80,13 +78,11 @@ FLOOR_GRAD_NORM_RATIO_FACTOR = 1.25
 TRAJECTORY_LOSS_TOL = TOL.parallel_vs_baseline_train_loss_abs
 
 
-def _loop_rule(self) -> bool:
-    """The per-expert loop at ``expert_tp_size > 1`` whatever the config asks."""
-    return self._use_grouped_mm and self.expert_tp_size <= 1
-
-
-def _per_expert_loop():
-    return patch.object(EPGptOssMoELayer, "_grouped_mm_enabled", _loop_rule)
+def _run_per_expert_loop(model) -> None:
+    """Every EP layer of ``model`` on the per-expert loop, the config unchanged: at ``expert_tp_size > 1`` both
+    compute paths hold the same weights, so the switch after the build changes the compute alone."""
+    for _, layer in named_ep_layers(model):
+        layer._use_grouped_mm = False
 
 
 def _sft_config(output_dir: str, max_steps: int, save_at: int | None) -> SFTConfig:
@@ -137,7 +133,7 @@ def _layer_checks(model, *, grouped: bool, label: str) -> dict[str, bool]:
             and layer.experts_per_rank == layer.num_experts // EP_SIZE
             for layer in layers
         ),
-        f"{label}_compute_path": all(layer._grouped_mm_enabled() is grouped for layer in layers),
+        f"{label}_compute_path": all(layer._use_grouped_mm is grouped for layer in layers),
     }
 
 
@@ -186,12 +182,13 @@ def _trajectory_checks(reference: list[float], candidate: list[float], label: st
 def _train_arm(ctx, tiny_dir, tokenizer, dataset, train_out, steps: int, *, grouped: bool, label: str, edit=None):
     """COLLECTIVE. One run from the tiny checkpoint: its layer checks, per-step losses and gradient norms, and what
     ``edit`` (applied to the built model before training) returned."""
-    with contextlib.nullcontext() if grouped else _per_expert_loop():
-        trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, steps, None))
-        ctx.on_teardown(trainer.cleanup_ep)
-        checks = _layer_checks(trainer.model, grouped=grouped, label=label)
-        edited = edit(trainer.model) if edit else None
-        trainer.train()
+    trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, steps, None))
+    ctx.on_teardown(trainer.cleanup_ep)
+    if not grouped:
+        _run_per_expert_loop(trainer.model)
+    checks = _layer_checks(trainer.model, grouped=grouped, label=label)
+    edited = edit(trainer.model) if edit else None
+    trainer.train()
     losses, norms = step_losses(trainer), _grad_norms(trainer)
     checks[f"{label}_ran_every_step"] = len(losses) == len(norms) == steps
     del trainer
@@ -230,10 +227,10 @@ def run(ctx):
     checks["loop_loss_moved_past_the_bound"] = loop_drop > TOL.control_min_loss_shift(TRAJECTORY_LOSS_TOL)
 
     log(f"\n--- 2. per-expert loop, {SAVE_AT_STEP} steps and a checkpoint ---")
-    with _per_expert_loop():
-        trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, SAVE_AT_STEP, SAVE_AT_STEP))
-        ctx.on_teardown(trainer.cleanup_ep)
-        trainer.train()
+    trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, SAVE_AT_STEP, SAVE_AT_STEP))
+    ctx.on_teardown(trainer.cleanup_ep)
+    _run_per_expert_loop(trainer.model)
+    trainer.train()
     saved_optimizer = local_optimizer_state(trainer.model, trainer.optimizer)
     saved_weights = _trainable_weights(trainer.model)
     del trainer

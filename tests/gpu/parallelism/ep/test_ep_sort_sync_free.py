@@ -9,12 +9,15 @@ only size their output by reading the device back.
 ``torch.cuda.set_sync_debug_mode("error")`` turns any such read into an exception, so this asserts the
 property directly rather than trusting a claim no check enforces.
 
-Scope: the whole sort, at ``ep_size == 1`` and at ``ep_size > 1``, where DeepEP's ``-1`` padding is
-compacted by a ``nonzero_static`` sized from the dispatch's host-side receive counts; and the per-expert loop
-(``use_grouped_gemm: false``, GptOss under expert TP) at ``ep_size > 1``, which sizes each expert's slot read
-off its count the same way. Each must also equal its device-sized reference (the ``nonzero`` sort; the
-``torch.where`` loop, under deterministic algorithms) bit for bit, and that reference must trip the same detector,
-so a sync-free pass is not a detector that sees nothing.
+Scope: the whole sort, at ``ep_size == 1`` and at ``ep_size > 1``, where the dispatch's host-side receive
+counts size a counting sort in three Triton launches (``halo/kernels/moe_route_sort.py``); and the per-expert
+loop (``use_grouped_gemm: false``, GptOss under expert TP) at ``ep_size > 1``, which sizes each expert's slot
+read off its count. Each must also equal its device-sized reference (the ``nonzero`` sort; the ``torch.where``
+loop, under deterministic algorithms) bit for bit, and that reference must trip the same detector, so a
+sync-free pass is not a detector that sees nothing. The counting sort also runs every case of
+``tests/common/route_sort_reference.py`` (top_k 1 to 10, 1 to 128 local experts, idle experts, rows with no local
+slot, a zero-token rank) against the torch construction, gate-weight gradient included, compiles no binary past
+its warm-up and takes no pinned host block.
 
 Run with 1 GPU:
     torchrun --nproc_per_node=1 \
@@ -28,17 +31,28 @@ import torch
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.kernels import moe_route_sort
+from halo.kernels.moe_route_sort import sort_routing_by_expert, warm_route_sort_kernels
 from tests.common.ep_reference import (
     GroupedSortLayer,
     grouped_sort_mismatches,
     nonzero_grouped_sort,
-    receive_counts,
     received_expert_ids,
     where_expert_loop,
 )
 from tests.common.harness import gpu_test_main
 from tests.common.parallelism import single_process_ep_config
 from tests.common.rank_log import log
+from tests.common.route_sort_reference import (
+    CASES,
+    case_findings,
+    compiled_sort_binaries,
+    pinned_host_requests,
+    receive,
+    receive_counts,
+    result_mismatches,
+    sort_with_grad,
+)
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 EXPERTS_PER_RANK = 8
@@ -60,7 +74,8 @@ def make_inputs(ep_size, device):
     if ep_size > 1:
         # DeepEP marks slots routed to another rank with -1.
         experts = torch.where(torch.rand_like(experts, dtype=torch.float) < 0.5, experts, -1)
-    weights = torch.rand(NUM_TOKENS, TOP_K, device=device, dtype=torch.float32)
+    # The dispatch's gate weights carry the router's gradient.
+    weights = torch.rand(NUM_TOKENS, TOP_K, device=device, dtype=torch.float32, requires_grad=True)
     return tokens, experts, weights
 
 
@@ -123,12 +138,14 @@ def run(ctx):
     log(f"[ep4] sort ran sync-free: {got[2].numel()} of {experts.numel()} slots local; mismatched={mismatched}")
     checks["ep4_padding_present"] = bool((experts < 0).any())
     checks["ep4_sort_equals_nonzero_sort_bitwise"] = not mismatched
+    checks["ep4_runs_the_counting_sort"] = type(got[3].grad_fn).__name__ == "_CountingSortBackward"
 
     # The detector sees the device-sized nonzero sort.
     checks["ep4_nonzero_sort_trips_the_detector"] = trips_the_detector(
         lambda: nonzero_grouped_sort(stub, tokens, experts, weights)
     )
 
+    checks |= check_counting_sort(device)
     checks |= check_loop(device)
     return {"checks": checks}
 
@@ -143,6 +160,47 @@ def trips_the_detector(fn) -> bool:
     finally:
         torch.cuda.synchronize()
     return False
+
+
+def check_counting_sort(device) -> dict[str, bool]:
+    """Each reference case through :func:`sort_routing_by_expert` after the layer warm-up for its ``top_k`` and local
+    expert count: sync-free, bit-identical to the torch construction (gate-weight gradient included), served by
+    the warmed binaries and handed no pinned host block. The receive and the reference are built outside the
+    detector, whose host copies sync."""
+    checks = {}
+    warm_up_counted = False
+    pinned = 0
+    for index, case in enumerate(CASES):
+        inputs = receive(case, device, seed=index)
+        want = sort_with_grad(moe_route_sort._argsort_routing, case, inputs)
+        cold = compiled_sort_binaries()
+        warm_route_sort_kernels(case.top_k, case.local_experts, device)
+        warm = compiled_sort_binaries()
+        warm_up_counted |= warm > cold
+        torch.cuda.synchronize()
+        requests = pinned_host_requests()
+        try:
+            with sync_is_an_error():
+                got = sort_with_grad(sort_routing_by_expert, case, inputs)
+            torch.cuda.synchronize()
+        except RuntimeError as exc:
+            log(f"[counting sort] {case.name} raised {exc}")
+            checks[f"{case.name}_sync_free"] = False
+            continue
+        pinned += pinned_host_requests() - requests
+        mismatched = case_findings(case, inputs) + result_mismatches(case, got, want)
+        log(f"[counting sort] {case.name}: {sum(inputs.counts)} local slots; mismatched={mismatched}")
+        checks[f"{case.name}_sync_free"] = True
+        checks[f"{case.name}_equals_torch_construction_bitwise"] = not mismatched
+        checks[f"{case.name}_compiles_nothing_past_the_warm_up"] = compiled_sort_binaries() == warm
+    # The count is not blind: some warm-up compiled a shape no earlier sort had.
+    checks["warm_up_compiles_are_counted"] = warm_up_counted
+    checks["counting_sort_takes_no_pinned_host_memory"] = pinned == 0
+    # Nor is the pinned count: one block handed out moves it.
+    requests = pinned_host_requests()
+    torch.empty(1, pin_memory=True)
+    checks["pinned_host_requests_are_counted"] = pinned_host_requests() > requests
+    return checks
 
 
 def check_loop(device) -> dict[str, bool]:
@@ -166,7 +224,7 @@ def check_loop(device) -> dict[str, bool]:
     counted = partial(layer._compute_experts, tokens, experts, weights, torch.bfloat16, recv_counts=counts)
     reference = partial(where_expert_loop, layer, tokens, experts, weights, torch.bfloat16)
 
-    checks = {"loop_runs_the_loop": not layer._grouped_mm_enabled(), "loop_every_expert_received": 0 not in counts}
+    checks = {"loop_runs_the_loop": not layer._use_grouped_mm, "loop_every_expert_received": 0 not in counts}
     with torch.no_grad():
         torch.cuda.synchronize()
         try:

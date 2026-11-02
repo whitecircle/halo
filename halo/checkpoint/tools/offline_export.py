@@ -105,7 +105,7 @@ def copy_checkpoint_aux_files(
         if is_dir:
             shutil.copytree(src, os.path.join(output_dir, name), dirs_exist_ok=True)
             if verbose:
-                print(f"Copied: {name}/")  # noqa: T201 — CLI-facing helper; the merge scripts report via print
+                logger.info(f"Copied: {name}/")
             continue
         skip_as_weight = (
             name.endswith(WEIGHT_FILE_SUFFIXES)
@@ -120,7 +120,7 @@ def copy_checkpoint_aux_files(
         if os.path.isfile(src):
             shutil.copy2(src, os.path.join(output_dir, name))
             if verbose:
-                print(f"Copied: {name}")  # noqa: T201 - CLI-facing helper; the merge scripts report via print
+                logger.info(f"Copied: {name}")
     tag_exported_model_card(output_dir, source_dir=input_dir)
 
 
@@ -323,16 +323,16 @@ def preflight_resource_warning(tool: str, output_dir: str, *, disk_bytes: int | 
     if ram_bytes:
         available = available_host_ram_bytes()
         if available is not None and ram_bytes > available:
-            print(  # noqa: T201 — CLI-facing preflight; the conversion tools report via print
-                f"WARNING: {tool}: estimated peak host RAM ~{ram_bytes / 1e9:.1f} GB exceeds available "
+            logger.warning(
+                f"{tool}: estimated peak host RAM ~{ram_bytes / 1e9:.1f} GB exceeds available "
                 f"~{available / 1e9:.1f} GB (/proc/meminfo MemAvailable). The process may be OOM-killed; "
                 f"free host memory or run on a larger host. Continuing — this is an estimate."
             )
     if disk_bytes:
         free = shutil.disk_usage(_nearest_existing_path(output_dir)).free
         if disk_bytes > free:
-            print(  # noqa: T201 — CLI-facing preflight; the conversion tools report via print
-                f"WARNING: {tool}: the output volume for {output_dir} has ~{free / 1e9:.1f} GB free but "
+            logger.warning(
+                f"{tool}: the output volume for {output_dir} has ~{free / 1e9:.1f} GB free but "
                 f"the artifact needs ~{disk_bytes / 1e9:.1f} GB. The write may fail with ENOSPC; free disk "
                 f"or write the output to a larger volume. Continuing — this is an estimate."
             )

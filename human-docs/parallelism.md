@@ -63,7 +63,7 @@ model before any weight loads, and LoRA under TP fails at trainer construction.
 ![Ulysses attention: each rank holds a sequence chunk, all-to-all swaps it for a head slice of the full sequence, then swaps back](../agent-docs/assets/diagrams/ulysses_attention_flow.png)
 
 CP splits the sequence across ranks and switches to a head split for the
-attention itself, so the result is exact. The cost is three all-to-alls per
+attention itself, so the result is exact. The cost is two all-to-alls per
 attention layer. The head counts must divide by `cp_size`; the collator pads the
 sequence length to fit.
 

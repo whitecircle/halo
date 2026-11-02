@@ -139,7 +139,13 @@ def test_compiled_flex_kernel_matches_fp64_reference():
     v = torch.randn(1, kv_heads, seq, dim, device="cuda", requires_grad=True)
     grad = torch.randn(1, seq, heads, dim, device="cuda")
     out, _ = sdpa_flex_sliding.flex_sliding_attention(
-        causal_attention(heads, kv_heads, dim), q, k, v, dense[None, None], scaling=1.0, sliding_window=WINDOW
+        causal_attention(heads, kv_heads, dim, sliding_window=WINDOW),
+        q,
+        k,
+        v,
+        dense[None, None],
+        scaling=1.0,
+        sliding_window=WINDOW,
     )
     out.backward(grad)
 
@@ -166,7 +172,7 @@ def test_tuned_tiles_match_sdpa_at_gemma4_shapes():
     grad = torch.randn_like(q)
     dense = torch.stack([_sliding_mask([seq], window), _sliding_mask([1500, 548], window)])[:, None]
     out, _ = sdpa_flex_sliding.flex_sliding_attention(
-        causal_attention(16, 8, 256), q, k, v, dense, scaling=1.0, sliding_window=window
+        causal_attention(16, 8, 256, sliding_window=window), q, k, v, dense, scaling=1.0, sliding_window=window
     )
     out.backward(grad.transpose(1, 2))
     q2, k2, v2 = (t.detach().clone().requires_grad_(True) for t in (q, k, v))
@@ -422,7 +428,13 @@ def test_a_mask_with_a_non_contiguous_row_keeps_sdpa():
     calls = []
     with patch.object(sdpa_flex_sliding, "_compiled_flex", _counting(flex_attention, calls)):
         out, _ = sdpa_flex_sliding.flex_sliding_attention(
-            causal_attention(head_dim=32), q, k, k, dense[None, None], scaling=1.0, sliding_window=WINDOW
+            causal_attention(head_dim=32, sliding_window=WINDOW),
+            q,
+            k,
+            k,
+            dense[None, None],
+            scaling=1.0,
+            sliding_window=WINDOW,
         )
     assert calls == []
     expected = torch.nn.functional.scaled_dot_product_attention(
@@ -469,7 +481,7 @@ def test_a_call_carrying_attention_sinks_keeps_sdpa():
     sinks = torch.zeros(4, device="cuda")
     with patch.dict(sdpa_flex_sliding.ALL_ATTENTION_FUNCTIONS._global_mapping, {"sdpa": spy}):
         sdpa_flex_sliding.flex_sliding_attention(
-            causal_attention(4, 4, 32, scaling=None),
+            causal_attention(4, 4, 32, scaling=None, sliding_window=WINDOW),
             q,
             q,
             q,
@@ -539,7 +551,13 @@ def test_one_warmup_serves_every_later_call():
                 torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast),
             ):
                 out, _ = sdpa_flex_sliding.flex_sliding_attention(
-                    causal_attention(heads, kv_heads, dim), q, k, v, dense, scaling=1.0, sliding_window=WINDOW
+                    causal_attention(heads, kv_heads, dim, sliding_window=WINDOW),
+                    q,
+                    k,
+                    v,
+                    dense,
+                    scaling=1.0,
+                    sliding_window=WINDOW,
                 )
             if trainable:
                 out.sum().backward()
@@ -641,7 +659,13 @@ def test_full_determinism_after_the_warmup_is_refused():
     def sliding_call():
         with torch.no_grad(), patch.object(torch._dynamo.config, "error_on_recompile", True):
             sdpa_flex_sliding.flex_sliding_attention(
-                causal_attention(), q, k, k, _sliding_mask([200])[None, None], scaling=1.0, sliding_window=WINDOW
+                causal_attention(sliding_window=WINDOW),
+                q,
+                k,
+                k,
+                _sliding_mask([200])[None, None],
+                scaling=1.0,
+                sliding_window=WINDOW,
             )
 
     sliding_call()  # control: in the warmed mode the call compiles nothing
@@ -671,7 +695,13 @@ def test_rows_past_46k_tokens_match_sdpa():
         dense = _sliding_mask(lengths, window)[None, None]
         grad = torch.randn(1, seq, heads, dim, **shape)
         out, _ = sdpa_flex_sliding.flex_sliding_attention(
-            causal_attention(heads, kv_heads, dim), q, k, v, dense, scaling=1.0, sliding_window=window
+            causal_attention(heads, kv_heads, dim, sliding_window=window),
+            q,
+            k,
+            v,
+            dense,
+            scaling=1.0,
+            sliding_window=window,
         )
         out.backward(grad)
         q2, k2, v2 = (t.detach().clone().requires_grad_() for t in (q, k, v))

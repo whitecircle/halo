@@ -52,7 +52,7 @@ The architecture has no bias slot (the gate is a bare weight), so the bias is tr
 
 **CP** — `Qwen3MoeAttention` → `Qwen3MoeUlyssesAttention` (`halo/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA.
 
-**TP and ETP** — selective attention-only TP (`q/k/v_proj` ColwiseParallel, `o_proj` RowwiseParallel); embeddings and `lm_head` stay replicated, expert layers belong to EP. ETP shards `gate_proj` / `up_proj` / `down_proj` along the intermediate dim; because Qwen3 already stores gate and up separately, the same compute path runs under both ETP and non-ETP with a smaller `M`.
+**TP and ETP** — selective attention-only TP (`q/k/v_proj` colwise, `o_proj` rowwise); embeddings and `lm_head` stay replicated, expert layers belong to EP. ETP shards `gate_proj` / `up_proj` / `down_proj` along the intermediate dim; because Qwen3 already stores gate and up separately, the same compute path runs under both ETP and non-ETP with a smaller `M`.
 
 **LoRA** on the experts works under EP through native grouped adapters (`_init_expert_lora`). It is rejected under TP and EP+TP, and at `expert_tp_size > 1` (the replicated adapter half would take partial gradients) — attention LoRA still runs there.
 

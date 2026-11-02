@@ -12,6 +12,8 @@ A `torch.compile`d combine taking a bound (or `alpha`) as a Python float is re-t
 
 The clamped combines latch into `_fused_glu_mul`, the GLU-combine seam every base expert path reads. DeepSeek-V4 arms its combine only when the block's activation probes as exactly SiLU and falls back to the family's eager clamped GLU otherwise; Step-3.7 takes the same probe but only on a layer whose `swiglu_limit` is finite — its unclamped layers keep the plain fused SiLU combine. GLM-5 Next's experts hardcode clamp-then-SiLU structurally, so its combine runs unconditionally.
 
+The EP routing sort at `ep_size > 1` stays eager too (`torch.compiler.disable` on the counting sort in `halo/kernels/moe_route_sort.py`): its three Triton kernels are already fused, and traced, the dispatch's host-side receive counts would become graph inputs that change every step. A compiled EP layer breaks its graph there.
+
 The low-precision weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats (mxfp8/mxfp4; nvfp4's weight stays eager), with a permanent eager fallback on any compile or runtime failure — see [Low-Precision MoE](low-precision-moe-kernels.md).
 
 ## Chunked log-prob head
@@ -65,10 +67,17 @@ Liger is the lever: +27% at 2 GiB less memory. Compile adds 0.3% to it in `defau
 Compile fuses the spans between graph breaks (norms, projections), not across them:
 
 - **DeepEP dispatch/combine** — splits the graph at every MoE layer.
-- **Flash Attention** — opaque; the compiler cannot fuse across FA boundaries.
+- **Flash Attention** — opaque; the compiler cannot fuse across FA boundaries. FA4's `autograd.Function` and its cute-DSL launcher do not trace, so each FA4 call also breaks the graph.
 - **Gradient checkpointing** — EP, CP and every MoE force `use_reentrant=True`, which adds graph breaks; on a dense model outside EP/CP the config's `use_reentrant` stands.
-- **TP DTensor** — sharded-op dispatch breaks the graph at every sharded operation.
-- **CP (Ulysses)** — all-to-all in every attention layer breaks the graph at every block.
+- **TP** — no break: the TP linears run on their local shards, and they and their collectives trace without a graph break; with the replicated-grad hooks Halo retargets after transformers' `tp_plan` load, the rest of a dense decoder layer's DTensor dispatch compiles into aten ops plus functional collectives. transformers' own module-level backward hooks would break it.
+- **CP (Ulysses)** — no break of its own: each exchange is one `all_to_all_single` inside an autograd function. The reentrant checkpointing CP forces (above) still breaks the graph.
+
+## Compile caches at scale
+
+Every DP/EP rank compiles the same graphs. Inductor keeps them in `TORCHINDUCTOR_CACHE_DIR` (default `$TMPDIR/torchinductor_<user>`, `/tmp` when `TMPDIR` is unset, so the launch recipe's `TMPDIR="$D/tmp"` already puts it on the verified scratch volume), and each process compiles with up to 32 worker threads, so an 8-GPU node starts up to 256 compile workers at warm-up. On a large job:
+
+- where `$D` is one NFS/Lustre directory shared by every node, point `TORCHINDUCTOR_CACHE_DIR` at a node-local directory: the cache's file-locked writes on a shared directory put every rank of the job on the same few keys;
+- set `TORCHINDUCTOR_COMPILE_THREADS` to the node's CPUs divided by its local ranks.
 
 ## Running benchmarks
 

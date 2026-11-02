@@ -1,6 +1,6 @@
 """HF-native tensor parallelism (``tp_plan="auto"``): what the plan shards, the tied embedding/head pair kept on one
-side of it, and the load finish: the post-load checks and transformers' per-backward norm all-reduce moved onto the
-trainer's step-time SUM."""
+side of it, and the load finish: the post-load checks, the planned linears moved onto the local-shard forward, and
+transformers' per-backward norm all-reduce moved onto the trainer's step-time SUM."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, TensorParallelLayer, _get_parameter_plan
 
+from halo.distributed.tensor_parallel.local_linears import install_planned_local_forwards
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, register_per_head_norm_params
 from halo.models.config_access import text_config, ties_word_embeddings
 from halo.models.model_classes import mapped_model_class
@@ -198,8 +199,9 @@ def is_input_embedding_tp_sharded(model: nn.Module) -> bool:
 
 
 def finish_hf_tp_load(model: nn.Module, device_mesh: DeviceMesh, tp_size: int) -> None:
-    """Check a ``tp_plan="auto"`` load against the plan it applied, stamp ``device_mesh`` on ``model`` and move
-    the per-backward norm all-reduces onto the trainer's step-time SUM.
+    """Check a ``tp_plan="auto"`` load against the plan it applied, stamp ``device_mesh`` on ``model``, run the
+    planned linears on their local shards and move the per-backward norm all-reduces onto the trainer's step-time
+    SUM.
 
     ``tp_plan="auto"`` plans at most the head for an architecture shipping no ``base_model_tp_plan`` (Qwen3-VL)
     and transformers only warns, so a plan sharding no backbone parameter is refused here by name.
@@ -225,5 +227,11 @@ def finish_hf_tp_load(model: nn.Module, device_mesh: DeviceMesh, tp_size: int) -
                 "stays REPLICATED: budget a full vocab-sized weight, gradient and optimizer state on "
                 "every TP rank."
             )
+    if tp_size > 1:
+        # After the tie check, which diagnoses a planned head whose tied weight loaded replicated; the install
+        # would only refuse that weight as a plain tensor.
+        installed = install_planned_local_forwards(model, applied_plan)
+        if is_global_main_process():
+            logger.info(f"{installed} TP linears compute on their local shards")
     model._device_mesh = device_mesh
     retarget_hf_replicated_grad_hooks(model)

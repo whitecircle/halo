@@ -12,7 +12,8 @@ on single-document and packed rows past and within the sliding window:
   value included, and a softcap stays off FA4's varlen kernels (not validated there; on B300 their forward with one
   did not finish), so a varlen call carrying a softcap, the warm-up's included, is refused before it launches and
   fails the check;
-* ``sdpa_flex_sliding``: Dynamo raises on any recompile, and the sliding layers are seen to run FlexAttention.
+* ``sdpa_flex_sliding``: Dynamo raises on any recompile, and each row runs FlexAttention on the layers it masks:
+  every layer of a packed row, the full ones under its document mask, and the sliding ones of a single document.
   Mistral, whose modules keep no window and pass the config's, rides along.
 
 A warm-up keyed on the config's global head count raised on Step-3.7 (the count is per layer) and compiled
@@ -43,6 +44,7 @@ from halo.models.attention import sdpa_flex_sliding
 from halo.models.attention.backend_setup import patch_transformers_flash_varlen_int_seqlen, warm_fa4_kernels
 from halo.models.attention.layout import attention_calls
 from halo.models.attention.sdpa_flex_sliding import register_flex_sliding_attention, warm_flex_sliding_kernels
+from tests.common.flex_sliding import FLEX_ROWS, flex_layers, train_row
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import TINY_LAGUNA_CONFIG, TINY_STEP3P7_CONFIG
 from tests.common.rank_log import log
@@ -107,18 +109,6 @@ def _model(build, attn: str) -> torch.nn.Module:
     return model
 
 
-def _step(model: torch.nn.Module, lengths: list[int], *, train: bool = True) -> None:
-    """A forward over one row of ``lengths`` packed documents, and its backward when ``train``."""
-    generator = torch.Generator().manual_seed(sum(lengths))
-    ids = torch.randint(3, 1024, (1, sum(lengths)), generator=generator).cuda()
-    position_ids = torch.cat([torch.arange(n) for n in lengths]).unsqueeze(0).cuda()
-    with torch.set_grad_enabled(train):
-        out = model(input_ids=ids, position_ids=position_ids, use_cache=False)
-    if train:
-        hidden = out.logits if hasattr(out, "logits") else out.last_hidden_state
-        hidden.float().pow(2).mean().backward()
-
-
 def _counted(fn, calls: list):
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):
@@ -178,7 +168,7 @@ def check_fa4_compiles_nothing_after_the_warmup(name: str) -> None:
         assert warmed["_flash_attn_fwd"], "the warm-up compiled no forward kernel"
         calls.clear()
         for lengths in rows:
-            _step(model, lengths)
+            train_row(model, lengths)
     layers = sum(1 for m in model.modules() if hasattr(m, "num_key_value_groups"))
     assert len(calls) == layers * len(rows), f"{len(calls)} FA4 calls; want every layer on every row"
     after = _jit_keys(cute.interface)
@@ -190,11 +180,6 @@ def check_fa4_compiles_nothing_after_the_warmup(name: str) -> None:
 def check_flex_compiles_nothing_after_the_warmup(name: str, build) -> None:
     flex = register_flex_sliding_attention()
     model = _model(build, flex)
-    sliding = sum(
-        1
-        for m in model.modules()
-        if hasattr(m, "num_key_value_groups") and getattr(m, "sliding_window", model.config.sliding_window)
-    )
     torch._dynamo.reset()
     warm_flex_sliding_kernels(model, dtype=torch.bfloat16)
     calls: list = []
@@ -202,10 +187,11 @@ def check_flex_compiles_nothing_after_the_warmup(name: str, build) -> None:
         patch.object(torch._dynamo.config, "error_on_recompile", True),
         patch.object(sdpa_flex_sliding, "_compiled_flex", _counted(sdpa_flex_sliding._compiled_flex, calls)),
     ):
-        _step(model, [300, 150, 40])
-        _step(model, [600])
-        _step(model, [400], train=False)
-    assert len(calls) == 3 * sliding, f"{len(calls)} flex calls; want {sliding} sliding layers x 3 forwards"
+        for lengths, train in FLEX_ROWS:
+            before = len(calls)
+            train_row(model, lengths, train=train)
+            want = flex_layers(model, lengths)
+            assert len(calls) - before == want, f"{lengths}: {len(calls) - before} flex calls; want {want}"
     log(f"  [{name}] {len(calls)} FlexAttention calls, no recompile")
 
 

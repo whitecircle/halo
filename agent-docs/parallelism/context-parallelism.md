@@ -13,12 +13,12 @@ already cut this rank's head count that Ulysses redistributes over.
 ## How Ulysses works
 
 Naive sequence chunking breaks cross-chunk attention. Ulysses instead redistributes tensors around
-the attention kernel: each GPU holds `S/cp_size` tokens but all heads, all-to-alls swap that to
-the full `S` tokens but `H/cp_size` heads for the attention compute (one for Q, one for the fused K
-and V), and a third swaps the output back. The backward runs the same three in reverse.
+the attention kernel: each GPU holds `S/cp_size` tokens but all heads, one all-to-all carrying Q, K
+and V swaps that to the full `S` tokens but `H/cp_size` heads for the attention compute, and a second
+swaps the output back. The backward runs the same two in reverse.
 Multi-head attention is independent across heads, which is what makes this exact.
 
-![Ulysses attention: RoPE runs on the local chunk, all-to-alls on Q and the fused K|V scatter heads and gather the sequence so each rank attends over the full sequence with 16 of 64 heads, and an all-to-all on the output restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
+![Ulysses attention: RoPE runs on the local chunk, one all-to-all on Q, K and V scatters heads and gathers the sequence so each rank attends over the full sequence with 16 of 64 heads, and an all-to-all on the output restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
 
 ![An SFT training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the logits stay sharded, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
 
@@ -26,8 +26,11 @@ Multi-head attention is independent across heads, which is what makes this exact
 
 `UlyssesModel` (`halo/distributed/context_parallel/ulysses_model.py`) is the entry point: the CP
 loaders construct it over the loaded model and the trainer adopts its `CPConfig`. The all-to-all
-(`UlyssesAllToAll`, `all_to_all.py`) is a custom autograd function: `sequence_to_heads` scatters heads
-and gathers the sequence, `heads_to_sequence` swaps back. The per-family attention wrappers in
+(`UlyssesAllToAll`, `all_to_all.py`) is a custom autograd function that packs every tensor it carries
+into one buffer, row by destination rank, and runs one `all_to_all_single`: `sequence_to_heads` scatters
+the heads of Q, K and V and gathers the sequence (GQA's K/V and MLA's narrower V keep their own head
+counts and head dims), `heads_to_sequence` swaps the output back, and the backward runs the opposite
+swap on the gradients. The per-family attention wrappers in
 `families.py` subclass `UlyssesAttention` (`ulysses_attention.py`), whose one forward path runs RoPE
 (and any position-dependent scale) on the local chunk before the all-to-all, so no position gather,
 then Flash Attention with native GQA in `[B, S, H, D]`, with zero transposes. The MLA families
@@ -242,11 +245,11 @@ at construction, so the best checkpoint cannot be reloaded in place). See
 ## Optimizations
 
 Native GQA (no `repeat_kv`) saves on the order of 6 GB per forward on a 20B-class GQA model, and the
-`[B, S, H, D]` layout drops the transposes. The all-to-alls run in native BFloat16, with K and V fused
-into one.
+`[B, S, H, D]` layout drops the transposes. The all-to-alls run in native BFloat16, with Q, K and V
+in one buffer.
 
-`torch.compile` gives no benefit: the all-to-all breaks the graph at every attention layer (±0.0% on
-Qwen3-8B, CP=2, seq 16384, 2 GPUs (Blackwell)). Use Liger (default on).
+`torch.compile` traces the exchange without a graph break, though the reentrant checkpointing CP
+forces still breaks the graph; its throughput effect under CP is not measured. Use Liger (default on).
 
 ## Limitations
 
@@ -290,7 +293,7 @@ alone OOMs at long sequences (it shards experts, not activations) — that is th
 | `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `reject_offline_cp_options` (offline GRPO) |
 | QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/load_rules.py`, `reject_offline_cp_options` |
 | `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_reject_hsdp`, `_reject_fsdp_settings` |
-| `torch_compile` | not gated, and no measured benefit — the all-to-all breaks the graph at every attention layer | — |
+| `torch_compile` | not gated; the exchange traces without a graph break, throughput effect not measured | — |
 | `save_sharded_ep` | rejected on a CP run — per-rank shards carry `.original_attention.` keys the merge script cannot remap | `reject_unmergeable_ep_sharded_save` |
 
 ## Adding a new model

@@ -1,4 +1,5 @@
-"""The Ulysses all-to-all: an autograd-aware swap of the sequence and head dims, in both directions."""
+"""The Ulysses all-to-all: an autograd-aware swap of the sequence and head dims, in both directions, each one
+``all_to_all_single`` however many tensors it carries."""
 
 from __future__ import annotations
 
@@ -6,61 +7,90 @@ import torch
 import torch.distributed as dist
 
 
+def _require_divisible(tensor: torch.Tensor, dim: int, world_size: int) -> None:
+    """Raise, on every rank ahead of the collective, unless ``world_size`` divides ``dim``: the swap's reshape would
+    otherwise cut through a head or a token without an error."""
+    if tensor.shape[dim] % world_size != 0:
+        raise ValueError(
+            f"Ulysses all-to-all: dim {dim} of size {tensor.shape[dim]} is not divisible by "
+            f"context_parallel_size={world_size}."
+        )
+
+
+def _exchange(rows: list[torch.Tensor], process_group: dist.ProcessGroup) -> tuple[torch.Tensor, ...]:
+    """COLLECTIVE over ``process_group``: ``rows`` are ``[world, ...]`` views sharing every dim but the last, row ``r``
+    of each bound for group rank ``r``. They travel side by side in one ``all_to_all_single`` and come back split the
+    same way, row ``i`` of each what group rank ``i`` sent here."""
+    # A lone view that is already contiguous goes as it is, without the copy a cat makes.
+    send = rows[0].contiguous() if len(rows) == 1 else torch.cat(rows, dim=-1)
+    received = torch.empty_like(send)
+    dist.all_to_all_single(received, send, group=process_group)
+    return received.split([row.shape[-1] for row in rows], dim=-1)
+
+
+def _swap_to_heads(tensors: tuple[torch.Tensor, ...], process_group: dist.ProcessGroup) -> tuple[torch.Tensor, ...]:
+    """``[batch, seq/CP, heads, dim]`` each → ``[batch, seq, heads/CP, dim]``; the tensors share batch and sequence,
+    each keeps its own head count and head dim."""
+    world_size = dist.get_world_size(process_group)
+    for tensor in tensors:
+        _require_divisible(tensor, 2, world_size)
+    batch, local_seq_len = tensors[0].shape[:2]
+    rows = [tensor.reshape(batch, local_seq_len, world_size, -1).permute(2, 0, 1, 3) for tensor in tensors]
+    # Row i of each holds group rank i's sequence chunk; in rank order they are the whole sequence.
+    return tuple(
+        part.transpose(0, 1).reshape(batch, world_size * local_seq_len, tensor.shape[2] // world_size, tensor.shape[3])
+        for part, tensor in zip(_exchange(rows, process_group), tensors, strict=True)
+    )
+
+
+def _swap_to_sequence(tensors: tuple[torch.Tensor, ...], process_group: dist.ProcessGroup) -> tuple[torch.Tensor, ...]:
+    """``[batch, seq, heads/CP, dim]`` each → ``[batch, seq/CP, heads, dim]``, the inverse of :func:`_swap_to_heads`."""
+    world_size = dist.get_world_size(process_group)
+    for tensor in tensors:
+        _require_divisible(tensor, 1, world_size)
+    batch, seq_len = tensors[0].shape[:2]
+    local_seq_len = seq_len // world_size
+    rows = [tensor.reshape(batch, world_size, local_seq_len, -1).transpose(0, 1) for tensor in tensors]
+    # Row i of each holds group rank i's heads; in rank order they are every head.
+    return tuple(
+        part.permute(1, 2, 0, 3).reshape(batch, local_seq_len, world_size * tensor.shape[2], tensor.shape[3])
+        for part, tensor in zip(_exchange(rows, process_group), tensors, strict=True)
+    )
+
+
 class UlyssesAllToAll(torch.autograd.Function):
-    """COLLECTIVE over ``process_group``: scatter ``scatter_dim`` and gather ``gather_dim``; the backward swaps
-    them back."""
+    """COLLECTIVE over ``process_group``: Ulysses' swap of ``[batch, seq, heads, dim]`` tensors from sequence to head
+    sharding (``to_heads``) or back, all of them in one ``all_to_all_single``; the backward swaps the gradients the
+    other way. An output can be a view of the received buffer (the swap to heads at batch 1), which autograd refuses
+    to modify in place."""
 
     @staticmethod
     def forward(
-        ctx, input: torch.Tensor, process_group: dist.ProcessGroup, scatter_dim: int, gather_dim: int
-    ) -> torch.Tensor:
+        ctx, process_group: dist.ProcessGroup, to_heads: bool, *tensors: torch.Tensor
+    ) -> tuple[torch.Tensor, ...]:
         ctx.process_group = process_group
-        ctx.scatter_dim = scatter_dim
-        ctx.gather_dim = gather_dim
-
-        world_size = dist.get_world_size(process_group)
-        if world_size == 1:
-            return input
-
-        if input.shape[scatter_dim] % world_size != 0:
-            raise ValueError(
-                f"Ulysses all-to-all: dim {scatter_dim} of size {input.shape[scatter_dim]} is not "
-                f"divisible by context_parallel_size={world_size} — the ranged narrow below would "
-                f"silently drop the tail elements."
-            )
-        chunk_size = input.shape[scatter_dim] // world_size
-        input_list = [input.narrow(scatter_dim, i * chunk_size, chunk_size).contiguous() for i in range(world_size)]
-
-        output_list = [torch.empty_like(input_list[0]) for _ in range(world_size)]
-        dist.all_to_all(output_list, input_list, group=process_group)
-
-        return torch.cat(output_list, dim=gather_dim)
+        ctx.to_heads = to_heads
+        return (_swap_to_heads if to_heads else _swap_to_sequence)(tensors, process_group)
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor) -> tuple[torch.Tensor, None, None, None]:
-        return UlyssesAllToAll.apply(grad_output, ctx.process_group, ctx.gather_dim, ctx.scatter_dim), None, None, None
+    def backward(ctx, *grads: torch.Tensor) -> tuple[torch.Tensor | None, ...]:
+        return None, None, *UlyssesAllToAll.apply(ctx.process_group, not ctx.to_heads, *grads)
 
 
 def heads_to_sequence(tensor: torch.Tensor, process_group: dist.ProcessGroup) -> torch.Tensor:
     """COLLECTIVE over ``process_group``: ``[batch, seq, heads/CP, dim]`` → ``[batch, seq/CP, heads, dim]``, the
     inverse of :func:`sequence_to_heads`."""
-    return UlyssesAllToAll.apply(tensor, process_group, 1, 2)
+    if dist.get_world_size(process_group) == 1:
+        return tensor
+    (output,) = UlyssesAllToAll.apply(process_group, False, tensor)
+    return output
 
 
 def sequence_to_heads(
     query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, process_group: dist.ProcessGroup
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """COLLECTIVE over ``process_group``: Q, K and V ``[batch, seq/CP, heads, dim]`` → ``[batch, seq, heads/CP,
-    dim]``, K and V fused on the last dim (they share a head count) so two all-to-alls carry all three."""
-    world_size = dist.get_world_size(process_group)
-    if world_size == 1:
+    dim]`` in one all-to-all, each keeping its own head count (GQA) and head dim (MLA's V)."""
+    if dist.get_world_size(process_group) == 1:
         return query, key, value
-
-    kv_fused = torch.cat([key, value], dim=-1)
-
-    query_out = UlyssesAllToAll.apply(query, process_group, 2, 1)
-    kv_out = UlyssesAllToAll.apply(kv_fused, process_group, 2, 1)
-
-    # The all-to-all scatters/gathers dims 2 and 1, never the fused last dim, so the split is exact.
-    head_dim = key.shape[-1]
-    return query_out, kv_out[..., :head_dim], kv_out[..., head_dim:]
+    return UlyssesAllToAll.apply(process_group, True, query, key, value)

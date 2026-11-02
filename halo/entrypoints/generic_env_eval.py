@@ -9,6 +9,7 @@ import logging
 from typing import Any
 
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
+from halo.data.sources.loading import load_dataset_split
 from halo.entrypoints.eval_contract import (
     load_training_contract,
     resolve_setting,
@@ -17,7 +18,7 @@ from halo.entrypoints.eval_contract import (
     write_eval_outputs,
 )
 from halo.environments.episode_keys import ANSWER_KEY
-from halo.environments.eval_runner import collect_results, load_hf_split, reject_answerless_examples, report
+from halo.environments.eval_runner import collect_results, reject_answerless_examples, report
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.inference.openai_client import build_openai_client
@@ -47,7 +48,7 @@ def require_field_columns(args: argparse.Namespace, columns: list[str]) -> None:
 
 def build_column_examples(args: argparse.Namespace) -> list[dict[str, Any]]:
     """Read eval examples from the dataset's prompt/answer columns, every named field checked first."""
-    split = load_hf_split(args.dataset, args.config, args.split)
+    split = load_dataset_split(args.dataset, split=args.split, config=args.config)
     require_field_columns(args, split.column_names)
     examples = []
     for row in split:

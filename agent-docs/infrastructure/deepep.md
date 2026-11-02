@@ -277,12 +277,14 @@ At `ep_size > 1` the expert compute reads nothing back from the device to size i
 already blocks the host until the receive counts land (`do_cpu_sync`, DeepEP's default), and both backends
 hand them on as `recv_counts`, the (token, expert) slots each local expert received: V2 from
 `EPHandle.num_recv_tokens_per_expert_list`, V1 from its fourth dispatch output. The GC replay caches them
-with the dispatch. On the grouped path their sum sizes a `nonzero_static` that compacts DeepEP's
-`-1`-padded slots; a stable sort, a `scatter_add_` histogram over `experts_per_rank` and a `cumsum` then
-give the grouped-GEMM `offs`. The per-expert loop (`use_grouped_gemm: false`) selects each local expert's
-slots with a `nonzero_static` of that expert's count. A count that disagrees with the received ids trips a
-device-side assert (`torch._assert_async`): on CUDA it surfaces as a `device-side assert triggered` at the
-rank's next synchronizing call, and its peers then wait out DeepEP's timeout. Besides each dispatch's own wait, the EP layer code reads back only the first MoE layer's capacity
+with the dispatch. On the grouped path their sum sizes the routing sort's outputs, and its counting sort
+takes the group offsets from its own histogram, so no count is copied to the device
+([Grouped GEMM](../optimization/grouped-gemm.md)). The per-expert loop (`use_grouped_gemm: false`) selects
+each local expert's slots with a `nonzero_static` of that expert's count. Counts that disagree with the
+received ids where a path reads them (the sum on the grouped path, each count on the loop) trip a
+device-side assert (`torch._assert_async`, checked before any slot is placed): on CUDA it surfaces as a
+`device-side assert triggered` at the rank's next synchronizing call, and its peers then wait out DeepEP's
+timeout. Besides each dispatch's own wait, the EP layer code reads back only the first MoE layer's capacity
 all-reduce (`cap.item()`, once per forward; per layer under `HALO_EP_CAPACITY_DEDUP=0`) and, at
 `ep_size == 1` (EP1, pure ETP), where no dispatch counts exist, the loop's `torch.where` per local expert.
 

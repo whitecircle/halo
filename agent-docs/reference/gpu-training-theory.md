@@ -229,7 +229,7 @@ The cost is that `outputs.logits` never exists. That makes FLCE SFT-only (prefer
 ### What fusion does not buy
 
 - **Chains, not isolated ops.** `torch.compile(mode="max-autotune")` on a single `silu(a)*b` is slower than eager on a B300, since autotune and guard overhead exceed the one-op saving.
-- **Compile carries guard and recompile cost.** On parallel models the DeepEP all-to-all (EP), DTensor dispatch (TP), and Ulysses all-to-all (CP) each break the graph, so compile fuses only the spans between breaks; on EP MoE it gains at most 1% ([torch.compile](../optimization/torch-compile.md)).
+- **Compile carries guard and recompile cost.** On parallel models the DeepEP all-to-all (EP), the reentrant checkpointing that EP and CP force, and each FA4 call break the graph, so compile fuses only the spans between breaks; on EP MoE it gains at most 1% ([torch.compile](../optimization/torch-compile.md)).
 - **Nothing for compute-bound matmuls**, which have no HBM pass to remove.
 
 ---
@@ -402,7 +402,7 @@ Each mode buys memory headroom by spending a specific collective.
     Load balance limits it: real routing is lumpy, so the busiest expert and the all-to-all gate the step and skew utilization. The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).
 
 - **TP (tensor parallel)** splits each matmul and needs an all-reduce on the forward's critical path that the toolkit does not overlap, so TP must stay NVLink-local. [Tensor Parallelism](../parallelism/tensor-parallelism.md).
-- **CP (context parallel)** splits the sequence; all-to-alls swap sequence-sharding for head-sharding around each attention (Ulysses): one for Q, one for the fused K and V, one for the output. Use it for sequences too long for one GPU. [Context Parallelism](../parallelism/context-parallelism.md).
+- **CP (context parallel)** splits the sequence; all-to-alls swap sequence-sharding for head-sharding around each attention (Ulysses): one carrying Q, K and V, one for the output. Use it for sequences too long for one GPU. [Context Parallelism](../parallelism/context-parallelism.md).
 
 **Where ZeRO fits.** Most readers arrive with DeepSpeed's stage vocabulary. DDP replicates everything; ZeRO-1 shards optimizer state, ZeRO-2 adds the gradients, ZeRO-3 shards the parameters too.
 

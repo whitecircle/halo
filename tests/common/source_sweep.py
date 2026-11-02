@@ -41,6 +41,40 @@ def imports_name(path: Path, name: str) -> bool:
     )
 
 
+def _imported_package_files(path: str, package: str) -> set[str]:
+    """The repo-relative files of the ``package`` modules the ``.py`` file at ``path`` imports by absolute name;
+    ``from package.mod import name`` counts ``name`` too where it is a submodule."""
+    modules = set()
+    for node in ast.walk(ast.parse((REPO_ROOT / path).read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            modules.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            modules.add(node.module)
+            modules.update(f"{node.module}.{alias.name}" for alias in node.names)
+    files = set()
+    for module in modules:
+        if module.split(".")[0] != package:
+            continue
+        base = REPO_ROOT.joinpath(*module.split("."))
+        for candidate in (base.with_suffix(".py"), base / "__init__.py"):
+            if candidate.is_file():
+                files.add(candidate.relative_to(REPO_ROOT).as_posix())
+                break
+    return files
+
+
+def imported_module_files(paths: Iterable[str], package: str) -> tuple[str, ...]:
+    """The repo-relative files of every ``package`` module the ``.py`` files at ``paths`` import, directly or
+    through another ``package`` module, sorted."""
+    files: set[str] = set()
+    frontier = list(paths)
+    while frontier:
+        found = _imported_package_files(frontier.pop(), package) - files
+        files |= found
+        frontier.extend(found)
+    return tuple(sorted(files))
+
+
 def call_name(call: ast.Call) -> str | None:
     """The name a call goes through: ``f`` in ``f()`` and in ``x.f()``; ``None`` for any other callee."""
     if isinstance(call.func, ast.Name):

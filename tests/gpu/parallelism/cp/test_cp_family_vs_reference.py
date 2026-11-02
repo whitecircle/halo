@@ -9,17 +9,19 @@ a random model the loss and the gradient direction can average away a wrong posi
 Mistral4's llama-4 query scale read off chunk-local positions, which this output does not. Every rank then
 scores one shared batch over the full sequence as the reference, wraps the model in ``UlyssesModel`` and scores
 its sequence shard: the CP loss averaged over the ranks must match the reference loss, and the gradients averaged
-over the ranks (the reduction FSDP2 runs) must match the reference gradients in direction and norm. A family
-adds the checks only its wrapper needs:
+over the ranks (the reduction FSDP2 runs) must match the reference gradients in direction and norm. Each comparison
+runs at batch 1, where flash takes Q, K and V as views of the all-to-all's receive buffer, and at batch 2, where
+they reach it as contiguous copies. A family adds the checks only its wrapper needs:
 
   * ``glm4_moe_lite``: MLA, whose ``kv_a_proj_with_mqa`` emits a compressed KV split into a normed nope part
-    and one rotary key shared by every head, with ``qk_head_dim`` distinct from ``v_head_dim`` (V padded for
-    flash); run with LoRA-Q under both ``rope_interleave`` settings, the wrapper's flag pinned to the
-    config's, since the loss cannot tell the two RoPE pairings apart on a random model.
+    and one rotary key shared by every head; run with LoRA-Q under both ``rope_interleave`` settings, the
+    wrapper's flag pinned to the config's, since the loss cannot tell the two RoPE pairings apart on a random
+    model, and at GLM-4.7-Flash's head geometry, whose 256-wide latent heads CP runs on FA2 even on Blackwell.
   * ``qwen3_5_moe_text``: a double-width ``q_proj`` (query and a sigmoid output gate), every layer full
-    attention. The router aux term takes no extra ``cp_size`` factor: its component, the eval loss at a loud
-    coefficient minus the loss at zero, matches the reference and is the same on every rank. A hybrid
-    ``layer_types`` config, whose GatedDeltaNet layers scan the sequence axis, is refused by name.
+    attention, also at Qwen3.5's head geometry, which puts CP on FA4's head_dim-256 kernel on Blackwell. The
+    router aux term takes no extra ``cp_size`` factor: its component, the eval loss at a loud coefficient minus
+    the loss at zero, matches the reference and is the same on every rank. A hybrid ``layer_types`` config, whose
+    GatedDeltaNet layers scan the sequence axis, is refused by name.
   * ``bailing_moe``: remote code with a fused ``query_key_value``, an output projection named ``dense``,
     Q/K RMSNorm before a partial rotary and a softmax scale the module never stores. An sdpa label is
     accepted (the wrapper calls flash itself) while a Lightning-Attention-2 layer, whose file reuses the
@@ -79,6 +81,8 @@ ATTENTION_WEIGHT_GAIN = 8.0
 # attention over the full sequence, the max error relative to the reference's largest output.
 ATTENTION_RTOL = 5e-2
 ATTENTION_COSINE_MIN = 0.9995
+# At batch 1 the swap to heads returns views of its receive buffer, beyond it contiguous copies.
+BATCHES = (1, BATCH)
 
 
 def causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
@@ -91,7 +95,8 @@ def causal_lm_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
 def attention_checks(model: nn.Module, cp_config, ids, metrics: dict) -> dict[str, bool]:
     """COLLECTIVE. The first attention layer under its wrapper over this rank's shard of one shared hidden state,
     gathered, against the unwrapped layer over the full sequence, each fed what the decoder hands it."""
-    positions = torch.arange(SEQ, device=ids.device).unsqueeze(0).expand(BATCH, -1)
+    batch = ids.shape[0]
+    positions = torch.arange(SEQ, device=ids.device).unsqueeze(0).expand(batch, -1)
     full_inputs = decoder_attention_inputs(model, ids, positions)
     local_inputs = decoder_attention_inputs(
         model, split_sequence_for_cp(ids, cp_config), split_sequence_for_cp(positions, cp_config)
@@ -102,7 +107,7 @@ def attention_checks(model: nn.Module, cp_config, ids, metrics: dict) -> dict[st
             if weight.dim() == 2:
                 weight.mul_(ATTENTION_WEIGHT_GAIN)
     wrapper = ULYSSES_ATTENTION_MAP[type(attention).__name__](attention, cp_config.process_group, CP_SIZE)
-    hidden = torch.randn(BATCH, SEQ, model.get_input_embeddings().embedding_dim, device=ids.device, dtype=model.dtype)
+    hidden = torch.randn(batch, SEQ, model.get_input_embeddings().embedding_dim, device=ids.device, dtype=model.dtype)
     dist.broadcast(hidden, src=0)
     with torch.no_grad():
         reference = attention(**(full_inputs | {"hidden_states": hidden}))[0]
@@ -149,6 +154,16 @@ class Glm4MoeLiteChecks(FamilyChecks):
     variants = {
         "interleaved": {"rope_interleave": True, "q_lora_rank": 48},
         "rotate_half": {"rope_interleave": False, "q_lora_rank": 48},
+        "glm_4_7_flash_heads": {
+            "rope_interleave": True,
+            "q_lora_rank": 48,
+            "num_attention_heads": 20,
+            "num_key_value_heads": 20,
+            "qk_nope_head_dim": 192,
+            "qk_rope_head_dim": 64,
+            "v_head_dim": 256,
+            "kv_lora_rank": 64,
+        },
     }
     # MLA adds an all-to-all and a V pad/crop per layer on top of bf16 ordering noise; a wrong projection or
     # interleave lands an order of magnitude off.
@@ -168,7 +183,15 @@ class Glm4MoeLiteChecks(FamilyChecks):
 class Qwen3_5MoeChecks(FamilyChecks):
     family = "qwen3_5_moe_text"
     # Loud enough that the aux component clears bf16 noise.
-    variants = {"": {"router_aux_loss_coef": 0.1}}
+    variants = {
+        "": {"router_aux_loss_coef": 0.1},
+        "qwen3_5_heads": {
+            "router_aux_loss_coef": 0.1,
+            "num_attention_heads": 16,
+            "num_key_value_heads": 2,
+            "head_dim": 256,
+        },
+    }
     # The sigmoid gate's multiply adds to the noise; a split that drops the gate lands ~10x off.
     loss_tolerance = QWEN3_5_LOSS_TOLERANCE
 
@@ -263,15 +286,18 @@ class BailingMoeChecks(FamilyChecks):
 FAMILY_CHECKS = {checks.family: checks for checks in FamilyChecks.__subclasses__()}
 
 
-def compare_with_reference(ctx, family: str, checker: FamilyChecks, overrides: dict, metrics: dict) -> dict[str, bool]:
-    """COLLECTIVE. ``family``'s tiny model under CP against itself unsplit, with ``checker``'s family checks."""
+def compare_with_reference(
+    ctx, family: str, checker: FamilyChecks, overrides: dict, batch: int, metrics: dict
+) -> dict[str, bool]:
+    """COLLECTIVE. ``family``'s tiny model under CP against itself unsplit on ``batch`` rows, with ``checker``'s
+    family checks."""
     model = tiny_model(family, "gpu", ctx.device, **overrides)
     # The seeded init already agrees across ranks; the broadcast keeps a weight mismatch from passing as a
     # wrapper error.
     for tensor in [*model.parameters(), *model.buffers()]:
         if tensor.is_floating_point():
             dist.broadcast(tensor.data, src=0)
-    ids, labels = random_token_batch(model.get_input_embeddings().num_embeddings, BATCH, SEQ, ctx.device)
+    ids, labels = random_token_batch(model.get_input_embeddings().num_embeddings, batch, SEQ, ctx.device)
     cp_config = ParallelismConfig(cp_size=CP_SIZE).cp_config()
 
     model.train()
@@ -315,13 +341,15 @@ def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     checker = FAMILY_CHECKS.get(family, FamilyChecks)()
-    for variant, overrides in checker.variants.items():
-        log(f"\n--- {family} {variant} ---")
-        suffix = f"_{variant}" if variant else ""
-        variant_metrics: dict[str, float] = {}
-        variant_checks = compare_with_reference(ctx, family, checker, overrides, variant_metrics)
-        checks |= {f"{name}{suffix}": ok for name, ok in variant_checks.items()}
-        metrics |= {f"{name}{suffix}": value for name, value in variant_metrics.items()}
+    for batch in BATCHES:
+        for variant, overrides in checker.variants.items():
+            log(f"\n--- {family} {variant} batch {batch} ---")
+            suffix = f"_{variant}" if variant else ""
+            suffix += f"_batch{batch}"
+            variant_metrics: dict[str, float] = {}
+            variant_checks = compare_with_reference(ctx, family, checker, overrides, batch, variant_metrics)
+            checks |= {f"{name}{suffix}": ok for name, ok in variant_checks.items()}
+            metrics |= {f"{name}{suffix}": value for name, value in variant_metrics.items()}
     return {"checks": checks, "metrics": metrics}
 
 

@@ -3,10 +3,11 @@
 own per-expert counts, and the expert compute they size is sync-free and bit-identical to its device-sized
 reference.
 
-The grouped sort compacts DeepEP's ``-1`` padding with a ``nonzero_static`` sized by the dispatch's host-side
-counts (V2 ``EPHandle.num_recv_tokens_per_expert_list``, V1's fourth dispatch output), and the per-expert loop
-selects each expert's slots with a ``nonzero_static`` of that expert's count; a count that is off by one drops
-slots or pads with one that gathers the wrong row. The CPU suite
+The grouped sort is a counting sort sized by the sum of the dispatch's host-side counts (V2
+``EPHandle.num_recv_tokens_per_expert_list``, V1's fourth dispatch output; ``halo/kernels/moe_route_sort.py``),
+and the per-expert loop selects each expert's slots with a ``nonzero_static`` of that expert's count; a count
+that is off by one sizes the sort's outputs a slot wrong, or drops slots or pads with one that gathers the
+wrong row. The CPU suite
 (``tests/cpu/parallelism/test_ep_receive_counts.py``) can only fake DeepEP, so this pins the contract on the
 installed extension: every tiny family's model at ``ep_size = world / expert_tp_size``, one forward and
 backward per rank on a batch of its own, with every ``_compute_experts`` call audited on the path that layer
@@ -19,6 +20,9 @@ build:
     (``set_sync_debug_mode("error")``) and equals the ``nonzero`` sort's six outputs, or the ``torch.where``
     loop's output, bit for bit;
   * every call ran the path the row expects (``--expect-path``);
+  * on the grouped path, the counting sort on DeepEP's own receive compiles no binary past the layer's warm-up,
+    which builds the kernels on synthetic ids and weights of the dtypes DeepEP hands back, and the binary count
+    sees those warm-up compiles;
   * somewhere in the run the receive carried ``-1`` padding (top-1 families carry none: a received token's
     one expert is local).
 
@@ -49,11 +53,11 @@ from tests.common.ep_reference import (
     grouped_sort_mismatches,
     nonzero_grouped_sort,
     random_token_batch,
-    receive_counts,
     where_expert_loop,
 )
 from tests.common.harness import gpu_test_main
 from tests.common.rank_log import log, log_all
+from tests.common.route_sort_reference import compiled_sort_binaries, receive_counts
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 SEED = 42
@@ -74,7 +78,7 @@ def sync_is_an_error():
 def audit(layer, tokens, experts, weights, output_dtype, recv_counts) -> dict:
     """One ``_compute_experts`` call's verdicts on the path ``layer`` runs. Never raises: a rank that raised here
     would leave its peers in the next dispatch."""
-    path = "grouped" if layer._grouped_mm_enabled() else "loop"
+    path = "grouped" if layer._use_grouped_mm else "loop"
     record = {
         "path": path,
         "counts_match": isinstance(recv_counts, tuple)
@@ -82,11 +86,13 @@ def audit(layer, tokens, experts, weights, output_dtype, recv_counts) -> dict:
         "padded": bool((experts < 0).any()),
         "sync_free": False,
         "bitwise": False,
+        "warm": True,
         "detail": f"{path} counts={recv_counts}",
     }
     if tokens.shape[0] == 0:
         record.update(sync_free=True, bitwise=True)
         return record
+    binaries = compiled_sort_binaries()
     with torch.no_grad():
         torch.cuda.synchronize()
         try:
@@ -102,6 +108,7 @@ def audit(layer, tokens, experts, weights, output_dtype, recv_counts) -> dict:
             record["detail"] += f"; raised {exc}"
             return record
         record["sync_free"] = True
+        record["warm"] = compiled_sort_binaries() == binaries
         if path == "grouped":
             mismatched = grouped_sort_mismatches(got, nonzero_grouped_sort(layer, tokens, experts, weights))
         else:
@@ -160,7 +167,7 @@ def run_family(ctx, family: str, ep_size: int) -> tuple[dict[str, bool], bool]:
     torch.cuda.synchronize()
 
     for index, record in enumerate(records):
-        if not (record["counts_match"] and record["sync_free"] and record["bitwise"]):
+        if not (record["counts_match"] and record["sync_free"] and record["bitwise"] and record["warm"]):
             log_all(f"  {family} call {index} rank {ctx.rank}: {record}")
     log(f"  {family}: {len(records)} expert computes over {len(layers)} EP layers")
     path = ARGS.expect_path
@@ -171,6 +178,8 @@ def run_family(ctx, family: str, ep_size: int) -> tuple[dict[str, bool], bool]:
         f"{family}_{path}_sync_free": all(r["sync_free"] for r in records),
         f"{family}_{path}_equals_reference": all(r["bitwise"] for r in records),
     }
+    if path == "grouped":
+        checks[f"{family}_sort_compiles_nothing_past_the_warm_up"] = all(r["warm"] for r in records)
     del model
     return checks, any(r["padded"] for r in records)
 
@@ -201,11 +210,15 @@ def run(ctx):
         "some_family_ran": bool(families),
     }
     padded = False
+    binaries = compiled_sort_binaries()
     for family in families:
         family_checks, family_padded = run_family(ctx, family, ep_size)
         checks |= family_checks
         padded |= family_padded
     checks["some_receive_carried_padding"] = padded
+    if ARGS.expect_path == "grouped":
+        # The count is not blind: the layers' warm-ups compiled the sort.
+        checks["sort_warm_ups_are_counted"] = compiled_sort_binaries() > binaries
     return {"checks": checks}
 
 

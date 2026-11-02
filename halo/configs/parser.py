@@ -25,6 +25,17 @@ _TOOLKIT_DEFAULTS = {
     "logging_nan_inf_filter": (False, None),
 }
 
+# Toolkit defaults for one key of a dict-valued field, as (name, key) -> (value, guard): merged into the dict the
+# config gives (or an empty one), never over a key it sets; a field given as a JSON file path is left whole.
+_TOOLKIT_KEY_DEFAULTS = {
+    # A pinned batch copies to the device behind the queued kernels; a blocking copy waits for them to drain. Off
+    # where nothing is pinned: ``use_cpu`` unpins in TrainingArguments.__post_init__.
+    ("accelerator_config", "non_blocking"): (
+        True,
+        lambda values: values.get("dataloader_pin_memory") is not False and not values.get("use_cpu"),
+    ),
+}
+
 _NONE_STRINGS = ("None", "null", "none")
 
 # Pre-seeded on every argparse destination, so a flag left off the command line stays recognizable.
@@ -162,9 +173,9 @@ class HaloArgumentParser(HfArgumentParser):
         super().__init__(*args, **kwargs)
 
     def load_values(self, argv: list[str] | None = None) -> dict[str, Any]:
-        """The values ``argv`` (default ``sys.argv[1:]``) sets, plus each toolkit default it leaves unset: ``argv[0]``
-        is the YAML config when it ends in .yaml/.yml and the rest its ``--key=value`` overrides, else ``argv`` is a
-        flags-only command line."""
+        """The values ``argv`` (default ``sys.argv[1:]``) sets, plus each toolkit default it leaves unset, a field's or
+        a dict field's key's: ``argv[0]`` is the YAML config when it ends in .yaml/.yml and the rest its
+        ``--key=value`` overrides, else ``argv`` is a flags-only command line."""
         argv = sys.argv[1:] if argv is None else argv
         if argv and argv[0].endswith((".yaml", ".yml")):
             values = self._merge_cli_overrides(_load_yaml(os.path.abspath(argv[0])), argv[1:])
@@ -176,7 +187,12 @@ class HaloArgumentParser(HfArgumentParser):
             for name, (default, guard) in _TOOLKIT_DEFAULTS.items()
             if name in declared and name not in values and (guard is None or guard(values))
         }
-        return {**defaults, **values}
+        values = {**defaults, **values}
+        for (name, key), (default, guard) in _TOOLKIT_KEY_DEFAULTS.items():
+            given = values.get(name) or {}
+            if name in declared and isinstance(given, dict) and key not in given and guard(values):
+                values[name] = {**given, key: default}
+        return values
 
     def parse_yaml_file(self, yaml_file: str, allow_extra_keys: bool = False):
         """Read the YAML as 1.2 (upstream's 1.1 read makes ``packing: no`` a boolean) through :meth:`parse_dict`;

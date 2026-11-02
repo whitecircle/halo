@@ -546,17 +546,20 @@ def flex_attention_calls(model: torch.nn.Module) -> set[AttentionCall]:
     return {call for call in attention_calls(model) if _flex_runs(call)}
 
 
-def warm_flex_sliding_kernels(model: torch.nn.Module, *, dtype: torch.dtype) -> None:
-    """Compile the training and forward-only FlexAttention graphs of each masked call ``model`` makes, so no
-    rank compiles one mid-run, and record the deterministic mode they compiled under. Rank-local; the caller
-    fences it."""
+def warm_flex_sliding_kernels(
+    model: torch.nn.Module, *, dtype: torch.dtype, device: torch.device | None = None
+) -> None:
+    """Compile the training and forward-only FlexAttention graphs of each masked call ``model`` makes, on ``device``
+    (the current CUDA device by default), so no rank compiles one mid-run, and record the deterministic mode they
+    compiled under. Rank-local; the caller fences it."""
     global _warmed_deterministic
     if effective_attn_implementation(model.config) != SDPA_FLEX_SLIDING:
         return
     calls = flex_attention_calls(model)
     if not calls:  # nothing to compile, so no graph for a later mode to miss
         return
-    device = torch.device(f"cuda:{torch.cuda.current_device()}")
+    if device is None:
+        device = torch.device(f"cuda:{torch.cuda.current_device()}")
     for call in sorted(calls, key=str):
         span = max(call.window or 0, _TILE)
         seq = 2 * span + 3  # past the window and a tile, off the tile edge (the padded path)

@@ -181,6 +181,22 @@ def test_fa3_sink_probe_falls_back_to_flash_attn_3(monkeypatch):
     assert _attn_impl_handles_sinks("flash_attention_3") is False
 
 
+def test_a_live_sinks_request_for_an_uninstalled_flash_build_says_it_is_not_installed(monkeypatch):
+    """An FA3 recipe on a host with no FA3 build (the Blackwell image, a Hopper FA4 recipe) must name the missing
+    build, not claim the kernel drops sinks: an installed FA3 build exposing ``s_aux`` would carry them."""
+    monkeypatch.setitem(sys.modules, "flash_attn_interface", None)
+    monkeypatch.setitem(sys.modules, "flash_attn_3", None)
+    with pytest.raises(ValueError, match="'flash_attention_3' is not installed") as refusal:
+        validate_attn_implementation(_gptoss(), "flash_attention_3", SinksPolicy.LIVE)
+    assert "drops" not in str(refusal.value)
+
+    monkeypatch.setitem(
+        sys.modules, "flash_attn_interface", _fake_fa3_module("flash_attn_interface", with_s_aux=False)
+    )
+    with pytest.raises(ValueError, match="silently drops the learnable attention sinks"):
+        validate_attn_implementation(_gptoss(), "flash_attention_3", SinksPolicy.LIVE)
+
+
 def test_the_sdpa_flip_stops_at_pretrained_model(monkeypatch):
     """The flip clears a family's own ``_supports_sdpa = False`` up the MRO and never the base default on
     ``PreTrainedModel``, which would admit sdpa for every architecture loaded later in the process."""

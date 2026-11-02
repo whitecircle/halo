@@ -198,7 +198,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         grouped-GEMM and ETP store them de-interleaved and contiguous, the per-expert loop splits
         them out of one interleaved projection output.
         """
-        if self._grouped_mm_enabled() or self.expert_tp_size > 1:
+        if self._use_grouped_mm or self.expert_tp_size > 1:
             gate, up = (half.contiguous() for half in gate_up.chunk(2, dim=-1))
         else:
             gate, up = split_interleaved_gate_up(gate_up)

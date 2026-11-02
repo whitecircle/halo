@@ -2,16 +2,17 @@
 ``forward`` TP installs, or refuse.
 
 transformers ≥ 5.16 shards a planned projection into DTensor params and replaces ``module.forward``
-with an INSTANCE attribute (``tp_forward``) closed over the bound ``nn.Linear.forward`` it found.
+with an INSTANCE attribute (``tp_forward``) closed over the bound ``nn.Linear.forward`` it found, and the
+toolkit's load swaps in its local-shard forward the same way (``install_planned_local_forwards``).
 ``LowPrecisionLinear.convert_`` retypes the module in place, and an instance attribute shadows the
-class ``forward``: the wrapper keeps calling the captured bf16 forward while
+class ``forward``: the wrapper keeps computing bf16 while
 ``apply_lowp_compute`` reports the module converted — a run under ``lowp_precision: fp8``
 that trains in bf16 with no other symptom. The fake-quant blocks each rank's shard, so a rowwise
 shard the format cannot split into blocks is refused at load on every rank.
 
-The TP machinery in play is transformers' own (``apply_tensor_parallelism`` on a fake process group,
-which slices shards locally and turns the collectives into no-ops), so what is pinned is the real
-composition, not a stand-in.
+The TP machinery in play is the toolkit's load (``apply_tensor_parallelism`` then
+``install_planned_local_forwards``, on a fake process group, which slices shards locally and turns the
+collectives into no-ops), so what is pinned is the real composition, not a stand-in.
 
     python tests/cpu/kernels/test_lowp_linear_tp_forward.py
 """
@@ -27,6 +28,8 @@ from torch.distributed.tensor import DTensor, Replicate, Shard, distribute_tenso
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
 
 from halo.distributed.mesh import MeshDim
+from halo.distributed.tensor_parallel import local_linears
+from halo.distributed.tensor_parallel.local_linears import install_planned_local_forwards
 from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
 from halo.kernels.lowp.quantization import QUANTIZERS, fake_quant
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
@@ -64,13 +67,15 @@ class _Model(nn.Module):
 
 
 def _tp_model(tp_size: int, intermediate: int, hidden: int = WIDTH) -> _Model:
-    """This rank's shards of a ``_Model`` after transformers' TP load on a ``tp_size``-way mesh; called inside
-    ``fake_process_group``, which sets the rank."""
+    """This rank's shards of a ``_Model`` after the toolkit's TP load on a ``tp_size``-way mesh (transformers'
+    shards, the local-shard forward installed over them); called inside ``fake_process_group``, which sets the
+    rank."""
     torch.manual_seed(0)
     # Named like the loader's mesh: the conversion finds the TP mesh through its ``tp`` dim.
     mesh = init_device_mesh("cpu", (tp_size,), mesh_dim_names=(MeshDim.TP,))
     model = _Model(intermediate, hidden)
     apply_tensor_parallelism(model, mesh)
+    install_planned_local_forwards(model, TP_PLAN)
     model._device_mesh = mesh
     return model
 
@@ -131,6 +136,7 @@ def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
         for proj in ("gate_proj", "up_proj", "down_proj"):
             module = getattr(model.layers[0], proj)
             assert isinstance(module, LowPrecisionLinear)
+            assert vars(module)["forward"].__module__ == local_linears.__name__, "not the local-shard forward"
             # Detached: ``to_local()`` is differentiable, so a plain clone of it would stay attached
             # to the module's graph — never a leaf (no ``.grad``) and accumulating a second time
             # into ``module.weight``. On a 1-rank mesh the local shard IS the full weight.

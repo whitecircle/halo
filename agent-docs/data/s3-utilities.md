@@ -152,11 +152,13 @@ python scripts/before_training/s3.py download project/experiment/data ./data
 python scripts/before_training/s3.py list my_project/ --recursive
 python scripts/before_training/s3.py delete my_folder/data.json --yes
 python scripts/before_training/s3.py delete my_folder --recursive --yes
+python scripts/before_training/s3.py download s3://my-bucket/project/experiment/data ./data
 ```
 
 Commands: `push`, `download`, `list`, `exists`, `delete`. Every command takes `--subfolder/-s`,
-`--bucket/-b` (default `HALO_S3_DEFAULT_BUCKET`, required while that is unset) and `--verbose/-v`. The
-other flags are per command:
+`--bucket/-b` (default `HALO_S3_DEFAULT_BUCKET`; a bare key needs one of the two) and `--verbose/-v`. A
+key (or `list`'s prefix) given as a full `s3://bucket/key` URI names its own bucket, so it refuses
+`--subfolder` and a different `--bucket`. The other flags are per command:
 
 | Flag | Commands | Notes |
 |---|---|---|

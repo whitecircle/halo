@@ -3,6 +3,7 @@ in OpenAI-compatible format."""
 
 import asyncio
 import logging
+import os
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable
@@ -51,6 +52,9 @@ MCP_SERVERS = {
         "command": "npx",
         "args": ["-y", "@modelcontextprotocol/server-memory"],
         "env": [],
+        # Unset, the server keeps one graph file inside its npm package, which every episode and every run on
+        # the host reads and writes; a file in the server's own scratch directory scopes the graph with it.
+        "scratch_env": {"MEMORY_FILE_PATH": "memory.jsonl"},
     },
     "github": {
         "command": "npx",
@@ -67,9 +71,9 @@ MCP_SERVERS = {
 
 class _ServerConnection:
     """One spawned MCP server, held open by an owner task that enters and exits its transport and session contexts,
-    as their anyio cancel scopes require. With ``scratch`` the server's last argument is a fresh directory under the
-    temp dir, kept across a respawn of a server that died and removed by :meth:`stop`; ``on_ready`` runs on the
-    session before :meth:`start` returns."""
+    as their anyio cancel scopes require. With ``scratch`` the transport is handed a fresh directory under the temp
+    dir, kept across a respawn of a server that died and removed by :meth:`stop`; ``on_ready`` runs on the session
+    before :meth:`start` returns."""
 
     def __init__(self, *, scratch: bool, on_ready: Callable[[ClientSession], Awaitable[None]] | None = None):
         self.session: ClientSession | None = None
@@ -89,7 +93,7 @@ class _ServerConnection:
         """The loop running the owner task, ``None`` while no server runs."""
         return self._task.get_loop() if self.is_open else None
 
-    async def start(self, transport_context: Callable[[list[str]], Any]) -> ClientSession:
+    async def start(self, transport_context: Callable[[str | None], Any]) -> ClientSession:
         """The server's session, starting it first unless it runs; concurrent callers share one start, and a failed
         start raises leaving no half-started server behind."""
         async with self._lock:
@@ -97,10 +101,10 @@ class _ServerConnection:
                 await self._spawn(transport_context)
         return self.session
 
-    async def _run(self, transport_context: Callable[[list[str]], Any], ready: asyncio.Future, stop: asyncio.Event):
+    async def _run(self, transport_context: Callable[[str | None], Any], ready: asyncio.Future, stop: asyncio.Event):
         try:
             async with (
-                transport_context([self._scratch_dir] if self._scratch_dir else []) as (read, write),
+                transport_context(self._scratch_dir) as (read, write),
                 ClientSession(read, write, read_timeout_seconds=timedelta(seconds=MCP_REQUEST_TIMEOUT_S)) as session,
             ):
                 await session.initialize()
@@ -117,7 +121,7 @@ class _ServerConnection:
         finally:
             self.session = None
 
-    async def _spawn(self, transport_context: Callable[[list[str]], Any]) -> None:
+    async def _spawn(self, transport_context: Callable[[str | None], Any]) -> None:
         if self._scratch and self._scratch_dir is None:
             self._scratch_dir = tempfile.mkdtemp(prefix="halo-mcp-")
         stop = asyncio.Event()
@@ -171,25 +175,37 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         server_url: str | None = None,
         transport: str = "stdio",
         scratch_allowlist: bool = False,
+        scratch_env: dict[str, str] | None = None,
         episode_scratch: bool = False,
         **kwargs,
     ):
-        """``scratch_allowlist`` appends a fresh scratch directory to a stdio server's arguments (the filesystem
-        server's access allowlist), removed when the server stops. ``episode_scratch`` scopes it to the episode:
-        each episode starts a server of its own over its own directory, stopped with the episode; otherwise one
-        server and its directory serve every episode."""
+        """A stdio server can take a fresh scratch directory, removed when the server stops: ``scratch_allowlist``
+        appends it to the server's arguments (the filesystem server's access allowlist), and ``scratch_env`` maps
+        environment variables to file names inside it (the memory server's graph file). ``episode_scratch``
+        scopes it to the episode: each episode starts a server of its own over its own directory, stopped with
+        the episode; otherwise one server and its directory serve every episode."""
         super().__init__(tool_registry=NativeToolRegistry(), **kwargs)
-        if transport != "stdio" and (scratch_allowlist or episode_scratch):
+        takes_scratch = scratch_allowlist or bool(scratch_env)
+        if transport != "stdio" and (takes_scratch or episode_scratch):
             raise ValueError(
-                f"scratch_allowlist and episode_scratch give a spawned server its scratch directory, but "
-                f"transport={transport!r} connects to one running server and spawns none. Use the stdio "
+                f"scratch_allowlist, scratch_env and episode_scratch give a spawned server its scratch directory, "
+                f"but transport={transport!r} connects to one running server and spawns none. Use the stdio "
                 f"transport, or drop them."
             )
-        if episode_scratch and not scratch_allowlist:
-            presets = sorted(name for name, config in MCP_SERVERS.items() if config.get("scratch_allowlist"))
+        if overlap := sorted(set(scratch_env or {}) & set(server_env or {})):
+            raise ValueError(
+                f"server_env sets {overlap}, which scratch_env would point into the scratch directory instead. "
+                f"Drop the name from one of the two."
+            )
+        if episode_scratch and not takes_scratch:
+            presets = sorted(
+                name
+                for name, config in MCP_SERVERS.items()
+                if config.get("scratch_allowlist") or config.get("scratch_env")
+            )
             raise ValueError(
                 f"episode_scratch scopes the server's scratch directory to the episode, but this server takes "
-                f"none (scratch_allowlist is off; of the presets, {presets} take one). Drop episode_scratch."
+                f"none (of the presets, {presets} take one). Drop episode_scratch."
             )
 
         self.transport = transport
@@ -198,10 +214,11 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         self.server_env = server_env
         self.server_url = server_url
         self.scratch_allowlist = scratch_allowlist
+        self.scratch_env = scratch_env or {}
         self.episode_scratch = episode_scratch
 
         # Discovers the tools on the first episode; under episode_scratch it serves no call.
-        self._server = _ServerConnection(scratch=scratch_allowlist, on_ready=self._register_tools)
+        self._server = _ServerConnection(scratch=takes_scratch, on_ready=self._register_tools)
         self._episode_servers: dict[int, _ServerConnection] = {}
 
     @property
@@ -213,16 +230,21 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         await self.connect()
         return await super()._reset_single_async(prompt, context)
 
-    def _transport_context(self, extra_args: list[str]):
-        """Build the transport's async context manager (stdio subprocess or SSE stream); ``extra_args`` follow
-        ``server_args`` on a stdio spawn."""
+    def _transport_context(self, scratch_dir: str | None):
+        """Build the transport's async context manager (stdio subprocess or SSE stream); a stdio spawn is handed
+        ``scratch_dir`` as its ``scratch_allowlist`` argument and its ``scratch_env`` files."""
         if self.transport == "stdio":
             if not self.server_command:
                 raise ValueError("server_command required for stdio transport")
+            args = list(self.server_args)
+            server_env = dict(self.server_env or {})
+            if scratch_dir is not None:
+                if self.scratch_allowlist:
+                    args.append(scratch_dir)
+                server_env.update({name: os.path.join(scratch_dir, file) for name, file in self.scratch_env.items()})
             # The SDK passes ``env`` verbatim when set, dropping PATH/HOME and breaking the spawn.
-            env = {**get_default_environment(), **self.server_env} if self.server_env else None
-            params = StdioServerParameters(command=self.server_command, args=[*self.server_args, *extra_args], env=env)
-            return stdio_client(params)
+            env = {**get_default_environment(), **server_env} if server_env else None
+            return stdio_client(StdioServerParameters(command=self.server_command, args=args, env=env))
         if self.transport == "sse":
             if not self.server_url:
                 raise ValueError("server_url required for sse transport")
@@ -385,12 +407,23 @@ def build_mcp_environment(
     declared = [name for name in config["env"] if name not in explicit]
     server_env = {**_resolve_required_env(mcp_server, declared), **explicit}
     scratch_allowlist = config.get("scratch_allowlist", False)
+    # A file env_vars names outranks the preset's scratch file: a seeded MEMORY_FILE_PATH is one graph, served
+    # to every episode by one server.
+    preset_scratch_env = config.get("scratch_env", {})
+    if (seeded := sorted(set(preset_scratch_env) & set(explicit))) and kwargs.get("episode_scratch"):
+        raise ValueError(
+            f"env_vars sets {seeded}, one file every episode's own server would read and write at once under "
+            f"episode_scratch=True. Drop episode_scratch to serve that file from one server, or drop the env_vars "
+            f"entry to give each episode a file of its own."
+        )
+    scratch_env = {name: file for name, file in preset_scratch_env.items() if name not in explicit}
     return NativeMCPClientEnvironment(
         server_command=config["command"],
         server_args=config["args"],
         server_env=server_env or None,
         scratch_allowlist=scratch_allowlist,
+        scratch_env=scratch_env,
         # A preset's scratch directory is the episode's unless the config scopes it to the environment.
-        episode_scratch=kwargs.pop("episode_scratch", scratch_allowlist),
+        episode_scratch=kwargs.pop("episode_scratch", scratch_allowlist or bool(scratch_env)),
         **kwargs,
     )
