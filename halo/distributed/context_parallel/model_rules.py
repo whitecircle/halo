@@ -9,17 +9,13 @@ import torch.nn as nn
 
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
-from halo.distributed.context_parallel.ulysses_attention import HUB_FLASH_ATTN2_KERNEL
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
 from halo.models.config_access import text_config
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_ATTN_IMPLEMENTATIONS = (
-    *VARLEN_ATTN_IMPLEMENTATIONS,
-    HUB_FLASH_ATTN2_KERNEL,
-    "kernels-community/flash-attn3",
-)
+# The labels CP accepts: the flash builds whose kernels its attention calls.
+SUPPORTED_ATTN_IMPLEMENTATIONS = VARLEN_ATTN_IMPLEMENTATIONS
 
 
 def _sequence_axis_detail(mechanism: str, remedy: str) -> str:

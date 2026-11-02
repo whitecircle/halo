@@ -2,8 +2,8 @@
 """CPU tests for the attention a head_dim-256 or softcapped model resolves to, packed and padded, per GPU.
 
 The failures these gates close are late or silent. FA4's dedicated head_dim-256 kernel asserts in its first
-forward on a softcap (Gemma 2) and on a window (Gemma 3), so FA4 on such a model never trains, and multi-head
-latent attention (GLM-4.7-Flash) trains on it away from FA2 by the second step. transformers' SDPA drops
+backward on a softcap (Gemma 2) and on a window (Gemma 3), so FA4 on such a model never trains, and multi-head
+latent attention (GLM-4.7-Flash) trained on it away from FA2 by the second step. transformers' SDPA drops
 ``attn_logit_softcapping`` without a word, so a Gemma 2 run on it trains a different model at a plausible loss.
 The padded scripts take the loader's own pick on Blackwell, head_dim-256 checkpoints included.
 
@@ -256,7 +256,7 @@ _LATENT_256 = {
 @pytest.mark.parametrize("request_", [None, FA4], ids=["unset", "pinned_fa4"])
 @pytest.mark.parametrize("family", sorted(_LATENT_256))
 def test_multi_head_latent_attention_at_head_dim_256_trains_on_fa2(family, request_, deterministic, monkeypatch):
-    """GLM-4.7-Flash trains on FA4's dedicated kernel to step-2 gradients about 4x FA2's, so a 256-wide latent
+    """GLM-4.7-Flash trained on FA4's dedicated kernel to step-2 gradients about 4x FA2's, so a 256-wide latent
     attention lands on FA2 whatever the family, pinned or not, in a deterministic run too (not on the SDPA its
     fallback names), and CP's kernel refuses FA4 on the same verdict."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)

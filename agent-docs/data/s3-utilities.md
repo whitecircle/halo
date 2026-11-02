@@ -71,6 +71,8 @@ How it works:
 
     Preprocessed/sharded classification therefore survives an outage too, not just the dataset bytes. Live wins; a live 404 drops the mirror, so a re-pushed raw dataset cannot keep its old classification offline.
 
+    A training script reads them once per launch: global rank 0 reads the stamp and both shard indexes (`share_s3_control_files`), every rank's later probes and loads use that read, and each node's local rank 0 writes the mirror. A file rank 0 cannot read is left to every rank's own read.
+
 The per-shard cache used by sharded pre-processed datasets (`halo/data/sources/sharded_dataset.py`) uses the same marker + fingerprint scheme. The first probe that finds S3 unreachable logs a warning and skips the remaining shard probes, so a fully cached offline run pays a few control-read timeouts (the sharded probe and per-split index each try live first), not one per shard.
 
 An empty prefix listing is a real absence, not a transport fault, and does not disarm the probes.

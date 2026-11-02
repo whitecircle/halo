@@ -3,8 +3,9 @@
 
 Exercises ``_extract_output_token_count`` (which batches carry a token-level loss mask) and the
 two-phase counter — ``_accumulate_unmasked_output_tokens`` folds each micro-batch's count into an
-ON-DEVICE running tensor with no collective, and ``_drain_unmasked_output_tokens`` does the cross-rank
-gather + TP/ETP/CP de-duplication once per log — against a fake trainer ``self`` (no GPU / dist init).
+ON-DEVICE running tensor with no collective, and ``_drain_token_counts`` does the cross-rank sum (with
+the pending input tokens and FLOPs) + TP/ETP/CP de-duplication once per log — against a fake trainer ``self``
+(no GPU / dist init), its peers standing in through a patched ``world_sums``.
 
 Run: python tests/cpu/trainers/test_unmasked_output_tokens_metric.py
 """
@@ -16,26 +17,39 @@ import pytest
 import torch
 
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.trainers import token_metrics
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
 _extract = DistributedTrainerMixin._extract_output_token_count
 _accumulate = DistributedTrainerMixin._accumulate_unmasked_output_tokens
-_drain = DistributedTrainerMixin._drain_unmasked_output_tokens
+_drain = DistributedTrainerMixin._drain_token_counts
 
 
-def _fake_self(*, training=True, num_processes=1, data_parallel_size=1, gather=None):
+def _fake_self(*, training=True, num_processes=1, data_parallel_size=1, unsummed_input_tokens=0, current_flos=0.0):
     return types.SimpleNamespace(
         model=types.SimpleNamespace(training=training),
-        accelerator=types.SimpleNamespace(
-            num_processes=num_processes,
-            gather=gather or (lambda x: x),
-            device=torch.device("cpu"),
-        ),
+        state=types.SimpleNamespace(num_input_tokens_seen=0, total_flos=0.0),
+        _unsummed_input_tokens=unsummed_input_tokens,
+        current_flos=current_flos,
         parallelism_config=types.SimpleNamespace(
             data_parallel_size=data_parallel_size,
             non_dp_replication_factor=num_processes // data_parallel_size,
         ),
     )
+
+
+def _peers(monkeypatch, *peer_values):
+    """Make the drain's all-reduce add each peer's ``[input tokens, loss tokens, FLOPs]`` to this rank's; returns the
+    list of local values each call sent."""
+    sent = []
+
+    def world_sums(values):
+        local = [float(value) for value in values]
+        sent.append(local)
+        return [sum(column) for column in zip(local, *peer_values, strict=True)]
+
+    monkeypatch.setattr(token_metrics, "world_sums", world_sums)
+    return sent
 
 
 class _RecordingBase:
@@ -55,7 +69,8 @@ class _LogHost(DistributedTrainerMixin, _RecordingBase):
 def _fake_log_self(*, training=True, global_step=5, cumulative=None):
     """A ``log`` host with all parallelism modes off (single-GPU)."""
     me = object.__new__(_LogHost)
-    me.state = types.SimpleNamespace(global_step=global_step)
+    me.state = types.SimpleNamespace(global_step=global_step, num_input_tokens_seen=0, total_flos=0.0)
+    me.current_flos = 0.0
     me.parallelism_config = types.SimpleNamespace(
         data_parallel_size=1,
         non_dp_replication_factor=1,
@@ -142,9 +157,10 @@ def test_extract_skips_when_no_mask():
     assert _extract(None, None) is None
 
 
-def test_accumulate_is_local_no_gather_until_drain():
-    # Gathering here would be a per-micro-batch host sync + collective; only the drain may do it.
-    me = _fake_self(gather=lambda _: (_ for _ in ()).throw(AssertionError("gather ran during accumulate")))
+def test_accumulate_is_local_no_collective_until_drain(monkeypatch):
+    # A collective here would be a per-micro-batch host sync; only the drain may run one.
+    monkeypatch.setattr(token_metrics, "world_sums", lambda _: pytest.fail("world_sums ran during accumulate"))
+    me = _fake_self()
     _accumulate(me, torch.tensor(7))
     _accumulate(me, torch.tensor(3))
     assert int(me._local_unmasked_token_accum) == 10
@@ -160,19 +176,34 @@ def test_drain_single_process():
     assert me._local_unmasked_token_accum is None
 
 
-def test_drain_dedups_replicated_ranks():
+def test_drain_dedups_replicated_ranks(monkeypatch):
     # TP/ETP/CP: both ranks hold identical data, so non_dp_factor=2 divides the duplicate out.
-    me = _fake_self(num_processes=2, data_parallel_size=1, gather=lambda x: torch.tensor([int(x), int(x)]))
+    _peers(monkeypatch, [0, 5, 0])
+    me = _fake_self(num_processes=2, data_parallel_size=1)
     _accumulate(me, torch.tensor(5))
     _drain(me)
     assert me._cumulative_unmasked_output_tokens == 5
 
 
-def test_drain_sums_distinct_dp_ranks():
+def test_drain_sums_distinct_dp_ranks(monkeypatch):
     # Pure DP: distinct batches, non_dp_factor=1 → the counts sum.
-    me = _fake_self(num_processes=2, data_parallel_size=2, gather=lambda _: torch.tensor([5, 3]))
+    _peers(monkeypatch, [0, 3, 0])
+    me = _fake_self(num_processes=2, data_parallel_size=2)
     _accumulate(me, torch.tensor(5))
     _drain(me)
+    assert me._cumulative_unmasked_output_tokens == 8
+
+
+def test_drain_sums_the_input_tokens_and_flops_in_the_same_all_reduce(monkeypatch):
+    """HF's input-token count (its ``"all"`` mode) and its FLOPs estimate, neither divided (HF counts every rank's
+    batch), land in the trainer state from the same collective, and the pending counts reset."""
+    sent = _peers(monkeypatch, [40, 3, 7.0e9])
+    me = _fake_self(num_processes=2, data_parallel_size=2, unsummed_input_tokens=24, current_flos=5.0e9)
+    _accumulate(me, torch.tensor(5))
+    _drain(me)
+    assert sent == [[24.0, 5.0, 5.0e9]], "one all-reduce carries every counter"
+    assert me.state.num_input_tokens_seen == 64 and me._unsummed_input_tokens == 0
+    assert me.state.total_flos == 1.2e10 and me.current_flos == 0
     assert me._cumulative_unmasked_output_tokens == 8
 
 
@@ -199,12 +230,12 @@ def test_accumulate_noop_when_count_none():
     assert not hasattr(me, "_local_unmasked_token_accum")
 
 
-def test_drain_gathers_zero_when_nothing_accumulated():
-    # The gather is world-wide: skipping it on a rank-local emptiness would desync the collective.
-    gathered = []
-    me = _fake_self(gather=lambda x: gathered.append(x) or x)
+def test_drain_sends_zeros_when_nothing_accumulated(monkeypatch):
+    # The all-reduce is world-wide: skipping it on a rank-local emptiness would desync the collective.
+    sent = _peers(monkeypatch, [0, 0, 0])
+    me = _fake_self()
     _drain(me)
-    assert len(gathered) == 1 and int(gathered[0]) == 0
+    assert sent == [[0.0, 0.0, 0.0]]
     assert not hasattr(me, "_cumulative_unmasked_output_tokens")
 
 
@@ -217,7 +248,7 @@ def test_drain_keeps_counting_after_an_empty_window():
 
 
 def test_accumulate_casts_to_int64():
-    # The drain zero-fills absent ranks with int64; a float mask sum must not change that dtype.
+    # A float mask sum must not make the window's accumulator a float, which rounds a long window's count.
     me = _fake_self()
     _accumulate(me, torch.tensor([1.0, 1.0, 0.0]).sum())
     assert me._local_unmasked_token_accum.dtype == torch.int64
@@ -250,7 +281,7 @@ def test_emit_skips_before_first_step():
 def test_non_dp_replication_factor_matches_the_ranks_sharing_a_batch():
     """The de-duplication divisor the token counters use, derived once on the config.
 
-    Both call sites (``_drain_unmasked_output_tokens`` and SFT's ``compute_loss``) read the property
+    Both call sites (``_drain_token_counts`` and SFT's ``compute_loss``) read the property
     instead of recomputing ``num_processes // data_parallel_size`` by hand. It must equal
     ``pp_size * max(tp, cp, expert_tp)`` — the ranks that see the SAME batch — on every axis
     combination, with EP orthogonal to DP.

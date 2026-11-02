@@ -18,9 +18,12 @@ The per-method leaves (`smpo.py`, `vlm.py`, `self_distill.py`, `classification.p
 | `DataCollatorWithFlattening` | No | Yes | No | reset per sequence |
 | `DataCollatorWithFlatteningAndCompletionMask` | No | Yes | Yes | reset per sequence |
 | `DataCollatorForCausalLMWithPadding` | No | No | No | No |
+| `DataCollatorForLanguageModelingWithVarlen` | No | No | No | No |
 
-The last one is the SFT CP-mode padded route; it preserves precomputed `labels` (the parent
+`DataCollatorForCausalLMWithPadding` is the SFT CP-mode padded route; it preserves precomputed `labels` (the parent
 `DataCollatorForLanguageModeling` rebuilds them from `input_ids` and crashes on ragged ones).
+`DataCollatorForLanguageModelingWithVarlen` is TRL's own SFT collator handing a one-document batch its varlen set
+([One-document batches](#one-document-batches)).
 
 You rarely construct these directly — `select_data_collator()` picks one from your YAML config.
 
@@ -41,9 +44,9 @@ Constructor notes that matter when you build one directly:
 
 **`DataCollatorWithPacking`** — packs multiple sequences per sample. Position IDs reset at each boundary; labels at `position_ids == 0` are set to `-100` so the model is not penalized for predicting the next document's first token across a boundary.
 
-It drops the dense `attention_mask` so Flash Attention runs its varlen kernel over per-document `cu_seq_lens`, handed over by the collator (below) or derived from the resetting position IDs, and flattens the packed mini-batch to a single `[1, total_tokens]` row of **real tokens only** — transformers' packed-sequence detection only engages at batch size 1, so a `[B>1, L]` batch would silently fall back to dense-causal attention.
+It drops the dense `attention_mask` (packed rows store none; `coordinated_pack` leaves it out) so Flash Attention runs its varlen kernel over per-document `cu_seq_lens`, handed over by the collator (below) or derived from the resetting position IDs, and flattens the packed mini-batch to a single `[1, total_tokens]` row of **real tokens only** — transformers' packed-sequence detection only engages at batch size 1, so a `[B>1, L]` batch would silently fall back to dense-causal attention.
 
-On a flash run (the resolved backend `select_data_collator` reads) it also hands attention that varlen set on every multi-document row: `cu_seq_lens_q`/`cu_seq_lens_k` and host-int `max_length_q`/`max_length_k`, the values transformers would derive from the position IDs. No attention layer then re-derives them — a packed-row check, a `nonzero` and a max length read back, each a device sync, per layer — and a gradient-checkpointing recompute, reentrant or not, re-runs attention on the same set. A one-document row carries none and keeps transformers' dense kernel. PP's kept rows carry none either: the schedule splits only batch-dim tensors, so each pipeline stage builds the set per microbatch instead ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
+On a flash run (the resolved backend `select_data_collator` reads) it also hands attention that varlen set on every multi-document row: `cu_seq_lens_q`/`cu_seq_lens_k` and host-int `max_length_q`/`max_length_k`, the values transformers would derive from the position IDs. No attention layer then re-derives them — a packed-row check, a `nonzero` and a max length read back, each a device sync, per layer — and a gradient-checkpointing recompute, reentrant or not, re-runs attention on the same set. A one-document row follows [One-document batches](#one-document-batches). PP's kept rows carry none: the schedule splits only batch-dim tensors, so each pipeline stage builds the set per microbatch instead ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
 
 Inter-row padding is dropped in the flatten. A pad carries position 0, so every kept pad would be its own varlen segment, and the FA4 backward pays a fixed per-segment cost.
 
@@ -75,6 +78,12 @@ document).
 
 **`DataCollatorWithFlatteningAndCompletionMask`** — padding-free plus completion masking; the lowest-overhead collator for variable-length SFT trained on assistant responses only.
 
+### One-document batches
+
+Without the set, an unpacked batch-1 row costs every flash attention layer a packed-row check (`_is_packed_sequence`, a device sync), again in each checkpoint recompute, before transformers runs its dense kernel: two per layer and step under gradient checkpointing. Where `select_data_collator` gets `one_document_varlen=True` (the SFT script passes it), a batch that is one unpadded document (an unpacked batch-1 row, a one-document packed row, a `wrapped` row) carries the set too: `cu_seq_lens_q/k` `[0, S]` and host-int `max_length_q/k` `S`, what transformers derives from its positions (`single_row_varlen_kwargs` in `halo/models/segment_markers.py`). Attention then runs the varlen kernel over one segment and no layer checks the row. The set is all the collator adds: every other tensor of the batch is the one the route builds without it. With neither packing nor completion masking the factory returns `DataCollatorForLanguageModelingWithVarlen`, TRL's own SFT collator handing the set, built with the `pad_token_id` and `pad_to_multiple_of` TRL builds its default with; without the opt-in it returns `None` there and TRL builds its own.
+
+The set is handed on FA2, FA3 and FA4 only, and not to a model whose GatedDeltaNet layers read it too (Qwen3.5/3.6, Qwen3-Next: the delta rule would take its varlen path) or whose attention FA4's varlen kernels refuse (`fa4_varlen_refusal`: Gemma 2's softcap, whose one-document rows keep FA4's dense kernel); `supports_one_document_varlen_set` in `collator_rules.py` is the rule. Never under CP (Ulysses passes its own `cu_seqlens`) or PP (each stage builds the set of its packed microbatches), and not for teacher distillation, whose batch also reaches the teacher. A batch of several rows or a padded one keeps transformers' mask path, and a multi-document packed row the set of its documents. A remote-code forward declaring no `**kwargs` raises on the set at the first step, as it does on a packed row's.
+
 ### Offline GRPO
 
 `OfflineGRPODataCollatorWithPadding` and, under CP, `OfflineGRPOCPDataCollatorWithPadding` are built
@@ -98,7 +107,8 @@ collator = select_data_collator(
 Flags, keyword-only: `train_on_completions_only` (required: the run's own setting), `padding_free=False`,
 `packing=False`, `assistant_message_template=None`, `pad_to_multiple_of=None`, `use_context_parallel=False`,
 `train_on_last_assistant_only=False`, `model_config=None`, `per_device_train_batch_size=1`,
-`keeps_packed_rows=False`. With `packing` above batch 1 the collator merges the mini-batch's packed
+`keeps_packed_rows=False`, `allow_cross_document_linear_attention=False`, `per_device_eval_batch_size=0`,
+`one_document_varlen=False` ([One-document batches](#one-document-batches)). With `packing` above batch 1 the collator merges the mini-batch's packed
 rows into one row (document isolation and throughput unchanged), and the factory warns: raise
 `max_length` instead when a longer pack is the intent. `keeps_packed_rows` suppresses that warning;
 only the PP seam sets it.
@@ -121,7 +131,7 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 | packing + completion masking | `DataCollatorForCompletionOnlyLMWithPacking` |
 | packing | `DataCollatorWithPacking` |
 | completion masking only | `DataCollatorForCompletionOnlyLM` |
-| none | `None` (default TRL behavior) |
+| none | `DataCollatorForLanguageModelingWithVarlen` where one-document batches take the set, else `None` (TRL builds its own) |
 
 YAML fields (`packing`, `packing_strategy`, `padding_free`, `eval_packing` come from TRL's `SFTConfig`; `train_on_completions_only` and `assistant_message_template` from `ConversationRenderArguments`, `train_on_last_assistant_only` from `SFTScriptArguments`, both in `halo/configs/sft.py`):
 
@@ -237,8 +247,8 @@ they score packed rows under the same masks the student does.
     DeepSeek-V4 (eager-only: head_dim 512 exceeds FA's 256 cap) refuses both. Gemma 4 lands on the
     warning; its shipped config packs at batch 1. See [Padding-Free Collator](../optimization/padding-free-collator.md).
 
-- **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose kernels take no softcap (the
-  backward asserts, and on B300 the forward does not finish). Packed, padding-free and padded rows (more than one
+- **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose kernels are not validated with a
+  softcap (on B300 their forward with one did not finish). Packed, padding-free and padded rows (more than one
   per batch: transformers unpads any batch holding a padding token) all reach it (`rows_reach_varlen_kernel`). Left unset, `attn_implementation` takes FA2 there; a pinned
   `flash_attention_4` the load keeps (Gemma 2 27B; the resolver moves a head_dim-256 pin to FA2) is refused before
   the load and again on the resolved backend by `select_data_collator` (`reject_fa4_varlen_training`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).

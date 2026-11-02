@@ -128,7 +128,7 @@ def test_fa4_dispatch_reaches_every_sm100_plus_capability(capability):
 def test_context_parallelism_resolves_fa4_over_the_same_capability_range(capability):
     """CP resolves its own ``flash_attn_func`` and must not carry a second SM-major test.
 
-    ``_flash_attn_func`` probes FA3 (Hopper) → FA4 (Blackwell) → FA2 → the hub kernel; an equality
+    ``_flash_attn_func`` probes FA3 (Hopper) → FA4 (Blackwell) → FA2; an equality
     test stopping at major 10 makes CP silently take a different kernel for the same run on a device
     the config-level detector calls Blackwell. Probed by making ``flash_attn`` unimportable and raising
     from the FA4-only cache setup — only ``ImportError`` is caught there, so the RuntimeError escaping
@@ -144,29 +144,6 @@ def test_context_parallelism_resolves_fa4_over_the_same_capability_range(capabil
             pytest.raises(RuntimeError, match="fa4 probe"),
         ):
             cp_base_layer._flash_attn_func()
-    finally:
-        cp_base_layer._flash_attn_func.cache_clear()
-
-
-@pytest.mark.parametrize(("allow_fa4", "installs"), [(True, True), (False, False)])
-def test_context_parallelism_hands_fa4_contiguous_head_dim_256_inputs(allow_fa4, installs):
-    """Ulysses runs FA4 whatever the config's label, on K/V split off one fused all-to-all (strided at every head
-    width), so its kernel probe installs the head_dim-256 contiguity fix itself rather than relying on the
-    loader's FA4-labelled path."""
-    cp_base_layer._flash_attn_func.cache_clear()
-
-    def kernel(q, k, v, **kwargs):
-        return q
-
-    try:
-        with (
-            patch.object(cp_base_layer.torch.cuda, "is_available", lambda: True),
-            patch.object(cp_base_layer.torch.cuda, "get_device_capability", lambda *a, **k: (10, 0)),
-            patch.object(cp_base_layer, "flash_kernel", lambda impl, varlen: kernel),
-            patch.object(cp_base_layer, "install_fa4_contiguous_dedicated_head_inputs") as install,
-        ):
-            cp_base_layer._flash_attn_func(allow_fa4)
-        assert install.called is installs
     finally:
         cp_base_layer._flash_attn_func.cache_clear()
 
@@ -405,7 +382,7 @@ def test_unmapped_config_never_opens_the_sdpa_sinks_escape_hatch():
 @pytest.mark.parametrize("model_type", FA4_HEAD_DIM_256_MODEL_TYPES)
 def test_a_deterministic_run_demotes_fa4_to_sdpa_at_head_dim_256(model_type, monkeypatch):
     """Each spelling of a head_dim-256 family must leave a deterministic run's resolver on sdpa: that kernel's
-    backward asserts ``not deterministic``, so a run that kept FA4 would stop at its first step. The warning is
+    deterministic backward is not validated here, so a run that kept FA4 would train on it. The warning is
     asserted too — a config can reach sdpa for unrelated reasons (fp32, Gemma4's head_dim), and only this
     warning proves the determinism gate is what moved it.
     """
@@ -414,8 +391,8 @@ def test_a_deterministic_run_demotes_fa4_to_sdpa_at_head_dim_256(model_type, mon
         resolved = attention_mod.resolve_attn_implementation(
             CONFIG_MAPPING[model_type](), "flash_attention_4", torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )
-    assert resolved == "sdpa", f"{model_type} kept FA4, whose head_dim-256 backward has no deterministic mode"
-    assert any("no deterministic backward" in call.args[0] for call in warn.call_args_list)
+    assert resolved == "sdpa", f"{model_type} kept FA4, whose head_dim-256 deterministic backward is not validated"
+    assert any("not validated with a deterministic backward" in call.args[0] for call in warn.call_args_list)
 
 
 @pytest.mark.parametrize("model_type", FA4_HEAD_DIM_256_MODEL_TYPES)

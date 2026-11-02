@@ -1,4 +1,5 @@
-"""Chunked log-probs over a logits plane, in at least fp32, and the next-token label math they score.
+"""Chunked log-probs and cross-entropy sums over a logits plane, in at least fp32, and the next-token label math they
+score.
 
 Whole, the fp32 upcast of a logits plane and the ``log_softmax`` output saved for backward are two
 fp32 planes, ~26 GB at ``V=201088``, ``S=8192``, so every caller chunks under the one budget below. The
@@ -8,6 +9,7 @@ hidden-state form, which never builds the plane, is :mod:`halo.kernels.head_logp
 from collections.abc import Callable, Iterator
 
 import torch
+import torch.nn.functional as F
 from torch.utils.checkpoint import checkpoint
 
 # fp32 elements per chunk of a [tokens, V] plane; a non-reentrant checkpoint bounds the held fp32 state
@@ -58,6 +60,28 @@ def map_token_chunks(fn: Callable[..., torch.Tensor], *tensors: torch.Tensor) ->
         # Nothing to stack: one empty chunk keeps the result's dtype.
         return map_token_chunks(fn, *(tensor.flatten(0, 1) for tensor in tensors)).view(first.shape[:2])
     return torch.stack([map_token_chunks(fn, *row) for row in zip(*tensors, strict=True)])
+
+
+def chunked_token_sum(
+    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
+    rows: torch.Tensor,
+    flat_labels: torch.Tensor,
+    chunk_rows: int,
+) -> torch.Tensor:
+    """``sum(fn(rows[chunk], flat_labels[chunk]))`` over :func:`checkpointed_chunks` of ``chunk_rows`` token rows,
+    accumulated in at least fp32 (an fp64 chunk result widens the sum). A single chunk needs no checkpoint."""
+    total = rows.new_zeros((), dtype=torch.float32)
+    if flat_labels.numel() <= chunk_rows:
+        return total + fn(rows, flat_labels)
+    for value in checkpointed_chunks(fn, rows, flat_labels, chunk_rows=chunk_rows):
+        total = total + value
+    return total
+
+
+def cross_entropy_sum(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """The cross-entropy of ``labels`` under ``[rows, V]`` logits (:func:`at_least_fp32`), summed over the rows it
+    scores: the unit :func:`chunked_token_sum` chunks."""
+    return F.cross_entropy(at_least_fp32(logits), labels, ignore_index=LABEL_IGNORE_INDEX, reduction="sum")
 
 
 def _logprob_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:

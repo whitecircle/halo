@@ -4,9 +4,10 @@
 TRL's ``SFTTrainer.compute_loss`` gathers its token count, entropy and accuracy across the world and reads each
 back with ``.item()`` on every micro-batch, and HF's exact input-token count (``include_num_input_tokens_seen``,
 which the efficiency metrics turn on) gathers one more; at 512 ranks that is a collective and a host stall per
-metric per micro-batch. The trainer records the metrics on the device and folds them once per log, and sums the
-input tokens once per optimizer step. This drives the real trainer for a few steps on CPU and counts, outside the
-log calls, every accelerate gather or reduce and every ``.item()``/``.tolist()`` the toolkit or TRL issues.
+metric per micro-batch. The trainer records the metrics on the device and folds them once per log, and adds the
+input tokens up on the host until a log or a save sums them. This drives the real trainer for a few steps on CPU
+and counts, outside the log calls, every accelerate gather or reduce and every ``.item()``/``.tolist()`` the toolkit
+or TRL issues.
 
 Run: python tests/cpu/trainers/test_sft_loss_host_syncs.py
 """
@@ -123,17 +124,17 @@ def _trainer(tmp_path, window, input_tokens: str) -> DistributedSFTTrainer:
 
 @pytest.mark.parametrize("input_tokens", ["no", "all"])
 def test_micro_batches_issue_no_metric_collective_or_host_read(tmp_path, counted, input_tokens):
-    """With the input-token count on, its world sum is the one read per optimizer step."""
+    """The input-token count on or off, a step between logs reads nothing back; the count still lands whole."""
     window, counts = counted
     trainer = _trainer(tmp_path, window, input_tokens)
     trainer.train()
 
     assert window.step == COUNTED_STEPS.stop, "the counting window never closed"
-    expected = {} if input_tokens == "no" else {"tolist at trainers": len(COUNTED_STEPS)}
-    assert dict(counts) == expected, f"collectives / host reads over {len(COUNTED_STEPS)} steps"
+    assert dict(counts) == {}, f"collectives / host reads over {len(COUNTED_STEPS)} steps"
+    logged = next(entry for entry in trainer.state.log_history if entry.get("step") == LOGGING_STEPS)
     if input_tokens == "all":
         assert trainer.state.num_input_tokens_seen == COUNTED_STEPS.stop * GRAD_ACCUM * BATCH * SEQ_LEN
-    logged = next(entry for entry in trainer.state.log_history if entry.get("step") == LOGGING_STEPS)
+        assert logged["num_input_tokens_seen"] == LOGGING_STEPS * GRAD_ACCUM * BATCH * SEQ_LEN
     assert logged["num_attended_tokens_seen"] == LOGGING_STEPS * GRAD_ACCUM * BATCH * SEQ_LEN
     assert 0.0 <= logged["mean_token_accuracy"] <= 1.0
     assert logged["entropy"] > 0.0

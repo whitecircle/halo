@@ -101,9 +101,8 @@ def load_reward_model(
 
     device = torch.device(device_str)
     config = AutoConfig.from_pretrained(model_path, trust_remote_code=trust_remote_code)
-    # On CUDA, the family patches the training loads take, keyed on this model's config: without them an FA4
-    # head_dim-256 reward model reads its q/k scrambled and scores finite noise. A CPU scorer builds the backend
-    # as given, since the wide-head SDPA pin turns off the backends CPU SDPA runs on.
+    # On CUDA, the family patches the training loads take, keyed on this model's config. A CPU scorer builds the
+    # backend as given, since the wide-head SDPA pin turns off the backends CPU SDPA runs on.
     build_attn_impl = apply_family_patches(config, attn_impl) if device.type == "cuda" else attn_impl
     # excuse_task_head=False: scoring consumes the reward head, it never trains one. Pointed at a
     # plain causal-LM directory the head would initialize randomly and every score would be noise.

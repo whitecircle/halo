@@ -290,10 +290,10 @@ def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks(
         assert len(seen["train"]) + len(seen["test"]) == num_docs, "the ranks' slices do not add up to the corpus"
 
 
-def test_the_bake_leaves_no_map_cache_behind_and_stores_labels_at_input_width():
-    """Each tokenize/filter/label/pack map writes a full copy of the corpus; the single-process tool must not
-    leave them in HF_DATASETS_CACHE, where nothing reuses or removes them. Labels inferred as int64 beside
-    int32 ``input_ids`` would be most of the artifact's bytes."""
+def test_the_bake_leaves_no_map_cache_behind_and_stores_no_full_sequence_labels():
+    """Each tokenize/filter/pack map writes a full copy of the corpus; the single-process tool must not leave them
+    in HF_DATASETS_CACHE, where nothing reuses or removes them. A packed full-sequence artifact stores no labels and
+    no attention_mask: its collator derives both from ``input_ids``, so stored copies would double the artifact."""
     with tempfile.TemporaryDirectory() as directory:
         raw, tokenizer_dir, out, cache = (os.path.join(directory, name) for name in ("raw", "tok", "out", "cache"))
         word_level_tokenizer(_WORDS).save_pretrained(tokenizer_dir)
@@ -318,7 +318,7 @@ def test_the_bake_leaves_no_map_cache_behind_and_stores_labels_at_input_width():
 
         assert os.listdir(cache) == [], f"the bake left map caches behind: {os.listdir(cache)}"
         features = load_preprocessed_dataset(out)["train"].features
-        assert features["labels"] == features["input_ids"], features
+        assert set(features) == {"input_ids", "seq_lengths"}, features
 
 
 if __name__ == "__main__":

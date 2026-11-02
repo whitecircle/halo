@@ -87,7 +87,11 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         self.run_dir = run_dir
         self.stop = stop
         self.args = SimpleNamespace(
-            save_total_limit=2, save_only_model=False, should_save=is_fs_save_rank(), push_to_hub=False
+            save_total_limit=2,
+            save_only_model=False,
+            should_save=is_fs_save_rank(),
+            push_to_hub=False,
+            include_num_input_tokens_seen="no",
         )
         self.state = (_StateWriteThenStop if stop == "state" else TrainerState)(global_step=2)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)

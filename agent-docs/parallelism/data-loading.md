@@ -71,6 +71,9 @@ Accelerate's `BatchSamplerShard`, which yields batch `idx` to a process when
 exactly as on the standard path; unset, the seedable sampler falls back to the ambient torch seed.
 The custom-path train loader seeds its workers by **DP rank**, not global rank, so TP/CP/ETP
 siblings and pipeline chains draw identical worker randomness; the eval loader sets no `worker_init_fn`.
+Under CP every loader collates through `_loader_collate_fn` (offline GRPO's grouped and reference-sweep
+loaders included), which refuses a left-padded batch on the host before it moves to the device
+([CP requirements](context-parallelism.md#requirements)).
 
 Every rank of one split must draw the same permutation, but a sampler without a generator shuffles
 off the rank's own torch RNG, which EP ranks consume differently.

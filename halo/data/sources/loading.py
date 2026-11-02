@@ -3,16 +3,19 @@ reads: one source, whole or by shard; a corpus of several (:mod:`halo.data.sourc
 pre-processed artifact."""
 
 import hashlib
+import pickle
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset, load_from_disk
 
 from halo.data.pipeline.coordinated_map import run_load_rank_first
 from halo.data.pipeline.map_cache_key import stamp_cache_key
 from halo.data.preprocessed.metadata import is_preprocessed_dataset
+from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE
 from halo.data.render_columns import apply_conversation_field, reject_missing_render_column
 from halo.data.sources.corpus import build_corpus, placeholder_test_split, resolve_dataset_ratios, subset_dataset_dict
 from halo.data.sources.paths import (
     DATA_FILE_BUILDERS,
+    METADATA_FILE,
     TRAIN_TEST_SPLITS,
     data_file_builder,
     eval_split_name,
@@ -21,19 +24,21 @@ from halo.data.sources.paths import (
     parse_hub_spec,
     reject_ambiguous_hub_source,
     reject_partial_splits,
+    s3_object_key,
 )
 from halo.data.sources.replica_identity import reject_divergent_replicas
-from halo.data.sources.s3_dataset_store import load_dataset_from_s3_uri
+from halo.data.sources.s3_dataset_store import load_dataset_from_s3_uri, share_control_files
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 from halo.log import info_logger
+from halo.runtime.collectives import combine_across_ranks
 from halo.runtime.consensus import (
     agree_probe_across_ranks,
     rank_consensus,
     reject_divergent_settings,
     store_join_recorded_failure,
 )
-from halo.runtime.filesystem import agree_input_probe_across_ranks
-from halo.runtime.ranks import is_global_main_process
+from halo.runtime.filesystem import agree_input_probe_across_ranks, is_fs_load_rank, is_input_shared_filesystem
+from halo.runtime.ranks import get_node_rank, is_global_main_process
 
 # INFO: this module's lines are the run's only record of what data actually loaded.
 logger = info_logger(__name__)
@@ -144,12 +149,47 @@ def _load_whole_dataset(path: str, test_size: float | None, *, placeholder_test:
     return dataset
 
 
+def _share_within_input_scope(loaded: tuple[DatasetDict, bytes] | None, path: str) -> DatasetDict:
+    """COLLECTIVE: the DatasetDict each input scope's load rank ``loaded`` (with its pickle), on every rank of that
+    scope. The pickle of memory-mapped tables holds their file paths under ``HF_DATASETS_CACHE``, whose sharing
+    across the scope the run's startup probe verified, so the other ranks open the load rank's files."""
+    loading_rank = is_fs_load_rank()
+    scope = None if is_input_shared_filesystem() else get_node_rank()
+    by_scope = combine_across_ranks(
+        (scope, loaded[1]) if loading_rank else None,
+        lambda gathered: dict(entry for entry in gathered if entry is not None),
+        what=f"the loads of dataset {path}",
+    )
+    dataset, failure = (loaded[0], None) if loading_rank else (None, None)
+    if not loading_rank:
+        try:
+            dataset = pickle.loads(by_scope[scope])
+        except BaseException as e:  # joined below, so every rank raises with it
+            failure = e
+    store_join_recorded_failure("shared_dataset_load", failure, f"Opening the load rank's copy of dataset {path}")
+    return dataset
+
+
 def _load_replicated(path: str, test_size: float | None, *, placeholder_test: bool) -> DatasetDict:
     """A non-sharded source, loaded whole on every rank (the first fills the source's cache, the rest read
-    it back) and agreed across them."""
-    dataset = run_load_rank_first(
-        lambda: _load_whole_dataset(path, test_size, placeholder_test=placeholder_test), f"loading dataset {path}"
-    )
+    it back) and agreed across them. A Hub source loads on each input scope's load rank alone, which hands
+    its copy to the scope (:func:`_share_within_input_scope`): the others would resolve it online again, about
+    ten requests each."""
+
+    def load() -> DatasetDict:
+        return _load_whole_dataset(path, test_size, placeholder_test=placeholder_test)
+
+    def load_and_pickle() -> tuple[DatasetDict, bytes] | None:
+        if not is_fs_load_rank():
+            return None
+        dataset = load()
+        return dataset, pickle.dumps(dataset)
+
+    operation_name = f"loading dataset {path}"
+    if parse_dataset_source(path)[0] == "hf_hub":
+        dataset = _share_within_input_scope(run_load_rank_first(load_and_pickle, operation_name), path)
+    else:
+        dataset = run_load_rank_first(load, operation_name)
     reject_divergent_replicas(dataset, path, replica=0, num_replicas=1)
     return dataset
 
@@ -316,6 +356,20 @@ def load_datasets(
     stamp_cache_key(ds["test"], f"loaded_{base_fp}_test")
 
     return ds
+
+
+def share_s3_control_files(path: str | list) -> None:
+    """COLLECTIVE: read each S3 source's control files (its ``metadata.json`` stamp and each split's shard index)
+    once for the launch (:func:`share_control_files`), so the probes and loads that follow read no S3 object
+    of them on any other rank."""
+    for entry in path if isinstance(path, list) else [path]:
+        source_type, bucket, key = parse_dataset_source(entry)
+        if source_type == "s3":
+            control_keys = [
+                s3_object_key(key, METADATA_FILE),
+                *(s3_object_key(key, split, SHARD_INDEX_FILE) for split in TRAIN_TEST_SPLITS),
+            ]
+            share_control_files(bucket, control_keys)
 
 
 def is_presharded_dataset_load(path, data_parallel_size: int) -> bool:

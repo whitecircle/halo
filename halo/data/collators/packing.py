@@ -26,7 +26,12 @@ from halo.data.turn_markers import (
     warn_if_pad_equals_eos,
 )
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.models.segment_markers import SegmentMarkers, positions_restart, segment_marker_kwargs
+from halo.models.segment_markers import (
+    SegmentMarkers,
+    positions_restart,
+    segment_marker_kwargs,
+    single_row_varlen_kwargs,
+)
 
 # Every position-0 reset is a varlen segment the FA4 backward pays for; a ramped pad tail bounds their count.
 PAD_TAIL_SEGMENT_CHUNK = 256
@@ -84,8 +89,10 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
 
     ``return_flash_attn_kwargs`` emits the varlen set (``cu_seq_lens_q/k``, ``max_length_q/k``) on every
     flattened row, for a mixer that reads it; ``flash_varlen_kwargs`` emits it where transformers would derive
-    the same set from position_ids itself, on a flash run's multi-document row. Handed over, the set spares
-    every attention layer that derivation and its device syncs, and a one-document row keeps the dense kernel.
+    the same set from position_ids itself, on a flash run's multi-document row; ``one_document_varlen`` on a batch
+    that is one document (:func:`~halo.models.segment_markers.single_row_varlen_kwargs`), which transformers
+    would test for packing before its dense kernel. Handed over, the set spares every attention layer that
+    derivation or test and its device syncs.
     """
 
     # Kept through HF's signature-column pruning: without ``seq_lengths`` every row is one document.
@@ -105,6 +112,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         return_seq_idx: bool = False,
         return_flash_attn_kwargs: bool = False,
         flash_varlen_kwargs: bool = False,
+        one_document_varlen: bool = False,
     ):
         if getattr(tokenizer, "padding_side", "right") != "right":
             raise ValueError(
@@ -118,6 +126,7 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         self.return_seq_idx = return_seq_idx
         self.return_flash_attn_kwargs = return_flash_attn_kwargs
         self.flash_varlen_kwargs = flash_varlen_kwargs
+        self.one_document_varlen = one_document_varlen
 
     def torch_call(self, examples: list[list[int] | Any | dict[str, Any]]) -> dict[str, Any]:
         # Copy mappings before popping seq_lengths/labels — the pops must not mutate the caller's rows.
@@ -162,6 +171,8 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             )
             markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=varlen and self.flatten_to_single_row)
             batch.update(segment_marker_kwargs(batch["position_ids"], markers))
+        if self.one_document_varlen:
+            batch.update(single_row_varlen_kwargs(batch))
 
         return batch
 
@@ -195,12 +206,14 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         return_seq_idx: bool = False,
         return_flash_attn_kwargs: bool = False,
         flash_varlen_kwargs: bool = False,
+        one_document_varlen: bool = False,
     ):
         super().__init__(
             tokenizer=tokenizer,
             return_seq_idx=return_seq_idx,
             return_flash_attn_kwargs=return_flash_attn_kwargs,
             flash_varlen_kwargs=flash_varlen_kwargs,
+            one_document_varlen=one_document_varlen,
         )
 
         self.response_prompt_template = response_prompt_template

@@ -58,11 +58,13 @@ per-param index space; upstream Muon serializes only its own state, which would 
 
 SR keeps the write unbiased so small updates accumulate. Each seed is keyed by the parameter's step count (a `step` entry in Muon's per-param state) and its name, under a key apart from the internal AdamWBF16's (see [AdamWBF16](bf16-optimizer.md#stochastic-rounding)), so replicas stay bit-identical and a resume rounds as the uninterrupted run would.
 
+A device skip flag (`skip_next_step_if`, as on [AdamWBF16](bf16-optimizer.md#stochastic-rounding)) reaches both legs: the momentum and weight kernels write nothing under it, and the internal AdamWBF16 skips with them.
+
 ## Newton-Schulz kernel backend
 
 The orthogonalization matmuls can run on the `quack-kernels` / `nvidia-cutlass-dsl` CUDA backend (`ns_use_kernels`, on by default). `build_muon_optimizer` probes the kernel on a tiny tensor at construction; if the call raises — missing package, import error, or ABI mismatch — it warns and falls back to a numerically-equivalent pure-torch path that is slower.
 
-The `Dockerfile` force-installs the ABI-compatible pair (`quack-kernels==0.5.0`, `nvidia-cutlass-dsl==4.5.2`) over `uv.lock`'s `0.4.1` / `4.4.2`, so the probe passes and the kernel path is the active one in the images. A bare host on the lockfile versions takes the fallback.
+The `Dockerfile` force-installs the ABI-compatible pair (`quack-kernels==0.6.4`, `nvidia-cutlass-dsl==4.6.2`) over `uv.lock`'s `0.4.1` / `4.4.2`, so the probe passes and the kernel path is the active one in the images. A bare host on the lockfile versions takes the fallback.
 
 ## Benchmark
 

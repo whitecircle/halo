@@ -16,7 +16,7 @@ from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, resol
 from halo.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
 from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
-from halo.data.sources.loading import is_presharded_dataset_load, load_datasets
+from halo.data.sources.loading import is_presharded_dataset_load, load_datasets, share_s3_control_files
 from halo.data.vlm_detection import dataset_declares_images, is_vlm_run, reject_image_columns
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import RUN_LOG_DIR_NAME
@@ -65,6 +65,7 @@ def load_script_datasets(
     ``conversation_knob`` when another config field names that column) or ``seed``."""
     data_parallel_rank = parallelism_config.get_data_parallel_rank()
     data_parallel_size = parallelism_config.data_parallel_size
+    share_s3_control_files(args.dataset)
     dataset_presharded = is_presharded_dataset_load(args.dataset, data_parallel_size)
     # Threaded for every script so a typo'd tools column fails the load instead of rendering the run without tools;
     # the scripts that cannot render it (KTO, environmental GRPO) refuse the knob before their load.

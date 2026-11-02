@@ -2,7 +2,7 @@
 """Cross-rank agreement and rejection are one fixed-size all-reduce on a real 3-rank gloo world.
 
 ``agree_across_ranks`` compares a canonical blake2b digest with one int64 MAX all-reduce of
-``[d, -d, -rank, abstained]``, so the common case of a check that runs every log step, or once per
+``[d, -d]``, so the common case of a check that runs every log step, or once per
 setting at startup, costs nothing proportional to the world: no object gather, no per-rank
 unpickle. Only a disagreement gathers the objects, to name them. The pins:
 
@@ -10,7 +10,6 @@ unpickle. Only a disagreement gathers the objects, to name them. The pins:
 * the digest is canonical across processes (a mapping's insertion order does not matter, and
   Python's per-process ``hash`` salt never enters);
 * a disagreement still raises on every rank with the caller's message;
-* an abstaining rank leaves the verdict unchanged and learns which rank to read the object from;
 * ``reject_across_ranks`` (and so every ``DeferredRankFailure.reject``) with no failure anywhere is
   one all-reduce of a has-reason flag and no object gather, and one rank's failure still raises on
   every rank with the gathered message;
@@ -70,7 +69,7 @@ def _worker(rank: int, out: str) -> None:
         # Built in a different insertion order on every rank: the digest must not see it.
         items = [("b", 2), ("a", 1), ("c", (3, None))]
         agreement = agree_across_ranks(dict(items[rank:] + items[:rank]))
-    results["agree"] = [agreement.agreed, agreement.first_present, agreement.any_abstained, counts]
+    results["agree"] = [agreement, counts]
 
     counts = {}
     with _counted_collectives(counts):
@@ -111,11 +110,6 @@ def _worker(rank: int, out: str) -> None:
     except ValueError as exc:
         results["all_undigestible"] = str(exc)
 
-    agreement = agree_across_ranks(["m"], abstain=rank == 0)
-    results["abstain"] = [agreement.agreed, agreement.first_present, agreement.any_abstained]
-    agreement = agree_across_ranks([], abstain=True)
-    results["all_abstain"] = [agreement.agreed, agreement.first_present, agreement.any_abstained]
-
     counts = {}
     with _counted_collectives(counts):
         reject_across_ranks(None, "checkpoint write")
@@ -151,7 +145,7 @@ def per_rank(tmp_path_factory):
 
 def test_agreement_is_one_all_reduce_whatever_the_insertion_order(per_rank):
     for rank, results in enumerate(per_rank):
-        assert results["agree"] == [True, 0, False, {"all_reduce": 1}], f"rank {rank}: {results['agree']}"
+        assert results["agree"] == [True, {"all_reduce": 1}], f"rank {rank}: {results['agree']}"
 
 
 def test_the_settings_check_agrees_without_an_object_collective(per_rank):
@@ -183,12 +177,6 @@ def test_an_object_one_rank_cannot_digest_reaches_the_gather_and_is_named(per_ra
         assert "All mixed-key settings differs across ranks: {2: ['0', '1', '2']}" in results["all_undigestible"], (
             f"rank {rank}: {results['all_undigestible']}"
         )
-
-
-def test_an_abstaining_rank_leaves_the_verdict_and_names_where_to_read(per_rank):
-    for rank, results in enumerate(per_rank):
-        assert results["abstain"] == [True, 1, True], f"rank {rank}: {results['abstain']}"
-        assert results["all_abstain"] == [True, None, True], f"rank {rank}: {results['all_abstain']}"
 
 
 def test_a_rejection_nobody_needs_is_one_all_reduce(per_rank):

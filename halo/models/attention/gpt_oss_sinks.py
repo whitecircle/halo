@@ -226,9 +226,10 @@ def _with_sink_grad(fn, varlen: bool):
 def install_fa4_trainable_sink_rescale() -> bool:
     """Route FA4 calls with a grad-requiring sink through a rescale that carries the sink gradient.
 
-    The fused backward returns no sink gradient but consumes ``dlse``, so the sink-less kernel's output
-    gated by ``sigmoid(lse - sink)`` in autograd-visible ops gives the identical forward and complete
-    gradients. Idempotent; False when ``flash_attn.cute`` is not importable.
+    The sink-less kernel's output gated by ``sigmoid(lse - sink)`` in autograd-visible ops gives the
+    fused forward and complete gradients: the sink's from the gate, dq/dk/dv through ``dout`` and the
+    kernel's ``dlse`` path. The kernel's own sink backward is not validated here. Idempotent; False when
+    ``flash_attn.cute`` is not importable.
     """
     return wrap_fa4_entry_points(
         _FA4_RESCALE_ATTR,

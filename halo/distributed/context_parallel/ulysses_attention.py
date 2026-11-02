@@ -16,16 +16,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from halo.distributed.context_parallel.all_to_all import heads_to_sequence, sequence_to_heads
-from halo.models.attention.backend_setup import install_fa4_contiguous_dedicated_head_inputs
 from halo.models.attention.selection import (
     flash_attention_deterministic,
     flash_kernel,
     preferred_flash_impl,
     supports_fa4_backward,
 )
-
-# The hub flash-attn2 build the kernel probe falls back to; also an accepted attn_implementation.
-HUB_FLASH_ATTN2_KERNEL = "kernels-community/flash-attn2"
 
 
 def _adapt_to_fa2_contract(func):
@@ -51,34 +47,22 @@ def _adapt_to_fa2_contract(func):
 
 @functools.lru_cache(maxsize=2)
 def _flash_attn_func(allow_fa4: bool = True):
-    """``flash_attn_func`` of :func:`preferred_flash_impl`, else FA2, then the hub kernel. This probe, not
-    ``_attn_implementation``, picks a CP run's kernel; the arch's own build comes first because both images
-    also ship FA2."""
+    """``flash_attn_func`` of :func:`preferred_flash_impl`, else FA2. This probe, not ``_attn_implementation``,
+    picks a CP run's kernel; the arch's own build comes first because both images also ship FA2."""
     # Hopper (sm_90) cannot take the FA2 path: the image stubs out the split-K kernels that FA2's
     # non-varlen forward (the one CP calls) selects by occupancy heuristic, so it would raise.
     preferred = preferred_flash_impl(allow_fa4=allow_fa4)
-    # Whatever the config's label, so its head_dim-256 kernel never sees the strided K/V the all-to-all splits off.
-    if preferred == "flash_attention_4":
-        install_fa4_contiguous_dedicated_head_inputs()
     if preferred != "flash_attention_2":
         with contextlib.suppress(ImportError):
             return _adapt_to_fa2_contract(flash_kernel(preferred, varlen=False))
 
-    with contextlib.suppress(ImportError):
-        return flash_kernel("flash_attention_2", varlen=False)
-
     try:
-        import kernels  # noqa: PLC0415 — optional arch-specific attention backend
-
-        return kernels.get_kernel(HUB_FLASH_ATTN2_KERNEL).flash_attn_func
-    except Exception as last_resort_error:
-        # Chained: this last probe also hits the hub, so a cache/auth/kernel failure here is not the
-        # same condition as flash-attn being absent.
+        return flash_kernel("flash_attention_2", varlen=False)
+    except ImportError as error:
         raise ImportError(
-            f"flash-attn is required for Context Parallelism but neither flash_attn nor "
-            f"{HUB_FLASH_ATTN2_KERNEL} could be loaded. Install flash-attn "
-            f"(see agent-docs/optimization/flash-attention.md) or the kernels package."
-        ) from last_resort_error
+            f"flash-attn is required for Context Parallelism, but neither {preferred} nor flash_attention_2 imports "
+            f"here. Run in the Blackwell or Hopper image, which ship flash-attn."
+        ) from error
 
 
 def rotate_half(x: torch.Tensor) -> torch.Tensor:

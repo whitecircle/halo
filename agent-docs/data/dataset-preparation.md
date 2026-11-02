@@ -95,7 +95,9 @@ python scripts/before_training/prepare_dataset.py \
 `--conversation_field` and `--train_on_completions_only` default to the **training-side** values
 (`prompt`, and masking on), so a dataset prepared with defaults is one the training defaults accept.
 Masking on means `--assistant_message_template` is required — pass the marker your model's chat
-template renders, or `--train_on_completions_only false` to bake full-sequence labels.
+template renders, or `--train_on_completions_only false` for a full-sequence loss. A full-sequence artifact
+stores no `labels`: its rows are the ones the runtime path collates, and the collator derives the labels from
+`input_ids` as it does there (a pad-valued token is masked, the turn-ending EOS kept where `pad == eos`).
 
 `--input` accepts an S3 URI, a Hub ID (`org/name`, with optional `:config` and `@split` suffixes,
 e.g. `HuggingFaceH4/ultrachat_200k@train_sft`), or a local path. `--output` accepts an S3 URI,
@@ -236,8 +238,13 @@ and uploaded from it.
 Each tokenize, filter, label and pack step writes a full copy of the corpus. The tool writes them to a
 scratch directory under `HF_DATASETS_CACHE`, removed when the bake ends, so peak disk there is those
 copies and nothing stays behind. The directory is named after `--output`, so a rerun to the same
-output first removes the copies a killed bake left there. Labels are stored at the integer width of
-`input_ids` (`int32`).
+output first removes the copies a killed bake left there. Completion-only labels are stored at the integer
+width of `input_ids` (`int32`).
+
+The pack runs on the `--num_proc` workers too. TRL packs each 1000-row batch on its own, so every worker
+packs whole batches and the artifact holds the same rows at any worker count. Packed rows store no
+`attention_mask` (the packing collator builds its own and drops it), so a packed full-sequence text artifact
+holds `input_ids` and `seq_lengths` alone, about 4 bytes per token.
 
 Hub and S3 `--overwrite` both delete the marker first and re-upload it after the payload, so an
 interrupted upload reads as *raw* (a loud failure) rather than as a silently truncated preprocessed

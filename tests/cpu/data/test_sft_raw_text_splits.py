@@ -9,6 +9,9 @@ alone lets an eval split of long conversations crash that way.
 
 The generation map tokenizes the whole test split, and the examples callback is its one reader.
 
+Unpacked rows on a flash run take TRL's collator from the factory, opted into the one-document varlen set and built
+with the run's ``pad_to_multiple_of``, as TRL builds its own.
+
 Usage:
     python tests/cpu/data/test_sft_raw_text_splits.py
 """
@@ -19,11 +22,14 @@ import datasets
 import pytest
 from accelerate import PartialState
 from datasets import Dataset, DatasetDict
+from transformers import Qwen3Config
 
 PartialState()
 
+from halo.data.collators.padded import DataCollatorForLanguageModelingWithVarlen
 from scripts.training.sft import _prepare_text_data
-from tests.common.models import QWEN3_0_6B
+from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
+from tests.common.packed_flash_varlen import VARLEN_KEYS
 from tests.common.tokenizers import load_cached_tokenizer
 
 _MAX_LENGTH = 64
@@ -48,17 +54,21 @@ def _args(generate_eval_examples: bool) -> SimpleNamespace:
     )
 
 
-def _sft_config() -> SimpleNamespace:
+def _sft_config(**overrides) -> SimpleNamespace:
     return SimpleNamespace(
-        max_length=_MAX_LENGTH,
-        packing=True,
-        eval_packing=True,
-        packing_strategy="bfd",
-        padding_free=False,
-        dataset_num_proc=None,
-        per_device_train_batch_size=1,
-        per_device_eval_batch_size=1,
-        eval_strategy="no",
+        **{
+            "max_length": _MAX_LENGTH,
+            "packing": True,
+            "eval_packing": True,
+            "packing_strategy": "bfd",
+            "padding_free": False,
+            "dataset_num_proc": None,
+            "per_device_train_batch_size": 1,
+            "per_device_eval_batch_size": 1,
+            "eval_strategy": "no",
+            "pad_to_multiple_of": None,
+            **overrides,
+        }
     )
 
 
@@ -68,7 +78,7 @@ def _writable_dataset_cache(tmp_path, monkeypatch):
     monkeypatch.setattr(datasets.config, "HF_DATASETS_CACHE", tmp_path)
 
 
-def _prepare(train_messages, test_messages, generate_eval_examples: bool = False):
+def _prepare(train_messages, test_messages, generate_eval_examples: bool = False, hf_config=None, **sft_overrides):
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     ds = DatasetDict(
         {
@@ -80,12 +90,12 @@ def _prepare(train_messages, test_messages, generate_eval_examples: bool = False
         ds,
         None,
         _args(generate_eval_examples),
-        _sft_config(),
+        _sft_config(**sft_overrides),
         SimpleNamespace(model_name_or_path=QWEN3_0_6B),
         tokenizer,
         tokenizer,
         SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1),
-        hf_config=None,
+        hf_config=hf_config,
     )
 
 
@@ -115,6 +125,26 @@ def test_the_test_split_is_mapped_for_generation_only_when_examples_are_generate
     _train, _eval, generate, _collator = _prepare([_SHORT] * 4, [_SHORT] * 2, generate_eval_examples=True)
     assert len(generate) == 2
     assert "input_ids" in generate.column_names
+
+
+@pytest.mark.parametrize("pad_to_multiple_of", [None, _MAX_LENGTH])
+def test_unpacked_rows_on_a_flash_run_take_trls_collator_with_the_one_document_set(pad_to_multiple_of):
+    flash = Qwen3Config(**TINY_QWEN3_CONFIG)
+    flash._attn_implementation = "flash_attention_2"
+    train_dataset, _eval, _generate, collator = _prepare(
+        [_SHORT] * 4, [_SHORT] * 2, hf_config=flash, packing=False, pad_to_multiple_of=pad_to_multiple_of
+    )
+
+    assert type(collator) is DataCollatorForLanguageModelingWithVarlen
+    assert collator.pad_to_multiple_of == pad_to_multiple_of
+    width = len(train_dataset[0]["input_ids"])
+    batch = collator([train_dataset[0]])
+    if pad_to_multiple_of is None:
+        assert batch["cu_seq_lens_q"].tolist() == [0, width] and batch["max_length_q"] == width
+    else:
+        # Anti-vacuity: the row is shorter than the multiple, so the padded batch keeps transformers' mask path.
+        assert width % pad_to_multiple_of and batch["input_ids"].shape[1] == pad_to_multiple_of
+        assert not any(key in batch for key in VARLEN_KEYS)
 
 
 if __name__ == "__main__":

@@ -42,6 +42,7 @@ from halo.checkpoint.format import (
     RESUME_ADAPTER_DIR,
     RESUME_ADAPTER_MARKER_FILE,
     ROUTER_BALANCING_BIASES_FILE,
+    RUN_PLAN_FILE,
     WEIGHT_DUMP_IGNORE_PATTERNS,
     prefetch_pending_filename,
 )
@@ -64,6 +65,8 @@ SKIPPED = (
     "rust_model.ot",
     "64.tflite",
     "model.onnx",
+    # The checkpointing-plan record of the run whose output_dir root holds the final model.
+    RUN_PLAN_FILE,
 )
 KEPT = (
     "config.json",

@@ -46,15 +46,15 @@ _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES = ("glm4_moe_lite", "gemma3_text", "gemma2
 
 @pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES + _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES)
 def test_a_deterministic_run_refuses_fa4_at_head_dim_256(model_type, monkeypatch):
-    """The dedicated kernel's backward asserts ``not deterministic``, which transformers passes under
-    ``FLASH_ATTENTION_DETERMINISTIC``: such a run would stop at its first backward."""
+    """transformers passes ``FLASH_ATTENTION_DETERMINISTIC`` to the dedicated head_dim-256 backward as
+    ``deterministic``, a mode not validated here, so such a run keeps FA4 off that width."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
     assert supports_fa4_backward(_config(model_type)) is False
 
 
 @pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES)
 def test_head_dim_256_keeps_fa4_outside_a_deterministic_run(model_type, monkeypatch):
-    """With q/k/v made contiguous for that kernel, nothing else refuses it."""
+    """Outside a deterministic run nothing refuses FA4 at that width."""
     monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
     assert supports_fa4_backward(_config(model_type)) is True
 
@@ -118,8 +118,8 @@ def test_the_deterministic_refusal_reads_the_query_key_width_alone(deterministic
 )
 def test_the_head_widths_count_the_mla_split(model_type, declared_head_dim, widths):
     """MLA declares a ``head_dim`` that is only its RoPE slice (GLM-4.7-Flash: 64) and the query/key width as
-    ``qk_nope_head_dim + qk_rope_head_dim``, so reading ``head_dim`` alone would hand it back FA4's deterministic
-    assert."""
+    ``qk_nope_head_dim + qk_rope_head_dim``, so reading ``head_dim`` alone would leave a deterministic run on FA4's
+    dedicated head_dim-256 backward."""
     config = _config(model_type)
     assert config.head_dim == declared_head_dim
     assert resolve_qk_v_head_dims(config) == widths

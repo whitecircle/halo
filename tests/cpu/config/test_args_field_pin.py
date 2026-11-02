@@ -52,6 +52,7 @@ _EXPECTED = {
         "chat_template": "None",
         "dataset": "'/path/to/dataset'",
         "dataset_ratio": "None",
+        "gradient_checkpointing_plan": "'off'",
         "enable_efficiency_metrics": "False",
         "enable_moe_metrics": "True",
         "enable_torch_profiler": "False",

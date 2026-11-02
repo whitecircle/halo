@@ -264,7 +264,7 @@ def fused_kernel_mismatches(device: str, *, seed_shift: int = 0) -> list[str]:
             )
         for live in launches.values():
             index, hparams, num_programs = _launch_tables(live)
-            _launch_fused(live, index.to(device), hparams.to(device), num_programs, grad_scale)
+            _launch_fused(live, index.to(device), hparams.to(device), num_programs, grad_scale, None)
         for role, name in enumerate(("param", "grad", "exp_avg", "exp_avg_sq")):
             for i, (expected, got) in enumerate(zip(oracle[role], fused[role], strict=True)):
                 if not torch.equal(expected, got):

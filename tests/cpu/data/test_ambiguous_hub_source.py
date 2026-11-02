@@ -43,7 +43,7 @@ def test_a_prepared_artifact_under_a_hub_shaped_path_is_refused_and_loads_with_d
 
     loaded, preprocessed = load_datasets_auto("./preprocessed/my_dataset", test_size=None, dataset_ratio=None)
     assert preprocessed
-    assert {"input_ids", "attention_mask", "labels"} <= set(loaded["train"].column_names)
+    assert {"input_ids", "attention_mask"} <= set(loaded["train"].column_names)
     assert len(loaded["train"]) == len(_DOCUMENTS["train"])
 
 

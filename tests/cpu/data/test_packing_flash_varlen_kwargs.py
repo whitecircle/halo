@@ -6,8 +6,8 @@ every attention layer's ``position_ids`` for a packed row (``_is_packed_sequence
 re-derives the set from them (``prepare_fa_kwargs_from_position_ids``: a ``nonzero`` and a tensor max length
 the kernel call reads back). The collator builds the same set on the host, so the kernel must see the same
 offsets and lengths: a multi-document row carries exactly what transformers derives, a one-document row
-carries nothing (transformers runs it on the dense kernel), and a non-flash run or a kept-rows (PP) batch
-carries nothing.
+carries nothing unless the caller opts in (``tests/cpu/data/test_one_document_flash_varlen.py``), and a non-flash
+run or a kept-rows (PP) batch carries nothing.
 
 Across the tiny roster of packing families (:mod:`tests.common.packed_flash_varlen`, one fresh interpreter
 each), a forward fed the set must take the kwargs branch in every layer that used to derive it, never call

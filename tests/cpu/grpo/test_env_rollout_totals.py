@@ -20,7 +20,7 @@ import pytest
 
 import halo.trainers.grpo.environmental.rollout_metrics as rm
 from halo.trainers import world_metrics
-from tests.common.world_metrics import pooled_states
+from tests.common.world_metrics import pooled_states, rank_states
 
 
 class _MetricsHost(rm.RolloutMetricsMixin):
@@ -50,7 +50,10 @@ def _fake_dp_world(monkeypatch, world: int):
     monkeypatch.setattr(
         world_metrics,
         "_world_states",
-        lambda states, group, key_mismatch_error: pooled_states([states] * world, key_mismatch_error),
+        lambda records, layout, group, key_mismatch_error: (
+            pooled_states([rank_states(records)] * world, key_mismatch_error),
+            layout,
+        ),
     )
 
 

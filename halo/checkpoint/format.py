@@ -59,6 +59,8 @@ ROUTER_BALANCING_BIASES_FILE = "router_balancing_biases.pt"
 REFERENCE_LOGPS_FILE = "reference_logps.pt"
 # An output_dir entry the run keeps beside its checkpoints and never exports, like the Trainer's Hub push.
 RUN_INTERNAL_PREFIX = "_"
+# The gradient-checkpointing plan record a run keeps in its output_dir root, beside the final model.
+RUN_PLAN_FILE = f"{RUN_INTERNAL_PREFIX}halo_run_plan.json"
 REFERENCE_CACHE_DIR_NAME = f"{RUN_INTERNAL_PREFIX}reference_cache"
 INCOMPLETE_CHECKPOINTS_DIR_NAME = f"{RUN_INTERNAL_PREFIX}incomplete_checkpoints"
 # The step directories HF's own ``get_last_checkpoint`` recognizes, and no others.

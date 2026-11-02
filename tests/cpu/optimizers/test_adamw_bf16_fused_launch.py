@@ -6,7 +6,8 @@ that tensor's block index from the tables alone, and key its rounding noise exac
 The kernel comparison runs under Triton's interpreter in a fresh process (``TRITON_INTERPRET`` is read when a
 kernel is defined); the CUDA leg, where FMA contraction applies, is ``tests/gpu/optimizers/test_adamw_bf16_fused.py``.
 The compiled-code check builds both kernels for sm_90, sm_100 and sm_103 without a GPU, each under one tensor's launch
-specialization and at the table size that target launches with: the full table on sm_100/103, one tensor elsewhere.
+specialization and at the table size that target launches with: the full table on sm_100/103, one tensor elsewhere,
+with and without the step's skip flag.
 
 Run: python tests/cpu/optimizers/test_adamw_bf16_fused_launch.py
 """
@@ -81,6 +82,8 @@ _GLOBAL_ACCESS = re.compile(r"^\s+(?:@%p\d+\s+)?((?:ld|st)\.global[\w.]*)", re.M
 _FLOAT_OP = re.compile(r"^\s*(?:@%p\d+\s+)?((?:fma|mul|add|sub|div|sqrt|rcp|cvt|max|min|neg|abs|mad)\.[\w.]+)\s", re.M)
 # The fused kernel's own reads: the int64 index rows and the fp32 scalar rows.
 _TABLE_LOADS = ("ld.global.b64", "ld.global.v2.b64", "ld.global.v4.b64", "ld.global.b32")
+# The read of the step's skip flag, a bool.
+_SKIP_FLAG_LOAD = "ld.global.b8"
 # (grad dtype, grad scale, _FusedUpdate.divisible): what step() meets (aligned shards, fresh tensors of an odd size, an
 # FSDP2 grad view off the boundary, fused-parameter slices and their grad views, an fp32 grad off the boundary), two
 # other partial alignments, and none.
@@ -350,7 +353,9 @@ def test_step_launches_full_chunks_from_each_steps_tensors(monkeypatch, capabili
     capability(major_minor)
     launches = []
     monkeypatch.setattr(
-        adamw_bf16, "_launch_fused", lambda updates, index, _, __, scale: launches.append((updates[:], index, scale))
+        adamw_bf16,
+        "_launch_fused",
+        lambda updates, index, _, __, scale, ___: launches.append((updates[:], index, scale)),
     )
     monkeypatch.setattr(torch.Tensor, "pin_memory", lambda self: self)
     # Two full launches of the aligned key go out mid-step and leave it empty; the odd-sized key ends partial.
@@ -402,16 +407,18 @@ def test_step_launches_full_chunks_from_each_steps_tensors(monkeypatch, capabili
 
 
 @pytest.mark.parametrize("target", _TARGETS, ids=lambda target: f"sm{target.arch}")
+@pytest.mark.parametrize("has_skip", [False, True], ids=["no_skip", "skip"])
 @pytest.mark.parametrize(
     ("grad_dtype", "has_scale", "divisible"),
     _SPECIALIZATIONS,
     ids=[f"{g}-{'scale' if s else 'no_scale'}-{''.join(str(int(f)) for f in d)}" for g, s, d in _SPECIALIZATIONS],
 )
-def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, divisible, target):
+def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, divisible, has_skip, target):
     """Compiled for each target under a tensor's launch specialization and the table that target launches with, the
     fused kernel runs the per-parameter kernel's per-element code: the same graph of tensor ops behind every store,
     each op in the same layout, and the same vector widths and float ops (the PTX schedule may place them around the
-    table loads and the block loop)."""
+    table loads and the block loop). The step's skip flag adds its one read and changes none of that, so an
+    unskipped step under the flag writes what a step without it does."""
     scale_ptr = "*fp32" if has_scale else f"*{grad_dtype}"
     oracle_signature = {
         "p_ptr": "*bf16",
@@ -441,8 +448,10 @@ def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, div
         "hparam_table": "*fp32",
         "num_tensors": "i32",
         "grad_scale_ptr": scale_ptr,
+        "skip_ptr": "*i1",
         **dict.fromkeys(
-            ("HAS_GRAD_SCALE", *specialization, "TABLE_SIZE", "BLOCKS_PER_PROGRAM", "BLOCK_SIZE"), "constexpr"
+            ("HAS_GRAD_SCALE", "HAS_SKIP", *specialization, "TABLE_SIZE", "BLOCKS_PER_PROGRAM", "BLOCK_SIZE"),
+            "constexpr",
         ),
     }
     # The launcher marks each base by the launch's first tensor of that role, which shares the role's flag.
@@ -452,6 +461,7 @@ def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, div
         fused_signature,
         {
             "HAS_GRAD_SCALE": has_scale,
+            "HAS_SKIP": has_skip,
             "TABLE_SIZE": _MAX_TENSORS_PER_LAUNCH
             if divmod(target.arch, 10) in _MULTI_TENSOR_LAUNCH_CAPABILITIES
             else 1,
@@ -464,7 +474,9 @@ def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, div
     )
 
     def data_accesses(ptx: str) -> collections.Counter:
-        return collections.Counter(op for op in _GLOBAL_ACCESS.findall(ptx) if op not in _TABLE_LOADS)
+        return collections.Counter(
+            op for op in _GLOBAL_ACCESS.findall(ptx) if op not in _TABLE_LOADS and op != _SKIP_FLAG_LOAD
+        )
 
     def float_ops(ptx: str) -> collections.Counter:
         return collections.Counter(op for op in _FLOAT_OP.findall(ptx) if ".f32" in op or ".bf16" in op)
@@ -476,6 +488,7 @@ def test_compiled_kernel_matches_a_lone_tensor_launch(grad_dtype, has_scale, div
     assert _store_dataflow(fused["ttgir"], interned) == _store_dataflow(oracle["ttgir"], interned)
     assert data_accesses(fused["ptx"]) == expected
     assert float_ops(fused["ptx"]) == float_ops(oracle["ptx"])
+    assert _GLOBAL_ACCESS.findall(fused["ptx"]).count(_SKIP_FLAG_LOAD) == int(has_skip)
 
 
 def test_lookup_matches_the_block_scan_interpreted():

@@ -349,5 +349,10 @@ def transform_cache_name(operation_name: str, dataset: Dataset, cache_key_extras
 
 
 def packed_cache_file_name(dataset: Dataset, strategy: str, seq_length: int, split: str) -> str:
-    """The cache file name of a coordinated pack of ``dataset``'s ``split``."""
-    return f"packed_{strategy}_{seq_length}_{rank_stable_dataset_id(dataset)}_{split}_{_RENDER_LIBRARY_VERSIONS}.arrow"
+    """The cache file name of a coordinated pack of ``dataset``'s ``split``, keyed on the columns it packs: a pack
+    that stored another column set (an ``attention_mask``) never serves these rows."""
+    columns = hashlib.md5("|".join(sorted(dataset.column_names)).encode()).hexdigest()[:8]
+    return (
+        f"packed_{strategy}_{seq_length}_{rank_stable_dataset_id(dataset)}_{columns}_{split}"
+        f"_{_RENDER_LIBRARY_VERSIONS}.arrow"
+    )

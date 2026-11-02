@@ -41,6 +41,7 @@ class _ResavingTrainer(DistributedTrainerMixin, BaseTrainerSave):
             save_only_model=False,
             should_save=is_fs_save_rank(),
             push_to_hub=False,
+            include_num_input_tokens_seen="no",
             world_size=world_size,
             process_index=get_global_rank(),
             parallel_mode=ParallelMode.DISTRIBUTED,

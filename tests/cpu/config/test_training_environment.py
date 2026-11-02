@@ -12,7 +12,7 @@ from unittest import mock
 import pytest
 from transformers import Qwen3NextConfig, TrainerState, TrainingArguments
 
-from halo.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME
+from halo.checkpoint.format import INCOMPLETE_CHECKPOINTS_DIR_NAME, REFERENCE_CACHE_DIR_NAME, RUN_PLAN_FILE
 from halo.entrypoints import run_setup
 from halo.entrypoints.run_setup import _validate_output_dir, configure_training_run, resume_checkpoint_from_config
 from halo.entrypoints.script import run_trainer
@@ -174,6 +174,18 @@ def test_stale_fs_probe_marker_does_not_exempt_other_leftovers(tmp_path):
     config = _config(out, resume=True)
     with pytest.raises(ValueError, match="already exists and is not empty"):
         resume_checkpoint_from_config(config, overwrite_output_dir=False)
+
+
+def test_a_checkpointing_plan_record_does_not_block_the_relaunch_it_is_for(tmp_path):
+    """A run that crashed before its first checkpoint leaves only its log and its checkpointing-plan record, which
+    the relaunch must read to checkpoint more; anything else beside it still refuses the directory."""
+    out = tmp_path / "out"
+    (out / RUN_LOG_DIR_NAME).mkdir(parents=True)
+    (out / RUN_PLAN_FILE).write_text("{}")
+    assert resume_checkpoint_from_config(_config(out, resume=True), overwrite_output_dir=False) is None
+    (out / "model.safetensors").write_bytes(b"previous run")
+    with pytest.raises(ValueError, match="already exists and is not empty"):
+        _validate_output_dir(str(out))
 
 
 @pytest.mark.parametrize("nfs_remnant", [False, True])

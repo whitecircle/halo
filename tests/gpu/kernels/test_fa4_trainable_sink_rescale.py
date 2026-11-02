@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """The FA4 trainable-sink rescale is exact on both kernel entry points.
 
-The fused FA4 backward returns no sink gradient, so ``install_fa4_trainable_sink_rescale`` routes
-grad-requiring sinks through ``out * sigmoid(lse - sink)`` on the sink-less kernel — for the varlen
-kernel (packing / padding-free / padded batches) and the dense one (unpadded batches). Checks: the
+``install_fa4_trainable_sink_rescale`` routes grad-requiring sinks through ``out * sigmoid(lse - sink)`` on
+the sink-less kernel, not the kernel's own sink backward, for the varlen kernel (packing / padding-free /
+padded batches) and the dense one (unpadded batches). Checks: the
 install is idempotent; a frozen sink is a bit-identical passthrough; the rescaled forward and the
 returned lse match the fused kernel; all four gradients (dq, dk, dv, d_sink) match an eager sink
 reference. Fails if the kernel's lse contract, its ``dlse`` backward path, or the wrapper's dispatch

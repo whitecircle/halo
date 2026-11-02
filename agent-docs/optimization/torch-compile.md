@@ -14,6 +14,10 @@ The clamped combines latch into `_fused_glu_mul`, the GLU-combine seam every bas
 
 The low-precision weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats (mxfp8/mxfp4; nvfp4's weight stays eager), with a permanent eager fallback on any compile or runtime failure — see [Low-Precision MoE](low-precision-moe-kernels.md).
 
+## Chunked log-prob head
+
+The chunked log-prob head's tile math is compiled on CUDA, one graph per direction serving every tile, with no fallback: a compile failure raises. Its temperature, logit scale and softcap are Python floats traced as symbolic inputs, the case [above](#expert-activations-are-not-compiled): `tests/cpu/kernels/test_head_logprob_tiles.py` holds each new value to the eager result on the C++ backend without a recompile, and `tests/gpu/kernels/test_chunked_logprob_precision.py` on CUDA. What compiles a graph, and the limit of 8 per tile function: [Chunked log-probs](../training-methods/async-grpo/performance.md#chunked-log-probs).
+
 ## Whole-model compilation (opt-in)
 
 ```yaml

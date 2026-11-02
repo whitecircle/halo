@@ -73,11 +73,12 @@ def default_padded_attn_implementation(
     resolver's FA2 where FA4 does not train the attention (head_dim-256 Gemma 2/3, multi-head latent attention).
     ``sdpa`` on every other GPU, and on Blackwell where a checkpoint this request loads rules that pick out: a
     remote-code class the resolver cannot read (Bailing's refuses every flash label at build), or an attention
-    FA4's varlen kernels refuse (:func:`fa4_varlen_refusal`: Gemma 2's softcap, which then refuses SDPA and lands
-    on FA2), since a padded batch unpads to them, a forward-only companion's too. ``checkpoint_config`` is the
-    policy's config; omitted, it is fetched (COLLECTIVE). ``companion_configs`` are those of the further models
-    loaded on the same request (a distillation teacher). ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks
-    live) drops the default, since only a sink-carrying impl is accepted there; pass the run's own ``reset_sinks``.
+    FA4's varlen kernels are not validated with (:func:`fa4_varlen_refusal`: Gemma 2's softcap, which then refuses
+    SDPA and lands on FA2), since a padded batch unpads to them, a forward-only companion's too.
+    ``checkpoint_config`` is the policy's config; omitted, it is fetched (COLLECTIVE). ``companion_configs`` are
+    those of the further models loaded on the same request (a distillation teacher). ``sinks_reset=False``
+    (on-policy gpt-oss, pretrained sinks live) drops the default, since only a sink-carrying impl is accepted there;
+    pass the run's own ``reset_sinks``.
     ``context_parallel`` drops it too: Ulysses calls FlashAttention itself, so the loader's hardware-aware
     pick names it.
     """
@@ -111,16 +112,16 @@ def default_training_rows_attn_implementation(
     of ``per_device_eval_batch_size`` rows included) and one of two kernel limits applies, else ``None``, the
     loader's pick.
 
-    - FA4's varlen kernels refuse the checkpoint's attention (:func:`fa4_varlen_refusal`: Gemma 2's softcap);
-      raises where no FA2 build imports. One unpadded row per batch, training and evaluation, runs FA4's dense
-      kernel, which takes the softcap.
+    - FA4's varlen kernels are not validated with the checkpoint's attention (:func:`fa4_varlen_refusal`: Gemma 2's
+      softcap); raises where no FA2 build imports. One unpadded row per batch, training and evaluation, runs FA4's
+      dense kernel, which takes the softcap.
     - The rows hold several documents (``packing``, ``padding_free``) on a decoder with GatedDeltaNet layers
       (:func:`has_gated_delta_net_layers`: the Qwen3.5/3.6 recipes pack on FA2, Qwen3-Next shares their attention)
-      whose heads run FA4's dedicated head_dim-256 kernel (:func:`uses_fa4_dedicated_head_dim`): that kernel is no
-      faster than FA2 on packed rows, and a deterministic run, whose backward it cannot take, would demote FA4 to
-      SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per query head. Not for
-      ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`: Qwen3.5/3.6, text-only checkpoints
-      included), whose varlen path faults FA2 there, and not without an FA2 build, where FA4 stands.
+      whose heads FA4 trains on its dedicated head_dim-256 backward (:func:`uses_fa4_dedicated_head_dim`): FA4
+      measured no faster than FA2 on packed rows, and a deterministic run, which that backward is not validated
+      with, would demote FA4 to SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per
+      query head. Not for ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`: Qwen3.5/3.6, text-only
+      checkpoints included), whose varlen path faults FA2 there, and not without an FA2 build, where FA4 stands.
 
     ``checkpoint_config`` omitted is fetched (COLLECTIVE), past the checks that need no config only.
     """
@@ -139,8 +140,8 @@ def default_training_rows_attn_implementation(
     refused = fa4_varlen_refusal(checkpoint_config)
     if refused is not None:
         return flash_attention_2_in_place_of_fa4(
-            f"FlashAttention-4's varlen kernels take no {refused}, and this run forwards rows that reach them "
-            f"(packed, padding-free or padded, in training or evaluation)"
+            f"FlashAttention-4's varlen kernels are not validated with {refused}, and this run forwards rows that "
+            f"reach them (packed, padding-free or padded, in training or evaluation)"
         )
     if (
         (packing or padding_free)

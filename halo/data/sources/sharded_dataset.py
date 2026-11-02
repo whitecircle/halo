@@ -13,7 +13,7 @@ from halo.data.sources.dataset_cache import (
     s3_cache_key,
     serve_cached_tree,
 )
-from halo.data.sources.paths import parse_dataset_source
+from halo.data.sources.paths import parse_dataset_source, s3_object_key
 from halo.data.sources.s3_client import S3Client
 from halo.data.sources.s3_dataset_store import download_dataset_tree, read_control_json_with_cache
 from halo.log import info_logger
@@ -46,7 +46,7 @@ class ShardedDatasetLoader:
         """
         source_type, bucket, key = parse_dataset_source(path)
         if source_type == "s3":
-            index_key = f"{key.rstrip('/')}/train/{SHARD_INDEX_FILE}"
+            index_key = s3_object_key(key, "train", SHARD_INDEX_FILE)
             try:
                 read_control_json_with_cache(bucket, index_key)
                 return True
@@ -139,7 +139,7 @@ class ShardedDatasetLoader:
 
         if self.source_type == "s3":
             # The mirrored control-file read: a warm-cache relaunch during an S3/SSO outage takes the local mirror.
-            index_key = f"{self.key.rstrip('/')}/{split}/{SHARD_INDEX_FILE}"
+            index_key = s3_object_key(self.key, split, SHARD_INDEX_FILE)
             index = ShardIndex.from_dict(read_control_json_with_cache(self.bucket, index_key))
         else:
             index = ShardIndex.load(os.path.join(self.dataset_path, split, SHARD_INDEX_FILE))

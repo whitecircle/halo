@@ -36,7 +36,9 @@ def _make_stub(trainer_cls, *, presharded: bool, tp: bool):
     call's split."""
     t = object.__new__(trainer_cls)
     # A TP group of 2 replicates each batch on two ranks.
-    t.parallelism_config = SimpleNamespace(is_tp_mode=tp, is_pp_mode=False, non_dp_replication_factor=2 if tp else 1)
+    t.parallelism_config = SimpleNamespace(
+        is_tp_mode=tp, is_cp_mode=False, is_pp_mode=False, non_dp_replication_factor=2 if tp else 1
+    )
     t._dataset_presharded = presharded
     t.train_dataset = [{"x": 1}, {"x": 2}, {"x": 3}]
     t.eval_dataset = [{"x": 1}, {"x": 2}]

@@ -82,6 +82,7 @@ from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.models import MODEL_CONFIGS
 from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, format_benchmark_report
+from tests.common.sft_collator import build_sft_collator
 
 # Main Benchmark
 
@@ -290,6 +291,7 @@ def main() -> int:
             "args": sft_config,
             "train_dataset": train_dataset,
             "processing_class": tokenizer,
+            "data_collator": build_sft_collator(tokenizer, sft_config, model.config, parallelism_config),
             "parallelism_config": parallelism_config,
             "callbacks": [efficiency_cb],
         }

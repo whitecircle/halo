@@ -18,6 +18,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 - **[BF16 optimizer](bf16-optimizer.md)** — AdamW with bf16 masters and stochastic rounding at 6 bytes/param. Auto-enabled with `bf16: true` on FSDP/EP/TP.
 - **[FlashAdamW](flash-adamw.md)** — Quantized 8-bit states + 24-bit masters (~5 bytes/param) with AdamW-matching convergence. Set `optim: flash_adamw`.
 - **[Low-precision compute (FP8/FP4)](low-precision-moe-kernels.md)** — FP8/FP4 matmul over bf16 masters and checkpoints — a QAT oracle plus inference-memory export (`scripts/after_training/quantize_to_lowp.py`).
+- **[Allocator](throughput-benchmarks.md#allocator-expandable-segments)** — `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` lowers peak reserved memory on dense runs at unchanged throughput; the dense SFT, DPO and SMPO examples launch with it, an EP run sets it only to fit.
 
 ---
 

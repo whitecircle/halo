@@ -15,6 +15,7 @@ from huggingface_hub import constants as hub_constants
 from transformers import TrainingArguments
 
 from halo.callbacks.balancing import configure_moe_balancing
+from halo.callbacks.checkpointing_plan import build_checkpointing_plan_callback
 from halo.callbacks.early_stop import StopsTrainingEarly
 from halo.callbacks.factory import build_run_callbacks, reorder_integration_callbacks_last
 from halo.config_validation import differs_from_default
@@ -202,9 +203,12 @@ def configure_balancing_and_build_callbacks(
     *,
     generate_callback=None,
     max_seq_len: int | None = None,
+    packed_rows: bool = False,
+    multimodal_rows: bool = False,
 ) -> list:
     """COLLECTIVE. Configure the run's MoE balancing on ``model`` for ``context.trainer_cls``'s loss and
-    weight-sync capabilities, then build its callback roster for that mode."""
+    weight-sync capabilities, then build its callback roster for that mode, the checkpointing plan's last.
+    ``packed_rows`` and ``multimodal_rows`` say what the run's collator builds, which the plan's refusals read."""
     balancing_mode = configure_moe_balancing(
         args,
         model,
@@ -212,7 +216,7 @@ def configure_balancing_and_build_callbacks(
         policy_gradient_loss=context.trainer_cls.POLICY_GRADIENT_LOSS,
         syncs_to_external_generator=context.trainer_cls.SYNCS_TO_EXTERNAL_GENERATOR,
     )
-    return build_run_callbacks(
+    callbacks = build_run_callbacks(
         args,
         training_config,
         model,
@@ -221,6 +225,18 @@ def configure_balancing_and_build_callbacks(
         generate_callback=generate_callback,
         max_seq_len=max_seq_len,
     )
+    if args.gradient_checkpointing_plan == "auto":
+        callbacks.append(
+            build_checkpointing_plan_callback(
+                training_config,
+                model,
+                context.parallelism_config,
+                context.trainer_cls,
+                packed_rows=packed_rows,
+                multimodal_rows=multimodal_rows,
+            )
+        )
+    return callbacks
 
 
 def run_trainer(

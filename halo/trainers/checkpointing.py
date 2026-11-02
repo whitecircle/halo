@@ -158,6 +158,8 @@ class CheckpointingMixin:
         the resume adapter, the sidecars and the per-rank optimizer shards are written, and only then is the
         trainer state published, pushed and rotated, so a preemption leaves this one passed over on resume.
         """
+        # The trainer state this save writes carries the input tokens of the steps since the last log.
+        self._sum_input_tokens()
         checkpoint_folder = f"{PREFIX_CHECKPOINT_DIR}-{self.state.global_step}"
         output_dir = os.path.join(self._get_output_dir(trial=trial), checkpoint_folder)
         # Any run type: what an earlier save left in a directory this save rewrites is stale by definition.

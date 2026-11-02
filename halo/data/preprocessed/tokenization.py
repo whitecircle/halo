@@ -1,5 +1,5 @@
-"""Offline tokenization of a corpus: text (chat or raw) and VLM rows to input_ids, attention_mask and baked
-labels, dropping the rows a map rejects."""
+"""Offline tokenization of a corpus: text (chat or raw) and VLM rows to input_ids, attention_mask and, where a mask
+shapes them, baked labels, dropping the rows a map rejects."""
 
 import functools
 import logging
@@ -167,46 +167,36 @@ def _bake_labels(
     eos_token_ids: frozenset[int] | None,
 ) -> Dataset:
     """Labels for the tokenized rows, baked for good (the artifact's collators only pad): completion-only under
-    the span policy of the collator that would have masked them at runtime, else a copy of ``input_ids``. Stored
-    at ``input_ids``' integer width, where inference would widen them to int64, most of the artifact's bytes."""
-    num_proc = resolve_map_num_proc(config.num_proc)
-    features = Features({**tokenized.features, "labels": tokenized.features["input_ids"]})
-    if config.train_on_completions_only:
-        marker = config.assistant_message_template
-        response_token_ids = tokenize_response_template(marker, tokenizer)
-        span_policy = PACKED_SPAN_POLICY if config.pack_sequences else COLLATOR_SPAN_POLICY
-        return coordinated_map(
-            tokenized,
-            lambda x: {
-                "labels": _completion_only_labels(
-                    x["input_ids"],
-                    tokenizer,
-                    marker,
-                    response_token_ids,
-                    eos_token_ids=eos_token_ids,
-                    span_policy=span_policy,
-                )
-            },
-            desc=f"masking completions in {split_name}",
-            num_proc=num_proc,
-            features=features,
-            # Two artifacts of one corpus can differ by the span policy alone.
-            cache_key_extras={
-                "completion_only": True,
-                "assistant_template": marker,
-                "eos_token_ids": sorted(eos_token_ids),
-                "span_policy": span_policy,
-            },
-        )
-    if "labels" in tokenized.column_names:
+    the span policy of the collator that would have masked them at runtime, else none, the collator deriving them
+    from ``input_ids`` as on the runtime path. Stored at ``input_ids``' integer width, where inference would widen
+    them to int64."""
+    if not config.train_on_completions_only:
         return tokenized
+    marker = config.assistant_message_template
+    response_token_ids = tokenize_response_template(marker, tokenizer)
+    span_policy = PACKED_SPAN_POLICY if config.pack_sequences else COLLATOR_SPAN_POLICY
     return coordinated_map(
         tokenized,
-        lambda x: {"labels": x["input_ids"].copy()},
-        desc=f"adding labels to {split_name}",
-        num_proc=num_proc,
-        features=features,
-        cache_key_extras={"labels": "full_copy"},
+        lambda x: {
+            "labels": _completion_only_labels(
+                x["input_ids"],
+                tokenizer,
+                marker,
+                response_token_ids,
+                eos_token_ids=eos_token_ids,
+                span_policy=span_policy,
+            )
+        },
+        desc=f"masking completions in {split_name}",
+        num_proc=resolve_map_num_proc(config.num_proc),
+        features=Features({**tokenized.features, "labels": tokenized.features["input_ids"]}),
+        # Two artifacts of one corpus can differ by the span policy alone.
+        cache_key_extras={
+            "completion_only": True,
+            "assistant_template": marker,
+            "eos_token_ids": sorted(eos_token_ids),
+            "span_policy": span_policy,
+        },
     )
 
 
@@ -218,8 +208,9 @@ def tokenize_dataset(
     *,
     eos_token_ids: frozenset[int] | None = None,
 ) -> Dataset:
-    """Tokenize a text split (raw-text or chat mode) to input_ids, attention_mask and labels; ``eos_token_ids``,
-    the completion mask's terminators, is resolved here when unset."""
+    """Tokenize a text split (raw-text or chat mode) to input_ids and attention_mask, plus labels under
+    ``train_on_completions_only``; ``eos_token_ids``, the completion mask's terminators, is resolved here when
+    unset."""
     tokenizer = resolve_tokenizer_backend(tokenizer, config.tokenizer_backend)
     if config.train_on_completions_only and eos_token_ids is None:
         eos_token_ids = resolve_label_eos_token_ids(config, tokenizer)

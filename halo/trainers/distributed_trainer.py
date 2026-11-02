@@ -581,16 +581,17 @@ class DistributedTrainerMixin(
         warn_unparallelized_reference(self.parallelism_config, self.REFERENCE_ALTERNATIVES)
 
     def log(self, logs: dict[str, float], start_time: float | None = None):
-        """COLLECTIVE: add the parallelism fields and the run's loss-token total (a world gather) to the log after
-        the first step, and log TRL's attended-token counter as ``num_attended_tokens_seen``, the name beside
-        ``num_input_tokens_seen`` (padding included) and ``num_unmasked_output_tokens_seen`` (loss tokens)."""
+        """COLLECTIVE: after the first step, add the parallelism fields and the run's loss-token total to the log,
+        summed over the world with HF's input-token count and FLOPs estimate in one all-reduce
+        (:meth:`_drain_token_counts`), and log TRL's attended-token counter as ``num_attended_tokens_seen``, the name
+        beside ``num_input_tokens_seen`` (padding included) and ``num_unmasked_output_tokens_seen`` (loss tokens)."""
         if hasattr(self, "_tp_size"):
             for mode_metrics in self._metrics.values():
                 if "num_tokens" in mode_metrics:
                     mode_metrics["num_attended_tokens_seen"] = mode_metrics.pop("num_tokens")
         if hasattr(self, "state") and self.state.global_step != 0:
             logs.update(_parallelism_log_fields(self.parallelism_config, self._ep_config, bool(self._ep_layers())))
-            self._drain_unmasked_output_tokens()
+            self._drain_token_counts()
             total_output_tokens = getattr(self, "_cumulative_unmasked_output_tokens", None)
             if total_output_tokens is not None:
                 logs["num_unmasked_output_tokens_seen"] = total_output_tokens

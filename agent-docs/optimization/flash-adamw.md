@@ -55,6 +55,8 @@ A real-model benchmark lives in `tests/gpu/optimizers/bench_muon_qwen3_5.py` (Qw
 
 Pipeline parallelism refuses it at trainer construction (`reject_pp_named_optimizer`, `halo/trainers/parallelism/pipeline_rules.py`): no PP run validates it. The other guard is the shared `reject_conflicting_optimizer_choice`: `bf16_optimizer: true` together with a named `optim` raises rather than silently discarding one of them. Correctness coverage is single-GPU (`tests/gpu/manifest.py` registers `test_flash_adamw.py` at `nproc=1`).
 
+The [non-finite step guard](../reference/trainer-architecture.md#non-finite-steps) reads the gradient norm back before every FlashAdamW step and skips a non-finite one on the host: `flashoptim`'s fused kernel takes no device skip flag, so FlashAdamW keeps the one host sync per step that AdamWBF16 and Muon avoid.
+
 The wrapper registers a step post-hook that advances each stepped param's version counter — `flashoptim`'s fused Triton update stores through raw pointers ATen never sees, and the low-precision weight-quant cache keys on that counter (see [Low-Precision MoE](low-precision-moe-kernels.md)).
 
 **Checkpoint limit: unevenly sharded params.** `flashoptim`'s `state_dict` refuses any FSDP2 DTensor param whose sharded dim does not divide the mesh, and the trainer's all-or-nothing shard save then raises at the first checkpoint. Training itself is unaffected. `_warn_if_uneven_shards` (`halo/optimizers/flash_adamw.py`) says so at optimizer build; set `save_only_model: true` for weights-only checkpoints, or pick dims divisible by the shard world or another `optim` to keep optimizer state.

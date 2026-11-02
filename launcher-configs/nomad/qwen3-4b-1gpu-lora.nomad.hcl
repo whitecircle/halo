@@ -82,14 +82,15 @@ job "halo-qwen3-4b-lora" {
       }
 
       env {
-        CONFIG_PATH       = var.config_path
-        MODEL             = var.model
-        OUTPUT_DIR        = "${var.scratch_host_path}/checkpoints/qwen3-4b-ultrachat-lora"
-        WANDB_PROJECT     = "halo-qwen3-4b-lora"
-        HF_HOME           = "${var.scratch_host_path}/hf"
-        HF_DATASETS_CACHE = "${var.scratch_host_path}/hf/datasets"
-        TMPDIR            = "${var.scratch_host_path}/tmp"
-        HALO_DATA_ROOT    = var.scratch_host_path
+        CONFIG_PATH             = var.config_path
+        MODEL                   = var.model
+        OUTPUT_DIR              = "${var.scratch_host_path}/checkpoints/qwen3-4b-ultrachat-lora"
+        WANDB_PROJECT           = "halo-qwen3-4b-lora"
+        HF_HOME                 = "${var.scratch_host_path}/hf"
+        HF_DATASETS_CACHE       = "${var.scratch_host_path}/hf/datasets"
+        TMPDIR                  = "${var.scratch_host_path}/tmp"
+        HALO_DATA_ROOT          = var.scratch_host_path
+        PYTORCH_CUDA_ALLOC_CONF = "expandable_segments:True"
       }
 
       # nomadVarExists first: a bare nomadVar BLOCKS forever on a missing path, which would strand the

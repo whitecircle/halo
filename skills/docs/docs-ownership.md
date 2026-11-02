@@ -72,7 +72,7 @@ changes.
 | `halo/trainers/grpo/environmental/rollout_metrics.py`, `halo/trainers/grpo/rollout/completions_logging.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/callbacks.md` |
 | `halo/trainers/grpo/early_stop.py` | `agent-docs/training-methods/async-grpo/monitoring.md`, `agent-docs/training-methods/grpo/online.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/trainers/grpo/objective/` | `agent-docs/training-methods/async-grpo/objective.md`, `agent-docs/training-methods/grpo/{online,offline}.md` |
-| `halo/trainers/grpo/logprob_scoring.py`, `halo/kernels/head_logprobs.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md` |
+| `halo/trainers/grpo/logprob_scoring.py`, `halo/kernels/head_logprobs.py` | `agent-docs/training-methods/async-grpo/performance.md`, `agent-docs/reference/configuration-reference.md`; the compiled tiles also `agent-docs/optimization/torch-compile.md` |
 | `halo/environments/ray_actors.py` | `agent-docs/infrastructure/ray.md`, `agent-docs/training-methods/async-grpo/setup.md` |
 | `halo/checkpoint/parallel/save.py`, `halo/checkpoint/parallel/resume_weights.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/trainer-architecture.md`, `agent-docs/parallelism/tensor-parallelism.md` |
 | `halo/checkpoint/parallel/ep.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md` |
@@ -170,6 +170,7 @@ changes.
 | `halo/` area | Owning doc page(s) |
 |---|---|
 | `halo/callbacks/` | `agent-docs/training-methods/callbacks.md` |
+| `halo/callbacks/checkpointing_plan.py`, `halo/models/checkpointing_plan.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/callbacks/factory.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `halo/callbacks/torch_profiler.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/debugging.md` |
 | `halo/models/moe/{balancing,config_fields,router_logits,router_aux_gradient}.py`, `halo/callbacks/balancing.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/models/README.md` |

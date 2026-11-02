@@ -269,10 +269,11 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         )
         rows = len(dataset)
         batch_size = self.args.per_device_train_batch_size
+        collator = self._loader_collate_fn(self.data_collator)
 
         def collate(batch):
             # Padded to a full batch so FSDP/EP per-row forward counts stay equal; only the real rows are cached.
-            return self.data_collator(batch + [batch[-1]] * (batch_size - len(batch))), len(batch)
+            return collator(batch + [batch[-1]] * (batch_size - len(batch))), len(batch)
 
         guard = DeferredRankFailure(f"Preparing the '{split}' reference loader", exc_type=ValueError)
         loader = guard.run(

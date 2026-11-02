@@ -152,7 +152,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
         )
     _reject_empty_split(train_dataset, "training", sft_config.max_length)
     if sft_config.packing:
-        pack = {"seq_length": sft_config.max_length, "strategy": sft_config.packing_strategy}
+        pack = {"seq_length": sft_config.max_length, "strategy": sft_config.packing_strategy, "num_proc": num_proc}
         train_dataset = coordinated_pack(train_dataset, **pack, split="train")
         if sft_config.eval_packing is not False:
             _reject_empty_split(eval_dataset, "evaluation", sft_config.max_length)
@@ -251,6 +251,8 @@ def _prepare_text_data(
             tokenizer, full_form=args.tree_full_attention, **resolve_tree_plan_options(hf_config)
         )
         return train_dataset, eval_dataset, generate_dataset, collator
+    # TRL's own setting outside CP: the full-sequence route then returns the collator TRL would build.
+    pad_to_multiple_of = parallelism_config.cp_size if parallelism_config.is_cp_mode else sft_config.pad_to_multiple_of
     collator = select_data_collator(
         tokenizer=tokenizer,
         padding_free=sft_config.padding_free,
@@ -259,7 +261,7 @@ def _prepare_text_data(
         # re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
         train_on_completions_only=args.train_on_completions_only and metadata is None,
         assistant_message_template=args.assistant_message_template,
-        pad_to_multiple_of=parallelism_config.cp_size if parallelism_config.is_cp_mode else None,
+        pad_to_multiple_of=pad_to_multiple_of,
         use_context_parallel=parallelism_config.is_cp_mode,
         train_on_last_assistant_only=args.train_on_last_assistant_only,
         model_config=hf_config,
@@ -267,6 +269,7 @@ def _prepare_text_data(
         per_device_eval_batch_size=evaluation_batch_size(sft_config),
         keeps_packed_rows=parallelism_config.pp_size > 1,
         allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+        one_document_varlen=True,
     )
     return train_dataset, eval_dataset, generate_dataset, collator
 
@@ -433,7 +436,13 @@ def main():
             "not supported for VLM datasets" if is_vlm else "a pre-processed dataset carries no raw prompts",
         )
     callbacks = configure_balancing_and_build_callbacks(
-        args, sft_config, model, context, generate_callback=generate_callback
+        args,
+        sft_config,
+        model,
+        context,
+        generate_callback=generate_callback,
+        packed_rows=_packs_rows(sft_config, metadata),
+        multimodal_rows=is_vlm,
     )
 
     disable_trl_dataset_prep(sft_config)

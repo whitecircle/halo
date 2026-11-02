@@ -2,9 +2,9 @@
 """CPU test: the clips and transformers keep the gradient norm on the device.
 
 The toolkit's clip paths (EP / TP / PP / FSDP) return the norm as a DEVICE tensor on purpose: a
-``.item()`` is a full host sync that serializes the whole rank against the copy engine. The one
-per-step read is the non-finite step guard's verdict, taken once per optimizer step
-(``tests/cpu/trainers/test_nonfinite_step_guard.py``). HF reads the norm back inside
+``.item()`` is a full host sync that serializes the whole rank against the copy engine. The non-finite step
+guard reads it a step late from pinned memory under AdamWBF16 and Muon, and before each step under any other
+optimizer (``tests/cpu/trainers/test_nonfinite_step_guard.py``). HF reads the norm back inside
 ``_maybe_log_save_evaluate``'s ``should_log`` branch, and ``_get_grad_norm`` itself converts only under
 DeepSpeed — this pins both, so a transformers bump that adds a second read fails here instead of
 showing up as a throughput regression.

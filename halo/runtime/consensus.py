@@ -9,7 +9,7 @@ import pickle
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, NamedTuple, TypeVar
+from typing import Any, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -24,8 +24,6 @@ logger = logging.getLogger(__name__)
 
 # A digest below 2**62 negates without overflowing int64, so [d, -d] rides one MAX all-reduce.
 _AGREEMENT_DIGEST_BITS = 62
-# MAX's neutral element: an abstaining rank's slot never wins.
-_INT64_MIN = -(2**63)
 # The [d, -d] pair of a rank whose object cannot be digested: 2**62 is above every real digest while
 # 0 is at or above every real -d, so max(d) != -max(-d) whoever else takes part.
 _UNDIGESTIBLE = (2**_AGREEMENT_DIGEST_BITS, 0)
@@ -157,15 +155,6 @@ def divergent_settings(gathered: list[dict[str, object]]) -> dict[str, list[str]
     }
 
 
-class RankAgreement(NamedTuple):
-    """What :func:`agree_across_ranks` learns in its one all-reduce."""
-
-    agreed: bool
-    # Lowest rank that did not abstain; None when every rank did.
-    first_present: int | None
-    any_abstained: bool
-
-
 def _agreement_digest(obj: object) -> int:
     """62-bit blake2b digest of ``obj``'s canonical repr (a mapping's items sorted). Never Python's
     ``hash``, which is salted per process."""
@@ -174,29 +163,22 @@ def _agreement_digest(obj: object) -> int:
     return int.from_bytes(digest, "big") >> (64 - _AGREEMENT_DIGEST_BITS)
 
 
-def agree_across_ranks(obj: object, *, abstain: bool = False, group: dist.ProcessGroup | None = None) -> RankAgreement:
-    """COLLECTIVE: whether every rank of ``group`` that holds ``obj`` holds an equal one.
+def agree_across_ranks(obj: object, *, group: dist.ProcessGroup | None = None) -> bool:
+    """COLLECTIVE: whether every rank of ``group`` holds an equal ``obj``.
 
-    One :func:`rank_max` of ``[d, -d, -rank, abstained]`` over the canonical digest ``d``: the ranks
-    agree iff ``max(d) == -max(-d)``. An object that cannot be digested forces a mismatch rather than
-    raising on one rank inside the collective. ``abstain`` takes a rank out of the comparison;
-    ``first_present`` names a rank the abstainers can learn the object from.
+    One :func:`rank_max` of ``[d, -d]`` over the canonical digest ``d``: the ranks agree iff
+    ``max(d) == -max(-d)``. An object that cannot be digested forces a mismatch rather than raising on
+    one rank inside the collective.
     """
     if not is_multi_rank_run():
-        return RankAgreement(True, None if abstain else 0, abstain)
-    if abstain:
-        local = [_INT64_MIN] * 3 + [1]
-    else:
-        try:
-            digest = _agreement_digest(obj)
-            pair = [digest, -digest]
-        except Exception:  # a rank-local raise here would strand the peers in the reduce
-            pair = list(_UNDIGESTIBLE)
-        local = [*pair, -dist.get_rank(group), 0]
-    max_digest, max_negated, max_negated_rank, any_abstained = rank_max(local, group)
-    if max_negated_rank == _INT64_MIN:
-        return RankAgreement(True, None, True)
-    return RankAgreement(max_digest == -max_negated, -max_negated_rank, bool(any_abstained))
+        return True
+    try:
+        digest = _agreement_digest(obj)
+        local = [digest, -digest]
+    except Exception:  # a rank-local raise here would strand the peers in the reduce
+        local = list(_UNDIGESTIBLE)
+    max_digest, max_negated = rank_max(local, group)
+    return max_digest == -max_negated
 
 
 def reject_divergent_settings(values: dict[str, object], what: str, guidance: str) -> None:
@@ -206,7 +188,7 @@ def reject_divergent_settings(values: dict[str, object], what: str, guidance: st
     :func:`agree_across_ranks` digest is only a fast path (``30`` and ``30.0`` digest differently); a
     mismatch gathers the values and :func:`divergent_settings` decides. ``guidance`` is appended.
     """
-    if not is_multi_rank_run() or agree_across_ranks(values).agreed:
+    if not is_multi_rank_run() or agree_across_ranks(values):
         return
     gathered: list[dict[str, object]] = [{} for _ in range(dist.get_world_size())]
     dist.all_gather_object(gathered, values)
@@ -465,7 +447,7 @@ def assert_rank_uniform(value: Any, *, group: dist.ProcessGroup | None, label: s
         return
 
     digest = _value_digest(value)
-    if agree_across_ranks(digest, group=group).agreed:
+    if agree_across_ranks(digest, group=group):
         return
     digests: list[str | None] = [None] * world
     dist.all_gather_object(digests, digest, group=group)

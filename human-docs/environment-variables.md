@@ -60,10 +60,15 @@ warning and falls back to the default.
   `DIST_FS_PROBE_TIMEOUT_SECONDS` when the multi-node startup probe refuses a
   mount you declared shared.
 - **NVL72:** `NVLINK_DOMAIN_SIZE=72`, since the NVLink domain spans the rack.
+- **Dense SFT, DPO or SMPO launch:** `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+  in front of the command, as their examples carry it (`make train` takes it as
+  `EXTRA_DOCKER_ENV="-e PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True"`).
+  Keep it out of a `.env` EP runs also read, since under EP it costs
+  throughput ([Performance](performance.md#levers-that-help)).
 - **One W&B run across restarts:** a fixed `WANDB_RUN_ID` on the whole job, with
   `WANDB_RESUME=allow` ([Monitoring](monitoring.md)).
 - **S3 helpers given a bare key:** `HALO_S3_DEFAULT_BUCKET`.
-- **Dataset map workers:** `HALO_DATASET_NUM_PROC` overrides the default (three
+- **Dataset map and packing workers:** `HALO_DATASET_NUM_PROC` overrides the default (three
   quarters of the CPUs the process may use, at most 64; all but two in
   `prepare_dataset.py`), for example on a memory-tight host.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels) or

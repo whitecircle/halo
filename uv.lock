@@ -1066,7 +1066,6 @@ dependencies = [
     { name = "gradio" },
     { name = "gram-newton-schulz" },
     { name = "huggingface-hub" },
-    { name = "kernels" },
     { name = "liger-kernel" },
     { name = "matplotlib" },
     { name = "mcp" },
@@ -1142,7 +1141,6 @@ requires-dist = [
     { name = "gradio", specifier = ">=6.15.1,<7.0.0" },
     { name = "gram-newton-schulz", git = "https://github.com/Dao-AILab/gram-newton-schulz.git" },
     { name = "huggingface-hub", specifier = ">=1.0.0,<2.0.0" },
-    { name = "kernels", specifier = ">=0.10.4,<0.11.0" },
     { name = "liger-kernel", specifier = ">=0.8.4,<0.9.0" },
     { name = "matplotlib", specifier = ">=3.10.5,<4.0.0" },
     { name = "mcp", specifier = ">=1.30.0,<2.0.0" },
@@ -1406,20 +1404,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
-]
-
-[[package]]
-name = "kernels"
-version = "0.10.5"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "huggingface-hub" },
-    { name = "packaging" },
-    { name = "pyyaml" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/a1/5a/92b08df5ba5e103c59978348fa03d2fd4d6c58573af3fdeb749f6149aca3/kernels-0.10.5.tar.gz", hash = "sha256:a4ce25eb73022b1313f2bb270b494c4679bc71088ff22252bd156d17d38d4973", size = 47493, upload-time = "2025-12-04T09:14:25.612Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/36/8c/3f415326e52a52c8696f22fb112c82c65628c615c84b3b19a6a2ccac47c4/kernels-0.10.5-py3-none-any.whl", hash = "sha256:39936236c5067a0931f1f58b04478b2a36d14e7d93320092aac61d450b40ddc3", size = 40444, upload-time = "2025-12-04T09:14:24.421Z" },
 ]
 
 [[package]]

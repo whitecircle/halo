@@ -33,10 +33,7 @@ from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.buffer_repair import finalize_loaded_model
-from halo.models.attention.backend_setup import (
-    install_fa4_contiguous_dedicated_head_inputs,
-    patch_transformers_flash_varlen_int_seqlen,
-)
+from halo.models.attention.backend_setup import patch_transformers_flash_varlen_int_seqlen
 from halo.models.attention.tree import (
     TREE_ATTN_IMPLEMENTATIONS,
     TREE_FAMILIES,
@@ -293,7 +290,6 @@ def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
 def run(ctx):
     ensure_fa4_kernel_cache_env()
     patch_transformers_flash_varlen_int_seqlen()
-    install_fa4_contiguous_dedicated_head_inputs()
     row = _tree_row(torch.Generator().manual_seed(0))
     table = build_node_table(row[POSITION_COLUMN].cpu(), row[DEPTH_COLUMN].cpu())
     log(f"  row: {len(row['input_ids'])} tokens, {len(table.starts)} nodes, depth {int(row[DEPTH_COLUMN].max())}")

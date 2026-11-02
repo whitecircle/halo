@@ -8,6 +8,8 @@ run minutes in, on a booked multi-GPU host, once the model is already resident:
 * the parallelism shape, built through ``parallelism_config_from_args`` at the topology the file's
   own launch comment declares, with the capability flags its entry script passes;
 * the rollout timeouts, validated against the NCCL watchdog the launch comment documents;
+* the allocator setting the launch lines carry: expandable segments on the dense SFT, DPO and SMPO
+  examples, never on an EP one;
 * the ``batch_rebalance`` train sampler, kept to the base loader and to a processing class whose first
   input a text row carries;
 * against the model's real config (skipped when it is not in the local HF cache — this test never
@@ -60,6 +62,7 @@ from tests.cpu.config.test_examples_parse import (
     parsed_field,
     parser_for,
     script_for,
+    uses_expert_parallelism,
 )
 
 # The repository's standard node, assumed for a config whose comments state no launch width. Every
@@ -69,6 +72,18 @@ DEFAULT_GPUS_PER_NODE = 8
 _NPROC = re.compile(r"--nproc[-_]per[-_]node[= ](\d+)")
 _NNODES = re.compile(r"--nnodes[= ](\d+)")
 _NCCL_MINUTES = re.compile(r"DIST_NCCL_TIMEOUT_MINUTES=(\d+)")
+_EXPANDABLE_SEGMENTS = re.compile(r"PYTORCH_(?:CUDA_)?ALLOC_CONF=\S*expandable_segments:True")
+# The setting as the launcher's env prefix (other assignments may sit between them); placed after the
+# launcher it would be an argument, and the run would not see it.
+_EXPANDABLE_SEGMENTS_PREFIX = re.compile(
+    r"PYTORCH_(?:CUDA_)?ALLOC_CONF=\S*expandable_segments:True\s+(?:\w+=\S*\s+)*(?:python|torchrun|accelerate|halo)\s"
+)
+_HALO_LAUNCH = re.compile(r"\bhalo launch\s")
+_COMMENT_CONTINUATION = re.compile(r"\\\n\s*#\s*")
+_EXPORT_LINE = re.compile(r"\s*#\s*export\s")
+_ALLOCATOR_DOC = "agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments"
+# The methods whose dense runs the allocator setting was measured on (_ALLOCATOR_DOC).
+_EXPANDABLE_SEGMENTS_SCRIPTS = frozenset({"sft.py", "preference/dpo.py", "preference/smpo.py"})
 
 # Parametrization ids: the example's path under examples/, so a failure names the file to open.
 _ID = {"ids": lambda config: config.relative_to(EXAMPLES_ROOT).as_posix()}
@@ -92,6 +107,17 @@ def raw_config(config: Path) -> dict:
 def comment_block(config: Path) -> str:
     """The example's comment lines — where its launch line and its serving contract live."""
     return "\n".join(line for line in config.read_text(encoding="utf-8").splitlines() if line.lstrip().startswith("#"))
+
+
+def launch_commands(config: Path) -> list[str]:
+    """The example's launch commands: comment lines naming an entry script or ``halo launch``, ``\\``
+    continuations folded in.
+
+    Keyed on the entry script rather than the launcher, so prose that names ``torchrun`` is not a command and
+    a wrapped command whose script sits on its continuation line still is.
+    """
+    folded = _COMMENT_CONTINUATION.sub(" ", comment_block(config))
+    return [line for line in folded.splitlines() if "scripts/training/" in line or _HALO_LAUNCH.search(line)]
 
 
 # Only the rollout methods carry an episode budget to check against the watchdog.
@@ -249,6 +275,44 @@ def test_examples_declare_their_launch_width():
     )
 
 
+def test_an_expandable_segments_example_exists():
+    """The EP refusal below reads launch commands through this pattern; one that matches none would refuse nothing."""
+    assert any(_EXPANDABLE_SEGMENTS.search(line) for config in _EXAMPLES for line in launch_commands(config)), (
+        "no example's launch command sets PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True, so the pattern has "
+        "drifted from the spelling the dense examples use"
+    )
+
+
+@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
+def test_example_allocator_setting_follows_expert_parallelism(config):
+    """Dense SFT, DPO and SMPO examples launch with expandable segments; no EP example does.
+
+    On those dense runs the setting lowers peak reserved memory at unchanged throughput, so each of their launch
+    commands carries it as the launcher's env prefix (a reader copies one); under EP it costs throughput, so no EP
+    launch command or ``export`` line sets it, while prose may still name it as the fit-only fix. Other methods and
+    a MoE run without EP are unmeasured, so neither rule binds them. Measurements: ``_ALLOCATOR_DOC``.
+    """
+    commands = launch_commands(config)
+    if uses_expert_parallelism(raw_config(config)):
+        exports = [line for line in comment_block(config).splitlines() if _EXPORT_LINE.match(line)]
+        assert not any(_EXPANDABLE_SEGMENTS.search(line) for line in commands + exports), (
+            f"this EP example launches with expandable_segments, which costs throughput under EP ({_ALLOCATOR_DOC}); "
+            "drop it"
+        )
+        return
+    script = script_for(config)
+    if script not in _EXPANDABLE_SEGMENTS_SCRIPTS:
+        return
+    parsed = parser_for(script).parse_yaml_file(str(config))
+    if has_routed_experts(model_config_for(config, parsed)):
+        return
+    bare = [line for line in commands if not _EXPANDABLE_SEGMENTS_PREFIX.search(line)]
+    assert commands and not bare, (
+        "this dense example's launch commands must start with PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+        f"in front of the launcher ({_ALLOCATOR_DOC}); without it: {bare or 'no launch command found'}"
+    )
+
+
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
 def test_example_parallelism_shape_is_accepted(config):
     """The declared axes must survive ``ParallelismConfig`` at the example's own launch width.
@@ -371,7 +435,7 @@ def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
         return
     parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
     model_config = try_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
-    if (raw.get("expert_parallel_size") or 1) <= 1 and not has_routed_experts(model_config):
+    if not uses_expert_parallelism(raw) and not has_routed_experts(model_config):
         return
     declared = (raw.get("gradient_checkpointing_kwargs") or {}).get("use_reentrant")
     assert declared is not False, (

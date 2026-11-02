@@ -105,11 +105,15 @@ _OWNERSHIP = {
         "_tp_sharded_plain_param_ids",
     ),
     NonFiniteStepGuardMixin: (
+        "_finalize_training",
         "_get_grad_norm",
+        "_hand_over_verdict",
+        "_init_training_state",
         "_install_nonfinite_step_skip",
         "_maybe_log_save_evaluate",
         "_raise_on_nonfinite_weights",
-        "_step_is_finite",
+        "_read_device_verdict",
+        "_record_verdict",
         "get_batch_samples",
     ),
 }
@@ -126,7 +130,14 @@ _SUPER_DELEGATED = {
         "train",
     ),
     EvaluationMixin: ("evaluate", "evaluation_loop"),
-    NonFiniteStepGuardMixin: ("_get_grad_norm", "_maybe_log_save_evaluate", "get_batch_samples", "log"),
+    NonFiniteStepGuardMixin: (
+        "_finalize_training",
+        "_get_grad_norm",
+        "_init_training_state",
+        "_maybe_log_save_evaluate",
+        "get_batch_samples",
+        "log",
+    ),
 }
 
 
@@ -163,6 +174,9 @@ class _BaseTrainer:
     def evaluation_loop(self, *args, **kwargs):
         return "base"
 
+    def _init_training_state(self, *args, **kwargs):
+        return "base"
+
     def _get_grad_norm(self, model, grad_norm=None):
         return "base"
 
@@ -173,6 +187,9 @@ class _BaseTrainer:
         return "base"
 
     def log(self, logs, start_time=None):
+        return "base"
+
+    def _finalize_training(self, *args, **kwargs):
         return "base"
 
 

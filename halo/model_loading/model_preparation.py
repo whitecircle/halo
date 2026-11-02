@@ -20,7 +20,6 @@ from halo.checkpoint.model_card import HUB_TAGS
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import (
-    install_fa4_contiguous_dedicated_head_inputs,
     install_fa4_varlen_softcap_refusal,
     patch_sdpa_for_wide_heads,
     patch_transformers_flash_varlen_int_seqlen,
@@ -154,11 +153,10 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     # sparse layer reads a [T, T] mask, and packed documents leak through the per-layer embedding.
     if model_type_matches(model_config, "qwen4_exp"):
         apply_qwen4_exp_patches(model_config)
-    # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor, its
-    # head_dim-256 forward misreads a head-major q/k, and a softcapped batch that unpads hangs its varlen forward.
+    # Else transformers' 0-dim max_seqlen tensor runs FA4's head_dim-256 varlen kernels on a variant the warm-up does
+    # not compile, and a softcapped batch that unpads reaches its varlen kernels.
     if attn_implementation == "flash_attention_4":
         patch_transformers_flash_varlen_int_seqlen()
-        install_fa4_contiguous_dedicated_head_inputs()
         if fa4_varlen_refusal(model_config):
             install_fa4_varlen_softcap_refusal()
     return resolve_flex_sliding_attn_implementation(model_config, attn_implementation)

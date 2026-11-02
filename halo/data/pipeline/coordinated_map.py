@@ -16,10 +16,11 @@ from collections.abc import Callable
 from typing import Any
 
 import datasets
+import pyarrow as pa
 from datasets import Dataset, DatasetDict, load_from_disk
 from datasets import fingerprint as hf_fingerprint
 from multiprocess.reduction import ForkingPickler
-from trl.data_utils import pack_dataset as _trl_pack_dataset
+from trl.data_utils import _pack_bfd, _pack_wrapped
 
 from halo.data.pipeline.map_cache_key import (
     map_cache_file_name,
@@ -40,6 +41,16 @@ logger = logging.getLogger(__name__)
 
 # The cache dir :func:`scratch_dataset_maps` redirects coordinated operations to, for its block.
 _scratch_cache_dir: str | None = None
+
+# The rows TRL's ``pack_dataset`` packs as one unit: its batched map leaves ``batch_size`` at the datasets default.
+_PACK_BATCH_ROWS = inspect.signature(Dataset.map).parameters["batch_size"].default
+
+# What TRL's ``pack_dataset`` maps over each batch, by strategy.
+_TRL_PACKERS = {
+    "bfd": functools.partial(_pack_bfd, on_seq_length_overflow="truncate"),
+    "bfd_split": functools.partial(_pack_bfd, on_seq_length_overflow="split"),
+    "wrapped": _pack_wrapped,
+}
 
 
 def dataset_num_proc_override() -> int | None:
@@ -368,23 +379,55 @@ def coordinated_map_and_filter(
     return filtered
 
 
+def _pack_batches(batch_starts: pa.Table, rows: Dataset, seq_length: int, strategy: str) -> pa.Table:
+    """The packed rows of each ``_PACK_BATCH_ROWS``-row batch of ``rows`` (arrow-formatted) starting at a
+    ``batch_start``, packed alone as TRL's own map packs it."""
+    packer = _TRL_PACKERS[strategy]
+    starts = batch_starts.column("batch_start").to_pylist()
+    return pa.concat_tables([packer(rows[start : start + _PACK_BATCH_ROWS], seq_length) for start in starts])
+
+
 def coordinated_pack(
     dataset: Dataset,
     seq_length: int,
     strategy: str = "bfd",
     split: str = "train",
+    num_proc: int = DATASET_NUM_PROC,
 ) -> Dataset:
-    """COLLECTIVE: TRL's ``pack_dataset`` under :func:`run_load_rank_first` into a deterministic cache file the
-    other ranks reuse, instead of a corpus copy per rank; ``dataset`` must be on disk for the file to apply."""
-    # Outside the phases: ensure_cache_dir() barriers, which the main rank alone would reach inside them.
-    cache_file_name = os.path.join(ensure_cache_dir(), packed_cache_file_name(dataset, strategy, seq_length, split))
-    return run_load_rank_first(
-        functools.partial(
-            _trl_pack_dataset,
-            dataset,
-            seq_length=seq_length,
-            strategy=strategy,
-            map_kwargs={"cache_file_name": cache_file_name, "load_from_cache_file": True},
-        ),
-        f"packing the {split} split",
+    """COLLECTIVE: TRL's ``pack_dataset`` of ``dataset`` into a deterministic cache file the other ranks reuse
+    (:func:`coordinated_dataset_operation`), instead of a corpus copy per rank. ``num_proc`` workers pack
+    whole batches, so the rows match TRL's single-process pack at any worker count. The packed rows carry no
+    ``attention_mask``: the packing collator, their one consumer, builds its own and drops it."""
+    if strategy not in _TRL_PACKERS:
+        raise ValueError(f"Invalid packing strategy {strategy!r}: TRL packs with one of {sorted(_TRL_PACKERS)}.")
+    operation_name = f"packing the {split} split"
+    documents = dataset.remove_columns("attention_mask") if "attention_mask" in dataset.column_names else dataset
+    cache_file_name = packed_cache_file_name(documents, strategy, seq_length, split)
+    # Workers split the map's input contiguously at any boundary, so its rows are the batches, never the documents.
+    batch_starts = Dataset.from_dict({"batch_start": list(range(0, len(dataset), _PACK_BATCH_ROWS))})
+    num_proc = max(1, min(num_proc, len(batch_starts)))  # no idle worker, and no datasets warning about one
+    pack = functools.partial(
+        _pack_batches, rows=documents.with_format("arrow"), seq_length=seq_length, strategy=strategy
+    )
+    if _maps_in_workers(num_proc):
+        pack = _PickledOnceCallable(pack, None, cache_file_name)
+
+    def pack_rows(**operation_kwargs) -> Dataset:
+        if not len(dataset):  # inside the work, so a rank's empty shard raises on every rank
+            raise ValueError(f"Cannot pack the {split} split: it has no rows.")
+        return batch_starts.with_format("arrow").map(
+            pack, batched=True, batch_size=1, remove_columns=["batch_start"], desc=operation_name, **operation_kwargs
+        )
+
+    packed = coordinated_dataset_operation(
+        pack_rows, dataset=dataset, operation_name=operation_name, num_proc=num_proc, cache_file_name=cache_file_name
+    )
+    # TRL's own restore: the input's format, its format columns joined by the ones the packer added.
+    source_format = documents.format
+    added = [name for name in packed.column_names if name not in documents.column_names]
+    return packed.with_format(
+        source_format["type"],
+        columns=source_format["columns"] + added,
+        output_all_columns=source_format["output_all_columns"],
+        **source_format["format_kwargs"],
     )

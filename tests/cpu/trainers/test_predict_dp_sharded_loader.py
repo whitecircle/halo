@@ -45,7 +45,7 @@ class _TpHost(DataParallelLoaderMixin, EvaluationMixin):
         self.data_collator = torch.tensor
         self._dataset_presharded = False
         self.parallelism_config = SimpleNamespace(
-            data_parallel_size=WORLD // TP, get_data_parallel_rank=lambda: rank // TP
+            is_cp_mode=False, data_parallel_size=WORLD // TP, get_data_parallel_rank=lambda: rank // TP
         )
         dp_rank_of = [r // TP for r in range(WORLD)]
         self._dp_metric_gather_scope = (dp_representative_ranks(dp_rank_of), WORLD)

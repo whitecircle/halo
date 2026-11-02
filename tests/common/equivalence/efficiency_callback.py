@@ -245,7 +245,7 @@ class AttentionWork:
         self.layout = None
         self.documents: tuple[int, ...] = ()
 
-    def drain_attention_flops(self) -> tuple[float, int]:
+    def drain_step_work(self) -> tuple[float, int]:
         documents, self.documents = self.documents, ()
         if self.layout is None or not documents:
             return 0.0, 0

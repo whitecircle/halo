@@ -17,7 +17,13 @@ from halo.data.preprocessed.shard_index import (
     IncompatiblePreprocessedDataset,
     reject_incompatible_stamp,
 )
-from halo.data.sources.paths import METADATA_FILE, hub_repo_id, parse_dataset_source, reject_ambiguous_hub_source
+from halo.data.sources.paths import (
+    METADATA_FILE,
+    hub_repo_id,
+    parse_dataset_source,
+    reject_ambiguous_hub_source,
+    s3_object_key,
+)
 from halo.data.sources.s3_dataset_store import read_control_json_with_cache
 from halo.model_loading.tokenizer_backend import TokenizerBackend
 from halo.model_loading.tokenizer_setup import load_chat_template
@@ -252,7 +258,7 @@ def _read_metadata_payload(path: str, *, s3_outage_reads_absent: bool) -> dict[s
     if source_type == "s3":
         # Mirrored: an outage serves the local mirror, so a warm-cache run still reads as preprocessed.
         try:
-            return read_control_json_with_cache(bucket, f"{key.rstrip('/')}/{METADATA_FILE}")
+            return read_control_json_with_cache(bucket, s3_object_key(key, METADATA_FILE))
         except FileNotFoundError:
             return None
         except ValueError:

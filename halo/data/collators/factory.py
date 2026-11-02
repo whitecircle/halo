@@ -3,14 +3,18 @@ options call for."""
 
 import logging
 
-from halo.data.collators.collator_rules import reject_unsupported_collator_options
+from halo.data.collators.collator_rules import reject_unsupported_collator_options, supports_one_document_varlen_set
 from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlattening,
     DataCollatorWithFlatteningAndCompletionMask,
     DataCollatorWithPacking,
 )
-from halo.data.collators.padded import DataCollatorForCausalLMWithPadding, DataCollatorForCompletionOnlyLM
+from halo.data.collators.padded import (
+    DataCollatorForCausalLMWithPadding,
+    DataCollatorForCompletionOnlyLM,
+    DataCollatorForLanguageModelingWithVarlen,
+)
 from halo.data.turn_markers import resolve_eos_token_ids
 from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
 from halo.models.segment_markers import segment_markers_for
@@ -34,10 +38,17 @@ def select_data_collator(
     keeps_packed_rows: bool = False,
     allow_cross_document_linear_attention: bool = False,
     per_device_eval_batch_size: int = 0,
+    one_document_varlen: bool = False,
 ):
     """The data collator matching the training configuration, ``None`` for TRL's own; raises on an option
     combination no collator can serve. ``model_config`` supplies the eos set that ends assistant turns,
-    which templates delimiting turns with role markers (GLM-4) need."""
+    which templates delimiting turns with role markers (GLM-4) need.
+
+    ``one_document_varlen`` hands a one-document batch its varlen set where the model takes it
+    (:func:`~halo.data.collators.collator_rules.supports_one_document_varlen_set`), outside PP
+    (``keeps_packed_rows``), whose stages build their own; the CP routes never take it, Ulysses handing the kernel
+    its own ``cu_seqlens``. TRL's collator then comes from here, with the set. Only for a caller whose batches reach
+    this model alone: the set moves every flash model a batch reaches onto the varlen kernel."""
     reject_unsupported_collator_options(
         tokenizer,
         padding_free=padding_free,
@@ -60,11 +71,13 @@ def select_data_collator(
         "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config),
     }
     last_only = ", last-only" if train_on_last_assistant_only else ""
+    one_document = one_document_varlen and not keeps_packed_rows and supports_one_document_varlen_set(model_config)
     flat_markers = {"return_seq_idx": markers.seq_idx, "return_flash_attn_kwargs": True}
     packed_markers = {
         "return_seq_idx": markers.seq_idx,
         "return_flash_attn_kwargs": markers.cu_seq_lens,
         "flash_varlen_kwargs": is_flash_attn_implementation(effective_attn_implementation(model_config)),
+        "one_document_varlen": one_document,
     }
     if use_context_parallel and train_on_completions_only:
         # pad_to_multiple_of keeps seqs divisible by cp_size.
@@ -89,7 +102,12 @@ def select_data_collator(
         collator = DataCollatorWithPacking(tokenizer=tokenizer, **packed_markers)
     elif train_on_completions_only:
         prefix, name = "📝", f"DataCollatorForCompletionOnlyLM{last_only}"
-        collator = DataCollatorForCompletionOnlyLM(**completion_kwargs)
+        collator = DataCollatorForCompletionOnlyLM(**completion_kwargs, one_document_varlen=one_document)
+    elif one_document:
+        prefix, name = "ℹ️", "DataCollatorForLanguageModelingWithVarlen (TRL's, with the one-document varlen set)"
+        collator = DataCollatorForLanguageModelingWithVarlen(
+            pad_token_id=tokenizer.pad_token_id, pad_to_multiple_of=pad_to_multiple_of
+        )
     else:
         prefix, name, collator = "ℹ️", "None (default TRL behavior)", None
     if isinstance(collator, DataCollatorWithPacking | DataCollatorWithFlattening):

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """CPU tests for where a softcapped model (Gemma 2) trains on FlashAttention-4, per size, row shape and GPU.
 
-FA4 takes a softcap on its dense call only. Its head_dim-256 kernel refuses one outright (Gemma 2 2B and 9B), and its
-varlen kernels refuse one at any width (the backward asserts, and on B300 the forward does not finish): a packed,
-padding-free or padded training batch unpads to that call, so
+FA4 trains a softcap on its dense call only. Its head_dim-256 backward refuses one outright (Gemma 2 2B and 9B), and a
+softcap stays off its varlen kernels at any width (not validated there; on B300 their forward with one did not
+finish): a packed, padding-free or padded training batch unpads to that call, so
 Gemma 2 27B (head_dim 128) trains on FA4 only one unpadded row per batch at a time, evaluation batches included. Every
 other row shape takes FA2, chosen before the load; a pinned FA4 there is refused with the remedy; a host with no FA2
 build refuses rather than fall back to a kernel that drops the softcap. Whatever still reaches FA4's varlen entry
@@ -158,9 +158,9 @@ def test_the_packed_varlen_sweep_runs_each_dense_family_on_its_packed_sft_backen
 
 
 def test_a_softcapped_forward_only_companion_takes_the_padded_scripts_off_fa4():
-    """A distillation teacher only forwards, but on B300 FA4's varlen forward with a softcap does not finish, so a
-    softcapped teacher moves the shared request off the loader's pick as a softcapped policy does; the softcap then
-    lands the teacher on FA2."""
+    """A distillation teacher only forwards, but a softcap stays off FA4's varlen forward too, so a softcapped teacher
+    moves the shared request off the loader's pick as a softcapped policy does; the softcap then lands the teacher on
+    FA2."""
     with _on("blackwell"):
         assert (
             default_padded_attn_implementation(
@@ -296,7 +296,10 @@ def test_the_route_names_the_kernel_limit():
     """The warning is the only record of why a run lost FA4."""
     with _on("blackwell"), patch.object(selection.logger, "warning") as warn:
         _sft_backend(_gemma2("27b"), "packed")
-    assert any("varlen kernels take no attention logit softcapping" in call.args[0] for call in warn.call_args_list)
+    assert any(
+        "varlen kernels are not validated with attention logit softcapping" in call.args[0]
+        for call in warn.call_args_list
+    )
 
 
 # --- the collator rule: a pinned FA4 ----------------------------------------------------------------------------
@@ -311,7 +314,9 @@ def _resolved_config(size: str, attn_impl: str) -> Gemma2Config:
 @pytest.mark.parametrize("rows", ["unpacked-bs4", "packed", "padding-free"])
 def test_fa4_on_varlen_rows_of_a_softcapped_model_is_refused_with_the_remedy(rows):
     packing, padding_free, batch_size = _SFT_ROWS[rows]
-    with pytest.raises(ValueError, match="varlen kernels, which take no attention logit softcapping") as e:
+    with pytest.raises(
+        ValueError, match="varlen kernels, which are not validated with attention logit softcapping"
+    ) as e:
         select_data_collator(
             tokenizer=types.SimpleNamespace(pad_token_id=0, eos_token_id=1, padding_side="right"),
             train_on_completions_only=False,
@@ -419,9 +424,8 @@ def cute(monkeypatch) -> _RecordingCute:
     (and restored afterwards)."""
     fake = _RecordingCute()
     monkeypatch.setitem(sys.modules, "flash_attn.cute", fake)
-    # `import flash_attn.cute` reads the package attribute first, which a real import earlier in the process set.
-    if (package := sys.modules.get("flash_attn")) is not None:
-        monkeypatch.setattr(package, "cute", fake, raising=False)
+    # ``import flash_attn.cute`` reads the package attribute first, which an earlier real import leaves bound.
+    monkeypatch.setattr(pytest.importorskip("flash_attn"), "cute", fake, raising=False)
     for name in _FLASH_CACHE_GLOBALS:
         monkeypatch.setattr(flash_utils, name, getattr(flash_utils, name))
     flash_utils._loaded_implementation = None
@@ -505,7 +509,6 @@ def test_every_softcapped_fa4_load_installs_the_refusal(monkeypatch, config, att
     model, a padded script's pinned policy or a frozen teacher, takes the refusal; no other load does."""
     calls = []
     monkeypatch.setattr(model_preparation, "install_fa4_varlen_softcap_refusal", lambda: calls.append(1))
-    monkeypatch.setattr(model_preparation, "install_fa4_contiguous_dedicated_head_inputs", lambda: None)
     monkeypatch.setattr(model_preparation, "patch_transformers_flash_varlen_int_seqlen", lambda: None)
     model_preparation.apply_family_patches(config, attn_implementation)
     assert bool(calls) is installs

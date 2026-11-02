@@ -1,7 +1,7 @@
 # Qwen3.5-9B (natively multimodal) — document-VQA SFT on Docmatix (rendered PDF pages + QA turns).
 # Small subset (~0.64 GB, 1,900 docs) — doubles as the quick VLM-path validation run; swap the
 # dataset for `HuggingFaceM4/Docmatix:images` (1.27M docs) for a real training run.
-# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+# Launch: PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3.5-9B

@@ -10,7 +10,10 @@ real gloo groups:
    reading different shard indexes raise, while identical copies whose HF fingerprints differ (a
    data file written at another mtime) load;
 2. a whole-source load or a pack that fails on the rank running it first raises its cause on every
-   rank, under a shared and a per-node input filesystem, and the waiting rank never repeats the work.
+   rank, under a shared and a per-node input filesystem, and the waiting rank never repeats the work;
+3. a Hub source is resolved once per input scope, on two nodes of two ranks: the scope's other ranks, on its
+   load rank's node or another, open that rank's copy, the same rows and fingerprint, and a rank that cannot
+   open it raises on every rank.
 
     python tests/cpu/data/test_multinode_dataset_loading.py
 """
@@ -18,6 +21,7 @@ real gloo groups:
 import datetime
 import json
 import os
+import pickle
 
 import pytest
 from accelerate import PartialState
@@ -30,6 +34,8 @@ from halo.data.sources import loading
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
+# Two nodes of two ranks: every input scope holds a follower, and per-node scopes hold copies of their own.
+SCOPED_WORLD_SIZE, RANKS_PER_NODE = 4, 2
 
 # A diverged load ends in a stuck collective; the suite must not sit on one.
 PG_TIMEOUT_SEC = 30
@@ -38,6 +44,8 @@ PG_TIMEOUT_SEC = 30
 PER_NODE_ENV = {"LOCAL_RANK": "0", "LOCAL_WORLD_SIZE": "1", "DIST_SHARED_FILESYSTEM": "0"}
 
 SAVED_SOURCE = "./ds"
+# Hub-shaped, so the load takes the Hub path; the tests hand it the saved copy under the shared directory.
+HUB_SOURCE = "org/corpus"
 ROWS = [f"row {i}" for i in range(12)]
 EDITED_ROWS = [*ROWS[:5], "row 5 (re-pushed)", *ROWS[6:]]
 
@@ -96,35 +104,71 @@ def _load_worker(rank: int, tmp_dir: str, source: str, data_parallel_size: int) 
     _record(tmp_dir, rank, json.dumps(outcome))
 
 
+def _hub_copy(tmp_dir, node: int) -> str:
+    return os.path.join(tmp_dir, f"hub_copy_node{node}")
+
+
+def _hub_load_worker(rank: int, tmp_dir: str, follower_open_fails: bool, ranks_per_node: int) -> None:
+    """Load a Hub-shaped source that resolves to this rank's node's saved copy; count the resolutions per rank."""
+    os.environ.update(LOCAL_RANK=str(rank % ranks_per_node), LOCAL_WORLD_SIZE=str(ranks_per_node))
+    PartialState()
+
+    def resolve_from_the_hub(path):
+        _count_call(tmp_dir, rank, "source_load")
+        return Dataset.load_from_disk(_hub_copy(tmp_dir, rank // ranks_per_node))
+
+    loading.load_dataset_from_source = resolve_from_the_hub
+    if follower_open_fails and rank == 1:
+
+        def unreadable(payload):
+            raise FileNotFoundError("the load rank's cache file is not on this node")
+
+        loading.pickle = type("Pickle", (), {"dumps": staticmethod(pickle.dumps), "loads": staticmethod(unreadable)})
+    try:
+        ds, _ = loading._load_dataset_from_path(HUB_SOURCE, None)
+        outcome = {
+            "train": ds["train"][:]["text"],
+            "fingerprint": ds["train"]._fingerprint,
+            "files": sorted(entry["filename"] for entry in ds["train"].cache_files),
+        }
+    except BaseException as exc:
+        outcome = {"error": f"{type(exc).__name__}: {exc}"}
+    _record(tmp_dir, rank, json.dumps(outcome))
+
+
 def _pack_worker(rank: int, tmp_dir: str) -> None:
     """Pack on every rank, the pack raising on the main rank only."""
     PartialState()
 
-    def pack_failing_on_main(dataset, **kwargs):
+    real_pack_batches = coordinated_map_module._pack_batches
+
+    def pack_failing_on_main(*args, **kwargs):
         _count_call(tmp_dir, rank, "pack")
         if rank == 0:
             raise OSError("No space left on device")
-        return dataset
+        return real_pack_batches(*args, **kwargs)
 
-    coordinated_map_module._trl_pack_dataset = pack_failing_on_main
+    coordinated_map_module._pack_batches = pack_failing_on_main
     try:
-        coordinated_map_module.coordinated_pack(Dataset.from_dict({"input_ids": [[1, 2], [3]]}), seq_length=4)
+        coordinated_map_module.coordinated_pack(
+            Dataset.from_dict({"input_ids": [[1, 2], [3]]}), seq_length=4, num_proc=1
+        )
         outcome = "NO RAISE"
     except BaseException as exc:
         outcome = f"{type(exc).__name__}: {exc}"
     _record(tmp_dir, rank, outcome)
 
 
-def _run(tmp_path, worker, *args, env=None) -> list[str]:
+def _run(tmp_path, worker, *args, env=None, world_size: int = WORLD_SIZE) -> list[str]:
     run_gloo_ranks(
         worker,
-        WORLD_SIZE,
+        world_size,
         str(tmp_path),
         *args,
         pg_timeout=datetime.timedelta(seconds=PG_TIMEOUT_SEC),
         env={"HF_DATASETS_CACHE": str(tmp_path / "hf_datasets"), **(env or {})},
     )
-    return [(tmp_path / f"result_{rank}.txt").read_text() for rank in range(WORLD_SIZE)]
+    return [(tmp_path / f"result_{rank}.txt").read_text() for rank in range(world_size)]
 
 
 def _loads(tmp_path, source: str = SAVED_SOURCE, data_parallel_size: int = 1, env=None) -> list[dict]:
@@ -237,6 +281,41 @@ def test_a_node_whose_load_fails_takes_every_node_down(tmp_path):
     assert outcomes[0]["error"].startswith("RuntimeError"), outcomes[0]
     assert "Could not load dataset" in outcomes[0]["error"], f"node 0 was not told the cause: {outcomes[0]}"
     assert _calls(tmp_path, 0, "source_load") == _calls(tmp_path, 1, "source_load") == 1
+
+
+def _hub_loads(
+    tmp_path, *, follower_open_fails: bool = False, env=None, world_size: int = WORLD_SIZE, ranks_per_node: int
+) -> list[dict]:
+    for node in range(world_size // ranks_per_node):
+        Dataset.from_dict({"text": ROWS}).save_to_disk(_hub_copy(tmp_path, node))
+    outcomes = _run(tmp_path, _hub_load_worker, follower_open_fails, ranks_per_node, env=env, world_size=world_size)
+    return [json.loads(outcome) for outcome in outcomes]
+
+
+@pytest.mark.parametrize("shared", [True, False], ids=["shared", "per-node"])
+def test_a_hub_source_is_resolved_once_per_input_scope(tmp_path, shared):
+    """Shared input filesystem: rank 0 resolves the source, and every other rank, on its node or the other, opens
+    rank 0's files. Per-node: each node's local rank 0 resolves it into that node's copy, which the node's
+    follower opens, not the other node's."""
+    env = None if shared else {"DIST_SHARED_FILESYSTEM": "0"}
+    outcomes = _hub_loads(tmp_path, env=env, world_size=SCOPED_WORLD_SIZE, ranks_per_node=RANKS_PER_NODE)
+
+    for rank, outcome in enumerate(outcomes):
+        load_rank = 0 if shared else rank - rank % RANKS_PER_NODE
+        assert outcome.get("train") == ROWS, f"rank {rank}: {outcome}"
+        assert outcome["files"] == outcomes[load_rank]["files"] != [], f"rank {rank} opened another copy: {outcomes}"
+        assert outcome["fingerprint"] == outcomes[load_rank]["fingerprint"], f"rank {rank}: {outcomes}"
+        resolutions = 1 if rank == load_rank else 0
+        assert _calls(tmp_path, rank, "source_load") == resolutions, f"rank {rank} resolved the Hub source"
+    assert (outcomes[0]["files"] == outcomes[2]["files"]) is shared, f"the nodes' copies: {outcomes}"
+
+
+def test_a_follower_that_cannot_open_the_load_ranks_copy_raises_everywhere(tmp_path):
+    outcomes = _hub_loads(tmp_path, follower_open_fails=True, ranks_per_node=WORLD_SIZE)
+
+    assert outcomes[1]["error"].startswith("FileNotFoundError"), outcomes[1]
+    assert outcomes[0]["error"].startswith("RuntimeError"), outcomes[0]
+    assert "not on this node" in outcomes[0]["error"], f"rank 0 was not told the cause: {outcomes[0]}"
 
 
 def test_a_failed_pack_raises_everywhere_and_is_not_repeated(tmp_path):

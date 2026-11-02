@@ -24,6 +24,7 @@ from halo.models.module_tree import embedding_module
 from halo.models.param_roles import EMBEDDING_HEAD_MARKERS
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.optimizers.param_groups import decay_groups
+from halo.optimizers.step_skip import DeviceStepSkipMixin
 from halo.optimizers.stochastic_rounding import (
     SR_BLOCK_SIZE,
     require_param_names,
@@ -69,19 +70,25 @@ def _momentum_nesterov_kernel(
     u_ptr,
     momentum_val,
     n_elements,
+    skip_ptr,
+    HAS_SKIP: tl.constexpr,
     NESTEROV: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused momentum update and Nesterov lookahead for one param."""
+    """Fused momentum update and Nesterov lookahead for one param. ``skip_ptr`` (with ``HAS_SKIP``) is the step's
+    skip flag (:mod:`~halo.optimizers.step_skip`): set, the momentum is not written."""
     pid = tl.program_id(0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
+    m_mask = mask
+    if HAS_SKIP:
+        m_mask = mask & (tl.load(skip_ptr) == 0)
 
     m = tl.load(m_ptr + offsets, mask=mask).to(tl.float32)
     g = tl.load(g_ptr + offsets, mask=mask).to(tl.float32)
 
     m = momentum_val * m + g
-    tl.store(m_ptr + offsets, m.to(tl.bfloat16), mask=mask)
+    tl.store(m_ptr + offsets, m.to(tl.bfloat16), mask=m_mask)
 
     if NESTEROV:  # noqa: SIM108  tl.constexpr branch in a @triton.jit kernel; keep explicit for codegen
         u = momentum_val * m + g
@@ -97,13 +104,18 @@ def _weight_decay_update_kernel(
     decay_factor,
     n_elements,
     seed,
+    skip_ptr,
+    HAS_SKIP: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
     """Fused ``p = p * decay - u`` with a stochastically rounded write: the orthogonalized update is ~lr,
-    below the bf16 weight ULP, so nearest rounding would truncate it to zero."""
+    below the bf16 weight ULP, so nearest rounding would truncate it to zero. ``skip_ptr`` (with ``HAS_SKIP``)
+    is the step's skip flag (:mod:`~halo.optimizers.step_skip`): set, the weight is not written."""
     pid = tl.program_id(0)
     offsets = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offsets < n_elements
+    if HAS_SKIP:
+        mask = mask & (tl.load(skip_ptr) == 0)
 
     p = tl.load(p_ptr + offsets, mask=mask).to(tl.float32)
     u = tl.load(u_ptr + offsets, mask=mask).to(tl.float32)
@@ -177,8 +189,9 @@ def _resolve_adjust_lr_fn(adjust_lr):
     )
 
 
-class Muon(UpstreamMuon):
-    """Upstream Muon with the fused Triton matrix step and a state dict that carries the scalar leg.
+class Muon(DeviceStepSkipMixin, UpstreamMuon):
+    """Upstream Muon with the fused Triton matrix step and a state dict that carries the scalar leg. A device skip
+    flag (:meth:`skip_next_step_if`) reaches both legs.
 
     The class name is load-bearing: an optimizer shard records ``type(optimizer).__name__`` in its
     ``OptimizerStateFingerprint``, and a resume whose recorded class differs is rejected.
@@ -191,15 +204,26 @@ class Muon(UpstreamMuon):
             # Upstream's torch.compile around the scalar step only adds graph breaks around AdamWBF16's kernel.
             self._compiled_scalar_step = self.scalar_optimizer.step
 
+    def skip_next_step_if(self, flag: torch.Tensor) -> None:
+        super().skip_next_step_if(flag)
+        if self.scalar_optimizer is not None:
+            self.scalar_optimizer.skip_next_step_if(flag)
+
+    def settle_step(self, skipped: bool) -> None:
+        super().settle_step(skipped)
+        if self.scalar_optimizer is not None:
+            self.scalar_optimizer.settle_step(skipped)
+
     def _muon_step(self, param_groups: list[dict]) -> None:
         """The matrix step: fused momentum, Newton-Schulz per shape group, fused weight decay and update."""
+        skip = self._take_step_skip(param_groups)
         for group in param_groups:
             group_params, sr_seeds = _collect_params_with_sr_seeds(self.state, group["params"], group["param_names"])
             if not group_params:
                 continue
             adjust_lr_fn = _resolve_adjust_lr_fn(group.get("adjust_lr", "rms_norm"))
             ns_inputs_by_shape, shape_indices, split_metadata = get_newton_schulz_inputs_from_gradients(
-                self._nesterov_updates(group_params, group["momentum"], group["nesterov"]),
+                self._nesterov_updates(group_params, group["momentum"], group["nesterov"], skip),
                 group.get("param_split_fn", None),
             )
             orthogonalized_by_shape = self._orthogonalize_by_shape(ns_inputs_by_shape)
@@ -226,12 +250,17 @@ class Muon(UpstreamMuon):
                     decay_factor,
                     n,
                     seed,
+                    skip if skip is not None else p_local,
+                    HAS_SKIP=skip is not None,
                     BLOCK_SIZE=SR_BLOCK_SIZE,
                 )
                 torch.autograd.graph.increment_version(p)  # the raw-pointer store above is invisible to ATen
 
-    def _nesterov_updates(self, params: list, momentum: float, nesterov: bool) -> list[torch.Tensor]:
-        """Advance each param's momentum buffer by its gradient and return its (Nesterov) update."""
+    def _nesterov_updates(
+        self, params: list, momentum: float, nesterov: bool, skip: torch.Tensor | None
+    ) -> list[torch.Tensor]:
+        """Advance each param's momentum buffer by its gradient, unless ``skip`` is set, and return its (Nesterov)
+        update."""
         updates = []
         for p in params:
             m_local = to_local(self.state[p]["momentum"])
@@ -243,6 +272,8 @@ class Muon(UpstreamMuon):
                 u.view(-1),
                 momentum,
                 n,
+                skip if skip is not None else m_local,
+                HAS_SKIP=skip is not None,
                 NESTEROV=nesterov,
                 BLOCK_SIZE=SR_BLOCK_SIZE,
             )

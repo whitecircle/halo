@@ -12,50 +12,25 @@ from functools import cached_property
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 from accelerate.utils import is_peft_model
 
 from halo.distributed.context_parallel.config import CPConfig, CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
-from halo.distributed.context_parallel.sequence_chunks import (
-    cp_local_targets,
-    cp_shift_against_full_labels,
-    split_sequence_for_cp,
-)
+from halo.distributed.context_parallel.sequence_chunks import cp_local_targets, split_sequence_for_cp
 from halo.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
-from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, chunked_token_sum, cross_entropy_sum, logit_chunk_rows
 from halo.log import warn_once
 from halo.model_loading.liger.cross_entropy import FusedHeadLossUnavailable, fused_head_loss
 from halo.model_loading.liger.dispatch import LIGER_CP_FUSED_LOSS_ATTR
-from halo.models.config_access import get_config_field
+from halo.models.config_access import config_sources, get_config_field
 from halo.models.moe.config_fields import require_router_aux_loss_coef
 from halo.models.unwrapping import base_transformers_model, strip_cp_attention_level, unwrap_framework_wrappers
 from halo.runtime.ranks import is_global_main_process
 from halo.subclass_registry import swap_registered_modules
 
 logger = logging.getLogger(__name__)
-
-
-def _reject_left_padding(attention_mask) -> None:
-    """Raise on a left-padded row: the Ulysses path drops the mask and attends causally, so it tolerates only
-    trailing pads, while leading ones would be attended by every real token.
-
-    Checked on every forward (one device-to-host sync): under a collator that left-pads prompts, a batch whose
-    prompts happen to be equal-length certifies nothing about the next one.
-    """
-    if attention_mask is None:
-        return
-    # A left-padded row starts with 0 and contains a 1 later; an all-zero row carries no tokens.
-    starts_with_pad, has_tokens = torch.stack([(attention_mask[:, 0] == 0).any(), attention_mask.any()]).cpu().tolist()
-    if starts_with_pad and has_tokens:
-        raise ValueError(
-            "Context Parallelism received a LEFT-padded batch (row starts with attention_mask == 0). "
-            "The CP attention path ignores the mask and runs dense causal attention, so every real "
-            "token would attend the leading pads and the loss would differ from the same batch "
-            "without CP. Use right padding (tokenizer.padding_side='right')."
-        )
 
 
 def _plain_named_items(items):
@@ -74,8 +49,9 @@ class UlyssesModel(nn.Module):
 
     Construction swaps every supported attention layer for its Ulysses wrapper. ``forward`` splits the
     inputs along the sequence axis and computes the loss itself, so the boundary token between two chunks
-    is scored. ``named_parameters`` and ``state_dict`` drop the ``original_attention`` level, so
-    checkpoints keep the hub layout.
+    is scored. Its attention ignores the mask, so its inputs carry trailing pads only, which the CP trainers'
+    loaders enforce on the host (:class:`LeftPaddingGuard`). ``named_parameters`` and ``state_dict`` drop the
+    ``original_attention`` level, so checkpoints keep the hub layout.
     """
 
     # Toolkit unwrap protocol (halo.models.unwrapping.unwrap_toolkit_wrappers).
@@ -117,7 +93,7 @@ class UlyssesModel(nn.Module):
         with self._captured_backbone_output(head_loss is not None) as captured:
             outputs = self.model(
                 input_ids=local_input_ids,
-                attention_mask=local_attention_mask,
+                attention_mask=self._backbone_attention_mask(local_attention_mask, kwargs),
                 labels=None,
                 position_ids=local_position_ids,
                 **kwargs,
@@ -162,7 +138,7 @@ class UlyssesModel(nn.Module):
         bump_forward_generation()
         return backbone(
             input_ids=local_input_ids,
-            attention_mask=local_attention_mask,
+            attention_mask=self._backbone_attention_mask(local_attention_mask, kwargs),
             position_ids=local_position_ids,
             use_cache=False,
             **kwargs,
@@ -230,8 +206,6 @@ class UlyssesModel(nn.Module):
                 "supply. Pass input_ids, or train without CP."
             )
         batch_size, seq_len = input_ids.shape
-        _reject_left_padding(attention_mask)
-
         local_input_ids = split_sequence_for_cp(input_ids, self.cp_config)
         local_attention_mask = (
             split_sequence_for_cp(attention_mask, self.cp_config) if attention_mask is not None else None
@@ -242,6 +216,19 @@ class UlyssesModel(nn.Module):
             )
         local_position_ids = split_sequence_for_cp(position_ids, self.cp_config)
         return local_input_ids, local_attention_mask, local_position_ids
+
+    def _backbone_attention_mask(self, attention_mask: torch.Tensor | None, kwargs: dict) -> torch.Tensor | None:
+        """The chunk's ``attention_mask`` where the wrapped forward reads it outside attention, else ``None``: the
+        Ulysses attention never reads it, while transformers' flash mask construction reads it back to the host
+        (``flash_attention_mask``'s ``.all()``). The router aux loss keeps padding out of its token statistics, so a
+        forward that computes it (``output_router_logits``, from the call or any config level) keeps the mask."""
+        router_logits = kwargs.get("output_router_logits")
+        if router_logits is None:
+            config = getattr(base_transformers_model(self.model), "config", None)
+            router_logits = config is not None and any(
+                getattr(source, "output_router_logits", False) for source in config_sources(config)
+            )
+        return attention_mask if router_logits else None
 
     @cached_property
     def _warned(self) -> set[str]:
@@ -312,18 +299,15 @@ class UlyssesModel(nn.Module):
 
     def _compute_cp_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Causal LM loss of this rank's chunk against the full ``labels``: a non-final rank's last logit predicts
-        the next chunk's first label (:meth:`_cp_mean` weighs it)."""
+        the next chunk's first label (:meth:`_cp_mean` weighs it), the final rank's last targets nothing. The fp32
+        cross-entropy runs over checkpointed chunks of the logits, as the pipeline's last stage scores them, so no
+        fp32 copy of the chunk's logits plane is built."""
         vocab_size = logits.size(-1)
-        shift_logits, shift_labels = cp_shift_against_full_labels(
-            logits, labels, self.cp_config.cp_rank, self.cp_config.cp_size
+        targets = cp_local_targets(labels, self.cp_config.cp_rank, self.cp_config.cp_size).reshape(-1)
+        local_loss_sum = chunked_token_sum(
+            cross_entropy_sum, logits.reshape(-1, vocab_size), targets, logit_chunk_rows(vocab_size)
         )
-
-        # fp32 CE like HF's ForCausalLMLoss / Liger FLCE: bf16 softmax+CE rounds differently.
-        shift_logits = shift_logits.reshape(-1, vocab_size).float()
-        shift_labels = shift_labels.reshape(-1)
-
-        local_loss_sum = F.cross_entropy(shift_logits, shift_labels, ignore_index=LABEL_IGNORE_INDEX, reduction="sum")
-        return self._cp_mean(local_loss_sum, shift_labels)
+        return self._cp_mean(local_loss_sum, targets)
 
     def _cp_mean(self, local_loss_sum: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         """This rank's loss term from its chunk's summed loss over ``targets``: the sum over the group's token count

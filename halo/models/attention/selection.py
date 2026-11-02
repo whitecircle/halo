@@ -57,7 +57,7 @@ FLASH_SINK_PARAM_NAMES = ("s_aux", "learnable_sink")
 
 # The widest head FA2 takes; FA4's SM100 kernel overflows tensor memory past it.
 FLASH_MAX_HEAD_DIM = 256
-# The query/key head width flash-attn-4 routes to its dedicated SM100/SM110 2-CTA kernel.
+# The query/key head width flash-attn-4 trains on its dedicated SM100/SM110 2-CTA backward kernel.
 FA4_DEDICATED_HEAD_DIM = 256
 # transformers' switch for its flash kernels' ``deterministic`` argument; ``full_determinism`` sets it.
 FLASH_ATTENTION_DETERMINISTIC_ENV = "FLASH_ATTENTION_DETERMINISTIC"
@@ -156,7 +156,7 @@ def has_attention_logit_softcap(model_config) -> bool:
 
 
 def uses_fa4_dedicated_head_dim(model_config) -> bool:
-    """Whether the attention runs FA4's dedicated head_dim-256 kernel: a :data:`FA4_DEDICATED_HEAD_DIM`-wide
+    """Whether FA4 trains the attention on its dedicated head_dim-256 backward: a :data:`FA4_DEDICATED_HEAD_DIM`-wide
     query/key head, MLA's nope + RoPE split counted (GLM-4.7-Flash's 192 + 64). The value width is not read:
     transformers' flash path pads values up to the query/key width."""
     return declares_attention_heads(model_config) and resolve_qk_v_head_dims(model_config)[0] == FA4_DEDICATED_HEAD_DIM
@@ -165,8 +165,8 @@ def uses_fa4_dedicated_head_dim(model_config) -> bool:
 def fa4_dedicated_kernel_refusal(model_config) -> str | None:
     """Why FA4's dedicated head_dim-256 kernel does not train this model's attention, or ``None`` where FA4 runs it on
     another kernel or the dedicated one trains it: the kernel asserts on Gemma 2's softcap and Gemma 3's sliding
-    windows, and multi-head latent attention (:func:`has_latent_attention`, GLM-4.7-Flash) trains on it to step-2
-    gradients about 4x FA2's, though the kernel replays FA2 exactly on that run's own tensors."""
+    windows, and multi-head latent attention (:func:`has_latent_attention`, GLM-4.7-Flash) trained on it to step-2
+    gradients about 4x FA2's on 4.0.0b16, though the kernel replayed FA2 exactly on that run's own tensors."""
     if not uses_fa4_dedicated_head_dim(model_config):
         return None
     if has_attention_logit_softcap(model_config):
@@ -174,14 +174,14 @@ def fa4_dedicated_kernel_refusal(model_config) -> str | None:
     if has_sliding_window_layers(model_config):
         return "it takes no sliding-window attention"
     if has_latent_attention(model_config):
-        return "multi-head latent attention trains on it away from FA2 by the second step"
+        return "multi-head latent attention trained on it away from FA2 by the second step"
     return None
 
 
 def fa4_varlen_refusal(model_config) -> str | None:
-    """What this model's attention needs that FA4's varlen kernels refuse, or ``None``: Gemma 2's softcap, which the
-    varlen backward takes none of and with which the varlen forward does not finish on B300, so only the dense call
-    runs it. Packed, padding-free and padded batches all reach the varlen kernels."""
+    """What this model's attention needs that FA4's varlen kernels are not validated with, or ``None``: Gemma 2's
+    softcap, with which their forward did not finish on B300 (4.0.0b16), so only the dense call runs it. Packed,
+    padding-free and padded batches all reach the varlen kernels."""
     return "attention logit softcapping" if has_attention_logit_softcap(model_config) else None
 
 
@@ -208,7 +208,7 @@ def supports_fa4_backward(model_config) -> bool:
     """Whether FA4 can train this model in this process: not where its dedicated head_dim-256 kernel does not train
     the attention (:func:`fa4_dedicated_kernel_refusal`), and not when transformers asks its kernels for a
     deterministic backward (:func:`flash_attention_deterministic`) and the attention runs that kernel
-    (:func:`uses_fa4_dedicated_head_dim`), whose backward has no deterministic mode."""
+    (:func:`uses_fa4_dedicated_head_dim`), whose deterministic mode is not validated here."""
     if fa4_dedicated_kernel_refusal(model_config) is not None:
         return False
     return not (flash_attention_deterministic() and uses_fa4_dedicated_head_dim(model_config))
@@ -343,8 +343,8 @@ def resolve_attn_implementation(
     fa4_fallback: str = "sdpa",
 ) -> str:
     """The attention backend for ``model_config``: auto-detected when ``attn_implementation`` is None,
-    narrowed by the per-family kernel limits (fp32, FA4's head_dim-256 kernel and the deterministic backward it
-    lacks, DeepSeek-V4, heads past the flash cap), then validated. Parallelism-specific overrides stay with the
+    narrowed by the per-family kernel limits (fp32, FA4's head_dim-256 kernel and its unvalidated deterministic
+    backward, DeepSeek-V4, heads past the flash cap), then validated. Parallelism-specific overrides stay with the
     caller that knows the topology, among them ``fa4_fallback``, the label taken in place of FA4 where
     :func:`supports_fa4_backward` refuses it. FA4's varlen limit (:func:`fa4_varlen_refusal`) depends on the
     rows, so the scripts' requests apply it.
@@ -368,13 +368,14 @@ def resolve_attn_implementation(
     runs_fa4 = attn_implementation == "flash_attention_4" and declares_flash_attention(model_config)
     if runs_fa4 and (refused := fa4_dedicated_kernel_refusal(model_config)):
         attn_implementation = flash_attention_2_in_place_of_fa4(
-            f"FlashAttention-4 runs head_dim-{FA4_DEDICATED_HEAD_DIM} attention on a dedicated kernel: {refused}"
+            f"FlashAttention-4 trains head_dim-{FA4_DEDICATED_HEAD_DIM} attention on a dedicated backward kernel: "
+            f"{refused}"
         )
     elif runs_fa4 and not supports_fa4_backward(model_config):
         if is_global_main_process():
             logger.warning(
-                "FlashAttention-4's head_dim-256 kernel has no deterministic backward, which this run asks for "
-                f"(FLASH_ATTENTION_DETERMINISTIC=1, full_determinism); falling back to "
+                "FlashAttention-4's head_dim-256 kernel is not validated with a deterministic backward, which this "
+                "run asks for (FLASH_ATTENTION_DETERMINISTIC=1, full_determinism); falling back to "
                 f"attn_implementation='{fa4_fallback}'."
             )
         attn_implementation = fa4_fallback

@@ -85,11 +85,11 @@ def test_off_blackwell_and_hopper_it_still_falls_back_to_fa2():
 @pytest.mark.skipif(not (HAS_FA2 and HAS_FA4), reason="needs both flash_attn and flash_attn.cute installed")
 def test_a_refused_fa4_gets_fa2():
     """Where FA4 cannot train the model (``supports_fa4_backward``: a deterministic run on its head_dim-256
-    kernel, whose backward has no deterministic mode), CP must not reach it.
+    kernel, whose deterministic backward is not validated here), CP must not reach it.
 
     `resolve_attn_implementation` demotes such a request to SDPA. CP cannot use that escape: it rejects SDPA
     outright, and this probe overrides the configured label anyway, so a run labelled `flash_attention_2` would
-    otherwise get FA4 regardless and assert in its first backward. ``allow_fa4=False`` is the only thing
+    otherwise get FA4 regardless and train on that backward. ``allow_fa4=False`` is the only thing
     standing there.
     """
     func = _resolve(blackwell=True, hopper=False, allow_fa4=False)

@@ -43,6 +43,7 @@ class _Trainer(TokenMetricsMixin):
     def __init__(self, callbacks):
         self.callback_handler = _Handler(callbacks)
         self.parallelism_config = _NO_PARALLELISM
+        self.args = SimpleNamespace(include_num_input_tokens_seen="no")
 
 
 def _batch(lengths) -> dict:
@@ -170,7 +171,7 @@ def test_a_callback_without_a_layout_keeps_the_trainer_accumulator_off():
     callback, trainer = _bound(layout=None)
     trainer._accumulate_attention_flops(_batch([100, 200]))
     assert trainer._attention_layout is None
-    assert trainer.drain_attention_flops() == (0.0, 0)
+    assert trainer.drain_step_work() == (0.0, 0)
     assert callback._drain_measured_attention_flops() is None
 
 
@@ -186,7 +187,7 @@ def test_measured_work_replaces_the_config_term_in_both_estimates(monkeypatch):
     assert dense == pytest.approx(_tflops(tokens * LINEAR_FLOPS_PER_TOKEN + measured), abs=0.01)
     assert active == pytest.approx(_tflops(tokens * 0.5 * LINEAR_FLOPS_PER_TOKEN + measured), abs=0.01)
     # The accumulator was reset by the step's drain.
-    assert trainer.drain_attention_flops() == (0.0, 0)
+    assert trainer.drain_step_work() == (0.0, 0)
 
 
 def test_the_measurement_differs_from_the_config_term_on_short_documents():
@@ -266,8 +267,8 @@ def test_the_drain_counts_documents_and_ignores_empty_slots():
     trainer._accumulate_attention_flops(
         {"input_ids": torch.zeros(1, 4, dtype=torch.long), "position_ids": torch.tensor([[0, 1, 2, 3]])}
     )
-    assert trainer.drain_attention_flops()[1] == 4
-    assert trainer.drain_attention_flops() == (0.0, 0)
+    assert trainer.drain_step_work()[1] == 4
+    assert trainer.drain_step_work() == (0.0, 0)
 
 
 if __name__ == "__main__":

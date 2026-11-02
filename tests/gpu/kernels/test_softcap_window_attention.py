@@ -5,17 +5,16 @@ Blackwell only. One family per launch (``--family``), a tiny random-init model a
 (8:4 heads, 2 layers): Gemma 2 with an attention softcap at head_dim 256 (2B/9B) and 128 (27B), and Gemma 3 at
 head_dim 256 with sliding layers whose window the rows exceed. Each row shape resolves through its script's seam: one
 unpacked row through SFT's default at one row per batch, a row of three packed documents through SFT's default for
-packed rows, a right-padded batch of two through the padded scripts' default. FA4's head_dim-256 kernel asserts on a
-softcap and on a window, and its varlen backward on a softcap, so only Gemma 2 27B's unpacked row may stay on FA4;
-every other row expects FA2. The bf16 model then trains each row on its backend against the same weights in fp32 on
+packed rows, a right-padded batch of two through the padded scripts' default. FA4's head_dim-256 backward asserts on
+a softcap and on a window, and a softcap stays off its varlen kernels, so only Gemma 2 27B's unpacked row may stay on
+FA4; every other row expects FA2. The bf16 model then trains each row on its backend against the same weights in fp32 on
 eager.
 
 Per row, the logits and the median gradient must stay within 1.5x of bf16 eager's error, all finite. Premise checks
-keep the gates honest: at head_dim 256 FA4 refuses the forward, at 128 FA4 refuses the packed and the padded rows
-(both routes are still needed): the varlen entry point's softcap refusal stops their forward, where the kernel's
-backward would assert and, on B300, its forward would not finish, and on Gemma 2 SDPA's logits error is at least 10x eager's (the softcap
-it drops matters at this geometry). Fails if a row resolves to FA4 where FA4 cannot train it, to SDPA under a
-softcap, or if its backend trains it wrong.
+keep the gates honest: at head_dim 256 FA4's backward refuses the model, at 128 the varlen entry point's softcap
+refusal the family patches install stops the packed and the padded rows' forward (both routes are still needed), and
+on Gemma 2 SDPA's logits error is at least 10x eager's (the softcap it drops matters at this geometry). Fails if a row
+resolves to FA4 where FA4 cannot train it, to SDPA under a softcap, or if its backend trains it wrong.
 
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_softcap_window_attention.py --family gemma2_hd128
 """
@@ -131,18 +130,15 @@ def _errors(model, row, attn_implementation, reference) -> dict[str, float]:
     }
 
 
-def _fa4_refuses(model, row, *, backward: bool) -> bool:
-    """Whether FA4 raises on this row's forward (or, with ``backward``, its backward), its kernel's assert or the
-    varlen entry point's softcap refusal the family patches install: the kernel limit a route off FA4 exists for."""
+def _fa4_refuses(model, row) -> bool:
+    """Whether FA4 raises on this row's forward or backward, its kernel's assert or the varlen entry point's softcap
+    refusal the family patches install: the limit a route off FA4 exists for."""
     model.config._attn_implementation = apply_family_patches(model.config, FA4)
     model.zero_grad(set_to_none=True)
     try:
-        with torch.set_grad_enabled(backward):
-            logits = model(**row, use_cache=False).logits
-            if backward:
-                logits.float().sum().backward()
+        model(**row, use_cache=False).logits.float().sum().backward()
     except AssertionError as error:
-        log(f"  FA4 refused the {'backward' if backward else 'forward'}: {error}")
+        log(f"  FA4 refused: {error}")
         return True
     except RuntimeError as error:
         if VARLEN_SOFTCAP_REFUSAL not in str(error):
@@ -193,10 +189,10 @@ def run(ctx):
             checks[f"{row_name}_sdpa_drops_the_softcap"] = sdpa["logits"] >= SOFTCAP_DROP_RATIO * eager["logits"]
             metrics[f"{row_name}_logits_sdpa"] = sdpa["logits"]
     if base.config.head_dim == 256:
-        checks["fa4_refuses_this_model"] = _fa4_refuses(model, rows["unpacked"], backward=False)
+        checks["fa4_backward_refuses_this_model"] = _fa4_refuses(model, rows["unpacked"])
     else:
         for row_name in ("packed", "padded"):
-            checks[f"fa4_refuses_the_{row_name}_row"] = _fa4_refuses(model, rows[row_name], backward=True)
+            checks[f"fa4_refuses_the_{row_name}_row"] = _fa4_refuses(model, rows[row_name])
     return {"checks": checks, "metrics": metrics}
 
 

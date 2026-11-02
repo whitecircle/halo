@@ -9,9 +9,9 @@ on single-document and packed rows past and within the sliding window:
 
 * FA4 (Blackwell): no new key lands in FA4's forward or backward JIT caches. Gemma 2 at the 27B's geometry
   (128-wide heads, ratio 2) rides along on its single-document rows: its logit softcap is part of the kernel key,
-  value included, and FA4 serves no varlen call with one (its varlen backward takes none, and on B300 its varlen
-  forward with one never finishes), so a varlen call carrying a softcap, the warm-up's included, is refused before
-  it launches and fails the check;
+  value included, and a softcap stays off FA4's varlen kernels (not validated there; on B300 their forward with one
+  did not finish), so a varlen call carrying a softcap, the warm-up's included, is refused before it launches and
+  fails the check;
 * ``sdpa_flex_sliding``: Dynamo raises on any recompile, and the sliding layers are seen to run FlexAttention.
   Mistral, whose modules keep no window and pass the config's, rides along.
 
@@ -130,7 +130,7 @@ def _counted(fn, calls: list):
 
 def _fa4_entry(fn, calls: list, *, varlen: bool):
     """``fn`` recording each call as ``(varlen, softcap)``, and refusing a varlen call with a softcap before it
-    launches, since on B300 that forward never finishes."""
+    launches, since the softcap stays off FA4's varlen kernels."""
 
     @functools.wraps(fn)
     def wrapped(*args, **kwargs):

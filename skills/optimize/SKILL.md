@@ -51,6 +51,8 @@ Mention these only to confirm, not as new advice:
 - **MoE/EP, fits without GC →** turn **gradient checkpointing off**, the largest single lever in the EP
   feature A/B, at a much larger activation footprint
   ([the A/B](../../agent-docs/optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
+  On packed SFT rows `gradient_checkpointing_plan: auto` measures whether it fits and checkpoints only the
+  layers the memory needs ([CheckpointingPlanCallback](../../agent-docs/training-methods/callbacks.md#checkpointingplancallback)).
 - **MoE, small model fits in FSDP →** prefer **FSDP (ep1) over EP** (no all-to-all); use EP only when
   FSDP OOMs ([Maximizing achieved TFLOPS](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-achieved-tflops)).
 - **Pure EP on 8 GPUs →** **ep2 (throughput) or ep8 (memory)**; ep4 there is rejected at config time
@@ -75,6 +77,11 @@ Mention these only to confirm, not as new advice:
   [CP fused head loss](../../agent-docs/parallelism/context-parallelism.md#fused-head-loss)). GRPO: `use_chunked_grpo_logprobs`
   ([the logits wall](../../agent-docs/training-methods/async-grpo/performance.md#the-logits-wall)).
 - **MoE activation OOM →** keep **GC on** and/or **raise the EP degree** (less expert memory per GPU).
+- **Fragmentation on a dense run (reserved well above allocated) →**
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` in front of the launch, as the dense SFT, DPO and SMPO
+  examples' launch comments carry it (13–14% less peak reserved memory). Under EP it costs ~1.5% throughput,
+  so set it there only to fit
+  ([Allocator](../../agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments)).
 - **Dense model does not fit one GPU at load →** **TP**: plain FSDP2/DDP loads the whole model onto every
   GPU before sharding ([Data Parallelism](../../agent-docs/parallelism/data-parallelism.md#fsdp2-strategy-by-mode)).
   Past one node, **PP** splits the layers across nodes

@@ -92,12 +92,12 @@ docker run -d --rm --name <job> \
 | Transformers 5.20.2 · TRL 1.14.2 · Accelerate 1.11.0 · PEFT 0.18.1 · sentence-transformers 6.1.0 · Liger 0.8.4 (`uv.lock`) | Yes | Yes |
 | Flash Attention 2 | Built from tag `v2.8.3.post1`, split-K kernels stubbed | Inherited from `BASE_IMAGE`, which is the pin; the build asserts it imports |
 | Flash Attention 3 (SM90) | Yes | No |
-| Flash Attention 4 (`flash-attn-4[cu13]==4.0.0b16`, `flash_attn.cute`) | No | Yes |
+| Flash Attention 4 (`flash-attn-4[cu13]==4.0.0b37`, `flash_attn.cute`) | No | Yes |
 | DeepEP V2 (commit `af9a040`, built `9.0+PTX`) | Yes | Yes |
 | NCCL `nvidia-nccl-cu13` at `uv.lock`'s exact pin, shared with the rollout images (asserted at build) | Yes | Yes |
 | EFA userspace: rdma-core, AWS libfabric and one pinned `aws-ofi-nccl` build (`docker/efa/install_efa_userspace.sh`), shared with the rollout images | Yes | Yes |
 | NVSHMEM (`nvidia-nvshmem-cu13`, transitive via torch) | Yes | Yes |
-| `nvidia-cutlass-dsl` 4.5.2 + `quack-kernels` 0.5.0 | Yes | Yes |
+| `nvidia-cutlass-dsl` 4.6.2 (CUDA 13 runtime flavor only) + `quack-kernels` 0.6.4 | Yes | Yes |
 | FlashAdamW (`flashoptim==0.1.4`) | Yes | Yes |
 | DeepGEMM (commit `559d79f`, native fp8/fp4 grouped MoE GEMM behind `HALO_DEEPGEMM_NATIVE=1`; JIT-compiles at runtime) | No | Yes |
 | Gigatoken tokenizer backend (`gigatoken` 0.9.x, `tokenizer_backend: gigatoken`) | Yes | Yes |
@@ -153,6 +153,13 @@ release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `A
   unreachable from the varlen forward and the backward, but the non-varlen forward can pick it by
   occupancy at small shapes, so a non-varlen caller prefers FA3 on sm_90, as
   `halo/distributed/context_parallel/ulysses_attention.py` does.
+- **No `flash_attn.cute` on Hopper.** FA2's source build also installs an old copy of FA4's CuTe DSL
+  sources, which does not import against the pinned cutlass-dsl; the Hopper build removes it, so every
+  FA4 probe reads FA4 as not installed there.
+- **Known `pip check` gaps.** The cutlass-dsl metapackage requires its CUDA 12 runtime flavor, which
+  neither image installs (both run CUDA 13), and neither carries the `nvidia-cuda-nvdisasm` wheel it
+  declares: the pinned set is installed without its dependencies, and cutlass-dsl runs `nvdisasm` only
+  to keep SASS (`CUTE_DSL_KEEP=sass`).
 - **Build-time checks.** `docker/training/verify_image.py` imports the stack, the target GPU's
   attention kernels, the cutlass-dsl the locked install re-pins and the extras; the build then runs
   `halo --help` and checks the bubblewrap jail's subordinate id maps. DeepEP needs `libcuda.so.1`, so

@@ -26,7 +26,7 @@ def _host() -> DataParallelLoaderMixin:
     ``DataLoader`` is what the assertions read."""
     host = object.__new__(DataParallelLoaderMixin)
     host.parallelism_config = SimpleNamespace(
-        non_dp_replication_factor=2, is_pp_mode=False, get_data_parallel_rank=lambda: 0
+        non_dp_replication_factor=2, is_cp_mode=False, is_pp_mode=False, get_data_parallel_rank=lambda: 0
     )
     host._dataset_presharded = False
     host.train_dataset = host.eval_dataset = _ROWS

@@ -86,6 +86,7 @@ from tests.common.memory import cleanup_memory, gpu_mem_gb, host_peak_rss_gib, r
 from tests.common.models import MODEL_CONFIGS
 from tests.common.rank_log import log
 from tests.common.reporting import emit_benchmark, emit_save_benchmark, format_benchmark_report
+from tests.common.sft_collator import build_sft_collator
 
 # The bench band's negative control: every EP layer holds the GPU idle this long before each forward.
 EP_FORWARD_DELAY_MS = env_float("HALO_TEST_EP_FORWARD_DELAY_MS", 0.0)
@@ -550,6 +551,7 @@ def main() -> int:
             "args": sft_config,
             "train_dataset": train_dataset,
             "processing_class": tokenizer,
+            "data_collator": build_sft_collator(tokenizer, sft_config, model.config, parallelism_config),
             "parallelism_config": parallelism_config,
             "callbacks": callbacks,
             # False forces the stock AdamW over the params as loaded; None keeps the bf16=True auto-AdamWBF16 default

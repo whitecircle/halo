@@ -32,6 +32,10 @@ THIRD_PARTY_ROWS = {
         "which thinking budgets and R3 capture run on"
     ),
     "NCCL_CUMEM_ENABLE": "read by NCCL in the SGLang server; the row exists because docker-compose.sglang.yml must pre-set it",
+    "PYTORCH_CUDA_ALLOC_CONF": (
+        "read by PyTorch's CUDA caching allocator; the row exists because the dense examples launch with "
+        "expandable segments and EP runs leave them off"
+    ),
 }
 
 # An env var name: SCREAMING_SNAKE with at least two segments, which is what every read spells.

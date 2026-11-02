@@ -249,8 +249,8 @@ def test_the_blackwell_seam_fetches_no_config_it_does_not_read(pinned, sinks_res
 )
 def test_the_blackwell_seam_decides_on_every_config_it_loads(policy_config, companion_config, expected):
     """A companion model loaded on the same request (a distillation teacher) can rule out the loader's pick
-    for both loads, and so can the policy's fetched config: a forward-only teacher's softcap counts, since FA4's
-    varlen forward with one does not finish on B300."""
+    for both loads, and so can the policy's fetched config: a forward-only teacher's softcap counts, since it stays
+    off FA4's varlen kernels too."""
     model_config = types.SimpleNamespace(attn_implementation=None)
     with _blackwell(policy_config) as fetch:
         assert (

@@ -1,20 +1,24 @@
-"""Padded LM collators: completion-only masking, and the CP route's label-preserving padder."""
+"""Padded LM collators: completion-only masking, TRL's SFT collator with the one-document varlen set, and the CP
+route's label-preserving padder."""
 
 from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
 from transformers import DataCollatorForLanguageModeling, PreTrainedTokenizerBase
+from trl.trainer.sft_trainer import DataCollatorForLanguageModeling as TRLDataCollatorForLanguageModeling
 
 from halo.data.completion_spans import mask_batch_to_completion_spans
 from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template, warn_if_pad_equals_eos
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.models.segment_markers import single_row_varlen_kwargs
 
 
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     """Completion-only collator: every label outside the assistant completions is ignored.
     ``response_prompt_template`` marks the response start; pass token ids where the tokenizer encodes it
-    context-dependently."""
+    context-dependently. ``one_document_varlen`` hands a one-document batch its varlen set
+    (:func:`~halo.models.segment_markers.single_row_varlen_kwargs`)."""
 
     def __init__(
         self,
@@ -22,6 +26,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         *args,
         train_on_last_assistant_only: bool = False,
         eos_token_ids: frozenset[int] | None = None,
+        one_document_varlen: bool = False,
         **kwargs,
     ):
         super().__init__(*args, mlm=False, **kwargs)
@@ -30,11 +35,12 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         self.train_on_last_assistant_only = train_on_last_assistant_only
         self.response_token_ids = tokenize_response_template(response_prompt_template, self.tokenizer)
         self.eos_token_ids = eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(self.tokenizer)
+        self.one_document_varlen = one_document_varlen
 
         warn_if_pad_equals_eos(self.tokenizer)
 
     def torch_call(self, examples: list[list[int] | Any | dict[str, Any]]) -> dict[str, Any]:
-        return mask_batch_to_completion_spans(
+        batch = mask_batch_to_completion_spans(
             super().torch_call(examples),
             self.response_token_ids,
             self.eos_token_ids,
@@ -42,6 +48,19 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
             self.response_prompt_template,
             tokenizer=self.tokenizer,
         )
+        if self.one_document_varlen:
+            batch.update(single_row_varlen_kwargs(batch))
+        return batch
+
+
+class DataCollatorForLanguageModelingWithVarlen(TRLDataCollatorForLanguageModeling):
+    """TRL's SFT collator, which an SFT run otherwise leaves TRL to build, handing a one-document batch its varlen set
+    (:func:`~halo.models.segment_markers.single_row_varlen_kwargs`)."""
+
+    def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
+        batch = super().torch_call(examples)
+        batch.update(single_row_varlen_kwargs(batch))
+        return batch
 
 
 def collate_preserving_precomputed_labels(

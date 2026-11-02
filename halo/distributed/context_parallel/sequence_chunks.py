@@ -52,3 +52,39 @@ def cp_sum_rows(local_values: torch.Tensor, cp_config: CPConfig | None) -> torch
     if cp_config is None or cp_config.cp_size <= 1:
         return values
     return dist_nn.all_reduce(values, group=cp_config.process_group)
+
+
+def reject_left_padding(attention_mask: torch.Tensor | None) -> None:
+    """Raise on a left-padded row: the Ulysses path drops the mask and attends causally, so it tolerates only
+    trailing pads, while leading ones would be attended by every real token.
+
+    Checked on every batch (:class:`LeftPaddingGuard`): under a collator that left-pads prompts, a batch whose
+    prompts happen to be equal-length certifies nothing about the next one.
+    """
+    if attention_mask is None:
+        return
+    # Only rows starting with a pad are scanned: one holding a token is left-padded, an all-zero one holds none.
+    if attention_mask[attention_mask[:, 0] == 0].any():
+        raise ValueError(
+            "Context Parallelism received a LEFT-padded batch (row starts with attention_mask == 0). "
+            "The CP attention path ignores the mask and runs dense causal attention, so every real "
+            "token would attend the leading pads and the loss would differ from the same batch "
+            "without CP. Use right padding (tokenizer.padding_side='right')."
+        )
+
+
+class LeftPaddingGuard:
+    """``collator``'s batches, each refused when left-padded (:func:`reject_left_padding`) while still on the host.
+
+    Every loader of a CP trainer collates through it, so the CP forward reads nothing back from the device to check
+    its input. It checks the collated ``attention_mask``, the one the SFT and offline GRPO forwards consume; SMPO's
+    concat builds its forward rows itself and flushes every pad behind their tokens.
+    """
+
+    def __init__(self, collator):
+        self.collator = collator
+
+    def __call__(self, features):
+        batch = self.collator(features)
+        reject_left_padding(batch.get("attention_mask"))
+        return batch

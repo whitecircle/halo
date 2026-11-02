@@ -31,7 +31,6 @@ dependencies = [
     "gradio>=6.15.1,<7.0.0",
     "gram-newton-schulz",
     "huggingface-hub>=1.0.0,<2.0.0",
-    "kernels>=0.10.4,<0.11.0",
     "liger-kernel>=0.8.4,<0.9.0",
     "matplotlib>=3.10.5,<4.0.0",
     "mcp>=1.30.0,<2.0.0",
@@ -66,7 +65,7 @@ halo = "halo.cli:main"
 # vllm/sglang run in separate Docker containers (they carry their own torch/transformers stacks).
 # See: Dockerfile.vllm, docker-compose.vllm.yml
 # flash-attn is installed separately with --no-build-isolation (see Dockerfile).
-# nvidia-cutlass-dsl 4.5.2 + quack-kernels 0.5.0 (Blackwell block-scaled MoE grouped-GEMM and
+# nvidia-cutlass-dsl 4.6.2 + quack-kernels 0.6.4 (Blackwell block-scaled MoE grouped-GEMM and
 #   Muon Newton-Schulz kernels) are pinned by a Dockerfile pip-install over the lock's 4.4.2/0.4.1
 #   (gram-newton-schulz's hard pin). Not declared here because the resolver can't co-resolve the
 #   git-dep pin; the kernels degrade gracefully when absent.

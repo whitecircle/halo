@@ -120,8 +120,8 @@ RUN pip install "torch~=2.11.0" --index-url https://download.pytorch.org/whl/cu1
 
 # cutlass-dsl/quack pair FA4, Muon and the block-scaled MoE kernels all need; two layers
 # force-reinstall it (here and after the uv reconcile).
-ARG CUTLASS_DSL_VERSION=4.5.2
-ARG QUACK_VERSION=0.5.0
+ARG CUTLASS_DSL_VERSION=4.6.2
+ARG QUACK_VERSION=0.6.4
 
 # Throw-on-call stubs for the FA2 split-K instantiations CUDA 13.2 ptxas hangs on for sm_90
 # (split-K serves KV-cache inference paths, not training). Hopper build only.
@@ -129,14 +129,16 @@ COPY docker/training/flash_attn_split_stubs_hopper.cpp /tmp/flash_attn_split_stu
 
 RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
       echo "=== Installing FlashAttention-4 (Blackwell, prebuilt CuTe DSL wheel) ===" \
-      && pip install "flash-attn-4[cu13]==4.0.0b16" \
-      # Force the pinned cutlass-dsl package set; FA4 itself declares floors only.
+      && pip install "flash-attn-4[cu13]==4.0.0b37" \
+      # Force the pinned cutlass-dsl package set; FA4 itself declares floors only. The image runs
+      # CUDA 13, so the cu12 runtime flavor the cutlass-dsl metapackage pulls in is removed.
       && pip install --force-reinstall --no-deps \
            "nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}" \
            "nvidia-cutlass-dsl-libs-base==${CUTLASS_DSL_VERSION}" \
+           "nvidia-cutlass-dsl-libs-core==${CUTLASS_DSL_VERSION}" \
            "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}" \
            "quack-kernels==${QUACK_VERSION}" \
-      && pip uninstall -y nvidia-cutlass-dsl-libs-core nvidia-cutlass-dsl-libs-cu12 \
+      && pip uninstall -y nvidia-cutlass-dsl-libs-cu12 \
       && python -c "import cutlass.cute.nvgpu; from flash_attn.cute import flash_attn_func; print('FA4 + cutlass.cute.nvgpu: OK')" \
       # Verify that the base image still provides the FA2 fallback.
       && python -c "import flash_attn; from flash_attn import flash_attn_func; \
@@ -171,6 +173,10 @@ print(f'FA2 inherited from base: {flash_attn.__version__}')"; \
       && sed -i '/csrc\/flash_attn\/flash_api.cpp/a\                "csrc/flash_attn/src/flash_fwd_split_stubs.cpp",' setup.py \
       && echo "Patched setup.py: removed split .cu lines, added 1 stub .cpp" \
       && pip install --no-build-isolation . \
+      # The build also installs flash_attn/cute, an old copy of FA4's CuTe DSL sources that does not
+      # import against the pinned cutlass-dsl. Hopper runs FA2 and FA3 only; removing it leaves
+      # flash_attn.cute absent, which every FA4 probe reads as not installed.
+      && rm -rf /usr/local/lib/python3.12/dist-packages/flash_attn/cute \
       && cd /tmp \
       && rm -rf /tmp/flash-attention; \
     fi
@@ -286,10 +292,11 @@ RUN uv export --locked --no-emit-project --no-hashes --extra gigatoken --extra f
     && rm -rf ${UV_CACHE_DIR} /tmp/requirements.txt
 
 # gram-newton-schulz hard-pins cutlass-dsl 4.4.2, which the reconcile re-installs, breaking
-# `import cutlass` (and with it Muon/quack, block-scaled GEMMs, FA4). Restore the pinned trio.
+# `import cutlass` (and with it Muon/quack, block-scaled GEMMs, FA4). Restore the pinned set.
 RUN pip install --force-reinstall --no-deps \
       "nvidia-cutlass-dsl==${CUTLASS_DSL_VERSION}" \
       "nvidia-cutlass-dsl-libs-base==${CUTLASS_DSL_VERSION}" \
+      "nvidia-cutlass-dsl-libs-core==${CUTLASS_DSL_VERSION}" \
       "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}" \
       "quack-kernels==${QUACK_VERSION}"
 

@@ -178,12 +178,13 @@ def _detect_precision(model: torch.nn.Module | None, training_args, lowp_precisi
 class EfficiencyCallback(transformers.TrainerCallback):
     """Step time, token throughput, MFU / S-MFU and GPU memory, merged into the logs dict.
 
-    Token accounting: HF gathers ``num_input_tokens_seen`` summed across ranks, and every rank counts the
-    batch its data-parallel replica shares. The rank's own tokens, what MFU multiplies by its local
-    FLOPs per token, divide that sum by ``world_size`` and by ``cp_size``, since CP splits the sequence
-    inside ``forward()``; TP, expert-TP and pipeline ranks each run every token of the batch through their
-    parameter slice. Throughput per GPU is the cluster's unique tokens over ``world_size``, so no axis
-    counts a shared batch twice (EP is orthogonal to DP: each EP rank sees a distinct batch).
+    Token accounting: ``num_input_tokens_seen`` is summed across ranks (a toolkit trainer sums it when this
+    callback drains the step's work from it), and every rank counts the batch its data-parallel replica
+    shares. The rank's own tokens, what MFU multiplies by its local FLOPs per token, divide that sum by
+    ``world_size`` and by ``cp_size``, since CP splits the sequence inside ``forward()``; TP, expert-TP and
+    pipeline ranks each run every token of the batch through their parameter slice. Throughput per GPU is
+    the cluster's unique tokens over ``world_size``, so no axis counts a shared batch twice (EP is
+    orthogonal to DP: each EP rank sees a distinct batch).
 
     Args:
         parallelism_config: the run's validated axis sizes; every divisor here is read off it.
@@ -374,12 +375,13 @@ class EfficiencyCallback(transformers.TrainerCallback):
             )
 
     def _drain_measured_attention_flops(self) -> float | None:
-        """This rank's measured attention-score FLOPs for the step, or ``None`` when no bound source
-        measured any document (the config term at the length bound then stands in)."""
+        """COLLECTIVE through a bound source, which also sums the step's input tokens into the state the
+        throughput reads: this rank's measured attention-score FLOPs for the step, or ``None`` when no bound
+        source measured any document (the config term at the length bound then stands in)."""
         source = self._attention_source() if self._attention_source is not None else None
         if source is None:
             return None
-        flops, documents = source.drain_attention_flops()
+        flops, documents = source.drain_step_work()
         if documents <= 0 or self.flops_model is None:
             return None
         parallelism = self._parallelism_config

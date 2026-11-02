@@ -60,6 +60,8 @@ COLLECTIVE_CALLEES = frozenset(
         "coordinated_map_and_filter",
         "coordinated_pack",
         "is_sharded_dataset_across_ranks",
+        "share_s3_control_files",
+        "share_control_files",
         "reject_across_ranks",
         "store_reject_across_ranks",
         "ensure_cache_dir",

@@ -2,6 +2,10 @@
 """Unit tests for :func:`halo.data.pipeline.coordinated_map.coordinated_pack`
 and the rank-stable cache identifier it uses.
 
+The pack's rows must not depend on its worker count: per-node load ranks pack on their own, and a bake's
+artifact must not change with the host's CPUs. TRL packs each 1000-row batch alone, so a worker split that
+moves a batch boundary moves the packing.
+
 Pins the behavior the helper exists for: even when HF's ``Dataset._fingerprint``
 diverges across ranks (it does after the upstream map+filter chain, so the
 per-rank cache file names diverge and the helper silently writes one copy per
@@ -15,12 +19,22 @@ Run::
 
 from __future__ import annotations
 
+import os
 import tempfile
+from typing import get_args
 
+import numpy as np
 import pytest
 from datasets import Dataset
+from trl.data_utils import pack_dataset
 
-from halo.data.pipeline.map_cache_key import rank_stable_dataset_id, stamp_cache_key
+from halo.data.pipeline.coordinated_map import _TRL_PACKERS, coordinated_pack
+from halo.data.pipeline.map_cache_key import _RENDER_LIBRARY_VERSIONS, rank_stable_dataset_id, stamp_cache_key
+from halo.data.preprocessed.metadata import _PackingStrategy
+
+# Not a multiple of the 1000-row batch, so any contiguous worker split lands inside a batch.
+_DOCUMENTS = 2_503
+_SEQ_LENGTH = 64
 
 
 def _on_disk_dataset(dirpath: str, data: dict, fingerprint: str) -> Dataset:
@@ -111,6 +125,93 @@ def test_toolkit_stamp_different_keys_different_ids() -> None:
     stamp_cache_key(ds_a, "cache-aaaa.arrow")
     stamp_cache_key(ds_b, "cache-bbbb.arrow")
     assert rank_stable_dataset_id(ds_a) != rank_stable_dataset_id(ds_b), "different stamps → different ids"
+
+
+@pytest.fixture
+def documents(tmp_path, monkeypatch) -> Dataset:
+    """On-disk token rows of mixed lengths: empty documents, short ones and ones longer than a packed row."""
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "cache"))
+    rng = np.random.default_rng(0)
+    long_documents = rng.random(_DOCUMENTS) < 0.1
+    lengths = np.where(
+        long_documents, rng.integers(_SEQ_LENGTH, 3 * _SEQ_LENGTH, _DOCUMENTS), rng.integers(0, 40, _DOCUMENTS)
+    )
+    ids = [rng.integers(1, 1000, n).tolist() for n in lengths]
+    Dataset.from_dict({"input_ids": ids, "attention_mask": [[1] * len(row) for row in ids]}).save_to_disk(
+        str(tmp_path / "documents")
+    )
+    return Dataset.load_from_disk(str(tmp_path / "documents"))
+
+
+def _rows(dataset: Dataset) -> list[dict]:
+    return dataset.with_format(None)[:]
+
+
+@pytest.mark.parametrize("strategy", get_args(_PackingStrategy))
+def test_the_pack_is_trls_single_process_pack_at_any_worker_count(documents, tmp_path, monkeypatch, strategy):
+    """Rows, features and format equal TRL's one-process pack at 1, 2 and 3 workers, less the attention_mask the
+    packing collator would drop. The control: TRL's own map at 3 workers packs other rows on this input, so a
+    pack that forwarded its worker count would fail."""
+    uncached = {"keep_in_memory": True}
+    reference = pack_dataset(documents, _SEQ_LENGTH, strategy, map_kwargs=uncached).remove_columns("attention_mask")
+    parallel_trl = pack_dataset(documents, _SEQ_LENGTH, strategy, map_kwargs={**uncached, "num_proc": 3})
+    assert _rows(parallel_trl.remove_columns("attention_mask")) != _rows(reference), (
+        "control: the input must be batch-boundary sensitive"
+    )
+
+    for num_proc in (1, 2, 3):
+        monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / f"cache-{strategy}-{num_proc}"))
+        packed = coordinated_pack(documents, _SEQ_LENGTH, strategy, num_proc=num_proc)
+        assert "attention_mask" not in packed.column_names, f"{strategy}: packed rows store an all-ones mask"
+        assert _rows(packed) == _rows(reference), f"{strategy} at num_proc={num_proc} packed other rows than TRL"
+        assert packed.features == reference.features, f"{strategy} at num_proc={num_proc}: {packed.features}"
+        assert packed.format == reference.format, f"{strategy} at num_proc={num_proc}: {packed.format}"
+
+
+def test_a_follower_at_another_worker_count_reads_the_writers_cache(documents, tmp_path):
+    """The load rank's pack at 3 workers is what a follower at 1 or 2 workers loads: no new cache file."""
+    cache = tmp_path / "cache"
+    written = coordinated_pack(documents, _SEQ_LENGTH, "bfd_split", num_proc=3)
+    files = set(os.listdir(cache))
+    for num_proc in (1, 2):
+        follower = coordinated_pack(documents, _SEQ_LENGTH, "bfd_split", num_proc=num_proc)
+        assert set(os.listdir(cache)) == files, f"num_proc={num_proc} repacked: {set(os.listdir(cache)) - files}"
+        assert _rows(follower) == _rows(written)
+        assert rank_stable_dataset_id(follower) == rank_stable_dataset_id(written)
+
+
+def test_a_cached_pack_that_stored_the_mask_is_not_served(documents, tmp_path):
+    """The shared cache holds what a pack that stored the ``attention_mask`` wrote for this input, under that pack's
+    name (no column-set term): the pack writes its own rows rather than serve that layout."""
+    cache = tmp_path / "cache"
+    os.makedirs(cache)
+    stored_mask = (
+        cache / f"packed_bfd_{_SEQ_LENGTH}_{rank_stable_dataset_id(documents)}_train_{_RENDER_LIBRARY_VERSIONS}.arrow"
+    )
+    pack_dataset(documents, _SEQ_LENGTH, "bfd", map_kwargs={"cache_file_name": str(stored_mask)})
+    assert stored_mask.exists(), "control: the mask-storing pack must be in the cache"
+
+    packed = coordinated_pack(documents, _SEQ_LENGTH, "bfd", num_proc=1)
+
+    assert "attention_mask" not in packed.column_names, "served a cached pack that stored the mask"
+    reference = pack_dataset(documents, _SEQ_LENGTH, "bfd", map_kwargs={"keep_in_memory": True})
+    assert _rows(packed) == _rows(reference.remove_columns("attention_mask"))
+
+
+def test_an_empty_split_is_refused_by_name(tmp_path, monkeypatch):
+    monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "cache"))
+    empty = Dataset.from_dict({"input_ids": [[1, 2]], "attention_mask": [[1, 1]]}).select([])
+    with pytest.raises(ValueError, match="Cannot pack the eval split: it has no rows"):
+        coordinated_pack(empty, _SEQ_LENGTH, "wrapped", split="eval", num_proc=2)
+
+
+def test_the_pack_runs_exactly_the_strategies_a_bake_accepts():
+    assert sorted(_TRL_PACKERS) == sorted(get_args(_PackingStrategy))
+
+
+def test_an_unknown_strategy_is_refused_by_name(documents):
+    with pytest.raises(ValueError, match="best_fit"):
+        coordinated_pack(documents, _SEQ_LENGTH, "best_fit")
 
 
 if __name__ == "__main__":

@@ -195,8 +195,7 @@ def test_tokenize_dataset_text_mode_survives_all_rejected_writer_batch():
 
     assert len(tokenized) == _NUM_VALID
     for row in tokenized.select(range(0, len(tokenized), 100)):
-        assert row["labels"] == row["input_ids"]
-        assert any(row["attention_mask"])
+        assert row["input_ids"] and all(row["attention_mask"])
 
 
 def test_tokenize_dataset_all_rejected_still_fails_loud():

@@ -44,7 +44,9 @@ CP computes loss per chunk with two corrections:
 2. **Globally-normalized sum loss** — completion-only training distributes tokens unevenly across
    chunks, so per-rank `reduction='mean'` biases gradients. Each rank computes
    `loss_i = cp_size * local_sum / global_tokens` with `global_tokens` the all-reduced non-masked
-   token count. After FSDP2's `1/cp_size` gradient averaging every token contributes equally.
+   token count. After FSDP2's `1/cp_size` gradient averaging every token contributes equally. The
+   fp32 `local_sum` runs over checkpointed chunks of the rank's logits (`chunked_token_sum`, as the
+   pipeline's last stage scores them), so no fp32 copy of the chunk's logits plane is built.
 
 That form is rank-varying and exists for the gradient path only. Under `torch.no_grad()` (the eval
 loop) the wrapper returns the rank-uniform group value instead — the CE sum and the aux term are
@@ -101,7 +103,7 @@ on NVLink. `cp_size=3` on an 8-GPU domain is rejected at config time, before the
 
 **Attention impl** — a real Flash Attention is required. `reject_unsupported_ulysses_model` raises
 `CPConfigError` for any `_attn_implementation` outside `SUPPORTED_ATTN_IMPLEMENTATIONS` (FA2,
-FA3, FA4, community kernel paths): `eager` and `sdpa` are rejected, and `flex_attention` is
+FA3, FA4): `eager`, `sdpa` and a hub kernel label are rejected, and `flex_attention` is
 auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrapper declaring
 `REQUIRES_FLASH_ATTN_LABEL = False` waives the check (Bailing; see
 [bailing.md](../models/bailing.md#cp-wrapper)).
@@ -132,11 +134,16 @@ vocabulary token 0.
 
 **Right padding only.** The Ulysses path ignores `attention_mask`: it calls dense flash attention
 with `causal=` and has no varlen path, so it tolerates only padding a causal mask already ignores.
-A left-padded batch is rejected on every forward. Every real token would attend the leading pads
-and the loss would silently differ from the same batch without CP.
+A left-padded batch is rejected: every real token would attend the leading pads and the loss would
+silently differ from the same batch without CP. Every loader of a CP trainer collates through
+`LeftPaddingGuard`, which checks each batch's `attention_mask` on the host before it moves to the
+device, so the CP forward reads nothing back from the GPU to check it. The wrapped model receives the
+chunk's mask only where its router aux loss reads it (`output_router_logits`, which keeps padding out of
+the aux statistics); elsewhere it gets none, and transformers' flash mask construction reads nothing back.
 
-SMPO's collator left-pads prompts; its chosen|rejected concat flushes every row left, so every pad
-trails the completion and any batch size runs.
+SMPO's collator left-pads prompts and emits no `attention_mask`, so the guard has nothing to check;
+its chosen|rejected concat, which builds the forward's rows on the device, flushes every row left,
+so every pad trails the completion and any batch size runs.
 
 Offline GRPO's CP collator right-pads each joined prompt+completion row
 ([Offline GRPO](../training-methods/grpo/offline.md)).
@@ -268,8 +275,8 @@ alone OOMs at long sequences (it shards experts, not activations) — that is th
 | Knob | Under CP | Gate |
 |---|---|---|
 | `packing`, `padding_free` | rejected — the Ulysses path runs a dense causal kernel with no per-document boundaries | `halo/data/collators/factory.py`; `reject_cp_packed_collator` re-checks a hand-built collator |
-| left-padded batches | rejected on **every** forward (not cached — a prompt-left-padding collator pads only its ragged batches) | `context_parallel/ulysses_model.py` |
-| `attn_implementation` | must resolve to FA2/FA3/FA4 or a community flash kernel; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on any label | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `reject_unsupported_ulysses_model` |
+| left-padded batches | rejected on **every** batch, on the host at collation (not cached — a prompt-left-padding collator pads only its ragged batches) | `LeftPaddingGuard` in `context_parallel/sequence_chunks.py`, applied by `DataParallelLoaderMixin._loader_collate_fn` |
+| `attn_implementation` | must resolve to FA2/FA3/FA4; `flex_attention` is auto-switched with a warning, `eager`/`sdpa` rejected — except for a wrapper declaring `REQUIRES_FLASH_ATTN_LABEL = False` (Bailing), which runs on any label | `SUPPORTED_ATTN_IMPLEMENTATIONS`, `reject_unsupported_ulysses_model` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `reject_unsupported_model`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `reject_cp_trainer_args` |

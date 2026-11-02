@@ -69,7 +69,13 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
     def __init__(self, run_dir, *, fsdp_wrapped=True, fail_shards=False, store=None, merge_expert_lora_on_save=False):
         self.run_dir = run_dir
         self.events = []
-        self.args = SimpleNamespace(save_total_limit=1, save_only_model=False, should_save=True, push_to_hub=False)
+        self.args = SimpleNamespace(
+            save_total_limit=1,
+            save_only_model=False,
+            should_save=True,
+            push_to_hub=False,
+            include_num_input_tokens_seen="no",
+        )
         self.state = TrainerState(global_step=2)
         self.parallelism_config = SimpleNamespace(
             is_tp_mode=False, merge_expert_lora_on_save=merge_expert_lora_on_save

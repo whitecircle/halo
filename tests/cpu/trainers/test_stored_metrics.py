@@ -140,16 +140,22 @@ _WORLD_MEAN = (1.0 + 1.0 + 5.0 * 2) / (1 + 1 + 2)
 
 
 def _world_mean_worker(rank: int, out: str) -> None:
+    """Two eval logs of the same entries: the first agrees the keys, the second reduces over them."""
     t = _Trainer()
-    for value, rows in _RANK_ENTRIES[rank]:
-        t.store_metrics({"m": value, "eval_n": float(rank)}, train_eval="eval", rows=rows)
-    logs = {"eval_loss": 0.1}
-    with ExitStack() as stack:
-        names = ("all_reduce", "all_gather_object")
-        counted = {name: stack.enter_context(patch.object(dist, name, wraps=getattr(dist, name))) for name in names}
-        t.log(logs)
+    windows = []
+    for _ in range(2):
+        for value, rows in _RANK_ENTRIES[rank]:
+            t.store_metrics({"m": value, "eval_n": float(rank)}, train_eval="eval", rows=rows)
+        logs = {"eval_loss": 0.1}
+        with ExitStack() as stack:
+            names = ("all_reduce", "all_gather_object")
+            counted = {
+                name: stack.enter_context(patch.object(dist, name, wraps=getattr(dist, name))) for name in names
+            }
+            t.log(logs)
+        windows.append({**logs, "collectives": {name: mock.call_count for name, mock in counted.items()}})
     with open(f"{out}.{rank}", "w") as fh:
-        json.dump({**logs, "collectives": {name: mock.call_count for name, mock in counted.items()}}, fh)
+        json.dump(windows, fh)
 
 
 def test_every_rank_logs_the_world_mean_not_rank_zeros(tmp_path):
@@ -157,11 +163,13 @@ def test_every_rank_logs_the_world_mean_not_rank_zeros(tmp_path):
     run_gloo_ranks(_world_mean_worker, 2, out)
     for rank in range(2):
         with open(f"{out}.{rank}") as fh:
-            logs = json.load(fh)
-        assert logs["eval_m"] == pytest.approx(_WORLD_MEAN), f"rank {rank} logged {logs['eval_m']}"
-        assert logs["eval_n"] == pytest.approx(1 * 2 / 4), f"rank {rank}: an eval_ key must not gain a second prefix"
-        # One digest all-reduce checks the keys and one more carries the sums; no object gather at any world size.
-        assert logs["collectives"] == {"all_reduce": 2, "all_gather_object": 0}, f"rank {rank}"
+            first, steady = json.load(fh)
+        for logs in (first, steady):
+            assert logs["eval_m"] == pytest.approx(_WORLD_MEAN), f"rank {rank} logged {logs['eval_m']}"
+            assert logs["eval_n"] == pytest.approx(1 * 2 / 4), f"rank {rank}: an eval_ key must gain one prefix"
+        # The first log learns the keys in one object gather; every later one is a single all-reduce.
+        assert first["collectives"] == {"all_reduce": 2, "all_gather_object": 1}, f"rank {rank}"
+        assert steady["collectives"] == {"all_reduce": 1, "all_gather_object": 0}, f"rank {rank}"
 
 
 def _mismatch_worker(rank: int, out: str) -> None:

@@ -384,8 +384,9 @@ export NVLINK_DOMAIN_SIZE=64
 ```
 
 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` composes with the `ElasticBuffer` and answers
-allocator fragmentation under variable-shape packing ([DeepEP → Memory allocation
-failures](../infrastructure/deepep.md#runtime-errors)).
+allocator fragmentation under variable-shape packing. Under EP it costs throughput, so set it only
+when the run does not fit without it
+([measured](../optimization/throughput-benchmarks.md#allocator-expandable-segments)).
 
 ### YAML knobs
 

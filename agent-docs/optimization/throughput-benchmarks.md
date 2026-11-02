@@ -376,6 +376,19 @@ Batch is the dominant lever — raise it with GC off while it fits. At a fixed 3
 
 **Model**: `unsloth/gpt-oss-120b-BF16` (120B total, 128 experts, top_k=4). On B300 (288 GB) it fits with **EP=8 + GC**: local params = 16.47B → ~99 GB model + AdamWBF16 state, plus ~33 GB bf16 gradients + activations, comfortable at 8K sequence (it does not fit a 141 GB H200 at this config). EP+TP further reduces local params (attention sharded across the TP group); multi-node raises aggregate memory.
 
+## Allocator: expandable segments
+
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against PyTorch's default caching allocator on B300. Memory here is peak **reserved** memory (what the allocator holds, fragmentation included), not the allocated peak the tables above report.
+
+| Run | Peak reserved, default → expandable | Throughput |
+|---|---|---|
+| Dense packed SFT (Qwen3-8B) | 41.3 → 35.4 GB | unchanged |
+| DPO | 61.6 → 52.7 GB | unchanged |
+| SMPO | 41.1 → 35.8 GB | unchanged |
+| EP8 | 1–6 GB lower | ~1.5% lower |
+
+The dense runs hold 13–14% less, so the dense SFT, DPO and SMPO examples launch with it. Under EP the saving is small and costs throughput, so the EP examples leave it off and an EP run sets it only to fit. How to set it: [Configuration Reference → Environment variables](../reference/configuration-reference.md#environment-variables).
+
 ## Using EfficiencyCallback
 
 Set `enable_efficiency_metrics: true` in any YAML; every standard training script builds the callback through `build_run_callbacks`, deriving EP/TP/CP sizes from `ParallelismConfig` and setting `include_num_input_tokens_seen="all"`. Off by default because multi-sequence trainers (DPO / SMPO / Reward / Distillation) report a misleading utilization. See [Performance & Balancing Flags](../reference/configuration-reference.md#performance--balancing-flags).

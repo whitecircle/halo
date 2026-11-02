@@ -3,6 +3,7 @@ push lands whole beside the destination and is promoted gates-last, so a complet
 instant; a load serves the local cache and falls back to the newest sealed push when the destination is torn."""
 
 import contextlib
+import copy
 import json
 import os
 import re
@@ -22,6 +23,8 @@ from halo.data.sources.dataset_cache import (
 from halo.data.sources.paths import parse_s3_uri
 from halo.data.sources.s3_client import S3Client, parallel_s3_transfer
 from halo.log import info_logger
+from halo.runtime.collectives import broadcast_from_rank0
+from halo.runtime.ranks import is_global_main_process, is_local_main_process
 
 logger = info_logger(__name__)
 
@@ -34,6 +37,9 @@ _PUSH_ID_RE = re.compile(r"^[0-9a-f]{8}/")
 # The files whose absence makes load_from_disk refuse a dataset directory: the promote's ordering gates.
 _DATASET_DICT_GATE = "dataset_dict.json"
 _SPLIT_GATE_BASENAME = "state.json"
+
+# The control-file reads :func:`share_control_files` made for this launch: ``(found, payload)`` by (bucket, key).
+_shared_control_reads: dict[tuple[str, str], tuple[bool, Any]] = {}
 
 
 def read_json_from_s3(bucket: str, key: str) -> Any:
@@ -50,19 +56,40 @@ def _control_json_mirror_path(bucket: str, key: str) -> str:
     return os.path.join(HALO_S3_DATASET_CACHE_DIR, "control", f"{s3_cache_key(bucket, key)}.json")
 
 
+def _drop_control_json_mirror(bucket: str, key: str) -> None:
+    # A racing rank's unlink or a read-only volume must not replace the absence signal with its own error.
+    with contextlib.suppress(OSError):
+        os.unlink(_control_json_mirror_path(bucket, key))
+
+
+def _write_control_json_mirror(bucket: str, key: str, payload: Any) -> None:
+    mirror_dir, mirror_name = os.path.split(_control_json_mirror_path(bucket, key))
+    try:
+        os.makedirs(mirror_dir, exist_ok=True)
+        with staged_file(mirror_dir, mirror_name, durable=False) as staged, open(staged, "w") as f:
+            json.dump(payload, f)
+    except OSError as e:
+        logger.warning(f"Could not mirror control file s3://{bucket}/{key} under {mirror_dir}: {e}")
+
+
 def read_control_json_with_cache(bucket: str, key: str) -> Any:
     """:func:`read_json_from_s3`, mirrored locally so a warm-cache relaunch survives an S3/SSO outage.
 
     A live read refreshes the mirror; an absent key drops it and raises, so a re-push without the file
     cannot keep serving it; any other failure serves the mirror with a warning, or re-raises without one.
+    A key :func:`share_control_files` read for this launch is served from a copy of that read, so no caller sees
+    another's edits.
     """
+    if (bucket, key) in _shared_control_reads:
+        found, payload = _shared_control_reads[(bucket, key)]
+        if not found:
+            raise FileNotFoundError(f"s3://{bucket}/{key}")
+        return copy.deepcopy(payload)
     mirror_path = _control_json_mirror_path(bucket, key)
     try:
         payload = read_json_from_s3(bucket, key)
     except FileNotFoundError:
-        # A racing rank's unlink or a read-only volume must not replace the absence signal with its own error.
-        with contextlib.suppress(OSError):
-            os.unlink(mirror_path)
+        _drop_control_json_mirror(bucket, key)
         raise
     except Exception as e:
         if not os.path.exists(mirror_path):
@@ -84,14 +111,32 @@ def read_control_json_with_cache(bucket: str, key: str) -> Any:
             f"serving the local mirror at {mirror_path}."
         )
         return payload
-    mirror_dir, mirror_name = os.path.split(mirror_path)
-    try:
-        os.makedirs(mirror_dir, exist_ok=True)
-        with staged_file(mirror_dir, mirror_name, durable=False) as staged, open(staged, "w") as f:
-            json.dump(payload, f)
-    except OSError as e:
-        logger.warning(f"Could not mirror control file s3://{bucket}/{key} to {mirror_path}: {e}")
+    _write_control_json_mirror(bucket, key, payload)
     return payload
+
+
+def share_control_files(bucket: str, keys: list[str]) -> None:
+    """COLLECTIVE: read ``keys`` (:func:`read_control_json_with_cache`) on global rank 0 alone and serve every rank's
+    later reads of them this launch from that read; each node's local rank 0 mirrors it. A key rank 0 could not
+    read (an outage its mirror could not serve) is left to every rank's own read."""
+    for key in keys:  # a key rank 0 cannot read now must not serve an earlier call's read in this process
+        _shared_control_reads.pop((bucket, key), None)
+    reads = {}
+    if is_global_main_process():
+        for key in keys:
+            try:
+                reads[key] = (True, read_control_json_with_cache(bucket, key))
+            except FileNotFoundError:
+                reads[key] = (False, None)
+            except Exception as e:  # each rank then reads it itself, with its own mirror
+                logger.warning(f"Reading s3://{bucket}/{key} for every rank failed ({type(e).__name__}: {e})")
+    for key, (found, payload) in broadcast_from_rank0(reads).items():
+        _shared_control_reads[(bucket, key)] = (found, payload)
+        if is_local_main_process() and not is_global_main_process():
+            if found:
+                _write_control_json_mirror(bucket, key, payload)
+            else:
+                _drop_control_json_mirror(bucket, key)
 
 
 def download_dataset_tree(client: S3Client, full_key: str, local_path: str) -> None:

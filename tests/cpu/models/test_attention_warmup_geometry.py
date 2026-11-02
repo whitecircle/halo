@@ -180,7 +180,7 @@ class _CompileCountingCute(types.ModuleType):
         )
         self.calls.append(key)
         if varlen and softcap:
-            raise AssertionError("an FA4 varlen call with a softcap: no backward, and a forward B300 never finishes")
+            raise AssertionError("an FA4 varlen call with a softcap, which stays off those kernels")
         self.compiled.add(key)
         if not grad:
             return q * 1.0
@@ -415,9 +415,8 @@ def test_a_deterministic_run_compiles_nothing_on_its_first_backward(cute, monkey
 
 
 def test_a_softcapped_layer_warms_its_dense_call_only(cute):
-    """The warm-up launches no varlen call on a softcapped layer (FA4's varlen backward takes no softcap, and its
-    varlen forward with one does not finish on B300), and warms the dense call one unpadded row trains with, forward
-    and backward, windowed and not."""
+    """The warm-up launches no varlen call on a softcapped layer (a softcap stays off FA4's varlen kernels), and warms
+    the dense call one unpadded row trains with, forward and backward, windowed and not."""
     model = _on_fa4(_gemma2())
     assert {bool(call.window) for call in attention_calls(model) if call.softcap} == {True, False}  # premise
     warm_fa4_kernels(model, dtype=torch.bfloat16, device=torch.device("cpu"))

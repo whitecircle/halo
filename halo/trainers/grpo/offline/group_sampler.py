@@ -131,7 +131,7 @@ class GroupedLoaderMixin:
         dp_size, dp_rank = self.dp_shard_geometry()
 
         dataloader_params = {
-            "collate_fn": self.data_collator,
+            "collate_fn": self._loader_collate_fn(self.data_collator),
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
             "persistent_workers": self.args.dataloader_persistent_workers,

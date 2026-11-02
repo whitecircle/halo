@@ -60,10 +60,13 @@ ADAPTER_TASKS = ("causal_lm", "classification")
 _LEGACY_TOKENIZER_SIDECARS = ("special_tokens_map.json", "added_tokens.json", "chat_template.json")
 
 
-def is_non_artifact_subdirectory(name: str) -> bool:
-    """Whether a checkpoint's top-level subdirectory ``name`` stays out of an artifact built from it: a hidden
-    one, a run-internal ``_*`` one, a nested ``checkpoint-N`` (resume state) or a vendor weight dump."""
-    return name.startswith((".", RUN_INTERNAL_PREFIX, f"{PREFIX_CHECKPOINT_DIR}-")) or name in WEIGHT_DUMP_DIRS
+def is_non_artifact_entry(name: str, *, is_dir: bool) -> bool:
+    """Whether a checkpoint's top-level entry ``name`` stays out of an artifact built from it: any run-internal
+    ``_*`` entry (the run's scratch and records, such as the checkpointing-plan record beside a final model), and a
+    hidden subdirectory, a nested ``checkpoint-N`` (resume state) or a vendor weight dump."""
+    if name.startswith(RUN_INTERNAL_PREFIX):
+        return True
+    return is_dir and (name.startswith((".", f"{PREFIX_CHECKPOINT_DIR}-")) or name in WEIGHT_DUMP_DIRS)
 
 
 def copy_checkpoint_aux_files(
@@ -78,11 +81,10 @@ def copy_checkpoint_aux_files(
 
     Skips the top-level weight files and indexes the caller writes fresh, but keeps the resume state a
     resume-from-merged run restores unless ``include_resume_sidecars`` is off (an artifact that is a new
-    base). Subdirectories copy whole, weights included (a SentenceTransformer module directory), except a
-    nested ``checkpoint-N``, a run-internal ``_*`` one, a vendor weight dump and a hidden one; unpublished
-    staged files stay behind too, and so do the ``carried`` names, the files the caller brings across
-    itself (a shard merge's linked resume state). ``output_dir`` inside ``input_dir`` raises: the walk would
-    copy the destination into itself.
+    base). Subdirectories copy whole, weights included (a SentenceTransformer module directory), except the
+    :func:`is_non_artifact_entry` ones; run-internal ``_*`` files and unpublished staged files stay behind too,
+    and so do the ``carried`` names, the files the caller brings across itself (a shard merge's linked resume
+    state). ``output_dir`` inside ``input_dir`` raises: the walk would copy the destination into itself.
     """
     input_root = os.path.realpath(input_dir)
     if os.path.commonpath([input_root, os.path.realpath(output_dir)]) == input_root:
@@ -92,12 +94,15 @@ def copy_checkpoint_aux_files(
             f"artifact to a directory outside the source checkpoint."
         )
     for name in os.listdir(input_dir):
-        if name in carried or (name in UNSUFFIXED_RESUME_ENTRIES and not include_resume_sidecars):
-            continue
         src = os.path.join(input_dir, name)
-        if os.path.isdir(src):
-            if is_non_artifact_subdirectory(name):
-                continue
+        is_dir = os.path.isdir(src)
+        if (
+            name in carried
+            or is_non_artifact_entry(name, is_dir=is_dir)
+            or (name in UNSUFFIXED_RESUME_ENTRIES and not include_resume_sidecars)
+        ):
+            continue
+        if is_dir:
             shutil.copytree(src, os.path.join(output_dir, name), dirs_exist_ok=True)
             if verbose:
                 print(f"Copied: {name}/")  # noqa: T201 — CLI-facing helper; the merge scripts report via print

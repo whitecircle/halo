@@ -103,7 +103,7 @@ leaves `checkpoints/`, where every example writes its run.
   D419, ERA001`; `make lint` and the blocking CI job enforce the full set, CI with
   `ruff format --check` ([Continuous Integration](../infrastructure/ci.md)).
 - **No inline imports** (`PLC0415`), in `tests/` as in `halo/`. A function-level import is reserved for a
-  genuinely optional or arch-specific dependency (`flash_attn`, `deep_ep`, `kernels`); a circular import
+  genuinely optional or arch-specific dependency (`flash_attn`, `deep_ep`, `deep_gemm`); a circular import
   is never that exception.
 - **One docstring format** (`D200`, `D202`, `D210`, `D300`, `D419`): triple double quotes, a one-line
   docstring on one line, no padding inside the quotes, no blank line after a function's docstring, never

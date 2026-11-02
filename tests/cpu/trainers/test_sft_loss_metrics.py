@@ -24,7 +24,7 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.trainers import world_metrics
 from halo.trainers.sft import DistributedSFTTrainer
 from halo.trainers.world_metrics import WorldMetrics
-from tests.common.world_metrics import fake_world
+from tests.common.world_metrics import fake_world, rank_states
 
 CP_SIZE = 2
 VOCAB = 32
@@ -191,7 +191,9 @@ def test_drain_folds_once_per_log_on_every_rank_however_many_microbatches(cp):
         _accumulate(full, *_microbatch(seed, aux_loss=0.3, cp=cp))
     for rank in (full, empty):
         with mock.patch.object(
-            world_metrics, "_world_states", side_effect=lambda states, group, key_mismatch_error: states
+            world_metrics,
+            "_world_states",
+            side_effect=lambda records, layout, group, key_mismatch_error: (rank_states(records), layout),
         ) as fold:
             rank._drain_loss_metrics()
         assert fold.call_count == 1

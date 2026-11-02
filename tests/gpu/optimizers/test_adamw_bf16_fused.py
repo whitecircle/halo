@@ -15,7 +15,9 @@ Checks, each on both ranks:
 3. FSDP2: DTensor shards over two ranks, uneven, one of them empty on rank 1, their grads the reduce-scatter's
    views into one flat buffer at padded-shard offsets.
 4. resume: a fused optimizer loading the oracle's state mid-run, with one param's step moved ahead.
-5. scale: Qwen3-8B's FSDP2 local shards, grads viewed into one buffer per FSDP unit, two steps each: at 8 ranks
+5. device skip: under a False skip flag the fused step writes what an unflagged one does, bit for bit, and under a
+   True one nothing, its step bookkeeping discarded (``tests/common/device_step_skip.py``).
+6. scale: Qwen3-8B's FSDP2 local shards, grads viewed into one buffer per FSDP unit, two steps each: at 8 ranks
    (399 aligned tensors, two launches), at 64 ranks (147 aligned, 252 not: the 2-element q/k norm shards move every
    later grad of a layer off the 8-element boundary) and 180 of its layers at 32 ranks (1980 tensors in nine
    launches, its 4-element norm shards unaligned).
@@ -38,6 +40,7 @@ from torch.distributed.fsdp import fully_shard
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.runtime.dtensor import to_local
 from tests.common.adamw_bf16_reference import PerParameterAdamWBF16, fused_kernel_mismatches
+from tests.common.device_step_skip import adamw_bf16_builder, device_skip_mismatches
 from tests.common.harness import gpu_test_main, record_check
 
 # (shape, dtype, grad dtype, group): group 0 decays, group 1 does not and runs at its own lr.
@@ -133,6 +136,12 @@ def test_fused_kernel_matches_per_parameter_kernel():
     mismatches = fused_kernel_mismatches("cuda")
     assert not mismatches, mismatches
     assert fused_kernel_mismatches("cuda", seed_shift=1), "a shifted seed changed no output: the check is blind"
+
+
+def test_device_skip_is_exact():
+    build = adamw_bf16_builder("cuda")
+    mismatches = device_skip_mismatches(build, build)
+    assert not mismatches, mismatches
 
 
 def test_step_matches_per_parameter_optimizer():
@@ -314,6 +323,7 @@ def run(ctx) -> dict:
     record_check(checks, "step_matches_per_parameter_optimizer", test_step_matches_per_parameter_optimizer)
     record_check(checks, "fsdp2_shards_match", test_fsdp2_shards_match)
     record_check(checks, "resumed_state_matches", test_resumed_state_matches)
+    record_check(checks, "device_skip_is_exact", test_device_skip_is_exact)
     metrics = {
         f"host_ms_per_step_{_TIMING_PARAMS}_params_fused": _host_ms_per_step(AdamWBF16),
         f"host_ms_per_step_{_TIMING_PARAMS}_params_per_parameter": _host_ms_per_step(PerParameterAdamWBF16),

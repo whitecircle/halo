@@ -240,7 +240,8 @@ def build_tree_attention_plan(
     per-token path links of :func:`_path_links`, from which those layers build their candidates on the
     device.
 
-    Maxima are python ints: a tensor there enters FA4's backward compile key and recompiles it per call.
+    Maxima are python ints, the bound the FA4 warm-up compiles its varlen kernels for: a tensor one runs another
+    head_dim-256 variant (``patch_transformers_flash_varlen_int_seqlen``).
     """
     runs = list(zip(table.starts.tolist(), table.lengths.tolist(), strict=True))
     parents = table.parents.tolist()

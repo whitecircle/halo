@@ -1,7 +1,7 @@
 # Qwen3-8B — two-node pipeline-parallel SFT (2 nodes x 8 GPUs: one stage per node, FSDP2 inside it).
 # See agent-docs/parallelism/pipeline-parallelism.md.
 # Launch on EACH node (MASTER_ADDR = node0 IP; SLURM: exactly ONE srun task per node):
-#   torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
+#   PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
 #     --master_addr=$MASTER_ADDR --master_port=29500 scripts/training/sft.py <this config>
 # Per-node output storage (DIST_OUTPUT_SHARED_FILESYSTEM=0, or the DIST_SHARED_FILESYSTEM=0 umbrella) leaves
 # each node only its own stage's parts: copy both nodes' directories onto one host and merge them with

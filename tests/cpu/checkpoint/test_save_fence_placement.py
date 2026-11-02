@@ -47,7 +47,13 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         self.run_dir = run_dir
         self.save_model_fails = save_model_fails
         self.tail_write_fails = tail_write_fails
-        self.args = SimpleNamespace(save_total_limit=1, save_only_model=False, should_save=True, push_to_hub=False)
+        self.args = SimpleNamespace(
+            save_total_limit=1,
+            save_only_model=False,
+            should_save=True,
+            push_to_hub=False,
+            include_num_input_tokens_seen="no",
+        )
         self.state = TrainerState(global_step=2)
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, merge_expert_lora_on_save=False)
         self._fsdp_wrapped = True

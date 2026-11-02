@@ -18,7 +18,6 @@ from datasets import Dataset
 from transformers import AutoTokenizer
 from trl import SFTConfig
 
-from halo.data.collators.factory import select_data_collator
 from halo.distributed.expert_parallel.deepep.dispatcher import destroy_all_dispatchers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
@@ -31,6 +30,7 @@ from tests.common.memory import cleanup_memory, gpu_mem_gb
 from tests.common.numerics import max_or_nan
 from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.rank_log import log
+from tests.common.sft_collator import build_sft_collator
 from tests.common.training_checks import step_losses, training_run_checks
 
 SEED = 42
@@ -137,18 +137,6 @@ def run_sft_mode(ctx, suite: SFTSuite, key: str, mode: SFTMode, tokenizer) -> di
     if suite.evaluate:
         sft_args |= {"eval_strategy": "steps", "eval_steps": max_steps}
     config = SFTConfig(output_dir=os.path.join(ctx.output_dir, key), **sft_args)
-    # CP splits every batch across ranks, so each has to pad to a multiple of cp_size; the production
-    # script builds the same collator through this factory.
-    data_collator = (
-        select_data_collator(
-            train_on_completions_only=False,
-            tokenizer=tokenizer,
-            pad_to_multiple_of=parallelism_config.cp_size,
-            use_context_parallel=True,
-        )
-        if parallelism_config.is_cp_mode
-        else None
-    )
     trainer = DistributedSFTTrainer(
         model=model,
         args=config,
@@ -156,7 +144,7 @@ def run_sft_mode(ctx, suite: SFTSuite, key: str, mode: SFTMode, tokenizer) -> di
         eval_dataset=eval_dataset,
         processing_class=tokenizer,
         parallelism_config=parallelism_config,
-        data_collator=data_collator,
+        data_collator=build_sft_collator(tokenizer, config, model.config, parallelism_config),
         peft_config=peft_config,
     )
 

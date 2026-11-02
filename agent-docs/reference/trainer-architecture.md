@@ -17,7 +17,7 @@ its concern:
 | `checkpointing.py` | `CheckpointingMixin`: save / resume over an explicit `CheckpointContext`, the LR-scheduler and router-balancing-bias sidecars and a per-trainer sidecar hook |
 | `dataloaders.py` | `DataParallelLoaderMixin`: the parallelism-aware DP-sharded train / eval / test loaders and the pre-sharded length equalization |
 | `evaluation.py` | `EvaluationMixin`: `evaluate` / `evaluation_loop`, the unequal-batch escape hatch, the DP-scoped evaluation gather and the final round's padding cut (`eval_split_rows`) |
-| `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device per-step accumulator, gathered once per log), HF's input-token count (`include_num_input_tokens_seen: all`) added up on the host and summed across the world once per optimizer step, the per-document attention-work accumulator the MFU attention term reads and HF's `total_flos` estimate with its parameter count walked once per model; `effective_loss_mask` |
+| `token_metrics.py` | `TokenMetricsMixin`: the loss-token counter behind `num_unmasked_output_tokens_seen` (an on-device accumulator) and HF's input-token count (`include_num_input_tokens_seen: all`, added up on the host), summed over the world in one all-reduce per log, the input tokens also before each save and at each step the [EfficiencyCallback](../training-methods/callbacks.md#efficiencycallback) measures; the per-document attention-work accumulator the MFU attention term reads; HF's `total_flos` estimate, with its parameter count walked once per model, summed in the log's all-reduce and on its own at a save and at the end of training (`store_flos`); `effective_loss_mask` |
 | `parallelism/mode_setup.py` | `ModeSetupMixin`: the mode ladder (`_wrap_for_parallel_mode`), every per-mode FSDP2 wrap and the QLoRA sync install, `FsdpExclusions`, the CP wrapper adoption, `reject_unsynced_trainable_params` (COLLECTIVE) |
 | `parallelism/ep_layers.py` | `EPLayersMixin`: the model's EP layers (`_ep_layers()`), their parameter-id sets (one `_param_id_caches` store, cleared after the wrap), EP-safe gradient checkpointing; `resolve_use_reentrant` |
 | `parallelism/grad_sync.py` | `GradientSyncMixin`: the grad-accum window, the QLoRA / deferred-EP / TP-replicated grad sweeps and their step-pre-hooks |
@@ -57,14 +57,16 @@ on-policy trainers decouple the completions table from the metric drain. The emb
 
 `WorldMetrics` (`world_metrics.py`) is the one cross-rank metric accumulator: `StoredMetricsMixin`, SFT's loss
 metrics, offline GRPO's sign metrics and the GRPO step and rollout metrics record rank-local sums into it. A
-flush agrees the sorted `(key, kind)` schema in one digest all-reduce (a rank with no records learns it by
-broadcast), then folds every column in one float64 SUM and one MAX all-reduce, a min riding as a negated max.
-The number of collectives, their width and the host work do not grow with the rank count (no per-peer read-back
-or unpickle); the all-reduces' own latency does. Only a `percentile`'s raw values, or a schema the ranks disagree
-on (a key behind a data-dependent gate), add an object gather, whose host work does grow with it on NCCL; the
-async GRPO rollout metrics pay that every round for `episode/generation_tokens_p90`. `world_sums` is the one-shot
-form for a value read outside a window (the trust-region breaker, the KL clamp fraction, the prefetch and
-routing-replay counters).
+flush folds each column where it was recorded (a tensor's on its device, with the arithmetic Python's `sum`,
+`max` and `min` apply to a list), then reduces over the `(key, kind)` layout the ranks agreed on last: one
+float64 SUM all-reduce carries each rank's fit verdict, the keys it holds and the summed columns, one MAX
+all-reduce the maxes and negated mins, and one host read brings both back. Their count, width and host work do
+not grow with the rank count. A key outside the layout (the first flush, or a key behind a data-dependent gate the
+first time a rank reaches it), ranks holding different keys under a key check, or a `percentile`'s raw values take
+one object gather instead, whose host work does grow with it on NCCL, and the next flush reuses the union; the
+async GRPO rollout metrics pay that gather every round for `episode/generation_tokens_p90`. `world_sums` is the
+one-shot form for a value read outside a window (the trust-region breaker, the KL clamp fraction, the prefetch and
+routing-replay counters, the token counters).
 
 `ModeSetupMixin` dispatches by method, not by mode string: `_apply_ep_fsdp2`,
 `_apply_cp_fsdp2` and `_apply_ep_tp_fsdp2` are called directly from the mode ladder
@@ -391,26 +393,38 @@ An optimizer step whose global gradient norm is NaN or inf is never applied (`ha
 Without the guard one such step writes NaN into every parameter and both Adam moments (the toolkit's clips
 pass a NaN norm through as coefficient 1.0, torch's multiplies it into every gradient), and the model is NaN
 from the next forward on. The norm transformers computes right before `optimizer.step()` is all-reduced by
-every clip path, so every rank reads the same verdict, at the cost of one device-to-host read per optimizer
-step.
+every clip path, so every rank reaches the same verdict. The optimizer picks how the verdict is applied:
+
+| Optimizer | Skip | Host read of the norm |
+|---|---|---|
+| AdamWBF16 and Muon (`DeviceStepSkipMixin`, `halo/optimizers/step_skip.py`) | On the device: the step runs under a 0-dim flag, set for a non-finite norm, and its kernels write no parameter or moment; transformers' per-step `zero_grad` drops the gradients | Late, without a stall: the norm is copied non-blocking to pinned memory and read at the first of the next step's norm, a step that logs, evaluates or saves, the end of training, and the next `train()` call |
+| Any other: torch's, and FlashAdamW, whose third-party kernel takes no flag | On the host: the step is not called, and its gradients are discarded through the optimizer's `zero_grad` | Before every step |
 
 | Step | Outcome |
 |---|---|
 | Finite norm | Applied. |
-| Non-finite norm, finite weights | Skipped: the step's gradients are discarded through the optimizer's `zero_grad` (which also drops AdamWBF16's deferred clip scale), weights and moments stay as they were, and the step counter, LR schedule and data move on. Rank 0 warns naming the step, and the logs carry `nonfinite_steps_skipped` (counted since launch). |
+| Non-finite norm, finite weights | Skipped: weights, moments and the optimizer's step counts stay as they were (a device skip rolls its step counts and any state its step created back when the host reads the verdict), and the trainer's step counter, LR schedule and data move on. Rank 0 warns naming the step, and the logs carry `nonfinite_steps_skipped` (counted since launch). |
 | Non-finite norm, non-finite weights | Raised on every rank, naming the parameters: they went bad before this step's gradients, and a skip cannot repair them. |
 | More than `max_consecutive_nonfinite_steps` (default 3) in a row | Raised on every rank. `0` raises at the first. |
 
-The skip is installed on `self.optimizer.step` in `create_optimizer`, so every trainer gets it: before the
-LR scheduler wraps it, or over the scheduler's wrapper when the caller passes a pre-built pair
-(`optimizers=(optimizer, scheduler)`), in which case a skipped step still counts as taken for the scheduler.
-The zero-LR step that materializes state during an optimizer restore always steps.
+On the device path the warning and both raises come at the late read, at the latest before the next step's
+update, so no later step is applied and a final non-finite step is reported before training ends.
+
+The skip is installed in `create_optimizer` on the optimizer that steps (the one inside accelerate's wrapper), so
+every trainer gets it: before the LR scheduler wraps its `step`, or over the scheduler's wrapper when the caller
+passes a pre-built pair (`optimizers=(optimizer, scheduler)`), in which case a skipped step still counts as taken
+for the scheduler. The zero-LR step that materializes state during an optimizer restore always steps.
 
 A skipped step's loss is discarded with its gradients: transformers' loss accumulator returns to its value
-before the step's first micro-batch, so none of the step's micro-batches, finite ones included, adds to its
-window's logged `loss` or to the run's `train_loss`, whatever the logging strategy, and later windows stay
-finite. Both still divide by every step, skipped ones included; a window none of whose steps was applied logs
-`loss: nan`, with `logging_nan_inf_filter` on too, since it has no applied loss to report.
+before the step's first micro-batch (by a device-side select on the device path), so none of the step's
+micro-batches, finite ones included, adds to its window's logged `loss` or to the run's `train_loss`, whatever
+the logging strategy, and later windows stay finite. Both divide by the applied steps alone, so each is the mean
+over the steps that were applied; a window none of whose steps was applied logs `loss: nan`, with
+`logging_nan_inf_filter` on too, and so does `train_loss` for a run none of whose steps was applied.
+
+A step that saves reads the unread verdict first, so a checkpoint's optimizer state counts the applied steps
+only, and a `train()` call settles one an interrupted run left before it loads any checkpoint (its warning or
+raise lands there). Nothing else of the guard is checkpointed: a resumed run starts with no streak.
 
 Router balancing biases (the bias-update modes'
 [BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)) still update on a skipped
@@ -419,7 +433,7 @@ expert-load counts the step's forward recorded, which are finite token counts wh
 skipped step therefore moves a bias no further than an applied one and cannot make it non-finite.
 
 Under fp16, where accelerate's optimizer wrapper steps through the loss scaler, the scaler owns overflow
-steps and the guard stands aside; the toolkit's no-wrap prepare keeps the raw optimizer, so there no scaler
+steps and the guard takes no verdict; the toolkit's no-wrap prepare keeps the raw optimizer, so there no scaler
 steps it and the guard stays armed. Async GRPO's trust-region
 [breaker](../training-methods/async-grpo/objective.md#breaker) is the other skip path: it discards the
 gradients in `on_pre_optimizer_step`, after the guard's verdict, and either one discarding them skips the

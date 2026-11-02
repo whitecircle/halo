@@ -3,10 +3,13 @@
 Attention isolates a row's documents from ``position_ids``, which restart at 0 at every document; some families'
 conv and linear-attention mixers read the boundaries from forward kwargs instead and carry state across documents
 without them. Held here: who reads which markers, the refusals for rows no marker can isolate, the markers, and the
-varlen set flash attention would otherwise derive from a packed row in every layer."""
+varlen set flash attention would otherwise derive from a packed row, or test a one-document row for, in every
+layer."""
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
+from typing import Any
 
 import torch
 from transformers.utils.import_utils import is_causal_conv1d_available, is_flash_linear_attention_available
@@ -213,6 +216,21 @@ def segment_marker_kwargs(position_ids: torch.Tensor, markers: SegmentMarkers) -
         kwargs["cu_seq_lens_q"] = kwargs["cu_seq_lens_k"] = cu_seq_lens
         kwargs["max_length_q"] = kwargs["max_length_k"] = int(cu_seq_lens.diff().max())
     return kwargs
+
+
+def single_row_varlen_kwargs(batch: Mapping[str, Any]) -> dict[str, torch.Tensor | int]:
+    """The varlen set of a collated batch that is one ``[1, S]`` document without padding: ``cu_seq_lens_q/k``
+    ``[0, S]`` and host-int ``max_length_q/k`` ``S``, what transformers derives from the row's positions. Without it,
+    transformers' flash path tests the row for packing in every attention layer (``_is_packed_sequence``, a device
+    sync) before running its dense kernel. Empty for several rows, a padded row (unpadded by its mask instead) and
+    restarting ``position_ids``."""
+    input_ids, attention_mask = batch["input_ids"], batch.get("attention_mask")
+    position_ids = batch.get("position_ids")
+    if input_ids.shape[0] != 1 or (attention_mask is not None and not bool(attention_mask.all())):
+        return {}
+    if position_ids is not None and positions_restart(position_ids):
+        return {}
+    return segment_marker_kwargs(torch.arange(input_ids.shape[1]).unsqueeze(0), SegmentMarkers(cu_seq_lens=True))
 
 
 def packed_row_varlen_kwargs(position_ids: torch.Tensor) -> dict[str, torch.Tensor | int]:

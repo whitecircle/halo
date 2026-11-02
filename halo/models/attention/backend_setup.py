@@ -1,4 +1,4 @@
-"""Process-wide attention backend fixes (flash varlen seqlens, FA4 head_dim-256 strides, wide-head SDPA, flex
+"""Process-wide attention backend fixes (flash varlen seqlens, FA4's varlen softcap refusal, wide-head SDPA, flex
 compile) and the FA4 warm-up."""
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from halo.models.attention.fa4_entry_points import wrap_fa4_entry_points
 from halo.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
 from halo.models.attention.layout import attention_calls
 from halo.models.attention.selection import (
-    FA4_DEDICATED_HEAD_DIM,
     FLASH_MAX_HEAD_DIM,
     effective_attn_implementation,
     flash_attention_deterministic,
@@ -31,16 +30,16 @@ logger = logging.getLogger(__name__)
 WARMUP_MIN_SEQ_LEN = 512
 _WARMUP_WINDOW_MARGIN = 8
 
-# Markers on the wrapped ``flash_attn.cute`` entry points.
-_FA4_CONTIGUOUS_ATTR = "_halo_fa4_contiguous_dedicated_head"
+# Marker on the wrapped ``flash_attn.cute`` entry points.
 _FA4_VARLEN_SOFTCAP_ATTR = "_halo_fa4_varlen_softcap_refusal"
 
 
 def patch_transformers_flash_varlen_int_seqlen() -> None:
     """Make transformers pass varlen ``max_seqlen_{q,k}`` to the flash kernel as python ints (idempotent).
 
-    It forwards a fresh CUDA tensor each step, and FA4's varlen-backward compile key hashes it by
-    identity, so the backward kernel would recompile on every call.
+    In eager it forwards a 0-dim CUDA tensor. FA4 compiles its head_dim-256 varlen kernels one way for a host-int
+    bound and another for a tensor one, and :func:`warm_fa4_kernels` warms the int variant, the one packed rows reach
+    with their host-built varlen set; the coercion keeps masked batches on it too, at one ``.item()`` per call.
     """
     fn = flash_utils._process_flash_attention_kwargs
     if getattr(fn, "_halo_int_seqlen", False):
@@ -65,40 +64,9 @@ def patch_transformers_flash_varlen_int_seqlen() -> None:
     flash_utils._process_flash_attention_kwargs = wrapped
 
 
-def fa4_contiguous_dedicated_head_inputs(fn):
-    """``fn`` (an FA4 entry point) with q, k and v made contiguous at :data:`FA4_DEDICATED_HEAD_DIM`; every other
-    call passes through untouched."""
-
-    @functools.wraps(fn)
-    def wrapped(q, k, v, *args, **kwargs):
-        if q.shape[-1] == v.shape[-1] == FA4_DEDICATED_HEAD_DIM:
-            q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-        return fn(q, k, v, *args, **kwargs)
-
-    return wrapped
-
-
-def install_fa4_contiguous_dedicated_head_inputs() -> bool:
-    """Hand FA4's dedicated head_dim-256 kernel contiguous q/k/v (idempotent).
-
-    flash-attn-4 4.0.0b16 builds that kernel's forward layouts with packed strides and repairs only ``stride(-1)``,
-    so a head-major q/k/v is read scrambled: a finite but wrong output and wrong gradients, NaN in training. Qwen3.5's
-    partial-rotary ``torch.cat`` leaves q/k head-major ahead of the flash transpose, and a KV-cache forward leaves
-    k/v so on every family. Fixed upstream from 4.0.0b19 (Dao-AILab/flash-attention#2666, #2670); drop this with
-    that bump. Installed wherever FA4 runs, since the copy is exact on every FA4 kernel. False when
-    ``flash_attn.cute`` is not importable.
-    """
-    return wrap_fa4_entry_points(
-        _FA4_CONTIGUOUS_ATTR,
-        lambda fn, _varlen: fa4_contiguous_dedicated_head_inputs(fn),
-        f"contiguous q/k/v for the dedicated head_dim-{FA4_DEDICATED_HEAD_DIM} kernel",
-    )
-
-
 def fa4_varlen_softcap_refusal(fn, varlen: bool):
-    """``fn`` (an FA4 entry point), its varlen one raising on a softcapped call: that kernel's backward takes no
-    softcap, and on B300 its forward with one does not finish. The dense entry point, which takes it, is returned
-    as is."""
+    """``fn`` (an FA4 entry point), its varlen one raising on a softcapped call (:func:`fa4_varlen_refusal`). The
+    dense entry point, which trains it, is returned as is."""
     if not varlen:
         return fn
 
@@ -106,8 +74,8 @@ def fa4_varlen_softcap_refusal(fn, varlen: bool):
     def wrapped(*args, **kwargs):
         if kwargs.get("softcap"):
             raise RuntimeError(
-                "A softcapped attention call reached FlashAttention-4's varlen kernels, which take no attention "
-                "logit softcapping (the backward asserts, and on B300 the forward does not finish). A packed, "
+                "A softcapped attention call reached FlashAttention-4's varlen kernels, which are not validated with "
+                "attention logit softcapping (on B300 their forward with it did not finish). A packed, "
                 "padding-free or padded batch, training or evaluation, reaches them. Leave attn_implementation "
                 "unset or set flash_attention_2; FA4 trains a softcapped model only on one unpadded row per batch."
             )
@@ -117,8 +85,8 @@ def fa4_varlen_softcap_refusal(fn, varlen: bool):
 
 
 def install_fa4_varlen_softcap_refusal() -> bool:
-    """Make FA4's varlen entry point refuse a softcapped call (:func:`fa4_varlen_softcap_refusal`) instead of
-    hanging or failing in the backward (idempotent). False when ``flash_attn.cute`` is not importable."""
+    """Make FA4's varlen entry point refuse a softcapped call (:func:`fa4_varlen_softcap_refusal`) before it
+    launches (idempotent). False when ``flash_attn.cute`` is not importable."""
     return wrap_fa4_entry_points(
         _FA4_VARLEN_SOFTCAP_ATTR, fa4_varlen_softcap_refusal, "the softcap refusal on the varlen kernel"
     )
@@ -179,8 +147,8 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
     """Pre-compile this model's FA4 forward and backward kernels, dense and varlen, for each attention layer's
     own geometry (:func:`~halo.models.attention.layout.attention_calls`) at the run's ``dtype``, in transformers'
     deterministic mode as set at the load (:func:`flash_attention_deterministic`), which FA4's backward keys on. A
-    softcapped layer warms its dense call only: FA4's varlen backward takes no softcap, and its varlen forward with
-    one does not finish on B300, so no varlen call is launched for it.
+    softcapped layer warms its dense call only: a softcap stays off FA4's varlen kernels
+    (:func:`~halo.models.attention.selection.fa4_varlen_refusal`), so no varlen call is launched for it.
 
     Rank-local and best-effort: a first-use JIT compile on one rank lets its peers race into the next
     collective, so the caller fences every rank around it and nothing here may gate a collective.

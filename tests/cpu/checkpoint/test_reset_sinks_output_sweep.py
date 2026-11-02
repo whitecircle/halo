@@ -24,7 +24,7 @@ from safetensors.torch import load_file, save_file
 from transformers import GptOssConfig, GptOssForCausalLM
 
 import halo.checkpoint.tools.sink_reset as reset_sinks_mod
-from halo.checkpoint.format import SAFETENSORS_METADATA
+from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME, RUN_PLAN_FILE, SAFETENSORS_METADATA
 from halo.checkpoint.reading import checkpoint_shard_files
 from halo.checkpoint.tools import offline_export
 from halo.checkpoint.tools.sink_reset import reset_sinks
@@ -362,21 +362,27 @@ def test_a_sink_free_family_is_copied_through(tmp_path):
     assert (out / SINGLE).read_bytes() == (source / SINGLE).read_bytes()
 
 
-def test_the_copy_through_leaves_the_vendor_weight_dumps_behind(tmp_path):
-    """``original/`` and ``metal/`` are the vendor's own copies of the same weights (gpt-oss ships both): a reset
-    that rewrites shards drops them through the aux copy, and the copy-through of a sink-free checkpoint must
-    not carry them either, while a subdirectory that belongs to the checkpoint still arrives."""
+def test_the_copy_through_leaves_the_vendor_weight_dumps_and_the_run_internal_entries_behind(tmp_path):
+    """``original/`` and ``metal/`` are the vendor's own copies of the same weights (gpt-oss ships both), and an
+    ``output_dir`` root holding the final model also holds the run's ``_*`` entries (the checkpointing-plan record,
+    the reference scratch): a reset that rewrites shards drops them through the aux copy, and the copy-through of a
+    sink-free checkpoint must not carry them either, while a subdirectory that belongs to the checkpoint still
+    arrives."""
     source, out = tmp_path / "src", tmp_path / "out"
     _build_sink_free_source(source)
     for dump in ("original", "metal"):
         (source / dump).mkdir()
         (source / dump / SINGLE).write_bytes(b"vendor-dump")
+    (source / RUN_PLAN_FILE).write_text("{}")
+    (source / REFERENCE_CACHE_DIR_NAME).mkdir()
+    (source / REFERENCE_CACHE_DIR_NAME / "merged.values").write_bytes(b"scores")
     (source / "2_Dense").mkdir()
     (source / "2_Dense" / "config.json").write_text("{}")
 
     assert reset_sinks(str(source), str(out)) == 0
 
-    assert not (out / "original").exists() and not (out / "metal").exists(), sorted(os.listdir(out))
+    left_behind = ("original", "metal", RUN_PLAN_FILE, REFERENCE_CACHE_DIR_NAME)
+    assert not any((out / name).exists() for name in left_behind), sorted(os.listdir(out))
     assert (out / "2_Dense" / "config.json").read_text() == "{}"
     assert (out / SINGLE).read_bytes() == (source / SINGLE).read_bytes()
 

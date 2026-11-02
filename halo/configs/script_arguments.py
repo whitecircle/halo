@@ -3,7 +3,7 @@
 several script-argument and trainer-config dataclasses mix in."""
 
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from trl import ModelConfig
 
@@ -236,6 +236,18 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             "help": "Freeze the parameters whose full names match these fnmatch patterns, applied after unfreezing."
         },
     )
+    gradient_checkpointing_plan: Literal["off", "auto"] = field(
+        default="off",
+        metadata={
+            "help": "auto: measure step 2 fully checkpointed, then checkpoint only every k-th text decoder layer (or "
+            "none) while the predicted peak fits 85% of device memory (75% under EP), one plan for every rank; a "
+            "relaunch into the same output_dir after an unfinished run checkpoints at least one step more. Packed "
+            "SFT rows only; refused under PP, torch_compile, auto_find_batch_size, RL rollouts, multimodal rows, "
+            "activation offload, an explicit every_n_layers, model-level checkpointing or gradient_checkpointing "
+            "off. "
+            "See agent-docs/training-methods/callbacks.md#checkpointingplancallback."
+        },
+    )
     enable_efficiency_metrics: bool = field(
         default=False,
         metadata={
@@ -313,7 +325,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             "help": "An optimizer step whose global gradient norm is NaN or inf is never applied: its gradients are "
             "discarded, weights and optimizer moments stay as they were, and the step counter and LR schedule "
             "advance. This many such steps in a row are skipped with a warning; the next one raises, as does a "
-            "non-finite step whose weights are already non-finite. 0 raises at the first. "
+            "non-finite step whose weights are already non-finite. Under AdamWBF16 or Muon the warning and both "
+            "raises come at the late read of the verdict, before the next step's update. 0 raises at the first. "
             "See agent-docs/reference/trainer-architecture.md#non-finite-steps."
         },
     )

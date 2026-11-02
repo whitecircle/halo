@@ -65,12 +65,26 @@ def test_every_flash_label_with_dividing_head_counts_passes(label):
     [
         (lambda: _qwen3("eager"), 2, r"Ulysses CP requires Flash Attention. Got attn_implementation='eager'"),
         (lambda: _qwen3("sdpa"), 2, r"Ulysses CP requires Flash Attention. Got attn_implementation='sdpa'"),
+        # A hub kernel label names a kernel the CP attention never loads: it calls the flash_attn build.
+        (
+            lambda: _qwen3("kernels-community/flash-attn2"),
+            2,
+            r"Ulysses CP requires Flash Attention. Got attn_implementation='kernels-community/flash-attn2'",
+        ),
         (_without_q_heads, 2, r"Model config must have num_attention_heads for Ulysses CP"),
         (_without_kv_heads, 2, r"Cannot resolve the KV head count for Qwen3Attention under Ulysses CP"),
         (_qwen3, 3, r"^Q heads \(4\) must be divisible by context_parallel_size \(3\)"),
         (_qwen3, 4, r"^KV heads \(2\) must be divisible by context_parallel_size \(4\)"),
     ],
-    ids=["eager", "sdpa", "no-q-heads", "no-kv-heads", "q-heads-indivisible", "kv-heads-indivisible"],
+    ids=[
+        "eager",
+        "sdpa",
+        "hub-kernel-label",
+        "no-q-heads",
+        "no-kv-heads",
+        "q-heads-indivisible",
+        "kv-heads-indivisible",
+    ],
 )
 def test_each_refusal_names_its_mechanism(model, cp_size, match):
     with pytest.raises(CPConfigError, match=match):

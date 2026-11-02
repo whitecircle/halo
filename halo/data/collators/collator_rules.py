@@ -1,5 +1,5 @@
 """The SFT collator option combinations no collator, or no attention kernel on its rows, can serve, refused before
-one is selected."""
+one is selected, and which rows reach FlashAttention's varlen kernel."""
 
 import logging
 
@@ -17,6 +17,7 @@ from halo.models.segment_markers import (
     reject_pipeline_packed_rows,
     reject_unmarked_linear_attention_rows,
     require_segment_aware_kernels,
+    segment_markers_for,
 )
 from halo.runtime.ranks import is_global_main_process
 
@@ -26,10 +27,24 @@ logger = logging.getLogger(__name__)
 def rows_reach_varlen_kernel(
     *, packing: bool, padding_free: bool, per_device_train_batch_size: int, per_device_eval_batch_size: int = 0
 ) -> bool:
-    """Whether the run's batches reach FlashAttention's varlen call: packed and padding-free rows hold several
-    documents, and transformers unpads any batch holding a padding token, which more than one row per batch does,
-    a training batch or an evaluation one (``per_device_eval_batch_size``, :func:`evaluation_batch_size`)."""
+    """Whether the run's batches reach FlashAttention's varlen call whatever the model: packed and padding-free rows
+    hold several documents, and transformers unpads any batch holding a padding token, which more than one row per
+    batch does, a training batch or an evaluation one (``per_device_eval_batch_size``, :func:`evaluation_batch_size`).
+    A one-document batch reaches it only where the varlen kernels take the model's attention
+    (:func:`supports_one_document_varlen_set`)."""
     return packing or padding_free or max(per_device_train_batch_size, per_device_eval_batch_size) > 1
+
+
+def supports_one_document_varlen_set(model_config) -> bool:
+    """Whether this model's one-document rows take their varlen set, running flash attention's varlen kernel where
+    transformers would test them for packing in every layer before its dense kernel: a flash backend, no other
+    mixer reading the set (:func:`~halo.models.segment_markers.segment_markers_for`: GatedDeltaNet's delta rule
+    would take its varlen path), and on FA4 varlen kernels that take the model's attention
+    (:func:`~halo.models.attention.selection.fa4_varlen_refusal`)."""
+    attn_impl = effective_attn_implementation(model_config)
+    if not is_flash_attn_implementation(attn_impl) or segment_markers_for(model_config).cu_seq_lens:
+        return False
+    return attn_impl != "flash_attention_4" or fa4_varlen_refusal(model_config) is None
 
 
 def evaluation_batch_size(training_args) -> int:
@@ -38,10 +53,9 @@ def evaluation_batch_size(training_args) -> int:
 
 
 def reject_fa4_varlen_training(model_config, *, varlen_rows: bool, attn_impl: str | None = None) -> None:
-    """Refuse FA4 on batches that reach its varlen call (``varlen_rows``, training or evaluation) when its varlen
-    kernels refuse the model's attention (:func:`fa4_varlen_refusal`): on B300 the first such forward would not
-    finish, elsewhere the first backward would raise. ``attn_impl`` is the backend the load resolves, read off
-    ``model_config`` when omitted."""
+    """Refuse FA4 on batches that reach its varlen call (``varlen_rows``, training or evaluation) when the model's
+    attention needs what its varlen kernels are not validated with (:func:`fa4_varlen_refusal`). ``attn_impl`` is
+    the backend the load resolves, read off ``model_config`` when omitted."""
     if attn_impl is None:
         attn_impl = effective_attn_implementation(model_config)
     if attn_impl != "flash_attention_4" or not varlen_rows:
@@ -51,8 +65,8 @@ def reject_fa4_varlen_training(model_config, *, varlen_rows: bool, attn_impl: st
         return
     raise ValueError(
         f"attn_implementation='flash_attention_4' cannot train this model on packed, padding-free or padded rows: "
-        f"they reach FA4's varlen kernels, which take no {refused} (the backward asserts, and on B300 the forward "
-        f"does not finish). "
+        f"they reach FA4's varlen kernels, which are not validated with {refused} (on B300 their forward with it "
+        f"did not finish). "
         f"Leave attn_implementation unset (these rows then take flash_attention_2) or set flash_attention_2, or "
         f"train unpacked at per_device_train_batch_size: 1 (and per_device_eval_batch_size: 1 where the run "
         f"evaluates), whose rows run FA4's dense kernel."

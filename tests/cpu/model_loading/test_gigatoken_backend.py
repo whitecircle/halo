@@ -209,8 +209,7 @@ def test_tokenize_dataset_backend_parity(mode):
         results[backend] = tokenized[:]
 
     assert results["gigatoken"]["input_ids"] == results["hf"]["input_ids"]
-    assert results["gigatoken"]["attention_mask"] == results["hf"]["attention_mask"]
-    assert results["gigatoken"]["labels"] == results["hf"]["labels"]
+    assert results["gigatoken"] == results["hf"], "the backends baked different columns"
 
 
 class _FakeGigatoken:

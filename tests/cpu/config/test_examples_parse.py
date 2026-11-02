@@ -83,6 +83,11 @@ _INTENT_KEYS = frozenset(
 )
 
 
+def uses_expert_parallelism(raw: dict) -> bool:
+    """Does the raw YAML ask for an EP group (``expert_parallel_size`` above 1)?"""
+    return (raw.get("expert_parallel_size") or 1) > 1
+
+
 def declares_cross_node_ep(config: Path) -> bool:
     """Does ``config`` declare an EP group meant to span NVLink domains over RDMA?
 
@@ -92,7 +97,7 @@ def declares_cross_node_ep(config: Path) -> bool:
     ``ep_scope`` through ``ParallelismConfig`` needs a live launcher topology.
     """
     raw = yaml.safe_load(config.read_text(encoding="utf-8")) or {}
-    return raw.get("ep_scope") == "global" and (raw.get("expert_parallel_size") or 1) > 1
+    return raw.get("ep_scope") == "global" and uses_expert_parallelism(raw)
 
 
 _CROSS_NODE_EP_EXAMPLES = [config for config in _EXAMPLES if declares_cross_node_ep(config)]

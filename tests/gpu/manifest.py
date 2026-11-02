@@ -345,7 +345,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_deepgemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_fa4_trainable_sink_rescale.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     # 1200s: FA4 JIT-compiles the head_dim-256 forward and backward per shape, dense and varlen.
-    "kernels/test_fa4_hd256_contiguous.py": TestSpec(
+    "kernels/test_fa4_hd256_strided_inputs.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "qwen3", "glm4"), timeout=1200
     ),
     "kernels/test_fa4_hd256_family_parity.py": TestSpec(
@@ -1521,6 +1521,10 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "trainers/other/test_reward.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
     "trainers/other/test_reward_vlm_e2e.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "vlm"), timeout=1200),
+    # The non-finite step guard's late verdict waits for its asynchronous copy and adds no host sync to a step.
+    "trainers/other/test_step_guard_device_verdict.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu"), timeout=300
+    ),
     "trainers/preference/test_dpo.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
     "trainers/preference/test_dpo_vlm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "vlm"), timeout=900),
     "trainers/preference/test_smpo_vlm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "vlm"), timeout=900),
@@ -1768,9 +1772,9 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=("--mode fsdp", "--mode tp", "--mode ep"),
         timeout=1500,
     ),
-    # A non-finite step skipped on every rank, a streak and corrupted weights raising, on every clip and
-    # sharding path: ep1 DTensor experts, ep2 plain experts, two EP groups' deferred sweep, ETP, dense FSDP2,
-    # TP, CP, QLoRA and PP.
+    # A non-finite step skipped on every rank, its verdict read at its own log and a step late, a streak and
+    # corrupted weights raising, on every clip and sharding path: ep1 DTensor experts, ep2 plain experts, two EP
+    # groups' deferred sweep, ETP, dense FSDP2, TP, CP, QLoRA and PP.
     "trainers/sft/test_sft_nonfinite_step_guard.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "qwen3"),
@@ -1785,7 +1789,7 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--mode qlora", markers=("gpu", "core", "2gpu", "lora", "qwen3")),
             Row("--mode pp", nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3")),
         ),
-        timeout=900,
+        timeout=1200,
     ),
     "trainers/sft/test_sft_qwen3_modes.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "cp", "qwen3"), timeout=600
@@ -1856,6 +1860,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_convergence.py",
     "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
+    "profiling/benchmark_head_logprobs.py",
     "profiling/benchmark_moe_block.py",
     "profiling/benchmark_roofline.py",
     "profiling/benchmark_sft_dense.py",

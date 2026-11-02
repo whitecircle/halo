@@ -1,9 +1,10 @@
 """Per-batch token accounting: the loss mask, loss-contributing tokens, HF's input-token count, each batch's
 attention-score work and HF's floating-point estimate.
 
-Nothing syncs the host per micro-batch: counts fold into host or on-device accumulators, the input tokens sum
-over the world once per optimizer step, the loss tokens once per log step and the attention work is read once
-per optimizer step, once a callback binds as its sink.
+Nothing syncs the host per micro-batch: counts fold into host or on-device accumulators, the input and loss
+tokens and HF's FLOPs estimate sum over the world in one all-reduce per log (the input tokens also at a save and
+at each step a bound callback measures, the FLOPs at a save and at the end of training), and the attention work
+is read once per optimizer step, once a callback binds as its sink.
 """
 
 from __future__ import annotations
@@ -41,24 +42,39 @@ class TokenMetricsMixin:
     _attention_layout = None
     # ``(model, non-embedding parameter count)`` for :meth:`floating_point_ops`, set on its first call.
     _flops_parameter_count: tuple | None = None
-    # This rank's input tokens since the last optimizer step, for :meth:`_track_num_input_tokens`.
-    _window_input_tokens: int = 0
+    # This rank's input tokens not yet summed into ``state.num_input_tokens_seen`` (HF's ``"all"`` mode).
+    _unsummed_input_tokens: int = 0
 
     def _track_num_input_tokens(self, inputs) -> None:
-        """COLLECTIVE at an accumulation window's last micro-batch: HF's ``state.num_input_tokens_seen``. In its
-        ``"all"`` mode the count is a shape, so each micro-batch adds it on the host and the window's world sum
-        lands once per optimizer step, before the step's callbacks, logs and saves read it, where HF gathers it
-        and reads it back on every micro-batch. The other modes stay HF's."""
+        """HF's ``state.num_input_tokens_seen``. In its ``"all"`` mode the count is a shape, so each micro-batch adds
+        it on the host and its world sum lands where the count is read: each log, save and step the efficiency
+        callback measures (:meth:`drain_step_work`); HF gathers it and reads it back on every micro-batch. The other
+        modes stay HF's."""
         if self.args.include_num_input_tokens_seen != "all":
             super()._track_num_input_tokens(inputs)
             return
         main_input = getattr(self.model, "main_input_name", "input_ids")
         if main_input in inputs:
-            self._window_input_tokens += inputs[main_input].numel()
-        if self.accelerator.sync_gradients:
-            (window_tokens,) = world_sums([self._window_input_tokens])
-            self.state.num_input_tokens_seen += int(window_tokens)
-            self._window_input_tokens = 0
+            self._unsummed_input_tokens += inputs[main_input].numel()
+
+    def _sum_input_tokens(self) -> None:
+        """COLLECTIVE in HF's ``"all"`` mode: add every rank's input tokens since the last sum to
+        ``state.num_input_tokens_seen``."""
+        if self.args.include_num_input_tokens_seen == "all":
+            (tokens,) = world_sums([self._unsummed_input_tokens])
+            self.state.num_input_tokens_seen += int(tokens)
+            self._unsummed_input_tokens = 0
+
+    def store_flos(self) -> None:
+        """COLLECTIVE off a logged step: add every rank's FLOPs estimate since the last sum (``current_flos``) to
+        ``state.total_flos``. HF calls it right before :meth:`log` on a logged step, with ``control.should_log``
+        still set, and the log's one all-reduce carries the count there (:meth:`_drain_token_counts`); a save and
+        the end of training sum it here, before ``trainer_state.json`` and the train metrics are written."""
+        if self.control.should_log:
+            return
+        (flos,) = world_sums([self.current_flos])
+        self.state.total_flos += flos
+        self.current_flos = 0
 
     def floating_point_ops(self, inputs) -> int:
         """HF's estimate for ``state.total_flos``, ``6 × main-input tokens × non-embedding parameters``, with the
@@ -106,7 +122,7 @@ class TokenMetricsMixin:
 
     def _accumulate_attention_flops(self, inputs):
         """Cost this micro-batch's documents through the bound layout into the on-device accumulator,
-        read once per optimizer step by :meth:`drain_attention_flops`."""
+        read once per optimizer step by :meth:`drain_step_work`."""
         if not self._attention_work_bound:
             # Offered to every callback that consumes measured attention work (duck-typed, so the trainer
             # package imports nothing from the callbacks); one answers with the layout it costs batches with.
@@ -127,9 +143,12 @@ class TokenMetricsMixin:
         prev = getattr(self, "_local_attention_work_accum", None)
         self._local_attention_work_accum = step if prev is None else prev + step
 
-    def drain_attention_flops(self) -> tuple[float, int]:
-        """``(this rank's attention-score FLOPs, documents)`` since the last drain, then reset: one host read per
-        optimizer step. Rank-local: each pipeline stage costs the documents through its own layer slice."""
+    def drain_step_work(self) -> tuple[float, int]:
+        """COLLECTIVE in HF's ``"all"`` mode, once per optimizer step from the callback measuring it: the step's input
+        tokens summed into ``state.num_input_tokens_seen``, then ``(this rank's attention-score FLOPs, documents)``
+        since the last drain, reset and read back once. Rank-local: each pipeline stage costs the documents through
+        its own layer slice."""
+        self._sum_input_tokens()
         accum = getattr(self, "_local_attention_work_accum", None)
         if accum is None:
             return 0.0, 0
@@ -152,30 +171,34 @@ class TokenMetricsMixin:
         return loss_mask.sum() if loss_mask is not None else None
 
     def _accumulate_unmasked_output_tokens(self, local_count):
-        """Add this micro-batch's loss-token count to the on-device accumulator, gathered once per log
-        (:meth:`_drain_unmasked_output_tokens`)."""
+        """Add this micro-batch's loss-token count to the on-device accumulator, summed once per log
+        (:meth:`_drain_token_counts`)."""
         if local_count is None:
             return
-        # int64 always: the gather zero-fills absent ranks, so a float sum would make its dtype rank-dependent.
+        # int64: a float accumulator would round a long window's count.
         local = local_count.detach().long()
         prev = getattr(self, "_local_unmasked_token_accum", None)
         self._local_unmasked_token_accum = local if prev is None else prev + local
 
-    def _drain_unmasked_output_tokens(self):
-        """COLLECTIVE. Fold every rank's token accumulator into the run total, corrected for non-DP replication
-        (TP/ETP/CP), and reset. A rank with nothing accumulated enters with a zero; the total stays unset until
-        some rank contributes, so sequence-level trainers log nothing."""
+    def _drain_token_counts(self):
+        """COLLECTIVE. Sum every rank's input tokens into ``state.num_input_tokens_seen`` (HF's ``"all"`` mode), its
+        FLOPs estimate into ``state.total_flos`` and its loss-token accumulator into the run total, corrected for
+        non-DP replication (TP/ETP/CP), in one all-reduce read back once, and reset all three. A rank with nothing
+        accumulated adds a zero; the loss-token total stays unset until some rank contributes, so sequence-level
+        trainers log nothing."""
         accum = getattr(self, "_local_unmasked_token_accum", None)
-        if accum is None:
-            accum = torch.zeros((), dtype=torch.long, device=self.accelerator.device)
-        gathered = int(self.accelerator.gather(accum).sum().item())
-        non_dp_factor = self.parallelism_config.non_dp_replication_factor
-        if non_dp_factor > 1:
-            gathered //= non_dp_factor
-        previous = getattr(self, "_cumulative_unmasked_output_tokens", None)
-        if previous is not None or gathered > 0:
-            self._cumulative_unmasked_output_tokens = (previous or 0) + gathered
+        input_tokens, output_tokens, flos = world_sums(
+            [self._unsummed_input_tokens, 0 if accum is None else accum, self.current_flos]
+        )
+        self.state.num_input_tokens_seen += int(input_tokens)
+        self.state.total_flos += flos
+        self._unsummed_input_tokens = 0
+        self.current_flos = 0
         self._local_unmasked_token_accum = None
+        output_tokens = int(output_tokens) // self.parallelism_config.non_dp_replication_factor
+        previous = getattr(self, "_cumulative_unmasked_output_tokens", None)
+        if previous is not None or output_tokens > 0:
+            self._cumulative_unmasked_output_tokens = (previous or 0) + output_tokens
 
     def _warn_once_on_empty_labels(self, inputs: dict) -> None:
         """Warn once if a batch carries no training signal (every label -100, pad or eos). First optimizer

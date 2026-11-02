@@ -1,24 +1,21 @@
 #!/usr/bin/env python
-"""FA4's dedicated head_dim-256 kernel, behind ``install_fa4_contiguous_dedicated_head_inputs``, is as accurate
-as FA2 on the strided q/k/v the head_dim-256 families hand it.
+"""FA4's head_dim-256 path, called as transformers calls it, is as accurate as FA2 on the strided q/k/v the
+head_dim-256 families hand it.
 
-flash-attn-4 4.0.0b16 builds the hd256 kernel's forward layouts with packed strides, so a head-major q/k (Qwen3.5's
-partial-rotary ``torch.cat``, GLM-4.7-Flash's MLA) or a v sliced off a fused K/V tensor (MLA, the Ulysses
-all-to-all) is read scrambled. Against an fp64 reference on those exact layouts, dense and varlen, at the Qwen3.5
-(16:2) and GLM-4.7-Flash MLA (20:20) head counts: the shimmed entry points' output and dq/dk/dv must stay within
-1.5x of FA2's error, and the unwrapped kernel must still misread the same inputs (when it stops, upstream fixed the
-layouts and the shim can go). The output gradient reaches the kernel contiguous, as from every FA4 caller; the shim
-leaves it alone, so a second backward with the same gradient head-major must stay within FA2's error too, or the
-backward misreads a strided dout and the shim has to copy it as well. The hd256 backward must also refuse
-``deterministic=True``, which is why the FA4 veto stays on for deterministic runs. Fails without the shim (its arm
-then is the unwrapped kernel), or if a wrapper drops the copy for any of q, k or v.
+A head-major q/k (Qwen3.5's partial-rotary ``torch.cat``, GLM-4.7-Flash's MLA) or a v sliced off a fused K/V tensor
+(MLA, the Ulysses all-to-all) reaches the kernel with every stride but the last one unpacked; flash-attn-4 4.0.0b16
+built its head_dim-256 layouts with packed strides and read them scrambled. Against an fp64 reference on those exact
+layouts, dense and varlen, at the Qwen3.5 (16:2) and GLM-4.7-Flash MLA (20:20) head counts: the entry points' output
+and dq/dk/dv must stay within 1.5x of FA2's error, and so must a second backward handed the output gradient
+head-major. Fails on a kernel that misreads any of q, k, v or dout, as 4.0.0b16's does. Also measured, not gated:
+whether the head_dim-256 backward with ``deterministic=True`` runs and repeats bit for bit, which the resolver does
+not rely on (a deterministic run keeps head_dim-256 attention off FA4).
 
-    torchrun --nproc_per_node=1 tests/gpu/kernels/test_fa4_hd256_contiguous.py
+    torchrun --nproc_per_node=1 tests/gpu/kernels/test_fa4_hd256_strided_inputs.py
 """
 
 import torch
 
-from halo.models.attention.backend_setup import install_fa4_contiguous_dedicated_head_inputs
 from halo.models.attention.selection import FA4_DEDICATED_HEAD_DIM
 from tests.common.harness import gpu_test_main
 from tests.common.numerics import max_abs_rel_err
@@ -29,10 +26,8 @@ D = FA4_DEDICATED_HEAD_DIM
 HEAD_COUNTS = ((16, 2), (20, 20))
 DOCUMENT_LENGTHS = (700, 900, 448)
 S = sum(DOCUMENT_LENGTHS)
-# The shimmed kernel's error may exceed FA2's (two bf16 kernels, different accumulation order) by this factor.
+# FA4's error may exceed FA2's (two bf16 kernels, different accumulation order) by this factor; a misread is O(1).
 FA2_ERROR_RATIO = 1.5
-# The unwrapped kernel on head-major inputs reads another head's rows: its output error is O(1), FA2's O(1e-3).
-MISREAD_RATIO = 10.0
 
 
 def _strided_inputs(heads: int, kv_heads: int, *, varlen: bool, seed: int):
@@ -80,79 +75,71 @@ def _attend(fn, q, k, v, *, varlen: bool, **kwargs):
     return out[0] if isinstance(out, tuple) else out
 
 
-def _errors(
-    fn, heads, kv_heads, *, varlen: bool, backward: bool = True, head_major_dout: bool = False
-) -> dict[str, float]:
-    """Output (and dq/dk/dv) error of ``fn`` against the fp64 reference on the same strided leaves, the output
+def _errors(fn, heads, kv_heads, *, varlen: bool, head_major_dout: bool = False) -> dict[str, float]:
+    """Output and dq/dk/dv error of ``fn`` against the fp64 reference on the same strided leaves, the output
     gradient handed to ``fn``'s backward contiguous or, with ``head_major_dout``, head-major."""
     q, k, v = (t.requires_grad_(True) for t in _strided_inputs(heads, kv_heads, varlen=varlen, seed=0))
     out = _attend(fn, q, k, v, varlen=varlen)
     q64, k64, v64 = (t.detach().double().requires_grad_(True) for t in (q, k, v))
     ref = _reference(q64, k64, v64, varlen=varlen)
     errors = {"o": max_abs_rel_err(out, ref)}
-    if backward:
-        grad = torch.randn(ref.shape, device="cuda", dtype=ref.dtype)
-        dout = grad.to(out.dtype)
-        if head_major_dout:
-            dout = dout.transpose(-3, -2).contiguous().transpose(-3, -2)
-            assert dout.stride(-1) == 1 and not dout.is_contiguous()
-        out.backward(dout)
-        ref.backward(grad)
-        for name, got, want in (("dq", q.grad, q64.grad), ("dk", k.grad, k64.grad), ("dv", v.grad, v64.grad)):
-            errors[name] = max_abs_rel_err(got, want)
+    grad = torch.randn(ref.shape, device="cuda", dtype=ref.dtype)
+    dout = grad.to(out.dtype)
+    if head_major_dout:
+        dout = dout.transpose(-3, -2).contiguous().transpose(-3, -2)
+        assert dout.stride(-1) == 1 and not dout.is_contiguous()
+    out.backward(dout)
+    ref.backward(grad)
+    for name, got, want in (("dq", q.grad, q64.grad), ("dk", k.grad, k64.grad), ("dv", v.grad, v64.grad)):
+        errors[name] = max_abs_rel_err(got, want)
     return errors
 
 
-def _deterministic_backward_refused(fn, heads, kv_heads) -> bool:
+def _deterministic_backward_repeats(fn, heads, kv_heads) -> float:
+    """1.0 when two ``deterministic=True`` backwards over the same strided leaves give bitwise-equal dq/dk/dv, 0.0
+    when they differ, -1.0 when the kernel refuses the flag."""
     q, k, v = (t.requires_grad_(True) for t in _strided_inputs(heads, kv_heads, varlen=False, seed=1))
-    try:
-        _attend(fn, q, k, v, varlen=False, deterministic=True).float().sum().backward()
-    except AssertionError as refusal:
-        return "deterministic" in str(refusal)
-    return False
+    dout = torch.randn(q.shape, device="cuda", dtype=q.dtype)
+    grads = []
+    for _ in range(2):
+        try:
+            _attend(fn, q, k, v, varlen=False, deterministic=True).backward(dout)
+        except AssertionError as refusal:
+            if "deterministic" not in str(refusal):
+                raise
+            return -1.0
+        grads.append([t.grad.clone() for t in (q, k, v)])
+        q.grad = k.grad = v.grad = None
+    return float(all(torch.equal(a, b) for a, b in zip(*grads, strict=True)))
 
 
-@gpu_test_main(exact_world_size=1, partial_state=False, prefix="fa4_hd256_contiguous")
+@gpu_test_main(exact_world_size=1, partial_state=False, prefix="fa4_hd256_strided_inputs")
 def run(ctx):
     import flash_attn  # noqa: PLC0415 - optional dependency (FA2, the reference kernel)
     import flash_attn.cute as cute  # noqa: PLC0415 - optional Blackwell-only dependency
 
-    checks = {"installs": install_fa4_contiguous_dedicated_head_inputs()}
-    entry_points = (cute.flash_attn_func, cute.flash_attn_varlen_func)
-    checks["install_is_idempotent"] = install_fa4_contiguous_dedicated_head_inputs() and entry_points == (
-        cute.flash_attn_func,
-        cute.flash_attn_varlen_func,
-    )
-    metrics = {}
+    checks, metrics = {}, {}
     for heads, kv_heads in HEAD_COUNTS:
         for varlen in (False, True):
             label = f"{heads}x{kv_heads}_{'varlen' if varlen else 'dense'}"
-            shimmed = cute.flash_attn_varlen_func if varlen else cute.flash_attn_func
+            fa4 = cute.flash_attn_varlen_func if varlen else cute.flash_attn_func
             fa2 = flash_attn.flash_attn_varlen_func if varlen else flash_attn.flash_attn_func
-            fa4_errors = _errors(shimmed, heads, kv_heads, varlen=varlen)
+            fa4_errors = _errors(fa4, heads, kv_heads, varlen=varlen)
             fa2_errors = _errors(fa2, heads, kv_heads, varlen=varlen)
-            head_major_dout = _errors(shimmed, heads, kv_heads, varlen=varlen, head_major_dout=True)
-            misread = _errors(shimmed.__wrapped__, heads, kv_heads, varlen=varlen, backward=False)["o"]
-            log(
-                f"  [{label}] fa4_shim {fa4_errors}  head-major dout {head_major_dout}  fa2 {fa2_errors}  "
-                f"unwrapped o {misread:.2e}"
-            )
+            head_major_dout = _errors(fa4, heads, kv_heads, varlen=varlen, head_major_dout=True)
+            log(f"  [{label}] fa4 {fa4_errors}  head-major dout {head_major_dout}  fa2 {fa2_errors}")
             for name, error in fa4_errors.items():
                 checks[f"{label}_{name}_within_fa2_error"] = error <= FA2_ERROR_RATIO * fa2_errors[name]
-                metrics[f"{label}_{name}_fa4_shim"] = error
+                metrics[f"{label}_{name}_fa4"] = error
                 metrics[f"{label}_{name}_fa2"] = fa2_errors[name]
             for name in ("dq", "dk", "dv"):
                 checks[f"{label}_{name}_head_major_dout_within_fa2_error"] = (
                     head_major_dout[name] <= FA2_ERROR_RATIO * fa2_errors[name]
                 )
-                metrics[f"{label}_{name}_fa4_shim_head_major_dout"] = head_major_dout[name]
-            checks[f"{label}_unwrapped_kernel_still_misreads_strided_inputs"] = not (
-                misread < MISREAD_RATIO * fa2_errors["o"]
-            )
-            metrics[f"{label}_o_unwrapped"] = misread
-        checks[f"{heads}x{kv_heads}_deterministic_backward_refused"] = _deterministic_backward_refused(
-            cute.flash_attn_func, heads, kv_heads
-        )
+                metrics[f"{label}_{name}_fa4_head_major_dout"] = head_major_dout[name]
+        repeats = _deterministic_backward_repeats(cute.flash_attn_func, heads, kv_heads)
+        log(f"  [{heads}x{kv_heads}] deterministic backward bitwise across two calls: {repeats}")
+        metrics[f"{heads}x{kv_heads}_deterministic_backward_bitwise"] = repeats
     return {"checks": checks, "metrics": metrics}
 
 

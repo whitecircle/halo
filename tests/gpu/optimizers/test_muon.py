@@ -9,6 +9,8 @@ Verifies that build_muon_optimizer:
 5. Round-trips its state dict
 6. Writes an orthogonalized update for every matrix the fused step batches, from the Nesterov
    momentum input on the step after
+7. Steps under a False device skip flag bit for bit as without one, and writes nothing under a True one,
+   on both legs (``tests/common/device_step_skip.py``)
 
 Each property is recorded as its own check, so one failure does not hide the others.
 
@@ -23,6 +25,7 @@ import torch.nn as nn
 from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
 from halo.optimizers.muon import _GNS_CHUNK_SIZE, _muon_kernels_available, build_muon_optimizer
+from tests.common.device_step_skip import device_skip_mismatches, muon_builder
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import assert_orthogonalized, log_spectrum_matrix
 from tests.common.optimizer_state import assert_optimizer_state_bit_exact
@@ -320,6 +323,12 @@ def check_step_writes_orthogonalized_update():
     log(f"  {checked} matrix updates orthogonal over two steps")
 
 
+def check_device_skip_is_exact():
+    build = muon_builder("cuda")
+    mismatches = device_skip_mismatches(build, build)
+    assert not mismatches, mismatches
+
+
 # ─── Main ────────────────────────────────────────────────────────────────────
 
 
@@ -333,6 +342,7 @@ def run(ctx) -> dict:
     record_check(checks, "decay_parameter_names", check_decay_parameter_names)
     record_check(checks, "state_dict_roundtrip", check_state_dict_roundtrip)
     record_check(checks, "step_writes_orthogonalized_update", check_step_writes_orthogonalized_update)
+    record_check(checks, "device_skip_is_exact", check_device_skip_is_exact)
     return {"checks": checks}
 
 

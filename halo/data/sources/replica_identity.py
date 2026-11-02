@@ -105,7 +105,7 @@ def reject_divergent_replicas(dataset: DatasetDict, path: str, *, replica: int, 
     if world <= 1 or num_replicas >= world:
         return
     identity = {name: _split_identity(dataset[name]) for name in sorted(dataset)}
-    if num_replicas == 1 and agree_across_ranks(identity).agreed:
+    if num_replicas == 1 and agree_across_ranks(identity):
         return
     local_world = get_local_world_size()
     divergence = combine_across_ranks(

@@ -10,11 +10,10 @@ packed documents by ``position_ids`` alone and again with the ``cu_seq_lens`` ma
 collators emit, and a right-padded batch of two (FA's unpad path).
 
 Per row: logits, the attention parameters' gradients (worst one) and every gradient (median) must stay within
-1.5x of FA2's error, all finite. On the rows whose q/k/v reach the kernel strided (unpacked, ``cu_seq_lens``), a
-forward on the unwrapped FA4 kernel shows the family meets the head_dim-256 stride defect at all (its error at
-least 10x FA2's); transformers copies q/k/v on the ``position_ids``-only and unpad paths. Fails if the loader stops
-installing the contiguity fix, if the fix misses a tensor this family hands the kernel, or if FA4 trails FA2 on
-any row. GLM-4.7-Flash's row holds the kernel path alone: the resolver keeps its latent attention on FA2, since
+1.5x of FA2's error, all finite. The unpacked and ``cu_seq_lens`` rows must hand FA4's entry points q/k/v strided,
+the layout flash-attn-4 4.0.0b16 read scrambled at head_dim 256 (transformers copies them on the ``position_ids``-only
+and unpad paths). Fails if FA4 trails FA2 on any row, or if those rows stop reaching FA4 strided and so stop testing
+that layout. GLM-4.7-Flash's row holds the kernel path alone: the resolver keeps its latent attention on FA2, since
 trained end to end on FA4 its gradients leave FA2's by the second step.
 
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_fa4_hd256_family_parity.py --family qwen3_5_moe_text
@@ -23,6 +22,7 @@ trained end to end on FA4 its gradients leave FA2's by the second step.
 import argparse
 import contextlib
 import copy
+import functools
 import os
 import statistics
 
@@ -48,8 +48,6 @@ DOCUMENT_LENGTHS = (400, 300, 324)
 PADDED_LENGTHS = (SEQ, SEQ - 200)
 # Two bf16 kernels accumulate in different orders; FA4 may trail FA2 by this factor.
 FA2_ERROR_RATIO = 1.5
-# The unwrapped kernel reads another head's rows: its logits error is far past bf16 round-off.
-MISREAD_RATIO = 10.0
 # The rows whose q/k/v transformers hands the kernel strided; its position_ids-only and unpad paths copy them.
 STRIDED_ROWS = ("unpacked", "packed_cu_seq_lens")
 
@@ -90,14 +88,12 @@ def _rows(vocab_size: int, device) -> dict[str, dict]:
     }
 
 
-def _forward_backward(model, row: dict, *, backward: bool = True):
+def _forward_backward(model, row: dict):
     """Logits over the real tokens and every parameter's gradient of a next-token loss over them."""
     model.zero_grad(set_to_none=True)
     logits = model(**row, use_cache=False).logits.float()
     real = row.get("attention_mask", torch.ones_like(row["input_ids"])).bool()
     logits = logits[real]
-    if not backward:
-        return logits.detach(), {}
     labels = row["input_ids"].roll(-1, dims=1)[real]
     F.cross_entropy(logits, labels).backward()
     grads = {name: p.grad.detach().float() for name, p in model.named_parameters() if p.grad is not None}
@@ -119,17 +115,27 @@ def _errors(model, row, reference) -> dict[str, float]:
 
 
 @contextlib.contextmanager
-def _unwrapped_fa4():
-    """FA4 with Halo's entry-point wrappers peeled off, for the duration of the block."""
+def _fa4_strided_calls():
+    """Per FA4 entry-point call in the block, whether any of q, k, v reached it strided."""
     import flash_attn.cute as cute  # noqa: PLC0415 - optional Blackwell-only dependency
 
-    wrapped = cute.flash_attn_func, cute.flash_attn_varlen_func
-    cute.flash_attn_func, cute.flash_attn_varlen_func = (fn.__wrapped__ for fn in wrapped)
+    strided = []
+    entry_points = cute.flash_attn_func, cute.flash_attn_varlen_func
+
+    def recording(fn):
+        @functools.wraps(fn)
+        def wrapped(q, k, v, *args, **kwargs):
+            strided.append(not all(t.is_contiguous() for t in (q, k, v)))
+            return fn(q, k, v, *args, **kwargs)
+
+        return wrapped
+
+    cute.flash_attn_func, cute.flash_attn_varlen_func = (recording(fn) for fn in entry_points)
     flash_utils._loaded_implementation = None  # transformers re-imports the entry points on its next call
     try:
-        yield
+        yield strided
     finally:
-        cute.flash_attn_func, cute.flash_attn_varlen_func = wrapped
+        cute.flash_attn_func, cute.flash_attn_varlen_func = entry_points
         flash_utils._loaded_implementation = None
 
 
@@ -140,7 +146,7 @@ def run(ctx):
     family_name = parser.parse_args().family
     family, overrides = FAMILIES[family_name]
     if os.environ.get("FLASH_ATTENTION_DETERMINISTIC") == "1":
-        raise RuntimeError("FLASH_ATTENTION_DETERMINISTIC=1 makes FA4's head_dim-256 backward assert; unset it")
+        raise RuntimeError("FLASH_ATTENTION_DETERMINISTIC=1 keeps head_dim-256 attention off FA4; unset it")
     configure_float32_matmul_precision()
 
     torch.manual_seed(SEED)
@@ -154,20 +160,19 @@ def run(ctx):
     for row_name, row in rows.items():
         reference = _forward_backward(reference_model, row)
         model.config._attn_implementation = apply_family_patches(model.config, "flash_attention_4")
-        fa4 = _errors(model, row, reference)
-        with _unwrapped_fa4():
-            misread = max_abs_rel_err(_forward_backward(model, row, backward=False)[0], reference[0])
+        with _fa4_strided_calls() as strided:
+            fa4 = _errors(model, row, reference)
         model.config._attn_implementation = "flash_attention_2"
         fa2 = _errors(model, row, reference)
-        log(f"  [{family_name}/{row_name}] fa4 {fa4}  fa2 {fa2}  unwrapped-fa4 logits {misread:.2e}")
+        log(f"  [{family_name}/{row_name}] fa4 {fa4}  fa2 {fa2}  strided fa4 calls {sum(strided)}/{len(strided)}")
         checks[f"{row_name}_finite"] = bool(fa4["finite"] and fa2["finite"])
         for metric in ("logits", "attention_grad_max", "grad_median"):
             checks[f"{row_name}_{metric}_within_fa2_error"] = fa4[metric] <= FA2_ERROR_RATIO * fa2[metric]
             metrics[f"{row_name}_{metric}_fa4"] = fa4[metric]
             metrics[f"{row_name}_{metric}_fa2"] = fa2[metric]
         if row_name in STRIDED_ROWS:
-            checks[f"{row_name}_family_reaches_the_stride_defect"] = not (misread < MISREAD_RATIO * fa2["logits"])
-        metrics[f"{row_name}_logits_unwrapped_fa4"] = misread
+            checks[f"{row_name}_hands_fa4_strided_inputs"] = any(strided)
+        metrics[f"{row_name}_fa4_strided_calls"] = sum(strided)
     return {"checks": checks, "metrics": metrics}
 
 

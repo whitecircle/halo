@@ -19,7 +19,7 @@ from halo.checkpoint.model_card import tag_exported_model_card
 from halo.checkpoint.reading import checkpoint_shard_files, detect_model_types, reject_partial_checkpoint
 from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
-    is_non_artifact_subdirectory,
+    is_non_artifact_entry,
     preflight_resource_warning,
     reject_in_place_conversion,
     resolve_checkpoint_source,
@@ -59,11 +59,11 @@ def _sink_keys_by_shard(shards: list[str]) -> dict[str, list[str]]:
     return found
 
 
-def _non_artifact_subdirectories(root: str, directory: str, names: list[str]) -> list[str]:
-    """``shutil.copytree``'s ignore: the subdirectories of ``root`` the aux copy leaves behind."""
+def _non_artifact_entries(root: str, directory: str, names: list[str]) -> list[str]:
+    """``shutil.copytree``'s ignore: the top-level entries of ``root`` the aux copy leaves behind."""
     if directory != root:
         return []
-    return [name for name in names if is_non_artifact_subdirectory(name) and os.path.isdir(os.path.join(root, name))]
+    return [name for name in names if is_non_artifact_entry(name, is_dir=os.path.isdir(os.path.join(root, name)))]
 
 
 def _passthrough_copy(source: Path, output_dir: Path, dry_run: bool) -> None:
@@ -71,7 +71,7 @@ def _passthrough_copy(source: Path, output_dir: Path, dry_run: bool) -> None:
 
     A no-op reset still writes the output it was asked for: returning without writing would leave the
     next pipeline stage pointing at a missing directory, or at a stale one of the same name. It leaves
-    behind the subdirectories a reset that rewrites shards does not carry (a vendor weight dump among them).
+    behind the entries a reset that rewrites shards does not carry (a vendor weight dump, the run's ``_*`` ones).
     """
     if dry_run or output_dir == source:
         return
@@ -80,7 +80,7 @@ def _passthrough_copy(source: Path, output_dir: Path, dry_run: bool) -> None:
         str(source),
         str(output_dir),
         dirs_exist_ok=True,
-        ignore=functools.partial(_non_artifact_subdirectories, str(source)),
+        ignore=functools.partial(_non_artifact_entries, str(source)),
     )
     tag_exported_model_card(str(output_dir), source_dir=str(source))
 

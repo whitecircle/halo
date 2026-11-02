@@ -50,7 +50,8 @@ def _wrapper(model, cp_size, cp_rank):
 
 @pytest.mark.parametrize("cp_size", [1, 2, 4])
 def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
-    """CP2/4 cover rank-ordering: each rank's backbone sees its own chunk at its global positions."""
+    """CP2/4 cover rank-ordering: each rank's backbone sees its own chunk at its global positions, and no mask,
+    which only a router aux loss reads outside the attention CP replaces."""
     torch.manual_seed(18)
     model = _Model()
     ids = torch.randint(1, 32, (2, SEQ))
@@ -67,7 +68,7 @@ def test_hidden_only_scores_each_contiguous_chunk_at_global_positions(cp_size):
         torch.testing.assert_close(got, expected[:, start:end])
         seen_ids, seen_mask, seen_positions, use_cache = model.base_model.calls[-1]
         torch.testing.assert_close(seen_ids, ids[:, start:end])
-        torch.testing.assert_close(seen_mask, mask[:, start:end])
+        assert seen_mask is None
         torch.testing.assert_close(seen_positions, positions[:, start:end])
         assert use_cache is False
 
@@ -85,10 +86,6 @@ def test_hidden_only_reuses_cp_guards_and_does_not_accept_labels():
     model = _Model()
     wrapper = _wrapper(model, cp_size=2, cp_rank=0)
     ids = torch.ones(1, SEQ, dtype=torch.long)
-    mask = torch.ones_like(ids)
-    mask[:, :2] = 0
-    with pytest.raises(ValueError, match="LEFT-padded"):
-        wrapper.forward_hidden_states(ids, attention_mask=mask)
     with pytest.raises(ValueError, match="does not accept labels"):
         wrapper.forward_hidden_states(ids, labels=ids)
     with pytest.raises(ValueError, match="use_cache=False"):

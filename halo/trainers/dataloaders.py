@@ -21,6 +21,7 @@ from accelerate.utils import recursively_apply
 from torch.utils.data import DataLoader
 from transformers.trainer_utils import seed_worker
 
+from halo.distributed.context_parallel.sequence_chunks import LeftPaddingGuard
 from halo.hardware import current_device
 from halo.runtime.collectives import all_gather_cat
 from halo.runtime.consensus import rank_consensus, rank_max
@@ -302,7 +303,7 @@ class DataParallelLoaderMixin:
 
         params = {
             "batch_size": batch_size,
-            "collate_fn": collator,
+            "collate_fn": self._loader_collate_fn(collator),
             "num_workers": self.args.dataloader_num_workers,
             "pin_memory": self.args.dataloader_pin_memory,
             "persistent_workers": self.args.dataloader_persistent_workers,
@@ -311,6 +312,11 @@ class DataParallelLoaderMixin:
             "in_order": self.args.dataloader_in_order,
         }
         return dataset, params
+
+    def _loader_collate_fn(self, collator):
+        """The collate function a loader batches with: ``collator``, under CP behind :class:`LeftPaddingGuard`, which
+        refuses a left-padded batch on the host before it moves to the device."""
+        return LeftPaddingGuard(collator) if self.parallelism_config.is_cp_mode else collator
 
     def _train_loader_batch_size(self) -> int:
         """Rows one train-loader fetch returns. GRPO overrides it to draw a whole generation round."""

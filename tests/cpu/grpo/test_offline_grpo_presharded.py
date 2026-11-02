@@ -32,7 +32,9 @@ def _sampler_span(presharded: bool, dp_size: int, dp_rank: int) -> int:
     """
     stub = SimpleNamespace(
         _dataset_presharded=presharded,
-        parallelism_config=SimpleNamespace(data_parallel_size=dp_size, get_data_parallel_rank=lambda: dp_rank),
+        parallelism_config=SimpleNamespace(
+            is_cp_mode=False, data_parallel_size=dp_size, get_data_parallel_rank=lambda: dp_rank
+        ),
         data_collator=lambda rows: rows,
         args=SimpleNamespace(
             dataloader_num_workers=0,
@@ -45,6 +47,7 @@ def _sampler_span(presharded: bool, dp_size: int, dp_rank: int) -> int:
         ),
     )
     stub.dp_shard_geometry = partial(DataParallelLoaderMixin.dp_shard_geometry, stub)
+    stub._loader_collate_fn = partial(DataParallelLoaderMixin._loader_collate_fn, stub)
 
     loader = OfflineGRPOTrainer._build_grouped_dataloader(
         stub, [{"row": index} for index in GROUP_IDS], GROUP_IDS, batch_size=1, shuffle=False

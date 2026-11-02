@@ -44,7 +44,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 - **Trainable** (`reset_sinks: false` + `train_sinks: true`): live with gradients on; full fine-tuning under FA4 or `eager` only.
 
-    The fused FA4 backward returns no sink gradient, so the loader installs a rescale on both `flash_attn.cute` entry points (varlen and dense). A grad-requiring sink runs the sink-less kernel with `return_lse=True` and applies `out * sigmoid(lse - sink)` outside it — algebraically the fused sink, with `d_sink` from the gate and complete `dq/dk/dv` through `dout` and the kernel's `dlse` path.
+    The loader installs a rescale on both `flash_attn.cute` entry points (varlen and dense), so a sink trains without the kernel's own sink backward, which is not validated here. A grad-requiring sink runs the sink-less kernel with `return_lse=True` and applies `out * sigmoid(lse - sink)` outside it — algebraically the fused sink, with `d_sink` from the gate and complete `dq/dk/dv` through `dout` and the kernel's `dlse` path.
 
     `tests/gpu/kernels/test_fa4_trainable_sink_rescale.py` pins all four against an eager reference on both entry points. Frozen sinks and no-grad calls pass through untouched.
 

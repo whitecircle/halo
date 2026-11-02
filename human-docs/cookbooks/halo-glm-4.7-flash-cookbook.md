@@ -80,7 +80,7 @@ the trainer.
 ## Settings that matter
 
 - **Attention.** The recipe pins `flash_attention_2`, which Blackwell also picks unpinned: Halo keeps
-  GLM's 256-wide latent attention off FA4, whose head_dim-256 kernel trains it away from FA2, under CP
+  GLM's 256-wide latent attention off FA4, whose head_dim-256 kernel trained it away from FA2, under CP
   and `full_determinism` too. CP refuses an explicit `sdpa` label.
 - **Router balancing.** The recipe sets `moe_balancing: bias_update`, which `auto` also picks. It updates
   the router's own `e_score_correction_bias`, so the trained bias ships in every checkpoint and the

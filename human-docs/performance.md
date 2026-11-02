@@ -31,7 +31,9 @@ Set these per run:
   fill the global batch with `gradient_accumulation_steps`, not more
   parallelism. It is the largest effect on MoE.
 - **`gradient_checkpointing: false`** when the activations fit, at much higher
-  peak memory.
+  peak memory. On packed SFT rows `gradient_checkpointing_plan: auto` finds that
+  out itself: it measures step 2 and checkpoints only the layers the memory
+  needs ([Callbacks](../agent-docs/training-methods/callbacks.md#checkpointingplancallback) ↗).
 - **`packing: true`** on a corpus of short rows; `padding_free: true` gains
   less. Where SFT rows share long prefixes (GPT-OSS, Qwen3, Qwen3.5/3.6,
   GLM-5 Next), `tree_packing: true` stores each prefix once, at some extra
@@ -40,6 +42,11 @@ Set these per run:
 - **`liger_kernel_config: {fused_linear_cross_entropy: true}`** past ~16k
   tokens, which trades a little speed for a lot of logits memory. Under
   context parallelism the CP wrapper runs it over each rank's chunk.
+- **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** in front of a dense
+  launch: 13–14% less peak reserved memory at the same speed, which is why the
+  dense SFT, DPO and SMPO examples carry it. Under EP it costs throughput, so
+  set it there only to fit
+  ([Allocator](../agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments) ↗).
 - **`fsdp_defer_grad_sync: true` with `fsdp_reshard_after_backward: false`**
   under gradient accumulation: one gradient reduce and one re-gather per
   optimizer step, at an unsharded gradient copy per GPU.

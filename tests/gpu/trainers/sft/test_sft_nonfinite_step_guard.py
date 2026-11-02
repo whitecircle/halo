@@ -18,15 +18,22 @@ Each row trains ``DistributedSFTTrainer`` on one clip and sharding path:
 
 The last rank poisons a step by multiplying its final norm's output by NaN, which leaves every forward
 collective (DeepEP dispatch included) finite and makes the backward NaN; under PP that rank is the last
-stage. Three phases per row:
+stage. AdamWBF16, the bf16 rows' optimizer, skips on the device and the guard reads the verdict a step late:
+at the step's own log when it logs, else at the next step's norm. QLoRA's torch AdamW skips on the host. Four
+phases per row:
 
-  1. **Skip.** The last rank poisons step ``POISON_STEP``. The gradient reductions carry the NaN to every
-     rank, so every rank reads a NaN global norm and skips: every parameter shard and optimizer moment
-     after the step equals its value before it. The later steps train, the windows after the skipped one
-     log finite losses, and the logs carry ``nonfinite_steps_skipped``.
-  2. **Streak.** At ``max_consecutive_nonfinite_steps=1``, two poisoned steps in a row raise on every rank,
-     the first skipped and the second refused.
-  3. **Corrupted weights.** Rank 0 writes NaN into one trainable ``q_proj`` shard before a step. The step's
+  1. **Skip.** The last rank poisons step ``POISON_STEP``, every step logging. The gradient reductions carry
+     the NaN to every rank, so every rank reads a NaN global norm and skips: every parameter shard and
+     optimizer moment after the step equals its value before it, and the optimizer's step counts leave it out.
+     The later steps train, the windows after the skipped one log finite losses, and the logs carry
+     ``nonfinite_steps_skipped``.
+  2. **Late verdict.** The same run logging once, over all ``TOTAL_STEPS``: the poisoned step logs nothing, so
+     its verdict is read at the next step's norm. The step is skipped as in phase 1, and the window's loss and
+     ``train_loss`` are the mean of phase 1's losses over the applied steps.
+  3. **Streak.** At ``max_consecutive_nonfinite_steps=1``, two poisoned steps in a row inside one logging
+     window raise on every rank, the first skipped and the second refused: on the device path one step late,
+     at the next step's norm, and either way before any later update.
+  4. **Corrupted weights.** Rank 0 writes NaN into one trainable ``q_proj`` shard before a step. The step's
      norm is NaN, and every rank raises naming that parameter instead of skipping.
 
 Run:
@@ -51,6 +58,7 @@ from halo.data.collators.factory import select_data_collator
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
+from halo.optimizers.step_skip import DeviceStepSkipMixin
 from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import to_local
@@ -69,6 +77,9 @@ from tests.common.rank_log import log
 FAMILY = "qwen3_moe"
 TOTAL_STEPS = 5
 POISON_STEP = 3
+# Two runs of one row agree on a step's logged loss up to reduction order; a divisor that counts the skipped step
+# misses it by a fifth.
+LOSS_RTOL = 2e-2
 BATCH_SIZE = 2
 MAX_LENGTH = 128
 PP_MAX_LENGTH = 64
@@ -126,6 +137,15 @@ class _PoisonSteps(TrainerCallback):
         self.armed = False
 
 
+def _stepped_optimizer(trainer):
+    """The optimizer that steps, inside accelerate's wrapper under ``accelerate launch``."""
+    return getattr(trainer.optimizer, "optimizer", trainer.optimizer)
+
+
+def _steps_counted(trainer) -> set[int]:
+    return {int(state["step"]) for state in _stepped_optimizer(trainer).state.values() if "step" in state}
+
+
 def _local_state(trainer) -> tuple[dict[str, torch.Tensor], list[torch.Tensor]]:
     """This rank's parameter shards and optimizer moments, copied."""
     model = trainer.model
@@ -171,7 +191,7 @@ class _CorruptShard(TrainerCallback):
             to_local(dict(model.named_parameters())[self.name]).view(-1)[0] = float("nan")
 
 
-def _sft_config(output_dir: str) -> SFTConfig:
+def _sft_config(output_dir: str, logging_steps: int) -> SFTConfig:
     pipelined = MODE.model == "pp"
     return SFTConfig(
         output_dir=output_dir,
@@ -186,7 +206,7 @@ def _sft_config(output_dir: str) -> SFTConfig:
         bf16=True,
         gradient_checkpointing=False,
         use_liger_kernel=False,
-        logging_steps=1,
+        logging_steps=logging_steps,
         save_strategy="no",
         report_to=[],
         logging_nan_inf_filter=False,
@@ -253,10 +273,15 @@ def run(ctx):
     moe_checkpoint = tiny_family_checkpoint(ctx, FAMILY) if MODE.model == "moe" else None
     out = os.path.join(shared_output_dir(ctx), "train_out")
 
-    def make_trainer(*, poison_steps=(), **guard_kwargs):
+    def make_trainer(*, poison_steps=(), logging_steps=1, **guard_kwargs):
+        # Seeds every random draw of a row's build (QLoRA's adapters), so two runs of one row take the same steps.
+        torch.manual_seed(SEED)
         pc = ParallelismConfig(**MODE.axes)
         trainer = DistributedSFTTrainer(
-            args=_sft_config(out), parallelism_config=pc, **_trainer_inputs(pc, moe_checkpoint), **guard_kwargs
+            args=_sft_config(out, logging_steps),
+            parallelism_config=pc,
+            **_trainer_inputs(pc, moe_checkpoint),
+            **guard_kwargs,
         )
         trainer.add_callback(_PoisonSteps(trainer, poison_steps))
         ctx.on_teardown(trainer.cleanup_ep)
@@ -264,7 +289,7 @@ def run(ctx):
 
     checks: dict[str, bool] = {}
 
-    log(f"\n[1/3] the last rank poisons step {POISON_STEP} of {TOTAL_STEPS}")
+    log(f"\n[1/4] the last rank poisons step {POISON_STEP} of {TOTAL_STEPS}, every step logging")
     trainer = make_trainer(poison_steps=(POISON_STEP,))
     around = _AroundStep(trainer, POISON_STEP)
     trainer.add_callback(around)
@@ -291,20 +316,63 @@ def run(ctx):
         0 if s < POISON_STEP else 1 for s in range(1, TOTAL_STEPS + 1)
     ]
     checks["run_mean_loss_finite"] = math.isfinite(result.training_loss)
+    device_path = isinstance(_stepped_optimizer(trainer), DeviceStepSkipMixin)
+    log(f"  verdict path: {'device' if device_path else 'host'}")
+    checks["step_counts_leave_out_the_skipped_step"] = rank_consensus(
+        _steps_counted(trainer) == {TOTAL_STEPS - 1}
+    ).all_ok
+    applied = [logs.get(s, {}).get("loss", math.nan) for s in range(1, TOTAL_STEPS + 1) if s != POISON_STEP]
+    applied_mean = sum(applied) / len(applied)
     finish_phase(trainer)
     ctx.barrier()
 
-    log("\n[2/3] two poisoned steps in a row at max_consecutive_nonfinite_steps=1")
-    trainer = make_trainer(poison_steps=(2, 3), max_consecutive_nonfinite_steps=1)
+    log(f"\n[2/4] the same poisoned step inside one {TOTAL_STEPS}-step logging window")
+    trainer = make_trainer(poison_steps=(POISON_STEP,), logging_steps=TOTAL_STEPS)
+    around = _AroundStep(trainer, POISON_STEP)
+    trainer.add_callback(around)
+    late = trainer.train()
+    before, after = around.before, around.after
+    skipped = before is not None and after is not None
+    checks["late_verdict_skipped_the_poisoned_step"] = rank_consensus(
+        skipped and _same(list(before[0].values()), list(after[0].values())) and _same(before[1], after[1])
+    ).all_ok
+    checks["late_verdict_step_counts_leave_out_the_skipped_step"] = rank_consensus(
+        _steps_counted(trainer) == {TOTAL_STEPS - 1}
+    ).all_ok
+    windows = {e["step"]: e for e in trainer.state.log_history if "loss" in e and "eval_loss" not in e}
+    window = windows.get(TOTAL_STEPS, {})
+    log(f"  window loss {window.get('loss')}, train_loss {late.training_loss}; phase 1 applied mean {applied_mean}")
+    checks["late_window_averages_the_applied_steps"] = sorted(windows) == [TOTAL_STEPS] and math.isclose(
+        window["loss"], applied_mean, rel_tol=LOSS_RTOL
+    )
+    checks["late_window_counts_the_skip"] = window.get("nonfinite_steps_skipped") == 1
+    checks["late_train_loss_averages_the_applied_steps"] = math.isclose(
+        late.training_loss, applied_mean, rel_tol=LOSS_RTOL
+    )
+    finish_phase(trainer)
+    ctx.barrier()
+
+    log("\n[3/4] two poisoned steps in a row at max_consecutive_nonfinite_steps=1, inside one logging window")
+    trainer = make_trainer(poison_steps=(2, 3), logging_steps=TOTAL_STEPS, max_consecutive_nonfinite_steps=1)
+    first = _AroundStep(trainer, 1)
+    trainer.add_callback(first)
     raised = _raised(trainer)
-    log(f"  raised: {raised}")
+    log(f"  raised at global step {trainer.state.global_step}: {raised}")
     checks["streak_raises_on_every_rank"] = rank_consensus(
         raised is not None and "Optimizer steps 2-3: 2 consecutive steps" in raised
+    ).all_ok
+    # A device skip's verdict is read at the next step's norm: step 3's raises in step 4, before its update.
+    checks["streak_raises_at_its_verdict_read"] = trainer.state.global_step == (3 if device_path else 2)
+    shards, moments = _local_state(trainer)
+    checks["no_update_after_the_last_applied_step"] = rank_consensus(
+        first.after is not None
+        and _same(list(first.after[0].values()), list(shards.values()))
+        and _same(first.after[1], moments)
     ).all_ok
     finish_phase(trainer)
     ctx.barrier()
 
-    log("\n[3/3] rank 0 corrupts one weight shard before step 2")
+    log("\n[4/4] rank 0 corrupts one weight shard before step 2")
     trainer = make_trainer()
     # Rank 0's name: under PP the other stage holds other layers.
     name = broadcast_from_rank0(

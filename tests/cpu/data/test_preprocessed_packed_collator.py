@@ -125,6 +125,7 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
             per_device_train_batch_size=1,
             per_device_eval_batch_size=1,
             eval_strategy="no",
+            pad_to_multiple_of=None,
         )
         model_config = SimpleNamespace(model_name_or_path="stub-model")
         parallelism_config = SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1)

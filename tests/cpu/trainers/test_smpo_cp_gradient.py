@@ -13,8 +13,8 @@ This drives the real ``get_batch_loss_metrics`` over a 2-rank gloo CP group in f
 the per-sequence log-probs, the loss, the FSDP-averaged gradient and every logged metric with a
 ``cp_size=1`` run of the same batch. The ``logits/*`` means are logging-only reduces: each rank's
 chunk mean would differ from the sequence's. A batch whose prompts the collator left-padded must
-reach the CP forward with trailing padding only — the stand-in model refuses a left-padded batch as
-the CP wrapper does — and still match the unsplit run.
+reach the CP forward with trailing padding only — the stand-in model refuses a left-padded batch, which
+the CP attention cannot serve — and still match the unsplit run.
 
     python tests/cpu/trainers/test_smpo_cp_gradient.py
 """
@@ -28,8 +28,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 
-from halo.distributed.context_parallel.sequence_chunks import split_sequence_for_cp
-from halo.distributed.context_parallel.ulysses_model import _reject_left_padding
+from halo.distributed.context_parallel.sequence_chunks import reject_left_padding, split_sequence_for_cp
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.first_step import AUTOGRAD_FALLBACK_WARNING
@@ -47,7 +46,7 @@ PER_SEQUENCE_KEYS = ("chosen_logps", "rejected_logps", "chosen_sft_loss", "rejec
 
 class _TokenTableLM(nn.Module):
     """Logits looked up per token; under CP it refuses a left-padded batch and forwards only this
-    rank's chunk, like the CP wrapper."""
+    rank's chunk."""
 
     def __init__(self):
         super().__init__()
@@ -57,7 +56,7 @@ class _TokenTableLM(nn.Module):
 
     def forward(self, input_ids, attention_mask=None, position_ids=None, use_cache=None):
         if self.cp_config is not None:
-            _reject_left_padding(attention_mask)
+            reject_left_padding(attention_mask)
             input_ids = split_sequence_for_cp(input_ids, self.cp_config)
         return SimpleNamespace(logits=self.table[input_ids])
 

@@ -2,8 +2,8 @@
 """The SFT, self-distillation and embedding scripts request FA2 for a softcapped model whose training or evaluation rows
 reach FA4's varlen call, and refuse a pinned FA4 there.
 
-FA4's varlen kernels take no softcap (the backward asserts, and on B300 the forward does not finish), and packed,
-padding-free and padded rows (more than one per batch) all reach them, so Gemma 2 27B (head_dim 128, which FA4's
+A softcap stays off FA4's varlen kernels (not validated there; on B300 their forward with one did not finish), and
+packed, padding-free and padded rows (more than one per batch) all reach them, so Gemma 2 27B (head_dim 128, which FA4's
 general kernel otherwise runs) trains on FA4 only one unpadded row per batch. Driven through ``main()`` (the embedding EP/TP pipeline through its builder) on a Blackwell host up to the policy
 load: the request must be decided on the rows the collator will build (a pre-processed corpus as it was baked), before
 any weight loads, and reach every model the run loads on it.
@@ -163,7 +163,7 @@ def test_a_preprocessed_corpus_is_judged_as_it_was_baked(tmp_path, packed_corpus
 
 
 def test_a_pinned_fa4_on_packed_rows_is_refused_before_the_load(tmp_path):
-    with pytest.raises(ValueError, match="which take no attention logit softcapping"):
+    with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
         loads = _sft_request(tmp_path, f"attn_implementation: {FA4}\npacking: true\n", _gemma2(128))
         pytest.fail(f"reached the policy load: {loads}")
 
@@ -247,7 +247,7 @@ def test_the_self_distillation_policy_takes_fa2_on_padded_rows(tmp_path, yaml_bo
 
 
 def test_a_self_distillation_policy_loaded_on_fa4_with_padded_rows_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="which take no attention logit softcapping"):
+    with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
         _self_distill_request(
             tmp_path, f"attn_implementation: {FA4}\nper_device_train_batch_size: 2\n", loaded_backend=FA4
         )
@@ -333,7 +333,7 @@ def test_padded_evaluation_batches_take_the_embedding_backbone_off_fa4():
 
 
 def test_an_embedding_backbone_loaded_on_fa4_with_padded_rows_is_refused():
-    with pytest.raises(ValueError, match="which take no attention logit softcapping"):
+    with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
         _embedding_backbone_loads(batch_size=2, pinned=FA4, loaded_backend=FA4)
 
 

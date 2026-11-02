@@ -29,6 +29,8 @@ On sm_100 and sm_103 (B200, B300) one launch steps up to 256 bf16 parameters tha
 
 **Gradient clipping inside the step.** `defer_grad_scale(coef)` hands the step a device scalar that the kernel multiplies into each gradient as it reads it. The EP clip (`GradientClippingMixin._install_ep_clip`) uses it whenever the optimizer exposes the hook and its parameters with gradients are exactly the clipped parameters with gradients, instead of rescaling every gradient with `_foreach_mul_` (whose fp32-scalar-on-bf16 form runs one unvectorized kernel per parameter). The gradients stay unscaled until the step; `zero_grad` drops a scale no step consumed. So anything reading `.grad` between the clip and the step (a `TrainerCallback.on_pre_optimizer_step`, which Hugging Face documents as running after clipping) sees the unclipped gradients; the reported `grad_norm` is the pre-clip norm either way.
 
+**Skipping a step on the device.** `skip_next_step_if(flag)` (`DeviceStepSkipMixin`, `halo/optimizers/step_skip.py`) hands the next step a 0-dim device bool: set, the fused kernel's programs step no block and the eager and fp32 paths keep every old value, while the step's host bookkeeping (`state["step"]`, first-step state) still moves until `settle_step(skipped)` rolls it back, and drops the copy of the old state whether the step was skipped or not. Unset, the step writes what a step without the flag does, bit for bit. The [non-finite step guard](../reference/trainer-architecture.md#non-finite-steps) skips this way, so it never waits for its verdict.
+
 SR seeds are drawn from no generator: `sr_seed_pair` (`halo/optimizers/stochastic_rounding.py`) hashes the parameter's optimizer step (`state["step"]`) and its name (`sr_param_index`, over the `param_names` each group carries) under a per-optimizer key. Replicas that hold the same parameter and receive the same averaged gradient — HSDP `dp_replicate` groups, DDP, EP replica groups, expert-TP partners — round it identically and stay bit-for-bit in sync, even where the ranks' optimizers hold different parameter lists (GPT-OSS keeps an expert's `down_proj_bias` on expert-TP rank 0 only). The optimizer refuses param groups built without names. A resumed run restores `step` with the optimizer state, so it rounds exactly as the uninterrupted run would have; there is no generator state to checkpoint, and the zero-LR step torch runs to materialize state before a restore consumes nothing. An element's noise is keyed by its offset in the rank's local shard, so it reproduces for one sharding layout (the one an optimizer-shard resume must keep), not across layouts.
 
 ## Benchmarks
@@ -117,6 +119,9 @@ torchrun --nproc_per_node=2 tests/gpu/optimizers/test_adamw_bf16_fused.py
 
 # Launch tables, the kernel comparison under Triton's interpreter, the per-element code compiled for sm_90, sm_100 and sm_103 (CPU)
 python tests/cpu/optimizers/test_adamw_bf16_fused_launch.py
+
+# The device skip flag on every path of AdamWBF16 and Muon, interpreted for the Triton ones (CPU)
+python tests/cpu/optimizers/test_device_step_skip.py
 
 # EP end-to-end + SR correctness under EP=8 (8 GPUs)
 torchrun --nproc_per_node=8 \

@@ -117,7 +117,6 @@ def test_every_kernel_the_probe_resolves_takes_the_flag(blackwell, hopper, modul
             patch.object(selection, "is_blackwell_gpu", return_value=blackwell),
             patch.object(selection, "is_hopper_gpu", return_value=hopper),
             patch.object(ulysses_attention, "flash_kernel", binding_kernel),
-            patch.object(ulysses_attention, "install_fa4_contiguous_dedicated_head_inputs"),
         ):
             UlyssesAttention(_Attention(), cp_group=None, cp_size=1)._attend(*_attend_inputs())
     finally:

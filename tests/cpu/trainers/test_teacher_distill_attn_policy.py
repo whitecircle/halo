@@ -16,7 +16,7 @@ declares has to reach the hub fetch:
   backend must be resolved under the SAME ``SinksPolicy`` the student was loaded with.
 * Student and teacher load on ONE padded-workload request, decided on both checkpoints, so the two
   forwards compared token by token resolve from the same label.
-* A student loaded on FA4 whose padded batches reach FA4's varlen kernels, which take no softcap (Gemma 2 at
+* A student loaded on FA4 whose padded batches reach FA4's varlen kernels, which a softcap stays off (Gemma 2 at
   more than one row per batch), is refused before the teacher loads, not in the first step.
 
 Run: python tests/cpu/trainers/test_teacher_distill_attn_policy.py  (or pytest)
@@ -251,7 +251,7 @@ def test_student_and_teacher_load_on_one_request_decided_on_both_checkpoints(
     """On Blackwell the request is the loader's own pick only when neither checkpoint rules it out, and both
     loads take it: a request decided on one checkpoint alone would hand the other model a label its class
     cannot be read for (remote code) or a kernel its padded batches cannot run (a softcap on FA4's varlen
-    kernels, whose forward does not finish on B300, a forward-only teacher's included)."""
+    kernels, a forward-only teacher's included)."""
     requests = _main_requests(tmp_path, student_config=student_config, teacher_config=teacher_config)
     assert requests == (expected, expected)
 
@@ -277,7 +277,7 @@ def _softcapped_student_on_fa4():
 
 @pytest.mark.parametrize(("batch_size", "refused"), [(2, True), (1, False)], ids=["padded-bs2", "unpadded-bs1"])
 def test_a_softcapped_student_on_fa4_is_refused_on_padded_rows_before_the_teacher_loads(batch_size, refused, tmp_path):
-    """More than one row per batch pads, and a padded batch reaches FA4's varlen kernels, which take no softcap;
+    """More than one row per batch pads, and a padded batch reaches FA4's varlen kernels, which a softcap stays off;
     one unpadded row per batch runs FA4's dense kernel and reaches the teacher load."""
     run = functools.partial(
         _main_requests,
@@ -288,7 +288,7 @@ def test_a_softcapped_student_on_fa4_is_refused_on_padded_rows_before_the_teache
         student=_softcapped_student_on_fa4(),
     )
     if refused:
-        with pytest.raises(ValueError, match="which take no attention logit softcapping"):
+        with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
             run()
     else:
         assert run() == ("flash_attention_4", "flash_attention_4")

@@ -108,12 +108,11 @@ def test_tokenize_dataset():
     tokenized = tokenize_dataset(dataset, tokenizer, config)
 
     assert "input_ids" in tokenized.column_names
-    assert "labels" in tokenized.column_names, "tokenize_dataset must add a labels column"
     assert len(tokenized) == 2
 
-    # Default (train_on_completions_only=False): labels copy input_ids, so nothing is masked out.
+    # train_on_completions_only=False: no labels are baked; the collator derives them from input_ids.
+    assert "labels" not in tokenized.column_names, "a full-sequence bake must not store a labels copy"
     row = tokenized[0]
-    assert row["labels"] == row["input_ids"], "labels must equal input_ids for full-sequence loss"
     assert len(row["input_ids"]) == len(row["attention_mask"])
 
     print("  tokenize_dataset: PASSED")
@@ -145,6 +144,8 @@ def test_tokenize_dataset_completion_only():
     tokenizer = load_cached_tokenizer(config.model_name_or_path)
 
     tokenized = tokenize_dataset(dataset, tokenizer, config)
+    # At input width: labels inferred as int64 beside int32 input_ids would be most of the artifact's bytes.
+    assert tokenized.features["labels"] == tokenized.features["input_ids"], tokenized.features
     row = tokenized[0]
     ids, labels = row["input_ids"], row["labels"]
 
@@ -587,8 +588,8 @@ def test_chat_template_compared_as_resolved_text_not_as_a_path(tmp_path):
 
 def test_source_labels_column_is_not_baked_as_loss_targets():
     """A source column named `labels` (classification/reward corpora carry one) must not survive the
-    tokenization map: the labels step only fills in a MISSING column, so those source values would
-    be baked as this dataset's loss targets."""
+    tokenization map: a full-sequence bake stores no labels, so those source values would be read as
+    this dataset's loss targets."""
     dataset = Dataset.from_dict(
         {
             "conversation": [[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "yo"}]],
@@ -604,8 +605,7 @@ def test_source_labels_column_is_not_baked_as_loss_targets():
     tokenizer = load_cached_tokenizer(config.model_name_or_path)
 
     tokenized = tokenize_dataset(dataset, tokenizer, config)
-    row = tokenized[0]
-    assert row["labels"] == row["input_ids"], f"source labels leaked into the baked targets: {row['labels']!r}"
+    assert "labels" not in tokenized.column_names, f"source labels leaked into the baked rows: {tokenized[0]!r}"
 
 
 # metadata.json version stamp: compared, and never downgraded into a silent raw-path fallback

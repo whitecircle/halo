@@ -17,7 +17,7 @@ import datasets
 import transformers
 from transformers import set_seed
 
-from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME
+from halo.checkpoint.format import REFERENCE_CACHE_DIR_NAME, RUN_PLAN_FILE
 from halo.checkpoint.parallel.resume_source import resolve_resume_checkpoint, resolve_resume_weights_source
 from halo.configs.parser import is_true_string
 from halo.data.pipeline.coordinated_map import ensure_cache_dir
@@ -55,12 +55,14 @@ def _validate_output_dir(output_dir: str) -> None:
                 f"Output directory '{output_dir}' exists but could not be read ({e}). Fix its "
                 f"permissions or mount, or use a new output_dir."
             ) from e
-        # Toolkit scratch and logging, not training state: probe suffixes and reference-cache parents can
-        # outlive a failed run, and NFS may retain live mmap inodes.
+        # Toolkit scratch and logging, not training state: probe suffixes, reference-cache parents and the
+        # checkpointing-plan record a crash before the first checkpoint leaves can outlive a failed run, and NFS
+        # may retain live mmap inodes.
         contents = [
             item
             for item in entries
-            if item != RUN_LOG_DIR_NAME and not item.startswith((FS_PROBE_PREFIX, REFERENCE_CACHE_DIR_NAME))
+            if item not in (RUN_LOG_DIR_NAME, RUN_PLAN_FILE)
+            and not item.startswith((FS_PROBE_PREFIX, REFERENCE_CACHE_DIR_NAME))
         ]
         if contents:
             raise ValueError(

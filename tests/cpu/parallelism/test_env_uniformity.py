@@ -77,7 +77,7 @@ def test_the_collective_raises_with_the_caller_s_guidance():
         out_list[:] = [{"HALO_GRAD_BUCKET_MB": 256}] * 4 + [{"HALO_GRAD_BUCKET_MB": 64}] * 4
 
     def disagreeing_digests(slots, op=None, group=None):
-        slots.copy_(torch.tensor([7, -3, 0, 0]))  # max(d) != -max(-d): two digests met
+        slots.copy_(torch.tensor([7, -3]))  # max(d) != -max(-d): two digests met
 
     with (
         patch(f"{_MOD}.dist.is_available", return_value=True),

@@ -8,7 +8,7 @@ from typing import Any
 
 from datasets import Dataset, DatasetDict
 
-from halo.data.pipeline.coordinated_map import coordinated_pack
+from halo.data.pipeline.coordinated_map import coordinated_pack, resolve_map_num_proc
 from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, PreprocessingConfig
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, ShardIndex, ShardInfo, write_stamped_sidecar
 from halo.data.preprocessed.tokenization import resolve_label_eos_token_ids, tokenize_dataset, tokenize_vlm_dataset
@@ -134,7 +134,13 @@ def _tokenize_splits(
             continue
         rows = tokenize(split_data, tokenizer_or_processor, config, split, eos_token_ids=eos_token_ids)
         if config.pack_sequences:
-            rows = coordinated_pack(rows, seq_length=config.max_length, strategy=config.packing_strategy, split=split)
+            rows = coordinated_pack(
+                rows,
+                seq_length=config.max_length,
+                strategy=config.packing_strategy,
+                split=split,
+                num_proc=resolve_map_num_proc(config.num_proc),
+            )
         tokenized[split] = rows
     return tokenized
 

@@ -61,6 +61,12 @@ def parse_s3_uri(uri: str) -> tuple[str, str]:
     return bucket, key.rstrip("/")
 
 
+def s3_object_key(prefix: str, *parts: str) -> str:
+    """The S3 key of ``parts`` under a dataset's key ``prefix``: one spelling for every read of its control files,
+    which the launch-wide read of ``share_s3_control_files`` serves only on an exact match."""
+    return "/".join((prefix.rstrip("/"), *parts))
+
+
 def parse_dataset_source(path: str) -> tuple[str, str | None, str]:
     """``(source_type, bucket_or_none, key_or_path)`` of a dataset path, ``source_type`` one of 's3',
     'hf_hub' (a bare "org/dataset": one slash, no dot-prefixed part) and 'local' (everything else)."""

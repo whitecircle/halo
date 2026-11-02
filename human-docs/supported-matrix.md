@@ -40,18 +40,18 @@ SDPA or eager where no flash kernel serves the family.
   GPUs (FA3 on Hopper for a softcapped model). Every GPU keeps the hardware pick for SMPO and offline GRPO under
   CP, and for a GPT-OSS run with live sinks (`reset_sinks: false`).
 - **Gemma 2 / Gemma 3 (head_dim 256)**: FA2 on Blackwell, since FA4's head_dim-256
-  kernel takes no softcap or sliding window. A model with attention softcapping
+  backward takes no softcap or sliding window. A model with attention softcapping
   (Gemma 2) never runs SDPA, which would drop the softcap.
 - **Gemma 2 27B (head_dim 128)**: FA4 on Blackwell at one unpadded row per batch,
   training and evaluation; FA2 on packed, padding-free or padded rows, since FA4's
-  varlen kernels take no softcap.
+  varlen kernels are not validated with a softcap.
 - **Gemma 4**: no flash path (FA2 caps head_dim at 256, FA4 overflows tensor
   memory at its 512-wide global layers).
 - **Qwen3.5/3.6, Qwen3-Next**: FA4 on Blackwell, FA3 on Hopper. Under
   `full_determinism`, SDPA on Blackwell. Packed SFT takes FA2 on Blackwell in
   either case.
 - **GLM-4 MoE Lite (GLM-4.7-Flash)**: FA2 on Blackwell in every run, since FA4's
-  head_dim-256 kernel trains its latent attention away from FA2; FA3 on Hopper.
+  head_dim-256 kernel trained its latent attention away from FA2; FA3 on Hopper.
 - **GLM-5 Next, Step-3.7 Flash, Inkling**: fall back to SDPA on their own. On
   GLM-5 Next that SDPA runs a packed row as one causal sequence, so it refuses
   flat `packing`; tree packing keeps its documents apart, and otherwise it trains

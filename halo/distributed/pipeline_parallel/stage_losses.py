@@ -12,15 +12,8 @@ from dataclasses import dataclass
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
-from halo.kernels.logprobs import (
-    LABEL_IGNORE_INDEX,
-    at_least_fp32,
-    checkpointed_chunks,
-    logit_chunk_rows,
-    shift_labels_left,
-)
+from halo.kernels.logprobs import chunked_token_sum, cross_entropy_sum, logit_chunk_rows, shift_labels_left
 from halo.models.head_transform import HeadTransform
 
 # ``(last-stage output, target) -> summed loss``; the target is the labels, or a
@@ -30,38 +23,18 @@ TokenLossFn = Callable[[torch.Tensor, torch.Tensor | dict], torch.Tensor]
 FusedHeadLossFn = Callable[[nn.Module, HeadTransform, torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-def _ce_sum_chunk(chunk_logits: torch.Tensor, chunk_labels: torch.Tensor) -> torch.Tensor:
-    return F.cross_entropy(at_least_fp32(chunk_logits), chunk_labels, ignore_index=LABEL_IGNORE_INDEX, reduction="sum")
-
-
 def _head_ce_sum_chunk(
     head: nn.Module, head_transform: HeadTransform, chunk_hidden: torch.Tensor, chunk_labels: torch.Tensor
 ) -> torch.Tensor:
     """One token chunk projected through the family's head path, its CE summed: the unit the
     checkpoint recomputes."""
-    return _ce_sum_chunk(head_transform.project(head, chunk_hidden), chunk_labels)
-
-
-def _chunked_token_sum(
-    fn: Callable[[torch.Tensor, torch.Tensor], torch.Tensor],
-    rows: torch.Tensor,
-    flat_labels: torch.Tensor,
-    chunk_rows: int,
-) -> torch.Tensor:
-    """``sum(fn(rows[chunk], flat_labels[chunk]))`` over checkpointed token chunks, accumulated in at
-    least fp32 (an fp64 chunk result widens the sum). A single chunk needs no checkpoint."""
-    total = rows.new_zeros((), dtype=torch.float32)
-    if flat_labels.numel() <= chunk_rows:
-        return total + fn(rows, flat_labels)
-    for value in checkpointed_chunks(fn, rows, flat_labels, chunk_rows=chunk_rows):
-        total = total + value
-    return total
+    return cross_entropy_sum(head_transform.project(head, chunk_hidden), chunk_labels)
 
 
 def causal_lm_token_loss(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
     """Shifted causal-LM cross-entropy summed over tokens, chunked, at least fp32."""
-    return _chunked_token_sum(
-        _ce_sum_chunk,
+    return chunked_token_sum(
+        cross_entropy_sum,
         logits.reshape(-1, logits.size(-1)),
         shift_labels_left(labels).reshape(-1),
         logit_chunk_rows(logits.size(-1)),
@@ -86,7 +59,7 @@ def fused_causal_lm_token_loss(
             f"{type(head).__name__} exposes no `out_features`. Only a linear task head can be fused; "
             f"set HALO_PP_FUSED_HEAD_LOSS=0 to keep the unfused logits path."
         )
-    return _chunked_token_sum(
+    return chunked_token_sum(
         functools.partial(_head_ce_sum_chunk, head, head_transform),
         hidden_states.reshape(-1, hidden_states.size(-1)),
         shift_labels_left(labels).reshape(-1),

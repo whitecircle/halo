@@ -19,6 +19,7 @@ import triton.language as tl
 from torch import Tensor
 
 from halo.optimizers.param_groups import decay_groups
+from halo.optimizers.step_skip import DeviceStepSkipMixin, write_unless_skipped
 from halo.optimizers.stochastic_rounding import (
     SR_BLOCK_SIZE,
     require_param_names,
@@ -118,7 +119,9 @@ def _adam_bf16_sr_kernel(
     hparam_table,
     num_tensors,
     grad_scale_ptr,
+    skip_ptr,
     HAS_GRAD_SCALE: tl.constexpr,
+    HAS_SKIP: tl.constexpr,
     NUMEL_DIVISIBLE: tl.constexpr,
     P_ALIGNED: tl.constexpr,
     GRAD_ALIGNED: tl.constexpr,
@@ -134,8 +137,9 @@ def _adam_bf16_sr_kernel(
     ``index_table`` (:func:`_launch_tables`) maps it to its tensor and to the index of each block within that
     tensor, which keys the rounding noise exactly as a launch over that tensor alone would. ``grad_scale_ptr``
     (with ``HAS_GRAD_SCALE``) is the deferred clip coefficient, applied as CUDA's in-place ``grad.mul_(scale)``
-    computes it: scale and product rounded to the gradient's dtype. ``NUMEL_DIVISIBLE`` and the ``*_ALIGNED``
-    flags (:func:`_divisibility`) restore what the table loads hide from the compiler: the divisibility a launch
+    computes it: scale and product rounded to the gradient's dtype. ``skip_ptr`` (with ``HAS_SKIP``) is the step's
+    skip flag (:mod:`~halo.optimizers.step_skip`): set, no program steps a block. ``NUMEL_DIVISIBLE`` and the
+    ``*_ALIGNED`` flags (:func:`_divisibility`) restore what the table loads hide from the compiler: the divisibility a launch
     over one of these tensors alone would specialize on. The compiled per-element code depends on it, the FMA
     association of each element included, so a tensor matches its lone launch bit for bit only under its own flags.
     """
@@ -146,6 +150,8 @@ def _adam_bf16_sr_kernel(
     tensor, n_elements, first_block, end_block = _program_blocks(
         index_table, num_tensors, NUMEL_DIVISIBLE, TABLE_SIZE, BLOCKS_PER_PROGRAM, BLOCK_SIZE
     )
+    if HAS_SKIP:
+        end_block = tl.where(tl.load(skip_ptr), first_block, end_block)
     seed = tl.load(index_table + _ROW_SEED * num_tensors + tensor)
     p_off = tl.load(index_table + _ROW_P * num_tensors + tensor)
     grad_off = tl.load(index_table + _ROW_GRAD * num_tensors + tensor)
@@ -289,7 +295,12 @@ def _launch_tables(updates: Sequence[_FusedUpdate]) -> tuple[Tensor, Tensor, int
 
 
 def _launch_fused(
-    updates: Sequence[_FusedUpdate], index: Tensor, hparams: Tensor, num_programs: int, grad_scale: Tensor | None
+    updates: Sequence[_FusedUpdate],
+    index: Tensor,
+    hparams: Tensor,
+    num_programs: int,
+    grad_scale: Tensor | None,
+    skip: Tensor | None,
 ) -> None:
     """Launch :func:`_adam_bf16_sr_kernel` over non-empty ``updates`` with their :func:`_launch_tables` on device."""
     p, grad, exp_avg, exp_avg_sq = updates[0].tensors
@@ -302,7 +313,9 @@ def _launch_fused(
         hparams,
         len(updates),
         grad_scale if grad_scale is not None else grad,
+        skip if skip is not None else grad,
         HAS_GRAD_SCALE=grad_scale is not None,
+        HAS_SKIP=skip is not None,
         TABLE_SIZE=triton.next_power_of_2(len(updates)),
         BLOCKS_PER_PROGRAM=_BLOCKS_PER_PROGRAM,
         BLOCK_SIZE=SR_BLOCK_SIZE,
@@ -321,7 +334,7 @@ def _tensors_per_launch(device: torch.device) -> int:
     return 1
 
 
-def _fused_adam_bf16_step(updates: Sequence[_FusedUpdate], grad_scale: Tensor | None) -> None:
+def _fused_adam_bf16_step(updates: Sequence[_FusedUpdate], grad_scale: Tensor | None, skip: Tensor | None) -> None:
     """Step non-empty ``updates``, at most :func:`_tensors_per_launch` sharing a :attr:`_FusedUpdate.group_key`, in one
     kernel launch."""
     index, hparams, num_programs = _launch_tables(updates)
@@ -329,7 +342,7 @@ def _fused_adam_bf16_step(updates: Sequence[_FusedUpdate], grad_scale: Tensor | 
     # Pinned and non-blocking: a pageable copy would synchronize the stream at the step's head.
     index = index.pin_memory().to(device, non_blocking=True)
     hparams = hparams.pin_memory().to(device, non_blocking=True)
-    _launch_fused(updates, index, hparams, num_programs, grad_scale)
+    _launch_fused(updates, index, hparams, num_programs, grad_scale, skip)
 
 
 def _scaled_grad(grad: Tensor, grad_scale: Tensor | None) -> Tensor:
@@ -350,8 +363,10 @@ def _eager_adam_bf16_step(
     beta2: float,
     sr_seeds: tuple[int, int],
     grad_scale: Tensor | None = None,
+    skip: Tensor | None = None,
 ):
-    """Eager Adam step for one bf16 parameter, seeding its two SR writes with ``sr_seeds``."""
+    """Eager Adam step for one bf16 parameter, seeding its two SR writes with ``sr_seeds``; ``skip`` is the step's
+    skip flag (:mod:`~halo.optimizers.step_skip`)."""
     easq_seed, weight_seed = sr_seeds
     p_data = to_local(p).detach()
     grad_fp32 = _scaled_grad(to_local(grad), grad_scale).float()
@@ -361,7 +376,7 @@ def _eager_adam_bf16_step(
     # The EMAs run in fp32, as in the kernel: in-place bf16 ops would lose small gradients.
     ea_fp32 = exp_avg.float()
     ea_fp32.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)
-    exp_avg.copy_(ea_fp32.bfloat16())
+    write_unless_skipped(exp_avg, ea_fp32.bfloat16(), skip)
 
     easq_fp32 = exp_avg_sq.float()
     easq_fp32.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)
@@ -372,17 +387,18 @@ def _eager_adam_bf16_step(
     p_fp32.addcdiv_(ea_fp32, denom, value=-step_size)
     del denom
 
-    exp_avg_sq.copy_(stochastic_round_to_bf16(easq_fp32, seed=easq_seed))
-    p_data.copy_(stochastic_round_to_bf16(p_fp32, seed=weight_seed))
+    write_unless_skipped(exp_avg_sq, stochastic_round_to_bf16(easq_fp32, seed=easq_seed), skip)
+    write_unless_skipped(p_data, stochastic_round_to_bf16(p_fp32, seed=weight_seed), skip)
     # A DTensor's copy_ bumps only the local shard's counter, not the wrapper's cached_fake_quant reads.
     torch.autograd.graph.increment_version(p)
 
 
-class AdamWBF16(torch.optim.Optimizer):
+class AdamWBF16(DeviceStepSkipMixin, torch.optim.Optimizer):
     """AdamW with stochastically rounded bf16 weights and moments.
 
     bf16 params take the fused Triton step (eager with ``use_triton=False`` or off CUDA), many per launch on sm_100/103
-    and one per launch elsewhere; fp32 params (``fp32_router`` / ``fp32_experts``) take plain in-place AdamW.
+    and one per launch elsewhere; fp32 params (``fp32_router`` / ``fp32_experts``) take plain AdamW. A device skip flag
+    (:meth:`skip_next_step_if`) makes a step write nothing.
     """
 
     def __init__(
@@ -431,6 +447,7 @@ class AdamWBF16(torch.optim.Optimizer):
                 loss = closure()
 
         grad_scale, self._grad_scale = self._grad_scale, None
+        skip = self._take_step_skip(self.param_groups)
         # Updates waiting for a launch, by group key; a full launch goes out at once, so the GPU starts on it
         # while the host builds the rest.
         pending: dict[tuple, list[_FusedUpdate]] = defaultdict(list)
@@ -457,7 +474,7 @@ class AdamWBF16(torch.optim.Optimizer):
                     launch = pending[update.group_key]
                     launch.append(update)
                     if len(launch) == _tensors_per_launch(update.tensors[0].device):
-                        _fused_adam_bf16_step(launch, grad_scale)
+                        _fused_adam_bf16_step(launch, grad_scale, skip)
                         launch.clear()
                     continue
                 beta1, beta2, step_size, bc2_sqrt, eps, wd_factor = _step_hparams(group, state["step"])
@@ -475,25 +492,33 @@ class AdamWBF16(torch.optim.Optimizer):
                         beta2,
                         sr_seed_pair(_SR_KEY, state["step"], sr_param_index(name)),
                         grad_scale,
+                        skip,
                     )
                     continue
 
                 # Per param, not _foreach_*: FSDP2 DTensor params cannot mix with plain tensors. All four
-                # tensors share one sharding, so the pointwise update on local shards writes through.
+                # tensors share one sharding, so the pointwise update on local shards writes through. Each new
+                # value is written once complete: a skipped step keeps the moments, and the weight update that
+                # reads them goes unwritten too.
                 p_data = to_local(p).detach()
                 exp_avg = to_local(state["exp_avg"])
                 exp_avg_sq = to_local(state["exp_avg_sq"])
                 grad_fp32 = _scaled_grad(to_local(p.grad), grad_scale).float()
-                exp_avg.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)
-                exp_avg_sq.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)
-                if group["weight_decay"] != 0.0:
-                    p_data.mul_(wd_factor)
+                write_unless_skipped(exp_avg, exp_avg.mul(beta1).add_(grad_fp32, alpha=1.0 - beta1), skip)
+                write_unless_skipped(
+                    exp_avg_sq, exp_avg_sq.mul(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2), skip
+                )
                 denom = (exp_avg_sq.sqrt() / bc2_sqrt).add_(eps)
-                p_data.addcdiv_(exp_avg, denom, value=-step_size)
+                if group["weight_decay"] != 0.0:
+                    new_p = p_data.mul(wd_factor).addcdiv_(exp_avg, denom, value=-step_size)
+                else:
+                    new_p = torch.addcdiv(p_data, exp_avg, denom, value=-step_size)
+                del denom
+                write_unless_skipped(p_data, new_p, skip)
 
         for launch in pending.values():
             if launch:
-                _fused_adam_bf16_step(launch, grad_scale)
+                _fused_adam_bf16_step(launch, grad_scale, skip)
         if fused_params:
             torch.autograd.graph.increment_version(fused_params)
         return loss

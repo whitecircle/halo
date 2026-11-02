@@ -219,7 +219,13 @@ class _RunTrainer(DistributedTrainerMixin, BaseTrainerSave):
 
     def __init__(self, run_dir, trajectory: str, *, merge_expert_lora_on_save: bool = True):
         self.run_dir = run_dir
-        self.args = SimpleNamespace(save_total_limit=None, save_only_model=True, should_save=True, push_to_hub=False)
+        self.args = SimpleNamespace(
+            save_total_limit=None,
+            save_only_model=True,
+            should_save=True,
+            push_to_hub=False,
+            include_num_input_tokens_seen="no",
+        )
         self.state = TrainerState(global_step=3, log_history=[{"trajectory": trajectory}])
         self.parallelism_config = SimpleNamespace(
             is_tp_mode=False, merge_expert_lora_on_save=merge_expert_lora_on_save

@@ -23,6 +23,7 @@ def _real_loader_trainer():
     trainer._cached_eval_group_ids = list(trainer.eval_dataset["group_id"])
     trainer._eval_dataloaders = {}
     trainer.dp_shard_geometry = lambda: (1, 0)
+    trainer.parallelism_config = SimpleNamespace(is_cp_mode=False)
     trainer.data_collator = lambda rows: rows
     trainer._prepare_dataloader = lambda loader, **kwargs: loader
     trainer.args = SimpleNamespace(
@@ -55,6 +56,7 @@ def test_reference_cache_constructor_failure_preserves_the_live_training_mode(tm
     trainer.args = SimpleNamespace(per_device_train_batch_size=2, output_dir=str(tmp_path))
     trainer.dp_shard_geometry = lambda: (1, 0)
     trainer._data_parallel_rank_by_global_rank = lambda: [0]
+    trainer.parallelism_config = SimpleNamespace(is_cp_mode=False)
     trainer.data_collator = lambda rows: rows
 
     def fail_cache(*args, **kwargs):
