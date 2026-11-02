@@ -319,7 +319,7 @@ def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | N
     :class:`DeferredRankFailure` and the verdict is taken at a rank-uniform reject: a rank raising mid-loop
     would leave every peer blocked in the next gather until the watchdog fires.
     """
-    # A forward leaves FSDP2's transient unsharded params registered, one optimizer step stale.
+    # Read the shards the optimizer steps, not the unsharded copies a forward can leave registered.
     reshard_fsdp2_modules(model)
     guard = DeferredRankFailure("weight-sync push to the rollout engine")
     peft = is_peft_model(model)

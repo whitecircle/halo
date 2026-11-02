@@ -106,7 +106,7 @@ plugin as a second NCCL runtime.
 python scripts/after_training/merge_ep_shards.py --input_dir checkpoint/ --output_dir merged/
 ```
 
-The two modes, save-rank memory, and every `save_sharded_ep` rejection live on [Expert Parallelism → Checkpointing & state dict](expert-parallelism.md#checkpointing); resume semantics are on [Checkpoints & Resume](../reference/checkpoints.md).
+The two modes, save-rank memory, and every `save_sharded_ep` rejection live on [Expert Parallelism → Checkpointing](expert-parallelism.md#checkpointing); resume semantics are on [Checkpoints & Resume](../reference/checkpoints.md).
 
 ## File system
 

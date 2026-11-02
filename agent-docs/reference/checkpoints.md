@@ -434,7 +434,9 @@ FSDP2 (`fully_shard`) itself.
 transformers logger, which non-logging ranks silence — a truncated or wrong-architecture directory would
 train from random weights with no output. Every toolkit load path (the per-mode loaders, the lazy EP
 loader, the reference/teacher loads) routes its absent set through `verify_checkpoint_coverage`
-(`halo/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`.
+(`halo/model_loading/checkpoint_coverage.py`) and **raises**; a new loader calls `from_pretrained_verified`,
+which also keeps the checkpoint's weights on every rank under accelerate's `fsdp_cpu_ram_efficient_loading`
+([Accelerate launch configs](../parallelism/data-parallelism.md#accelerate-launch-configs)).
 
 Legitimate absences are read off the model class: a task head outside `base_model_prefix` (`score`,
 `classifier`, an untied `lm_head` — what makes reward / classification training on a base checkpoint

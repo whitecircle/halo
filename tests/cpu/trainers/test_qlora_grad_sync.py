@@ -122,6 +122,19 @@ def test_the_sweep_runs_once_per_optimizer_step():
     assert _run_sweep(trainer, present_on_some_rank=[1, 1]), "a new step must sweep again"
 
 
+def test_each_run_sweeps_its_own_first_step():
+    """``global_step`` restarts at 0 with every ``train()``'s fresh state: a sweep at an earlier run's step 0 must
+    not mark the new run's step 0 swept, which would leave its grads un-averaged."""
+    model = _Model()
+    model.text_lora.weight.grad = torch.ones(4, 4)
+    trainer = _trainer(model)
+    assert _run_sweep(trainer, present_on_some_rank=[1, 1])
+
+    trainer.state = SimpleNamespace(global_step=0)
+    assert _run_sweep(trainer, present_on_some_rank=[1, 1]), "the new run's first step was taken as already swept"
+    assert not _run_sweep(trainer, present_on_some_rank=[1, 1]), "the new run swept its first step twice"
+
+
 def test_disabled_when_the_run_is_not_qlora():
     model = _Model()
     model.text_lora.weight.grad = torch.ones(4, 4)

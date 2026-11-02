@@ -148,6 +148,8 @@ _TINY_MOE_FAMILY_MARKERS = {
     "zaya": "zaya",
 }
 _TINY_MOE_FAMILIES = tuple(_TINY_MOE_FAMILY_MARKERS)
+# The families the reentrant-recompute suite scores row by row: one per expert layout it crosses.
+_REENTRANT_FAMILIES = ("qwen3_moe", "gpt_oss", "gemma4_text")
 
 
 def _family_markers(families) -> tuple[str, ...]:
@@ -324,6 +326,10 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_liger_routed_experts.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "qwen3"), timeout=600
     ),
+    "kernels/test_liger_rope_repeated_calls.py": TestSpec(
+        nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=300
+    ),
+    "kernels/test_fla_blackwell_autotune.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600),
     "kernels/test_lowp_expert_lora.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "lora", "moe"), timeout=600),
     "kernels/test_packed_broadcast_memory.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_lowp_fsdp2_weight_cache.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
@@ -575,7 +581,7 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=600,
     ),
-    "parallelism/ep/test_ep_hook_divide_zero_token.py": TestSpec(
+    "parallelism/ep/test_ep_expert_divide_zero_token.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3"), timeout=900
     ),
     "parallelism/ep/test_ep_expert_only_rank_uniform_graph.py": TestSpec(
@@ -805,6 +811,46 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/test_fsdp_tied_embeddings.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
+    ),
+    # Per-row scoring under FSDP2 and reentrant checkpointing: ep1 (ZeRO-2 and ZeRO-3, a nested fp32-router group)
+    # on two ranks, one EP group of four and two EP groups of two on four, each full and LoRA.
+    "parallelism/test_fsdp2_reentrant_recompute.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", "lora", *_family_markers(_REENTRANT_FAMILIES)),
+        timeout=900,
+        args_matrix=(
+            *(
+                Row(
+                    f"--family {family} --layout ep1 --adapter {adapter}{zero3}",
+                    markers=(
+                        "gpu",
+                        "core" if (family, adapter, zero3) == ("qwen3_moe", "full", "") else "full",
+                        "2gpu",
+                        "ep",
+                        "moe",
+                        "lora",
+                        _TINY_MOE_FAMILY_MARKERS[family],
+                    ),
+                )
+                for family in _REENTRANT_FAMILIES
+                for adapter in ("full", "lora")
+                for zero3 in ("", " --reshard-after-forward")
+            ),
+            Row(
+                "--family qwen3_moe --layout ep1 --fp32-router",
+                markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+            ),
+            *(
+                Row(
+                    f"--family {family} --layout {layout} --adapter {adapter}",
+                    nproc=4,
+                    markers=("gpu", "full", "4gpu", "ep", "moe", "lora", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family in _REENTRANT_FAMILIES
+                for layout in ("ep_single", "ep_multi")
+                for adapter in ("full", "lora")
+            ),
+        ),
     ),
     # One node per family and mode; the markers are the union over the rows. EP+TP needs a single dispatch group
     # (ep_size == world): ep4+tp2 on 8 forms two 4-rank groups, the topology ParallelismConfig rejects.
@@ -1252,6 +1298,21 @@ MANIFEST: dict[str, TestSpec] = {
             "--trainer classification --mode qlora",
         ),
         timeout=900,
+    ),
+    # Frozen models and the policy under accelerate's rank-0-only loading; the row runs the file as one process and
+    # `halo launch --accelerate` starts the ranks.
+    "trainers/other/test_accelerate_full_shard_loading.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3", "lora"),
+        args_matrix=(
+            "--case dpo",
+            "--case dpo_peft_precompute",
+            "--case kto",
+            "--case offline_grpo_kl",
+            "--case teacher_distill",
+        ),
+        timeout=900,
+        launcher="python",
     ),
     "trainers/other/test_checkpoint_roundtrip.py": TestSpec(
         nproc=2,

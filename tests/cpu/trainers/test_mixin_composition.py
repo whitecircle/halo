@@ -95,6 +95,7 @@ _OWNERSHIP = {
         "_install_tp_clip",
     ),
     GradientSyncMixin: (
+        "_finish_fsdp2_backward",
         "_install_grad_accum_window",
         "_register_grad_sync_step_hooks",
         "_sync_deferred_expert_grads",

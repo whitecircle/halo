@@ -6,11 +6,14 @@ sink-dropping backend moves a GptOss loss by nats.
 
 from __future__ import annotations
 
+from types import MethodType, SimpleNamespace
+
 import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.datasets import CHAT_TEMPLATE_NOW
 from tests.common.memory import cleanup_memory
 from tests.common.numerics import cos_sim
@@ -63,6 +66,23 @@ FIXED_CONVERSATIONS = (
 def ep_layers(model) -> list:
     """Every EP/ETP-wrapped MoE layer in ``model``, by the walk the toolkit's own EP consumers use."""
     return [layer for _name, layer in named_ep_layers(model)]
+
+
+def sweep_ep_grads(model: torch.nn.Module) -> None:
+    """COLLECTIVE where its legs reduce: the trainer's post-backward EP sweep over ``model``'s EP layers, as a
+    test driving the layers without a trainer runs it once per optimizer step after the backward."""
+    layers = ep_layers(model)
+    expert_ids = {id(p) for layer in layers for _, p in layer.expert_named_params()}
+    ep_ids = {id(p) for layer in layers for p in layer.parameters()}
+    host = SimpleNamespace(
+        _ep_config=layers[0].ep_config,
+        state=SimpleNamespace(global_step=0),
+        _get_sharded_expert_param_ids=lambda: expert_ids,
+        _get_ep_param_ids=lambda: ep_ids,
+        _top_level_model=lambda: model,
+    )
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
+    DistributedTrainerMixin._sync_deferred_expert_grads(host)
 
 
 def named_router_weights(model) -> list[tuple[str, torch.nn.Parameter]]:

@@ -10,7 +10,7 @@ What fusion buys and what it does not: [GPU Training Theory §5](../reference/gp
 
 A `torch.compile`d combine taking a bound (or `alpha`) as a Python float is re-traced as a symbolic input once the token count goes dynamic, and the inductor C++ backend then serves **every later value from the first graph**: a silently wrong clamp on every layer after the first.
 
-The clamped combines latch into the shared `_glu_combine` seam. DeepSeek-V4 arms its combine only when the block's activation probes as exactly SiLU and falls back to the family's eager clamped GLU otherwise; Step-3.7 takes the same probe but only on a layer whose `swiglu_limit` is finite — its unclamped layers keep the plain fused SiLU combine. GLM-5 Next's experts hardcode clamp-then-SiLU structurally, so its combine runs unconditionally.
+The clamped combines latch into `_fused_glu_mul`, the GLU-combine seam every base expert path reads. DeepSeek-V4 arms its combine only when the block's activation probes as exactly SiLU and falls back to the family's eager clamped GLU otherwise; Step-3.7 takes the same probe but only on a layer whose `swiglu_limit` is finite — its unclamped layers keep the plain fused SiLU combine. GLM-5 Next's experts hardcode clamp-then-SiLU structurally, so its combine runs unconditionally.
 
 The low-precision weight quantize/dequantize round-trip *is* compiled, for the power-of-two-scale formats (mxfp8/mxfp4; nvfp4's weight stays eager), with a permanent eager fallback on any compile or runtime failure — see [Low-Precision MoE](low-precision-moe-kernels.md).
 

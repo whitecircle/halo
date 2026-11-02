@@ -67,7 +67,7 @@ that (`docker/sglang/patches/`). Gemma 4 has no routing replay on either engine
 
 Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-only under EP=8 at 32,768 max length. Example: `examples/sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml`. The multimodal class loads either way, but a text-only dataset takes the **text** data path, which is what makes `packing` legal here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)).
 
-Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
+Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Either `rollout_backend` takes the weight sync ([Export](#export)).
 
 Gemma 4's bf16 log-probs carry several nats of noise at low-probability tokens on every bf16 path, the engines and the trainer alike (fp32 agrees to 0.001), and that noise enters the importance ratios, so the engine startup probe compares only the positions the model scores confidently ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).
 

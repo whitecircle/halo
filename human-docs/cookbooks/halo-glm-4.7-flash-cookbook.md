@@ -100,8 +100,9 @@ the trainer.
 
 ## Export and serve
 
-Gathered saves write the hub's per-expert layout, which both engines read. A checkpoint that skipped the
-EP save, such as a `merge-peft-adapters` merge over a plain load, stays fused and needs
+Gathered saves write the hub's per-expert layout, which both engines read, and the other writers keep
+the layout the checkpoint was loaded in. A checkpoint fused before Halo loaded it, or one from a save
+that logged `revert_weight_conversion failed`, holds the fused pair and needs
 `halo run unfuse-moe-experts` before serving.
 
 Smoke-test with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Serve from the

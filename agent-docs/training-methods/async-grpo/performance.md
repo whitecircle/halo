@@ -32,6 +32,8 @@ The sweep applies the family's head transform (Gemma's softcap, Cohere's `logit_
 
 Under FA4, or at `per_device_train_batch_size: 1`, rows are trimmed to their real span before the backbone forward, one forward per row, and one head sweep then covers every row's real completion tokens.
 
+One forward per row means one backward recomputes each checkpointed decoder layer once per row. FSDP2's hooks catch only one of those recomputes, so the trainer completes the post-backward for the rest after the backward: one extra reduce-scatter per decoder-layer shard group per microbatch, the same size as the one FSDP2 already issues but exposed after the backward, or one per window under `fsdp_defer_grad_sync`. Until the backward returns, every layer it has recomputed twice stays gathered with an unsharded gradient, ZeRO-3 included ([Layers recomputed more than once per backward](../../parallelism/data-parallelism.md#layers-recomputed-more-than-once-per-backward)). With one EP group the experts' divide waits for the optimizer step for the same reason ([Gradient synchronization](../../parallelism/expert-parallelism.md#gradient-synchronization)).
+
 ## Context budget
 
 Keep the trained trajectory under the served context. Reasoning survives only on the last turn:
@@ -40,7 +42,7 @@ Keep the trained trajectory under the served context. Reasoning survives only on
 
 The per-turn reasoning budget counts once, not `max_turns` times (twice under `carry_reasoning`). `prompt + max_turns × rollout_max_tokens` is a loose bound that over-restricts `max_turns`; `rollout_max_episode_tokens` bounds the generated share directly ([Trajectory length](episodes.md#trajectory-length)).
 
-- Cap the longest training row with [`max_train_row_tokens`](episodes.md#trajectory-length) (unset by default; `64000` in the Qwen3.6 curriculum stages).
+- Cap the longest training row with [`max_train_row_tokens`](episodes.md#training-row-cap) (unset by default; `64000` in the Qwen3.6 curriculum stages).
 - Bound tool output with `max_observation_chars` (default `16384`, in `environment_kwargs`), which every tool-use environment applies ([Common knobs](environments/README.md#common-knobs)).
 - The usual memory savers are on by default: gradient checkpointing ([reentrant on every MoE](../../optimization/flash-attention.md#usage)) and AdamWBF16 at 6 B/param, which a bf16 run gets from the default `optim` ([BF16 optimizer](../../optimization/bf16-optimizer.md#usage)).
 

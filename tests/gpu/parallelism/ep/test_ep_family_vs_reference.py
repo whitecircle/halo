@@ -27,7 +27,7 @@ from halo.models.moe.expert_layout import (
     to_hub_expert_tensors,
 )
 from tests.common.distributed import world_spread
-from tests.common.ep_reference import random_token_batch, score_ep_grad_pairs
+from tests.common.ep_reference import random_token_batch, score_ep_grad_pairs, sweep_ep_grads
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
     BAILING_LING_3_TINY,
@@ -181,6 +181,7 @@ def _bailing_v3_block_checks(model, layers, input_ids) -> dict[str, bool]:
         out = out[0] if isinstance(out, tuple) else out  # the stock block also returns its router logits
         out.sum().backward()
         outputs.append(out.detach().float())
+    sweep_ep_grads(wrapped)
     max_abs = (outputs[1] - outputs[0]).abs().max().item()
     log(f"bailing v3 block: max|Δ|={max_abs:.3e} cosine={cos_sim(outputs[1], outputs[0], label='v3 block'):.6f}")
     ep_cls = ep_layer_class_by_model_type()["bailing_hybrid"]
@@ -244,6 +245,8 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
         out = module(input_ids=input_ids, labels=labels)
         out.loss.backward()
         losses.append(out.loss.item())
+    # Every rank ran the same batch: the trainer's sweep divides the combine's world-wide expert sum back down.
+    sweep_ep_grads(model)
     ref_loss, ep_loss = losses
     log(f"reference loss {ref_loss:.6f}, EP loss {ep_loss:.6f} (|Δ| {abs(ep_loss - ref_loss):.2e})")
     metrics = {"ref_loss": ref_loss, "ep_loss": ep_loss}

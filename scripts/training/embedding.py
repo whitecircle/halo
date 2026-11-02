@@ -32,6 +32,7 @@ from halo.entrypoints.script import (
     with_distributed_teardown,
 )
 from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.checkpoint_coverage import full_weights_on_every_rank
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from halo.model_loading.model_preparation import apply_run_model_policies
 from halo.model_loading.parallel.model_source import resolve_model_source
@@ -173,8 +174,11 @@ def _load_sentence_transformer(
     revision = resolve_model_source(
         context.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
     ).revision
-    with joined_node_load(
-        f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
+    with (
+        joined_node_load(
+            f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading
+        ),
+        full_weights_on_every_rank(),
     ):
         st_model = SentenceTransformer(
             context.model_source,
@@ -234,7 +238,7 @@ def inject_lora(model: SentenceTransformer, model_config: ModelArguments, args: 
 
     The backbone only: checkpoints fold and resume its adapters, and the trainer refuses any outside
     it. ``inject_adapter_in_model``, not ``SentenceTransformer.add_adapter``: that goes through
-    transformers' adapter API, which requires peft >= 0.19.1 while the image pins 0.18.1. EP/TP are
+    transformers' adapter API, which requires peft >= 0.20.0 while the image pins 0.18.1. EP/TP are
     rejected by the trainer's own gates, which see the injected adapters structurally.
     """
     backbone = model[0].auto_model

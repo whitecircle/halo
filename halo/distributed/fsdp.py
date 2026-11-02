@@ -2,7 +2,9 @@
 
 The DP entry point builds its mesh and the TP one takes the loader's ``(dp, tp)`` mesh; both run one wrap body, so a
 policy knob cannot drift between them. ``reshard_after_forward``: False = SHARD_GRAD_OP (faster), True = FULL_SHARD
-(lower peak memory)."""
+(lower peak memory). :func:`complete_fsdp2_post_backward` finishes the post-backward FSDP2 skips for a module
+recomputed more than once by reentrant checkpointing; it reads FSDP2 internals (``FSDPParamGroup``), which
+``tests/cpu/parallelism/test_fsdp2_post_backward_internals.py`` pins against the installed torch."""
 
 import contextlib
 import logging
@@ -12,6 +14,8 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
+from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 from transformers.modeling_utils import PreTrainedModel
 
 from halo.distributed.mesh import MeshDim, build_dp_mesh, build_dp_tp_mesh, mesh_dim_names
@@ -412,6 +416,85 @@ def reshard_fsdp2_modules(model: nn.Module) -> None:
     """
     for module in fsdp2_modules(model):
         module.reshard()
+
+
+def fsdp2_param_groups(model: nn.Module) -> list[FSDPParamGroup]:
+    """The parameter group of every ``fully_shard``-wrapped module under ``model`` that manages parameters, in
+    ``modules()`` order."""
+    groups = (module._get_fsdp_state()._fsdp_param_group for module in fsdp2_modules(model))
+    return [group for group in groups if group is not None]
+
+
+def _holds_unsharded_grad(group: FSDPParamGroup) -> bool:
+    """Whether a parameter of ``group`` holds a gradient FSDP2 has not reduce-scattered onto its shard: autograd's
+    on the unsharded parameter, or the accumulator a ``set_requires_gradient_sync(False)`` microstep keeps."""
+    return any(
+        hasattr(fsdp_param, "_unsharded_param")
+        and (fsdp_param.unsharded_param.grad is not None or fsdp_param.unsharded_accumulated_grad is not None)
+        for fsdp_param in group.fsdp_params
+    )
+
+
+def complete_fsdp2_post_backward(groups: list[FSDPParamGroup]) -> int:
+    """COLLECTIVE where a group reduces: run FSDP2's post-backward on every group a finished backward left
+    gathered or holding an unsharded gradient, then make the current stream wait on the reductions it issued;
+    returns how many groups reduce-scattered. Which groups reduce follows from rank-local gradient state, so
+    every rank must run each layer the same number of times per backward, as FSDP2 itself needs every rank to
+    run the same modules.
+
+    A ``fully_shard`` module that reentrant checkpointing recomputes K>1 times in one backward (checkpoint around
+    its ``__call__``) gets FSDP2's post-backward hook in only one recompute. The others find its state
+    PRE_BACKWARD, re-gather it and accumulate into the unsharded gradient, and the root's final callback skips
+    the group as already POST_BACKWARD: K-1 contributions never reach the sharded gradient, and the gathered
+    parameters outlive the optimizer step. ``post_backward`` is idempotent where the backward ran it and honours
+    the group's window flags (no reduce after ``set_requires_gradient_sync(False)``, no reshard after
+    ``set_reshard_after_backward(False)``), so this is a no-op wherever every recompute was hooked.
+    """
+    pending = [group for group in groups if group.is_unsharded or _holds_unsharded_grad(group)]
+    busy = [
+        f"{group!r}: {group._training_state.name}" for group in pending if group._training_state != TrainingState.IDLE
+    ]
+    if busy:
+        raise RuntimeError(
+            f"complete_fsdp2_post_backward ran while FSDP2 groups were mid-pass ({busy[:4]}): it finishes a "
+            f"backward whose root final callback has already run, never one in flight."
+        )
+    reducing = [group for group in pending if group.reduce_grads and _holds_unsharded_grad(group)]
+    for group in pending:
+        with group.use_training_state(TrainingState.IDLE):
+            group.post_backward()
+    # The root final callback's tail: each group's reduce and HSDP all-reduce, then the last reduce-scatter,
+    # whose input buffer stays referenced until the stream has consumed it.
+    for group in pending:
+        group.finalize_backward()
+    for comm_ctx in {id(group.comm_ctx): group.comm_ctx for group in pending}.values():
+        reduce_scatter = comm_ctx.reduce_scatter_state
+        if reduce_scatter is None:
+            continue
+        if reduce_scatter.event is not None:
+            comm_ctx.device_handle.current_stream().wait_event(reduce_scatter.event)
+        comm_ctx.reduce_scatter_state = None
+    return len(reducing)
+
+
+def reject_unfinished_fsdp2_backward(groups: list[FSDPParamGroup]) -> None:
+    """Raise if a group's post-backward is still undone after :func:`complete_fsdp2_post_backward`: a gradient
+    held unsharded while the group's reduce is armed is missing from the sharded gradient the clip and the
+    optimizer read, and a group left gathered while its reshard is armed feeds the next forward parameters
+    the optimizer step never reaches. Rank-local, as a check on torch's internals: a leftover only some ranks
+    hold raises there while their peers wait in the next collective."""
+    unreduced = [repr(group) for group in groups if group.reduce_grads and _holds_unsharded_grad(group)]
+    gathered = [repr(group) for group in groups if group.reshard_after_backward and group.is_unsharded]
+    if not unreduced and not gathered:
+        return
+    raise RuntimeError(
+        f"FSDP2 post-backward left undone after complete_fsdp2_post_backward: {len(unreduced)} group(s) still "
+        f"hold an unreduced gradient {unreduced[:4]} and {len(gathered)} armed to reshard are still gathered "
+        f"{gathered[:4]}. Training on would step sharded gradients missing those contributions. Either a "
+        f"backward ran outside the trainer's training_step, or the FSDP2 internals the completion drives "
+        f"(FSDPParamGroup.post_backward and the unsharded gradients it reduces) changed in torch "
+        f"{torch.__version__}."
+    )
 
 
 def install_fsdp2_safe_disable_adapter(peft_model: nn.Module, fsdp_root: nn.Module) -> None:

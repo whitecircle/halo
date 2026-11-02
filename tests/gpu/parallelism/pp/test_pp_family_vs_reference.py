@@ -52,11 +52,23 @@ parser.add_argument("--ep-size", type=int, choices=(1, 2), default=2)
 ARGS = parser.parse_args()
 
 
-def _score(pairs: dict[str, tuple[torch.Tensor | None, torch.Tensor]]) -> tuple[bool, float, float, str]:
-    """``(all within the EP bounds, worst cosine, worst norm-ratio distance from 1, its name)`` over ``pairs``."""
+def _score(pairs: dict[str, tuple[torch.Tensor | None, torch.Tensor]]) -> tuple[bool, float, float, str, int]:
+    """``(all within the EP bounds, worst cosine, worst norm-ratio distance from 1, its name, negligible count)``.
+
+    A pair whose reference norm is under ``TOL.grad_negligible_norm_fraction`` of the set's is held to that same
+    fraction as absolute error instead (``TOL.grad_negligible_norm_fraction``'s comment says why).
+    """
     low, high = TOL.ep_grad_norm_ratio_band
-    ok, worst_cos, worst_ratio, worst_name = True, 1.0, 0.0, ""
+    floor = TOL.grad_negligible_norm_fraction * torch.stack([ref.float().norm() for _, ref in pairs.values()]).norm()
+    ok, worst_cos, worst_ratio, worst_name, negligible = True, 1.0, 0.0, "", 0
     for name, (got, reference) in pairs.items():
+        if got is not None and got.shape == reference.shape and reference.float().norm() < floor:
+            negligible += 1
+            error = (got.float() - reference.float()).norm()
+            if error >= floor:
+                ok = False
+                log(f"  GRAD MISMATCH {name}: negligible reference, error {error:.3e}")
+            continue
         ratio, cosine = compare_ep_grad(got, reference, name)
         if cosine <= TOL.ep_grad_cosine_min or not low < ratio < high:
             ok = False
@@ -64,7 +76,7 @@ def _score(pairs: dict[str, tuple[torch.Tensor | None, torch.Tensor]]) -> tuple[
         if cosine < worst_cos:
             worst_cos, worst_name = cosine, name
         worst_ratio = max(worst_ratio, abs(ratio - 1.0))
-    return ok, worst_cos, worst_ratio, worst_name
+    return ok, worst_cos, worst_ratio, worst_name, negligible
 
 
 @gpu_test_main(exact_world_size=4, prefix="pp_family_vs_reference")
@@ -87,6 +99,7 @@ def run(ctx):
 
     # Both runs sum each token's two weighted expert outputs alike, so they route alike.
     ppeq.pin_unfused_expert_sum(ctx)
+    ppeq.pin_fla_autotune_single_config(ctx)
     twin = ppeq.apply_single_process_ep1(copy.deepcopy(base), ctx.rank).to(ctx.device)
     reference = ppeq.run_unsplit_reference(twin, rows, labels, ctx.device, dp_size)
     del twin
@@ -134,10 +147,15 @@ def run(ctx):
             pairs[f"{name}.{key}"] = (grad.float(), reference.expert_grads[name][key].float())
             compared.add(f"{name}.{key}")
 
-    ok, worst_cos, worst_ratio, worst_name = _score(pairs)
+    ok, worst_cos, worst_ratio, worst_name, negligible = _score(pairs)
     checks["stage_grads_match_reference"] = ok
-    metrics.update(worst_grad_cosine=worst_cos, worst_grad_ratio_drift=worst_ratio, params_compared=len(pairs))
-    log(f"[rank {ctx.rank}] {len(pairs)} grads, worst cos {worst_cos:.5f} at {worst_name}")
+    metrics.update(
+        worst_grad_cosine=worst_cos,
+        worst_grad_ratio_drift=worst_ratio,
+        params_compared=len(pairs),
+        params_negligible=negligible,
+    )
+    log(f"[rank {ctx.rank}] {len(pairs)} grads ({negligible} negligible), worst cos {worst_cos:.5f} at {worst_name}")
 
     # The stages together compare every gradient the reference holds, so the name map cannot empty the check.
     gathered: list = [None] * ctx.world_size

@@ -247,6 +247,8 @@ def run(ctx):
     logps = token_logps(oracle.model, batch["input_ids"], batch["attention_mask"])
     expected_loss = _pure_kl_loss(logps, reference[:2], batch)
     expected_loss.backward()
+    # The trainer's post-backward EP sweep, which the clip or the step pre-hook runs in training.
+    oracle._sync_deferred_expert_grads()
     expected_gradients = _snapshot(oracle.model, gradients=True)
     oracle_missing = _missing_gradients(oracle.model)
     expected_loss_value = expected_loss.detach().clone()
@@ -303,6 +305,7 @@ def run(ctx):
         loss_error = abs((loss.detach() - expected_loss_value).item())
         checks[f"{prefix}_kl_loss_oracle"] = loss_error < TOL.exact_objective_rel * expected_loss_value.abs().item()
         loss.backward()
+        trainer._sync_deferred_expert_grads()
         gradients = _snapshot(trainer.model, gradients=True)
         log(f"{prefix} absent gradients CP1={oracle_missing}, CP{cp_size}={_missing_gradients(trainer.model)}")
         ep_names = ep_gradient_parameter_names(

@@ -113,7 +113,8 @@ changes.
 | `halo/model_loading/tokenizer_setup.py`, `halo/models/context_window.py` | `agent-docs/reference/configuration-reference.md` |
 | `halo/model_loading/buffer_repair.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/kernels/hub_kernel_dispatch.py` | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
-| `halo/model_loading/checkpoint_coverage.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md` |
+| `halo/kernels/fla_autotune.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/models/bailing.md`, `agent-docs/models/glm5-next.md` |
+| `halo/model_loading/checkpoint_coverage.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`; the full-weight loads under accelerate FSDP also `agent-docs/parallelism/data-parallelism.md` |
 | `halo/model_loading/dtype.py` | `agent-docs/models/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/models/config_access.py` | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |
 | `halo/models/modality.py` | `agent-docs/data/dataset-formats.md`, `agent-docs/models/README.md` |
@@ -151,7 +152,8 @@ changes.
 | `halo/kernels/fused_glu.py` | `agent-docs/models/glm4.md`, `agent-docs/models/gpt-oss.md`, `agent-docs/optimization/liger-kernels.md`, `agent-docs/reference/configuration-reference.md`, `agent-docs/reference/troubleshooting.md`, `agent-docs/optimization/grouped-gemm.md`, `agent-docs/optimization/torch-compile.md`, `agent-docs/parallelism/expert-parallelism.md` |
 | `halo/kernels/moe_permute.py` | `agent-docs/optimization/grouped-gemm.md`, `agent-docs/parallelism/expert-parallelism.md` |
 | `halo/kernels/logprobs.py` | `agent-docs/training-methods/preference/dpo.md`, `agent-docs/training-methods/preference/smpo.md`, `agent-docs/parallelism/pipeline-parallelism.md` |
-| `halo/models/attention/{selection,backend_setup}.py`, `halo/kernels/jit_cache.py` | `agent-docs/optimization/flash-attention.md` |
+| `halo/models/attention/{selection,backend_setup}.py` | `agent-docs/optimization/flash-attention.md` |
+| `halo/kernels/jit_cache.py` | `agent-docs/optimization/flash-attention.md`; the Liger implementation pin also `agent-docs/optimization/liger-kernels.md`; the cache and CuTe DSL variables also `agent-docs/infrastructure/docker.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/models/attention/packed_position_ids.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/mistral4.md`, `agent-docs/models/zaya.md` |
 | `halo/models/attention/sdpa_flex_sliding.py` | `agent-docs/optimization/flash-attention.md`, `agent-docs/models/gemma4.md` |
 | `halo/models/attention/gpt_oss_sinks.py` | `agent-docs/models/gpt-oss.md`, `agent-docs/reference/configuration-reference.md` |

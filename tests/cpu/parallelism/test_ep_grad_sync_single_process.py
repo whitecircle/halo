@@ -1,11 +1,12 @@
 #!/usr/bin/env python
-"""CPU tests: EP grad-sync hooks must be no-ops on a single-process launch.
+"""CPU tests: EP grad sync must be a no-op on a single-process launch.
 
 A bare ``python`` run (dist never initialized) still builds EP layers at ``ep_size=1`` (grouped
-GEMM default); with ``fsdp_shard_ep1_experts=False`` the layer registers its router/expert
-post-accumulate hooks. A router hook built without consulting the live process state issues
+GEMM default); with ``fsdp_shard_ep1_experts=False`` the layer registers its router post-accumulate
+hooks. A router hook built without consulting the live process state issues
 ``dist.all_reduce(group=None)``, and the first backward crashes with "Default process group has not
-been initialized". The hooks must detect the single-process state and no-op.
+been initialized". The hooks must detect the single-process state and no-op, and the trainer's expert
+sweep, whose other legs run collectives, must never be armed.
 
 Run: ``python tests/cpu/parallelism/test_ep_grad_sync_single_process.py`` (or ``pytest -m cpu``).
 """
@@ -18,11 +19,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from halo.distributed.expert_parallel.moe_layer.grad_sync import (
-    build_expert_grad_hook,
-    build_router_grad_hook,
-    has_grad_sync_peers,
-)
+from halo.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook, has_grad_sync_peers
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -45,11 +42,11 @@ def test_router_hook_noop_without_process_group():
     assert torch.equal(param.grad, before), "single-process router hook must leave the grad untouched"
 
 
-def test_expert_hook_noop_without_process_group():
-    param = _param_with_grad()
-    before = param.grad.clone()
-    build_expert_grad_hook(single_process_ep_config(E, experts_fsdp_managed=False))(param)
-    assert torch.equal(param.grad, before), "single-process expert hook must leave the grad untouched"
+def test_expert_sweep_not_armed_without_process_group():
+    """No peers, nothing to divide by: the post-backward sweep stays off, its collectives with no group."""
+    ep_config = single_process_ep_config(E, experts_fsdp_managed=False)
+    assert not ep_config.defer_expert_grad_sync
+    assert not ep_config.defer_grad_sync
 
 
 class _Lfm2Gate(nn.Module):

@@ -50,10 +50,8 @@ Set only the environment-specific variables; the image covers the rest:
 | `DIST_SHARED_FILESYSTEM` | `0` | RunPod pods have independent storage |
 | `HF_HOME` | `/workspace/hf_cache` | HuggingFace cache on the volume |
 
-`init_distributed` passes `DIST_NCCL_TIMEOUT_MINUTES` as the `timeout=` of `init_process_group` and pins it
-as the default for every later `dist.new_group()`, so EP/CP/TP subgroups and the gathered-checkpoint
-all_gather inherit it. A bare `NCCL_TIMEOUT` does nothing — PyTorch does not read it. It does not bound
-DeepEP's own dispatch/combine barrier ([DeepEP](deepep.md)).
+`DIST_NCCL_TIMEOUT_MINUTES` is the one watchdog setting ([Launch Recipes → Environment variables](../parallelism/launch-recipes.md#environment-variables) lists the groups it covers and the DeepEP barrier it does not).
+A bare `NCCL_TIMEOUT` does nothing — PyTorch does not read it.
 
 ## Per-pod setup
 

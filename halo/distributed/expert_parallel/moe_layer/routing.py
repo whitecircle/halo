@@ -1,5 +1,5 @@
-"""Routing for EP MoE layers: the router probe and its fp32 input, biased top-k selection, gate weights and their
-renormalization, and the routing-replay override."""
+"""Routing for EP MoE layers: the router probe and its input at the router weight's dtype, biased top-k selection,
+gate weights and their renormalization, and the routing-replay override."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from halo.distributed.expert_parallel.config import EPConfig
 from halo.models.gradient_checkpointing import active_recompute_scope
 from halo.models.moe.config_fields import ROUTER_TOPK_FIELDS
 from halo.runtime.ranks import is_global_main_process
@@ -21,7 +20,6 @@ logger = logging.getLogger(__name__)
 class EPRoutingMixin:
     """Routing, mixed into :class:`EPMoELayerBase`, whose construction builds the state annotated here."""
 
-    ep_config: EPConfig
     fp32_router: bool
     top_k: int
     gate: nn.Module
@@ -71,9 +69,15 @@ class EPRoutingMixin:
 
     @property
     def _fp32_router_input(self) -> bool:
-        """Whether the router input is upcast to match an fp32 router weight: only while FSDP ignores the
-        router, since FSDP casts a managed weight to bf16 for compute."""
-        return self.fp32_router and not self.ep_config.experts_fsdp_managed
+        """Whether the router input is upcast to match an fp32 router weight: under ``fp32_router``, while the live
+        router still holds its fp32 master at this forward. Read off the weight, not ``experts_fsdp_managed``: an
+        FSDP2 group unshards the router at its bf16 ``param_dtype``, but nothing wraps a one-rank job's model or an
+        unwrapped copy."""
+        if not self.fp32_router:
+            return False
+        router = self._live_router_module()
+        weight = next(router.parameters(), None) if router is not None else None
+        return weight is not None and weight.dtype == torch.float32
 
     def _router_input(self, hidden: torch.Tensor) -> torch.Tensor:
         """``hidden`` at the router's dtype (see :attr:`_fp32_router_input`)."""

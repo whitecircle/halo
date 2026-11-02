@@ -30,6 +30,7 @@ from tests.common.cp_grpo import (
     gradient_agreement,
     optimizer_step_agreement,
 )
+from tests.common.ep_reference import sweep_ep_grads
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
@@ -85,10 +86,12 @@ def _build_model(device, cp_size):
 
 
 def _sync_non_ep_grads(model, ep_layers):
+    # EP params: the router's in-backward hook has averaged it, and the trainer's sweep divides the experts.
+    sweep_ep_grads(model)
     expert_ids = {id(param) for layer in ep_layers for param in layer.parameters()}
     for _name, param in model.named_parameters():
         if id(param) in expert_ids:
-            continue  # EP router/expert hooks already applied the correct world-wide sync/scale.
+            continue
         has_grad = torch.tensor(int(param.grad is not None), device=param.device)
         dist.all_reduce(has_grad, op=dist.ReduceOp.MAX)
         if has_grad.item() == 0:

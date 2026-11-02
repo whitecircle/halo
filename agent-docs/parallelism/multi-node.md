@@ -88,9 +88,9 @@ intra-group DeepEP combine: rank-inconsistent collective order deadlocks.
 
 The sweep agrees each bucket's membership over that bucket's reduce group instead: a param some rank
 of the group touched is zero-filled where absent, and one no rank touched keeps no gradient, so the
-optimizer applies no weight decay to it. The TP and QLoRA sweeps agree theirs the same way. The hook
-that survives on a single-group EP run carries no collective: it only divides by
-`world_size / expert_tp_size`.
+optimizer applies no weight decay to it. The TP and QLoRA sweeps agree theirs the same way. A
+single-group EP run keeps its router hooks, and the same sweep runs only its expert leg there
+(`EPConfig.defer_expert_grad_sync`): a divide by `world_size / expert_tp_size` with no collective.
 
 `EPConfig.is_deferred_dp` is narrower and **multi-domain only** — `num_ep_groups > 1`,
 `ep_group_size > 1`, more than one NVLink domain, no expert-TP. (Attention TP needs no term of its
@@ -142,7 +142,7 @@ FSDP2 (`fully_shard`) syncs non-expert gradients; EP params go in `ignored_param
 
 | Mode | Non-expert FSDP group | Expert gradients |
 |------|----------------------|------------------|
-| DP / CP / single-group EP / single-domain EP+CP | All ranks (1D, `world_size`) | The DeepEP combine already sums the group; the in-backward hook only rescales |
+| DP / CP / single-group EP / single-domain EP+CP | All ranks (1D, `world_size`) | The DeepEP combine already sums the group; the post-backward sweep only rescales |
 | Multi-group EP (no TP) — across domains (node-local EP, EP+CP) **or within one** (`ep_size=2`) | The **EP group** above one domain (`is_deferred_dp`), all ranks otherwise | One post-backward cross-replica sweep |
 | EP+TP (DP>1) | `(dp, tp)` mesh — per-TP-position DP groups | The combine, plus the sweep once the world holds several EP groups |
 

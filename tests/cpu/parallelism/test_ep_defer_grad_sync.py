@@ -1,12 +1,14 @@
 #!/usr/bin/env python
 """EPConfig deferred-grad-sync + DP-scope-group contracts (pipeline-parallel rank blocks).
 
-``defer_grad_sync`` decides whether EP grad sync rides per-backward hooks or the trainer's
-post-backward sweep. It must be a strict superset of ``is_deferred_dp``: any rank-blocked job
+``defer_grad_sync`` decides whether the router and replicated EP params ride per-backward hooks or the
+trainer's post-backward sweep. It must be a strict superset of ``is_deferred_dp``: any rank-blocked job
 (``num_rank_blocks > 1``, i.e. pipeline parallelism) also defers, because PP forces
 ``gradient_accumulation_steps`` to 1 so post-accumulate hooks would fire after EVERY microbatch
 backward and re-scale already-synced gradients. The one exception is ep1 experts sharded by FSDP
 (``fsdp_shard_ep1_experts`` + ``ep_group_size == 1``), whose reduce-scatter is accumulation-safe.
+``defer_expert_grad_sync`` widens it to every FSDP-ignored expert topology with peers: the expert divide
+runs in the sweep even where the router keeps its hook.
 
 ``dp_scope_group`` is the collective domain for router/replicated-param DP averages under PP (one
 group per rank block); ``None`` without PP keeps the non-PP collective sequence bit-identical.
@@ -57,11 +59,14 @@ def _make_ep(rank: int, *, world_size: int, stage_world_size: int, fsdp_shard_ep
 
 
 def test_defer_false_without_pp_single_node():
-    """pp1, single node, single EP group: hooks stay (defer False), no DP-scope group."""
+    """pp1, single node, single EP group: the router hooks stay (defer False) and the expert divide defers,
+    with no DP-scope group."""
     cfg, _ = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_rank_blocks == 1
     assert not cfg.is_deferred_dp
     assert not cfg.defer_grad_sync
+    assert cfg.uses_backward_grad_hooks
+    assert cfg.defer_expert_grad_sync
     assert cfg.dp_scope_group is None
 
 
@@ -173,13 +178,19 @@ def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_
         assert cfg.defer_grad_sync or cfg.experts_fsdp_managed, (world, stage, ep_size, etp, ep_scope, managed)
     if cfg.experts_fsdp_managed:
         assert cfg.ep_group_size == 1
+    # The expert divide, which a reentrant recompute would repeat on a hook, defers wherever FSDP2 leaves
+    # the experts out.
+    assert cfg.defer_expert_grad_sync == (not cfg.experts_fsdp_managed), (world, stage, ep_size, etp, ep_scope)
 
 
-def test_single_process_mode_defaults():
-    """Bare ``python`` launch (dist never initialized): one block, no deferral, world-scope group."""
-    cfg = EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=True)
+@pytest.mark.parametrize("managed", [True, False])
+def test_single_process_mode_defaults(managed):
+    """Bare ``python`` launch (dist never initialized): one block, no deferral, world-scope group; with the
+    experts left out of FSDP2 too, since the sweep's collectives have no group to run on."""
+    cfg = EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=managed)
     assert cfg.num_rank_blocks == 1
     assert not cfg.defer_grad_sync
+    assert not cfg.defer_expert_grad_sync
     assert cfg.dp_scope_group is None
 
 
@@ -267,6 +278,7 @@ def _deferred_sweep_host(**ep_attrs):
     ep = SimpleNamespace(
         **{
             "defer_grad_sync": True,
+            "defer_expert_grad_sync": True,
             "expert_replica_group": None,
             "is_deferred_dp": True,
             "ep_group_size": 4,
@@ -371,6 +383,38 @@ def test_the_fsdp_norm_reduce_falls_back_to_the_stage_not_the_world():
     assert groups == [stage_group]
 
 
+def test_each_run_sweeps_its_own_first_step():
+    """``global_step`` restarts at 0 with every ``train()``'s fresh state: a sweep taken before it (a hand-called
+    optimizer step) must neither stop the run's own step 0 from sweeping nor make it raise, while a second sweep
+    within one step still raises."""
+    expert = nn.Parameter(torch.zeros(2))
+    model = nn.Module()
+    model.expert = expert
+    host = SimpleNamespace(
+        _ep_config=SimpleNamespace(
+            defer_grad_sync=False,
+            defer_expert_grad_sync=True,
+            expert_replica_group=None,
+            stage_world_size=4,
+            expert_tp_size=1,
+            fp32_grad_reduce=False,
+        ),
+        state=SimpleNamespace(global_step=0),
+        _get_sharded_expert_param_ids=lambda: {id(expert)},
+        _get_ep_param_ids=lambda: {id(expert)},
+        _top_level_model=lambda: model,
+    )
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
+    expert.grad = torch.full((2,), 8.0)
+    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    with pytest.raises(RuntimeError, match="ran twice"):
+        DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    host.state = SimpleNamespace(global_step=0)
+    expert.grad = torch.full((2,), 8.0)
+    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    assert torch.equal(expert.grad, torch.full((2,), 2.0))
+
+
 def test_restore_time_zero_lr_step_does_not_run_the_sweep():
     """torch's ``set_optimizer_state_dict`` materializes empty optimizer state via a zero-LR
     ``optimizer.step()`` (``_init_optim_state``). That step fires the registered pre-step hook at
@@ -380,7 +424,7 @@ def test_restore_time_zero_lr_step_does_not_run_the_sweep():
     param = nn.Parameter(torch.zeros(2))
     fake = SimpleNamespace(
         optimizer=torch.optim.SGD([param], lr=0.0),
-        _ep_config=SimpleNamespace(defer_grad_sync=True),
+        _ep_config=SimpleNamespace(defer_grad_sync=True, defer_expert_grad_sync=True),
         state=SimpleNamespace(global_step=4),
         _deferred_sweep_last_step=None,
         _sync_deferred_expert_grads=lambda: calls.append(1),

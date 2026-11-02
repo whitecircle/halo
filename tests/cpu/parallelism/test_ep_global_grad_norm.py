@@ -9,8 +9,9 @@ expert grad, so the norm sums each group's shards and never the replicas: summin
 count each shard once per EP group, and leaving out the group's own reduce would count one shard.
 The pins, per topology: every rank returns the norm of the swept gradients, and scales its shards
 by the same coefficient. A third topology is EP+ETP inside one EP group of four: dispatch groups
-[0, 1], [2, 3] and expert-TP groups [0, 2], [1, 3], so each rank holds its own (expert, half) and
-the norm needs both legs.
+[0, 1], [2, 3] and expert-TP groups [0, 2], [1, 3], so each rank holds its own (expert, half), the
+sweep runs the expert divide alone (the router arrives averaged by its hook), and the norm needs both
+legs.
 
     python tests/cpu/parallelism/test_ep_global_grad_norm.py
 """
@@ -101,6 +102,7 @@ def _worker(rank: int, out: str) -> None:
     for topology, (group_attr, divisor) in TOPOLOGIES.items():
         ep_config = SimpleNamespace(
             defer_grad_sync=True,
+            defer_expert_grad_sync=True,
             expert_replica_group=replica_group,
             is_deferred_dp=False,
             stage_world_size=WORLD,
@@ -129,9 +131,11 @@ def _worker(rank: int, out: str) -> None:
 
 
 def _ep_etp(rank: int, dispatch_group, expert_tp_group) -> dict:
-    """EP+ETP in one EP group: no replicas, so no deferred sweep; the router arrives synced."""
+    """EP+ETP in one EP group: no replicas, so the sweep only divides the experts; the router arrives synced."""
     ep_config = SimpleNamespace(
         defer_grad_sync=False,
+        defer_expert_grad_sync=True,
+        fp32_grad_reduce=False,
         expert_replica_group=None,
         stage_world_size=WORLD,
         expert_tp_size=2,
@@ -147,10 +151,14 @@ def _ep_etp(rank: int, dispatch_group, expert_tp_group) -> dict:
     return {"norm": float(norm), "expert": model.expert.grad.tolist()}
 
 
+# EP+ETP's expert divisor (world_size // expert_tp_size): the expert-TP partners share a batch.
+EP_ETP_DIVISOR = WORLD // 2
+
+
 def _ep_etp_reference_norm() -> float:
-    """Every rank's (expert, half) shard once, plus the synced router."""
+    """Every rank's divided (expert, half) shard once, plus the synced router."""
     router = sum(_router_grad(rank) for rank in range(WORLD)) / WORLD
-    shards = sum(float(_expert_grad(rank).pow(2).sum()) for rank in range(WORLD))
+    shards = sum(float((_expert_grad(rank) / EP_ETP_DIVISOR).pow(2).sum()) for rank in range(WORLD))
     return math.sqrt(shards + float(router.pow(2).sum()))
 
 
@@ -185,7 +193,8 @@ def test_ep_etp_sums_the_expert_norm_over_both_legs(per_rank):
     for rank, results in enumerate(per_rank):
         result = results["ep_etp"]
         assert result["norm"] == pytest.approx(reference, rel=1e-6), f"rank {rank}: {result['norm']} vs {reference}"
-        assert result["expert"] == pytest.approx((_expert_grad(rank) * coefficient).tolist(), rel=1e-5)
+        expected = _expert_grad(rank) / EP_ETP_DIVISOR * coefficient
+        assert result["expert"] == pytest.approx(expected.tolist(), rel=1e-5)
 
 
 if __name__ == "__main__":

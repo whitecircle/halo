@@ -1,32 +1,32 @@
 {
   "key": "sft_ep_gpt-oss-20b_ep8_gathered_save",
   "provenance": {
-    "commit": "b9b8625bc235cc05bba1803a8b5c8c6b4f0f6aff",
-    "image": "halo:blackwell@sha256:61d64844d08e5e864e443b92c6223783ed1a980cbfeef7d5955161db72e6cbb8",
-    "measured": "2026-10-19",
+    "commit": "d25d39e464618eb91e8796216737f989d8810341",
+    "image": "halo:blackwell@sha256:0c4d76058c49d7031f7155967cddfd70459981578b5729491f3073a100f60772",
+    "measured": "2026-10-29",
     "world_size": 8,
     "command": "tests/gpu/profiling/benchmark_sft_ep.py --model gpt-oss-20b --ep 8 --measure_save --seq 4096 --steps 20 --warmup 3"
   },
   "repeats": [
     {
-      "save_seconds": 28.2,
-      "save_peak_rss_gib": 9.51
+      "save_seconds": 29.26,
+      "save_peak_rss_gib": 9.43
     },
     {
-      "save_seconds": 28.47,
+      "save_seconds": 28.81,
+      "save_peak_rss_gib": 9.43
+    },
+    {
+      "save_seconds": 29.64,
+      "save_peak_rss_gib": 9.33
+    },
+    {
+      "save_seconds": 29.16,
       "save_peak_rss_gib": 9.44
     },
     {
-      "save_seconds": 28.6,
-      "save_peak_rss_gib": 9.42
-    },
-    {
-      "save_seconds": 27.86,
-      "save_peak_rss_gib": 9.53
-    },
-    {
-      "save_seconds": 28.55,
-      "save_peak_rss_gib": 9.51
+      "save_seconds": 31.82,
+      "save_peak_rss_gib": 9.44
     }
   ]
 }

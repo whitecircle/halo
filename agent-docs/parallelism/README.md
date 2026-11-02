@@ -20,7 +20,7 @@ Which MoE families each axis wraps: [Supported Models → Compatibility matrix](
 
 ## Supported combinations
 
-All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignored_params` and sync via EP backward hooks or the deferred post-backward sweep, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
+All modes use FSDP2 (`fully_shard`, per-layer). EP expert modules sit in `ignored_params`; their routers sync via EP backward hooks, and their experts (with one EP group) or everything (with more) via the deferred post-backward sweep, except at `ep_group_size == 1`, where `fsdp_shard_ep1_experts` (default on) has FSDP2 shard them; CP wraps the attention path for sequence splitting and lets FSDP2 sync the rest.
 
 | Mode | Data Parallel Size | Notes |
 |------|-------------------|-------|
@@ -124,8 +124,8 @@ What crosses the wire:
 Backward mirrors the table: every activation all-to-all / all-reduce has an autograd transpose. By
 default FSDP2 reduce-scatters after every accumulation micro-step's backward
 ([`fsdp_defer_grad_sync`](data-parallelism.md#deferred-gradient-reduce-fsdp_defer_grad_sync) holds
-it to the last); the EP gradient sync (hooks or the deferred sweep) fires once per optimizer step, on
-the last micro-step.
+it to the last); the EP gradient sync runs on the last micro-step: the router hooks during its backward (once per
+recompute under reentrant checkpointing, an average that repeats harmlessly), the deferred sweep after it.
 
 EP gradients sync outside FSDP2: the replicated router all-reduces over the world group (the stage
 under PP), and expert grads all-reduce over the expert-replica group only when a run holds more than

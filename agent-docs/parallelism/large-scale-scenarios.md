@@ -169,7 +169,7 @@ and TP is the route past one GPU ([Data Parallelism](data-parallelism.md#fsdp2-s
 The EP lazy loader slices by **`ep_size`, not `X`** — ETP partners share `dispatch_ep_rank` and load
 the same experts at full intermediate width. The intermediate dim is split later, at EP patching
 (`_init_fused_glu_params` / `_store_separate_glu_params`,
-`halo/distributed/expert_parallel/moe_layer/layer.py`), which also holds one layer's transposed full-width
+`halo/distributed/expert_parallel/moe_layer/compute.py`), which also holds one layer's transposed full-width
 copy alongside the new shard. So `ep2 + etp8` has the same steady state as `ep16` and a **407 GB**
 load peak.
 
@@ -401,9 +401,9 @@ Values that differ from it or are load-bearing at 397B:
 | `gradient_checkpointing` | `true` | the activation column assumes it |
 | `bf16` + `optim` | as shipped | AdamWBF16 auto-enables whenever `bf16: true` and `optim` is `adamw_torch_fused`/`adamw_torch` outside accelerate-managed DDP — both are already the defaults, so neither key has to be written to get the 8 B/param cost. `optim: muon` or `flash_adamw` opts out |
 | `fp32_experts` / `fp32_non_ep_params` | **omit** | the 35B configs set them; fp32 masters would take the expert term to 16 B/param and OOM every cell |
-| `text_only_model` | `true` | loads `Qwen3_5MoeForCausalLM`, whose forward declares `output_router_logits` — what `aux_loss` needs. The 122B base keeps the multimodal class, where an explicit `aux_loss` raises; the export drops the vision tower ([Qwen3.5 → EP layer](../models/qwen3_5.md#ep-layer)) |
-| `moe_balancing` | `aux_loss` | trains and exports by construction under `text_only_model: true`. Strict `bias_update` raises: Qwen3.5 has no checkpoint slot for a routing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
-| `router_balancing_rate` | well below `1e-3`, only under `bias_update_transient` (the multimodal-class alternative) | inert under `aux_loss`. The sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
+| `text_only_model` | `true` | loads `Qwen3_5MoeForCausalLM`, which drops the vision tower and MTP tail from the build and the export ([Qwen3.5 → EP layer](../models/qwen3_5.md#ep-layer)). `aux_loss` trains on either class |
+| `moe_balancing` | `aux_loss` | trains and exports by construction. Strict `bias_update` raises: Qwen3.5 has no checkpoint slot for a routing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
+| `router_balancing_rate` | well below `1e-3`, only under `bias_update_transient` (the 122B recipe's mode) | inert under `aux_loss`. The sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
 | `fp32_router` | `true` | +1 GB per rank (the 0.13 B router weights at 16 B/param, not in the matrix columns), and 512 experts at top-10 is where bf16 routing logits start to tie |
 | `fp32_grad_reduce` | `true` | bf16 sums lose precision at 16–64 ranks; no storage cost outside PP, where it doubles the held stage gradient |
 | `use_grouped_gemm` / `use_liger_kernel` / `fp32_output_conversion` | `true` / `true` / `false` (all defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100; the disabled upcast keeps an fp32 copy of the logits off the card |

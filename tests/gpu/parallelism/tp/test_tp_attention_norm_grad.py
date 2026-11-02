@@ -28,6 +28,7 @@ Run:
 """
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import torch
 import torch.distributed as dist
@@ -82,6 +83,7 @@ class _StepSync:
         self._device_mesh = model._device_mesh
         self.parallelism_config = parallelism_config
         self._param_id_caches = {}
+        self.state = SimpleNamespace(global_step=0)
 
     def _top_level_model(self):
         return self._model

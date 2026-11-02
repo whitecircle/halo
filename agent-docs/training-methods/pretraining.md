@@ -82,7 +82,7 @@ max_grad_norm: 1.0
 train_on_completions_only: false   # matches the text-mode artifact
 ```
 
-`warmup_steps` of 1 or more is an exact step count, below 1 a fraction of the total; there is no `warmup_ratio`. `max_grad_norm` clips on the global gradient norm reduced across all DP/EP/TP shards ([clipping](../reference/trainer-architecture.md#ep-aware-gradient-clipping)).
+`warmup_steps` reads as on [SFT](sft.md#learning-rate-and-global-batch-size). `max_grad_norm` clips on the global gradient norm reduced across all DP/EP/TP shards ([clipping](../reference/trainer-architecture.md#ep-aware-gradient-clipping)).
 
 Under `bf16` (the toolkit default) with a stock AdamW, AdamWBF16 with stochastic rounding is the optimizer unless accelerate manages DDP ([BF16 Optimizer](../optimization/bf16-optimizer.md)). Checkpoints write as HF-standard safetensors sharded at `save_max_shard_size` (default `5GB`); exact optimizer resume needs the same world size ([Checkpoints](../reference/checkpoints.md)).
 

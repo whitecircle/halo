@@ -83,6 +83,7 @@ def _deferred_ep(model: _Model, *, experts: bool, replica_group, dp_scope_group=
     host = SimpleNamespace(
         _ep_config=SimpleNamespace(
             defer_grad_sync=True,
+            defer_expert_grad_sync=True,
             expert_replica_group=replica_group,
             is_deferred_dp=False,
             stage_world_size=world_size,
@@ -172,6 +173,7 @@ def _replica_leg(rank: int, ep_group, replica_group) -> list[float] | None:
     host = SimpleNamespace(
         _ep_config=SimpleNamespace(
             defer_grad_sync=True,
+            defer_expert_grad_sync=True,
             expert_replica_group=replica_group,
             is_deferred_dp=True,
             ep_group_size=2,

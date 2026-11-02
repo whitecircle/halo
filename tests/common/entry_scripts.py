@@ -201,9 +201,20 @@ def write_run_config(
     return path
 
 
-def launch_command(method: str, config: Path, *, nproc: int, port: int | None, overrides: list[str]) -> list[str]:
-    """``halo launch <method> <config> -n <nproc> [--port <port>] <overrides>`` as an argv."""
+def launch_command(
+    method: str,
+    config: Path,
+    *,
+    nproc: int,
+    port: int | None,
+    overrides: list[str],
+    accelerate_config: Path | None = None,
+) -> list[str]:
+    """``halo launch <method> <config> -n <nproc> [--port <port>] [--accelerate <config>] <overrides>`` as an
+    argv."""
     launcher = ["-n", str(nproc)] + ([] if port is None else ["--port", str(port)])
+    if accelerate_config is not None:
+        launcher += ["--accelerate", str(accelerate_config)]
     return [sys.executable, "-m", "halo.cli", "launch", method, str(config), *launcher, *overrides]
 
 
@@ -240,9 +251,14 @@ def _log_history(checkpoint: Path) -> list[dict]:
     return json.loads((checkpoint / "trainer_state.json").read_text())["log_history"]
 
 
+def logged_steps(checkpoint: Path) -> list[dict]:
+    """The training-step entries of a complete checkpoint's ``trainer_state.json`` log, in order."""
+    return [entry for entry in _log_history(checkpoint) if "loss" in entry]
+
+
 def trained_steps(checkpoint: Path) -> list[int]:
     """The steps a complete checkpoint's ``trainer_state.json`` logged a training loss at, in order."""
-    return [entry["step"] for entry in _log_history(checkpoint) if "loss" in entry]
+    return [entry["step"] for entry in logged_steps(checkpoint)]
 
 
 def had_a_learning_signal(checkpoint: Path) -> bool:

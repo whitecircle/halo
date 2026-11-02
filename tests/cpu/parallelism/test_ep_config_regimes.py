@@ -10,6 +10,8 @@ property that drifts from its reader syncs experts twice or not at all, or sizes
     python tests/cpu/parallelism/test_ep_config_regimes.py
 """
 
+import contextlib
+
 import pytest
 
 from halo.distributed.expert_parallel import config as ep_config_mod
@@ -37,19 +39,26 @@ def _hooked_layers(ep_config: EPConfig) -> list[bool]:
     return [bool(layer._grad_sync_hooks) for _, layer in named_ep_layers(model)]
 
 
+def _single_group_etp_config() -> EPConfig:
+    """Rank 0's config for a 2-rank pure-ETP job: one EP group with peers, its router synced by in-backward
+    hooks (the expert divide is the trainer's sweep either way)."""
+    return EPConfig(ep_size=1, expert_tp_size=2, stage_world_size=2, nvlink_domain_size=2, experts_fsdp_managed=False)
+
+
 @pytest.mark.parametrize(
-    ("build", "expected"),
+    ("job", "build", "expected"),
     [
-        (lambda: single_process_ep_config(experts_fsdp_managed=False), True),
-        (lambda: single_process_ep_config(experts_fsdp_managed=True), False),
-        (lambda: _pp_stage_config(experts_fsdp_managed=False), False),
+        (lambda: stubbed_process_groups(2, 0), _single_group_etp_config, True),
+        (contextlib.nullcontext, lambda: single_process_ep_config(experts_fsdp_managed=True), False),
+        (contextlib.nullcontext, lambda: _pp_stage_config(experts_fsdp_managed=False), False),
     ],
     ids=["hooks", "fsdp-managed", "deferred"],
 )
-def test_backward_grad_hooks_register_exactly_where_the_config_says(build, expected):
-    ep_config = build()
-    assert ep_config.uses_backward_grad_hooks is expected
-    hooked = _hooked_layers(ep_config)
+def test_backward_grad_hooks_register_exactly_where_the_config_says(job, build, expected):
+    with job():
+        ep_config = build()
+        assert ep_config.uses_backward_grad_hooks is expected
+        hooked = _hooked_layers(ep_config)
     assert hooked and all(flag is expected for flag in hooked), hooked
 
 

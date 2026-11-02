@@ -36,7 +36,7 @@ CUDA_VISIBLE_DEVICES=1,2,3 torchrun --nproc_per_node=3 \
   examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml
 
 # MoE with EP: one DeepEP group across the trainer GPUs (ep_size = trainer-GPU count)
-VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 \
+VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_TP=4 \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 \
   scripts/training/grpo/online.py \
@@ -59,7 +59,7 @@ with `--reasoning-parser qwen3` and no tool-call parser — react_math reads its
 text — so compose runs it with the tool-calling flags emptied:
 
 ```bash
-VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_REASONING_PARSER=qwen3 \
+VLLM_MODEL=Qwen/Qwen3.6-35B-A3B VLLM_CUDA_DEVICES=4,5,6,7 VLLM_TP=4 VLLM_REASONING_PARSER=qwen3 \
 VLLM_TOOL_CALLING_FLAGS= docker compose -f docker-compose.vllm.yml up -d vllm-server
 
 # Trainer — single entry point; resolves the env from environment_type in the YAML

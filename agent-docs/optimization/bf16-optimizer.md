@@ -85,7 +85,7 @@ AdamWBF16 auto-detects dtype per param: bf16 params take the fused Triton SR pat
 
 `bf16_optimizer=False` builds on dense models and on `ep_group_size == 1` MoE with the default FSDP-sharded experts. The `fp32_non_ep_params` delta is small for gpt-oss because its non-expert params are a minor fraction; high-vocab or attention-heavy models cost more.
 
-`fp32_grad_reduce: true` upcasts gradients to fp32 for every cross-rank reduction the mixin owns (FSDP2 `reduce_dtype=fp32` for dense params, the EP router/expert grad-sync hooks, the TP replicated-grad sync, the QLoRA adapter AllReduce), then stores the averaged result bf16. It keeps bf16 master weights (6 B/param) — unlike `fp32_non_ep_params` it changes only the reduction, not storage. An fp32 reduction is the TorchTitan, Megatron and DeepSpeed default.
+`fp32_grad_reduce: true` upcasts gradients to fp32 for every cross-rank reduction the mixin owns (FSDP2 `reduce_dtype=fp32` for dense params, the EP router grad-sync hooks and deferred sweep, the TP replicated-grad sync, the QLoRA adapter AllReduce), then stores the averaged result bf16. It keeps bf16 master weights (6 B/param) — unlike `fp32_non_ep_params` it changes only the reduction, not storage. An fp32 reduction is the TorchTitan, Megatron and DeepSpeed default.
 
 
 NCCL's bf16 all-reduce accumulates in bf16, so error grows with world size. On 8× B300 with real bf16 gradients, fp32 reduce is ~2.2× tighter (0.17% vs 0.37% of signal), and the gap widens with scale. The cost is ~2× bandwidth on that collective only.
@@ -94,7 +94,7 @@ The bucketed sweeps (`reduce_grads_bucketed`: the deferred cross-replica EP swee
 
 At the defaults (256 MB, 2 in flight) that is ~1.5 GB allocated post-backward, while every gradient is still live. That is the worst memory moment of the step, and exactly the multi-node EP path where 100–400B models run. Halve `HALO_GRAD_BUCKET_MB` there if the step OOMs at the sweep.
 
-Default `false`. `fp32_non_ep_params` implies it only for the FSDP2 reduce dtype — the EP router/expert, TP and QLoRA hooks read `fp32_grad_reduce` directly, so set it explicitly to cover them. Enable for many-rank / multi-node runs. It applies only on the mixin-managed (torchrun) path — an `accelerate launch` that manages FSDP/DDP itself takes its reduce dtype from accelerate's plugin, and the trainer warns that the knob is unapplied.
+Default `false`. `fp32_non_ep_params` implies it only for the FSDP2 reduce dtype — the EP router hooks and deferred sweep, the TP and QLoRA sweeps read `fp32_grad_reduce` directly, so set it explicitly to cover them. Enable for many-rank / multi-node runs. It applies only on the mixin-managed (torchrun) path — an `accelerate launch` that manages FSDP/DDP itself takes its reduce dtype from accelerate's plugin, and the trainer warns that the knob is unapplied.
 
 ## Compatibility
 

@@ -10,7 +10,6 @@ import torch
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.moe_layer import grad_sync
-from halo.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.models.moe.family_specs import find_moe_family_spec
 from tests.common.equivalence import ep_bitwise
@@ -26,7 +25,7 @@ from tests.common.equivalence.ep_bitwise import (
     produce,
     unexpected_raises,
 )
-from tests.common.equivalence.revisions import RAISED, run_in_tree
+from tests.common.equivalence.revisions import run_in_tree
 from tests.common.equivalence.tensor_records import (
     GRADIENT_PREFIX,
     case_of,
@@ -38,6 +37,7 @@ from tests.common.equivalence.tensor_records import (
 )
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
 from tests.common.repo import REPO_ROOT
+from tests.common.rosters import ep_layer_class_by_model_type
 
 CPU = LAUNCHES["cpu"][0]
 GROUPED = LAUNCHES["gpu"][0]
@@ -101,9 +101,9 @@ def test_each_forward_variant_records_what_sets_it_apart(roster):
     defaults, fp32 = _records(roster, "qwen3_moe", "defaults"), _records(roster, "qwen3_moe", "fp32_masters")
     dtypes = {line.split()[0]: line.split()[1] for line in fp32["orders"]["named_parameters"]}
     assert (dtypes[ROUTER], dtypes["model.embed_tokens.weight"]) == ("torch.float32", "torch.bfloat16")
-    # FSDP-managed experts register no hook; FSDP-ignored ones without peers register an inert one.
+    # Experts register no hook, FSDP-managed or not: their sync is FSDP2's or the trainer's sweep.
     assert defaults["orders"]["grad_hooks"] == []
-    assert fp32["orders"]["grad_hooks"] and all(line.endswith(" scale 1.0") for line in fp32["orders"]["grad_hooks"])
+    assert fp32["orders"]["grad_hooks"] == []
 
     lora = _records(roster, "qwen3_moe", "expert_lora")["tensors"]
     assert any("lora" in name and lora[name].any() for name in lora if name.startswith(GRADIENT_PREFIX))
@@ -122,14 +122,20 @@ def test_each_construction_variant_records_what_sets_it_apart(roster):
     hooked = _records(roster, "qwen3_moe", "in_backward_grad_sync")
     router_hooks = [line for line in _hooks(hooked, 0) if line.startswith(f"{ROUTER} ")]
     assert router_hooks == [f"{ROUTER} all_reduce(RedOpType.SUM, torch.float32, default group) scale 0.5"]
-    assert f"{EXPERT_SHARD} scale 0.5" in _hooks(hooked, 1)
+    # The expert divide is the trainer's post-backward sweep, which a reentrant recompute cannot repeat.
+    assert not any(line.startswith(f"{EXPERT_SHARD} ") for line in _hooks(hooked, 1))
 
     deferred = _records(roster, "qwen3_moe", "deferred_grad_sync")
     assert [_hooks(deferred, rank) for rank in range(4)] == [[]] * 4
 
     saved = _hooks(_records(roster, "qwen3_moe", "modules_to_save"), 0)
     assert any(".gate.modules_to_save.default.weight all_reduce(" in line for line in saved)
-    assert all(_records(roster, family, "in_backward_grad_sync")["orders"]["rank0/grad_hooks"] for family in FAMILIES)
+    # Every family whose EP layer owns its router hooks it; an external router (Gemma 4) is FSDP2's.
+    layer_classes = ep_layer_class_by_model_type()
+    owners = [family for family in FAMILIES if layer_classes[family]._ROUTER_ATTR is not None]
+    assert owners and all(
+        _records(roster, family, "in_backward_grad_sync")["orders"]["rank0/grad_hooks"] for family in owners
+    )
 
     shards = _records(roster, "qwen3_moe", "etp_construction")["tensors"]
     assert not torch.equal(shards[f"rank0/{EXPERT_SHARD}"], shards[f"rank1/{EXPERT_SHARD}"])
@@ -200,10 +206,19 @@ def test_unregistered_gradient_hooks_are_an_order_delta(monkeypatch, tmp_path):
     assert {entry.split("[")[0] for entry in entries} == {"orders/rank0/grad_hooks", "orders/rank1/grad_hooks"}
 
 
-def test_a_router_given_the_expert_hook_is_an_order_delta(monkeypatch, tmp_path):
+def _local_average_hook(ep_config):
+    """A router hook that divides by the DP width without reducing first."""
+
+    def hook(param):
+        param.grad.div_(ep_config.stage_world_size)
+
+    return hook
+
+
+def test_a_router_hook_without_its_all_reduce_is_an_order_delta(monkeypatch, tmp_path):
     """Router gradients that lose their DP all-reduce: the same hook count, a different hook."""
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["in_backward_grad_sync"])
-    monkeypatch.setattr(grad_sync, "build_router_grad_hook", build_expert_grad_hook)
+    monkeypatch.setattr(grad_sync, "build_router_grad_hook", _local_average_hook)
 
     entries = _differences(
         baseline,
@@ -217,7 +232,7 @@ def test_a_router_given_the_expert_hook_is_an_order_delta(monkeypatch, tmp_path)
 
 
 def test_a_hook_under_a_deferred_sync_is_a_delta(monkeypatch, tmp_path):
-    """In-backward hooks in a layout the post-backward sweep owns: here the expert hook refuses to build."""
+    """In-backward hooks in a layout the post-backward sweep owns: the router hooks register on every rank."""
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["deferred_grad_sync"])
     init = EPConfig.__init__
 
@@ -234,7 +249,8 @@ def test_a_hook_under_a_deferred_sync_is_a_delta(monkeypatch, tmp_path):
         "deferred_grad_sync",
     )
 
-    assert len(entries) == 1 and entries[0].startswith(f"{RAISED}: None != {{'type': 'RuntimeError'")
+    world = CONSTRUCTION_VARIANTS["deferred_grad_sync"].world_size
+    assert {entry.split("[")[0] for entry in entries} == {f"orders/rank{rank}/grad_hooks" for rank in range(world)}
 
 
 def test_a_saved_router_left_unhooked_is_an_order_delta(monkeypatch, tmp_path):

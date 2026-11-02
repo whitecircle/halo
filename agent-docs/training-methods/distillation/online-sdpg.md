@@ -47,13 +47,13 @@ Run a three-step smoke against a live server before the real run: take one of th
 
 Two keys on top of the online-GRPO metrics: `opd_beta` (the live coefficient, prefixed `eval_` under evaluation) and `opd_loss`. Treat a finite `opd_loss` with a non-zero `opd_beta` as healthy.
 
-Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TRL's online eval: generating the final round's padding prompts, the GRPO term and its reward, length, KL and clamp metrics count them like real prompts ([Eval padding](../grpo/online.md#what-to-watch)). Async GRPO with Environments never rolls the padding out: its rollout metrics count the split's own episodes alone ([Padding and round means](../async-grpo/evaluation.md#padding-and-round-means)).
+Under evaluation `opd_loss` reads the split's own rows alone, but the rest is TRL's online eval: generating the final round's padding prompts, the GRPO term and its reward, length, KL and clamp metrics count them like real prompts ([Eval padding](../grpo/online.md#what-to-watch)).
 
 - **`opd_loss` is exactly 0** — under `opd_positive_advantage_only: true`, no rollout in the batch earned a positive advantage, so the gate masked every token. Expected on easy or fully-failed batches; persistent zeros mean the verifier never separates a group.
 - **OOM the online trainer did not hit** — OPD reads the student's `[B, C, V]` completion logits off the GRPO loss forward and adds one no-grad teacher forward on the longer prompt+hint+completion sequence; both logit planes stay alive until backward (where the forward takes `logits_to_keep`, the prompt rows stay out of both; the divergence itself chunks, [memory](README.md)). `use_chunked_grpo_logprobs` keeps the GRPO log-probs off the logits plane, but with OPD on the loss forward still projects the student's plane for the term; size the batch against the OPD peak.
 - **Missing-answer warning** — a row whose answer is blank gets no hint, so it distills toward an unprivileged teacher. Fix the `answer_field` mapping.
 
-`use_liger_kernel` is cleared with a warning (`disable_trl_liger`): TRL's fused GRPO-Liger loss replaces the trainer's own and would silently drop the OPD term. Model-level Liger kernels still apply at load.
+TRL's `use_liger_kernel` is off, as on every online GRPO run ([Forced and refused settings](../grpo/online.md#forced-and-refused-settings)).
 
 ## Related pages
 

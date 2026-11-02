@@ -303,7 +303,8 @@ enters and restores it on the ones it holds at exit. A reference pass that is th
 FSDP2 reshard (online GRPO at `beta > 0` with no old-logps recompute) enters on the sharded params and exits
 on the unsharded copies, which would freeze every sharded adapter silently. `install_fsdp2_safe_disable_adapter`
 wraps the context for every PEFT model: when the registered trainable params changed across it, it reshards
-before PEFT's exit, so the restore lands on the sharded params (fixed upstream in huggingface/peft#3839).
+before PEFT's exit, so the restore lands on the sharded params (upstream PEFT drops the freeze in
+huggingface/peft#3839, which 0.18.1 predates).
 
 An explicit reference model (DPO, KTO, self-distillation's KL `reference_model`) is never parallelized:
 under EP or TP it is a whole dense replica on every rank, warned about rather than refused. LoRA with the

@@ -14,7 +14,7 @@ Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`halo/e
 | `MoEMetricsCallback` | `moe/*` per-expert load | `enable_moe_metrics: true` (default) |
 | `BalancingBiasCallback` | DeepSeek-V3 bias update, plus `moe/*` | a `bias_update` mode |
 | `TorchProfilerCallback` | Per-rank traces, memory timeline | `enable_torch_profiler: true` ([Debugging](../reference/debugging.md)) |
-| `VariableSchedulerCallback` | Schedules a model attribute | Manual |
+| `VariableSchedulerCallback` | Schedules a model attribute | Added by SMPO (`use_margin_schedule`) and offline GRPO (`initial_min_log_prob`) |
 
 ### ParameterStatsCallback
 

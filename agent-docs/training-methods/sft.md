@@ -10,7 +10,7 @@ Conversations under `conversation_field` (default `prompt`):
 {"prompt": [{"role": "user", "content": "Explain gravity."}, {"role": "assistant", "content": "Gravity is..."}]}
 ```
 
-Sources are `s3://`, the HuggingFace Hub, or a local path. `dataset_ratio` is a per-source keep fraction in [0, 1]: a scalar broadcasts across a list of sources, a list maps 1:1. Rows over `max_length` are dropped, not truncated (a conversation cut mid-turn is corrupt), and an emptied train split raises.
+Sources are `s3://`, the HuggingFace Hub, or a local path. `dataset_ratio` is a per-source keep fraction in (0, 1]: a scalar broadcasts across a list of sources, a list maps 1:1. Rows over `max_length` are dropped, not truncated (a conversation cut mid-turn is corrupt), and an emptied train split raises.
 
 Every row is rendered with `tokenizer.apply_chat_template`, so train under the template the model is served with — a mismatch degrades quality with no signal in the loss. The template knobs are in [Chat templates](../data/dataset-formats.md#chat-templates). `interleaved_thinking: true` keeps `<think>…</think>` in history for GLM-family templates that must byte-match rollouts (text-only; the VLM path raises).
 
@@ -125,7 +125,7 @@ python scripts/before_training/prepare_dataset.py \
     --assistant_message_template $'<|im_start|>assistant\n'
 ```
 
-The training script detects the artifact from its `metadata.json`, skips tokenization, and holds the run to what was baked: `max_length` and `train_on_completions_only` must agree or startup raises, as must any render knob the YAML states. `ShardedDatasetLoader` then assigns shards by DP rank ([Pre-Processing](../data/dataset-preparation.md)).
+The training script detects the artifact from its `metadata.json`, skips tokenization, and holds the run to what was baked: `max_length` and `train_on_completions_only` must agree or startup raises, as must any render knob the YAML states and the chat template the checkpoint would export. `ShardedDatasetLoader` then assigns shards by DP rank ([Pre-Processing](../data/dataset-preparation.md)).
 
 ## Testing a setup
 

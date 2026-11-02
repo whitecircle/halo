@@ -70,7 +70,7 @@ class ModelLoadArguments:
         metadata={
             "help": "Load a multimodal checkpoint through its text-only CausalLM class (Qwen3.5/3.6: "
             "Qwen3_5MoeForCausalLM), dropping the vision tower and any MTP tail from the build and the export. For "
-            "text-only datasets; it also restores the output_router_logits path moe_balancing: aux_loss needs. "
+            "text-only datasets. "
             "See agent-docs/reference/configuration-reference.md#model-checkpoint-and-from-scratch-flags."
         },
     )

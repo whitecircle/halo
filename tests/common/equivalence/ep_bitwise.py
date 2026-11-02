@@ -33,7 +33,7 @@ from halo.optimizers.param_groups import decay_groups
 from halo.trainers.grpo.environmental.routing_replay import build_routing_replay_injector
 from tests.common.adapters import mixer_linear_leaves, randomize_adapters
 from tests.common.distributed import init_distributed, teardown_distributed
-from tests.common.ep_reference import random_token_batch, roll_expert_banks
+from tests.common.ep_reference import random_token_batch, roll_expert_banks, sweep_ep_grads
 from tests.common.equivalence.revisions import (
     export_tree,
     quiet_logs,
@@ -99,7 +99,7 @@ class ConstructionLayout:
 
 
 CONSTRUCTION_VARIANTS = {
-    # One EP group with peers: the in-backward router and expert gradient hooks.
+    # One EP group with peers: the in-backward router hooks (the trainer's sweep divides the experts).
     "in_backward_grad_sync": ConstructionLayout(2, {"ep_size": 2}),
     # Two EP groups: the trainer's post-backward sweep syncs, so no hook may register.
     "deferred_grad_sync": ConstructionLayout(4, {"ep_size": 2}),
@@ -255,6 +255,8 @@ def _forward_backward(model: torch.nn.Module, variant: str, seq: int, device, ba
     with injector.capture(BATCH, seq) if injector is not None else contextlib.nullcontext([]) as routing:
         outputs = model(input_ids=ids, labels=labels)
     outputs.loss.backward()
+    # The trainer's post-backward expert divide, a no-op in one process.
+    sweep_ep_grads(model)
     if replays:
         injector.disarm()
     tensors = {"loss": outputs.loss, "logits": outputs.logits}

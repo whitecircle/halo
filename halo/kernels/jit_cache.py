@@ -1,4 +1,5 @@
-"""JIT kernel caches (FA4's CuTe DSL, Triton) anchored on a persistent volume, and the CuTe DSL warning filter."""
+"""JIT kernel caches (FA4's CuTe DSL, Triton) anchored on a persistent volume, the CuTe DSL warning filter, and the
+Liger implementations pinned because of the CuTe DSL calling convention the toolkit turns on."""
 
 from __future__ import annotations
 
@@ -8,6 +9,13 @@ import tempfile
 import warnings
 
 logger = logging.getLogger(__name__)
+
+# Liger ops pinned to one implementation, through the per-op variable Liger's dispatcher reads on every call ahead of
+# every global setting. Its CuTe DSL RoPE, auto-selected ahead of Triton at production shapes, caches one TMA handle per
+# shape and swaps the handle's data pointer per call; under CUTE_DSL_ENABLE_TVM_FFI the launch passes the tensor the
+# handle was built from instead, so from the second same-shape launch at the latest, backward included, it rotates a
+# stale buffer.
+_PINNED_LIGER_IMPLS = {"rope": "nvidia-triton"}
 
 
 def silence_cute_dsl_deprecations() -> None:
@@ -53,10 +61,31 @@ def anchor_jit_cache_dir(var: str, subdir: str) -> None:
     )
 
 
+def pin_liger_impls() -> None:
+    """Pin every op in :data:`_PINNED_LIGER_IMPLS` through ``LIGER_KERNEL_IMPL_<OP>``, which an empty value leaves
+    unset for Liger. A value naming that implementation (full or bare-DSL spelling) is kept; any other, in that
+    variable or its legacy ``LIGER_KERNEL_BACKEND_<OP>`` spelling, raises."""
+    for op, impl in _PINNED_LIGER_IMPLS.items():
+        accepted = (impl, impl.split("-", 1)[1])
+        pinned_var = f"LIGER_KERNEL_IMPL_{op.upper()}"
+        for var in (pinned_var, f"LIGER_KERNEL_BACKEND_{op.upper()}"):
+            chosen = os.environ.get(var)
+            if chosen and chosen not in accepted:
+                raise ValueError(
+                    f"{var}={chosen} selects a Liger {op} implementation the toolkit does not run: it pins {op} "
+                    f"to {impl}, since the CuTe DSL RoPE returns wrong results under CUTE_DSL_ENABLE_TVM_FFI. "
+                    f"Unset {var}."
+                )
+        if not os.environ.get(pinned_var):
+            os.environ[pinned_var] = impl
+
+
 def ensure_fa4_kernel_cache_env() -> None:
-    """Enable FA4's persistent kernel cache and TVM-FFI and mute the DSL's deprecations. Must run before
-    the first ``import flash_attn.cute``, which reads the environment. Idempotent."""
+    """Enable FA4's persistent kernel cache and TVM-FFI, pin the Liger ops TVM-FFI breaks (:func:`pin_liger_impls`)
+    and mute the DSL's deprecations. Must run before the first ``import flash_attn.cute``, which reads the
+    environment. Idempotent."""
     silence_cute_dsl_deprecations()
     os.environ.setdefault("FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED", "1")
     os.environ.setdefault("CUTE_DSL_ENABLE_TVM_FFI", "1")
+    pin_liger_impls()
     anchor_jit_cache_dir("FLASH_ATTENTION_CUTE_DSL_CACHE_DIR", "flash_attn_cute_dsl_cache")

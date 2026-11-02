@@ -169,7 +169,7 @@ DeepEP or the base image.
 | `CUDA_DEVICE_MAX_CONNECTIONS` | `1` | Latched by the driver at `cuInit` (DeepEP import), so it must be set from PID 1. The setting EP is validated with ([DeepEP](deepep.md#environment-variables)); it does not make racy single-domain multi-group EP safe, which `ParallelismConfig` rejects. |
 | `TORCH_ALLOW_TF32_CUBLAS_OVERRIDE` | `0` | The NGC base defaults fp32 matmuls to TF32, whose 10-bit mantissa collapses adjacent RoPE positions past 2048. |
 | `FLASH_ATTENTION_CUTE_DSL_CACHE_ENABLED` | `1` | Persist the FA4 CuTe DSL kernel cache (~10 s JIT per kernel on first use). |
-| `CUTE_DSL_ENABLE_TVM_FFI` | `1` | TVM-FFI direct-invocation ABI for CuTe DSL kernels. |
+| `CUTE_DSL_ENABLE_TVM_FFI` | `1` | TVM-FFI direct-invocation ABI for CuTe DSL kernels. Liger's CuTe DSL RoPE returns wrong results under it, so the toolkit pins Liger's RoPE to Triton ([Liger → Kernel implementation](../optimization/liger-kernels.md#kernel-implementation)). |
 | `EP_SUPPRESS_NCCL_CHECK` | `1` | Silences DeepEP's duplicate-NCCL-runtime check, which flags the NGC base's HPC-X NCCL transport plugin beside the pip `libnccl.so.2`. |
 | `NCCL_IB_DISABLE=0`, `NCCL_NET_GDR_LEVEL=2`, `NCCL_IB_HCA=mlx5`, `NCCL_P2P_LEVEL=NVL`, `NCCL_DEBUG=WARN` | — | Mellanox IB/RoCE defaults; IB clusters need no extra env. |
 | `PYTHONPATH` | `/workspace` | Lets `python tests/.../foo.py` resolve the `tests` package. |

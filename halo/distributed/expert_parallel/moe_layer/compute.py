@@ -189,7 +189,7 @@ class EPExpertComputeMixin:
         return self._compute_experts_weighted(tokens, experts, weights, output_dtype, self._expert_forward)
 
     def _grouped_mm_enabled(self) -> bool:
-        """Whether the grouped-GEMM path runs: the hardware/config flag (GptOss also requires no ETP)."""
+        """Whether the grouped-GEMM path runs: the hardware/config flag."""
         return self._use_grouped_mm
 
     def _compute_experts_gmm(
@@ -208,9 +208,7 @@ class EPExpertComputeMixin:
         """Sort -> ``compute_fn(sorted_tokens, offs, sorted_expert_ids)`` under autocast -> weighted unpermute.
         ``F.grouped_mm`` does not autocast, so ``compute_fn`` casts its weights to ``output_dtype``."""
         if tokens.shape[0] == 0:
-            return self._expert_hook_grad_edge(
-                torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
-            )
+            return torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
 
         sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map = (
             self._sort_tokens_for_grouped_mm(tokens, experts, weights)
@@ -294,9 +292,7 @@ class EPExpertComputeMixin:
     ) -> torch.Tensor:
         """The per-expert loop: ``compute_fn(local_idx, x)`` per expert, outputs weighted and accumulated."""
         if tokens.shape[0] == 0:
-            return self._expert_hook_grad_edge(
-                torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
-            )
+            return torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
 
         output = torch.zeros(tokens.shape, device=tokens.device, dtype=output_dtype)
 
@@ -310,10 +306,7 @@ class EPExpertComputeMixin:
                 expert_output = out.to(output_dtype) * expert_weights.unsqueeze(-1).to(output_dtype)
                 output.index_add_(0, token_idx, expert_output)
 
-        # Per-expert params (this loop's regime) miss the sync-microbatch divide when their expert
-        # idles in it after accumulating earlier; edges are per-param, so the rank-level wrap on the
-        # zero-token return above cannot cover an individual idle expert.
-        return self._expert_hook_grad_edge(output)
+        return output
 
     def _expert_forward(self, idx: int, x: torch.Tensor) -> torch.Tensor:
         """One local expert's GLU forward for the loop."""

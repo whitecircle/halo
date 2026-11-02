@@ -43,7 +43,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from tests.common.adapters import freeze_base_keep_expert_adapters
-from tests.common.ep_reference import ep_layers, score_ep_grad_pairs
+from tests.common.ep_reference import ep_layers, score_ep_grad_pairs, sweep_ep_grads
 from tests.common.harness import gpu_test_main
 from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
@@ -165,6 +165,7 @@ def run_scenario(ctx, model, reference, batches, name: str, starved: set[int], c
             # Every rank sees the same gathered list, so all skip together: this backward would hang.
             return
         loss.backward()
+        sweep_ep_grads(model)
         ref_losses = [reference(input_ids=batch, labels=batch).loss for batch in batches]
         (sum(ref_losses) / len(ref_losses)).backward()
 
@@ -186,9 +187,11 @@ def run(ctx):
     model, reference = build_models(family, ctx.device)
     layers = ep_layers(model)
     ep_config = layers[0].ep_config
-    # The comparison assumes the in-backward hook regime: its /world divide makes the ep2 gradient the
-    # gradient of the mean of both ranks' losses, which is what the reference differentiates.
-    checks["hook_regime"] = not ep_config.defer_grad_sync and not ep_config.experts_fsdp_managed
+    # The comparison assumes the single-group regime: the sweep's /world expert divide makes the ep2 gradient
+    # the gradient of the mean of both ranks' losses, which is what the reference differentiates.
+    checks["single_group_sweep_regime"] = (
+        ep_config.defer_expert_grad_sync and not ep_config.defer_grad_sync and not ep_config.experts_fsdp_managed
+    )
 
     generator = torch.Generator().manual_seed(SEED)
     vocab = model.config.vocab_size

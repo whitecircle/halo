@@ -53,9 +53,9 @@ hand-built model.
 A save is safe to interrupt: `save_total_limit` never deletes a checkpoint
 before its successor is complete. LoRA runs restore the adapters onto the base,
 and MoE router-balancing state is saved and restored automatically.
-`load_best_model_at_end` is refused at startup where the end-of-run reload
-cannot work: a full fine-tune under CP, an MoE on EP layers, and TP with more
-than one data-parallel replica
+`load_best_model_at_end` is refused at startup on a full fine-tune whose
+end-of-run reload cannot work: under CP, on an MoE with EP layers, and under TP
+with more than one data-parallel replica
 ([full mechanics](../agent-docs/reference/checkpoints.md#resuming-training) ↗).
 
 ## Per-node PP saves

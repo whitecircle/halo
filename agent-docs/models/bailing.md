@@ -94,6 +94,8 @@ The KDA layers run fla's Triton kernels, whose autotuners re-benchmark on shape-
 
 Measured configs persist in the Triton disk cache, which `configure_training_run` anchors on `HF_HOME` (`TRITON_CACHE_DIR`), so the warm-up is paid once per volume and the slow-step pattern appears only against a fresh cache.
 
+On Blackwell the KDA path shares the delta-rule state kernel whose `num_warps=4` configs are excluded there; the Ling 3.0 remote code imports `fla` directly, and the restriction applies when its load finishes ([Qwen3.5 linear attention](qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)).
+
 ## Router balancing
 
 Bailing is aux-loss-free by design (`moe_router_enable_expert_bias: true`; Ling 3.0 also declares `topk_method: noaux_tc`): no modeling variant computes a load-balancing loss and the config carries no `router_aux_loss_coef`. The family's native mechanism is the gate's persistent `expert_bias` buffer, added to the sigmoid scores for **selection only** — combine weights stay unbiased.

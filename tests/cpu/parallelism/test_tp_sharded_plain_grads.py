@@ -68,6 +68,7 @@ def _trainer(model: nn.Module) -> SimpleNamespace:
         _fsdp_wrapped=False,
         _ep_config=None,
         _get_sharded_expert_param_ids=lambda: set(),
+        state=SimpleNamespace(global_step=0),
         # The PP scope the norm path reads: None on every non-PP run (the stage IS the world, and
         # there is no chain to reduce over), which is what this stub models.
         _pp_stage_group=None,

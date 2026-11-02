@@ -14,8 +14,10 @@ python tests/cpu/models/test_<name>_support.py            # registration, gather
 python tests/cpu/model_loading/test_liger_family_coverage.py    # every spec class exists and is exact
 python tests/cpu/checkpoint/test_merge_ep_shards.py       # merged-from-shards == gathered for the family
 torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family <name>
+torchrun --nproc_per_node=1 tests/gpu/kernels/test_liger_family_kernels.py   # each Liger role vs the family's own module
 ```
 
 The family counts as supported once the tests of step 7 of
-[Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support) pass and its docs rows exist
-(step 8); where you wired `bias_update`, also `tests/gpu/parallelism/ep/test_gptoss_bias_balancing.py`.
+[Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support) and the Liger cases of
+[Declare Liger coverage](../../agent-docs/models/adding-a-model.md#declare-liger-coverage) pass and its
+docs rows exist (step 8); where you wired `bias_update`, also `tests/gpu/parallelism/ep/test_gptoss_bias_balancing.py`.

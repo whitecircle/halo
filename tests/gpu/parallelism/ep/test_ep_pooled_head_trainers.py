@@ -74,12 +74,13 @@ CENTER_COEF = 0.05
 
 # The EP path computes the expert FFN through DeepEP dispatch/combine in bf16 against the
 # reference's dense HF experts, so the two agree only to bf16 kernel and reduction-order noise (plus
-# the logged loss itself being a bf16-rounded scalar). Measured relative error under ep2: 1.2e-4
-# (reward), 4.9e-4 (classification); tp2 and etp2 sum bf16 partials across their ranks instead, noise
-# of the same kind. Relative, because the two objectives differ in scale.
+# the logged loss itself being a bf16-rounded scalar); tp2 and etp2 sum bf16 partials across their
+# ranks instead, noise of the same kind. Measured relative error under ep2 / tp2 / etp2: 4.4e-4 /
+# 2.0e-3 / 3.2e-4 (reward), 1.0e-3 / 1.5e-3 / 7.7e-4 (classification). Relative, because the two
+# objectives differ in scale.
 LOSS_RTOL = 5e-3
 # A control that lands inside this band would mean the comparison cannot see a real bug. Measured
-# control error: 0.42 (reward, halves swapped), 0.11 (classification, labels rolled).
+# control error: 0.42-0.43 (reward, halves swapped), 0.11-0.26 (classification, labels rolled).
 CONTROL_MIN_RTOL = 0.02
 
 

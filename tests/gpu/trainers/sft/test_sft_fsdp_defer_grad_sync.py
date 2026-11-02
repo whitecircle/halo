@@ -21,7 +21,8 @@ Modes (``--mode``, 4 GPUs):
   ep1   MoE at ep_size=1: experts are FSDP2-sharded DTensors, deferred with everything else
   ep1_fp32_router
         ep1 with ``fp32_router``: each fp32 router is a nested FSDP2 group inside its bf16 layer
-  ep    MoE, one EP group over the world: experts FSDP-ignored, synced by the in-backward hooks
+  ep    MoE, one EP group over the world: experts FSDP-ignored, the router synced by its in-backward hook and
+        the experts by the post-backward sweep's divide
   ep2   MoE, two EP groups over two simulated domains: non-expert params sharded over the EP group,
         experts and the cross-replica average synced by the post-backward sweep
 
@@ -119,7 +120,7 @@ def _exercises_mode(mode: str, pc: ParallelismConfig, model) -> bool:
             isinstance(p, DTensor) and p.dtype == torch.float32 and p.requires_grad for p in model.parameters()
         )
     if mode in ("ep", "ep2"):
-        # ep: in-backward expert/router hooks; ep2: the post-backward sweep over EP-group shards.
+        # ep: the in-backward router hook and the swept expert divide; ep2: the full post-backward sweep.
         ep_config = pc.ep_config()
         sweep = mode == "ep2"
         return ep_config.defer_grad_sync == sweep and ep_config.is_deferred_dp == sweep

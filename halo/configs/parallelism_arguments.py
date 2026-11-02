@@ -50,8 +50,8 @@ class ParallelismArguments(ValidatedConfig):
     fp32_router: bool = field(
         default=ParallelismConfig.ep_fp32_router,
         metadata={
-            "help": "Keep EP router weights as FP32 masters with an FP32 routing matmul, except at ep_group_size == 1 "
-            "under fsdp_shard_ep1_experts, where FSDP2's BF16 param policy owns the compute dtype. "
+            "help": "Keep EP router weights as FP32 masters with an FP32 routing matmul, except where FSDP2 wraps an "
+            "ep_group_size == 1 router under fsdp_shard_ep1_experts and its BF16 param policy owns the compute dtype. "
             "fp32_non_ep_params implies it; Gemma 4 ignores it with a warning. "
             "See agent-docs/parallelism/expert-parallelism.md#precision-control."
         },

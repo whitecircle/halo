@@ -13,6 +13,7 @@ Run: ``python tests/cpu/parallelism/test_tp_grad_sync_hook_structural.py`` (or `
 
 from __future__ import annotations
 
+import contextlib
 from types import MethodType, SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -62,28 +63,41 @@ def test_pre_step_sync_skipped_when_clip_path_owns_it():
     trainer._sync_tp_replicated_grads.assert_not_called()
 
 
-def test_sync_is_idempotent_within_one_step():
-    """At ``max_grad_norm == 0`` transformers still reaches the patched clip (``_get_grad_norm``
-    calls it with ``inf``), so the pre-step hook is a SECOND call in the same step. The AVG bucket
-    survives that; the per-head-norm SUM would double (S → tp_size·S), so the sync itself must be
-    marker-gated rather than the hook guessing when transformers skips clipping."""
+def _syncing_trainer(global_step: int):
+    """A TP trainer whose sync reaches its reduce: a bare TP mesh whose group has peers under :func:`_tp_sync`."""
     trainer = _trainer(max_grad_norm=0.0)
-    trainer.state = SimpleNamespace(global_step=7)
+    trainer.state = SimpleNamespace(global_step=global_step)
     trainer.parallelism_config = SimpleNamespace(is_tp_mode=True, fp32_grad_reduce=False)
-    # A bare TP mesh whose group has peers, per the patch below.
     trainer._device_mesh = SimpleNamespace(get_group=lambda: object())
     trainer._tp_sharded_plain_param_ids = lambda: set()
     trainer._tp_per_head_norm_param_ids = lambda: set()
-    params = list(trainer.model.parameters())
+    return trainer
 
-    reduce_calls = Mock()
+
+@contextlib.contextmanager
+def _tp_sync(reduce_calls: Mock):
     with (
         patch.object(grad_sync_mod.dist, "get_world_size", return_value=2),
         patch.object(grad_sync_mod.dist, "all_reduce"),
         patch.object(grad_sync_mod, "reduce_grads_bucketed", reduce_calls),
     ):
+        yield
+
+
+def test_sync_is_idempotent_within_one_step():
+    """At ``max_grad_norm == 0`` transformers still reaches the patched clip (``_get_grad_norm``
+    calls it with ``inf``), so the pre-step hook is a SECOND call in the same step. The AVG bucket
+    survives that; the per-head-norm SUM would double (S → tp_size·S), so the sync itself must be
+    marker-gated rather than the hook guessing when transformers skips clipping."""
+    trainer = _syncing_trainer(global_step=7)
+    params = list(trainer.model.parameters())
+
+    reduce_calls = Mock()
+    with _tp_sync(reduce_calls):
         DistributedTrainerMixin._sync_tp_replicated_grads(trainer, params)
-        assert trainer._tp_sync_last_step == 7, "the sync did not record the step it ran on"
+        assert grad_sync_mod.same_optimizer_step(trainer._tp_sync_last_step, trainer.state), (
+            "the sync did not mark its step"
+        )
         first_round = reduce_calls.call_count
         assert first_round > 0, "nothing was reduced — the rest of this test would be vacuous"
 
@@ -93,6 +107,25 @@ def test_sync_is_idempotent_within_one_step():
         trainer.state.global_step = 8
         DistributedTrainerMixin._sync_tp_replicated_grads(trainer, params)
         assert reduce_calls.call_count == 2 * first_round, "the next step did not sync"
+
+
+def test_each_run_syncs_its_own_first_step():
+    """``global_step`` restarts at 0 with every ``train()``'s fresh state: a sync at an earlier run's step 0 must not
+    mark the new run's step 0 synced, which would leave its TP replicas drifting apart."""
+    trainer = _syncing_trainer(global_step=0)
+    params = list(trainer.model.parameters())
+
+    reduce_calls = Mock()
+    with _tp_sync(reduce_calls):
+        DistributedTrainerMixin._sync_tp_replicated_grads(trainer, params)
+        first_round = reduce_calls.call_count
+        assert first_round > 0, "nothing was reduced — the rest of this test would be vacuous"
+
+        trainer.state = SimpleNamespace(global_step=0)
+        DistributedTrainerMixin._sync_tp_replicated_grads(trainer, params)
+        assert reduce_calls.call_count == 2 * first_round, "the new run's first step was taken as already synced"
+        DistributedTrainerMixin._sync_tp_replicated_grads(trainer, params)
+        assert reduce_calls.call_count == 2 * first_round, "the new run synced its first step twice"
 
 
 if __name__ == "__main__":

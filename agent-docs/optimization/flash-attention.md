@@ -178,7 +178,9 @@ MoE routes in its recompute, and non-reentrant checkpointing rejects the routing
 when a nondeterministic attention recompute flips a near-tie pick). Pipeline parallelism is the
 exception: a reentrant forward runs under `no_grad`, where FSDP2 registers no pre-backward hooks, so PP
 stages run non-reentrant and refuse `use_reentrant: true`
-([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)).
+([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)). Under FSDP2,
+a layer the reentrant backward recomputes more than once gets its post-backward completed by the trainer
+([Data Parallelism](../parallelism/data-parallelism.md#layers-recomputed-more-than-once-per-backward)).
 
 ## Backend benchmark
 
@@ -225,7 +227,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 
 It covers both entry points — dense `flash_attn_func` and varlen `flash_attn_varlen_func` over a two-document `cu_seqlens` — each in the variants the model can reach: sliding-window when the config declares one, and a learnable sink when the model carries sinks.
 
-The on-disk cache (`ensure_fa4_kernel_cache_env` in `halo/kernels/jit_cache.py`, anchored on `HF_HOME`) makes the compile a one-time cost across processes. The DeepEP `ElasticBuffer` dispatch/combine timeout is long (100 s) and absorbs residual skew. FA2 is precompiled and unaffected.
+The on-disk cache (`ensure_fa4_kernel_cache_env` in `halo/kernels/jit_cache.py`, anchored on `HF_HOME`) makes the compile a one-time cost across processes. The same call turns on `CUTE_DSL_ENABLE_TVM_FFI` where the environment leaves it unset, and pins Liger's RoPE to Triton, whose CuTe DSL kernel is wrong under it ([Liger → Kernel implementation](liger-kernels.md#kernel-implementation)). The DeepEP `ElasticBuffer` dispatch/combine timeout is long (100 s) and absorbs residual skew. FA2 is precompiled and unaffected.
 
 **FA4 varlen backward JIT-cache key (packed / masked batches).** A packed or attention-masked batch unpads to a `cu_seqlens` varlen FA4 call. transformers' `_process_flash_attention_kwargs` coerces the 0-dim `max_seqlen` tensor to `int` only under tracing; in eager it forwards a fresh CUDA tensor each step, and `flash_attn.cute`'s varlen backward keys its JIT cache on that tensor by *identity*.
 

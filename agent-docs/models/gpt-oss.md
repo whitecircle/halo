@@ -127,7 +127,7 @@ GPT-OSS defaults to switch-style **aux-loss** balancing: `moe_balancing: auto` r
 
 The coefficient a run reads is the checkpoint's, not the class default. `GptOssConfig` declares `router_aux_loss_coef: 0.001`, but every released `config.json` (`openai/gpt-oss-*` and the `unsloth/*-BF16` mirrors) ships **0.9**, large enough to dominate both the SFT loss and the router gradient.
 
-Every shipped example that stays on `aux_loss` overrides it back down to `0.001` in `model_init_kwargs`; do the same on a new aux-loss run rather than inheriting 0.9. A `bias_update` run needs no override — that mode zeroes the coefficient itself (below).
+The shipped SFT examples that stay on `aux_loss` override it back down to `0.001` in `model_init_kwargs`; do the same on any aux-loss run, DPO and KTO included (their TRL loss weighs the term by the model config's coefficient: [Callbacks](../training-methods/callbacks.md#moe-balancing-modes)), rather than inheriting 0.9. A `bias_update` run needs no override — that mode zeroes the coefficient itself (below).
 
 The DeepSeek-V3 **aux-loss-free bias update** is opt-in on the EP path (`moe_balancing: bias_update`) and adopts the hub router's own **`router.bias`** as the balancing state. The Parameter is re-registered as a persistent buffer under the same key: frozen out of gradient training, sign-updated by [`BalancingBiasCallback`](../training-methods/callbacks.md#balancingbiascallback) each optimizer step, and exported with every checkpoint.
 

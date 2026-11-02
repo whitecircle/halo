@@ -89,7 +89,6 @@ class _Layer(StubEPLayerBase):
         self._activation_warmed = True
         self._capture_routing = False
         self._expert_adapters_enabled = True
-        self._hook_synced_expert_params = []
         self._perf = lambda _label: contextlib.nullcontext()
         self.act_fn = F.silu
         generator = torch.Generator().manual_seed(seed)

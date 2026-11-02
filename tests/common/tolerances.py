@@ -115,6 +115,11 @@ class _Tolerances:
     # the norm ratio stays tight enough that a missing or doubled /world_size divide (2.0 / 0.5) fails.
     ep_grad_cosine_min: float = 0.9
     ep_grad_norm_ratio_band: tuple[float, float] = (0.67, 1.5)
+    # A reference gradient this small against the whole compared set has no reliable direction: GatedDeltaNet's
+    # A_log on a hard-decaying head is a sum of ~1e-9 terms that cancel 5-29x, so every FLA kernel config lands a
+    # different rounding pattern on it (cos 0.71-0.85 against fp32). Such a pair is held to its absolute error
+    # against the set's norm instead of its cosine and ratio.
+    grad_negligible_norm_fraction: float = 1e-6
 
     # ── Exact-objective pins ────────────────────────────────────────────────
     # A test's independent reimplementation of its trainer's objective (offline GRPO, distillation,

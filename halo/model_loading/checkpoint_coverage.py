@@ -1,4 +1,5 @@
-"""Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized.
+"""Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized, and load the checkpoint's
+weights on every rank.
 
 ``from_pretrained`` reports the keys it re-initialized only through the transformers logger, which
 ``configure_training_run`` silences off the logging rank. Which absences are legitimate is read off the model class.
@@ -7,8 +8,10 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
+from contextlib import contextmanager
 
 import torch.nn as nn
 from transformers import PreTrainedModel
@@ -19,6 +22,9 @@ from halo.model_loading.remote_code import reject_untieable_list_ties
 logger = logging.getLogger(__name__)
 
 ALLOW_MISSING_CHECKPOINT_KEYS_ENV = "HALO_ALLOW_MISSING_CHECKPOINT_KEYS"
+# accelerate's switch under an FSDP launch for keeping the checkpoint's weights on each node's local rank 0 only;
+# transformers reads it inside ``from_pretrained``.
+_FSDP_CPU_RAM_EFFICIENT_LOADING = "FSDP_CPU_RAM_EFFICIENT_LOADING"
 
 
 def unexpected_missing_keys(
@@ -92,15 +98,38 @@ def verify_checkpoint_coverage(
     )
 
 
+@contextmanager
+def full_weights_on_every_rank() -> Iterator[None]:
+    """Turn accelerate's ``FSDP_CPU_RAM_EFFICIENT_LOADING`` off for the loads inside the scope.
+
+    With it on under an accelerate FSDP launch, ``from_pretrained`` reads the checkpoint on every rank and then
+    replaces every parameter and buffer off each node's local rank 0 with a CPU zero copy, leaving the weights to the
+    broadcast in ``accelerator.prepare``. A frozen model never gets that broadcast, and the policy is that zero copy
+    until it does, so anything that uses it first (a reference sweep at construction, a teacher placed on the policy's
+    device) fails. The broadcast at ``prepare`` still runs, from weights every rank already holds.
+    """
+    previous = os.environ.get(_FSDP_CPU_RAM_EFFICIENT_LOADING)
+    os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = "false"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(_FSDP_CPU_RAM_EFFICIENT_LOADING, None)
+        else:
+            os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = previous
+
+
 def from_pretrained_verified(
     model_class, model_name_or_path: str, *, excuse_task_head: bool = True, **kwargs
 ) -> PreTrainedModel:
-    """``model_class.from_pretrained`` with the missing-key report captured and gated.
+    """``model_class.from_pretrained`` with the missing-key report captured and gated, inside
+    :func:`full_weights_on_every_rank` so every rank holds the checkpoint's weights.
 
     The report is taken from ``output_loading_info`` rather than the transformers logger so it
     survives the ``set_verbosity_error`` that ``configure_training_run`` applies off the logging rank.
     """
-    model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
+    with full_weights_on_every_rank():
+        model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
     reject_untieable_list_ties(model)
     verify_checkpoint_coverage(
         model, loading_info["missing_keys"], source=model_name_or_path, excuse_task_head=excuse_task_head

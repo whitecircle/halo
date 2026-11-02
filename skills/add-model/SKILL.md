@@ -65,9 +65,10 @@ carries the templates and the commands to run.
    names it, added after its PP GPU rows pass; until then it is refused by name
    ([Adding a Model](../../agent-docs/models/adding-a-model.md)).
 7. **Configs + tests.** Add `examples/sft/<family>/` YAMLs and the required tests: an EP=2-vs-stock
-   equivalence row, a save-and-reload trainer test, a CPU support test, and the Liger numerics
-   case — step 7 of [Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support); the
-   commands are in `checklist.md`.
+   equivalence row, a save-and-reload trainer test and a CPU support test (step 7 of
+   [Add EP support](../../agent-docs/models/adding-a-model.md#add-ep-support)), plus the Liger GPU
+   numerics case (step 5 of [Declare Liger coverage](../../agent-docs/models/adding-a-model.md#declare-liger-coverage));
+   the commands are in `checklist.md`.
 
 All execution (tests, loading) runs **inside the Docker image** — tools are on `PATH` (uv-built, no
 prefix); see `CLAUDE.md`.

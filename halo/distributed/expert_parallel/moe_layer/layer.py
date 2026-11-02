@@ -201,7 +201,6 @@ class EPMoELayerBase(
 
         self.dispatcher = DeepEPDispatcher(ep_config, self.num_experts, hidden_dim)
         self._grad_sync_hooks = []
-        self._hook_synced_expert_params: list = []  # populated only in the in-backward hook regime
 
         self._use_grouped_mm = ep_config.grouped_gemm_enabled
 

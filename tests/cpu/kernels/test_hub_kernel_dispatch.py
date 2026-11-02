@@ -16,7 +16,7 @@ from transformers.integrations import hub_kernels
 
 from halo.kernels import hub_kernel_dispatch
 from halo.kernels.hub_kernel_dispatch import ensure_device_aware_kernel_dispatch
-from tests.common.repo import REPO_ROOT
+from tests.common.repo import REPO_ROOT, probe_findings
 
 
 def _decorate_probe():
@@ -63,7 +63,6 @@ def test_cpu_delta_rule_restarts_recurrent_state_per_document():
     """The torch fallback ignores ``cu_seqlens`` and runs one recurrence over the packed row; the
     shim must slice per document. A cumsum stands in for the recurrence: without segmentation
     document B starts from document A's running state."""
-    pytest.importorskip("fla")
     ensure_device_aware_kernel_dispatch()
 
     @hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
@@ -77,43 +76,59 @@ def test_cpu_delta_rule_restarts_recurrent_state_per_document():
     assert leaked[0, :, 0].tolist() == [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
 
 
-def _closure_functions(fn, depth=0, seen=None):
-    seen = seen if seen is not None else set()
-    if id(fn) in seen or depth > 6 or not callable(fn):
-        return
-    seen.add(id(fn))
-    yield fn
-    for cell in getattr(fn, "__closure__", None) or []:
-        value = getattr(cell, "cell_contents", None)
-        if callable(value):
-            yield from _closure_functions(value, depth + 1, seen)
-
-
 def test_cuda_capture_resolves_a_submodule_only_package_kernel():
     """``fla`` exports nothing at root, so a decoration that resolved only off a bare package import
     would silently capture the torch body — every CUDA forward then running the naive scan at ~10x
-    the step time. The decoration must capture fla's real kernel."""
-    pytest.importorskip("fla")
-    ensure_device_aware_kernel_dispatch()
+    the step time. The decoration must capture fla's real kernel.
 
-    @hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
-    def probe(query, key, value, **kwargs):
-        return value, None
+    A fresh interpreter is required: once anything in the process has imported the submodule (any
+    ``fla.ops`` import loads it), it is an attribute of the ``fla`` root and a root-only resolve finds
+    the kernel by walking attributes, so the check would pass against the very regression it pins.
+    """
+    script = """
+import sys
 
-    captured = {
-        f"{fn.__module__}.{fn.__qualname__}"
-        for fn in _closure_functions(probe)
-        if getattr(fn, "__module__", "").startswith("fla.")
-    }
-    assert any("chunk_gated_delta_rule" in name for name in captured), (
-        f"decoration captured no fla kernel (closure held {captured or 'only torch functions'}) — "
-        "CUDA forwards would silently run the torch fallback"
+import fla
+import halo
+from transformers.integrations import hub_kernels
+
+SUBMODULE = "fla.ops.gated_delta_rule"
+findings = []
+if SUBMODULE in sys.modules:
+    findings.append(f"importing halo or fla loaded {SUBMODULE}, so a root-only resolve would pass unseen")
+
+
+@hub_kernels.use_kernel_func_from_hub_with_fallback("chunk_gated_delta_rule", "fla")
+def probe(query, key, value, **kwargs):
+    return value, None
+
+
+def closure_functions(fn, seen):
+    if callable(fn) and id(fn) not in seen:
+        seen.add(id(fn))
+        yield fn
+        for cell in getattr(fn, "__closure__", None) or ():
+            yield from closure_functions(getattr(cell, "cell_contents", None), seen)
+
+
+closure = list(closure_functions(probe, set()))
+kernel = getattr(sys.modules.get(SUBMODULE), "chunk_gated_delta_rule", None)
+if kernel is None or not any(fn is kernel for fn in closure):
+    fla_functions = sorted(
+        f"{fn.__module__}.{fn.__qualname__}" for fn in closure if getattr(fn, "__module__", "").startswith("fla.")
     )
+    findings.append(
+        f"decoration did not capture {SUBMODULE}.chunk_gated_delta_rule, so CUDA forwards would silently run "
+        f"the torch fallback (fla functions in its closure: {fla_functions or 'none'})"
+    )
+print("FINDINGS:" + "|".join(findings))
+"""
+    findings = probe_findings(script, "FINDINGS:")
+    assert not findings, "\n".join(findings)
 
 
 def test_torch_capture_with_the_package_installed_warns(caplog, monkeypatch):
     """A capture that lands on torch while the package is importable is a silent 10x — it must warn."""
-    pytest.importorskip("fla")
     ensure_device_aware_kernel_dispatch()
     monkeypatch.setitem(hub_kernels._KERNELS_INTERNAL_PATH_MAPPINGS, "chunk_gated_delta_rule", "ops.no_such_submodule")
     monkeypatch.setattr(hub_kernel_dispatch, "_warned_torch_captures", set())

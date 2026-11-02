@@ -53,13 +53,13 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6 halo launch grpo/online \
 
 Wait for `/health` before launching. For an MoE model, set `expert_parallel_size` to the number of
 trainer GPUs, which usually means a power-of-two split such as four and four. Smoke-test first with
-`examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml`: three steps, one weight sync, nothing
-saved.
+`examples/grpo/online/qwen3/online-grpo-qwen3-4b-smoke.yaml`: three steps, a weight sync before each,
+nothing saved.
 
 Set `max_completion_length` (the generation budget) explicitly, keep `num_generations` at 4 or more so
 groups carry a signal, and leave the sampling cuts (`top_p`, `top_k`, `min_p`, `repetition_penalty`)
-off. Serve MoE models with `--moe-backend triton`, or the engine repacks the synced expert weights and
-the served policy stops matching.
+off. Serve MoE models with the compose default `--moe-backend triton`
+([why](../rollout-servers.md#what-weight-sync-does)).
 
 ## What to watch
 

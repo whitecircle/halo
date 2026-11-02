@@ -1,32 +1,33 @@
 #!/usr/bin/env python
-"""Single-EP-group hook regime: the /world divide must survive a zero-token sync microbatch.
+"""Single EP group: the /world expert divide must survive a zero-token sync microbatch.
 
-``build_expert_grad_hook`` divides the ACCUMULATED expert gradient on the sync microbatch, but a
-post-accumulate hook fires only for params in that backward's graph. A rank whose expert bank
-receives tokens in an early accumulation microbatch and ZERO dispatched tokens in the final one
-must still end at accumulated/world — not at the raw sum (``_expert_hook_grad_edge`` keeps the
-hooks firing). Routing is forced by a fixed-selection router stub so which rank idles is exact.
+With one EP group the trainer's post-backward sweep divides each ACCUMULATED expert gradient by the DP
+width once per optimizer step (``EPConfig.defer_expert_grad_sync``). A rank whose expert bank receives
+tokens in an early accumulation microbatch and ZERO dispatched tokens in the final one must still end at
+accumulated/world — not at the raw sum — and a bank that never received a token keeps ``grad is None``.
+Routing is forced by a fixed-selection router stub so which rank idles is exact; the sweep runs through
+``DistributedTrainerMixin._sync_deferred_expert_grads`` over the real EP layers (``sweep_ep_grads``).
 
 Schedule (ep2, top_k=1, all tokens to ONE expert):
-  control: one microbatch to rank 1's expert, sync=True            → grad_ctl = g / world
-  main:    µb1 to rank 1's expert (sync=False), µb2 to rank 0's expert (sync=True)
+  control: one microbatch to rank 1's expert, then the sweep           → grad_ctl = g / world
+  main:    µb1 to rank 1's expert, µb2 to rank 0's expert, then the sweep
            → rank 1 idles in the sync microbatch; its grad must STILL equal grad_ctl
-             (the missed-divide bug leaves it at world × grad_ctl).
+             (a missed divide leaves it at world × grad_ctl).
 
 Run with 2 GPUs:
     torchrun --nproc_per_node=2 \
-        tests/gpu/parallelism/ep/test_ep_hook_divide_zero_token.py
+        tests/gpu/parallelism/ep/test_ep_expert_divide_zero_token.py
 """
 
 import torch
 import torch.nn as nn
-from accelerate.state import GradientState
 from transformers import AutoModelForCausalLM
 from transformers.models.qwen3_moe import Qwen3MoeConfig
 
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
+from tests.common.ep_reference import sweep_ep_grads
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_QWEN3_MOE_CONFIG
@@ -58,11 +59,15 @@ class _FixedRouter(nn.Module):
         return logits, weights, experts
 
 
+def _expert_params(ep_layers) -> list[list[nn.Parameter]]:
+    return [[p for _, p in layer.expert_named_params() if p.requires_grad] for layer in ep_layers]
+
+
 def _expert_grad_norms(ep_layers) -> list[float | None]:
-    """Per-layer L2 norm over the hook-synced expert params' grads (None = no grad anywhere)."""
+    """Per-layer L2 norm over the expert params' grads (None = no grad anywhere)."""
     norms: list[float | None] = []
-    for layer in ep_layers:
-        grads = [p.grad for p in layer._hook_synced_expert_params if p.grad is not None]
+    for params in _expert_params(ep_layers):
+        grads = [p.grad for p in params if p.grad is not None]
         norms.append(
             torch.linalg.vector_norm(torch.stack([g.float().norm() for g in grads])).item() if grads else None
         )
@@ -85,12 +90,9 @@ def run(ctx):
     ep_layers = [m for m in model.modules() if isinstance(m, EPMoELayerBase)]
     ep_cfg = ep_layers[0].ep_config
 
-    # Anti-vacuity: this file certifies the HOOK regime — if defer_grad_sync ever covers the
-    # single-group topology too, the premise (and this test's subject) is gone and must fail loudly.
-    checks["hook_regime_active"] = (
-        not ep_cfg.defer_grad_sync
-        and not ep_cfg.experts_fsdp_managed
-        and all(layer._hook_synced_expert_params for layer in ep_layers)
+    # Anti-vacuity: this file certifies the single-group sweep regime, router on its hook, experts swept.
+    checks["single_group_sweep_regime"] = (
+        ep_cfg.defer_expert_grad_sync and not ep_cfg.defer_grad_sync and not ep_cfg.experts_fsdp_managed
     )
 
     router = _FixedRouter(config.num_experts, top_k=1)
@@ -106,27 +108,24 @@ def run(ctx):
     labels = input_ids.clone()
     model.train()
 
-    grad_state = GradientState()
-
-    # ── Control: one microbatch to the last rank's expert, sync=True → divided grad ──
-    grad_state._set_sync_gradients(True)
+    # ── Control: one microbatch to the last rank's expert, then the sweep → divided grad ──
     router.target = idle_rank_expert
     model(input_ids=input_ids, labels=labels).loss.backward()
+    sweep_ep_grads(model)
     ctl_norms = _expert_grad_norms(ep_layers)
     if not owns_idle_expert:
-        # This rank's bank never saw a token: the hook edge must NOT have materialized a grad.
+        # This rank's bank never saw a token: the sweep must NOT have materialized a grad.
         checks["untouched_bank_grad_stays_none"] = all(n is None for n in ctl_norms)
     log_all(f"  control expert-grad norms: {[f'{n:.4f}' if n is not None else 'None' for n in ctl_norms]}")
 
     model.zero_grad(set_to_none=True)
 
-    # ── Main: accumulate on the last rank's expert, then a sync microbatch it idles in ──
-    grad_state._set_sync_gradients(False)
+    # ── Main: accumulate on the last rank's expert, then a sync microbatch it idles in, then the sweep ──
     router.target = idle_rank_expert
     model(input_ids=input_ids, labels=labels).loss.backward()
-    grad_state._set_sync_gradients(True)
     router.target = 0
     model(input_ids=input_ids, labels=labels).loss.backward()
+    sweep_ep_grads(model)
     main_norms = _expert_grad_norms(ep_layers)
     log_all(f"  main expert-grad norms:    {[f'{n:.4f}' if n is not None else 'None' for n in main_norms]}")
 
@@ -147,7 +146,7 @@ def run(ctx):
     return {"checks": checks, "metrics": metrics}
 
 
-main = gpu_test_main(min_world_size=2, prefix="ep_hook_divide_zero_token")(run)
+main = gpu_test_main(min_world_size=2, prefix="ep_expert_divide_zero_token")(run)
 
 if __name__ == "__main__":
     main()

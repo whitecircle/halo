@@ -588,7 +588,7 @@ class DistributedTrainerMixin(
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         """Count the batch's loss tokens and attention-score work and arm FSDP2's per-window post-backward
-        toggles before the inherited step."""
+        toggles before the inherited step, and complete FSDP2's post-backward after it."""
         self._accumulate_unmasked_output_tokens(self._extract_output_token_count(inputs))
         self._accumulate_attention_flops(inputs)
         if self._pp_runner is not None:
@@ -598,7 +598,7 @@ class DistributedTrainerMixin(
         # HF sets sync_gradients before every training_step, so this is the window's last microbatch.
         self._set_window_end(self.accelerator.sync_gradients)
         try:
-            return super().training_step(model, inputs, num_items_in_batch)
+            loss = super().training_step(model, inputs, num_items_in_batch)
         except torch.OutOfMemoryError as e:
             # The peers die on launch failures in whatever kernel is on-stream (DeepEP combine, cuBLAS; Xid 43),
             # which read like a compute bug, so the rank that ran out of memory says so, whichever rank it is.
@@ -608,6 +608,8 @@ class DistributedTrainerMixin(
                 f"context tearing down; diagnose this OOM, not those. {e}"
             )
             raise
+        self._finish_fsdp2_backward(model)
+        return loss
 
     def _warn_once_on_thin_memory_margin(self):
         """After the first optimizer step, the first point where weights, grads, optimizer state and a backward's

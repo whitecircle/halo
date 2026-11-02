@@ -36,7 +36,7 @@ over. What gets sharded varies:
 | Mode | What's sharded | Note |
 |------|----------------|------|
 | No parallelism / CP | All params | CP attention coordinates the sequence split independently |
-| EP / ETP / EP+CP / EP+TP | Non-EP params only | EP modules (router + experts) excluded via `ignored_params`; their gradients sync through the EP layer's own post-accumulation grad hooks (`halo/distributed/expert_parallel/moe_layer/grad_sync.py`), or — at `num_ep_groups > 1`, single-node shapes included — through one post-backward sweep instead. **Multi-group EP across nodes** (`is_deferred_dp`) additionally shards non-EP params over the EP group; `ep_size==1` MoE stays on plain world-wide FSDP — see [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync) |
+| EP / ETP / EP+CP / EP+TP | Non-EP params only | EP modules (router + experts) excluded via `ignored_params`; with one EP group the router syncs through the EP layer's own post-accumulation grad hooks (`halo/distributed/expert_parallel/moe_layer/grad_sync.py`) and the experts through one post-backward sweep, which at `num_ep_groups > 1`, single-node shapes included, takes the router too. **Multi-group EP across nodes** (`is_deferred_dp`) additionally shards non-EP params over the EP group; `ep_size==1` MoE stays on plain world-wide FSDP — see [Multi-Node → deferred cross-replica sync](multi-node.md#deferred-cross-replica-sync) |
 | TP (DP > 1) | Per-layer, 2D `(dp, tp)` mesh | DTensor-compatible grad sync across the DP dim |
 | TP (DP == 1, pure TP) | None | Nothing to sync across DP |
 | PP (alone, or with EP / pure ETP) | The stage's params, over its rank block | As the rows above, scoped to the stage; the schedule reduces once per optimizer step ([PP + EP](pipeline-parallelism.md#pp--ep-moe)) |
@@ -193,9 +193,9 @@ FSDP-ignored and only the non-expert params pay it. It saves nothing at
 `gradient_accumulation_steps: 1`. Use it when the reduction is a visible share of the step (large DP
 width, slow inter-node fabric, small microbatches) and the memory is there.
 
-The in-backward EP expert and router hooks gate on the same `sync_gradients`, and the deferred EP
-sweep, the TP replicated-gradient sweep and the gradient clip run after the window's last backward,
-so all of them read the same reduced gradients as with the flag off. Rejected under PP (the schedule
+The in-backward EP router hooks gate on the same `sync_gradients`, and the deferred EP sweep, the TP
+replicated-gradient sweep and the gradient clip run after the window's last backward, so all of them
+read the same reduced gradients as with the flag off. Rejected under PP (the schedule
 already reduces once per step), TP at `data_parallel_size==1` (no FSDP2 wrap to defer), QLoRA (no
 wrap; its sweep already runs once per step) and `fsdp_reshard_after_forward: true` (the held unsharded
 gradient is the state ZeRO-3 exists to shard; defer under ZeRO-2 instead). Under `accelerate launch`
@@ -287,8 +287,14 @@ accelerate launch \
 ```
 
 The two FSDP v2 configs differ in `fsdp_reshard_after_forward`; the full config also sets
-`fsdp_cpu_ram_efficient_loading: true`. They have no hybrid-shard option — for that use `torchrun`
-FSDP2 with [`--use_hsdp`](#hsdp-hybrid-sharded-data-parallel).
+`fsdp_cpu_ram_efficient_loading: true`. With it, `from_pretrained` reads the checkpoint on every rank and then
+zero-fills the weights off each node's local rank 0, leaving them to the broadcast at `accelerator.prepare`, which a
+frozen reference or teacher never gets and which the policy gets only once training starts. The toolkit's loads
+therefore keep the full weights on every rank (`full_weights_on_every_rank` in
+`halo/model_loading/checkpoint_coverage.py`), as under the gradop config, at the same host memory.
+
+Neither config has a hybrid-shard option; for that use `torchrun` FSDP2 with
+[`--use_hsdp`](#hsdp-hybrid-sharded-data-parallel).
 
 > [!WARNING]
 > **Avoid accelerate FSDP v1**
@@ -319,6 +325,38 @@ first. A forward leaves the transient unsharded params registered (`reshard_afte
 never reshards after its forward), so a read would see objects the optimizer never steps: param groups
 built over them update orphans, a writer saves state one step stale, and the PEFT save's DTensor probe
 mis-routes.
+
+### Layers recomputed more than once per backward
+
+Reentrant gradient checkpointing, forced for EP, CP and every MoE
+([rule](../optimization/flash-attention.md#usage)), wraps each decoder layer's `__call__`, so FSDP2's
+hooks run inside the checkpoint. A loss that runs a layer more than once before one backward recomputes
+it once per run: env-GRPO scores each turn row in its own forward, and the GRPO log-prob scorers run one
+backbone call per row or chunk. torch's FSDP2 hooks only the first recompute the backward reaches. The
+others find the layer's state mid-backward, re-gather its parameters and accumulate into their
+unsharded gradients, and the root's final callback skips the group as already reduced. Left alone,
+those contributions never reach the sharded gradients the clip and the optimizer read, the group stays
+gathered past the optimizer step (the next forward reads pre-step weights), and its sharded gradient
+survives HF's `model.zero_grad()` into the next step.
+
+After every microstep's backward, `training_step` runs `complete_fsdp2_post_backward`
+(`halo/distributed/fsdp.py`) over every shard group: FSDP2's own `post_backward` on each group left
+gathered or holding an unsharded gradient, then the compute stream waits on the reductions it issued,
+as the root's final callback does. It reads each group's window flags: a `fsdp_defer_grad_sync`
+microstep folds the leftovers into the deferred accumulator with no collective, and a
+`fsdp_reshard_after_backward: false` microstep keeps the group gathered. A layer run once per
+backward leaves nothing to complete, and the step is bit-identical. The cost is one extra
+reduce-scatter per recomputed layer group per backward, or per window under `fsdp_defer_grad_sync`,
+issued after the backward with no compute left to overlap it. Memory inside the backward is torch's:
+from its second recompute until the backward returns, each recomputed group holds its gathered
+parameters and an unsharded gradient, under ZeRO-3 too. `reject_unfinished_fsdp2_backward` then raises
+if a group whose reduce is armed still holds an unsharded gradient, or one whose reshard is armed is
+still gathered. Which groups reduce is read off each rank's own gradients, so every rank must run each
+layer the same number of times per backward (env-GRPO pads its row count across ranks).
+
+The completion reads FSDP2 internals (`FSDPParamGroup`); `tests/cpu/parallelism/test_fsdp2_post_backward_internals.py`
+pins every member it touches, and the defect, against the installed torch. Non-reentrant checkpointing,
+and a checkpoint inside the module's `forward` (FSDP2's hooks outside it), are unaffected.
 
 `use_grouped_gemm` does not count as custom parallelism; it only activates for MoE models during
 loading, and an MoE under `accelerate launch` is rejected at load ([Two launchers](#two-launchers)).

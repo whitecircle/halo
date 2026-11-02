@@ -302,12 +302,12 @@ each rank clips by its own coefficient) and backstopped by a step-pre-hook for `
 
 | Mode | DP effect | Gradient sync | Model loader |
 |------|-----------|---------------|--------------|
-| EP | none (orthogonal) | non-expert via FSDP2 (`ignored_params`); expert via DeepEP backward hooks within the EP group, except at `ep_group_size == 1` where FSDP2 shards the experts too. **Any multi-EP-group topology** (`defer_grad_sync`, single-domain included) drops the in-backward hooks and averages in one post-backward sweep (`_sync_deferred_expert_grads`); **across nodes** (`is_deferred_dp`) the non-expert FSDP shards over the EP group as well | `load_ep_model()` / `load_distributed_model()` |
+| EP | none (orthogonal) | non-expert via FSDP2 (`ignored_params`); router via in-backward hooks, expert via the DeepEP combine within the EP group and one post-backward divide (`defer_expert_grad_sync`), except at `ep_group_size == 1` where FSDP2 shards the experts too. **Any multi-EP-group topology** (`defer_grad_sync`, single-domain included) drops the router hooks too and averages everything in one post-backward sweep (`_sync_deferred_expert_grads`); **across nodes** (`is_deferred_dp`) the non-expert FSDP shards over the EP group as well | `load_ep_model()` / `load_distributed_model()` |
 | CP | `world / cp_size` | FSDP2 across all ranks (each holds a partial gradient from its chunk) | `load_cp_model()` |
 | TP | `world / tp_size` | FSDP2 `fully_shard` on the DP dimension (DTensor weights) | dense: `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))`; MoE: `load_tp_moe_model` (attention-only TP — the auto plan mis-shards expert biases) |
-| EP+CP | `world / cp_size` | EP hooks for experts + FSDP2 for non-experts | `load_ep_cp_model()` |
-| EP+TP | `world / tp_size` | DTensor (TP) + EP hooks (experts) + FSDP2 per-TP-position DP groups | `load_distributed_model()` |
-| ETP (pure, `ep_size=1`) | `world / expert_tp_size` | EP hooks with expert-TP sub-group aggregation + FSDP2 | `load_distributed_model()` |
+| EP+CP | `world / cp_size` | EP sync for routers and experts (as EP) + FSDP2 for non-experts | `load_ep_cp_model()` |
+| EP+TP | `world / tp_size` | DTensor (TP) + EP sync (routers and experts) + FSDP2 per-TP-position DP groups | `load_distributed_model()` |
+| ETP (pure, `ep_size=1`) | `world / expert_tp_size` | EP sync with expert-TP sub-group aggregation + FSDP2 | `load_distributed_model()` |
 | [PP](../parallelism/pipeline-parallelism.md) | `world / pp_size` | stage-scoped FSDP2 (EP-aware) inside each stage; P2P for boundary activations | `load_distributed_model()`, split per stage |
 
 Which combinations may run, and the domain-locality rules each one carries, are the
@@ -322,11 +322,11 @@ The mixin bypasses HuggingFace's DDP and manages sync directly, per the table ab
 exception to the expert/non-expert split is `experts_fsdp_managed` — `fsdp_shard_ep1_experts`
 (default `true`) at `ep_group_size == 1`, the default shape of every `ep_size: 1` MoE run: the
 `ignored_params` list is emptied, FSDP2 shards the experts, its reduce-scatter becomes their sole
-sync, and the EP layer skips its own hooks.
+sync, and the EP layer skips its own hooks and the sweep its expert leg.
 
 In CP-only mode each rank computes partial gradients from its chunk and FSDP averaging yields the
 correct global mean (`effective_grad = (1/cp_size) * sum(partial_grad_i)`). In EP+TP with DP=1,
-DTensor and EP hooks alone sync; with DP>1, FSDP2 syncs non-EP params across nodes.
+DTensor and the EP sync alone; with DP>1, FSDP2 syncs non-EP params across nodes.
 
 Clipping and sync read the mesh groups (TP, DP) through the mesh accessors (`tp_group`, `dp_group`
 in `halo/distributed/mesh.py`) and the expert groups (dispatch-EP, expert-TP, expert-replica) off

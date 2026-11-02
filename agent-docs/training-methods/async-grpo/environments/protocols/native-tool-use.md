@@ -2,7 +2,7 @@
 
 `NativeToolUseEnvironment` (`halo/environments/protocols/native_tool_use.py`) runs the OpenAI/vLLM function-calling protocol: the environment advertises tool schemas, the server's `--tool-call-parser` extracts the calls, and each result returns as a `tool` message.
 
-Serve the model with its family's parser ([Tool calls](../../episodes.md#tool-calls)). Without one, vLLM rejects the request (400) and SGLang returns the calls as plain text, so every episode ends on its first turn.
+Serve the model with its family's parser; without one every episode ends on its first turn ([Tool calls](../../episodes.md#tool-calls)).
 
 Presets: `native_math` (`calculate`, `python`), `native_coding` (`python_repl`), `native_combined` (math, python, search, simulated files; `search_backend` names the search backend as on [`qa_search`](../tasks/qa-benchmarks.md#configuration)). `qa_search`, `exam_qa`, `swe`, `code_contests`, `codeforces` and `mcp` build on the same protocol, so this page applies to them.
 

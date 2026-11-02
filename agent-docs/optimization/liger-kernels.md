@@ -242,6 +242,20 @@ trainer).
 
 With `use_liger_kernel: false`, SFT's TRL `chunked_nll` loss type becomes `nll` ([SFT → Configuration](../training-methods/sft.md#configuration)).
 
+### Kernel implementation
+
+Liger's dispatcher ranks a CuTe DSL kernel ahead of Triton for most ops on sm_90+
+wherever `cutlass.cute` imports, which it does in both images. Of the Liger entry points the toolkit binds, only the
+rotary goes through it to a CuTe kernel; RMSNorm, the GLU MLPs and the fused loss call Triton directly, and
+cross-entropy's CuTe kernel ranks behind Triton. RoPE is pinned to Triton: `pin_liger_impls`
+(`halo/kernels/jit_cache.py`) sets `LIGER_KERNEL_IMPL_ROPE=nvidia-triton` where the toolkit turns
+`CUTE_DSL_ENABLE_TVM_FFI` on and at both Liger application sites, and another explicit value, in that variable or
+the legacy `LIGER_KERNEL_BACKEND_ROPE`, raises. Liger's CuTe DSL RoPE serves grad-carrying 2-byte calls with `bsz ×
+heads × seq ≥ 131072` and `head_dim ≥ 128`, and under `CUTE_DSL_ENABLE_TVM_FFI`, which the images set for FA4, it
+rotates a stale buffer from the second launch of a shape at the latest, backward included.
+`tests/gpu/kernels/test_liger_rope_repeated_calls.py` checks the bound rotary over repeated calls at Qwen3-8B's
+4096-token shape, against a control that runs the CuTe DSL kernel directly.
+
 ## CrossEntropy vs FusedLinearCrossEntropy
 
 **CrossEntropy** (default) replaces only the loss function; the model still materializes the

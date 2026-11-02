@@ -5,6 +5,8 @@
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
+model_init_kwargs:
+  router_aux_loss_coef: 0.001         # the hub config ships 0.9, which would dominate the DPO loss
 attn_implementation: flash_attention_2   # FA2 carries no sink argument; live sinks are rejected
                                          #   under it, so reset_sinks must stay on (its default)
 

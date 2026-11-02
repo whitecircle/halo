@@ -642,9 +642,9 @@ Async GRPO against a live server, per trainer parallelism axis:
 | Trainer and server on different nodes over EFA ([above](#servers-on-other-nodes-efa)) | supported; not run on the 0.32.0 image | supported; not run on the 0.5.22 image |
 
 An SGLang server under its own expert parallelism (`SGLANG_TP=2 SGLANG_EXTRA_ARGS="--ep-size 2"`) takes
-the sync for Qwen3 MoE. Measured on SGLang 0.5.17 (not re-run on 0.5.22), gpt-oss could not be served
-that way: its bf16 fused expert loader narrowed only the TP dimension and copied the global expert count
-into local storage (`_load_w2`), so the server failed at start under `--ep-size`.
+the sync for Qwen3 MoE. Measured on SGLang 0.5.17 (not re-run on 0.5.22), gpt-oss fails at start under
+`--ep-size`: its bf16 fused expert loader narrows only the TP dimension and copies the global expert count
+into local storage (`_load_w2`).
 
 ## Troubleshooting
 

@@ -10,9 +10,10 @@ every expert GEMM:
 [GPU Training Theory §2](../reference/gpu-training-theory.md#worked-example--why-small-per-expert-m-is-slow).
 
 EP **requires** [DeepEP](https://github.com/deepseek-ai/DeepEP) — there is no NCCL fallback.
-Non-EP gradients sync via FSDP2 (`fully_shard`, EP modules in `ignored_params`); router and expert
-gradients sync via the EP layer's own backward hooks, or a post-backward sweep when there is more than
-one EP group ([Gradient synchronization](#gradient-synchronization)). [Expert Tensor
+Non-EP gradients sync via FSDP2 (`fully_shard`, EP modules in `ignored_params`); router gradients
+sync via the EP layer's own backward hooks and expert gradients via the trainer's post-backward sweep,
+which takes the routers too when there is more than one EP group
+([Gradient synchronization](#gradient-synchronization)). [Expert Tensor
 Parallelism](expert-tensor-parallelism.md) further shards each expert's FFN inside the EP group.
 
 Every family's EP layer subclasses `EPMoELayerBase` (`halo/distributed/expert_parallel/moe_layer/layer.py`),
@@ -197,7 +198,7 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 
 | Flag | Scope | Effect |
 |---|---|---|
-| `fp32_router` | Router/gate weights | FP32 master. The routing matmul runs in FP32 while the EP layer syncs the router (`ep_group_size > 1`, or `fsdp_shard_ep1_experts: false`); at `ep_group_size == 1` under `fsdp_shard_ep1_experts` the router takes its own FSDP2 shard group and computes in BF16 under FSDP2's `param_dtype` |
+| `fp32_router` | Router/gate weights | FP32 master. The routing matmul runs at the dtype the router weight holds at the forward: FP32 wherever no FSDP2 group casts it (`ep_group_size > 1`, `fsdp_shard_ep1_experts: false`, a frozen router whose dtype no trainable parameter shares, which the wrap leaves out of its shard groups, and any run FSDP2 does not wrap: one rank, TP or CP at `data_parallel_size == 1`, an unwrapped copy); BF16 under FSDP2's `param_dtype` where FSDP2 wraps an `ep_group_size == 1` router under `fsdp_shard_ep1_experts`, which takes its own shard group |
 | `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — set `fsdp_shard_ep1_experts: false` for fp32 expert masters there |
 | `fp32_non_ep_params` | Attention, embed, norm | FP32 master, BF16 compute |
 
@@ -263,23 +264,25 @@ What an EP run has to plan around:
 
 ## Gradient synchronization
 
-Hybrid sync (`halo/distributed/expert_parallel/moe_layer/grad_sync.py`):
+Hybrid sync, with one EP group:
 
 - **Non-EP params** — FSDP2 `fully_shard` reduce-scatter over the DP world; EP modules sit in
   `ignored_params`.
-- **Router params** (`register_post_accumulate_grad_hook`): computed on the local batch before
-  all-to-all, then `all_reduce(SUM) / world_size`.
-- **Expert params**: the DeepEP backward already aggregates within the EP group, so the hook carries
-  no collective — it divides by `world_size / expert_tp_size` and nothing else.
-
-Hooks integrate with accelerate's `GradientState`: they skip sync while `sync_gradients` is False
-(accumulation steps).
-
-A post-accumulate hook fires only for params in that backward's graph, so a bank (or a single expert
-in the eager loop) that idles in the **sync** microbatch after accumulating earlier would miss the
-divide. The layer adds a zero-valued graph edge onto every already-accumulated expert param
-(`_expert_hook_grad_edge`) so the hook always reaches it; a bank with no accumulated grad keeps
-`grad=None` and the optimizer skips it.
+- **Router and replicated params** (`register_post_accumulate_grad_hook`,
+  `halo/distributed/expert_parallel/moe_layer/grad_sync.py`): computed on the local batch before
+  all-to-all, then `all_reduce(SUM) / world_size`. The hooks skip sync while accelerate's
+  `GradientState.sync_gradients` is False (accumulation steps). Under reentrant checkpointing a hook
+  fires once per nested backward, which the average absorbs, being linear in the gradient; a layer
+  recomputed K times pays K all-reduces of its router and shared-expert gradients.
+- **Expert params**: the DeepEP backward already aggregates within the EP group, so their sync is a
+  divide by `world_size / expert_tp_size`, with no collective. It runs once per optimizer step in the
+  trainer's post-backward sweep (`_sync_deferred_expert_grads`, from the clip or, with clipping off,
+  the optimizer's step pre-hook), never on a hook: a reentrant recompute re-enters the backward once
+  per segment, and a divide repeated per firing would leave the earlier segments divided K times.
+  The sweep divides every accumulated expert gradient, so a bank that idles in the sync microbatch
+  after accumulating earlier still gets it; a bank with no accumulated grad keeps `grad=None` and the
+  optimizer skips it (`EPConfig.defer_expert_grad_sync`, off only without peers or under
+  `fsdp_shard_ep1_experts`).
 
 **More than one EP group registers no hooks at all.** The cross-replica `all_reduce(SUM)` those
 topologies need cannot ride a post-accumulate hook: it fires only where a grad accumulated, so a

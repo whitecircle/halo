@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""The EP cross-replica expert-grad reduce must never ride an in-backward hook.
+"""The EP expert-grad sync must never ride an in-backward hook.
 
 ``register_post_accumulate_grad_hook`` fires only where a grad was actually accumulated. A rank whose
 DeepEP dispatch delivered ZERO tokens for a layer returns early from ``_compute_experts`` without
@@ -13,9 +13,10 @@ The guarantee is structural, not a guard: ``EPConfig.defer_grad_sync`` covers EV
 topology (not just the cross-node ``is_deferred_dp`` one), routing the sum through the trainer's
 post-backward sweep, which walks ``named_parameters()`` and agrees grad presence over its reduce group
 (zero-filling a grad only a peer holds) so membership is rank-uniform. Grad-equivalence holds: a zero
-grad contributes nothing to the SUM, and the sweep's expert divisor is the same
-``world_size // expert_tp_size`` a hook would use. ``build_expert_grad_hook`` refuses to build a
-reducing hook at all, so a regression fails loudly instead of hanging.
+grad contributes nothing to the SUM. With one EP group the sweep only divides the experts, by
+``world_size // expert_tp_size``, with no collective, so a rank holding no expert grad skips nothing its
+peers enter (``EPConfig.defer_expert_grad_sync``; a hook would divide once per nested backward of a
+reentrant recompute).
 
 The end-to-end proof is a GPU test: an 8-GPU ``ep_size=2`` run (4 EP groups, one NVLink domain — the
 shape an ``is_deferred_dp``-only rule leaves on the hook) with a batch small enough for a rank to be
@@ -27,18 +28,17 @@ Run: python tests/cpu/parallelism/test_ep_zero_token_grad_sync.py
 
 from __future__ import annotations
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.moe_layer.grad_sync import build_expert_grad_hook
+from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import stubbed_process_groups
-
-_GS_MOD = "halo.distributed.expert_parallel.moe_layer.grad_sync"
 
 
 def _make_ep(
@@ -52,21 +52,6 @@ def _make_ep(
         return EPConfig(
             stage_world_size=stage_world_size, stage_base_rank=stage_base_rank, experts_fsdp_managed=managed, **kwargs
         )
-
-
-def _expert_hook_from(**ep_attrs):
-    """Build the expert grad hook off a stub carrying every attribute a real ``EPConfig`` sets, with a
-    process group reported up so the hook is the distributed one rather than the single-process no-op."""
-    defaults = {
-        "stage_world_size": 8,
-        "expert_tp_size": 1,
-        "needs_expert_grad_sync": False,
-        "fp32_grad_reduce": False,
-        "dp_scope_group": None,
-    }
-    ep = SimpleNamespace(**{**defaults, **ep_attrs})
-    with patch(f"{_GS_MOD}.has_process_group", return_value=True):
-        return build_expert_grad_hook(ep)
 
 
 # EPConfig: every multi-group topology defers
@@ -84,14 +69,15 @@ def test_single_domain_multigroup_ep_defers():
     assert cfg.defer_grad_sync
 
 
-def test_single_ep_group_still_hooks():
-    """One EP group spanning the world needs no cross-replica reduce, so the cheap in-backward hook
-    path stays. Guards against "just defer everything", which would drop backward overlap for the
-    single-group majority."""
+def test_single_ep_group_keeps_the_router_hook_and_defers_the_expert_divide():
+    """One EP group spanning the world needs no cross-replica reduce, so the router's in-backward hook
+    stays and keeps its backward overlap for the single-group majority; only the expert divide, which a
+    hook would repeat per nested backward, moves to the sweep."""
     cfg = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_ep_groups == 1
     assert not cfg.needs_expert_grad_sync
     assert not cfg.defer_grad_sync
+    assert cfg.defer_expert_grad_sync
 
 
 def test_fsdp_managed_ep1_experts_never_defer():
@@ -115,8 +101,8 @@ def test_fsdp_managed_ep1_experts_never_defer():
 
 def test_no_topology_leaves_a_reducing_hook_on_any_rank():
     """The invariant, swept over every rank of every EP shape this box admits: a cross-replica reduce
-    is never left to the hook path. Equivalently — ``build_expert_grad_hook`` never raises for a config
-    that reaches it."""
+    is never left to the router hook path, and the expert grads are the sweep's wherever FSDP2 leaves
+    them out."""
     world = 8
     shapes = [
         {"ep_size": 1, "fsdp_shard_ep1_experts": True},
@@ -132,45 +118,52 @@ def test_no_topology_leaves_a_reducing_hook_on_any_rank():
             cfg = _make_ep(
                 rank, world_size=world, stage_world_size=world, nvlink_domain_size=world, node_local=True, **shape
             )
-            hooks_registered = not cfg.experts_fsdp_managed and not cfg.defer_grad_sync
-            assert not (hooks_registered and cfg.needs_expert_grad_sync), (shape, rank)
+            assert not (cfg.uses_backward_grad_hooks and cfg.needs_expert_grad_sync), (shape, rank)
+            assert cfg.defer_expert_grad_sync == (not cfg.experts_fsdp_managed), (shape, rank)
 
 
-# The hook itself is collective-free, and says so loudly
+# The single-group expert sweep is collective-free
 
 
-def test_expert_hook_refuses_to_carry_a_cross_replica_reduce():
-    """A hand-built config that selects hooks while needing the cross-replica sum must fail loudly at
-    hook creation rather than hang mid-backward on the first zero-token rank."""
-    with pytest.raises(RuntimeError, match="zero-token rank"):
-        _expert_hook_from(needs_expert_grad_sync=True)
+def _single_group_sweep(expert_grad: torch.Tensor | None) -> nn.Parameter:
+    """The trainer's real sweep over one expert of a single EP group (8 ranks, expert TP 2)."""
+    expert = nn.Parameter(torch.zeros(2, 2))
+    expert.grad = expert_grad
+    model = nn.Module()
+    model.expert = expert
+    host = SimpleNamespace(
+        _ep_config=SimpleNamespace(
+            defer_grad_sync=False,
+            defer_expert_grad_sync=True,
+            expert_replica_group=None,
+            stage_world_size=8,
+            expert_tp_size=2,
+            fp32_grad_reduce=False,
+        ),
+        state=SimpleNamespace(global_step=0),
+        _get_sharded_expert_param_ids=lambda: {id(expert)},
+        _get_ep_param_ids=lambda: {id(expert)},
+        _top_level_model=lambda: model,
+    )
+    host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
+    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    return expert
 
 
-def test_expert_hook_only_scales_and_issues_no_collective():
-    """The surviving hook path divides in place by ``world_size // expert_tp_size`` and calls no
-    collective — so a rank that never fires it costs nothing but its own (zero) contribution."""
-    hook = _expert_hook_from(stage_world_size=8, expert_tp_size=2)
-    param = nn.Parameter(torch.zeros(2, 2))
-    param.grad = torch.full((2, 2), 8.0)
-    reduced: list = []
-    with (
-        patch(f"{_GS_MOD}.reduce_grad", lambda *a, **kw: reduced.append(kw)),
-        patch(f"{_GS_MOD}.should_sync_gradients", return_value=True),
-    ):
-        hook(param)
-    assert reduced == [], "the expert hook must issue no collective"
-    # world_size // expert_tp_size == 4 — the same divisor the deferred sweep applies.
-    assert torch.equal(param.grad, torch.full((2, 2), 2.0)), param.grad
+@pytest.mark.parametrize("has_grad", [True, False], ids=["tokens", "zero_tokens"])
+def test_single_group_expert_sweep_only_scales_and_issues_no_collective(has_grad):
+    """The sweep divides in place by ``world_size // expert_tp_size`` and calls no collective, so a rank
+    whose dispatch delivered no tokens (``grad is None``) skips nothing its peers enter."""
 
+    def collective(*args, **kwargs):
+        raise AssertionError("the single-group expert sweep issued a collective")
 
-def test_expert_hook_is_a_noop_without_peers():
-    """Single-process runs have no peers: the hook must not even divide (divisor 1 semantics)."""
-    hook = _expert_hook_from(stage_world_size=1)
-    param = nn.Parameter(torch.zeros(2))
-    param.grad = torch.ones(2)
-    with patch(f"{_GS_MOD}.should_sync_gradients", return_value=True):
-        hook(param)
-    assert torch.equal(param.grad, torch.ones(2))
+    with patch.object(dist, "all_reduce", collective):
+        expert = _single_group_sweep(torch.full((2, 2), 8.0) if has_grad else None)
+    if has_grad:
+        assert torch.equal(expert.grad, torch.full((2, 2), 2.0)), expert.grad
+    else:
+        assert expert.grad is None
 
 
 def test_every_multi_group_rank_holds_an_expert_replica_group():
