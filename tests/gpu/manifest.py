@@ -1001,6 +1001,10 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_environmental_grpo_benchmarks.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
     ),
+    # FSDP2 ZeRO-3 over two ranks; no rollout server: the round is built in place.
+    "trainers/grpo/test_env_length_ordered_rows.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=900
+    ),
     "trainers/grpo/test_sglang_weight_sync_e2e.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "sglang_server"), timeout=900
     ),
@@ -1015,16 +1019,18 @@ MANIFEST: dict[str, TestSpec] = {
     # HALO_TEST_ENV_GRPO_SGLANG_MODEL point the two-rank rows at another family for a per-family pass.
     # --ep-size 1 gathers DTensor experts out of the FSDP2 shard, --ep-size 2 gathers FSDP-ignored plain
     # tensors; both must land in the engine's loader. The three bare vLLM rows are the per-family server
-    # arms (a family pass runs them with -k "not peft and not resume and not routing"); the --peft /
-    # --resume rows are the Qwen3-30B pass. --thinking-budget is not a row: it is a gpt-oss shape that
-    # needs that image's reasoning plugin (agent-docs/models/gpt-oss.md#serving-for-grpo-vllm). The
-    # --routing-replay rows need the server on VLLM_ENABLE_R3=1, or SGLANG_ENABLE_R3=1 with
-    # SGLANG_MOE_RUNNER_BACKEND=triton, since SGLang's fused runners bypass the capture hook and return no
-    # ids; the flag is additive, so one server carrying it runs every row. The SGLang --tp-size 2 and
-    # --resume R3 rows are the ones whose post-sync policy produces runaway completions, the zero-gradient
-    # batch the replay gate exempts. The resume rows set the two-rank budget (two model builds and a
-    # checkpoint round-trip), EP+TP the four-rank one (a DTensor attention plan on top of the EP
-    # layers), each with room for the FA4-JIT and checkpoint-download cold paths.
+    # arms (a family pass runs them with -k "not peft and not resume and not routing and not prefetch"); the
+    # --peft / --resume rows are the Qwen3-30B pass, and the --prefetch-depth rows prefetch on the one server
+    # (enable_prefetch: true), on vLLM at depth 2 too, and beside R3 on both backends. The --chunked R3 rows
+    # run the length deal against a --length-ordered false arm, compared on routing_replay_flip_rate_max.
+    # --thinking-budget is not a row: it is a gpt-oss shape that needs that image's reasoning plugin
+    # (agent-docs/models/gpt-oss.md#serving-for-grpo-vllm). The --routing-replay rows need the server on
+    # VLLM_ENABLE_R3=1, or SGLANG_ENABLE_R3=1 with SGLANG_MOE_RUNNER_BACKEND=triton, since SGLang's fused
+    # runners bypass the capture hook and return no ids; the flag is additive, so one server carrying it runs
+    # every row. The SGLang --tp-size 2 and --resume R3 rows are the ones whose post-sync policy produces
+    # runaway completions, the zero-gradient batch the replay gate exempts. The resume rows set the two-rank
+    # budget (two model builds and a checkpoint round-trip), EP+TP the four-rank one (a DTensor attention plan
+    # on top of the EP layers), each with room for the FA4-JIT and checkpoint-download cold paths.
     "trainers/grpo/test_env_grpo_e2e.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "etp", "tp", "lora", "moe", "qwen3", "vllm_server"),
@@ -1045,6 +1051,13 @@ MANIFEST: dict[str, TestSpec] = {
                     "--ep-size 2 --resume",
                     "--ep-size 1 --routing-replay rollout",
                     "--ep-size 2 --routing-replay rollout",
+                    "--ep-size 2 --prefetch-depth 1",
+                    "--ep-size 2 --prefetch-depth 2",
+                    "--ep-size 2 --routing-replay rollout --prefetch-depth 1",
+                    "--ep-size 1 --routing-replay rollout --chunked",
+                    "--ep-size 1 --routing-replay rollout --chunked --length-ordered false",
+                    "--ep-size 2 --routing-replay rollout --chunked",
+                    "--ep-size 2 --routing-replay rollout --chunked --length-ordered false",
                 )
             ),
             *_rows(
@@ -1069,6 +1082,10 @@ MANIFEST: dict[str, TestSpec] = {
                         "--ep-size 1 --resume --routing-replay rollout",
                         "--ep-size 2 --peft expert_lora",
                         "--ep-size 2 --peft expert_lora --resume",
+                        "--ep-size 1 --prefetch-depth 1",
+                        "--ep-size 1 --routing-replay rollout --prefetch-depth 1",
+                        "--ep-size 1 --routing-replay rollout --chunked",
+                        "--ep-size 1 --routing-replay rollout --chunked --length-ordered false",
                     )
                 ),
                 markers=("gpu", "full", "2gpu", "ep", "tp", "lora", "moe", "gptoss", "sglang_server"),
@@ -1138,11 +1155,12 @@ MANIFEST: dict[str, TestSpec] = {
     # the single-process rows of the online and environmental bodies. Each policy has its own server, and
     # each row asserts on logprobs only its own checkpoint's server can produce: VLLM_SERVER_URL serves
     # Qwen/Qwen3-30B-A3B-Instruct-2507 (the MoE rows), HALO_TEST_VLLM_DENSE_SERVER_URL Qwen/Qwen3-0.6B (the
-    # dense and one-process rows). The --servers 2 row needs a second server of the same checkpoint in
-    # HALO_TEST_VLLM_SERVER_URLS and skips without one. --resume rows run two trainers in one process (phase 2
-    # is what restores TRL's -1 sync sentinel), so they load the policy twice and are the longest rows of their
-    # policy: the MoE resume loads 30B twice plus the gathered checkpoint, so its rows take 1800s with room for
-    # a cold cache, the dense rows 900s, the one-process rows 3000s.
+    # dense and one-process rows). The --servers 2 rows need a second server of the same checkpoint in
+    # HALO_TEST_VLLM_SERVER_URLS and skip without one; the --prefetch-depth rows prefetch over the two. --resume
+    # rows run two trainers in one process (phase 2 is what restores TRL's -1 sync sentinel), so they load the
+    # policy twice and are the longest rows of their policy: the MoE resume loads 30B twice plus the gathered
+    # checkpoint, so its rows take 1800s with room for a cold cache, the dense rows 900s, the one-process rows
+    # 3000s.
     "trainers/grpo/test_online_grpo_vllm_e2e.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "lora", "ep", "etp", "moe", "qwen3", "vllm_server"),
@@ -1183,6 +1201,8 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer environmental --mode full_world1",
                     "--trainer environmental --mode lora_world1",
                     "--trainer environmental --mode full_world1 --servers 2",
+                    "--trainer environmental --mode full_world1 --servers 2 --prefetch-depth 1",
+                    "--trainer environmental --mode full_world1 --servers 2 --prefetch-depth 2",
                 ),
                 nproc=1,
                 markers=("gpu", "full", "1gpu", "lora", "qwen3", "vllm_server"),

@@ -1,14 +1,14 @@
 # DPO — GPT-OSS 20B on the Tulu-3 preference mixture, EP=8, LoRA (the PEFT adapters are the implicit
 # reference; full fine-tuning under EP/TP takes precompute_ref_log_probs: true, or loads a frozen
 # reference as a whole dense replica on every rank).
+# Blackwell only: attention is pinned to FA4, which the Hopper image does not carry.
 # Launch: torchrun --nproc_per_node=8 scripts/training/preference/dpo.py <this config>
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
 model_init_kwargs:
   router_aux_loss_coef: 0.001         # the hub config ships 0.9, which would dominate the DPO loss
-attn_implementation: flash_attention_2   # FA2 carries no sink argument; live sinks are rejected
-                                         #   under it, so reset_sinks must stay on (its default)
+attn_implementation: flash_attention_4   # these scripts' unset pick on Blackwell (SDPA elsewhere); sinks stay reset (the default)
 
 # --- Parallelism ---
 expert_parallel_size: 8
@@ -26,8 +26,7 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 2
 gradient_accumulation_steps: 8
-gradient_checkpointing_kwargs:
-  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+gradient_checkpointing: false   # a full 2 x 4,096 pair holds ~33 GB of activations
 learning_rate: 5.0e-07
 lr_scheduler_type: cosine
 warmup_steps: 20

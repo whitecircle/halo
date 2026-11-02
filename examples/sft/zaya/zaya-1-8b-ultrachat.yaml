@@ -18,14 +18,14 @@ dataset_num_proc: 16
 train_on_last_assistant_only: true
 
 # --- Attention & kernels ---
-attn_implementation: flash_attention_2
 packing: true
-max_length: 4096
+max_length: 16384   # ~50 GB of activations per row; one GPU needs a B200/B300, while eight 80 GB GPUs
+                    #   halve it and double accumulation (GC is refused)
 
 # --- Training schedule ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 16
+gradient_accumulation_steps: 4
 num_train_epochs: 1.0
 # Refused in every mode: the toolkit clears ZayaPreTrainedModel.supports_gradient_checkpointing at
 # load, since recompute through CCA's nn.Conv1d pair faults in cuDNN on the CUDA 13.2 image.

@@ -2,6 +2,7 @@
 
 import dataclasses
 import logging
+import math
 
 from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.rollout_config import IDENTITY_SAMPLER, SGLANG_BACKEND, VALID_REASONING_EFFORTS
@@ -217,6 +218,31 @@ def reject_unsupported_engine_reference(client_cls, async_config, is_correction:
             f"({', '.join(f'{name} {value}' for name, value in identity.items())}), got {moved}: the engine "
             "echoes the raw distribution's log-probs while the sampling log-probs are the processed "
             "ones, so only at the identity sampler do the two share a reference."
+        )
+
+
+def reject_prefetch_past_retry_budget(client_cls, async_config, args) -> None:
+    """Refuse a prefetch whose rounds span more weight syncs than a turn's ``max_retries`` on an engine whose pause
+    aborts the turns in flight (``client_cls.PAUSE_ABORTS_IN_FLIGHT``): a turn aborted ``max_retries + 1`` times in
+    a row fails its episode. A round is in flight from the step that submits it to the one that trains it
+    ``prefetch_depth`` rounds later, and TRL generates a round every ``steps_per_generation × num_iterations``
+    micro-batches."""
+    if not client_cls.PAUSE_ABORTS_IN_FLIGHT or not async_config.prefetch_active():
+        return
+    depth, every = async_config.prefetch_depth, async_config.sync_weights_every_n_steps
+    round_micro_batches = args.steps_per_generation * args.num_iterations
+    syncs = math.ceil(depth * round_micro_batches / (args.gradient_accumulation_steps * every))
+    if syncs > async_config.max_retries:
+        raise ValueError(
+            f"Every {client_cls.BACKEND_NAME} weight sync aborts the turns in flight, and at prefetch_depth={depth} a "
+            f"prefetched round stays in flight across up to {syncs} syncs (rounds of steps_per_generation × "
+            f"num_iterations = {round_micro_batches} micro-batches, gradient_accumulation_steps="
+            f"{args.gradient_accumulation_steps}, sync_weights_every_n_steps={every}): a long turn aborted at each of "
+            f"them outruns its max_retries={async_config.max_retries} re-issues and fails its episode. Shorten the "
+            "span (it grows with prefetch_depth, steps_per_generation and num_iterations, falls as "
+            "sync_weights_every_n_steps rises, and is never below 1), raise max_retries to "
+            f"{syncs} with (1 + max_retries) × request_timeout still within episode_timeout, or turn prefetch off "
+            "(enable_prefetch: false at prefetch_depth: 1)."
         )
 
 

@@ -2,12 +2,12 @@
 # Dataset rows need prompt/completions/rewards — generate via
 # scripts/inference/reward_model/rejection_sample.py --output_format offline_grpo (the default is preference).
 # See agent-docs/training-methods/grpo/offline.md.
+# Blackwell only: attention is pinned to FA4, which the Hopper image does not carry.
 # Launch: torchrun --nproc_per_node=8 scripts/training/grpo/offline.py <this config>
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2  # FA2 carries no sink argument; live sinks are rejected
-                                        #   under it, so reset_sinks must stay on (its default)
+attn_implementation: flash_attention_4   # these scripts' unset pick on Blackwell (SDPA elsewhere); sinks stay reset (the default)
 model_init_kwargs:
   output_router_logits: true
 moe_balancing: none  # explicit aux_loss is REJECTED on a GRPO trainer (it never enters the loss); router logits stay on for MoE metrics
@@ -32,9 +32,6 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 1.0
 gradient_accumulation_steps: 8
-gradient_checkpointing: true
-gradient_checkpointing_kwargs:
-  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
 learning_rate: 5.0e-06
 weight_decay: 0.01
 lr_scheduler_type: cosine

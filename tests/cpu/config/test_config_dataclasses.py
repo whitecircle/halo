@@ -377,7 +377,7 @@ def test_async_config_defaults():
     assert cfg.rollout_temperature == 0.7
     assert cfg.rollout_top_p == 0.95
     assert cfg.rollout_max_tokens == 32768
-    assert cfg.enable_prefetch is True
+    assert cfg.enable_prefetch is None
     assert cfg.max_retries == 3
     assert cfg.retry_base_wait == 1.0
 

@@ -3,13 +3,15 @@
 built without ``__init__``.
 
 * ``_configure_rollout_state`` takes the rollout, row and objective state from the async config and reaches
-  every refusal of a knob that would go unread;
+  every refusal of a knob that would go unread, and of a prefetch past a turn's retries on an engine whose pause
+  aborts the turns in flight, read off the configured backend's client (SGLang refused, vLLM passed);
 * ``_configure_importance_sampling`` scores at the sampling temperature, turns the correction on only where the
   sampled tokens carry their log-probs, and refuses every stage it would leave inert, the engine re-score
   against the configured backend's client included;
 * ``_resolve_environment_spec`` takes a registry config or a custom environment class, and nothing else;
 * the prefetch worker thread delivers exactly one output per submitted round, a failure marker included, and
-  stops within its join timeout, also while it waits to deliver;
+  stops within its join timeout; a delivery that finds the output queue full raises instead of waiting, and
+  leaves the worker stoppable;
 * a second ``train()`` stops the worker at its cleanup and starts a new one at train-begin: nothing the stop
   leaves behind ends the new worker, and a worker still in its round past the join is not revived.
 
@@ -19,6 +21,7 @@ Run: python tests/cpu/grpo/test_env_trainer_wiring.py
 import asyncio
 import logging
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -30,6 +33,7 @@ from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfi
 from halo.environments.environment_base import EnvironmentBase
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from halo.trainers.grpo.environmental import async_rollouts, importance_sampling
+from halo.trainers.grpo.environmental import trainer as env_trainer
 from halo.trainers.grpo.environmental.importance_sampling import _BreakerOptimizerSkipCallback
 from halo.trainers.grpo.environmental.step_batch import BatchBuildFence
 from halo.trainers.grpo.environmental.trainer import (
@@ -37,6 +41,7 @@ from halo.trainers.grpo.environmental.trainer import (
     _resolve_environment_spec,
 )
 from halo.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY
+from halo.weight_sync.clients.sglang import SGLangWeightSyncClient
 from tests.common.tiny_models import word_level_tokenizer
 
 _STOP = "<stop>"
@@ -117,12 +122,52 @@ def test_the_default_config_arms_no_breaker_and_no_stage(tmp_path):
         ),
         ({"loss_type": "grpo"}, {"balance_token_mass": True}, r"balance_token_mass needs a loss whose loss tokens"),
         ({}, {"rollout_stop_tokens": ["<absent>"]}, r"rollout_stop_tokens \['<absent>'\] are not tokens"),
+        (
+            {},
+            {
+                "rollout_backend": "sglang",
+                "rollout_server_configs": _TWO_SERVERS,
+                "prefetch_depth": 2,
+                "max_retries": 1,
+            },
+            r"a prefetched round stays in flight across up to 2 syncs",
+        ),
     ],
-    ids=["off-policy-mask", "vespo", "std-floor-without-scaling", "unbalanceable-loss", "unknown-stop-token"],
+    ids=[
+        "off-policy-mask",
+        "vespo",
+        "std-floor-without-scaling",
+        "unbalanceable-loss",
+        "unknown-stop-token",
+        "sglang-prefetch-past-retries",
+    ],
 )
 def test_the_rollout_state_reaches_each_refusal(tmp_path, grpo, config, match):
     with pytest.raises(ValueError, match=match):
         _trainer(tmp_path, grpo=grpo, **config)._configure_rollout_state()
+
+
+def test_a_vllm_prefetch_past_one_retry_passes_the_rollout_state(tmp_path):
+    """vLLM's pause keeps the turns in flight, so the round the SGLang case refuses passes here."""
+    trainer = _trainer(tmp_path, rollout_server_configs=_TWO_SERVERS, prefetch_depth=2, max_retries=1)
+    assert trainer.async_config.rollout_backend == "vllm"
+    trainer._configure_rollout_state()
+
+
+def test_the_retry_budget_is_checked_against_the_configured_backends_client(tmp_path, monkeypatch):
+    """The verdict is the resolved client's, not the backend key's: the same vLLM config resolved to a client whose
+    pause aborts is refused."""
+    resolved = []
+
+    def resolve(backend):
+        resolved.append(backend)
+        return SGLangWeightSyncClient
+
+    monkeypatch.setattr(env_trainer, "resolve_weight_sync_client", resolve)
+    trainer = _trainer(tmp_path, rollout_server_configs=_TWO_SERVERS, prefetch_depth=2, max_retries=1)
+    with pytest.raises(ValueError, match="Every SGLang weight sync aborts the turns in flight"):
+        trainer._configure_rollout_state()
+    assert resolved == ["vllm"]
 
 
 # ── _configure_importance_sampling ──────────────────────────────────────────────
@@ -265,16 +310,25 @@ class _RolloutManager:
 
 
 class _HeldRolloutManager:
-    """Holds every round until :attr:`release` is set: a round still collecting when training ends."""
+    """Holds every round until :attr:`release` is set, a cancel included: a round still collecting when
+    training ends, whose collection outlasts the stop's join. Cancelled, it then raises the cancel, or with
+    ``finishes_when_cancelled`` returns its round as a collection that swallows the cancel would."""
 
-    def __init__(self):
+    def __init__(self, finishes_when_cancelled: bool):
         self.entered = threading.Event()
         self.release = threading.Event()
+        self.finishes_when_cancelled = finishes_when_cancelled
 
     async def collect_rollouts(self, prompts, contexts):
         self.entered.set()
+        cancelled = False
         while not self.release.is_set():
-            await asyncio.sleep(0.001)
+            try:
+                await asyncio.sleep(0.001)
+            except asyncio.CancelledError:
+                cancelled = True
+        if cancelled and not self.finishes_when_cancelled:
+            raise asyncio.CancelledError
         return [f"rollout:{prompt}" for prompt in prompts]
 
 
@@ -283,7 +337,6 @@ def prefetching(tmp_path, monkeypatch):
     """A trainer whose real async state prefetches over two servers, collecting through :class:`_RolloutManager`,
     its worker's waits shortened; the worker is stopped at teardown."""
     monkeypatch.setattr(async_rollouts, "_PREFETCH_POLL_TIMEOUT_S", 0.01)
-    monkeypatch.setattr(async_rollouts, "_PREFETCH_DELIVER_TIMEOUT_S", 0.01)
     # Bounds the wait for an in-flight round, so a lost delivery fails in seconds rather than a minute.
     monkeypatch.setattr(async_rollouts, "_PREFETCH_SUBMIT_TIMEOUT_S", 2.0)
     trainer = _trainer(tmp_path, enable_prefetch=True, rollout_server_configs=_TWO_SERVERS, episode_timeout=1.0)
@@ -334,30 +387,34 @@ def test_stopping_joins_the_worker_and_drops_what_no_step_consumes(prefetching):
     assert prefetching._prefetch_queue.empty()
 
 
-def test_a_worker_waiting_to_deliver_abandons_the_round_at_stop(prefetching, caplog):
-    """The output queue holds one unconsumed round, so the next one waits in the delivery slices; a stop must
-    end that wait instead of leaving the join to time out."""
+def test_a_delivery_to_a_full_output_queue_raises_instead_of_waiting_and_the_worker_still_stops(prefetching, caplog):
+    """The output queue holds one unconsumed round, more than the depth allows. Waiting for a slot on the
+    worker's event loop would freeze every other round's collection, so the delivery raises (logged), and a
+    stop still joins the worker."""
     prefetching._prefetch_queue.put((1, ["rollout:unconsumed"]))
     prefetching._start_prefetch_thread()
     thread = prefetching._prefetch_thread
-    prefetching._submit_for_prefetch(["a"], [None])
-    assert prefetching._rollout_manager.collected.wait(_WORKER_WAIT_S)
-
     with caplog.at_level(logging.WARNING, logger=async_rollouts.__name__):
+        prefetching._submit_for_prefetch(["a"], [None])
+        assert prefetching._rollout_manager.collected.wait(_WORKER_WAIT_S)
+        deadline = time.monotonic() + _WORKER_WAIT_S
+        while "Prefetch output queue full delivering a 1-prompt round" not in caplog.text:
+            assert time.monotonic() < deadline, "the delivery waited on the full queue instead of raising"
+            time.sleep(0.01)
+        assert thread.is_alive(), "a failed delivery must not end the worker"
         prefetching._stop_prefetch_thread()
 
     assert not thread.is_alive()
-    assert "abandoning delivery of a 1-prompt rollout batch" in caplog.text
     assert "did not stop cleanly" not in caplog.text
     assert prefetching._prefetch_queue.empty()
 
 
-@pytest.fixture
-def retraining(prefetching, monkeypatch):
+@pytest.fixture(params=[False, True], ids=["cancel-raises", "cancel-swallowed"])
+def retraining(prefetching, monkeypatch, request):
     """:func:`prefetching` over :class:`_HeldRolloutManager`, generation started as train-begin starts it (the
     push stubbed), with a round in flight and a join too short for it to finish."""
     monkeypatch.setattr(async_rollouts, "_PREFETCH_JOIN_TIMEOUT_S", 0.05)
-    prefetching._rollout_manager = _HeldRolloutManager()
+    prefetching._rollout_manager = _HeldRolloutManager(finishes_when_cancelled=request.param)
     prefetching.state = SimpleNamespace(global_step=0)
     prefetching._sync_weights_to_engine_fenced = lambda force=False: True
     prefetching._start_rollout_generation()

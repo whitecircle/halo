@@ -93,7 +93,7 @@ num_rollout_workers: 4
 rollout_temperature: 0.7
 rollout_top_p: 0.95
 rollout_max_tokens: 512         # per-turn generation cap; the script pins max_completion_length to it
-enable_prefetch: false          # needs 2+ rollout_server_configs; one server auto-disables it
+enable_prefetch: false          # one server: serial and on-policy; true overlaps rollout with the update
 
 # GRPO hyperparameters (GRPOConfig)
 num_generations: 4

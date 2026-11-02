@@ -118,6 +118,16 @@ def test_sglang_declares_the_fused_a_proj_halves_as_one_request():
     assert VLLMWeightSyncClient.CO_LOADED_PARAM_GROUPS == (), "vLLM's layerwise reload assembles a layer itself"
 
 
+@pytest.mark.parametrize("backend", rollout_backends())
+def test_each_client_declares_whether_the_pause_it_sends_aborts_the_turns_in_flight(backend):
+    """The env-GRPO retry-budget refusal reads ``PAUSE_ABORTS_IN_FLIGHT``, so it must agree with the pause the
+    client sends: SGLang's ``abort`` mode drops the requests in flight, vLLM's ``keep`` freezes them."""
+    client = resolve_weight_sync_client(backend)
+    request = client.PAUSE_REQUEST
+    mode = {**request.get("json", {}), **request.get("params", {})}["mode"]
+    assert client.PAUSE_ABORTS_IN_FLIGHT is (mode == "abort"), f"{client.__name__} pauses with mode={mode!r}"
+
+
 def test_every_registered_backend_is_a_selectable_config_value():
     """The registry and the config's Literal must not drift apart — a client registered under a key
     the config rejects is unreachable, and a config value with no client raises only at train time."""

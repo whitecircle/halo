@@ -78,8 +78,8 @@ rollout_max_tokens: 8192
 # reasoning_terms_in_failed_groups: false # also charge both terms in a training group no episode of which earned the objective
 
 # --- Prefetch (AsyncRolloutConfig fields) ---
-enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the
-                          # trainer auto-disables it (that server stops serving during weight sync)
+# enable_prefetch: true   # unset = on with 2+ rollout_server_configs, off with one server; true prefetches on one
+                          # server too: the next round rolls out while this one trains, one step stale (IS-corrected)
 
 # --- Dataset (EnvironmentalGRPOScriptArguments fields) ---
 dataset:

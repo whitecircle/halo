@@ -20,11 +20,13 @@ room (``rollout_max_answer_tokens``) has to be what a turn keeps past the cap th
 (the level's budget, or under a soft one the ceiling that room leaves of the turn). And the per-turn thinking budgets are
 one contract at every family, so a recipe states the same reasoning economy whichever model it trains. The audit
 judge is the last: its process flags price a scratchpad run that tested nothing and only log working-out in a
-run that did, and a verdict it never reached voids the episode.
+run that did, a verdict it never reached voids the episode, and each check costs what the reward page states;
+the environment's shaping prices are the ones the task page's recipe table states.
 
 Run: python tests/cpu/config/test_env_grpo_reward_economy.py  (or pytest)
 """
 
+import re
 from pathlib import Path
 
 import pytest
@@ -49,6 +51,9 @@ from halo.trainers.grpo.environmental.reasoning import (
 from tests.common.repo import REPO_ROOT
 
 RECIPES = sorted((REPO_ROOT / "examples" / "grpo" / "environmental").rglob("*code-contests*.yaml"))
+_TASK_PAGES = REPO_ROOT / "agent-docs/training-methods/async-grpo/environments/tasks/code-contests"
+_REWARD_PAGE = _TASK_PAGES / "reward.md"
+_README_PAGE = _TASK_PAGES / "README.md"
 _yaml = YAML(typ="safe")
 _DEFAULTS = AsyncRolloutConfig()
 # The most tokens a shipped recipe lets one episode sample: its worst-case trajectory beside the prompt
@@ -57,6 +62,28 @@ _EPISODE_TOKENS_CEILING = 131072
 _EPISODE_TOKENS_CEILINGS = {"qwen3_5": 160000}
 # The audit's process checks a solved episode can never raise: each is defined on an episode that never passed.
 _FAILURE_ONLY_CHECKS = ("untested_submission",)
+# What each audit check costs fired alone, as the code-contests reward page's audit table states it: the
+# environment's check weights (7 units in all) at the recipes' judge weight.
+_DOCUMENTED_CHECK_PRICES = {
+    "reasoning_in_actions": 0.0,
+    "reasoning_in_runs": 0.0,
+    "notepad_run": 0.0,
+    "wasted_run": 0.1,
+    "untested_submission": 0.1,
+    "hardcoded_output": 0.3,
+    "environment_probe": 0.0,
+    "verdict_probe": 0.2,
+    "verdict_mining": 0.0,
+}
+# The environment's shaping prices every code-contests recipe sets, as the task page's recipe table states them.
+_DOCUMENTED_SHAPING_PRICES = {
+    "submission_reward": 0.1,
+    "resubmission_penalty": 0.2,
+    "no_tool_use_penalty": 0.2,
+    "turn_overflow_penalty": 0.35,
+    "length_cutoff_penalty": 0.08,
+    "tool_error_penalty": 0.05,
+}
 # The curriculum stages run one after another on one cluster: one economy and one set of limits.
 _STAGE_RECIPES = [p for p in RECIPES if "-stage" in p.name]
 _STAGE_SHARED_KEYS = (
@@ -83,6 +110,11 @@ def _parsed_terms(terms: list) -> tuple:
     judge listing ``checks: environment`` audits with the code-contests rubric."""
     terms = parse_reward_terms(read_context_files(terms), ENVIRONMENT_REWARD_SOURCES)
     return resolve_environment_checks(terms, AUDIT_CHECKS)
+
+
+def _check_price(judge: JudgeTerm, name: str) -> float:
+    """The judge term's price for check ``name`` fired alone, a veto check's gate aside."""
+    return -judge.price(judge.flag_fraction({name: True}))
 
 
 def _economy(path: Path) -> dict:
@@ -118,7 +150,7 @@ def _economy(path: Path) -> dict:
         "max_turns": cfg["max_turns"],
         # What each fired process check of a veto judge costs; a veto check's own price is left out, its gate costs more.
         "process_prices": {
-            check.name: -judge.price(judge.flag_fraction({check.name: True}))
+            check.name: _check_price(judge, check.name)
             for judge in _parsed_terms(terms)
             if isinstance(judge, JudgeTerm) and judge.is_veto
             for check in judge.checks
@@ -201,6 +233,29 @@ def _audit(path: Path) -> JudgeTerm:
     """The recipe's veto judge, parsed as the trainer parses it."""
     (judge,) = (term for term in _parsed_terms(_yaml.load(path)["rewards"]) if isinstance(term, JudgeTerm))
     return judge
+
+
+def _page_check_prices() -> dict[str, float]:
+    """Each check's price as the reward page's audit table states it: the ``(price)`` in its effect cell, else 0."""
+    prices = {}
+    in_table = False
+    for line in _REWARD_PAGE.read_text(encoding="utf-8").splitlines():
+        if not line.startswith("|"):
+            in_table = False
+        elif line.startswith("| Check | Effect |"):
+            in_table = True
+        elif in_table and (row := re.match(r"\| `([a-z_]+)` \| ([^|]*) \|", line)):
+            price = re.search(r"\((\d+(?:\.\d+)?)\)", row[2])
+            prices[row[1]] = float(price[1]) if price else 0.0
+    return prices
+
+
+def _page_shaping_prices() -> dict[str, float]:
+    """Each shaping price as the task page's recipe table states it: the ``name`` value pairs of its Shaping row."""
+    row = next(
+        line for line in _README_PAGE.read_text(encoding="utf-8").splitlines() if line.startswith("| [Shaping]")
+    )
+    return {name: float(value) for name, value in re.findall(r"`([a-z_]+)` (\d+(?:\.\d+)?)", row)}
 
 
 def _ids(paths):
@@ -431,6 +486,41 @@ def test_the_audit_judge_prices_a_wasted_run_and_voids_a_verdict_it_never_reache
     assert judge.weight * judge.flag_fraction({"wasted_run": True}) < 0, f"{path.name}: a wasted run costs nothing"
     assert judge.weight * judge.flag_fraction({"reasoning_in_runs": True}) == 0, (
         f"{path.name}: working-out in a scratchpad run that tested something is priced"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_every_code_contests_recipe_prices_the_documented_checks(path):
+    """A check's price is its check weight over the environment's total, at the recipe's judge weight, so moving either
+    re-prices every check while the economy's relations above may still hold."""
+    judge = _audit(path)
+    prices = {check.name: _check_price(judge, check.name) for check in judge.checks}
+    assert prices == pytest.approx(_DOCUMENTED_CHECK_PRICES), (
+        f"{path.name} prices the audit checks at {prices}, not the reward page's {_DOCUMENTED_CHECK_PRICES}"
+    )
+
+
+def test_the_reward_page_states_the_pinned_check_prices():
+    """The audit table is where a recipe author reads a check's price, so the page and the pin above move together."""
+    assert _page_check_prices() == pytest.approx(_DOCUMENTED_CHECK_PRICES), (
+        f"{_REWARD_PAGE.name}'s audit table prices the checks at {_page_check_prices()}, not {_DOCUMENTED_CHECK_PRICES}"
+    )
+
+
+@pytest.mark.parametrize("path", RECIPES, ids=_ids(RECIPES))
+def test_every_code_contests_recipe_sets_the_documented_shaping_prices(path):
+    """The relations above hold over a band of prices, so a price moved inside it passes them and re-prices the
+    recipe; the pin holds each to the value the task page states."""
+    env = _yaml.load(path)["environment_kwargs"]
+    prices = {name: env.get(name) for name in _DOCUMENTED_SHAPING_PRICES}
+    assert prices == pytest.approx(_DOCUMENTED_SHAPING_PRICES), (
+        f"{path.name} sets the shaping prices {prices}, not the task page's {_DOCUMENTED_SHAPING_PRICES}"
+    )
+
+
+def test_the_task_page_states_the_pinned_shaping_prices():
+    assert _page_shaping_prices() == pytest.approx(_DOCUMENTED_SHAPING_PRICES), (
+        f"{_README_PAGE.name}'s Shaping row states {_page_shaping_prices()}, not {_DOCUMENTED_SHAPING_PRICES}"
     )
 
 

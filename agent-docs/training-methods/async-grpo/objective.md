@@ -2,7 +2,7 @@
 
 The loss is TRL's GRPO objective ([Online GRPO](../grpo/online.md#grpo-objective-for-verifiable-rewards)) at TRL's default `loss_type: dapo`: a token-sum loss divided by the step's loss-token count (the DAPO normalizer). Its `epsilon` clip (`0.2`; no recipe sets `epsilon_high`) is inert at `num_iterations: 1` and the default `steps_per_generation`.
 
-Rollouts differ from the trainer's policy by the engine↔trainer numerics gap, plus up to one sync interval under prefetch or `sync_weights_every_n_steps > 1`. An importance ratio corrects that; the trust region is masks on the ratio, not a KL term.
+Rollouts differ from the trainer's policy by the engine↔trainer numerics gap, plus a weight lag: up to `prefetch_depth` rounds under prefetch (one round per optimizer step at the default `steps_per_generation`), and up to `sync_weights_every_n_steps − 1` more between syncs. An importance ratio corrects that; the trust region is masks on the ratio, not a KL term.
 
 ## Training rows
 
@@ -150,14 +150,14 @@ TRL's `RepeatSampler` delivers each prompt `num_generations` consecutive times, 
 
 A rollout with no learning signal (a raised episode, an `episode_timeout` cancellation, an invalid one) enters as a zero-masked row outside its group's baseline (`sampling/invalid_episode_frac`). A step where no episode survived warns once, then **halts the run on the second consecutive one**.
 
-Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed.
+Rows carry two masks, and the loss and the DAPO normalizer use their intersection: `completion_mask` covers every real completion token (tool results and generation-prompt headers included), `tool_mask` only the assistant spans. The batch is never packed. A round's rows reach its micro-batches dealt by length rather than shuffled where only the order changes ([Length-ordered micro-batches](performance.md#length-ordered-micro-batches)).
 
 `per_device_train_batch_size` counts rows (completions); unique prompts per step are the rollout total ÷ `num_generations` ([online-GRPO count](../grpo/online.md#data-flow-and-batch-construction)).
 
 | Knob | Sets | Sizing rule |
 |---|---|---|
 | `num_generations` | GRPO group size | 8 in most recipes, 12 in curriculum stages 2–3, 4 in the template and exam-QA. Trades unique prompts for samples each. |
-| `max_concurrent_rollouts` | Per-rank cap on rollouts in flight | Defaults to 4× this rank's actor share; above the round's count it never binds. |
+| `max_concurrent_rollouts` | Per-rank cap on one round's rollouts in flight | Defaults to 4× this rank's actor share; above the round's count it never binds. |
 | `num_rollout_workers` | Ray actor pool per rank | The environment's blocking per-episode cost ([Pool sizing](../../infrastructure/ray.md#pool-sizing)). |
 
 ## Learning rate

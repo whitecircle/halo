@@ -19,15 +19,15 @@ moe_balancing: bias_update           # LFM2 has no router auxiliary loss; update
 fp32_router: true
 
 # --- Attention & kernels ---
-attn_implementation: flash_attention_2
 use_liger_kernel: false
 packing: true
-max_length: 8192
+max_length: 16384
 
 # --- Training ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 8
+gradient_accumulation_steps: 4
+gradient_checkpointing: false   # ~43 GB of activations per 16,384-token row; set true on 80 GB GPUs
 num_train_epochs: 1.0
 
 # --- Optimizer & LR schedule ---

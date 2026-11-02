@@ -83,11 +83,13 @@ supports CP for full fine-tuning, without a rollout server. Use `torchrun` (not
 
 ## Single-server vs multi-server
 
-Single server blocks during weight sync, so prefetch is auto-disabled with a
-warning (no overlap possible). For rollout/training overlap, run multiple servers
-via `rollout_server_configs`. Every push pauses all servers together, a single
-training process's included: prefetch overlaps rollouts with training, not with
-the sync.
+Prefetch overlaps rollouts with training, not with the sync: every push pauses
+all servers together. It is on by default with 2+ `rollout_server_configs`; a
+single server runs serial and on-policy unless `enable_prefetch: true`, which
+trains each round one step stale (IS-corrected). `prefetch_depth: N` (default 1)
+collects N rounds ahead at once, so the servers stay full at a round's tail; above
+1 it is refused where prefetch is off. On SGLang each sync aborts in-flight turns,
+so a prefetched round spanning more syncs than `max_retries` is refused.
 
 ## Sources of truth
 

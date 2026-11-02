@@ -1,6 +1,6 @@
 """Generate the two async-GRPO server-topology figures.
 
-- environmental_grpo_single_server.png — the compose default: one engine, prefetch off, a serial step.
+- environmental_grpo_single_server.png — the compose default: one engine, prefetch unset (off), a serial step.
 - environmental_grpo_multi_server.png — the code-contests shape: two engines, prefetch on.
 
 Both figures use one layout so the modes can be compared square on.
@@ -76,7 +76,7 @@ def _draw_servers(ax, multi):
             "for the push: POST /pause?mode=keep",
             "in-flight requests resume after it",
             "nothing is served until /resume",
-            "one engine: nothing to prefetch against",
+            "one engine: prefetch is opt-in",
         ],
         color=VIOLET,
     )
@@ -151,7 +151,7 @@ def draw(mode):
         sub_mono=(
             "rollout_server_configs: 2 · enable_prefetch: true"
             if multi
-            else "rollout_server_url · enable_prefetch → off"
+            else "rollout_server_url · enable_prefetch unset → off"
         ),
     )
     _draw_gpu_split(ax, n_trainer)
@@ -166,7 +166,7 @@ def draw(mode):
         (
             "The streamed sync pauses both servers for the whole push; prefetch then keeps the pipeline one round deep."
             if multi
-            else "One server: the sync pauses the only engine, and the round cannot overlap the update — prefetch is off."
+            else "One server, by default: the round and the update run in turn. enable_prefetch: true overlaps them, one step stale."
         ),
     )
 

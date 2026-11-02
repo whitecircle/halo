@@ -45,6 +45,10 @@ num_train_epochs: 1.0
 # so a packed document would read another's compressed KV. Padded batches only.
 packing: false
 max_length: 8192
+# Sorts each optimizer step's rows by length into its accumulation slots, so the ranks of one micro-step
+# hold rows of similar length and none waits on another's long row. Pure EP keeps HF's loader, which
+# this sampler needs; its shuffle is fixed-seed, so seed and data_seed do not move the data order.
+train_sampling_strategy: batch_rebalance
 
 # --- Optimizer & LR schedule ---
 learning_rate: 1.0e-04

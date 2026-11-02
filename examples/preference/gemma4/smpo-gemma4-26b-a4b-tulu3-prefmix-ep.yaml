@@ -27,8 +27,7 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 2
 gradient_accumulation_steps: 8
-gradient_checkpointing_kwargs:
-  use_reentrant: true   # EP requires reentrant GC (the trainer force-promotes false)
+gradient_checkpointing: false   # a full 2 x 4,096 pair holds ~52 GB of activations; set true on 80 GB GPUs
 learning_rate: 5.0e-06
 lr_scheduler_type: cosine
 warmup_steps: 20

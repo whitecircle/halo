@@ -73,6 +73,7 @@ from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.context_window import resolve_model_context_window
 from halo.runtime.collectives import barrier
 from halo.runtime.ranks import is_global_main_process
+from halo.trainers.grpo.environmental.environmental_rules import reject_prefetch_past_retry_budget
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import rollout_template_kwargs
 from halo.trainers.grpo.rollout.engine_preflight import (
@@ -80,6 +81,7 @@ from halo.trainers.grpo.rollout.engine_preflight import (
     verify_engine_prompt_logprobs,
     verify_sampler_logprob_reference,
 )
+from halo.weight_sync.registry import resolve_weight_sync_client
 
 logger = logging.getLogger(__name__)
 
@@ -159,7 +161,7 @@ def rollout_start_log(env_settings: dict, async_config: AsyncRolloutConfig) -> l
         f"max_concurrent: {async_config.max_concurrent_rollouts or 'auto'}",
         *servers,
         f"weight_sync: every {async_config.sync_weights_every_n_steps} steps",
-        f"prefetch: {'enabled' if async_config.prefetch_active() else 'disabled'}",
+        f"prefetch: {f'depth {async_config.prefetch_depth}' if async_config.prefetch_active() else 'disabled'}",
         f"model: {async_config.model_name}",
     ]
 
@@ -255,6 +257,10 @@ def main():
             f"the script also writes into max_completion_length. Set rollout_max_tokens instead and remove "
             f"max_completion_length."
         )
+    # The trainer refuses the same config at construction; checked here, before the model load.
+    reject_prefetch_past_retry_budget(
+        resolve_weight_sync_client(async_config.rollout_backend), async_config, grpo_config
+    )
 
     # A throwaway env for the startup checks below (max_turns=None takes the class default), built
     # before any load so an unknown environment_type, or an environment_kwargs the environment

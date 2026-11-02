@@ -1,5 +1,6 @@
 """Async rollout plumbing for environmental GRPO: Ray actors, the prefetch thread and engine weight sync. Under
-prefetch each round trains one round late, so a checkpoint carries the submitted rounds a resume submits again."""
+prefetch each round trains ``prefetch_depth`` rounds late, so a checkpoint carries the submitted rounds a resume
+submits again, oldest first."""
 
 import asyncio
 import contextlib
@@ -36,16 +37,12 @@ from halo.weight_sync.registry import resolve_weight_sync_client
 logger = logging.getLogger(__name__)
 
 
-# The worker frees an input slot within one collection, so an expired submit means it is wedged.
+# The worker takes each submission as it arrives, so an expired submit means it is wedged.
 _PREFETCH_SUBMIT_TIMEOUT_S = 60.0
 # Input-queue poll slice, so a quiet round does not hold up shutdown.
 _PREFETCH_POLL_TIMEOUT_S = 0.5
-# Output-queue delivery slice, retried until the stop event fires.
-_PREFETCH_DELIVER_TIMEOUT_S = 1.0
-# Grace for the worker to finish its current poll slice and exit at shutdown.
+# Grace for the worker to finish its current poll slice, cancel its rounds and exit at shutdown.
 _PREFETCH_JOIN_TIMEOUT_S = 5.0
-# Rounds the prefetch pipeline holds: a round pops the previous round's result before it submits its own.
-_PREFETCH_DEPTH = 1
 
 
 class _RolloutStartCallback(TrainerCallback):
@@ -86,17 +83,19 @@ class AsyncRolloutMixin:
         self._multi_server_mode = bool(self.async_config.rollout_server_configs)
 
         self._prefetch_enabled = self.async_config.prefetch_active()
-        if self.async_config.enable_prefetch and not self._prefetch_enabled and is_global_main_process():
-            logger.warning(
-                "Prefetch auto-disabled: 1 rollout server configured. Every weight sync pauses that one "
-                "engine for its whole push, so a prefetched round would only sit frozen (vLLM) or be "
-                "aborted (SGLang) across it; prefetch is enabled with two or more servers in "
-                "rollout_server_configs."
+        if self.async_config.enable_prefetch is None and not self._prefetch_enabled and is_global_main_process():
+            logger.info(
+                "Prefetch off: 1 rollout server, so each round rolls out and then trains on-policy. "
+                "enable_prefetch: true rolls the next round out while this one trains, one step stale "
+                "(IS-corrected), as two or more servers do by default."
             )
 
         self._prefetch_thread = None
-        self._prefetch_queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
-        self._prefetch_input_queue = queue.Queue(maxsize=_PREFETCH_DEPTH)
+        # At most prefetch_depth rounds are submitted and unconsumed, so no put on either queue waits while the
+        # worker lives.
+        depth = self.async_config.prefetch_depth
+        self._prefetch_queue = queue.Queue(maxsize=depth)
+        self._prefetch_input_queue = queue.Queue(maxsize=depth)
         # The running worker's own stop event, made by each start.
         self._prefetch_stop_event: threading.Event | None = None
 
@@ -286,40 +285,97 @@ class AsyncRolloutMixin:
         logger.info("Prefetch thread started for async overlap")
 
     def _prefetch_worker(self, stop: threading.Event):
-        """The prefetch thread until ``stop`` is set: every consumed submission yields exactly one output item,
-        its rollouts or a ``(prompt_count, None)`` failure marker, so the in-flight accounting stays exact."""
+        """The prefetch thread until ``stop`` is set, its rounds collecting on an event loop of its own."""
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-
         try:
-            while not stop.is_set():
-                try:
-                    prompts, contexts = self._prefetch_input_queue.get(timeout=_PREFETCH_POLL_TIMEOUT_S)
-                except queue.Empty:
-                    continue
-
-                results = None
-                start_time = time.time()
-                try:
-                    results = loop.run_until_complete(self._rollout_manager.collect_rollouts(prompts, contexts))
-                except Exception as e:  # a worker-thread raise is invisible; report and mark
-                    logger.error(f"Prefetch worker error ({len(prompts)} prompts): {e}")
-                self._put_prefetch_output((len(prompts), results), stop)
-                if results is not None:
-                    logger.debug(f"Prefetched {len(results)} rollouts in {time.time() - start_time:.2f}s")
-
+            loop.run_until_complete(self._prefetch_rounds(stop))
+            loop.run_until_complete(loop.shutdown_default_executor())
         finally:
             loop.close()
 
+    async def _prefetch_rounds(self, stop: threading.Event):
+        """Start each submitted round's collection as it arrives, so up to ``prefetch_depth`` rounds collect
+        together: a later round's episodes keep the engines busy while an earlier round's longest ones finish.
+        Rounds still collecting at ``stop`` are cancelled, since no later step consumes them."""
+        loop = asyncio.get_running_loop()
+        collecting: set[asyncio.Task] = set()
+        previous: asyncio.Task | None = None
+        try:
+            while not stop.is_set():
+                try:
+                    prompts, contexts = await loop.run_in_executor(
+                        None, partial(self._prefetch_input_queue.get, timeout=_PREFETCH_POLL_TIMEOUT_S)
+                    )
+                except queue.Empty:
+                    continue
+                previous = loop.create_task(self._collect_prefetch_round(prompts, contexts, previous, stop))
+                collecting.add(previous)
+                previous.add_done_callback(collecting.discard)
+        finally:
+            for task in list(collecting):
+                task.cancel()
+            await asyncio.gather(*collecting, return_exceptions=True)
+
+    async def _collect_prefetch_round(
+        self,
+        prompts: list[str],
+        contexts: list[dict | None],
+        previous: asyncio.Task | None,
+        stop: threading.Event,
+    ) -> None:
+        """Collect one round, then deliver it once ``previous`` (the round submitted before it) has delivered: the
+        trainer pairs each output with its oldest pending round. Every round yields exactly one output item, its
+        rollouts or a ``(prompt_count, None)`` failure marker, so the in-flight accounting stays exact."""
+        results = None
+        start_time = time.time()
+        try:
+            results = await self._rollout_manager.collect_rollouts(prompts, contexts)
+        except asyncio.CancelledError:
+            if stop.is_set():
+                raise
+            # Ended without an output, the round would pair every later output one round off.
+            logger.error(f"Prefetch round of {len(prompts)} prompts cancelled while the worker runs; marked failed")
+        except Exception as e:  # a worker-thread raise is invisible; report and mark
+            logger.error(f"Prefetch worker error ({len(prompts)} prompts): {e}")
+        if previous is not None:
+            await asyncio.wait([previous])
+        self._put_prefetch_output((len(prompts), results), stop)
+        if results is not None:
+            logger.debug(f"Prefetched {len(results)} rollouts in {time.time() - start_time:.2f}s")
+
     def _put_prefetch_output(self, item: tuple[int, list[RolloutResult] | None], stop: threading.Event):
-        """Deliver a prefetch item, blocking in slices until ``stop``; only shutdown abandons one (logged)."""
-        while not stop.is_set():
-            try:
-                self._prefetch_queue.put(item, timeout=_PREFETCH_DELIVER_TIMEOUT_S)
-                return
-            except queue.Full:
-                continue
-        logger.warning(f"Prefetch stopping; abandoning delivery of a {item[0]}-prompt rollout batch (shutdown)")
+        """Deliver a prefetch item; only shutdown abandons one (logged). Rounds deliver in order and at most
+        ``prefetch_depth`` are unconsumed, so the queue holds a slot for this one: a full queue raises instead of
+        waiting, since a wait on the worker's event loop would freeze every other round's collection."""
+        if stop.is_set():
+            logger.warning(f"Prefetch stopping; abandoning delivery of a {item[0]}-prompt rollout batch (shutdown)")
+            return
+        try:
+            self._prefetch_queue.put_nowait(item)
+        except queue.Full:
+            logger.error(
+                f"Prefetch output queue full delivering a {item[0]}-prompt round: more rounds in flight than "
+                f"prefetch_depth={self.async_config.prefetch_depth}"
+            )
+            raise
+
+    def _acquire_prefetched_round(self) -> list[RolloutResult] | None:
+        """The oldest pending round's rollouts once ``prefetch_depth`` rounds are in flight, else ``None``.
+
+        Below that depth the step is a cold round, counted as a miss: it collects its own prompts and submits
+        them too, deepening the pipeline by one, so a run opens with ``prefetch_depth`` of them. At depth, a round
+        not yet delivered is waited for; one delivered as a failure is popped, and the step collects its own
+        prompts instead, keeping the younger rounds for the steps they belong to.
+        """
+        depth = self.async_config.prefetch_depth
+        if self._prefetch_inflight < depth:
+            self._prefetch_misses += 1
+            return None
+        results = self._try_get_prefetched_results()
+        if results is None and self._prefetch_inflight == depth:
+            results = self._wait_for_inflight_prefetch()
+        return results
 
     def _try_get_prefetched_results(self) -> list[RolloutResult] | None:
         """The next prefetched round if one is ready; a popped failure marker counts as a miss."""
@@ -337,25 +393,23 @@ class AsyncRolloutMixin:
         return results
 
     def _wait_for_inflight_prefetch(self) -> list[RolloutResult] | None:
-        """Wait for an in-flight round rather than re-collect it, so each dataset batch trains once; ``None`` when
-        every in-flight round failed or the worker is wedged past the episode deadline. A wedge is recorded on
+        """Wait for the oldest in-flight round rather than re-collect it, so each dataset batch trains once;
+        ``None`` when that round failed or the worker is wedged past the episode deadline. A wedge is recorded on
         the ``_batch_errors`` fence, not raised: prefetch state is per rank."""
         timeout = self.async_config.episode_timeout + _PREFETCH_SUBMIT_TIMEOUT_S
-        while self._prefetch_inflight > 0:
-            try:
-                _count, results = self._prefetch_queue.get(timeout=timeout)
-            except queue.Empty:
-                self._batch_errors.record(
-                    f"Prefetch worker produced no rollouts within {timeout:.0f}s with "
-                    f"{self._prefetch_inflight} batch(es) in flight — the prefetch pipeline is wedged "
-                    f"({self._rollout_engine_name} unreachable or the worker thread died)."
-                )
-                return None
-            self._prefetch_pending.popleft()
-            if results is not None:
-                logger.info(f"Prefetch miss: waited for {len(results)} in-flight rollouts")
-                return results
-        return None
+        try:
+            _count, results = self._prefetch_queue.get(timeout=timeout)
+        except queue.Empty:
+            self._batch_errors.record(
+                f"Prefetch worker produced no rollouts within {timeout:.0f}s with "
+                f"{self._prefetch_inflight} batch(es) in flight — the prefetch pipeline is wedged "
+                f"({self._rollout_engine_name} unreachable or the worker thread died)."
+            )
+            return None
+        self._prefetch_pending.popleft()
+        if results is not None:
+            logger.info(f"Prefetch miss: waited for {len(results)} in-flight rollouts")
+        return results
 
     @property
     def _prefetch_inflight(self) -> int:
@@ -392,8 +446,8 @@ class AsyncRolloutMixin:
         return metrics
 
     def _persist_trainer_sidecars(self, checkpoint_dir: str) -> None:
-        """Write this rank's pending prefetch rounds, which a resume submits again first: they left the
-        dataloader untrained, and the resumed one starts past them."""
+        """Write this rank's pending prefetch rounds, oldest first, which a resume submits again first: they left
+        the dataloader untrained, and the resumed one starts past them."""
         super()._persist_trainer_sidecars(checkpoint_dir)
         if not self._prefetch_enabled:
             return
@@ -416,7 +470,10 @@ class AsyncRolloutMixin:
 
     def _restore_trainer_sidecars(self, checkpoint: str) -> None:
         """Load this rank's pending prefetch rounds for :meth:`_start_rollout_generation` to submit; rounds drawn
-        under another layout are dropped on every rank together. ``weights_only=False``: they carry context values."""
+        under another layout are dropped on every rank together. ``weights_only=False``: they carry context values.
+
+        A smaller ``prefetch_depth`` keeps the oldest rounds it holds: each step trains one round and draws one, so
+        the pipeline would never shed the surplus. A larger one opens with cold rounds until it is full."""
         super()._restore_trainer_sidecars(checkpoint)
         payload, path = consensus_read(
             os.path.join(checkpoint, prefetch_pending_filename(get_global_rank(), get_global_world_size())),
@@ -424,14 +481,14 @@ class AsyncRolloutMixin:
             what="pending prefetch rounds",
             checkpoint=checkpoint,
             remedy=" Resume with the rank-to-node placement it was saved with, or delete its "
-            f"{PREFETCH_PENDING_PREFIX}-* files to open with a cold round.",
+            f"{PREFETCH_PENDING_PREFIX}-* files to open with cold rounds.",
         )
         if path is None:
             if self._prefetch_enabled and is_global_main_process():
                 logger.warning(
                     f"{checkpoint} holds no pending prefetch rounds for this world size, so the run opens with "
-                    "a cold round: if the saving run prefetched, the batch it had drawn but not trained is "
-                    "skipped and the next one trained twice."
+                    "cold rounds: if the saving run prefetched, the batches it had drawn but not trained are "
+                    "skipped and the next ones trained twice."
                 )
             return
         if not self._prefetch_enabled:
@@ -445,10 +502,16 @@ class AsyncRolloutMixin:
                 logger.warning(
                     f"{checkpoint}'s pending prefetch rounds were drawn under {payload['layout']}, this run "
                     f"draws under {self._prefetch_round_layout()}: they are not resubmitted, and the run opens "
-                    "with a cold round."
+                    "with cold rounds."
                 )
             return
-        self._resumed_prefetch_rounds = list(payload["rounds"])
+        rounds, depth = list(payload["rounds"]), self.async_config.prefetch_depth
+        if len(rounds) > depth and is_global_main_process():
+            logger.warning(
+                f"{path} holds {len(rounds)} pending prefetch rounds, more than prefetch_depth={depth}: the "
+                f"oldest {depth} are resubmitted, and the newest {len(rounds) - depth} are not trained."
+            )
+        self._resumed_prefetch_rounds = rounds[:depth]
 
     def _cleanup_async_components(self):
         """Cleanup Ray actors and the engine weight-sync client(s). Run by every rank."""
@@ -481,8 +544,8 @@ class AsyncRolloutMixin:
         self._last_sync_attempt_step = -1
 
     def _stop_prefetch_thread(self):
-        """Stop the background prefetch thread: it sees its stop event within a poll slice, and nothing is
-        queued for it, so a later start begins on an empty input queue."""
+        """Stop the background prefetch thread: it sees its stop event within a poll slice and cancels the rounds
+        still collecting, and nothing is queued for it, so a later start begins on an empty input queue."""
         if self._prefetch_thread is None:
             return
 

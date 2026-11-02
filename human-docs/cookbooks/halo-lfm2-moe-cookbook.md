@@ -94,6 +94,8 @@ and leave out `--routing_replay=rollout`, because SGLang's routing capture is no
   `expert_bias`, so the trained bias ships in every checkpoint and the served model routes as it
   trained. LFM-2 has no router auxiliary loss. Without EP or grouped GEMM nothing carries the bias, so
   freeze the router instead with `freeze_layers_patterns: ["*.feed_forward.gate.weight"]`.
+- **Gradient checkpointing.** The recipe trains 16,384-token packed rows without it, which fits on
+  B200 and B300. On 80 GB GPUs add `--gradient_checkpointing=true`.
 - **Tool parser.** vLLM needs `VLLM_TOOL_PARSER=lfm2`. The default `hermes` leaves LFM-2's tool calls as
   text, so every episode scores zero.
 

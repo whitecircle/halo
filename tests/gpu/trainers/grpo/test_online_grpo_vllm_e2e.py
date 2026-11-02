@@ -24,7 +24,10 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     one process, no FSDP wrap (Qwen3-0.6B, the first ``--servers`` URLs of ``HALO_TEST_VLLM_SERVER_URLS``):
     full_world1, lora_world1   ``--trainer environmental`` runs the ReAct math environment through
                         :mod:`tests.common.env_grpo_e2e`, pushing through a WeightSyncPool; each row
-                        first probes every server it drives
+                        first probes every server it drives. ``--prefetch-depth N`` prefetches N rounds
+                        deep (``enable_prefetch: true``, on any server count): the run must open with N
+                        cold rounds, pop a prefetched round on every later step, and score the IS
+                        log-ratio on every step
 
 ``--resume`` (two-rank modes only) drives the two-phase resume invariant: the checkpoint's weights must generate
 the first resumed rollout. Each server must serve the SAME checkpoint the row trains, with ``--moe-backend triton``
@@ -65,12 +68,15 @@ parser.add_argument("--trainer", choices=("online", "sdpg", "environmental"), re
 parser.add_argument("--mode", choices=sorted(MODES), required=True)
 parser.add_argument("--resume", action="store_true", help="drive the two-phase resume invariant")
 parser.add_argument("--servers", type=int, default=1, help="environmental: the WeightSyncPool's server count")
+parser.add_argument("--prefetch-depth", type=int, default=None, help="environmental: prefetch at this depth")
 ARGS = parser.parse_args()
 POLICY = MODES[ARGS.mode].family
 if POLICY != "world1" and (ARGS.trainer == "environmental" or ARGS.servers != 1):
     parser.error("--trainer environmental and --servers run in one process: a *_world1 mode")
 if POLICY == "world1" and ARGS.resume:
     parser.error("--resume drives a two-rank mode; the one-process body has no resume row")
+if ARGS.prefetch_depth is not None and ARGS.trainer != "environmental":
+    parser.error("--prefetch-depth drives the environmental trainer's prefetch")
 
 
 def _row_index() -> int:
@@ -112,6 +118,7 @@ def _run_one_process(ctx) -> dict:
             model_name=DENSE_MODEL,
             environment_type="react_math",
             pool_urls=tuple(servers),
+            prefetch_depth=ARGS.prefetch_depth,
         )
     else:
         result = run_online_grpo_e2e(

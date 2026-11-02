@@ -144,6 +144,14 @@ class LogprobScoringMixin:
         finally:
             self._completion_logits_sink = None
 
+    @property
+    def _trains_rows_densely(self) -> bool:
+        """Whether the train-mode scoring forwards, the loss pass and its no-grad recompute, take the dense
+        per-row path: the chunked sweep at a batch size :func:`rows_forward_densely` trims."""
+        return self._use_chunked_grpo_logprobs and rows_forward_densely(
+            self.accelerator.unwrap_model(self.model), self.args.per_device_train_batch_size
+        )
+
     def _resolve_chunked_head_transform(self) -> None:
         """Verify the policy's head path at construction when the chunked sweep will score it, so a
         family it cannot reproduce is refused before the first rollout. Pure local computation on the

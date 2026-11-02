@@ -33,7 +33,8 @@ Two init settings differ from Ray's defaults:
   under `/tmp` (`halo-ray-<uid>-<hash>`) to `<root>/ray` as its temp dir: the sockets take the short
   path, while the session logs and spilled objects stay on the root's volume.
 
-Teardown runs in `train()`'s `finally`: the prefetch thread stops, every actor's `shutdown()` is
+Teardown runs in `train()`'s `finally`: the prefetch thread stops, cancelling the rounds still collecting (their
+episodes run until the actor shutdown), every actor's `shutdown()` is
 awaited sequentially, weight-sync communicators close. `ray.shutdown()` is never called; actors die
 by reference counting. A truly wedged actor can stall this teardown; kill the trainer container if
 exit hangs.
@@ -109,7 +110,8 @@ exported `RAY_ADDRESS` joins the cluster (Ray substitutes it for the `address=No
 passes) while `ray_address: null` still has every rank build the full pool. Set the config field.
 
 Three cluster-wide totals bound a large run: actors (above), in-flight episodes
-(`world_size × max_concurrent_rollouts`), and per-node sandbox slots (next section).
+(`world_size × max_concurrent_rollouts` per round in flight: `prefetch_depth` rounds plus a cold or eval
+round), and per-node sandbox slots (next section).
 
 **Under TP/ETP, most of that load is discarded.** Every rank collects a full batch, then
 the round entry replaces each rank's results with its TP-group leader's (`_broadcast_object_from_tp_leader`), so all ranks
@@ -117,7 +119,7 @@ tokenize identical trajectories. Actor and rollout-server load therefore scales 
 while useful rollouts scale with `data_parallel_size`.
 
 Size the pool and the servers for the former: per-server load is
-`max_concurrent_rollouts × world_size / num_servers`
+`max_concurrent_rollouts × world_size / num_servers` per round in flight
 ([Rollout Servers — Throughput](rollout-servers.md#throughput)).
 
 Actors are async, so size the pool to the env's **blocking** per-episode cost, not to HTTP

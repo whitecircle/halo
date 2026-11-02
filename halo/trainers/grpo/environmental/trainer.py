@@ -19,6 +19,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
+    reject_prefetch_past_retry_budget,
     reject_straddling_eval_groups,
     reject_straddling_train_groups,
     reject_unread_grpo_knobs,
@@ -29,6 +30,7 @@ from halo.trainers.grpo.environmental.importance_sampling import ImportanceSampl
 from halo.trainers.grpo.environmental.reasoning import ReasoningBudgetMixin, reasoning_token_counts
 from halo.trainers.grpo.environmental.rollout_metrics import RolloutMetricsMixin
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayMixin
+from halo.trainers.grpo.environmental.row_order import LengthOrderedRowsMixin
 from halo.trainers.grpo.environmental.step_batch import ROUTING_MASKS_KEY, BatchBuildFence, StepBatchMixin
 from halo.trainers.grpo.environmental.trajectory_tokenize import TrajectoryTokenizeMixin
 from halo.trainers.grpo.grpo_rules import reject_inert_std_floor, reject_unbalanceable_token_mass
@@ -37,6 +39,7 @@ from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitM
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin, unbounded_completion_logs
 from halo.trainers.training_args_overrides import keep_all_dataset_columns
 from halo.trainers.world_metrics import WorldMetrics
+from halo.weight_sync.registry import resolve_weight_sync_client
 
 
 def _resolve_environment_spec(environment_config, environment_cls, environment_kwargs) -> tuple[Any, dict]:
@@ -64,6 +67,7 @@ def env_reward_func(prompts, _completions, **_kwargs) -> list[float]:
 class DistributedAsyncEnvironmentalGRPOTrainer(
     OnPolicyGRPOInitMixin,
     StepBatchMixin,
+    LengthOrderedRowsMixin,
     ImportanceSamplingMixin,
     ReasoningBudgetMixin,
     RoutingReplayMixin,
@@ -139,9 +143,12 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._finish_on_policy_init()
         # After _configure_distributed_modes (needs the EP layers); eager, so an unsupported setup fails now.
         self._routing_injector = self._build_routing_replay_injector(self.async_config.routing_replay)
+        # After the model is placed: the deal reads its attention implementation.
+        self._resolve_length_ordered_rows()
 
     def _configure_rollout_state(self) -> None:
-        """The rollout, row and objective state the async config sets, refusing a knob that would go unread."""
+        """The rollout, row and objective state the async config sets, refusing a knob that would go unread and a
+        prefetch whose syncs would abort a turn past its retries on an engine whose pause drops the turns in flight."""
         cfg = self.async_config
         self._rollout_backend = cfg.rollout_backend
         self._rollout_stop_token_ids = resolve_rollout_stop_token_ids(self._tokenizer, cfg.rollout_stop_tokens)
@@ -152,6 +159,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         self._logs = unbounded_completion_logs()
         self._world_metrics = WorldMetrics()
         reject_inert_std_floor(self.args.scale_rewards, cfg.scale_rewards_std_floor)
+        reject_prefetch_past_retry_budget(resolve_weight_sync_client(cfg.rollout_backend), cfg, self.args)
         # Ahead of the balance gate, which refuses both beside it: here each is refused on its own.
         reject_off_policy_mask_threshold(self.args)
         reject_vespo_loss(self.args)
@@ -206,9 +214,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         with profiling_context(self, "rollout_acquire"):
             rollout_results = None
             if self._prefetch_enabled and mode == "train":
-                rollout_results = self._try_get_prefetched_results()
-                if rollout_results is None and self._prefetch_inflight > 0:
-                    rollout_results = self._wait_for_inflight_prefetch()
+                rollout_results = self._acquire_prefetched_round()
 
             # A wedged prefetch is fenced before the synchronous fallback: peers that hit are already
             # waiting here, and a full fallback round can outlast DIST_NCCL_TIMEOUT_MINUTES.
@@ -218,7 +224,8 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
                     self._rollout_manager.collect_rollouts(expanded_prompts, expanded_contexts)
                 )
 
-        # The next round pops these one round stale (the IS ratio corrects it); a cold round rolls out twice.
+        # Popped prefetch_depth steps later, that many steps stale (the IS ratio corrects it); a cold round
+        # rolls out twice.
         if self._prefetch_enabled and mode == "train":
             self._submit_for_prefetch(expanded_prompts, expanded_contexts)
 

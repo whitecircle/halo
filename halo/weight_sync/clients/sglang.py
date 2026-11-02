@@ -75,6 +75,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
     PAUSE_ENDPOINT = "/pause_generation"
     # The post-update flush needs an idle scheduler, so in-flight requests are aborted.
     PAUSE_REQUEST = {"json": {"mode": "abort"}}
+    PAUSE_ABORTS_IN_FLIGHT = True
     RESUME_ENDPOINT = "/continue_generation"
     # The endpoint takes a request dataclass and rejects an empty body.
     RESUME_REQUEST = {"json": {}}

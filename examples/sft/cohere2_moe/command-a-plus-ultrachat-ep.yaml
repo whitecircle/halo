@@ -29,8 +29,6 @@ fp32_router: true
 # the 206B routed experts (~26B/rank at ep8) does not fit HBM.
 
 # --- Attention & kernels ---
-attn_implementation: flash_attention_2   # pinned, not auto: Blackwell would take FA4. The family has
-                                         #   no forced fallback, so either label loads
 # Text-only SFT takes the text pipeline, where packing is supported (isolation verified for the
 # family); off here to keep the batch shape this config was validated at.
 packing: false

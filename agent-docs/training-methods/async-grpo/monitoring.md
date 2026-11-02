@@ -6,7 +6,7 @@ Async GRPO metrics are namespaced by the question they answer. The rollout, `sam
 
 | Namespace | Answers | Keys to watch |
 |---|---|---|
-| `async/*` | rollout throughput | `mean_rollout_latency`; job totals `total_rollouts`, `cumulative_mean_rollout_latency`, `total_generation_tokens`; `prefetch_hit_rate`, `prefetch_hits` / `prefetch_misses` (multiple servers only); `requests_expired_in_sync` |
+| `async/*` | rollout throughput | `mean_rollout_latency`; job totals `total_rollouts`, `cumulative_mean_rollout_latency`, `total_generation_tokens`; `prefetch_hit_rate`, `prefetch_hits` / `prefetch_misses` (prefetching runs only); `requests_expired_in_sync` |
 | `episode/*` | agent behavior | `turns`, `generation_tokens` (+`_max`, `_p90`), `natural_termination_rate`, `truncation_rate`, `truncation_alarm`, `error_rate`, `length_cutoff_turns`, `length_cutoff_in_call_turns`, `empty_turns`, `thinking_cap_turns`, `output_budget_exhausted`, `reasoning_cjk_rate`, `tool_calls`, `sandbox_infra_fault`, `sandbox_agent_fault`, `reward_scored` |
 | `outcome/*` | task success | `solve_rate`, `all_pass_group_frac` / `all_fail_group_frac`, eval `success@k`, plus per-env keys such as `test_pass_frac` |
 | `reward/*` | reward and decomposition | bare `reward` / `reward_std`; `within_group_std`; the components and `composition_residue` ([Reward decomposition](#reward-decomposition)) |
@@ -23,6 +23,7 @@ Environments add task-specific `outcome/*` and `reward/*` keys through their `ro
 
 | Metric | Meaning |
 |---|---|
+| `prefetch_hits` / `prefetch_misses` | Training rounds, summed over the world's ranks, whose prefetched round was delivered when the round started, against rounds that waited for it, found it failed, or ran cold (a run's first `prefetch_depth` rounds) |
 | `prefetch_input_skips` | Logged once non-zero: prefetch submissions (each a round's prompts) skipped because a wedged worker's input queue stayed full; those prompts never train |
 | `requests_expired_in_sync` | Per-round world count of request deadlines that expired across a weight sync (pause credited), each discarding a started turn. Nonzero: raise `request_timeout` |
 

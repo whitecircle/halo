@@ -145,7 +145,7 @@ footnote(
     L,
     0.25,
     W,
-    "With one server the round and the update are serial; with two or more, a prefetched round overlaps the update.",
+    "By default one server runs the round and the update in turn; two or more, or enable_prefetch: true, overlap them.",
 )
 
 save(plt.gcf(), "batch_rollout_pipeline")

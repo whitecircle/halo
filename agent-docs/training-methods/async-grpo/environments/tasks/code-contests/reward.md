@@ -52,7 +52,9 @@ in it, so a recipe states only the judge's model, view, price and context. The c
 `context_file` under `examples/grpo/environmental/code-contests-judge/`, one file per chat template, rollout
 backend and scratchpad: `gptoss.txt` (gpt-oss on either engine), `gemma4-vllm.txt`, `gemma4-qwen3.6-sglang.txt`,
 `qwen3.6-vllm.txt`, and `qwen3.6-vllm-run-code.txt` for the Python and C++ stages. The term's `weight` (−0.7) prices
-the weighted checks by their check weights, each fired one adding its own price.
+the weighted checks by their check weights, each fired one adding its own price. The check weights are the
+environment's (7 in all), so −0.7 is 0.1 per unit; a recipe of your own that lists `checks: environment` takes the
+same check weights, so its unit is its `weight` / 7.
 
 The judge is served through OpenRouter and reads `OPENROUTER_API_KEY`: pass it with `--env-file`, or drop the term
 to run without a judge.
@@ -109,6 +111,9 @@ limit on gpt-oss, whose template states no budget.
 - Per-turn budgets match across families, all enforced or all soft, and soft budgets are priced past them.
 - The episode output budget binds below `max_turns × rollout_max_tokens`; on vLLM the answer room binds below the
   turn ceiling.
+- Each audit check fired alone costs what the [audit table](#audit-judge) states, so moving a judge `weight` or a
+  check weight alone, which re-prices every weighted check, fails here; each shaping price is the one the
+  [recipe table](README.md#shipped-recipes) states.
 
 ## Behavior counters
 

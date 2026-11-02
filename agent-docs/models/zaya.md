@@ -74,7 +74,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when bias_update is active
 
 ## Kernels
 
-- **Attention** — FA2/FA3/FA4 all supported; FA4 is the Blackwell default, the shipped configs pin `flash_attention_2`.
+- **Attention** — FA2/FA3/FA4 all supported. The shipped configs leave it unset, so the loader picks FA4 on Blackwell and FA3 on Hopper; packed documents stay isolated on each label ([Document isolation under packing](#document-isolation-under-packing)).
 - **Grouped GEMM** (`F.grouped_mm`) — default on SM90+; disable with `use_grouped_gemm: false`.
 - **Liger** — upstream has no `zaya` applier; the toolkit covers it from its own spec (`halo/model_loading/liger/family_specs.py`). It defaults to the fused loss plus Liger RMSNorm; CE is off when the fused loss is on.
 
@@ -86,10 +86,10 @@ router_balancing_rate: 1.0e-3    # gamma; only used when bias_update is active
 
 | Config | EP | Notes |
 |---|:--:|---|
-| `examples/sft/zaya/zaya-1-8b-ultrachat.yaml` | — | Plain FSDP2, 4K seq |
-| `examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml` | 8 (16 experts → 2/rank) | 4K seq |
+| `examples/sft/zaya/zaya-1-8b-ultrachat.yaml` | — | Plain FSDP2, 16K packed rows |
+| `examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml` | 8 (16 experts → 2/rank) | 16K packed rows |
 
-All of them set `gradient_checkpointing: false` and `output_router_logits: false`. For long-context EP runs raise `max_length` (e.g. 32K at `per_device_train_batch_size: 1`, `gradient_accumulation_steps: 8`) — FLCE skips the logits tensor.
+All of them set `gradient_checkpointing: false` and `output_router_logits: false`, and pack 16,384-token rows at `gradient_accumulation_steps: 4` (65,536 tokens per rank per optimizer step). A row holds about 50 GB of activations: beside EP8's ~11 GB of state that fits an 80 GB GPU. Plain FSDP2 on eight GPUs (~27 GB of state) needs B200/B300 at 16K; since checkpointing is refused, on 80 GB GPUs it takes half the `max_length` at twice the accumulation. On one GPU the ~72 GB of state alone leaves no 80 GB fallback: a single-GPU run needs a B200/B300 (about 102–124 GB at 16K). For long-context EP runs raise `max_length` further (e.g. 32K at `gradient_accumulation_steps: 2`) — FLCE skips the logits tensor.
 
 ## Checkpoint save
 

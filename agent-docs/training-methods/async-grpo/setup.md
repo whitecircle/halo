@@ -97,40 +97,58 @@ round's generation.
 
 ## Multiple servers and prefetch
 
-With a **single** server (`rollout_server_url`, default `http://localhost:8000`, or a one-entry
-`rollout_server_configs`), prefetch is auto-disabled and the sync blocks, since that engine pauses for the push. Two or more
-servers enable it.
+Prefetch rolls the next rounds out while the current one trains, so each round trains `prefetch_depth` steps stale
+(one at the default) and the [importance sampling correction](objective.md#importance-sampling-correction) covers
+the lag. `enable_prefetch` unset turns it on with two or more servers and off with a **single** one
+(`rollout_server_url`, default `http://localhost:8000`, or a one-entry `rollout_server_configs`), whose step stays
+serial and on-policy. `true` prefetches on a single server too; `false` never prefetches.
 
 ```yaml
 rollout_server_configs:
   - {url: "http://localhost:8000", group_port: 51216}
   - {url: "http://localhost:8001", group_port: 51217}
-enable_prefetch: true
 ```
 
-- Every push pauses all servers together.
-- Prefetch runs **one round deep**: a round pops what the previous one submitted, then submits its own.
-- `num_rollout_workers` and an explicit `max_concurrent_rollouts` are refused below `1`; turn prefetch off with
-  `enable_prefetch: false`.
+- Every push pauses all servers together, so one server overlaps a round with the update the way several do: the
+  rounds in flight wait out the push. vLLM resumes them under the new weights; SGLang aborts their in-flight turns
+  and the actors re-issue them, losing the decode they had done.
+- Prefetch runs **`prefetch_depth` rounds deep** (default `1`): a step pops the oldest submitted round, then submits
+  its own prompts. The worker collects every pending round at once and delivers them in submission order, so a round
+  trains `prefetch_depth` rounds after it was drawn.
+- Until the pipeline is full a step is a cold round: it collects its own prompts synchronously and submits them too.
+  A run opens with `prefetch_depth` cold rounds, each trained twice.
+- Raise `prefetch_depth` when every step misses while the servers drain at each round's tail; the next round's
+  episodes fill them. Each round in flight holds its own `max_concurrent_rollouts`, so the servers carry up to
+  `prefetch_depth` rounds' KV, every sync lands on all of them, and an eval round shares the servers with them.
+- A round spans up to `ceil(prefetch_depth × steps_per_generation × num_iterations ÷ (gradient_accumulation_steps ×
+  sync_weights_every_n_steps))` syncs, a bound never below 1. On SGLang a turn aborted at each of them needs that
+  many re-issues, so a span above `max_retries` is refused before the model load, and again at trainer
+  construction, on one server that opts in as on several: the shipped SGLang recipes (`max_retries: 1`) take
+  `prefetch_depth: 1`. Deepen one by syncing less often, or raise `max_retries` to the span with
+  `(1 + max_retries) × request_timeout` still within `episode_timeout`.
+- `num_rollout_workers` and an explicit `max_concurrent_rollouts` are refused below `1`. A `prefetch_depth` above
+  `1` is refused where prefetch is off, naming `enable_prefetch: false` or the opt-in a one-server run left unset.
 
 `async/prefetch_hit_rate` shows which phase bounds the step, not server health. On a short single-turn environment it
 should approach 1; below ~0.8, add servers or raise `max_concurrent_rollouts` / `num_rollout_workers`. On a multi-turn
-one the round outlasts the update, so it sits near 0.
+one the round outlasts the update, so it sits near 0 at `prefetch_depth: 1`; a deeper pipeline raises it.
 
 ### Prefetch across a resume
 
-A checkpoint stores each rank's submitted-but-untrained round (`prefetch_pending-<rank>-of-<world>.pt`), and a resume
-resubmits it before its first round.
+A checkpoint stores each rank's submitted-but-untrained rounds, oldest first (`prefetch_pending-<rank>-of-<world>.pt`),
+and a resume resubmits them in order before its first round.
 
 - A save on a generation boundary (every save by default, since `steps_per_generation` equals the accumulation
   steps) resumes onto the batches an uninterrupted run trains. A save inside a round that feeds several optimizer
   steps trains that round twice.
-- No file for this world size, or one drawn under another group size, round size or DP slice, resumes with a cold
-  round: that batch is skipped and the next one trains twice.
+- A resume under a smaller `prefetch_depth` resubmits the oldest rounds that depth holds and warns; the newer ones
+  are not trained. Under a larger one it opens with cold rounds until the pipeline is full.
+- No file for this world size, or one drawn under another group size, round size or DP slice, resumes with cold
+  rounds: those batches are skipped and the next ones train twice.
 - A file present on some ranks only (a non-shared filesystem under another rank-to-node placement, or a torn copy)
-  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for a cold round.
+  raises. Resume with the saving placement, or delete the `prefetch_pending-*` files for cold rounds.
 
-![One rollout server (compose default): the push pauses the engine, so step time is sync + round + update](../../assets/diagrams/environmental_grpo_single_server.png)
+![One rollout server (compose default, prefetch unset): the push pauses the engine, so step time is sync + round + update](../../assets/diagrams/environmental_grpo_single_server.png)
 
 ![Two rollout servers with prefetch: step time is sync + max(round, update)](../../assets/diagrams/environmental_grpo_multi_server.png)
 

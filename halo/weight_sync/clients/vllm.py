@@ -48,6 +48,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     # mode=keep resumes in-flight generations under the new weights (the staleness the IS ratio corrects);
     # vLLM's default abort returns each as a fragment with an ordinary stop reason.
     PAUSE_REQUEST = {"params": {"mode": "keep"}}
+    PAUSE_ABORTS_IN_FLIGHT = False
     RESUME_ENDPOINT = "/resume"
     # The layerwise reload phase.
     SESSION_OPEN_ENDPOINT = "/start_weight_update"

@@ -4,7 +4,6 @@
 
 # --- Model ---
 model_name_or_path: Qwen/Qwen3-4B-Instruct-2507
-attn_implementation: flash_attention_2
 
 # --- 4-bit Quantization (BitsAndBytes) ---
 load_in_4bit: true

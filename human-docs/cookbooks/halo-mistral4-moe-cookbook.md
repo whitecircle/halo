@@ -30,7 +30,7 @@ The converter streams one shard at a time and writes a standard BF16 Hugging Fac
 ### Full fine-tune
 
 ```bash
-halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
+HALO_EP_SHARED_OVERLAP=1 halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
   --model_name_or_path=/data/models/mistral-small-4-119b-bf16 \
   --output_dir=/data/checkpoints/mistral-small-4-sft
 ```
@@ -49,7 +49,7 @@ Add one of these to the full fine-tune command:
 ### LoRA
 
 ```bash
-halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
+HALO_EP_SHARED_OVERLAP=1 halo launch sft examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml -n 8 \
   --model_name_or_path=/data/models/mistral-small-4-119b-bf16 \
   --use_peft=true --learning_rate=1e-4 \
   --lora_target_modules=q_a_proj,q_b_proj,kv_a_proj_with_mqa,kv_b_proj,o_proj \
@@ -70,7 +70,11 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 - **Chat template.** The recipe forces `jinja-templates/mistral4/mistral4-multiturn.jinja`, because
   `mistral4-instruct.jinja` accepts only single-turn rows and UltraChat is multi-turn. It marks
   completions with `assistant_message_template: "[/INST]"`.
-- **Attention.** The recipe pins `flash_attention_2`.
+- **Shared expert.** Launch with `HALO_EP_SHARED_OVERLAP=1`, as the commands above do. The shared expert is
+  as wide as a routed one, and the setting runs it on a side stream while the tokens travel to their
+  experts, instead of after they return.
+- **Attention.** The recipe leaves `attn_implementation` unset, so Halo picks FA4 on Blackwell and FA3
+  on Hopper. MLA's query/key and value widths are both 128 here, so no kernel veto applies.
 
 ## Limits
 

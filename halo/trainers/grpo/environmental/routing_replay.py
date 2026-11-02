@@ -25,7 +25,7 @@ from halo.runtime.ranks import is_global_main_process
 from halo.trainers.grpo.environmental.environmental_rules import reject_unsupported_routing_replay
 from halo.trainers.grpo.environmental.step_batch import StepRows
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
-from halo.trainers.grpo.logprob_scoring import dense_row_spans, rows_forward_densely
+from halo.trainers.grpo.logprob_scoring import dense_row_spans
 from halo.trainers.world_metrics import world_sums
 
 logger = logging.getLogger(__name__)
@@ -120,6 +120,12 @@ def assemble_rollout_masks(
     return out, stats
 
 
+def _require_spans_with_order(row_spans: list[tuple[int, int]] | None, row_order: torch.Tensor | None) -> None:
+    """Refuse a row order without the per-row spans: only the dense per-row path forwards rows reordered."""
+    if row_order is not None and row_spans is None:
+        raise RuntimeError("routing replay got a row order without row spans: only per-row forwards are reordered")
+
+
 class RoutingReplayInjector:
     """Capture/replay state across one model's EP MoE layers, in ``named_modules`` order (the mask's layer
     axis); ``engine_layers`` and ``layer_indices`` place those layers among the engine's per-decoder-layer rows."""
@@ -176,12 +182,22 @@ class RoutingReplayInjector:
         return mask[:, self._layer_indices, :]
 
     @contextlib.contextmanager
-    def capture(self, rows: int, seq_len: int, row_spans: list[tuple[int, int]] | None = None):
+    def capture(
+        self,
+        rows: int,
+        seq_len: int,
+        row_spans: list[tuple[int, int]] | None = None,
+        row_order: torch.Tensor | None = None,
+    ):
         """Capture routing over a (possibly chunked) no-grad forward of ``rows`` sequences of padded width
         ``seq_len``; the yielded list holds the ``[rows, seq, layers, top_k]`` mask on exit. ``row_spans``
-        describes span-trimmed per-row forwards (positions outside a span stay ``-1``). An error inside resets
-        every layer and propagates unchanged, so the token-count check cannot shadow an OOM or NCCL failure.
+        describes span-trimmed per-row forwards (positions outside a span stay ``-1``). ``row_order[p]`` is the
+        batch row the ``p``-th forwarded row is, so the mask comes back in batch order; only the per-row path
+        reorders rows, so it comes with ``row_spans``. An error inside resets every layer and propagates
+        unchanged, so the token-count check cannot shadow an OOM or NCCL failure.
         """
+        _require_spans_with_order(row_spans, row_order)
+        targets = list(range(rows)) if row_order is None else row_order.tolist()
         for layer in self._layers:
             layer._capture_routing = True
             layer._captured_routing_chunks = []
@@ -209,7 +225,7 @@ class RoutingReplayInjector:
             else:
                 full = flat.new_full((rows, seq_len, flat.size(-1)), -1)
                 offset = 0
-                for r, (lo, hi) in enumerate(row_spans):
+                for r, (lo, hi) in zip(targets, row_spans, strict=True):
                     full[r, lo:hi] = flat[offset : offset + (hi - lo)]
                     offset += hi - lo
                 per_layer.append(full)
@@ -222,10 +238,18 @@ class RoutingReplayInjector:
             )
         result.append(torch.stack(per_layer, dim=2))  # [rows, seq, layers, top_k] int16
 
-    def arm(self, masks: torch.Tensor, row_spans: list[tuple[int, int]] | None = None) -> None:
+    def arm(
+        self,
+        masks: torch.Tensor,
+        row_spans: list[tuple[int, int]] | None = None,
+        row_order: torch.Tensor | None = None,
+    ) -> None:
         """Arm every EP layer with one microbatch's ``[rows, seq, layers, top_k]`` mask, consumed cursor-wise
         across the row-chunked forwards (a GC forward saves its slice for the backward recompute); it stays armed
-        through backward. ``row_spans`` trims each row to what its per-row forward covers."""
+        through backward. ``row_spans`` trims each forwarded row to what its per-row forward covers, and
+        ``row_order[p]`` is the mask row the ``p``-th forwarded row is (batch order when ``None``; given only with
+        ``row_spans``)."""
+        _require_spans_with_order(row_spans, row_order)
         if masks.dim() != 4 or masks.size(2) != len(self._layers):
             raise RuntimeError(
                 f"routing mask shape {tuple(masks.shape)} does not match "
@@ -233,12 +257,17 @@ class RoutingReplayInjector:
             )
         if row_spans is not None and len(row_spans) != masks.size(0):
             raise RuntimeError(f"row_spans has {len(row_spans)} entries for {masks.size(0)} mask rows")
+        if row_order is not None and row_order.numel() != masks.size(0):
+            raise RuntimeError(f"row_order has {row_order.numel()} entries for {masks.size(0)} mask rows")
+        sources = list(range(masks.size(0))) if row_order is None else row_order.tolist()
         for i, layer in enumerate(self._layers):
             layer_masks = masks[:, :, i, :]
             if row_spans is None:
                 flat = layer_masks.reshape(-1, masks.size(3))
             else:
-                flat = torch.cat([layer_masks[r, lo:hi] for r, (lo, hi) in enumerate(row_spans)], dim=0)
+                flat = torch.cat(
+                    [layer_masks[r, lo:hi] for r, (lo, hi) in zip(sources, row_spans, strict=True)], dim=0
+                )
             layer._forced_topk_indices = flat.long()
             layer._forced_cursor = 0
             layer._forced_consumed_total = 0
@@ -304,9 +333,7 @@ class RoutingReplayMixin:
             return None
         injector = build_routing_replay_injector(self.model)
         # The dense per-row path trims each row to its real span, and capture/arm must tile the same layout.
-        self._replay_row_spans = self._use_chunked_grpo_logprobs and rows_forward_densely(
-            self.accelerator.unwrap_model(self.model), self.args.per_device_train_batch_size
-        )
+        self._replay_row_spans = self._trains_rows_densely
         reject_unsupported_routing_replay(
             mode,
             train_on_sampled_tokens=self.async_config.train_on_sampled_tokens,

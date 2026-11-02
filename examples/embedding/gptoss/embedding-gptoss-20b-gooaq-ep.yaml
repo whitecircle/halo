@@ -5,8 +5,6 @@
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2   # FA2 carries no sink argument; live sinks are rejected
-                                         #   under it, so reset_sinks must stay on (its default)
 
 # --- Parallelism ---
 expert_parallel_size: 8

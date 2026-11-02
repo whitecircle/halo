@@ -85,6 +85,7 @@ _INIT_GATES = (
     "resolve_rollout_stop_token_ids",
     "_arm_update_breaker",
     "reject_unread_grpo_knobs",
+    "reject_prefetch_past_retry_budget",
 )
 
 

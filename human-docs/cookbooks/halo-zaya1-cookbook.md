@@ -34,9 +34,12 @@ halo launch sft examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/zaya1-8b-sft-ep8
 ```
 
-Both recipes train at 4,096 tokens. For long context at EP8, raise the limit with
-`--max_length=32768`, which fits at `per_device_train_batch_size: 1` because the fused loss never builds
-the full logits tensor.
+Both recipes pack 16,384-token rows at gradient accumulation 4. Zaya cannot use gradient checkpointing,
+so the one-GPU command needs a B200 or B300 (about 102–124 GB at 16k; its ~72 GB of state leaves an
+80 GB GPU no room for a useful row). On eight 80 GB GPUs, launch the plain FSDP2 recipe with
+`-n 8 --max_length=8192 --gradient_accumulation_steps=8`; the EP8 recipe fits there as shipped.
+For long context at EP8, raise the limit with `--max_length=32768 --gradient_accumulation_steps=2`,
+which fits at `per_device_train_batch_size: 1` because the fused loss never builds the full logits tensor.
 
 ### Other layouts
 

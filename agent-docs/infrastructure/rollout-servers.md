@@ -21,7 +21,7 @@ rollout_server_configs:          # one entry per server
 (enforced); the defaults sit inside Linux's ephemeral range (32768–60999), so reserve them
 (`net.ipv4.ip_local_reserved_ports`) or pick ports outside it. Entry keys are read by name without
 validation, so a misspelled `group_port` silently falls back to `rollout_group_port + index`. The
-trainer-side mechanics (prefetch and its one-step staleness, sync cadence, trajectory length) live on
+trainer-side mechanics (prefetch and its staleness, sync cadence, trajectory length) live on
 [Async GRPO → Weight synchronization](../training-methods/async-grpo/setup.md#weight-synchronization).
 
 | | vLLM 0.32.0 | SGLang 0.5.22 |
@@ -110,13 +110,15 @@ lands, so a server stops serving for as long as the gather runs (minutes at 397B
 pauses all servers together
 ([single vs multi-server](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)).
 
-- **vLLM** is paused with `/pause?mode=keep`: in-flight generations (the prefetched round) freeze and
-  resume under the new weights, the one-step staleness the sampling-logprob IS ratio corrects. vLLM's
+- **vLLM** is paused with `/pause?mode=keep`: in-flight generations (the prefetched rounds) freeze and
+  resume under the new weights, the staleness the sampling-logprob IS ratio corrects. vLLM's
   default `abort` would hand every in-flight request back as a fragment with an ordinary stop reason.
 - **SGLang** is paused with `{"mode": "abort"}` (its post-update cache flush refuses while a request is
   running), so in-flight generations drop. The rollout actor re-issues an aborted turn
   (`finish_reason: abort`) against the same observation, up to `max_retries` times; an abort is never
-  charged as a length cut.
+  charged as a length cut. A prefetch whose rounds span more syncs than `max_retries` is refused
+  ([Prefetch](../training-methods/async-grpo/setup.md#multiple-servers-and-prefetch)). The refusal
+  reads the client's `PAUSE_ABORTS_IN_FLIGHT`, true only on SGLang's client.
 
 The paused window is charged to neither the episode nor the request: every rank credits the push to
 its in-flight episodes' `episode_timeout` and, through the Ray actors' clock, to their requests'
@@ -584,7 +586,8 @@ engine on one GPU only time-slices it (and two starting at once fail their memor
 fewer servers shrink the sync fan-out. Where rollout collection dominates (a tool-heavy environment
 such as `code_contests`), 2×(TP=2) and 4×(TP=1) give the same step time; re-measure short single-turn
 environments before consolidating. Per-server request load is
-`max_concurrent_rollouts × world_size / num_servers`: every rank builds its own actor pool, under TP
+`max_concurrent_rollouts × world_size / num_servers` per round in flight (`prefetch_depth` of them under
+prefetch): every rank builds its own actor pool, under TP
 too ([Ray → Pool sizing](ray.md#pool-sizing)), and dispatch is round-robin regardless of load.
 
 **Prefix caching** stays on: a multi-turn episode re-sends its whole context every turn, and the

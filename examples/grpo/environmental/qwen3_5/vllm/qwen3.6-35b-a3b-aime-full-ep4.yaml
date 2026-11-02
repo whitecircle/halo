@@ -27,8 +27,8 @@ rollout_temperature: 0.7
 rollout_max_tokens: 8192
 
 # --- Prefetch ---
-enable_prefetch: false    # needs a rollout_server_configs list of 2+ servers; with one server the
-                          # trainer auto-disables it (that server stops serving during weight sync)
+enable_prefetch: false    # one rollout_server_url, so each round rolls out, then trains on-policy; true rolls the
+                          # next round out while this one trains, one step stale (IS-corrected)
 
 # --- Dataset ---
 dataset:

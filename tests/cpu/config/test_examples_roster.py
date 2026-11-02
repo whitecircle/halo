@@ -8,6 +8,8 @@ run minutes in, on a booked multi-GPU host, once the model is already resident:
 * the parallelism shape, built through ``parallelism_config_from_args`` at the topology the file's
   own launch comment declares, with the capability flags its entry script passes;
 * the rollout timeouts, validated against the NCCL watchdog the launch comment documents;
+* the ``batch_rebalance`` train sampler, kept to the base loader and to a processing class whose first
+  input a text row carries;
 * against the model's real config (skipped when it is not in the local HF cache — this test never
   reaches the network): the router-balancing export contract, the context-window budget, the
   expert/head divisibility, and the GptOss sink rules.
@@ -21,26 +23,36 @@ Run: pytest tests/cpu/config/test_examples_roster.py
 import ast
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
+from datasets import Dataset
+from transformers import Trainer
+from transformers.trainer_pt_utils import BatchRebalanceSampler
 
 from halo.configs.parallelism_arguments import parallelism_config_from_args
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
 from halo.environments.rollout_config import resolve_reasoning_end_ids
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
+from halo.model_loading.tokenizer_setup import load_processing_class, resolve_tokenizer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.models.attention.selection import flash_kernel, is_flash_attn_implementation, validate_attn_implementation
 from halo.models.config_access import text_config
 from halo.models.context_window import is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
 from halo.models.moe.config_fields import has_routed_experts
+from halo.trainers.dataloaders import uses_dp_sharded_loader
+from tests.common.hub_seed import is_hub_repo
 from tests.common.parallelism import make_parallelism_config
 from tests.common.repo import REPO_ROOT
+from tests.common.tiny_models import TINY_MOE_FAMILIES, build_tiny_family_checkpoint, word_level_tokenizer
 from tests.common.tokenizers import load_cached_config, load_cached_tokenizer, try_cached_config
 from tests.cpu.config.test_examples_parse import (
     _EXAMPLES,
+    ENV_GRPO_EXAMPLES,
+    ENV_GRPO_SCRIPT,
     EXAMPLES_ROOT,
     TRAINING_ROOT,
     _bf16_capable,  # noqa: F401 — autouse fixture, imported so both modules validate as a training host does
@@ -87,10 +99,16 @@ _ROLLOUT_EXAMPLES = [config for config in _EXAMPLES if "episode_timeout" in raw_
 
 # The two methods that push trained weights into a live rollout engine. Their launch comments are the
 # only place the server-side half of the contract is written down, so it is checked as part of the file.
-_WEIGHT_SYNC_EXAMPLES = [
-    config for config in _EXAMPLES if script_for(config) in ("grpo/online.py", "grpo/environmental.py")
+_WEIGHT_SYNC_EXAMPLES = [config for config in _EXAMPLES if script_for(config) in ("grpo/online.py", ENV_GRPO_SCRIPT)]
+_BATCH_REBALANCE_EXAMPLES = [
+    config for config in _EXAMPLES if raw_config(config).get("train_sampling_strategy") == "batch_rebalance"
 ]
-_ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == "grpo/environmental.py"]
+
+# The tiny family each host-local placeholder checkpoint holds. Where the placeholder is absent, a check that
+# reads only the processing class runs on that family's tiny checkpoint with an offline tokenizer: the
+# release's own file set (config and tokenizer, no processor). A release that ships a processor has no such
+# stand-in.
+_PLACEHOLDER_FAMILIES = {"/mnt/models/DeepSeek-V4-Flash-BF16": "deepseek_v4"}
 
 
 def launch_topology(config: Path) -> tuple[int, int]:
@@ -202,6 +220,22 @@ def model_config_for(config: Path, parsed: tuple):
     return load_cached_config(parsed_field(parsed, "model_name_or_path"), trust_remote_code=True)
 
 
+def processing_class_source(reference: str, stand_in_dir: Path) -> str:
+    """Where the checkpoint ``reference`` loads its processing class from on this host: itself when it is a
+    Hub id or a directory here, else the tiny stand-in :data:`_PLACEHOLDER_FAMILIES` names for it, written to
+    ``stand_in_dir``."""
+    if is_hub_repo(reference) or Path(reference).exists():
+        return reference
+    family = _PLACEHOLDER_FAMILIES.get(reference)
+    assert family is not None, (
+        f"{reference} is a local checkpoint this host does not have. Name its tiny family in "
+        f"_PLACEHOLDER_FAMILIES only if it holds no processor, since the stand-in is tokenizer-only; one that "
+        f"holds a processor is checked only on a host that has it"
+    )
+    build_tiny_family_checkpoint(TINY_MOE_FAMILIES[family], str(stand_in_dir), word_level_tokenizer())
+    return str(stand_in_dir)
+
+
 def test_examples_declare_their_launch_width():
     """A multi-node example must state its launch line, or the topology assumed here is fiction."""
     undeclared = [
@@ -227,26 +261,6 @@ def test_example_parallelism_shape_is_accepted(config):
 
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
-def test_example_does_not_claim_prefetch_it_cannot_get(config):
-    """``enable_prefetch`` on a single-server config is a knob the trainer turns straight back off.
-
-    Prefetch overlaps rollout collection with training, which needs a SECOND engine to serve while
-    one syncs weights — so the trainer disables it (with a warning) whenever no
-    ``rollout_server_configs`` list is present. A config shipping ``enable_prefetch: true`` beside a
-    lone ``rollout_server_url`` therefore describes a run nobody gets, and the reader has to know the
-    trainer's override to tell what it actually does. Its DEFAULT is ``true``, so honesty here means
-    writing ``false``, not deleting the line.
-    """
-    raw = raw_config(config)
-    if "enable_prefetch" not in raw or raw.get("rollout_server_configs"):
-        return
-    assert raw["enable_prefetch"] is False, (
-        "this config declares one rollout_server_url, where the trainer force-disables prefetch and "
-        "warns; set enable_prefetch: false, or give it a rollout_server_configs list of 2+ servers"
-    )
-
-
-@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
 def test_example_thinking_budget_has_a_server_side_parser(config):
     """A thinking budget the serving engine cannot enforce is a 400 on EVERY rollout, not a no-op.
 
@@ -264,7 +278,7 @@ def test_example_thinking_budget_has_a_server_side_parser(config):
     )
 
 
-@pytest.mark.parametrize("config", _ENV_GRPO_EXAMPLES, **_ID)
+@pytest.mark.parametrize("config", ENV_GRPO_EXAMPLES, **_ID)
 def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(config):
     """The loss finds the reasoning closes vLLM's thinking budget forces by ``rollout_reasoning_end_token``.
 
@@ -281,10 +295,10 @@ def test_vllm_example_names_a_reasoning_close_its_tokenizer_writes(config):
 
 def test_a_weight_sync_example_exists():
     """The three server-contract checks below are parametrized over this list."""
-    assert _WEIGHT_SYNC_EXAMPLES and _ENV_GRPO_EXAMPLES, "no shipped example drives a rollout engine"
+    assert _WEIGHT_SYNC_EXAMPLES and ENV_GRPO_EXAMPLES, "no shipped example drives a rollout engine"
 
 
-@pytest.mark.parametrize("config", _ENV_GRPO_EXAMPLES, **_ID)
+@pytest.mark.parametrize("config", ENV_GRPO_EXAMPLES, **_ID)
 def test_sampled_token_example_names_the_server_flag(config):
     """Sampled-token training without ``--return-tokens-as-token-ids`` trains on ids nobody sampled.
 
@@ -556,6 +570,50 @@ def test_weight_sync_example_keeps_a_pushable_sink_parameter(config):
         "false with a sink-carrying implementation (flash_attention_4 on Blackwell; eager or "
         "flex_attention on Hopper)."
     )
+
+
+def test_a_batch_rebalance_example_exists():
+    """The two checks below are parametrized over this list — an empty one would assert nothing."""
+    assert _BATCH_REBALANCE_EXAMPLES, "no shipped example sets train_sampling_strategy: batch_rebalance"
+
+
+@pytest.mark.parametrize("config", _BATCH_REBALANCE_EXAMPLES, **_ID)
+def test_batch_rebalance_example_keeps_the_base_loader(config):
+    """HF's rebalance sampler shards over every process, so the toolkit refuses it on its DP-sharded loader
+    (TP/CP/ETP/PP) when the trainer builds the train loader, after every rank has loaded the model."""
+    _, parallelism = build_parallelism_config(config)
+    assert not uses_dp_sharded_loader(parallelism, dataset_presharded=False), (
+        "this config asks for batch_rebalance on a shape that shards batches over data-parallel replicas, where "
+        "the trainer refuses it; drop the line or run pure EP / DDP"
+    )
+
+
+@pytest.mark.parametrize("config", _BATCH_REBALANCE_EXAMPLES, **_ID)
+def test_batch_rebalance_example_reads_lengths_its_rows_carry(config, tmp_path):
+    """HF builds the sampler from each row's ``processing_class.model_input_names[0]``. A multimodal
+    checkpoint's processor lists an image or audio input first, which a text SFT row lacks, so the sampler
+    raises at loader build. Built here through HF's own ``_get_train_sampler`` with the processing class the
+    entry script loads, on rows carrying the tokenizer's keys; a placeholder checkpoint absent on this host
+    is checked through its tiny stand-in."""
+    parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
+    checkpoint = processing_class_source(parsed_field(parsed, "model_name_or_path"), tmp_path)
+    load_cached_config(checkpoint, trust_remote_code=True)  # skips a Hub checkpoint not cached here
+    processing_class = load_processing_class(
+        checkpoint, trust_remote_code=bool(parsed_field(parsed, "trust_remote_code"))
+    )
+    tokenizer = resolve_tokenizer(processing_class)
+    rows = Dataset.from_list([dict(tokenizer(text)) for text in ("a short row", "a row that runs a little longer")])
+    args = SimpleNamespace(
+        train_sampling_strategy="batch_rebalance",
+        length_column_name="length",
+        world_size=1,
+        process_index=0,
+        gradient_accumulation_steps=1,
+        train_batch_size=1,
+        dataloader_drop_last=False,
+    )
+    host = SimpleNamespace(args=args, processing_class=processing_class, train_dataset=rows)
+    assert isinstance(Trainer._get_train_sampler(host), BatchRebalanceSampler)
 
 
 if __name__ == "__main__":

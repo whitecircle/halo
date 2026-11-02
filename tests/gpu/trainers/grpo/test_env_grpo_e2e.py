@@ -71,7 +71,16 @@ parser.add_argument("--thinking-budget", type=int, default=None)
 # (vLLM: VLLM_ENABLE_R3=1; SGLang: --moe-runner-backend triton, since the fused runners bypass the
 # capture hook).
 parser.add_argument("--routing-replay", choices=("none", "rollout"), default="none")
+# enable_prefetch: true at this depth on the one server: each round rolls out while the steps before it train,
+# across the push (vLLM freezes it, SGLang aborts and re-issues its in-flight turns).
+parser.add_argument("--prefetch-depth", type=int, default=None)
+# Chunked log-probs at one row per micro-batch, two a round: each row is its own forward, the shape the length
+# deal reorders. --length-ordered false is the arm that keeps TRL's shuffle, for the replay flip-rate comparison.
+parser.add_argument("--chunked", action="store_true")
+parser.add_argument("--length-ordered", choices=("unset", "false"), default="unset")
 ARGS = parser.parse_args()
+if ARGS.length_ordered != "unset" and not ARGS.chunked:
+    parser.error("--length-ordered sets the deal of a --chunked row; a padded row never deals")
 # The expert group, or attention TP over the dispatch group, and never fewer than two ranks.
 WORLD_SIZE = max(2, ARGS.ep_size * max(ARGS.tp_size, ARGS.etp_size))
 # The checkpoint the server must already serve.
@@ -98,6 +107,9 @@ def run(ctx):
         resume=ARGS.resume,
         thinking_budget=ARGS.thinking_budget,
         routing_replay=ARGS.routing_replay,
+        prefetch_depth=ARGS.prefetch_depth,
+        chunked=ARGS.chunked,
+        length_ordered=None if ARGS.length_ordered == "unset" else False,
         model_name=MODEL,
     )
 

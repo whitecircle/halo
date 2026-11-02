@@ -53,6 +53,18 @@ async GRPO refuse one here, since their prompt-group sampler needs a length), an
 `accelerator_config.dispatch_batches: true` raises, as does `train_sampling_strategy: batch_rebalance`,
 whose HF sampler shards over every process rather than over the DP replicas.
 
+On the base flow (DDP, plain FSDP2 data parallel, pure EP) `train_sampling_strategy: batch_rebalance`
+runs HF's `BatchRebalanceSampler`. It draws each optimizer step's rows from its own shuffle, seeded 42
+plus the epoch: HF hands it no seed, so `seed` and `data_seed` do not move the data order, and the
+steps hold other rows than under `random`. Within a step it only reassigns those rows among
+(rank, accumulation slot), splitting them by length into groups of near-equal padded cost so the ranks
+of a micro-step finish together. A rank's row count per micro-step varies whenever
+`per_device_train_batch_size > 1`, so `per_device_train_batch_size × max_length` no longer bounds the
+tokens one MoE forward presents (a cross-node dispatch past the Gin ceiling raises at that step). It reads each row's length from
+`processing_class.model_input_names[0]`, which for a multimodal checkpoint's processor (Command A+,
+Inkling, Gemma 4) is an image or audio input that a text row lacks, so on those checkpoints it raises
+at loader build.
+
 The samplers are not `DistributedSampler` — distribution happens in `prepare_data_loader` via
 Accelerate's `BatchSamplerShard`, which yields batch `idx` to a process when
 `idx % num_processes == process_index`. `data_seed` is passed through, so it owns the shuffle order

@@ -71,6 +71,10 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 `examples/sft/gptoss/gptoss-20b-multinode-ep.yaml` is the infra-agnostic EP example for GPT-OSS 20B and doubles as the multi-node reference; `gptoss-120b-multinode-ep.yaml` is its 120B counterpart.
 
+The DPO, SMPO, reward, classification and offline GRPO configs pin `flash_attention_4`, so they run on Blackwell only; it is also what those scripts pick there for an unset label. Elsewhere those scripts default an unset label to SDPA ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)), so on Hopper pass `--attn_implementation=flash_attention_3`. The self-distillation and embedding configs leave it unset, which those scripts resolve to FA4 on Blackwell and FA3 on Hopper.
+
+The DPO, SMPO, reward, classification, offline GRPO, self-distillation and 20B multi-node SFT configs train without gradient checkpointing, the largest single throughput lever here: at EP8 the activations fit to 32k tokens per rank (159 GiB, [Throughput Benchmarks](../optimization/throughput-benchmarks.md#maximizing-throughput-sequence--batch)). The 120B multi-node config keeps it, since it targets 80 GB parts.
+
 A multi-stage fine-tune must agree on `reset_sinks` across stages — a continuation run keeps the sink policy of the export it starts from.
 
 Use the BF16-dequantized mirrors `unsloth/gpt-oss-{20b,120b}-BF16`. EP materializes experts as plain parameters, so a natively MXFP4 checkpoint (the original `openai/gpt-oss-*`, uint8 expert blocks) fails fast at patching with "Expert Parallelism requires a de-quantized (BF16) checkpoint".

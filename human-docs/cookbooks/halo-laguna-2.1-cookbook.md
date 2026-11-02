@@ -12,7 +12,7 @@ Modes: the Laguna S / XS 2.1 row of the [Supported Matrix](../supported-matrix.m
 
 - **Checkpoints:** `poolside/Laguna-S-2.1` and `poolside/Laguna-XS-2.1`. The recipes load them through
   the hub's remote code at a pinned revision.
-- **GPUs:** S runs at EP4 on four GPUs, 64 experts per GPU, or at EP8 on eight. XS runs on one GPU.
+- **GPUs:** S runs at EP8 on eight GPUs, 32 experts per GPU, or at EP4 on four. XS runs on one GPU.
 
 ## Recipes
 
@@ -20,15 +20,17 @@ Run these in the [training container](README.md#start-the-training-container).
 
 ### Full fine-tune
 
-Laguna S on four GPUs:
+Laguna S on eight GPUs:
 
 ```bash
-halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 4 \
+halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/laguna-s-2.1-sft
 ```
 
-EP4 on eight GPUs is rejected at startup. On eight GPUs, launch with `-n 8` and add
-`--expert_parallel_size=8`.
+The recipe trains without gradient checkpointing, which fits a B300; on smaller GPUs add
+`--gradient_checkpointing=true`. On four GPUs, launch with `-n 4` and add
+`--expert_parallel_size=4 --max_length=2048 --gradient_accumulation_steps=8` for the same tokens per
+step. EP4 on eight GPUs is rejected at startup.
 
 Laguna XS on one GPU, where the `flash_adamw` optimizer keeps the full fine-tune within one B300:
 
@@ -39,13 +41,14 @@ halo launch sft examples/sft/laguna/laguna-xs-2.1-ultrachat.yaml \
 
 ### Other layouts
 
-- Pure ETP2 on Laguna S, which passes tiny-model GPU tests only: add
-  `--expert_parallel_size=1 --expert_tensor_parallel_size=2` to the four-GPU command.
+- Pure ETP2 on Laguna S, which passes tiny-model GPU tests only: in the full fine-tune command replace
+  `-n 8` with `-n 4 --expert_parallel_size=1 --expert_tensor_parallel_size=2 --max_length=2048
+  --gradient_accumulation_steps=8 --gradient_checkpointing=true`.
 
 ### LoRA
 
 ```bash
-halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 4 \
+halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 8 \
   --use_peft=true --learning_rate=1e-4 \
   --lora_target_modules=q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj \
   --output_dir=/data/checkpoints/laguna-s-2.1-lora
@@ -55,9 +58,8 @@ These targets adapt attention and the experts.
 
 ### GRPO
 
-Read [Before a GRPO run](README.md#before-a-grpo-run) first. Laguna S has about 118B parameters, so the
-trainer keeps the SFT recipe's shape: EP4 with `flash_adamw` on four GPUs. This setup serves the SFT
-checkpoint from vLLM on GPUs 0–3 and trains on GPUs 4–7. On the host:
+Read [Before a GRPO run](README.md#before-a-grpo-run) first. Laguna S has about 118B parameters. This
+setup serves the SFT checkpoint from vLLM on GPUs 0–3 and trains at EP4 with `flash_adamw` on GPUs 4–7. On the host:
 
 ```bash
 VLLM_MODEL=/data/checkpoints/laguna-s-2.1-sft VLLM_CUDA_DEVICES=0,1,2,3 VLLM_TP=4 VLLM_ENABLE_R3=1 \

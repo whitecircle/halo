@@ -16,16 +16,13 @@ from trl import GRPOConfig
 from halo.configs.grpo_environmental import AsyncRolloutConfig
 from halo.trainers.grpo.environmental.environmental_rules import reject_straddling_eval_groups
 from tests.cpu.config.test_examples_parse import (
-    _EXAMPLES,
+    ENV_GRPO_EXAMPLES,
+    ENV_GRPO_SCRIPT,
     EXAMPLES_ROOT,
     _bf16_capable,  # noqa: F401 — autouse fixture: validate the configs as a training host does
     parsed_field,
     parser_for,
-    script_for,
 )
-
-_ENV_GRPO_SCRIPT = "grpo/environmental.py"
-_ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == _ENV_GRPO_SCRIPT]
 
 
 def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
@@ -33,12 +30,12 @@ def _grpo_config(tmp_path, **overrides) -> GRPOConfig:
 
 
 def test_env_grpo_recipes_exist():
-    assert _ENV_GRPO_EXAMPLES, "no env-GRPO recipe found; the sweep below would check nothing"
+    assert ENV_GRPO_EXAMPLES, "no env-GRPO recipe found; the sweep below would check nothing"
 
 
-@pytest.mark.parametrize("config", _ENV_GRPO_EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
+@pytest.mark.parametrize("config", ENV_GRPO_EXAMPLES, ids=lambda c: c.relative_to(EXAMPLES_ROOT).as_posix())
 def test_every_env_grpo_recipe_passes_the_eval_round_gate(config):
-    parsed = parser_for(_ENV_GRPO_SCRIPT).parse_yaml_file(str(config))
+    parsed = parser_for(ENV_GRPO_SCRIPT).parse_yaml_file(str(config))
     grpo_config = next(obj for obj in parsed if isinstance(obj, GRPOConfig))
     async_config = next(obj for obj in parsed if isinstance(obj, AsyncRolloutConfig))
     num_generations_eval = parsed_field(parsed, "num_generations_eval") or parsed_field(parsed, "num_generations")

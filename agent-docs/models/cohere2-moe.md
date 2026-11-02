@@ -120,6 +120,5 @@ memory-validated shape.
 
 `examples/sft/cohere2_moe/command-a-plus-ultrachat-ep.yaml` runs text-only SFT of the VLM checkpoint at
 EP=8. At `max_length: 1024` it peaks at ~255 of the B300's ~268 GiB; 4096 OOMs when DeepEP's elastic
-buffer resizes. It pins `model_revision` to the layout those numbers hold for, and
-`attn_implementation: flash_attention_2` (the family has no forced fallback; FA4 loads but is unmeasured
-here).
+buffer resizes. It pins `model_revision` to the layout those numbers hold for and leaves
+attention unset, so the loader picks FA4 on Blackwell (128-wide heads, sliding window included).

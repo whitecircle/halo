@@ -19,14 +19,13 @@ train_on_last_assistant_only: true
 expert_parallel_size: 8         # 16 routed experts → 2/rank
 
 # --- Attention & kernels ---
-attn_implementation: flash_attention_2
 packing: true
-max_length: 4096
+max_length: 16384   # ~50 GB of activations per row beside ~11 GB of EP8 state
 
 # --- Training schedule ---
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
-gradient_accumulation_steps: 16
+gradient_accumulation_steps: 4
 num_train_epochs: 1.0
 gradient_checkpointing: false   # refused in every mode on Zaya, EP included
 

@@ -94,7 +94,7 @@ environment_type: react_math
 max_turns: 10
 num_rollout_workers: 16            # Ray environment actors per training rank
 rollout_max_tokens: 8192           # budget for ONE turn, not the trajectory
-enable_prefetch: false             # needs two or more servers
+enable_prefetch: false             # one server; true overlaps rollout with training
 num_generations: 8                 # episodes per prompt
 beta: 0.0                          # no KL anchor, so no second model in memory
 scale_rewards: batch
@@ -117,6 +117,11 @@ SGLang ones are `ep1` only.
 - **The objective** truncates each token's importance-sampling ratio from above, and startup refuses the
   loss types and ratio modes it does not implement
   ([Objective](../../agent-docs/training-methods/async-grpo/objective.md) ↗).
+- **Row order.** With `use_chunked_grpo_logprobs: true` at `per_device_train_batch_size: 1`, each turn's
+  row is its own forward. `length_ordered_microbatches`, on by default wherever only the order changes,
+  deals a round's rows into its micro-batches longest first on every rank alike, so ranks that forward
+  in lock-step under ZeRO-3 or EP run rows of one length together
+  ([Length-ordered micro-batches](../../agent-docs/training-methods/async-grpo/performance.md#length-ordered-micro-batches) ↗).
 
 Three decisions matter more than the rest:
 
@@ -158,16 +163,20 @@ budgets priced past the budget
 
 ### One server or several
 
-![One rollout server: trainer ranks on GPUs 0-6, the engine on GPU 7 in the trainer's NCCL group, the push pausing it, prefetch off, step time = sync + round + update](../../agent-docs/assets/diagrams/environmental_grpo_single_server.png)
+![One rollout server: trainer ranks on GPUs 0-6, the engine on GPU 7 in the trainer's NCCL group, the push pausing it, prefetch off by default, step time = sync + round + update](../../agent-docs/assets/diagrams/environmental_grpo_single_server.png)
 
-With one server the step is serial: sync, generate, train. The push pauses the only engine, so prefetch
-turns itself off.
+With one server the step is serial by default: sync, generate, train. `enable_prefetch: true` overlaps the
+next round with the update there too, training each round one step stale (the importance ratio corrects it).
 
 ![Two rollout servers: six trainer ranks, engines on GPUs 6 and 7, one NCCL group per server on ports 51216 and 51217, prefetch one round deep, step time = sync + max(round, update)](../../agent-docs/assets/diagrams/environmental_grpo_multi_server.png)
 
-With two or more, list them in `rollout_server_configs`, each with its own `group_port`. Prefetch
-(`enable_prefetch`, on by default) then generates the next round while the current one trains, the only
-way to overlap the two.
+With two or more, list them in `rollout_server_configs`, each with its own `group_port`. Prefetch is
+then on by default: it generates the next round while the current one trains, the only way to overlap
+the two. `prefetch_depth` (default 1) collects that many rounds ahead at once, which keeps the servers
+busy while a round's longest episodes finish, at the cost of that many steps of staleness. On SGLang
+every sync aborts the turns in flight, so `max_retries` must be at least the number of syncs a
+prefetched round spans (more with a deeper pipeline or longer rounds); the trainer refuses a smaller
+one, on one server that opts in as on several.
 
 ## Run
 
@@ -224,8 +233,9 @@ per rank. Every metric, including the prefetch hit rate:
 ## Sizing a run
 
 Rollouts in flight per server are at most `world_size × per_device_train_batch_size ×
-steps_per_generation ÷ num_servers`, capped per rank by `max_concurrent_rollouts`. Measure the engine's
-decode speed at about that concurrency with the run's own prompts; nothing in the config predicts it.
+steps_per_generation ÷ num_servers` per round, capped per rank by `max_concurrent_rollouts`, with up to
+`prefetch_depth` rounds in flight under prefetch. Measure the engine's decode speed at about that
+concurrency with the run's own prompts; nothing in the config predicts it.
 
 - `request_timeout`: at least twice one turn's budget at that speed.
 - `episode_timeout`: the time for the smaller of `max_turns` turns and `rollout_max_episode_tokens`

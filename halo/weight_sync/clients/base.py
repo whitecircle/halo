@@ -131,6 +131,8 @@ class WeightSyncClientBase(ABC):
     PAUSE_REQUEST: Mapping[str, object] = {}
     RESUME_ENDPOINT: str
     RESUME_REQUEST: Mapping[str, object] = {}
+    # Whether that pause drops the requests in flight, so every turn a sync lands on is re-issued (``max_retries``).
+    PAUSE_ABORTS_IN_FLIGHT: bool
     # The session the engine brackets an update with inside the quiesce, and the request keywords both routes take.
     SESSION_OPEN_ENDPOINT: str
     SESSION_CLOSE_ENDPOINT: str

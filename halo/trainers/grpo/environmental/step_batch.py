@@ -298,16 +298,20 @@ class StepBatchMixin:
         mode: str,
     ) -> StepScores:
         """The step's no-grad scores: the policy recompute, the IS weights with the engine's forced closes
-        zeroed, and the reference log-probs clamped against the policy's."""
+        zeroed, and the reference log-probs clamped against the policy's. Both forwards run the rows in the
+        length deal's order, every score handed back in batch order."""
+        order = self._no_grad_row_order(step.attention_mask, mode)
         recompute_logps, routing_masks = self._recompute_logps_and_routing_masks(
-            step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, rollout_routing_masks, mode
+            step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, rollout_routing_masks, mode, order
         )
         ratio, logps_diff, corrected_mask, traj_row_ids = self._apply_is_correction(
             recompute_logps, step, rows, engine_logps
         )
         if self._is_correction and self._forced_close_ids is not None:
             ratio = self._zero_forced_closes(ratio, step)
-        ref_logps = self._compute_ref_logps(step.prompt_completion_ids, step.attention_mask, step.logits_to_keep)
+        ref_logps = self._compute_ref_logps(
+            step.prompt_completion_ids, step.attention_mask, step.logits_to_keep, order
+        )
         kl_clamped = None
         if ref_logps is not None and recompute_logps is not None:
             ref_logps, kl_clamped = clamp_ref_logps(ref_logps, recompute_logps)
@@ -332,17 +336,22 @@ class StepBatchMixin:
         logits_to_keep: int,
         rollout_routing_masks: torch.Tensor | None,
         mode: str,
+        order: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor | None, torch.Tensor | None]:
-        """The no-grad log-prob recompute and the routing mask the gradient forward replays. The gate is
-        config-derived, so the forward and its EP dispatch are entered by every rank or by none."""
+        """The no-grad log-prob recompute and the routing mask the gradient forward replays, both in batch
+        order with the rows forwarded in ``order`` (batch order when ``None``). The gate is config-derived, so
+        the forward and its EP dispatch are entered by every rank or by none."""
         # Recomputed once and chunked: a full-batch DeepEP dispatch overflows its 32-bit limit.
         recompute_logps = None
         # Either the recompute forward below captures the mask, or the engine already supplied it.
         routing_masks = rollout_routing_masks
         if self._runs_logprob_recompute:
+            ids, mask = prompt_completion_ids, attention_mask
+            if order is not None:
+                ids, mask = ids[order], mask[order]
             # Capture is scoped to this call: the ref-logps forward that follows is a different policy.
             replay_spans = (
-                dense_row_spans(attention_mask)[0]
+                dense_row_spans(mask)[0]
                 if self._routing_injector is not None and self._replay_row_spans and mode == "train"
                 else None
             )
@@ -350,7 +359,7 @@ class StepBatchMixin:
                 captured = (
                     capture_stack.enter_context(
                         self._routing_injector.capture(
-                            prompt_completion_ids.size(0), prompt_completion_ids.size(1), row_spans=replay_spans
+                            ids.size(0), ids.size(1), row_spans=replay_spans, row_order=order
                         )
                     )
                     if self._routing_injector is not None and mode == "train" and not self._rollout_routing_replay
@@ -359,15 +368,9 @@ class StepBatchMixin:
                 if rollout_routing_masks is not None:
                     # The recompute must run under the same routing the update pass replays, or
                     # the ratio comes from a different token distribution than the policy trains on.
-                    self._routing_injector.arm(rollout_routing_masks, row_spans=replay_spans)
+                    self._routing_injector.arm(rollout_routing_masks, row_spans=replay_spans, row_order=order)
                 try:
-                    recompute_logps, _, _ = self._get_per_token_logps_and_entropies(
-                        self.model,
-                        prompt_completion_ids,
-                        attention_mask,
-                        logits_to_keep,
-                        compute_entropy=False,
-                    )
+                    recompute_logps = self._scored_rows(self.model, ids, mask, logits_to_keep, order)
                 finally:
                     if rollout_routing_masks is not None:
                         self._routing_injector.disarm()
@@ -380,20 +383,31 @@ class StepBatchMixin:
         prompt_completion_ids: torch.Tensor,
         attention_mask: torch.Tensor,
         logits_to_keep: int,
+        order: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
-        """Reference-model log-probs for the KL penalty (``None`` when ``beta == 0``)."""
+        """Reference-model log-probs for the KL penalty in batch order, the rows forwarded in ``order``
+        (``None`` when ``beta == 0``)."""
         if self.beta == 0.0:
             return None
+        if order is not None:
+            prompt_completion_ids, attention_mask = prompt_completion_ids[order], attention_mask[order]
         # Chunked: a whole-batch DeepEP dispatch exceeds its 32-bit limit on long trajectories.
         with self._reference_policy() as model:
-            ref_per_token_logps, _, _ = self._get_per_token_logps_and_entropies(
-                model,
-                prompt_completion_ids,
-                attention_mask,
-                logits_to_keep,
-                compute_entropy=False,
-            )
-        return ref_per_token_logps
+            return self._scored_rows(model, prompt_completion_ids, attention_mask, logits_to_keep, order)
+
+    def _scored_rows(
+        self,
+        model,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor,
+        logits_to_keep: int,
+        order: torch.Tensor | None,
+    ) -> torch.Tensor:
+        """``model``'s per-token log-probs of rows already taken in ``order``, put back in batch order."""
+        logps, _, _ = self._get_per_token_logps_and_entropies(
+            model, input_ids, attention_mask, logits_to_keep, compute_entropy=False
+        )
+        return logps if order is None else logps[torch.argsort(order)]
 
     def _step_advantages(
         self, rewards: torch.Tensor, rows: BatchRows, num_padding: int, num_generations: int

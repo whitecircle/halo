@@ -121,6 +121,11 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
   `packing`, so an SFT run there also needs `--packing=false`.
 - `packing: true` needs a flash attention backend. It is refused on eager, SDPA and flex attention.
+- The DPO, SMPO, reward, classification and offline GRPO recipes pin FA4, so they run on Blackwell only;
+  FA4 is also what those scripts pick there unpinned. Unpinned on other GPUs, they take SDPA; on Hopper,
+  pass `--attn_implementation=flash_attention_3`. The self-distillation recipe trains without
+  gradient checkpointing and peaks at about 130 GB, so on an 80 GB GPU it also needs
+  `--gradient_checkpointing=true`.
 
 ## Export and serve
 

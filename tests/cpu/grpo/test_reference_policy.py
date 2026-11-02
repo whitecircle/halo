@@ -48,6 +48,7 @@ def _ref_forward(ref_model):
         _get_per_token_logps_and_entropies=forward,
     )
     host._reference_policy = types.MethodType(LogprobScoringMixin._reference_policy, host)
+    host._scored_rows = types.MethodType(DistributedAsyncEnvironmentalGRPOTrainer._scored_rows, host)
     DistributedAsyncEnvironmentalGRPOTrainer._compute_ref_logps(host, torch.zeros(1, 3), torch.ones(1, 3), 2)
     return seen, policy
 

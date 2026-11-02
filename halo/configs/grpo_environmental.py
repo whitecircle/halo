@@ -262,9 +262,10 @@ class AsyncRolloutConfig(
     max_concurrent_rollouts: int | None = field(
         default=None,
         metadata={
-            "help": "Per-rank cap on rollouts in flight, the generation-throughput throttle; size it to one "
-            "generation cycle's per-rank demand with about 2× prefetch headroom. Unset = 4 × this rank's share of "
-            "the rollout workers, and an explicit value below that share is raised to it. "
+            "help": "Per-rank cap on one round's rollouts in flight, the generation-throughput throttle; size it to "
+            "one generation cycle's per-rank demand. Each round in flight holds its own cap: the prefetch_depth "
+            "prefetched rounds, and a cold or eval round beside them. Unset = 4 × this rank's share of the rollout "
+            "workers, and an explicit value below that share is raised to it. "
             "See agent-docs/reference/configuration-reference.md#asyncrolloutconfig."
         },
     )
@@ -335,6 +336,18 @@ class AsyncRolloutConfig(
             "See agent-docs/training-methods/async-grpo/objective.md#routing-replay."
         },
     )
+    length_ordered_microbatches: bool | None = field(
+        default=None,
+        metadata={
+            "help": "Deal each training round's rows into its micro-batches longest first, every rank alike, in "
+            "place of TRL's per-rank shuffle, and run the round's no-grad forwards in the same order: under ZeRO-3 "
+            "or EP the ranks forward their rows in lock-step, so each row costs the longest one its peers forward "
+            "with it. Only the row order changes. Unset = on wherever that holds (aligned accumulation, a loss that "
+            "does not read micro-batch composition, rows forwarded one per call); true raises where it does not; "
+            "false keeps TRL's shuffle. "
+            "See agent-docs/training-methods/async-grpo/performance.md#length-ordered-micro-batches."
+        },
+    )
     early_stop_on_skipped_updates: bool = field(
         default=False,
         metadata={
@@ -378,12 +391,26 @@ class AsyncRolloutConfig(
             "See agent-docs/training-methods/async-grpo/episodes.md#chat-template."
         },
     )
-    enable_prefetch: bool = field(
-        default=True,
+    enable_prefetch: bool | None = field(
+        default=None,
         metadata={
-            "help": "Enable prefetching to overlap rollout collection with training. Multi-server "
-            "only: with one rollout server it auto-disables, since that engine stops serving during "
-            "weight sync and there is nothing to overlap against."
+            "help": "Roll the next rounds out while this one trains, so each round trains prefetch_depth steps stale "
+            "(the sampling-logprob IS ratio corrects it). Unset = on with two or more rollout servers, off with one; "
+            "true prefetches on a single server too, false never. "
+            "See agent-docs/training-methods/async-grpo/setup.md#multiple-servers-and-prefetch."
+        },
+    )
+    prefetch_depth: int = field(
+        default=1,
+        metadata={
+            "help": "Rounds prefetch collects ahead of the step that trains them, together on the engines and "
+            "delivered in submission order: each round trains on samples up to this many rounds stale (one round "
+            "per optimizer step at the default steps_per_generation), which the sampling-logprob IS ratio corrects. "
+            "Raise it when the trainer waits on rollouts every step while the engines drain at each round's tail. "
+            "Costs staleness, engine KV for every round in flight, and this many cold rounds when a run starts. "
+            "An int >= 1; above 1 it needs a run that prefetches. On SGLang, whose every sync aborts the turns in "
+            "flight, a round may span at most max_retries syncs (refused before the model load). "
+            "See agent-docs/training-methods/async-grpo/setup.md#multiple-servers-and-prefetch."
         },
     )
     model_name: str | None = field(
@@ -433,12 +460,26 @@ class AsyncRolloutConfig(
             ge=1,
             sync_weights_every_n_steps=self.sync_weights_every_n_steps,
             num_rollout_workers=self.num_rollout_workers,
+            prefetch_depth=self.prefetch_depth,
             **present(
                 max_concurrent_rollouts=self.max_concurrent_rollouts,
                 eval_rollout_batch_size=self.eval_rollout_batch_size,
             ),
         )
         require_int(owner, ge=0, le=65535, rollout_group_port=self.rollout_group_port)
+        # Above 1 the depth sizes the prefetch pipeline; without one it would parse and hold no round.
+        if self.prefetch_depth > 1 and not self.prefetch_active():
+            why = (
+                "enable_prefetch is false. Enable prefetch"
+                if self.enable_prefetch is False
+                else "enable_prefetch is unset, which prefetches on two or more rollout servers, and this run has "
+                "one. Set enable_prefetch: true to prefetch on one server, configure two or more servers in "
+                "rollout_server_configs"
+            )
+            raise ValueError(
+                f"{owner}: prefetch_depth={self.prefetch_depth} sets how many rounds prefetch holds, but {why}, "
+                "or remove prefetch_depth."
+            )
         # A negative budget reaches backoff as max_tries <= 0, which it treats as "no limit": a wedged
         # server is then retried until the NCCL watchdog kills the job.
         require_int(owner, ge=0, why=" (0 = one attempt, no retry)", max_retries=self.max_retries)
@@ -496,9 +537,11 @@ class AsyncRolloutConfig(
         return [self.rollout_server_url]
 
     def prefetch_active(self) -> bool:
-        """Whether the run prefetches: ``enable_prefetch`` with two or more rollout servers. A weight sync
-        pauses a lone engine for its whole push, so with one server there is nothing to overlap against."""
-        return self.enable_prefetch and len(self.get_server_urls()) > 1
+        """Whether the run prefetches: ``enable_prefetch`` where set, else two or more rollout servers. Every push
+        pauses all servers together, so one server overlaps as several do; unset keeps a lone one on-policy."""
+        if self.enable_prefetch is None:
+            return len(self.get_server_urls()) > 1
+        return self.enable_prefetch
 
     @classmethod
     def rollout_field_sources(cls) -> dict[str, str]:

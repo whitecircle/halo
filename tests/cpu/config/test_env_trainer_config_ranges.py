@@ -15,6 +15,9 @@
 * ``rollout_max_answer_tokens`` bounds what a turn generates past its reasoning cap: an int in
   ``[1, rollout_max_tokens)``, since at or above the turn cap it shrinks no turn and below 1 a turn the
   engine force-closed has no room to answer.
+* ``prefetch_depth`` is an int >= 1, and above 1 needs a run that prefetches (``enable_prefetch: true``, or
+  unset with two or more servers): elsewhere it would parse and hold no round, and the refusal names which
+  of the two turned prefetch off, so a one-server run is pointed at the opt-in rather than told it is off.
 
     python tests/cpu/config/test_env_trainer_config_ranges.py
 """
@@ -211,6 +214,51 @@ def test_an_answer_bound_outside_one_to_the_turn_cap_or_not_a_count_is_refused(b
 def test_an_answer_bound_inside_the_turn_cap_passes_and_reaches_the_rollout_config(ok):
     cfg = AsyncRolloutConfig(rollout_max_tokens=1000, rollout_max_answer_tokens=ok)
     assert cfg.get_rollout_config(in_process_group=False).max_answer_tokens == ok
+
+
+_TWO_SERVERS = [{"url": "http://s0:8000"}, {"url": "http://s1:8000"}]
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 1.5, "2"])
+def test_a_prefetch_depth_below_one_or_not_a_count_is_refused(bad):
+    with pytest.raises(ValueError, match=r"prefetch_depth must be an integer >= 1"):
+        AsyncRolloutConfig(rollout_server_configs=_TWO_SERVERS, prefetch_depth=bad)
+
+
+_UNSET_ON_ONE_SERVER = r"but enable_prefetch is unset, .* and this run has one\. Set enable_prefetch: true"
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "match"),
+    [
+        ({"rollout_server_configs": _TWO_SERVERS, "enable_prefetch": False}, "but enable_prefetch is false"),
+        ({"enable_prefetch": False}, "but enable_prefetch is false"),
+        ({}, _UNSET_ON_ONE_SERVER),
+        ({"rollout_server_configs": _TWO_SERVERS[:1]}, _UNSET_ON_ONE_SERVER),
+    ],
+    ids=["false-two-servers", "false-one-url", "unset-one-url", "unset-one-entry-list"],
+)
+def test_a_prefetch_depth_above_one_names_why_prefetch_is_off(kwargs, match):
+    with pytest.raises(ValueError, match=match):
+        AsyncRolloutConfig(prefetch_depth=2, **kwargs)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"rollout_server_configs": _TWO_SERVERS},
+        {"enable_prefetch": True},
+        {"rollout_server_configs": _TWO_SERVERS[:1], "enable_prefetch": True},
+    ],
+    ids=["unset-two-servers", "true-one-url", "true-one-entry-list"],
+)
+def test_a_prefetch_depth_passes_on_every_run_that_prefetches(kwargs):
+    assert AsyncRolloutConfig(prefetch_depth=3, **kwargs).prefetch_depth == 3
+
+
+def test_depth_one_passes_anywhere():
+    assert AsyncRolloutConfig(enable_prefetch=False).prefetch_depth == 1
+    assert AsyncRolloutConfig().prefetch_depth == 1
 
 
 if __name__ == "__main__":

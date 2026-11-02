@@ -69,6 +69,8 @@ Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-onl
 
 `text_only_model` is refused for `gemma4`: transformers' CausalLM mapping names `Gemma4ForConditionalGeneration` itself, so no text-only sibling exists to drop the vision tower into (`resolve_auto_model_class`).
 
+The DPO, SMPO and reward configs (`examples/{preference,reward}/gemma4/`, EP=8 at 4,096 tokens) train without gradient checkpointing: a full-length chosen/rejected pair holds about 52 GB of activations, which fits beside the LoRA DPO state on any supported GPU and beside the full fine-tune state on B200/B300; on 80 GB parts the full fine-tunes pass `--gradient_checkpointing=true`. The 32k SFT config keeps it.
+
 Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Either `rollout_backend` takes the weight sync ([Export](#export)).
 
 Gemma 4's bf16 log-probs carry several nats of noise at low-probability tokens on every bf16 path, the engines and the trainer alike (fp32 agrees to 0.001), and that noise enters the importance ratios, so the engine startup probe compares only the positions the model scores confidently ([Engine reference](../training-methods/async-grpo/objective.md#engine-reference)).

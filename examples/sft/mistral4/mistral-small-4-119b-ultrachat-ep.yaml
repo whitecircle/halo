@@ -1,5 +1,6 @@
 # Mistral-Small-4-119B — EP=8 SFT example on UltraChat 200K. See agent-docs/models/mistral4.md.
-# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+# HALO_EP_SHARED_OVERLAP=1 runs the shared expert, as wide as a routed one, beside the dispatch all-to-all.
+# Launch: HALO_EP_SHARED_OVERLAP=1 torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
 
 # --- Model ---
 # The public mistralai/Mistral-Small-4-119B-2603 checkpoint ships its language-model weights in FP8 — dequantize
@@ -23,7 +24,6 @@ fp32_experts: true
 fp32_non_ep_params: true
 
 # --- Attention & kernels ---
-attn_implementation: flash_attention_2
 packing: true
 max_length: 32000
 

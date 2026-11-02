@@ -68,6 +68,7 @@ _RANGE_VIOLATIONS = [
     (AsyncRolloutConfig, "sync_weights_every_n_steps", "0"),
     (AsyncRolloutConfig, "max_retries", "-1"),
     (AsyncRolloutConfig, "scale_rewards_std_floor", "-0.05"),
+    (AsyncRolloutConfig, "prefetch_depth", "0"),
     (OnlineGRPOScriptArguments, "scale_rewards_std_floor", "nan"),
     (OnlineGRPOScriptArguments, "sdpg_temperature", "0"),
     (OnlineGRPOScriptArguments, "sdpg_hint_template", "{solution}"),

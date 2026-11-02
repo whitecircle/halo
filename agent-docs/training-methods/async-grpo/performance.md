@@ -48,20 +48,32 @@ The per-turn reasoning budget counts once, not `max_turns` times (twice under `c
 
 ## Throughput levers
 
-Each step is generate → train → NCCL sync, serial on one server, so idle trainer GPUs during generation are expected. In priority order:
+Each step is generate → train → NCCL sync, serial on one server unless it prefetches, so idle trainer GPUs during generation are expected there. In priority order:
 
-1. **Multiple servers plus prefetch**, the only way to overlap generation with training. Prefetch runs one round deep, so **step time = sync + max(round, update)**. It auto-disables on a single server.
+1. **Prefetch**, the only way to overlap generation with training. It is on by default with two or more servers; a single server needs `enable_prefetch: true`. At the default `prefetch_depth: 1`, **step time = sync + max(round, update)**, at one step of IS-corrected staleness, and the servers drain at each round's tail while its longest episodes finish. `prefetch_depth: 2` collects the next round beside it to fill that tail, at the cost of one more step of staleness and of engine KV ([Prefetch](setup.md#multiple-servers-and-prefetch)).
 2. **Saturate the servers.** The optimizer step's row count sets the rollouts in flight; `max_concurrent_rollouts` only throttles them. Grow the batch with `gradient_accumulation_steps` (no per-forward memory cost), then raise the cap to match. `Waiting: > 0` or timeouts means you overshot.
 3. **Speed generation.** Server-side levers are on [Rollout Servers](../../infrastructure/rollout-servers.md#throughput). Trainer-side, keep `rollout_max_tokens` and `rollout_max_thinking_tokens` no larger than the task needs; `sync_weights_every_n_steps > 1` amortizes the sync.
 4. **Cut `max_turns`.** Turns are sequential, so halving them roughly halves rollout time. If `episode/turns` is pinned at the cap, raise it; well below, lower it.
 
 `nvidia-smi dmon`, `EfficiencyCallback` or `async/prefetch_hit_rate` shows which phase bounds the step ([Prefetch](setup.md#multiple-servers-and-prefetch)).
 
+## Length-ordered micro-batches
+
+Under `train_on_sampled_tokens` a round holds one row per assistant turn, and at `per_device_train_batch_size: 1` each row is its own backbone call: in the loss pass, its checkpoint recompute and the no-grad recompute. Under ZeRO-3 (`fsdp_reshard_after_forward: true`) or an EP dispatch the ranks forward their rows in lock-step, so a row costs the longest row its peers forward with it. `length_ordered_microbatches` ranks every rank's rows longest first and deals them round-robin over the round's `steps_per_generation` micro-batches, in place of TRL's per-rank shuffle: the `i`-th longest rows of all ranks run together, and each micro-batch takes one row per length stratum. The no-grad forwards run in the same order and hand their scores back in batch order. A rank holding more row tokens in total than its peers still sets the pace.
+
+Only the row order changes. Each row is forwarded on its own, so its log-probs, IS ratio and masks are bitwise the shuffled run's wherever a row's forward does not read its peers' (pure DP, FSDP2, TP; an EP dispatch keeps its own run-to-run tolerance) and the head sweep scores one row at a time (`per_device_train_batch_size: 1`); under FA4 at `per_device_train_batch_size > 1` one head sweep covers a micro-batch's rows together, so a different order matches to kernel rounding. The loss and gradients match the shuffled run's to accumulation order. Unset, the deal is on wherever that holds and off otherwise:
+
+- accumulation that straddles a generation round, where the order picks which micro-batches an optimizer step takes;
+- `loss_type: bnpo`, `top_entropy_quantile < 1` and the entropy bonus, which read each micro-batch's own tokens;
+- a padded batch (`use_chunked_grpo_logprobs: false`, or `per_device_train_batch_size > 1` without FA4), where every row costs the batch's width whatever its order.
+
+`true` raises at construction on those; `false` keeps TRL's shuffle.
+
 ## Sizing a run
 
 For a new model, environment or GPU, size in order:
 
-- **Rollouts in flight per server** = `world_size × min(max_concurrent_rollouts, per_device_train_batch_size × steps_per_generation) ÷ num_servers`, peaking at a round's start; an eval round opens with `world_size × eval_rollout_batch_size ÷ num_servers` ([eval rounds](evaluation.md#during-training)). TP and ETP siblings roll out too, though only each group leader's rollouts are kept ([Ray — Pool sizing](../../infrastructure/ray.md#pool-sizing)).
+- **Rollouts in flight per server** = `world_size × min(max_concurrent_rollouts, per_device_train_batch_size × steps_per_generation) ÷ num_servers` per round, peaking at a round's start, with up to `prefetch_depth` rounds in flight at once; an eval round opens with `world_size × eval_rollout_batch_size ÷ num_servers` ([eval rounds](evaluation.md#during-training)). TP and ETP siblings roll out too, though only each group leader's rollouts are kept ([Ray — Pool sizing](../../infrastructure/ray.md#pool-sizing)).
 - **Decode speed at that concurrency.** Engine step latency ≈ `a + b × n` (one CPU thread). Measure two concurrencies against a live server with the run's own prompts ([Throughput](../../infrastructure/rollout-servers.md#throughput)).
 - **Timeouts from the per-turn cap**, the turn's total ([Enforced and soft budgets](reasoning.md#enforced-and-soft-budgets)): `rollout_max_tokens`, or the engine's reasoning cap plus `rollout_max_answer_tokens` where that is smaller.
     - `request_timeout ≥ 2 × cap ÷ speed(n_peak)` (default `120`).

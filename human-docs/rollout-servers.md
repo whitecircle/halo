@@ -136,8 +136,8 @@ halo run weight-sync-transport --server_url http://<server>:8000 --backend vllm 
 ## How the trainer finds it
 
 Async GRPO names one server with `rollout_server_url`, or several with
-`rollout_server_configs` (a list of `{url, group_port}`; `enable_prefetch` needs
-two or more). Online GRPO dials `vllm_server_host` / `vllm_server_port`: the
+`rollout_server_configs` (a list of `{url, group_port}`; two or more turn prefetch
+on by default). Online GRPO dials `vllm_server_host` / `vllm_server_port`: the
 address the **trainer dials**, not a bind address. The weight-sync port,
 bound on the **trainer** host, is `rollout_group_port` for async GRPO (a server
 entry without its own `group_port` takes it plus the entry's index; a

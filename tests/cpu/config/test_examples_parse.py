@@ -113,6 +113,10 @@ def script_for(config: Path) -> str | None:
     return max(matches, key=lambda match: len(match[0]))[1]
 
 
+ENV_GRPO_SCRIPT = "grpo/environmental.py"
+ENV_GRPO_EXAMPLES = [config for config in _EXAMPLES if script_for(config) == ENV_GRPO_SCRIPT]
+
+
 def _script_module(script: str):
     """Import an entry script by path (``scripts/training`` is not a package root)."""
     if script not in _module_cache:

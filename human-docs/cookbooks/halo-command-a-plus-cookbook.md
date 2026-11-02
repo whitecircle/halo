@@ -64,9 +64,9 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
   exactly what you trained.
 - **Precision.** The experts train in BF16 (`fp32_experts: false`). FP32 masters for 200B of expert
   parameters do not fit.
-- **Pinned settings.** The recipe pins `attn_implementation: flash_attention_2` and the model revision
-  its memory numbers were measured on. It keeps `packing: false` to stay on that measured shape, though
-  text data supports packing.
+- **Pinned settings.** The recipe pins the model revision its memory numbers were measured on and
+  leaves attention to the loader, which picks FA4 on Blackwell. It keeps `packing: false` to stay on
+  that measured shape, though text data supports packing.
 
 ## Limits
 

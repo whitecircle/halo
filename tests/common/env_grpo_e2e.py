@@ -19,6 +19,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.env import env_int, env_str
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
+from halo.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY
 from tests.common.adapters import assert_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
@@ -67,6 +68,9 @@ ATTN_IMPL = env_str("HALO_TEST_ENV_GRPO_ATTN_IMPL") or None
 LORA_TARGETS = [name for name in env_str("HALO_TEST_ENV_GRPO_LORA_TARGETS", "").split(",") if name] or None
 # Deliberately large: the sync has to move the served weights measurably within MAX_STEPS.
 LEARNING_RATE = 1e-4
+# Steps a prefetch row runs past its prefetch_depth cold rounds, each popping the round submitted that many steps
+# earlier.
+PREFETCH_POPPED_STEPS = 2
 
 
 def _make_trainer(
@@ -93,12 +97,14 @@ def _make_trainer(
     )
 
 
-def _grpo_config(*, output_dir: str, max_steps: int, save: bool, peft: str | None) -> GRPOConfig:
+def _grpo_config(*, output_dir: str, max_steps: int, save: bool, peft: str | None, chunked: bool) -> GRPOConfig:
     return GRPOConfig(
         output_dir=output_dir,
         max_steps=max_steps,
-        per_device_train_batch_size=2,
-        gradient_accumulation_steps=1,
+        # The same two rows a step either way; a chunked row forwards them one per micro-batch, two micro-batches
+        # a round, the shape the length deal reorders.
+        per_device_train_batch_size=1 if chunked else 2,
+        gradient_accumulation_steps=2 if chunked else 1,
         learning_rate=LEARNING_RATE,
         bf16=True,
         logging_steps=1,
@@ -129,6 +135,9 @@ def _async_config(
     model_name: str,
     thinking_budget: int | None,
     routing_replay: str,
+    prefetch_depth: int | None,
+    chunked: bool,
+    length_ordered: bool | None,
 ) -> AsyncRolloutConfig:
     return AsyncRolloutConfig(
         rollout_backend=backend,
@@ -142,7 +151,10 @@ def _async_config(
         rollout_max_tokens=128,
         rollout_max_thinking_tokens=thinking_budget,
         routing_replay=routing_replay,
-        enable_prefetch=False,
+        enable_prefetch=prefetch_depth is not None,
+        prefetch_depth=prefetch_depth or 1,
+        use_chunked_grpo_logprobs=chunked,
+        length_ordered_microbatches=length_ordered,
         sync_weights_every_n_steps=1,
         model_name=model_name,
         # The engine-specific capture wiring exists for this: the trainer trains the ids the engine
@@ -151,7 +163,7 @@ def _async_config(
     )
 
 
-def record_routing_replay(trainer, checks: dict[str, bool]) -> None:
+def record_routing_replay(trainer, checks: dict[str, bool], metrics: dict[str, float]) -> None:
     """The engine's own routed-expert ids reached the loss, and lined up with the sampled tokens.
 
     Reaching here already covers the capture wire: a batch in which no rollout returned
@@ -168,7 +180,50 @@ def record_routing_replay(trainer, checks: dict[str, bool]) -> None:
     checks["routing_replay_placed_every_mask"] = bool(coverage) and all(
         step["routing/rollout_unresolved_frac"] == 0.0 for step in coverage
     )
-    log(f"  routing replay coverage per step: {coverage}")
+    # A mask placed on the wrong row still covers every token; only the live router disagreeing with it shows.
+    # Measured against an arm that changes one thing, so recorded rather than checked.
+    flips = [
+        entry["routing/replay_flip_rate"] for entry in trainer.state.log_history if "routing/replay_flip_rate" in entry
+    ]
+    metrics["routing_replay_flip_rate_max"] = max(flips, default=math.nan)
+    log(f"  routing replay coverage per step: {coverage}; flip rate per step: {flips}")
+
+
+def record_prefetch_acquisitions(trainer) -> list[bool]:
+    """Record, per training step, whether its acquire popped a prefetched round (``True``) or left the step to
+    collect its own prompts (``False``: a cold round, or a popped failure)."""
+    acquired: list[bool] = []
+    acquire = trainer._acquire_prefetched_round
+
+    def recording():
+        results = acquire()
+        acquired.append(results is not None)
+        return results
+
+    trainer._acquire_prefetched_round = recording
+    return acquired
+
+
+def record_prefetch(trainer, checks: dict[str, bool], metrics: dict[str, float], acquired: list[bool], depth: int):
+    """The run prefetched at ``depth``: exactly its first ``depth`` steps collected their own prompts, every later
+    step popped the round submitted ``depth`` steps earlier, and the IS log-ratio was scored, finite, on every step,
+    the stale rounds included.
+
+    A liveness check on the log-ratio, not a bound: at this row's ``LEARNING_RATE`` no fixed limit separates a stale
+    round from a wrong one, so the band is the landing A/B's to enforce."""
+    history = trainer.state.log_history
+    hits = max((entry.get("async/prefetch_hits", 0) for entry in history), default=0)
+    logratios = [float(entry[LOGRATIO_MEAN_KEY]) for entry in history if LOGRATIO_MEAN_KEY in entry]
+    checks["prefetch_ran_at_depth"] = trainer._prefetch_enabled and trainer.async_config.prefetch_depth == depth
+    checks["prefetch_opened_with_depth_cold_rounds_then_popped_every_step"] = (
+        acquired == [False] * depth + [True] * PREFETCH_POPPED_STEPS
+    )
+    checks["prefetch_skipped_no_submission"] = not any("async/prefetch_input_skips" in entry for entry in history)
+    checks["logratio_scored_every_step"] = len(logratios) == len(acquired) and all(map(math.isfinite, logratios))
+    # A hit (the round ready before its step asks) depends on round versus update time: measured, not checked.
+    metrics["prefetch_hits"] = float(hits)
+    metrics["logratio_mean_max_abs"] = max((abs(v) for v in logratios), default=math.nan)
+    log(f"  prefetch depth {depth}: popped per step {acquired}, {hits} hits; {LOGRATIO_MEAN_KEY}: {logratios}")
 
 
 def run_env_grpo_e2e(
@@ -187,6 +242,9 @@ def run_env_grpo_e2e(
     routing_replay: str = "none",
     environment_type: str = "native_math",
     pool_urls: tuple[str, ...] = (),
+    prefetch_depth: int | None = None,
+    chunked: bool = False,
+    length_ordered: bool | None = None,
 ) -> dict:
     """Train Environmental GRPO against a live ``backend`` server and assert the sync landed.
 
@@ -195,13 +253,20 @@ def run_env_grpo_e2e(
     ``peft`` puts the run on an adapter fold; ``resume`` adds a fresh phase with one step left, whose
     train-begin push must land the engine on the checkpoint's policy; ``thinking_budget`` sets and grades
     ``rollout_max_thinking_tokens``. ``pool_urls`` (``server_url`` among them) pushes through a WeightSyncPool
-    instead of one client, and every one of those servers must serve the moved policy.
+    instead of one client, and every one of those servers must serve the moved policy. ``prefetch_depth`` turns
+    ``enable_prefetch`` on at that depth, however many servers serve; unset leaves it off. ``chunked`` scores with
+    chunked log-probs, one row per micro-batch, so each row is its own forward and the length deal reorders the
+    round; ``length_ordered`` sets ``length_ordered_microbatches`` (unset: on wherever it changes only the order).
     """
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
     pre_perturb: dict[str, float] = {}
     expert_lora = peft == "expert_lora"
     max_steps = RESUME_MAX_STEPS if resume else MAX_STEPS
+    if prefetch_depth is not None:
+        if resume:
+            raise ValueError("a prefetch row sets its own step count, which a resume row's save step does not fit")
+        max_steps = prefetch_depth + PREFETCH_POPPED_STEPS
 
     # ── 0. expert TP refuses the native grouped expert adapters, at config time ───────────────
     # Before the load, which is the point of the refusal: it fires ahead of a multi-hundred-GB
@@ -235,8 +300,11 @@ def run_env_grpo_e2e(
         model_name=model_name,
         thinking_budget=thinking_budget,
         routing_replay=routing_replay,
+        prefetch_depth=prefetch_depth,
+        chunked=chunked,
+        length_ordered=length_ordered,
     )
-    grpo_config = _grpo_config(output_dir=output_dir, max_steps=max_steps, save=resume, peft=peft)
+    grpo_config = _grpo_config(output_dir=output_dir, max_steps=max_steps, save=resume, peft=peft, chunked=chunked)
 
     parallelism_config = fresh_parallelism_config(ep_size, tp_size, expert_tp_size)
     model, peft_config = load_policy(
@@ -313,6 +381,10 @@ def run_env_grpo_e2e(
         log(f"  [trainable] {detail}")
         adapters_before = snapshot_adapters(unwrap(trainer.model), expert_lora=expert_lora)
 
+    if chunked:
+        # The deal resolves at construction; a chunked row runs the shape it reorders, so only false turns it off.
+        checks["rows_dealt_by_length_as_set"] = trainer._orders_rows_by_length is (length_ordered is not False)
+    acquired = record_prefetch_acquisitions(trainer) if prefetch_depth is not None else []
     trainer.train()
     log("  training completed")
     # Everything below reads or writes parameters by identity, and the run leaves the FSDP2 modules
@@ -325,6 +397,8 @@ def run_env_grpo_e2e(
     losses, trained = record_step_losses(trainer, checks)
     metrics["steps_logged"] = float(len(losses))
     metrics["training_had_a_gradient"] = float(trained)
+    if prefetch_depth is not None:
+        record_prefetch(trainer, checks, metrics, acquired, prefetch_depth)
 
     # ── 3. the engine's own sampled ids reached the loss ──────────────────────────────────────
     # The trainer falls back to re-tokenization when a rollout returns no ids, and that fallback warns
@@ -396,7 +470,7 @@ def run_env_grpo_e2e(
     if thinking_budget is not None:
         record_thinking_budget_checks(trainer, checks, thinking_budget)
     if routing_replay == "rollout":
-        record_routing_replay(trainer, checks)
+        record_routing_replay(trainer, checks, metrics)
 
     if not resume:
         return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
@@ -450,7 +524,7 @@ def run_env_grpo_e2e(
         peft_config=peft_config,
         # The resumed phase writes nothing: it is judged on the served policy and on what it
         # restored, and a second full-model checkpoint would only cost scratch space.
-        grpo_config=_grpo_config(output_dir=output_dir, max_steps=max_steps, save=False, peft=peft),
+        grpo_config=_grpo_config(output_dir=output_dir, max_steps=max_steps, save=False, peft=peft, chunked=chunked),
         async_config=async_config,
         trainer_cls=DistributedAsyncEnvironmentalGRPOTrainer,
         environment_type=environment_type,

@@ -95,7 +95,7 @@ def batch_host(
     host.pad_token_id, host.eos_token_id = 0, 2
     host._tokenize_step_rows = lambda results: [[r] for r in rows]
     host._get_per_token_logps_and_entropies = lambda model, ids, mask, keep, compute_entropy: (policy, None, None)
-    host._compute_ref_logps = lambda ids, mask, keep: reference
+    host._compute_ref_logps = lambda ids, mask, keep, order: reference
     host._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
     host._save_completions, host.log_completions = save_completions, False
     host._logs = unbounded_completion_logs()

@@ -19,7 +19,7 @@ of them are MoE.
 | [Laguna 2.1](cookbooks/halo-laguna-2.1-cookbook.md) | `poolside/Laguna-S-2.1` | MoE | set `attn_implementation: sdpa`; there is no automatic fallback |
 | [LFM-2 MoE](cookbooks/halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2-24B-A2B` | MoE | hybrid short-convolution layers |
 | [ZAYA1](cookbooks/halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | MoE | trains without gradient checkpointing, always |
-| [Command A+](cookbooks/halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | MoE | 200B+; pinned revision and FA2 |
+| [Command A+](cookbooks/halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | MoE | 200B+; pinned revision |
 | [Bailing / Ling](../agent-docs/models/bailing.md) ↗ | `inclusionAI/Ling-mini-2.0` | MoE | needs `trust_remote_code` |
 | [Inkling](../agent-docs/models/inkling.md) ↗ | `thinkingmachines/Inkling-Small` | MoE | multimodal; pin `sdpa`; no pad token |
 | [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` and `padding_free` refused); convert to bf16 first |
