@@ -48,7 +48,7 @@ from halo.models.attention.selection import (
     supports_fa4_backward,
     validate_attn_implementation,
 )
-from halo.models.config_access import apply_config_overrides
+from halo.models.config_access import apply_config_overrides, drop_toolkit_stamps
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.load_coordination import joined_node_load
@@ -307,6 +307,7 @@ def _resolve_run_config(
     model_config = AutoConfig.from_pretrained(
         model_name_or_path, trust_remote_code=trust_remote_code, revision=source.revision
     )
+    drop_toolkit_stamps(model_config)
     apply_config_overrides(model_config, model_config_overrides)
     wraps_experts = pc.needs_ep_layers and has_routed_experts(model_config)
     reject_unsupported_model(pc, model_config, sinks_policy=sinks_policy, wraps_experts=wraps_experts)

@@ -60,6 +60,8 @@ from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5Moe
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeSparseMoeBlock
+from transformers.models.qwen3_next.configuration_qwen3_next import Qwen3NextConfig
+from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextSparseMoeBlock
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 from transformers.models.step3p7.modeling_step3p7 import Step3p7SparseMoeBlock
 from transformers.models.zaya.configuration_zaya import ZayaConfig
@@ -76,6 +78,7 @@ from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
@@ -127,6 +130,16 @@ def _qwen3_moe() -> Qwen3MoeSparseMoeBlock:
 def _qwen3_5_moe() -> Qwen3_5MoeSparseMoeBlock:
     return Qwen3_5MoeSparseMoeBlock(
         Qwen3_5MoeConfig(num_experts=E, num_experts_per_tok=K, shared_expert_intermediate_size=M, **_COMMON)
+    )
+
+
+def _qwen3_next() -> Qwen3NextSparseMoeBlock:
+    """Renormalization off: the knob that sets the family apart from Qwen3.5-MoE, whose router always
+    renormalizes."""
+    return Qwen3NextSparseMoeBlock(
+        Qwen3NextConfig(
+            num_experts=E, num_experts_per_tok=K, shared_expert_intermediate_size=M, norm_topk_prob=False, **_COMMON
+        )
     )
 
 
@@ -292,6 +305,7 @@ FAMILIES = [
     ("gemma4", EPGemma4MoELayer, _gemma4_experts, _experts_inputs),
     ("qwen3_moe", EPQwen3MoELayer, _qwen3_moe, _block_inputs),
     ("qwen3_5_moe", EPQwen3_5MoELayer, _qwen3_5_moe, _block_inputs),
+    ("qwen3_next", EPQwen3NextMoELayer, _qwen3_next, _block_inputs),
     ("gpt_oss", EPGptOssMoELayer, _gpt_oss, _block_inputs),
     ("zaya", EPZayaMoELayer, _zaya, _block_inputs),
     ("deepseek_v4", EPDeepseekV4MoELayer, _deepseek_v4, _block_inputs),

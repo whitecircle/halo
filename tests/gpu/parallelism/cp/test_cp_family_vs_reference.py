@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""A tiny model of each Ulysses wrapper class under CP=2 against the same model unsplit: the first attention
-layer, every attention layer wrapped, the loss, and every gradient.
+"""Each tiny model of the CP roster under CP=2 against the same model unsplit: the first attention layer, every
+attention layer wrapped, the loss, and every gradient.
 
-The roster is ``FAMILIES`` of ``tests/common/equivalence/cp_equivalence.py``, one tiny model per wrapper class.
+The roster is ``FAMILIES`` of ``tests/common/equivalence/cp_equivalence.py``, which covers every wrapper class.
 Every rank builds the same seeded model. The first attention layer under its wrapper over each rank's sequence
 shard, gathered, must match the unwrapped layer over the full sequence, each fed what the decoder hands it: on
 a random model the loss and the gradient direction can average away a wrong position-dependent term such as

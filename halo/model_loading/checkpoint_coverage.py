@@ -1,5 +1,5 @@
-"""Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized, and load the checkpoint's
-weights on every rank.
+"""Checkpoint-coverage gate: refuse a load that leaves live weights randomly initialized, load the checkpoint's
+weights on every rank, and read the checkpoint's own config without another run's toolkit stamps.
 
 ``from_pretrained`` reports the keys it re-initialized only through the transformers logger, which
 ``configure_training_run`` silences off the logging rank. Which absences are legitimate is read off the model class.
@@ -18,6 +18,7 @@ from transformers import PreTrainedModel
 
 from halo.env import env_flag
 from halo.model_loading.remote_code import reject_untieable_list_ties
+from halo.models.config_access import drop_toolkit_stamps
 
 logger = logging.getLogger(__name__)
 
@@ -126,10 +127,14 @@ def from_pretrained_verified(
     :func:`full_weights_on_every_rank` so every rank holds the checkpoint's weights.
 
     The report is taken from ``output_loading_info`` rather than the transformers logger so it
-    survives the ``set_verbosity_error`` that ``configure_training_run`` applies off the logging rank.
+    survives the ``set_verbosity_error`` that ``configure_training_run`` applies off the logging rank. A
+    ``config`` the caller passes carries this run's stamps and is kept; one the load reads from the checkpoint
+    takes :func:`drop_toolkit_stamps`.
     """
     with full_weights_on_every_rank():
         model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
+    if kwargs.get("config") is None:
+        drop_toolkit_stamps(model.config)
     reject_untieable_list_ties(model)
     verify_checkpoint_coverage(
         model, loading_info["missing_keys"], source=model_name_or_path, excuse_task_head=excuse_task_head

@@ -2,7 +2,7 @@
 
 Grouped GEMM (`torch.nn.functional.grouped_mm`) batches a rank's per-expert matmuls into one kernel launch, eliminating per-expert dispatch overhead in MoE layers. Available on SM90+ (Hopper, Blackwell) with the pinned PyTorch 2.11.x. Enabled by default (`use_grouped_gemm: true`).
 
-The MoE expert step sorts tokens by expert (contiguous per-expert blocks), builds an int32 cumulative-offset tensor, runs one `F.grouped_mm` over all groups, then scatters outputs back and applies routing weights. The sort (`_sort_tokens_for_grouped_mm`, `halo/distributed/expert_parallel/moe_layer/compute.py`) drops `-1` padding from DeepEP dispatch (expert IDs outside `[0, experts_per_rank)`) before sorting; an unfiltered padding ID misaligns the groups and produces NaN.
+The MoE expert step sorts tokens by expert (contiguous per-expert blocks), builds an int32 cumulative-offset tensor, runs one `F.grouped_mm` over all groups, then scatters outputs back and applies routing weights. The sort (`_sort_tokens_for_grouped_mm`, `halo/distributed/expert_parallel/moe_layer/compute.py`) drops `-1` padding from DeepEP dispatch (expert IDs outside `[0, experts_per_rank)`) before sorting, with a `nonzero_static` sized by the dispatch's host-side receive counts, so the sort never syncs the host ([DeepEP](../infrastructure/deepep.md#how-the-toolkit-drives-it)); an unfiltered padding ID misaligns the groups and produces NaN.
 
 ## Performance
 
@@ -63,7 +63,7 @@ The permute expresses both directions with no atomics via a precomputed `inv_map
 
 It runs on every grouped-GEMM path, whatever `top_k` and `ep_size` (`_sort_tokens_for_grouped_mm`; the EP warm-up compiles it). Even where a received token lands on few local rows (gpt-oss top-4 at EP8), a bf16 `index_add_` is a CAS-loop atomic. On packed chat data (BFD-packed `HuggingFaceH4/ultrachat_200k`, 16k tokens/GPU/step, GC on, 8× B300) it costs ~1.5 ms per call on gpt-oss-20b EP8: 108 ms of a 1.24 s step, and 161 ms of gpt-oss-120b's 1.57 s. The gather-reduce makes one memory-bandwidth pass. On that data gpt-oss-20b EP8 runs 16,574 tok/s/GPU at s4096 b4 and 16,618 at s16384 b1, against 13,050 and 13,138 with `index_add_` (+27%); gpt-oss-120b EP8 runs 12,832 against 10,301 (+25%). Those figures include the copy-free DeepEP padding ([DeepEP](../infrastructure/deepep.md#hidden-padding-hidden--256)), about 2 points at gpt-oss-20b EP8; the permute alone is +24% there.
 
-The per-expert loop (`use_grouped_gemm: false`) does not use it: it gathers each expert's tokens with `index_select` and scatters the weighted outputs back with a bf16 atomic `index_add_`.
+The per-expert loop (`use_grouped_gemm: false`) does not use it: it gathers each expert's tokens with `index_select` and scatters the weighted outputs back with a bf16 atomic `index_add_`. At `ep_size > 1` it sizes each expert's slot read off the dispatch's receive count, so it does not sync the host either.
 
 Both reductions run as one Triton kernel (`halo/kernels/moe_permute.py`) that walks `inv_map` per output row and accumulates in fp32, so no `[recv_N, top_k, H]` transient or padded copy exists. The grouped path folds the routing-weight multiply into the unpermute (`MoEWeightedUnpermute`), and its backward writes the expert-output gradient and the routing-weight gradient in one pass. Routing weights that need no gradient leave the expert outputs unsaved, since only the routing-weight gradient reads them. The fused `[gate | up]` GLU output is read in place by the packed GLU kernel (`GluCombine.packed` in `halo/kernels/fused_glu.py`), whose backward writes one `[..., 2M]` gradient.
 
@@ -98,7 +98,7 @@ This is the bf16 path, the MoE production default. fp8/fp4 grouped GEMM and the 
 
 ## Requirements and compatibility
 
-SM90+ (Hopper H100/H200, Blackwell B200/B300) and the pinned PyTorch 2.11.x. DeepEP is required only for EP token distribution, not for standalone grouped GEMM at `ep_size=1`. Every parallelism mode composes — EP, ETP, TP, CP, PP, gradient checkpointing and FSDP2 — with one exception: GptOss under ETP falls back to the loop path (see the note below).
+SM90+ (Hopper H100/H200, Blackwell B200/B300) and the pinned PyTorch 2.11.x. DeepEP is required only for EP token distribution, not for standalone grouped GEMM at `ep_size=1`. Every parallelism mode composes — EP, ETP, TP, CP, PP, gradient checkpointing and FSDP2.
 
 ### Blackwell (SM100+) backward fix
 
@@ -126,7 +126,7 @@ has its own kernel (`GluCombine.gptoss`, `halo/kernels/fused_glu.py`).
 > [!NOTE]
 > **Expert Tensor Parallelism**
 >
-> When `expert_tp_size > 1`, GptOss runs the loop path: ETP stores its de-interleaved gate/up pair under the plain `gate_proj`/`up_proj` names the loop reads, not the `gate_proj_gmm`/`up_proj_gmm` pair the grouped path reads (the layer's init summary reports `grouped_mm=False`). The other families use grouped GEMM regardless of ETP, on the 3-call separate-projection path (`gate_up_proj` is split into `gate_proj`/`up_proj` before the intermediate dim is sharded).
+> When `expert_tp_size > 1`, every family runs grouped GEMM on the 3-call separate-projection path, over its slice of each local expert: the halves are stored apart as `gate_proj`/`up_proj` before the intermediate dim is sharded (a fused `gate_up_proj` is split, GptOss's interleaved pair de-interleaved), and `down_proj` is sharded on its input dim.
 
 ## Standalone grouped GEMM mode
 

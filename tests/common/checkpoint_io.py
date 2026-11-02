@@ -5,6 +5,7 @@ and after its reload or resume, and the optimizer and scheduler state a resume r
 (:func:`run_two_phase_resume` drives the whole save-then-resume shape).
 """
 
+import hashlib
 import json
 import math
 import os
@@ -66,6 +67,15 @@ def safetensors_state_dict(checkpoint_dir: str | Path) -> dict[str, torch.Tensor
             for key in reader.keys():  # noqa: SIM118 - safe_open has .keys() but is not a mapping
                 tensors[key] = reader.get_tensor(key)
     return tensors
+
+
+def file_digests(directory: str | Path) -> dict[str, str]:
+    """sha256 of every file in ``directory``, by name: a byte-level fingerprint of a save, index and config included."""
+    digests = {}
+    for path in sorted(Path(directory).iterdir()):
+        with open(path, "rb") as handle:
+            digests[path.name] = hashlib.file_digest(handle, "sha256").hexdigest()
+    return digests
 
 
 def written_keys(output_dir: str) -> set[str]:

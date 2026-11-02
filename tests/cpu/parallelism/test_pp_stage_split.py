@@ -549,7 +549,16 @@ REGISTERED_BACKBONES = {
 }
 _TINY_FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 # The tiny families whose backbone is neither registered nor refused with a spec of its own.
-_UNREGISTERED_FAMILIES = ("bailing_moe", "cohere2_moe", "glm4_moe_lite", "laguna", "lfm2_moe", "mistral4", "qwen3_moe")
+_UNREGISTERED_FAMILIES = (
+    "bailing_moe",
+    "cohere2_moe",
+    "glm4_moe_lite",
+    "laguna",
+    "lfm2_moe",
+    "mistral4",
+    "qwen3_moe",
+    "qwen3_next",
+)
 
 
 def test_the_registry_holds_exactly_the_validated_families():
@@ -580,7 +589,7 @@ def test_an_unregistered_backbone_is_refused_by_name(family):
 
 
 def test_a_backbone_without_a_family_wrapper_is_refused_by_name():
-    with pytest.raises(ValueError, match=r"^Qwen3NextModel is not registered"):
+    with pytest.raises(ValueError, match=r"^MixtralModel is not registered"):
         reject_unsupported_pp_model(tiny_family_model(TINY_UNWRAPPED_MOE_FAMILY), "none")
 
 

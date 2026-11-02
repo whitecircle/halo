@@ -3,10 +3,12 @@ index, the streaming shard writer, and the tied-embedding reconcile."""
 
 from __future__ import annotations
 
+import concurrent.futures
 import glob
 import json
 import logging
 import os
+from collections import deque
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -26,6 +28,7 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.hub_layout import revert_to_load_layout
 from halo.checkpoint.reading import read_checkpoint_index
+from halo.env import env_int
 from halo.models.config_access import ties_word_embeddings, untie_word_embeddings
 from halo.models.moe.balancing import balancing_param_keys, is_balancing_state_key
 from halo.models.param_roles import fp32_pinned_names, norm_param_keys
@@ -37,6 +40,7 @@ logger = logging.getLogger(__name__)
 _SAVE_DTYPE = torch.bfloat16
 # The tied pair, in the order reconcile_tie_word_embeddings reads them.
 _TIE_KEY_SUFFIXES = ("lm_head.weight", "embed_tokens.weight")
+DEFAULT_CHECKPOINT_WRITE_THREADS = 0
 
 
 def cast_to_save_dtype(t: torch.Tensor) -> torch.Tensor:
@@ -170,10 +174,37 @@ def reconcile_tie_word_embeddings(model, state_dict: dict) -> None:
         )
 
 
+def _write_part(part: dict[str, torch.Tensor], path: str) -> None:
+    """A background part write. The part is emptied before the write reports done, so a flush waiting on it
+    never holds it beside the next."""
+    try:
+        save_safetensors_file(part, path, metadata=SAFETENSORS_METADATA)
+    finally:
+        part.clear()
+
+
+def checkpoint_write_threads() -> int:
+    """How many finished parts an entered :class:`StreamingShardWriter` writes in the background at once
+    (``HALO_CHECKPOINT_WRITE_THREADS``; a negative value warns and reads as 0); 0 writes each part in line."""
+    threads = env_int("HALO_CHECKPOINT_WRITE_THREADS", DEFAULT_CHECKPOINT_WRITE_THREADS)
+    if threads < 0:
+        logger.warning(f"Ignoring HALO_CHECKPOINT_WRITE_THREADS={threads} (expected >= 0); writing each part in line.")
+        return 0
+    return threads
+
+
 class StreamingShardWriter:
     """Accumulate tensors and flush them to numbered safetensors parts under one prefix, whenever the next
     one would overflow ``max_shard_size``. ``enabled=False`` makes every method a no-op for non-writer
-    ranks, which still enter each collective gather."""
+    ranks, which still enter each collective gather.
+
+    Entered as a context manager, the writer hands each finished part to one of
+    :func:`checkpoint_write_threads` background threads and fills the next meanwhile (``save_file``
+    releases the GIL), so it holds up to that many parts more (:attr:`max_resident_bytes`). A failed
+    write raises its own exception from the next flush or close, once no other write is running; the
+    block's exit waits out every write, so none outlives the caller's failure, and logs each failed one
+    the caller never collected. Outside a block each part is written in line.
+    """
 
     def __init__(
         self, output_dir: str, max_shard_size: str, *, enabled: bool, filename_prefix: str = STREAM_PART_PREFIX
@@ -188,6 +219,46 @@ class StreamingShardWriter:
         self._weight_map: dict[str, str] = {}
         self._part_names: list[str] = []
         self._total_bytes = 0
+        self._write_threads = 0
+        self._executor: concurrent.futures.ThreadPoolExecutor | None = None
+        self._writes: deque[concurrent.futures.Future] = deque()
+        self._write_error: BaseException | None = None
+
+    def __enter__(self) -> StreamingShardWriter:
+        self._write_threads = checkpoint_write_threads() if self.enabled else 0
+        if self._write_threads:
+            self._executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=self._write_threads, thread_name_prefix="halo-shard-writer"
+            )
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        if self._executor is None:
+            return
+        try:
+            if exc_type is None:
+                self._settle_writes(0)
+            else:
+                # The caller's exception propagates; a write failing beside it, possibly its cause, is logged.
+                concurrent.futures.wait(self._writes)
+                for write in self._writes:
+                    if (error := write.exception()) is not None:
+                        logger.error(
+                            f"A background part write to {self.output_dir} failed while the save was already "
+                            f"raising {exc_type.__name__}: {error!r}",
+                            exc_info=error,
+                        )
+                self._writes.clear()
+        finally:
+            self._executor.shutdown()
+            self._executor = None
+            self._write_threads = 0
+
+    @property
+    def max_resident_bytes(self) -> int:
+        """Host bytes of staged parts the writer can hold at once: the part filling plus one per background
+        write (a single tensor over ``max_shard_size`` makes a larger part)."""
+        return self.max_bytes * (1 + self._write_threads)
 
     def add(self, key: str, tensor: torch.Tensor) -> None:
         """Stage one tensor, flushing first if it would overflow the pending part (HF's rule). A key stages
@@ -214,6 +285,7 @@ class StreamingShardWriter:
         if not self.enabled:
             return {}, 0
         self._flush()
+        self._settle_writes(0)
         return self._weight_map, self._total_bytes
 
     def close_as_hf_checkpoint(self) -> int:
@@ -223,6 +295,7 @@ class StreamingShardWriter:
         if not self.enabled:
             return 0
         self._flush()
+        self._settle_writes(0)
         if not self._part:
             raise RuntimeError(
                 f"Refusing to finalize an empty checkpoint in {self.output_dir}: this writer is the "
@@ -244,14 +317,33 @@ class StreamingShardWriter:
     def _flush(self) -> None:
         if not self._pending:
             return
+        if self._executor is not None:
+            self._settle_writes(self._write_threads - 1)
         self._part += 1
         name = stream_part_filename(self.filename_prefix, self._part)
-        save_safetensors_file(self._pending, os.path.join(self.output_dir, name), metadata=SAFETENSORS_METADATA)
+        path = os.path.join(self.output_dir, name)
+        if self._executor is None:
+            save_safetensors_file(self._pending, path, metadata=SAFETENSORS_METADATA)
+        else:
+            # The thread gets a dict of its own; a device tensor's D2H runs here, in the caller's stream order.
+            part = {key: tensor.cpu() for key, tensor in self._pending.items()}
+            self._writes.append(self._executor.submit(_write_part, part, path))
         self._weight_map.update(dict.fromkeys(self._pending, name))
         self._part_names.append(name)
         self._total_bytes += self._pending_bytes
         self._pending = {}
         self._pending_bytes = 0
+
+    def _settle_writes(self, in_flight: int) -> None:
+        """Reap the finished background writes and wait until at most ``in_flight`` remain; a failed write
+        raises here once every other write has stopped, and again on each later call."""
+        while self._writes and (len(self._writes) > in_flight or self._writes[0].done()):
+            error = self._writes.popleft().exception()
+            self._write_error = self._write_error or error
+        if self._write_error is not None:
+            concurrent.futures.wait(self._writes)
+            self._writes.clear()
+            raise self._write_error
 
 
 def merge_shard_index(gathered: list[tuple[dict[str, str], int] | None]) -> tuple[dict[str, str], int]:

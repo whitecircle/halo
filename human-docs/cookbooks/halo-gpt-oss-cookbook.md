@@ -121,7 +121,6 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
   `packing`, so an SFT run there also needs `--packing=false`.
 - `packing: true` needs a flash attention backend. It is refused on eager, SDPA and flex attention.
-- ETP runs the experts through the per-expert loop instead of grouped GEMM.
 
 ## Export and serve
 

@@ -9,9 +9,12 @@ only size their output by reading the device back.
 ``torch.cuda.set_sync_debug_mode("error")`` turns any such read into an exception, so this asserts the
 property directly rather than trusting a claim no check enforces.
 
-Scope: at ``ep_size == 1`` the whole sort must be sync-free. At ``ep_size > 1`` one sync remains, in
-the ``nonzero`` that compacts DeepEP's ``-1`` padding — asserted here too, so that when it is removed
-this test is what records it.
+Scope: the whole sort, at ``ep_size == 1`` and at ``ep_size > 1``, where DeepEP's ``-1`` padding is
+compacted by a ``nonzero_static`` sized from the dispatch's host-side receive counts; and the per-expert loop
+(``use_grouped_gemm: false``, GptOss under expert TP) at ``ep_size > 1``, which sizes each expert's slot read
+off its count the same way. Each must also equal its device-sized reference (the ``nonzero`` sort; the
+``torch.where`` loop, under deterministic algorithms) bit for bit, and that reference must trip the same detector,
+so a sync-free pass is not a detector that sees nothing.
 
 Run with 1 GPU:
     torchrun --nproc_per_node=1 \
@@ -19,23 +22,35 @@ Run with 1 GPU:
 """
 
 import contextlib
-from types import SimpleNamespace
+from functools import partial
 
 import torch
 
-from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from tests.common.ep_reference import (
+    GroupedSortLayer,
+    grouped_sort_mismatches,
+    nonzero_grouped_sort,
+    receive_counts,
+    received_expert_ids,
+    where_expert_loop,
+)
 from tests.common.harness import gpu_test_main
+from tests.common.parallelism import single_process_ep_config
 from tests.common.rank_log import log
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 EXPERTS_PER_RANK = 8
 TOP_K = 4
 NUM_TOKENS = 512
 HIDDEN = 256
+# The family whose real EP layer the loop check runs; any family's loop reads its slots the same way.
+LOOP_FAMILY = "qwen3_moe"
 
 
 def make_layer(ep_size):
-    """Minimal stand-in carrying only what the sort reads off ``self``."""
-    return SimpleNamespace(ep_size=ep_size, experts_per_rank=EXPERTS_PER_RANK)
+    return GroupedSortLayer(ep_size=ep_size, experts_per_rank=EXPERTS_PER_RANK)
 
 
 def make_inputs(ep_size, device):
@@ -58,14 +73,27 @@ def sync_is_an_error():
         torch.cuda.set_sync_debug_mode("default")
 
 
+@contextlib.contextmanager
+def deterministic_algorithms():
+    """Torch's deterministic-algorithms mode, restored to the caller's setting on exit."""
+    enabled = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
 def run_sort(ep_size, device):
     stub = make_layer(ep_size)
     tokens, experts, weights = make_inputs(ep_size, device)
+    counts = receive_counts(experts, EXPERTS_PER_RANK) if ep_size > 1 else None
     torch.cuda.synchronize()
     with sync_is_an_error():
-        out = EPMoELayerBase._sort_tokens_for_grouped_mm(stub, tokens, experts, weights)
+        out = EPMoELayerBase._sort_tokens_for_grouped_mm(stub, tokens, experts, weights, recv_counts=counts)
     torch.cuda.synchronize()
-    return out
+    return out, (stub, tokens, experts, weights)
 
 
 @gpu_test_main(exact_world_size=1, prefix="ep_sort_sync_free", partial_state=False)
@@ -75,7 +103,7 @@ def run(ctx):
 
     # ep_size == 1: no DeepEP padding to compact, so nothing in the sort may read the device back
     # (a sync raises out of run_sort and fails the run).
-    sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, _ = run_sort(1, device)
+    (sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, _), _ = run_sort(1, device)
     log(f"[ep1] sort ran sync-free: {sorted_tokens.shape[0]} rows, offs={offs.tolist()}")
 
     # The counts must still be right — a sync-free histogram that miscounts is worse than a sync.
@@ -89,21 +117,74 @@ def run(ctx):
     checks["ep1_sorted_index_covers_every_slot"] = sorted_token_idx.numel() == NUM_TOKENS * TOP_K
     checks["ep1_sorted_weights_cover_every_slot"] = sorted_weights.numel() == NUM_TOKENS * TOP_K
 
-    # ep_size > 1: exactly one sync remains, the nonzero that compacts the -1 padding. When that is
-    # removed, this check is what fails and tells you to update the claim.
-    try:
-        run_sort(4, device)
-    except RuntimeError as exc:
-        checks["ep4_padding_compaction_still_syncs"] = "synchroniz" in str(exc).lower()
-        log(f"[ep4] {exc}")
-    else:
-        checks["ep4_padding_compaction_still_syncs"] = False
-        log(
-            "the ep_size>1 sort no longer synchronizes — the padding-compaction sync was removed. "
-            "That is the intended direction: update this test and the sync note in "
-            "_sort_tokens_for_grouped_mm."
-        )
+    # ep_size > 1: the receive counts size the compaction, so this sort raises on any read-back too.
+    got, (stub, tokens, experts, weights) = run_sort(4, device)
+    mismatched = grouped_sort_mismatches(got, nonzero_grouped_sort(stub, tokens, experts, weights))
+    log(f"[ep4] sort ran sync-free: {got[2].numel()} of {experts.numel()} slots local; mismatched={mismatched}")
+    checks["ep4_padding_present"] = bool((experts < 0).any())
+    checks["ep4_sort_equals_nonzero_sort_bitwise"] = not mismatched
+
+    # The detector sees the device-sized nonzero sort.
+    checks["ep4_nonzero_sort_trips_the_detector"] = trips_the_detector(
+        lambda: nonzero_grouped_sort(stub, tokens, experts, weights)
+    )
+
+    checks |= check_loop(device)
     return {"checks": checks}
+
+
+def trips_the_detector(fn) -> bool:
+    torch.cuda.synchronize()
+    try:
+        with sync_is_an_error():
+            fn()
+    except RuntimeError as exc:
+        return "synchroniz" in str(exc).lower()
+    finally:
+        torch.cuda.synchronize()
+    return False
+
+
+def check_loop(device) -> dict[str, bool]:
+    """A real EP layer's per-expert loop, marked ``ep_size=2``: sync-free off the counts, bit-identical to the
+    ``torch.where`` loop, which trips the detector.
+
+    Each token routes to distinct experts, as a router's top-k picks them. The sync check runs in the default mode;
+    the bitwise comparison runs under deterministic algorithms, outside which CUDA's ``index_add_`` adds by atomics in
+    a run-dependent order, so it compares the slot reads and not that order. The reference must reproduce itself
+    there first."""
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_MOE_FAMILIES[LOOP_FAMILY]).to(device, torch.bfloat16)
+    apply_ep_layers(model, single_process_ep_config(use_grouped_gemm=False))
+    layer = named_ep_layers(model)[0][1]
+    layer.ep_size = 2
+    # Rank 0 of two: slots routed to the other half of the experts arrive as -1.
+    experts = received_expert_ids(NUM_TOKENS, TOP_K, layer.experts_per_rank, layer.ep_size, seed=0).to(device)
+    tokens = torch.randn(experts.shape[0], layer.hidden_dim, device=device, dtype=torch.bfloat16)
+    weights = torch.rand(experts.shape, device=device, dtype=torch.float32)
+    counts = receive_counts(experts, layer.experts_per_rank)
+    counted = partial(layer._compute_experts, tokens, experts, weights, torch.bfloat16, recv_counts=counts)
+    reference = partial(where_expert_loop, layer, tokens, experts, weights, torch.bfloat16)
+
+    checks = {"loop_runs_the_loop": not layer._grouped_mm_enabled(), "loop_every_expert_received": 0 not in counts}
+    with torch.no_grad():
+        torch.cuda.synchronize()
+        try:
+            with sync_is_an_error():
+                counted()
+            torch.cuda.synchronize()
+            checks["loop_sync_free"] = True
+        except RuntimeError as exc:
+            log(f"[loop] raised {exc}")
+            checks["loop_sync_free"] = False
+            return checks
+        with deterministic_algorithms():
+            want = reference()
+            checks["loop_where_loop_is_deterministic"] = torch.equal(want, reference())
+            checks["loop_equals_where_loop_bitwise"] = torch.equal(counted(), want)
+        checks["loop_where_loop_trips_the_detector"] = trips_the_detector(reference)
+    log(f"[loop] {LOOP_FAMILY}: counts={counts}; {checks}")
+    return checks
 
 
 if __name__ == "__main__":

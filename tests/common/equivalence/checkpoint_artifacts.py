@@ -37,6 +37,7 @@ from tests.common.checkpoint_io import save_context, shard_store_context
 from tests.common.cp_model import unpatched_cp_wrapper
 from tests.common.equivalence.revisions import (
     RAISED,
+    common_families,
     compare_outputs,
     digest,
     export_tree,
@@ -295,9 +296,13 @@ def main(argv: list[str] | None = None) -> int:
 
     base, head = resolve_commit(REPO_ROOT, args.base_ref), resolve_commit(REPO_ROOT, args.head_ref)
     with tempfile.TemporaryDirectory() as scratch:
+        trees = {
+            label: export_tree(REPO_ROOT, commit, Path(scratch, label))
+            for label, commit in (("base", base), ("head", head))
+        }
+        families, skipped = common_families(trees, __spec__.name, families)
         outputs = {}
-        for label, commit in (("base", base), ("head", head)):
-            tree = export_tree(REPO_ROOT, commit, Path(scratch, label))
+        for label, tree in trees.items():
             outputs[label] = Path(scratch, f"{label}-artifacts")
             run_in_tree(
                 tree, __spec__.name, "--produce", str(outputs[label]), "--families", *families, env=PRODUCER_ENV
@@ -308,6 +313,7 @@ def main(argv: list[str] | None = None) -> int:
     verdict = "fail" if deltas or raised else "pass"
     findings = {
         "families": families,
+        "skipped": skipped,
         "cases": sum(case.family in families for case in ARTIFACT_CASES),
         "files": len(after),
         "raised": raised,
@@ -319,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     print(  # noqa: T201 — the CLI's report
         f"checkpoint artifacts: {verdict}, {findings['files']} files, {len(deltas)} deltas, {len(accepted)} "
-        f"accepted, {len(raised)} cases raising ({path})"
+        f"accepted, {len(raised)} cases raising, skipped as absent from a tree's roster: {skipped or 'none'} ({path})"
     )
     return 0 if verdict == "pass" else 1
 

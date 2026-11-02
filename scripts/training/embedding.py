@@ -41,6 +41,7 @@ from halo.model_loading.parallel.peft_setup import build_peft_config
 from halo.model_loading.parallel.whole_model import warm_attention_kernels
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.config_access import drop_toolkit_stamps
 from halo.models.context_window import resolve_length_to_context
 from halo.models.peft_adapters import tuner_adapter_param_ids
 from halo.runtime.collectives import barrier
@@ -207,9 +208,10 @@ def _load_sentence_transformer(
     # Refuses a pipeline without a transformer backbone before anything reads it.
     resolve_embedding_max_length(embedding_config, st_model[0])
     # ST loads the backbone itself, so the post-load steps of the parallel loader run here too: the
-    # run-dtype cast, the buffer repair, and the shared finalization (a GptOss backbone would
-    # otherwise keep live sinks under an attention backend that drops them).
+    # stamp drop, the run-dtype cast, the buffer repair, and the shared finalization (a GptOss backbone
+    # would otherwise keep live sinks under an attention backend that drops them).
     backbone = st_model[0].auto_model
+    drop_toolkit_stamps(backbone.config)
     cast_parameters_to_run_dtype(backbone, model_kwargs["dtype"], keep_fp32=parallelism_config.fp32_non_ep_params)
     finalize_loaded_model(backbone)
     apply_run_model_policies(

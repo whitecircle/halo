@@ -13,8 +13,8 @@ writing through the link.
 
 The merge is streamed: input shards are opened once and read group by group (one MoE layer's
 experts, or one replicated tensor, at a time), each merged group is transformed and handed straight
-to an incremental shard writer. Peak host RAM is one merged layer plus one pending output shard
-rather than the whole model, so a 397B artifact merges on an ordinary host.
+to an incremental shard writer. Peak host RAM is one merged layer plus the output shard being filled
+and one per write thread rather than the whole model, so a 397B artifact merges on an ordinary host.
 
 Output is HuggingFace-style sharded safetensors (``model-0000N-of-000XX.safetensors`` +
 ``model.safetensors.index.json``); ``--max_shard_size`` sets the per-file cap.

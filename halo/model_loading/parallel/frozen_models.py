@@ -30,6 +30,7 @@ from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
+from halo.models.config_access import drop_toolkit_stamps
 from halo.runtime.load_coordination import joined_node_load
 
 if TYPE_CHECKING:
@@ -131,6 +132,7 @@ def load_frozen_auxiliary_model(
     if download_tag:
         revision = resolve_model_source(model_name_or_path, revision, tag=download_tag).revision
     config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
+    drop_toolkit_stamps(config)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks)
     backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_policy=sinks_policy)
     resolved_attn = apply_family_patches(config, backend)

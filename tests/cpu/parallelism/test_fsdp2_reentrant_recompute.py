@@ -15,7 +15,9 @@ under EP layers at ep1 with FSDP-sharded experts; the dense one also under HSDP 
 steps beside an unsharded model
 without checkpointing that averages its gradients over the ranks, with HF's step order (backward per
 microbatch, clip, step, ``model.zero_grad()``). At K=1 the step must leave every gradient and weight bit for
-bit what the same step without the completion leaves.
+bit what the same step without the completion leaves. The non-finite step guard reads its verdict off the
+completed gradient: a K>1 step whose backward overflows on one rank is skipped everywhere, and nothing of it
+reaches a later step.
 
     python tests/cpu/parallelism/test_fsdp2_reentrant_recompute.py
 """
@@ -32,9 +34,11 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from accelerate.utils import DistributedType
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.fsdp._fully_shard import _fsdp_param_group
 from torch.distributed.tensor import DTensor
+from transformers import Trainer
 
 from halo.distributed import fsdp
 from halo.distributed.expert_parallel.config import EPConfig
@@ -83,6 +87,9 @@ NO_WINDOW = {"fsdp_reshard_after_backward": True, "fsdp_defer_grad_sync": False}
 # HSDP over 4 ranks: 2 replicas of 2 shards, each group's reduce a reduce-scatter then an all-reduce.
 HSDP_MESH = (2, 2)
 HSDP_K_VALUES = (1, 4)
+# The step whose backward overflows on the last rank, and the rows each of its backwards recomputes.
+POISONED_STEP = 1
+POISONED_K = 4
 
 
 def _rows(k: int, step: int, micro: int, rank: int) -> list[torch.Tensor]:
@@ -101,11 +108,32 @@ def _rows_loss(model: nn.Module, rows: list[torch.Tensor]) -> torch.Tensor:
     return loss
 
 
+class _InfGrad(torch.autograd.Function):
+    """Identity forward, infinite backward: a finite loss whose every gradient overflows."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad):
+        return grad * math.inf
+
+
+class _PoisonedRows(list):
+    """Rows whose backward overflows."""
+
+
 class _RowsBackward:
-    """The step the trainer seam wraps: one backward through every row's forward."""
+    """The step the trainer seam wraps: one backward through every row's forward. The step guard extends
+    transformers' own norm read."""
+
+    _get_grad_norm = Trainer._get_grad_norm
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         loss = _rows_loss(model, inputs)
+        if isinstance(inputs, _PoisonedRows):
+            loss = _InfGrad.apply(loss)
         loss.backward()
         return loss.detach()
 
@@ -116,7 +144,7 @@ class _Trainer(DistributedTrainerMixin, _RowsBackward):
     def __init__(self, model: nn.Module, ep_config: EPConfig | None, window: dict):
         self.model = model
         self.parallelism_config = SimpleNamespace(is_tp_mode=False, **window)
-        self.accelerator = SimpleNamespace(sync_gradients=True)
+        self.accelerator = SimpleNamespace(sync_gradients=True, distributed_type=DistributedType.NO)
         self.state = SimpleNamespace(global_step=0)
         self.optimizer = None
         self._ep_config = ep_config
@@ -329,6 +357,50 @@ def _train(
     return record
 
 
+def _skipped_step_run(mesh) -> dict:
+    """``STEPS`` steps of the dense model at ``POISONED_K`` rows per backward, ``POISONED_STEP``'s backward
+    overflowing on the last rank, through the trainer's step and the step guard on its optimizer; the reference
+    takes no step there."""
+    rank = dist.get_rank()
+    reference = _build("dense", None)
+    model = _sharded("dense", None, mesh, raf=False, nested=False)
+    trainer = _Trainer(model, None, NO_WINDOW)
+    ref_params = list(reference.parameters())
+    params = list(model.parameters())
+    trainer.optimizer = torch.optim.SGD(params, lr=LR)
+    trainer._tr_loss, trainer._tr_loss_before_step = torch.zeros(()), torch.zeros(())
+    trainer._install_nonfinite_step_skip()
+    ref_optimizer = torch.optim.SGD(ref_params, lr=LR)
+    record = {"grad_rel": [], "weights": []}
+    for step in range(STEPS):
+        trainer.state.global_step = step
+        rows = _rows(POISONED_K, step, 0, rank)
+        poisoned = step == POISONED_STEP
+        trainer.training_step(model, _PoisonedRows(rows) if poisoned and rank == WORLD - 1 else rows)
+        if not poisoned:
+            _rows_loss(reference, rows).backward()
+            _average(ref_params)
+            record["grad_rel"].append(_rel(_grads(params), [p.grad for p in ref_params]))
+        trainer._get_grad_norm(model, grad_norm=trainer.clip(1.0))
+        trainer.optimizer.step()
+        if not poisoned:
+            torch.nn.utils.clip_grad_norm_(ref_params, 1.0)
+            ref_optimizer.step()
+        model.zero_grad()
+        reference.zero_grad()
+        record["weights"].append([_full(p).tolist() for p in params])
+    model.eval()
+    reference.eval()
+    with torch.no_grad():
+        rows = _rows(POISONED_K, STEPS, 0, rank)
+        record["logit_rel"] = _rel(
+            [model(input_ids=ids).logits.flatten() for ids in rows],
+            [reference(input_ids=ids).logits.flatten() for ids in rows],
+        )
+    record["skipped"] = trainer._nonfinite_steps_skipped
+    return record
+
+
 def _guard_cases(ep_config: EPConfig, mesh) -> dict:
     """The guard on a backward the completion cannot finish, and on each leftover injected by hand."""
     out = {}
@@ -410,6 +482,15 @@ def _guard_worker(rank: int, out: str) -> None:
         json.dump(_guard_cases(_ep1_config(), init_device_mesh("cpu", (WORLD,))), fh)
 
 
+def _skip_worker(rank: int, out: str) -> None:
+    try:
+        result = _skipped_step_run(init_device_mesh("cpu", (WORLD,)))
+    except Exception as error:
+        result = {"error": f"{type(error).__name__}: {error}"}
+    with open(f"{out}.{rank}", "w") as fh:
+        json.dump({"completed": result}, fh)
+
+
 def _hsdp_worker(rank: int, out: str) -> None:
     """The dense model under HSDP, 2 replicas of 2 shards: a completion's reduce-scatter and all-reduce."""
     mesh = init_device_mesh("cpu", HSDP_MESH, mesh_dim_names=("dp_replicate", "dp_shard"))
@@ -443,6 +524,11 @@ def runs(tmp_path_factory):
 @pytest.fixture(scope="module")
 def guard_runs(tmp_path_factory):
     return _spawn(_guard_worker, tmp_path_factory, "guard")
+
+
+@pytest.fixture(scope="module")
+def skip_runs(tmp_path_factory):
+    return _spawn(_skip_worker, tmp_path_factory, "skip")
 
 
 @pytest.fixture(scope="module")
@@ -570,6 +656,17 @@ def test_hsdp_completes_the_reduce_scatter_and_the_replica_all_reduce(hsdp_runs)
             assert run["recorded"] > 0 and run["unwaited"] == 0, k
             expected = 1 if k == 1 else 2
             assert all(m["layer_reduces"] == [expected] * len(m["layer_reduces"]) for m in run["micro"]), k
+
+
+def test_a_recomputed_step_that_overflows_on_one_rank_is_skipped_on_every_rank(skip_runs):
+    """The step guard's norm is the completed gradient's: the poisoned step leaves every rank's weights bit for
+    bit, and the steps around it, the first one after it included, match the reference that never took it."""
+    for rank_runs in skip_runs:
+        run = _run(rank_runs, "completed")
+        assert run["skipped"] == 1, run["skipped"]
+        assert run["weights"][POISONED_STEP] == run["weights"][POISONED_STEP - 1]
+        assert max(run["grad_rel"]) < PARITY_RTOL, run["grad_rel"]
+        assert run["logit_rel"] < PARITY_RTOL, run["logit_rel"]
 
 
 def test_the_guard_refuses_a_backward_left_unfinished(guard_runs):

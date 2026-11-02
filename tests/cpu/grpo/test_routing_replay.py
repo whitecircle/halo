@@ -14,10 +14,12 @@ from torch import nn
 from transformers import PretrainedConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeTopKRouter
 from transformers.models.qwen3_moe.modeling_qwen3_moe import Qwen3MoeTopKRouter
+from transformers.models.qwen3_next.modeling_qwen3_next import Qwen3NextTopKRouter
 
 from halo.distributed.expert_parallel.families.bailing import EPBailingMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
 from halo.models.gradient_checkpointing import RecomputeScope
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.trainers.grpo.environmental.routing_replay import (
@@ -260,6 +262,21 @@ def test_qwen3_5_gate_weights_at_matches_router():
     layer.gate = router
     replayed = layer._gate_weights_at(logits, indices)
     assert torch.allclose(replayed, scores, atol=0, rtol=0), "Qwen3.5 weighting formula drifted from the HF router"
+
+
+@pytest.mark.parametrize("norm_topk_prob", [True, False])
+def test_qwen3_next_gate_weights_at_matches_router(norm_topk_prob):
+    """Qwen3.5-MoE's block, but the router renormalizes only under its own flag: replay must follow it."""
+    router = Qwen3NextTopKRouter(_router_config(None, norm_topk_prob=norm_topk_prob))
+    torch.nn.init.normal_(router.weight)
+    hidden = torch.randn(T, 16)
+    logits, scores, indices = router(hidden)
+
+    layer = EPQwen3NextMoELayer.__new__(EPQwen3NextMoELayer)
+    nn.Module.__init__(layer)
+    layer.gate = router
+    replayed = layer._gate_weights_at(logits, indices)
+    assert torch.allclose(replayed, scores, atol=0, rtol=0), "Qwen3-Next weighting formula drifted from the HF router"
 
 
 def test_bailing_gate_weights_at_formula():

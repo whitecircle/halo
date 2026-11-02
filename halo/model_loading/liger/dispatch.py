@@ -17,6 +17,7 @@ from halo.kernels.jit_cache import pin_liger_impls
 from halo.model_loading.liger.applier import LigerApplier, build_liger_appliers
 from halo.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.model_loading.liger.launch_context import pin_liger_device_context
 from halo.models.config_access import set_config_field_run_scoped, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
@@ -27,6 +28,9 @@ logger = logging.getLogger(__name__)
 # The effective Liger config the classes were patched with, stamped run-scoped on ``model.config`` for the
 # post-load TRL flag reconciliation to read back.
 LIGER_APPLIED_CONFIG_ATTR = "_halo_liger_applied_config"
+# Under CP, whether the run resolves ``fused_linear_cross_entropy`` on for the family: the Ulysses wrapper, which
+# scores the loss outside the model's forward, then runs the fused kernel over its chunk itself.
+LIGER_CP_FUSED_LOSS_ATTR = "_halo_liger_cp_fused_loss"
 
 # Flags whose applier-declared ``False`` default states that Liger's kernel cannot serve the family
 # (a partial, mrope or YARN rotary; GptOss's clamped experts) — honored over the shared default-on.
@@ -201,10 +205,11 @@ def sanitize_liger_config(
     Both Liger applications (model load, and the trainer's before HF Trainer re-applies) call this, since a
     rule present at one site only is undone by whichever runs second. The parallelism rules yield to an
     explicit ``swiglu``/``geglu`` request, which they make inert rather than wrong; the routed-experts
-    rule does not. It also pins the Liger implementations (:func:`pin_liger_impls`), since a model passed to
-    the trainer reaches only the second site.
+    rule does not. It also pins the Liger implementations (:func:`pin_liger_impls`) and the same-device launch
+    context (:func:`pin_liger_device_context`), since a model passed to the trainer reaches only the second site.
     """
     pin_liger_impls()
+    pin_liger_device_context()
     forced_off = liger_parallelism_overrides(
         has_ep_wrapped_experts=liger_ep_disables_fused_glu(needs_ep_layers, model_config),
         tp_size=tp_size,
@@ -257,6 +262,20 @@ def warn_if_flce_unreachable(model_config: AutoConfig, trainer_name: str) -> Non
         )
 
 
+def _layered_liger_config(model_type: str, user_overrides: dict) -> dict:
+    """The shared Liger defaults under the family's own and the user's overrides."""
+    return {**_LIGER_DEFAULTS, **_PER_MODEL_DEFAULTS.get(model_type, {}), **user_overrides}
+
+
+def _resolves_fused_loss(model_type: str | None, fallback_type: str | None, user_overrides: dict) -> bool:
+    """Whether ``fused_linear_cross_entropy`` resolves on for the family: requested or its default, and offered by
+    the applier Liger resolves for it."""
+    resolved_type, apply_fn = _resolve_applier(model_type, fallback_type)
+    if apply_fn is None or "fused_linear_cross_entropy" not in inspect.signature(apply_fn).parameters:
+        return False
+    return bool(_layered_liger_config(resolved_type, user_overrides)["fused_linear_cross_entropy"])
+
+
 def _build_liger_config(
     apply_fn: Callable,
     model_type: str,
@@ -270,11 +289,7 @@ def _build_liger_config(
     signature_params = inspect.signature(apply_fn).parameters
     valid_params = set(signature_params.keys())
 
-    config = {
-        **_LIGER_DEFAULTS,
-        **_PER_MODEL_DEFAULTS.get(model_type, {}),
-        **user_overrides,
-    }
+    config = _layered_liger_config(model_type, user_overrides)
 
     flce_requested = bool(user_overrides.get("fused_linear_cross_entropy"))
     if wrapper_head and "fused_linear_cross_entropy" in valid_params:
@@ -394,12 +409,26 @@ def apply_liger_kernel(
     :func:`sanitize_liger_config`.
 
     Returns the effective applied config, or ``None`` when nothing was applied, and records it run-scoped
-    on ``model_config`` under :data:`LIGER_APPLIED_CONFIG_ATTR`.
+    on ``model_config`` under :data:`LIGER_APPLIED_CONFIG_ATTR`; under CP, also whether the wrapper runs the
+    fused loss, under :data:`LIGER_CP_FUSED_LOSS_ATTR`.
     """
     model_type, fallback_type = _liger_model_types(model_config)
+    patch_config = liger_kernel_config or {}
+    if cp_size > 1:
+        cp_fused_loss = _resolves_fused_loss(model_type, fallback_type, patch_config)
+        set_config_field_run_scoped(model_config, LIGER_CP_FUSED_LOSS_ATTR, cp_fused_loss)
+        # Taken out of the patch request rather than forced off under a warning: the CP override still keeps the
+        # model's own head unpatched, and the wrapper serves the request.
+        patch_config = {key: value for key, value in patch_config.items() if key != "fused_linear_cross_entropy"}
+        if cp_fused_loss and is_global_main_process():
+            logger.info(
+                f"Liger fused_linear_cross_entropy under Context Parallelism ({model_type}): the model's own head "
+                f"stays unpatched, and the CP wrapper runs the fused kernel on a labelled training forward (SFT); "
+                f"any other forward keeps the full logits."
+            )
 
     user_overrides = sanitize_liger_config(
-        liger_kernel_config or {},
+        patch_config,
         needs_ep_layers=needs_ep_layers,
         model_config=model_config,
         tp_size=tp_size,

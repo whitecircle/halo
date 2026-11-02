@@ -1,8 +1,9 @@
-"""CP equivalence harness: Ulysses attention and the CP model wrapper on one tiny model per Ulysses wrapper class,
-compared between two commits (``make verify-cp BASE=<sha>``) into ``evidence/cp_equivalence-<head sha>.json``.
-The base tree runs twice: a record it repeats is compared bit for bit, one it does not with each gradient inside
-the base's own spread. The GPU tier runs bf16 with CP's own flash kernel made deterministic; the CPU tier runs
-fp32 on gloo with a plain-torch attention under the flash contract.
+"""CP equivalence harness: Ulysses attention and the CP model wrapper on a roster of tiny models covering every
+Ulysses wrapper class, compared between two commits (``make verify-cp BASE=<sha>``) into
+``evidence/cp_equivalence-<head sha>.json``. A family either tree's roster lacks is skipped and named. The base
+tree runs twice: a record it repeats is compared bit for bit, one it does not with each gradient inside the base's
+own spread. The GPU tier runs bf16 with CP's own flash kernel made deterministic; the CPU tier runs fp32 on gloo
+with a plain-torch attention under the flash contract.
 """
 
 from __future__ import annotations
@@ -33,6 +34,7 @@ from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.ep_reference import random_token_batch
 from tests.common.equivalence.revisions import (
     RAISED,
+    common_families,
     compare_outputs,
     export_tree,
     quiet_logs,
@@ -56,7 +58,13 @@ from tests.common.equivalence.tensor_records import (
 from tests.common.models import TINY_MISTRAL4_CONFIG, TINY_QWEN35_MOE_CONFIG
 from tests.common.parallelism import single_process_ep_config
 from tests.common.repo import REPO_ROOT
-from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, TinyFamily, tiny_family_model
+from tests.common.tiny_models import (
+    TINY_DENSE_FAMILY,
+    TINY_MOE_FAMILIES,
+    TINY_QWEN3_VL_FAMILY,
+    TinyFamily,
+    tiny_family_model,
+)
 
 CP_SIZE = 2
 SEED = 1234
@@ -83,6 +91,10 @@ class CPFamily:
 
 FAMILIES: dict[str, CPFamily] = {
     "qwen3": CPFamily(TINY_DENSE_FAMILY, moe=False),
+    # The Qwen3 wrapper's other model classes: a routed MoE with its router aux term, and a multimodal backbone in
+    # front of the head.
+    "qwen3_moe": CPFamily(TINY_MOE_FAMILIES["qwen3_moe"]),
+    "qwen3_vl": CPFamily(TINY_QWEN3_VL_FAMILY, moe=False),
     "gpt_oss": CPFamily(TINY_MOE_FAMILIES["gpt_oss"]),
     "bailing_moe": CPFamily(TINY_MOE_FAMILIES["bailing_moe"]),
     "cohere2_moe": CPFamily(TINY_MOE_FAMILIES["cohere2_moe"]),
@@ -370,22 +382,26 @@ def main(argv: list[str] | None = None) -> int:
 
     base, head = resolve_commit(REPO_ROOT, args.base_ref), resolve_commit(REPO_ROOT, args.head_ref)
     with tempfile.TemporaryDirectory() as scratch:
-        base_tree = export_tree(REPO_ROOT, base, Path(scratch, "base"))
-        head_tree = export_tree(REPO_ROOT, head, Path(scratch, "head"))
+        trees = {
+            label: export_tree(REPO_ROOT, commit, Path(scratch, label))
+            for label, commit in (("base", base), ("head", head))
+        }
+        families, skipped = common_families(trees, __spec__.name, families)
         outputs = {label: Path(scratch, f"{label}-records") for label in ("base", "repeat", "head", "control")}
-        _produce_in(base_tree, outputs["base"], families, levels, args.tier)
-        _produce_in(base_tree, outputs["repeat"], families, levels, args.tier)
-        _produce_in(head_tree, outputs["head"], families, levels, args.tier)
-        _produce_in(head_tree, outputs["control"], families[:1], levels, args.tier, perturb=True)
+        _produce_in(trees["base"], outputs["base"], families, levels, args.tier)
+        _produce_in(trees["base"], outputs["repeat"], families, levels, args.tier)
+        _produce_in(trees["head"], outputs["head"], families, levels, args.tier)
+        _produce_in(trees["head"], outputs["control"], families[:1], levels, args.tier, perturb=True)
         verdict, assessed = assess(
             outputs["base"], outputs["repeat"], outputs["head"], outputs["control"], args.accept
         )
-    findings = {"tier": args.tier, "families": families, "levels": levels, **assessed}
+    findings = {"tier": args.tier, "families": families, "skipped": skipped, "levels": levels, **assessed}
     path = write_evidence("cp_equivalence", base=base, head=head, image=args.image, verdict=verdict, findings=findings)
     print(  # noqa: T201 — the CLI's report
         f"CP equivalence ({args.tier}): {verdict}, {len(assessed['deltas'])} deltas, {len(assessed['accepted'])} "
         f"accepted, {len(assessed['enveloped'])} records judged by envelope, {len(assessed['raised'])} raising, "
-        f"negative control unseen in {len(assessed['negative_control']['unseen'])} ({path})"
+        f"negative control unseen in {len(assessed['negative_control']['unseen'])}, skipped as absent from a tree's "
+        f"roster: {skipped or 'none'} ({path})"
     )
     return 0 if verdict == "pass" else 1
 

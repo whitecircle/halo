@@ -303,9 +303,9 @@ def merge_ep_shards(
             model_type, bool(expert_groups), bool(shards.shard_groups), len(logical), verbose
         )
 
-        writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
+        writer = stack.enter_context(StreamingShardWriter(output_dir, max_shard_size, enabled=True))
         # Peak RAM is about twice the largest group (the concatenated inputs plus the transform's
-        # copies) on top of the writer's pending output shard. On disk the merged artifact is the
+        # copies) on top of the writer's staged output parts. On disk the merged artifact is the
         # input shards' size, since tensors are re-emitted at their stored dtype, plus the resume state
         # it cannot hard-link.
         largest_group = max(
@@ -318,7 +318,7 @@ def merge_ep_shards(
             output_dir,
             disk_bytes=sum(os.path.getsize(os.path.join(input_dir, f)) for f in shard_files)
             + cross_device_bytes([os.path.join(input_dir, name) for name in resume_files], output_dir),
-            ram_bytes=2 * largest_group + writer.max_bytes,
+            ram_bytes=2 * largest_group + writer.max_resident_bytes,
         )
 
         os.makedirs(output_dir, exist_ok=True)

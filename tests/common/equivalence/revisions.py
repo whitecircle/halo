@@ -1,7 +1,8 @@
 """Two commits of the repository side by side, for the harnesses that compare a change with its base: a
-commit's tree exported and run, the renames git finds, how a producer records a case that raised, the
-entry-by-entry comparison of two outputs with its accepted deltas and negative control, and the evidence
-record a harness writes per head commit. Standard library only, so the move kit runs wherever git does.
+commit's tree exported and run, the families both trees' rosters hold, the renames git finds, how a producer
+records a case that raised, the entry-by-entry comparison of two outputs with its accepted deltas and negative
+control, and the evidence record a harness writes per head commit. Standard library only, so the move kit runs
+wherever git does.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from pathlib import Path
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT
 
+logger = logging.getLogger(__name__)
+
 # Git-ignored; each run writes <harness>-<head commit>.json here.
 EVIDENCE_DIR = REPO_ROOT / "evidence"
 # The similarity git pairs a deleted file with an added one at; a declared rename must clear the
@@ -35,6 +38,8 @@ DELTA_ENTRIES = 20
 RAISED = "raised"
 # Spelled into a raised message in place of the output root, which differs between the two runs.
 OUTPUT_ROOT_MARK = "<output>"
+# Prints, as JSON, the names the ``FAMILIES`` roster of the module named by ``argv[1]`` holds.
+_ROSTER_SCRIPT = "import importlib, json, sys; print(json.dumps(list(importlib.import_module(sys.argv[1]).FAMILIES)))"
 
 
 def _git(repo: Path, *args: str) -> bytes:
@@ -84,15 +89,19 @@ def detect_renames(repo: Path, base: str, head: str) -> list[Rename]:
     return renames
 
 
-def _run_module(
-    tree: Path, module: str, args: tuple[str, ...], env: Mapping[str, str] | None, nproc: int | None = None, **kwargs
-):
+def _run_python(tree: Path, argv: list[str], env: Mapping[str, str] | None, nproc: int | None = None, **kwargs):
     environment = {**os.environ, **(env or {}), "PYTHONPATH": str(tree)}
     launcher = [sys.executable]
     if nproc is not None:
         launcher += ["-m", "torch.distributed.run", f"--nproc_per_node={nproc}"]
         launcher += ["--master_addr=127.0.0.1", f"--master_port={free_port()}"]
-    return subprocess.run([*launcher, "-m", module, *args], cwd=tree, env=environment, **kwargs)
+    return subprocess.run([*launcher, *argv], cwd=tree, env=environment, **kwargs)
+
+
+def _run_module(
+    tree: Path, module: str, args: tuple[str, ...], env: Mapping[str, str] | None, nproc: int | None = None, **kwargs
+):
+    return _run_python(tree, ["-m", module, *args], env, nproc, **kwargs)
 
 
 def run_in_tree(
@@ -110,9 +119,37 @@ def probe_in_tree(tree: Path, module: str, *args: str) -> subprocess.CompletedPr
     return _run_module(tree, module, args, None, check=False, capture_output=True, text=True)
 
 
+def tree_roster(tree: Path, module: str) -> list[str]:
+    """The names ``module``'s ``FAMILIES`` roster holds as the repository at ``tree`` defines it: what that tree's
+    producer accepts as ``--families``, which a head with a wider roster must not hand it. A tree that cannot
+    import ``module`` raises with that tree's error."""
+    result = _run_python(tree, ["-c", _ROSTER_SCRIPT, module], None, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        raise RuntimeError(f"reading {module}.FAMILIES in {tree} failed: {result.stderr.strip()}")
+    return json.loads(result.stdout.splitlines()[-1])
+
+
 def digest(data: bytes) -> str:
     """The short content digest every harness compares by."""
     return hashlib.sha256(data).hexdigest()[:DIGEST_HEX_CHARS]
+
+
+def common_families(trees: Mapping[str, Path], module: str, requested: Iterable[str]) -> tuple[list[str], list[str]]:
+    """``requested`` narrowed to the families ``module``'s :func:`tree_roster` holds in every one of ``trees``, in
+    request order, and the families left out because some tree's roster lacks them: requested ones, and those
+    another tree's roster holds, so a family a commit adds, drops or renames is named rather than silently not
+    compared. Each tree's lacking families are logged. Raises when no requested family is left."""
+    requested = list(requested)
+    rosters = {label: tree_roster(tree, module) for label, tree in trees.items()}
+    named = dict.fromkeys([*requested, *(family for roster in rosters.values() for family in roster)])
+    for label, roster in rosters.items():
+        if missing := [family for family in named if family not in roster]:
+            logger.warning("%s: the %s tree's roster lacks %s, so they are not compared", module, label, missing)
+    skipped = [family for family in named if not all(family in roster for roster in rosters.values())]
+    families = [family for family in requested if family not in skipped]
+    if not families:
+        raise ValueError(f"{module}: no family of {requested} is in every tree's roster (left out: {skipped})")
+    return families, skipped
 
 
 def raised_description(error: Exception, output_root: Path | str) -> dict[str, str]:

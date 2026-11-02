@@ -4,13 +4,13 @@ true global L2 norm they reduce across EP/TP/FSDP/PP shards, and the primitives 
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.tensor import DTensor
-from transformers.trainer_utils import IntervalStrategy
 
 from halo.distributed.mesh import MeshDim, dp_group, mesh_dim_names, tp_group
 from halo.hardware import current_device
@@ -38,8 +38,9 @@ def trainable_clip_params(parameters) -> list[nn.Parameter]:
 
 def is_clipping_enabled(max_norm) -> bool:
     """HF's convention: ``max_grad_norm <= 0`` (or unset) disables clipping, where scaling by
-    ``0 / norm`` would zero every gradient."""
-    return bool(max_norm) and max_norm > 0
+    ``0 / norm`` would zero every gradient. The infinite threshold of transformers' norm-only pass at
+    ``max_grad_norm <= 0`` clips nothing either, so it skips a pass multiplying every gradient by 1."""
+    return bool(max_norm) and 0 < max_norm < math.inf
 
 
 def local_grad_shards(params) -> list[torch.Tensor]:
@@ -293,34 +294,6 @@ class GradientClippingMixin:
             f"Cannot pick an FSDP shard group from a {mesh.ndim}D mesh with dims {dim_names}: "
             f"expected a 1D full-shard mesh or a 2D HSDP mesh carrying {MeshDim.DP_SHARD!r}."
         )
-
-    def _get_grad_norm(self, model, grad_norm=None):
-        """HF's post-step gradient norm, computed only on the steps that log it.
-
-        With clipping on, the clip's by-product passes through. With ``max_grad_norm <= 0`` HF asks for an
-        unclipped norm for the log line alone, a collective discarded on non-logging steps; the sweeps
-        that path carries are covered by their step-pre-hooks.
-        """
-        if grad_norm is None and not self._logs_after_this_step():
-            return None
-        return super()._get_grad_norm(model, grad_norm=grad_norm)
-
-    def _logs_after_this_step(self) -> bool:
-        """Whether ``_maybe_log_save_evaluate`` will log the step now being completed.
-
-        Replicates ``DefaultFlowCallback.on_step_end``, which runs after ``global_step`` is incremented,
-        from rank-uniform state only; whatever it cannot predict (an epoch-strategy log, a flag another
-        callback raised, the final step) answers True.
-        """
-        args, state = self.args, self.state
-        if getattr(self.control, "should_log", False) or args.logging_strategy != IntervalStrategy.STEPS:
-            return True
-        step = state.global_step + 1
-        if args.logging_first_step and step == 1:
-            return True
-        if state.max_steps and step >= state.max_steps:
-            return True
-        return step % max(int(state.logging_steps), 1) == 0
 
     def _has_mixed_mesh_grads(self, model) -> bool:
         """Always ``False``, so HF's clip and its unclipped norm both go through ``accelerator.clip_grad_norm_``:

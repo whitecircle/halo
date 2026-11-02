@@ -5,7 +5,8 @@
 whose explicit signature lacks one of its keys raises a ``TypeError`` at construction; one that stops
 forwarding a checkpoint knob to ``_init_distributed_config``, or a spine that stops popping it, turns
 ``save_max_shard_size`` / ``allow_optimizer_warm_restart`` into silent no-ops, since the savers read them
-only off the contexts the trainer builds. ``_init_distributed_config`` also owns the HF settings every distributed trainer
+only off the contexts the trainer builds; the same holds for ``max_consecutive_nonfinite_steps``, which the step
+guard reads off the trainer. ``_init_distributed_config`` also owns the HF settings every distributed trainer
 needs (``fsdp`` off, ``ddp_find_unused_parameters`` under EP).
 
 Run: python tests/cpu/trainers/test_distributed_trainer_kwargs.py
@@ -30,7 +31,11 @@ TRAINERS = distributed_trainer_classes()
 
 def _bundle(parallelism_config) -> dict:
     args = SimpleNamespace(
-        moe_balancing="auto", save_sharded_ep=False, save_max_shard_size="1GB", allow_optimizer_warm_restart=True
+        moe_balancing="auto",
+        save_sharded_ep=False,
+        save_max_shard_size="1GB",
+        allow_optimizer_warm_restart=True,
+        max_consecutive_nonfinite_steps=7,
     )
     return distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=False)
 
@@ -65,9 +70,10 @@ def test_the_checkpoint_knobs_reach_the_checkpoint_contexts(tmp_path, monkeypatc
             **_bundle(make_parallelism_config(world_size=1, gpus_per_node=1)),
         }
     )
-    assert not {"save_max_shard_size", "allow_optimizer_warm_restart"} & set(remaining), (
-        "the checkpoint knobs were left in the kwargs the trainer forwards to its base"
-    )
+    assert not {"save_max_shard_size", "allow_optimizer_warm_restart", "max_consecutive_nonfinite_steps"} & set(
+        remaining
+    ), "the trainer knobs were left in the kwargs the trainer forwards to its base"
+    assert trainer._max_consecutive_nonfinite_steps == 7, "the non-finite step limit never reached the step guard"
     trainer.model, trainer.optimizer, trainer.lr_scheduler, trainer.processing_class = model, None, None, None
     trainer._top_level_model = lambda: model
     trainer._get_tp_rank = lambda: 0
@@ -96,6 +102,7 @@ def test_the_embedding_signature_forwards_the_checkpoint_knobs(tmp_path, monkeyp
         )
     assert recorded["save_max_shard_size"] == "1GB"
     assert recorded["allow_optimizer_warm_restart"] is True
+    assert recorded["max_consecutive_nonfinite_steps"] == 7
 
 
 @pytest.mark.parametrize("ep_size", [1, 2], ids=["dp", "ep"])

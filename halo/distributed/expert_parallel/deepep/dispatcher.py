@@ -70,7 +70,8 @@ def _combine_backward(ctx, grad_combined_x: torch.Tensor) -> torch.Tensor:
 
 
 class DeepEPDispatchFunction(torch.autograd.Function):
-    """DeepEP dispatch; its backward is a combine."""
+    """DeepEP dispatch; its backward is a combine. The handle and the host-side receive counts pass through
+    as non-tensor outputs."""
 
     @staticmethod
     def forward(ctx, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, dispatcher):
@@ -78,16 +79,16 @@ class DeepEPDispatchFunction(torch.autograd.Function):
         topk_idx = topk_idx.contiguous().to(deep_ep().topk_idx_t)
         # DeepEP asserts contiguous float32 top-k weights.
         topk_weights = topk_weights.to(dtype=torch.float32).contiguous()
-        recv_x, recv_topk_idx, recv_topk_weights, handle = dispatcher.backend.dispatch_forward(
+        recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts = dispatcher.backend.dispatch_forward(
             x, topk_idx, topk_weights
         )
         ctx.dispatcher = dispatcher
         ctx.handle = handle
         ctx.input_dtype = x.dtype
-        return recv_x, recv_topk_idx, recv_topk_weights, handle
+        return recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts
 
     @staticmethod
-    def backward(ctx, grad_recv_x, grad_recv_topk_idx, grad_recv_topk_weights, grad_handle):
+    def backward(ctx, grad_recv_x, grad_recv_topk_idx, grad_recv_topk_weights, grad_handle, grad_recv_counts):
         grad_x, grad_topk_weights = _dispatch_backward(ctx, grad_recv_x, grad_recv_topk_weights)
         return grad_x, None, grad_topk_weights, None
 
@@ -184,14 +185,16 @@ class DeepEPDispatcher:
         self.backend = build_ep_backend(self, ep_config.ep_buffer_backend)
 
     def dispatch(self, x: torch.Tensor, topk_idx: torch.Tensor, topk_weights: torch.Tensor, *, owner: nn.Module):
-        """Dispatch tokens to their experts' ranks; the identity in no-op mode, where the indices are local.
+        """Dispatch tokens to their experts' ranks → ``(recv_x, recv_topk_idx, recv_topk_weights, handle,
+        recv_counts)``, ``recv_counts`` the backend's host-side per-local-expert counts; the identity in no-op
+        mode, where the indices are local and there are no counts.
 
         Inside a recompute scope the original pass caches its results under ``owner`` and the recompute replays
         them: a second DeepEP dispatch invalidates the handle the original backward holds and silently corrupts
         every gradient.
         """
         if self._noop:
-            return x, topk_idx, topk_weights, None
+            return x, topk_idx, topk_weights, None, None
         scope = active_recompute_scope()
         if scope is None and owner.training and in_backward_pass():
             raise RuntimeError(
@@ -202,7 +205,7 @@ class DeepEPDispatcher:
             )
         slot = scope.slot(owner, "dispatch") if scope is not None else None
         if scope is not None and scope.is_recompute:
-            return ReplayDispatchFunction.apply(
+            replayed = ReplayDispatchFunction.apply(
                 x,
                 topk_idx,
                 topk_weights,
@@ -212,8 +215,9 @@ class DeepEPDispatcher:
                 slot["recv_topk_weights"],
                 slot["handle"],
             )
+            return (*replayed, slot["recv_counts"])
         self._ensure_buffer(x.shape[0], topk_idx.shape[1])
-        recv_x, recv_topk_idx, recv_topk_weights, handle = DeepEPDispatchFunction.apply(
+        recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts = DeepEPDispatchFunction.apply(
             x, topk_idx, topk_weights, self
         )
         if slot is not None:
@@ -224,8 +228,9 @@ class DeepEPDispatcher:
                 recv_topk_idx=recv_topk_idx.detach() if recv_topk_idx is not None else None,
                 recv_topk_weights=recv_topk_weights.detach() if recv_topk_weights is not None else None,
                 handle=handle,
+                recv_counts=recv_counts,
             )
-        return recv_x, recv_topk_idx, recv_topk_weights, handle
+        return recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts
 
     def _ensure_buffer(self, num_tokens: int, num_topk: int) -> None:
         """COLLECTIVE over the EP group. Build or grow the buffer to hold ``num_tokens`` per rank."""

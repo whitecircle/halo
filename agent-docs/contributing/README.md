@@ -476,9 +476,12 @@ and in `HEAD_REF` with that tree's code (so `BASE` must already carry it) and wr
 `ACCEPT="<case> ..."` names the cases whose deltas a flagged change declares, each a case path or a
 prefix of one (`ACCEPT=cpu/qwen3_moe` covers every EP record of that family); their deltas stay in the
 evidence under `accepted` without failing the verdict, and `FAMILIES=` limits a run to some tiny
-families. Every verdict also fails on an unexpected raise. The EP, CP and efficiency harnesses run a
-negative control: the head tree reruns one case with a deliberate perturbation, and the verdict fails
-when that record matches its base or raised.
+families. The checkpoint and EP harnesses run only the families both trees' `FAMILIES` rosters hold, so
+a change that adds, drops or renames a family still compares the rest against its base; each family left
+out is logged by the tree whose roster lacks it and listed under `skipped`
+(`tests/cpu/conventions/test_harness_family_rosters.py`). Every verdict also fails on an unexpected raise.
+The EP, CP and efficiency harnesses run a negative control: the head tree reruns one case with a
+deliberate perturbation, and the verdict fails when that record matches its base or raised.
 
 - **Checkpoint artifacts** (`make verify-artifacts`, `tests/common/equivalence/checkpoint_artifacts.py`)
   saves a tiny model of every family (the dense roster, every EP family and its multimodal wrappers) at
@@ -504,8 +507,10 @@ when that record matches its base or raised.
   with `HALO_EP_SHARED_OVERLAP` off and on. Records outside `KNOWN_RAISING` must not raise; the negative
   control rotates every expert bank by one expert (`tests/cpu/parallelism/test_ep_bitwise_harness.py`).
 - **CP equivalence** (`make verify-cp`, `tests/common/equivalence/cp_equivalence.py`) runs a two-rank CP
-  group in each tree on one tiny model per Ulysses wrapper class, at two levels: the first attention layer
-  on fixed hidden states, and the model under `UlyssesModel` through its loss. The base tree runs twice
+  group in each tree on the CP roster, tiny models covering every Ulysses wrapper class (the Qwen3 wrapper on
+  its dense, MoE and VL classes), at two levels: the first attention layer on fixed hidden states, and the
+  model under `UlyssesModel` through its loss. A family the base tree's roster lacks has nothing to compare
+  with: it is skipped and listed under `skipped`. The base tree runs twice
   and must repeat bit for bit; a record whose base does not repeat is compared forward bit for bit with
   each gradient inside its base-vs-base envelope (listed under `enveloped`). `TIER=gpu` runs bf16 under
   `full_determinism` with the flash kernel CP picks per family (FA4 on Blackwell where the family allows

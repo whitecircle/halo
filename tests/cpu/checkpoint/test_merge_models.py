@@ -42,6 +42,7 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.reading import iter_checkpoint_shard_entries
 from halo.checkpoint.tools import model_merge as mm
+from halo.checkpoint.writing import checkpoint_write_threads
 from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -706,8 +707,9 @@ def test_each_method_working_set_bound_covers_its_peak(method, n_models, dtype, 
 def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tmp_path, monkeypatch):
     """The RAM estimate is the costliest key — every contributor's copy as stored (a fp32 base beside
     bf16 fine-tunes here) plus the method's working set for the model count (not the contributor count)
-    over it — and the writer's pending shard. The working set is float32 whatever the stored dtype, so
-    key ``b``, with more elements, outweighs ``a``, which stores more bytes (fp32)."""
+    over it — and the writer's staged parts (the shard it is filling and one per write thread). The
+    working set is float32 whatever the stored dtype, so key ``b``, with more elements, outweighs ``a``,
+    which stores more bytes (fp32)."""
     captured = {}
     monkeypatch.setattr(mm, "preflight_resource_warning", lambda *_, ram_bytes, **__: captured.update(ram=ram_bytes))
     wide_bytes, large = torch.randn(600), torch.randn(64, 16)
@@ -727,7 +729,7 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
     numel = large.numel()
     stored = 3 * numel * 2 + numel * 4
     working = mm.MERGE_METHODS["ties"].fp32_copies(3) * 4 * numel
-    shard = mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
+    shard = (1 + checkpoint_write_threads()) * mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
 
 
@@ -755,7 +757,7 @@ def test_the_ram_preflight_counts_the_costliest_key_when_sizes_tie(tmp_path, mon
     numel = tensor.numel()
     stored = 2 * numel * 2 + numel * 4
     working = mm.MERGE_METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
-    shard = mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
+    shard = (1 + checkpoint_write_threads()) * mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
     assert captured["ram"] == stored + working + shard
 
 

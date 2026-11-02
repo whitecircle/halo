@@ -15,6 +15,7 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from halo.hardware import current_device
 from halo.kernels.fla_autotune import restrict_fla_blackwell_autotune
+from halo.kernels.fla_fixed_nb import fix_fla_norm_nb
 from halo.log import warn_once
 from halo.models.attention.layout import resolve_head_dim
 from halo.models.config_access import text_config
@@ -292,9 +293,12 @@ def finalize_loaded_model(model: nn.Module) -> None:
     transformers 5 re-materializes every non-persistent buffer as ``torch.empty_like``, and a
     remote-code family overriding ``_init_weights`` without ``super()`` never repairs it: a zero
     inv_freq degenerates RoPE to NoPE at a plausible loss. A buffer no fix covers stays on meta and is
-    rejected at the trainer's device placement. The kernel restrictions the loaded modules need before
-    their first launch are applied here too (:func:`~halo.kernels.fla_autotune.restrict_fla_blackwell_autotune`).
+    rejected at the trainer's device placement. The kernel restrictions and launch options the loaded modules
+    need before their first launch are applied here too
+    (:func:`~halo.kernels.fla_autotune.restrict_fla_blackwell_autotune`,
+    :func:`~halo.kernels.fla_fixed_nb.fix_fla_norm_nb`).
     """
     _walk_and_fix(model, (_ROTARY_FIXERS, _NON_PERSISTENT_FIXERS))
     _retie_shared_weights(model)
     restrict_fla_blackwell_autotune()
+    fix_fla_norm_nb()

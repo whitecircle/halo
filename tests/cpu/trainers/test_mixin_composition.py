@@ -23,6 +23,7 @@ from halo.trainers.parallelism.grad_clipping import GradientClippingMixin
 from halo.trainers.parallelism.grad_sync import GradientSyncMixin
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
+from halo.trainers.step_guard import NonFiniteStepGuardMixin
 
 # name -> the sub-mixin that must own it. Each is reached off ``DistributedTrainerMixin`` by a
 # trainer, a test or a strategy, so an owner change must stay MRO-visible from the composed class.
@@ -88,7 +89,6 @@ _OWNERSHIP = {
     ),
     GradientClippingMixin: (
         "_compute_global_grad_norm",
-        "_get_grad_norm",
         "_has_mixed_mesh_grads",
         "_install_ep_clip",
         "_install_qlora_clip",
@@ -104,6 +104,14 @@ _OWNERSHIP = {
         "_tp_per_head_norm_param_ids",
         "_tp_sharded_plain_param_ids",
     ),
+    NonFiniteStepGuardMixin: (
+        "_get_grad_norm",
+        "_install_nonfinite_step_skip",
+        "_maybe_log_save_evaluate",
+        "_raise_on_nonfinite_weights",
+        "_step_is_finite",
+        "get_batch_samples",
+    ),
 }
 
 # Owner -> the methods it extends with a zero-arg ``super()``: the HF Trainer implementations they reach.
@@ -118,6 +126,7 @@ _SUPER_DELEGATED = {
         "train",
     ),
     EvaluationMixin: ("evaluate", "evaluation_loop"),
+    NonFiniteStepGuardMixin: ("_get_grad_norm", "_maybe_log_save_evaluate", "get_batch_samples", "log"),
 }
 
 
@@ -152,6 +161,18 @@ class _BaseTrainer:
         return "base"
 
     def evaluation_loop(self, *args, **kwargs):
+        return "base"
+
+    def _get_grad_norm(self, model, grad_norm=None):
+        return "base"
+
+    def _maybe_log_save_evaluate(self, *args, **kwargs):
+        return "base"
+
+    def get_batch_samples(self, *args, **kwargs):
+        return "base"
+
+    def log(self, logs, start_time=None):
         return "base"
 
 

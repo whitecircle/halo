@@ -68,6 +68,26 @@ training, evaluation and reference scoring; online and environmental GRPO do not
 reference and resume contract is in
 [Offline GRPO](../training-methods/grpo/offline.md#reference-model).
 
+### Fused head loss
+
+Without it, each rank scores its chunk from the model's logits in fp32: the bf16 logits, their fp32 copy and the
+saved log-softmax, about 12 B per local token per vocabulary entry across forward and backward. When the run
+resolves Liger's `fused_linear_cross_entropy` on for the family (requested in `liger_kernel_config`, or the family
+default: GLM-4.7-Flash), a training forward instead keeps one position's logits (`logits_to_keep=1`), takes the
+backbone's final hidden states, and scores them through Liger's fused linear cross-entropy under the family's
+verified head transform (`fused_head_ce_sum` in `halo/model_loading/liger/cross_entropy.py`: hidden and logit scale
+folded onto the hidden states, softcap in the kernel, vocabulary cut on the weight). No logits plane is built. The
+weight gradient accumulates in fp32. The boundary pairing, the token normalization and the aux term are the
+logits loss's. The forward returns `logits=None` and the chunk's `token_accuracy`, so SFT logs accuracy but no
+entropy, as FLCE does without CP.
+
+Eval forwards keep the logits loss. A training forward without labels returns the full logits, with one warning:
+only a labelled forward (SFT) runs the fused loss, and SMPO scores its pairs from those logits. A forward that cannot
+take the fused path keeps the logits loss, with one warning:
+no `logits_to_keep` parameter (Bailing's remote code), a PEFT tuner or a non-`nn.Linear` module on the output
+embedding, a head path the transform probe cannot verify, or a logit scale over a biased head. The model's own head
+stays unpatched under CP, since the wrapper never hands it labels.
+
 A model that returns an `aux_loss` while its config declares no `router_aux_loss_coef` **raises** — a
 stand-in weight would train a different objective than the same config without CP. Set the field
 through `model_init_kwargs`, or turn the aux loss off for that family with `moe_balancing`.
@@ -253,12 +273,12 @@ alone OOMs at long sequences (it shards experts, not activations) — that is th
 | `reset_sinks: false` on GPT-OSS | rejected at model load — the CP attention kernels drop the sink column, so live sinks would misnormalize the softmax in every layer | `reject_unsupported_model`, re-checked in `GptOssUlyssesAttention` |
 | `label_smoothing_factor > 0`, `loss_type: dft` | rejected — the Trainer pops `labels` and pairs full labels with this rank's chunk logits | `reject_cp_trainer_args` |
 | `compute_metrics`, `preprocess_logits_for_metrics` | rejected whenever set, not gated on `eval_strategy` (a direct `evaluate()`/`predict()` reaches the same misaligned chunk-logits path) — eval under CP is loss-only | same |
-| SFT's metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | scored on the rank's chunk against the full labels, accumulated locally per micro-batch and reduced once per log, as in every mode ([SFT loss and metrics](../reference/trainer-architecture.md#sft-loss-and-metrics)) | `halo/trainers/sft.py` (`_record_loss_metrics`) |
+| SFT's metrics (`mean_token_accuracy`, `entropy`, `aux_loss`, `num_attended_tokens_seen`) | scored on the rank's chunk against the full labels, accumulated locally per micro-batch and reduced once per log, as in every mode ([SFT loss and metrics](../reference/trainer-architecture.md#sft-loss-and-metrics)); under the [fused head loss](#fused-head-loss), accuracy from the chunk's `token_accuracy` weighed by its supervised targets, and no entropy | `halo/trainers/sft.py` (`_record_loss_metrics`) |
 | multimodal inputs (`pixel_values`) | rejected — text-only | `context_parallel/ulysses_model.py` |
 | `fsdp_shard_ep1_experts: false` | rejected — the CP path shards `ep1` experts unconditionally, so the flag would be a silent no-op | `_reject_fsdp_settings` |
 | `accelerate launch` | rejected — CP requires `torchrun` | `reject_unsupported_run` and `reject_accelerate_launch` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True` (warned when the config sets `false`; [rule](../optimization/flash-attention.md#usage)) | `DistributedTrainerMixin._apply_training_args_overrides` |
-| `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `halo/model_loading/liger/dispatch.py` |
+| `use_liger_kernel` | supported; the model's own `cross_entropy` and `fused_linear_cross_entropy` patches are off (an explicit `cross_entropy` is warned), and a resolved `fused_linear_cross_entropy` runs in the CP wrapper ([fused head loss](#fused-head-loss)) | `halo/model_loading/liger/dispatch.py`, `context_parallel/ulysses_model.py` |
 | `use_peft` / LoRA | supported for SFT and SMPO — CP leaves attention unsharded, so adapters stay replicated; offline GRPO rejects adapters | `reject_offline_cp_options` (offline GRPO) |
 | QLoRA (`load_in_4bit`) | supported for SFT and SMPO on a **dense** model — CP keeps the standard loader and preserves `Params4bit`. On an MoE the grouped-GEMM loader takes over and rejects a quantized base (`use_grouped_gemm` is on by default); offline GRPO rejects adapters | `model_loading/parallel/load_rules.py`, `reject_offline_cp_options` |
 | `use_hsdp`, `fsdp_reshard_after_forward` | supported — CP is one of HSDP's two accepted paths (pure DP, CP) and one of ZeRO-3's EP-free shapes | `_reject_hsdp`, `_reject_fsdp_settings` |

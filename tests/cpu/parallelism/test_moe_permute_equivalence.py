@@ -206,8 +206,15 @@ def test_the_grouped_path_permutes_atomic_free_at_every_top_k_and_ep_size(monkey
     weights = torch.rand(recv_n, top_k, dtype=torch.float64, generator=g)
     scale = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
 
+    local_ids = experts[(experts >= 0) & (experts < 3)]
+    recv_counts = tuple(torch.bincount(local_ids, minlength=3).tolist())
     out = layer._compute_experts_with_grouped_mm(
-        tokens, experts, weights, torch.float64, lambda rows, _offs, eids: rows * scale[eids, None]
+        tokens,
+        experts,
+        weights,
+        torch.float64,
+        lambda rows, _offs, eids: rows * scale[eids, None],
+        recv_counts=recv_counts,
     )
 
     assert calls == ["MoEGatherPermute", "MoEWeightedUnpermute"]

@@ -19,6 +19,9 @@ _DEFAULT_PROJECT = "default-project"
 # The dataset column a ground-truth answer is read from unless a config renames it.
 DEFAULT_ANSWER_FIELD = "answer"
 
+# Optimizer steps in a row whose gradient norm may be non-finite (each skipped) before the run raises.
+DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS = 3
+
 
 @dataclass
 class CheckpointArguments:
@@ -304,6 +307,16 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             "scripts."
         },
     )
+    max_consecutive_nonfinite_steps: int = field(
+        default=DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS,
+        metadata={
+            "help": "An optimizer step whose global gradient norm is NaN or inf is never applied: its gradients are "
+            "discarded, weights and optimizer moments stay as they were, and the step counter and LR schedule "
+            "advance. This many such steps in a row are skipped with a warning; the next one raises, as does a "
+            "non-finite step whose weights are already non-finite. 0 raises at the first. "
+            "See agent-docs/reference/trainer-architecture.md#non-finite-steps."
+        },
+    )
 
     def __post_init__(self):
         if self.project_name == _DEFAULT_PROJECT:
@@ -331,6 +344,7 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
         require_finite(owner, gt=0, lt=1, why=" (a proportion)", **present(test_size=self.test_size))
         require_finite(owner, gt=0, **present(num_full_model_params=self.num_full_model_params))
         require_finite(owner, gt=0, router_balancing_rate=self.router_balancing_rate)
+        require_int(owner, ge=0, max_consecutive_nonfinite_steps=self.max_consecutive_nonfinite_steps)
 
 
 @dataclass

@@ -1,13 +1,17 @@
 """AdamW with bf16 master weights and moments (6 B/param), stochastically rounded.
 
 Stochastic rounding keeps the bf16 writes unbiased, where nearest rounding would truncate a sub-ULP ``lr*step``
-update to zero and inflate the non-negative second moment. Writes go through ``p.detach()`` and bump ``_version``
-explicitly: the Triton stores are invisible to ATen, and the low-precision weight cache keys on the counter."""
+update to zero and inflate the non-negative second moment. The fused step updates the bf16 parameters that share
+dtypes and a launch specialization in one launch on sm_100/103 and one parameter per launch on other GPUs, through raw
+pointers to the local shards, and bumps ``_version`` explicitly: the Triton stores are invisible to ATen, and the
+low-precision weight cache keys on the counter."""
 
+import functools
 import logging
 import math
-from collections.abc import Sequence
-from typing import Any
+from collections import defaultdict
+from collections.abc import Iterable, Sequence
+from typing import Any, NamedTuple
 
 import torch
 import triton
@@ -33,108 +37,299 @@ _SR_KEY = 0xB165EED
 # One thread per Philox lane of four elements: beats Triton's default 4 warps on a large parameter's
 # memory-bound step.
 _ADAM_NUM_WARPS = SR_BLOCK_SIZE // 4 // 32
+# Rows of the int64 index table a fused launch reads (_launch_tables): each tensor's first program, element
+# count and seed, then the element offset of each of its four tensors from that role's base tensor.
+_ROW_FIRST_PROGRAM = tl.constexpr(0)
+_ROW_NUMEL = tl.constexpr(1)
+_ROW_SEED = tl.constexpr(2)
+_ROW_P = tl.constexpr(3)
+_ROW_GRAD = tl.constexpr(4)
+_ROW_EA = tl.constexpr(5)
+_ROW_EASQ = tl.constexpr(6)
+_ROLE_ROWS = tuple(row.value for row in (_ROW_P, _ROW_GRAD, _ROW_EA, _ROW_EASQ))
+_INDEX_ROWS = _ROW_EASQ.value + 1
+# Rows of the fp32 scalar table, in _FusedUpdate.hparams order.
+_ROW_BETA1 = tl.constexpr(0)
+_ROW_BETA2 = tl.constexpr(1)
+_ROW_STEP_SIZE = tl.constexpr(2)
+_ROW_BC2_SQRT = tl.constexpr(3)
+_ROW_EPS = tl.constexpr(4)
+_ROW_WD_FACTOR = tl.constexpr(5)
+# Each program binary-searches its launch's first-program row, one probe per halving: the cap bounds that search
+# at 8 probes and the TABLE_SIZE variants a run compiles.
+_MAX_TENSORS_PER_LAUNCH = 256
+# The compute capabilities (B200, B300) the multi-tensor launch is measured on. Elsewhere each launch steps one tensor
+# at TABLE_SIZE 1, which compiles to the per-parameter kernel's per-element code.
+_MULTI_TENSOR_LAUNCH_CAPABILITIES = frozenset({(10, 0), (10, 3)})
+# Blocks of one tensor a program steps. Its lookup and table reads run once for all of them, so a block costs about
+# what a lone launch's program does; more would leave a launch of small tensors too few programs to fill the GPU.
+_BLOCKS_PER_PROGRAM = 16
+# Registers per thread at full occupancy (64K registers over 2,048 threads), the per-parameter kernel's count:
+# uncapped, the per-tensor scalars a program holds across its blocks take 48, and an SM fits 5 programs, not 8.
+_ADAM_MAX_REGISTERS = 32
+# Triton's launcher specializes an integer argument as divisible when it is a multiple of this, and a pointer
+# argument when its address is.
+_DIVISIBILITY = tl.constexpr(16)
+# The kernel's flag for each entry of _FusedUpdate.divisible.
+_DIVISIBILITY_FLAGS = ("NUMEL_DIVISIBLE", "P_ALIGNED", "GRAD_ALIGNED", "EA_ALIGNED", "EASQ_ALIGNED")
+
+
+@triton.constexpr_function
+def _halvings(size: int) -> int:
+    """How many times a power-of-two ``size`` halves down to 1."""
+    return size.bit_length() - 1
+
+
+@triton.jit
+def _program_blocks(
+    index_table,
+    num_tensors,
+    NUMEL_DIVISIBLE: tl.constexpr,
+    TABLE_SIZE: tl.constexpr,
+    BLOCKS_PER_PROGRAM: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """The tensor slot this program steps, the tensor's element count, and the range ``[first, end)`` of its
+    blocks the program covers.
+
+    The slot is the last one of the sorted first-program row at or below the program id, found by binary search
+    over ``TABLE_SIZE`` slots; a probe past ``num_tensors`` reads the last tensor's entry instead.
+    """
+    pid = tl.program_id(0)
+    tensor = 0
+    for level in tl.static_range(_halvings(TABLE_SIZE)):
+        probe = tl.minimum(tensor + (TABLE_SIZE >> (level + 1)), num_tensors - 1)
+        tensor = tl.where(tl.load(index_table + probe) <= pid, probe, tensor)
+    n_elements = tl.load(index_table + _ROW_NUMEL * num_tensors + tensor)
+    # Hinted here, on the load: Triton drops a hint applied to the value this call returns.
+    if NUMEL_DIVISIBLE:
+        n_elements = tl.multiple_of(n_elements, _DIVISIBILITY)
+    first = (pid - tl.load(index_table + tensor)) * BLOCKS_PER_PROGRAM
+    return tensor, n_elements, first, tl.minimum(first + BLOCKS_PER_PROGRAM, tl.cdiv(n_elements, BLOCK_SIZE))
 
 
 @triton.jit
 def _adam_bf16_sr_kernel(
-    p_ptr,
-    grad_ptr,
-    ea_ptr,
-    easq_ptr,
-    beta1,
-    beta2,
-    step_size,
-    bc2_sqrt,
-    eps,
-    wd_factor,
-    n_elements,
-    seed,
+    p_base,
+    grad_base,
+    ea_base,
+    easq_base,
+    index_table,
+    hparam_table,
+    num_tensors,
     grad_scale_ptr,
     HAS_GRAD_SCALE: tl.constexpr,
+    NUMEL_DIVISIBLE: tl.constexpr,
+    P_ALIGNED: tl.constexpr,
+    GRAD_ALIGNED: tl.constexpr,
+    EA_ALIGNED: tl.constexpr,
+    EASQ_ALIGNED: tl.constexpr,
+    TABLE_SIZE: tl.constexpr,
+    BLOCKS_PER_PROGRAM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
 ):
-    """Fused Adam step for bf16 params: reads bf16, computes fp32, stochastically rounds the writes.
+    """Fused Adam step for a group of bf16 params: reads bf16, computes fp32, stochastically rounds the writes.
 
-    ``grad_scale_ptr`` (with ``HAS_GRAD_SCALE``) is the deferred clip coefficient, applied as CUDA's
-    in-place ``grad.mul_(scale)`` computes it: scale and product rounded to the gradient's dtype.
+    Each program steps up to ``BLOCKS_PER_PROGRAM`` consecutive ``BLOCK_SIZE`` blocks of one tensor;
+    ``index_table`` (:func:`_launch_tables`) maps it to its tensor and to the index of each block within that
+    tensor, which keys the rounding noise exactly as a launch over that tensor alone would. ``grad_scale_ptr``
+    (with ``HAS_GRAD_SCALE``) is the deferred clip coefficient, applied as CUDA's in-place ``grad.mul_(scale)``
+    computes it: scale and product rounded to the gradient's dtype. ``NUMEL_DIVISIBLE`` and the ``*_ALIGNED``
+    flags (:func:`_divisibility`) restore what the table loads hide from the compiler: the divisibility a launch
+    over one of these tensors alone would specialize on. The compiled per-element code depends on it, the FMA
+    association of each element included, so a tensor matches its lone launch bit for bit only under its own flags.
     """
     # One Philox call per lane of four elements: its 4 x 32 bits give each element two 16-bit draws
     # (high half for the second moment, low half for the weight). A call per element would make the
     # Philox rounds, not memory, the bound.
     QUARTER: tl.constexpr = BLOCK_SIZE // 4
-    pid = tl.program_id(0).to(tl.int64)
-    lane = tl.arange(0, QUARTER)
-    offsets = pid * BLOCK_SIZE + (lane[:, None] * 4 + tl.arange(0, 4)[None, :])
-    mask = offsets < n_elements
+    tensor, n_elements, first_block, end_block = _program_blocks(
+        index_table, num_tensors, NUMEL_DIVISIBLE, TABLE_SIZE, BLOCKS_PER_PROGRAM, BLOCK_SIZE
+    )
+    seed = tl.load(index_table + _ROW_SEED * num_tensors + tensor)
+    p_off = tl.load(index_table + _ROW_P * num_tensors + tensor)
+    grad_off = tl.load(index_table + _ROW_GRAD * num_tensors + tensor)
+    ea_off = tl.load(index_table + _ROW_EA * num_tensors + tensor)
+    easq_off = tl.load(index_table + _ROW_EASQ * num_tensors + tensor)
+    beta1 = tl.load(hparam_table + _ROW_BETA1 * num_tensors + tensor)
+    beta2 = tl.load(hparam_table + _ROW_BETA2 * num_tensors + tensor)
+    step_size = tl.load(hparam_table + _ROW_STEP_SIZE * num_tensors + tensor)
+    bc2_sqrt = tl.load(hparam_table + _ROW_BC2_SQRT * num_tensors + tensor)
+    eps = tl.load(hparam_table + _ROW_EPS * num_tensors + tensor)
+    wd_factor = tl.load(hparam_table + _ROW_WD_FACTOR * num_tensors + tensor)
+    if P_ALIGNED:
+        p_off = tl.multiple_of(p_off, _DIVISIBILITY // p_base.dtype.element_ty.itemsize)
+    if GRAD_ALIGNED:
+        grad_off = tl.multiple_of(grad_off, _DIVISIBILITY // grad_base.dtype.element_ty.itemsize)
+    if EA_ALIGNED:
+        ea_off = tl.multiple_of(ea_off, _DIVISIBILITY // ea_base.dtype.element_ty.itemsize)
+    if EASQ_ALIGNED:
+        easq_off = tl.multiple_of(easq_off, _DIVISIBILITY // easq_base.dtype.element_ty.itemsize)
 
-    p = tl.load(p_ptr + offsets, mask=mask).to(tl.float32)
-    grad_raw = tl.load(grad_ptr + offsets, mask=mask)
-    grad = grad_raw.to(tl.float32)
-    if HAS_GRAD_SCALE:
-        scale = tl.load(grad_scale_ptr).to(grad_raw.dtype).to(tl.float32)
-        grad = (grad * scale).to(grad_raw.dtype).to(tl.float32)
-    ea = tl.load(ea_ptr + offsets, mask=mask).to(tl.float32)
-    easq = tl.load(easq_ptr + offsets, mask=mask).to(tl.float32)
+    for block in range(first_block, end_block):
+        lane = tl.arange(0, QUARTER)
+        offsets = block * BLOCK_SIZE + (lane[:, None] * 4 + tl.arange(0, 4)[None, :])
+        mask = offsets < n_elements
 
-    ea = beta1 * ea + (1.0 - beta1) * grad
-    easq = beta2 * easq + (1.0 - beta2) * grad * grad
+        p = tl.load(p_base + p_off + offsets, mask=mask).to(tl.float32)
+        grad_raw = tl.load(grad_base + grad_off + offsets, mask=mask)
+        grad = grad_raw.to(tl.float32)
+        if HAS_GRAD_SCALE:
+            scale = tl.load(grad_scale_ptr).to(grad_raw.dtype).to(tl.float32)
+            grad = (grad * scale).to(grad_raw.dtype).to(tl.float32)
+        ea = tl.load(ea_base + ea_off + offsets, mask=mask).to(tl.float32)
+        easq = tl.load(easq_base + easq_off + offsets, mask=mask).to(tl.float32)
 
-    # exp_avg is a signed ~zero-mean EMA, so nearest rounding is already unbiased.
-    tl.store(ea_ptr + offsets, ea.to(tl.bfloat16), mask=mask)
+        ea = beta1 * ea + (1.0 - beta1) * grad
+        easq = beta2 * easq + (1.0 - beta2) * grad * grad
 
-    r0, r1, r2, r3 = tl.randint4x(seed, pid * QUARTER + lane)
-    bits = tl.reshape(tl.join(tl.join(r0, r1), tl.join(r2, r3)), (QUARTER, 4)).to(tl.uint32, bitcast=True)
-    easq_noise = (bits >> 16).to(tl.int32)
-    rand_noise = (bits & 0xFFFF).to(tl.int32)
+        # exp_avg is a signed ~zero-mean EMA, so nearest rounding is already unbiased.
+        tl.store(ea_base + ea_off + offsets, ea.to(tl.bfloat16), mask=mask)
 
-    # Near the bf16 underflow floor nearest rounding biases this non-negative accumulator by tens of
-    # percent, moving sqrt(v) and the effective step away from lr.
-    tl.store(easq_ptr + offsets, sr_round_to_bf16(easq, easq_noise), mask=mask)
+        r0, r1, r2, r3 = tl.randint4x(seed, block * QUARTER + lane)
+        bits = tl.reshape(tl.join(tl.join(r0, r1), tl.join(r2, r3)), (QUARTER, 4)).to(tl.uint32, bitcast=True)
+        easq_noise = (bits >> 16).to(tl.int32)
+        rand_noise = (bits & 0xFFFF).to(tl.int32)
 
-    # The weight update reads the un-rounded second moment.
-    p = p * wd_factor
-    denom = tl.math.sqrt(easq) / bc2_sqrt + eps
-    p = p - step_size * ea / denom
-    tl.store(p_ptr + offsets, sr_round_to_bf16(p, rand_noise), mask=mask)
+        # Near the bf16 underflow floor nearest rounding biases this non-negative accumulator by tens of
+        # percent, moving sqrt(v) and the effective step away from lr.
+        tl.store(easq_base + easq_off + offsets, sr_round_to_bf16(easq, easq_noise), mask=mask)
+
+        # The weight update reads the un-rounded second moment.
+        p = p * wd_factor
+        denom = tl.math.sqrt(easq) / bc2_sqrt + eps
+        p = p - step_size * ea / denom
+        tl.store(p_base + p_off + offsets, sr_round_to_bf16(p, rand_noise), mask=mask)
 
 
-def _triton_adam_bf16_step(
-    p: Tensor,
-    grad: Tensor,
-    exp_avg: Tensor,
-    exp_avg_sq: Tensor,
-    step_size: float,
-    bc2_sqrt: float,
-    eps: float,
-    wd_factor: float,
-    beta1: float,
-    beta2: float,
-    sr_seeds: tuple[int, int],
-    grad_scale: Tensor | None = None,
-):
-    """Launch :func:`_adam_bf16_sr_kernel` on one parameter's local shard."""
-    p_flat = to_local(p.detach()).view(-1)
-    grad_flat = to_local(grad).view(-1)
-    n = p_flat.numel()
-    _adam_bf16_sr_kernel[(triton.cdiv(n, SR_BLOCK_SIZE),)](
-        p_flat,
-        grad_flat,
-        to_local(exp_avg).view(-1),
-        to_local(exp_avg_sq).view(-1),
-        beta1,
-        beta2,
-        step_size,
-        bc2_sqrt,
-        eps,
-        wd_factor,
-        n,
-        sr_seeds[0],  # the kernel derives both noise streams from the first seed
-        grad_scale if grad_scale is not None else grad_flat,
+class _FusedUpdate(NamedTuple):
+    """One bf16 parameter's share of a fused step: its local tensors and its own scalars."""
+
+    param: Tensor
+    tensors: tuple[Tensor, Tensor, Tensor, Tensor]  # local p, grad, exp_avg, exp_avg_sq
+    hparams: tuple[float, float, float, float, float, float]  # in _ROW_BETA1 .. _ROW_WD_FACTOR order
+    seed: int
+    divisible: tuple[bool, bool, bool, bool, bool]  # _divisibility(tensors)
+
+    @property
+    def group_key(self) -> tuple:
+        """Updates sharing a key run in one launch, which specializes on each role's dtype and device and on the
+        divisibility flags."""
+        return (*((tensor.device, tensor.dtype) for tensor in self.tensors), self.divisible)
+
+
+def _step_hparams(group: dict, step: int) -> tuple[float, float, float, float, float, float]:
+    """A param's Adam scalars at optimizer ``step`` under ``group``, in ``_ROW_BETA1 .. _ROW_WD_FACTOR`` order."""
+    beta1, beta2 = group["betas"]
+    lr = group["lr"]
+    step_size = lr / (1.0 - beta1**step)
+    bc2_sqrt = math.sqrt(1.0 - beta2**step)
+    return beta1, beta2, step_size, bc2_sqrt, group["eps"], 1.0 - lr * group["weight_decay"]
+
+
+def _divisibility(tensors: Sequence[Tensor]) -> tuple[bool, bool, bool, bool, bool]:
+    """What Triton's launch specialization would mark divisible in a launch over ``tensors`` (p, grad, exp_avg,
+    exp_avg_sq) alone: the element count, then each tensor's start (:data:`_DIVISIBILITY`)."""
+    divisor = _DIVISIBILITY.value
+    return (tensors[0].numel() % divisor == 0, *(tensor.data_ptr() % divisor == 0 for tensor in tensors))
+
+
+def _specialization(divisible: Iterable[tuple[bool, ...]]) -> dict[str, bool]:
+    """The kernel's flags for one launch over updates of these :attr:`_FusedUpdate.divisible`, which must agree:
+    flags other than a tensor's own compile other per-element code for it."""
+    distinct = set(divisible)
+    if len(distinct) != 1:
+        raise ValueError(f"a fused AdamWBF16 launch takes one specialization, got {sorted(distinct)}")
+    return dict(zip(_DIVISIBILITY_FLAGS, distinct.pop(), strict=True))
+
+
+def _fused_update(p: Tensor, name: str, state: dict, group: dict) -> _FusedUpdate:
+    """``p``'s share of the fused step at its current ``state["step"]``, under ``group``'s hyperparameters."""
+    tensors = (to_local(p), to_local(p.grad), to_local(state["exp_avg"]), to_local(state["exp_avg_sq"]))
+    step = state["step"]
+    # The kernel derives both noise streams from the first seed.
+    seed = sr_seed_pair(_SR_KEY, step, sr_param_index(name))[0]
+    return _FusedUpdate(p, tensors, _step_hparams(group, step), seed, _divisibility(tensors))
+
+
+def _launch_tables(updates: Sequence[_FusedUpdate]) -> tuple[Tensor, Tensor, int]:
+    """The host tables one :func:`_adam_bf16_sr_kernel` launch reads, over ``updates`` (an empty one owns no program).
+
+    Returns the int64 index table (rows ``_ROW_*``: first program, element count, seed, then each role's
+    element offset from the first update's tensor of that role), the fp32 scalar table (rows ``_ROW_BETA1``
+    to ``_ROW_WD_FACTOR``, rounded from Python floats as the launcher rounds a float argument) and the total
+    program count.
+    """
+    # One launch shares each role's dtype, so the first update's tensors give every role's base and element size.
+    bases = [tensor.data_ptr() for tensor in updates[0].tensors]
+    sizes = [tensor.element_size() for tensor in updates[0].tensors]
+    per_program = SR_BLOCK_SIZE * _BLOCKS_PER_PROGRAM
+    rows: list[list[int]] = [[] for _ in range(_INDEX_ROWS)]
+    first_programs, numels, seeds = rows[_ROW_FIRST_PROGRAM], rows[_ROW_NUMEL], rows[_ROW_SEED]
+    offsets = [rows[row] for row in _ROLE_ROWS]
+    num_programs = 0
+    for update in updates:
+        n = update.tensors[0].numel()
+        first_programs.append(num_programs)
+        numels.append(n)
+        seeds.append(update.seed)
+        for column, tensor, base, size in zip(offsets, update.tensors, bases, sizes, strict=True):
+            byte_offset = tensor.data_ptr() - base
+            if tensor.numel() != n or not tensor.is_contiguous() or byte_offset % size:
+                raise ValueError(
+                    f"AdamWBF16 steps contiguous, element-aligned local shards: got a {tuple(tensor.shape)} "
+                    f"tensor with strides {tensor.stride()} at byte offset {byte_offset} beside a "
+                    f"{n}-element parameter"
+                )
+            column.append(byte_offset // size)
+        num_programs += (n + per_program - 1) // per_program
+    index = torch.tensor(rows, dtype=torch.int64)
+    hparams = torch.tensor(list(zip(*(update.hparams for update in updates), strict=True)), dtype=torch.float32)
+    return index, hparams, num_programs
+
+
+def _launch_fused(
+    updates: Sequence[_FusedUpdate], index: Tensor, hparams: Tensor, num_programs: int, grad_scale: Tensor | None
+) -> None:
+    """Launch :func:`_adam_bf16_sr_kernel` over non-empty ``updates`` with their :func:`_launch_tables` on device."""
+    p, grad, exp_avg, exp_avg_sq = updates[0].tensors
+    _adam_bf16_sr_kernel[(num_programs,)](
+        p,
+        grad,
+        exp_avg,
+        exp_avg_sq,
+        index,
+        hparams,
+        len(updates),
+        grad_scale if grad_scale is not None else grad,
         HAS_GRAD_SCALE=grad_scale is not None,
+        TABLE_SIZE=triton.next_power_of_2(len(updates)),
+        BLOCKS_PER_PROGRAM=_BLOCKS_PER_PROGRAM,
         BLOCK_SIZE=SR_BLOCK_SIZE,
         num_warps=_ADAM_NUM_WARPS,
+        maxnreg=_ADAM_MAX_REGISTERS,
+        **_specialization(update.divisible for update in updates),
     )
-    torch.autograd.graph.increment_version(p)
+
+
+@functools.cache
+def _tensors_per_launch(device: torch.device) -> int:
+    """How many tensors one fused launch on CUDA ``device`` steps: :data:`_MAX_TENSORS_PER_LAUNCH` on the
+    :data:`_MULTI_TENSOR_LAUNCH_CAPABILITIES`, one elsewhere."""
+    if torch.cuda.get_device_capability(device) in _MULTI_TENSOR_LAUNCH_CAPABILITIES:
+        return _MAX_TENSORS_PER_LAUNCH
+    return 1
+
+
+def _fused_adam_bf16_step(updates: Sequence[_FusedUpdate], grad_scale: Tensor | None) -> None:
+    """Step non-empty ``updates``, at most :func:`_tensors_per_launch` sharing a :attr:`_FusedUpdate.group_key`, in one
+    kernel launch."""
+    index, hparams, num_programs = _launch_tables(updates)
+    device = updates[0].tensors[0].device
+    # Pinned and non-blocking: a pageable copy would synchronize the stream at the step's head.
+    index = index.pin_memory().to(device, non_blocking=True)
+    hparams = hparams.pin_memory().to(device, non_blocking=True)
+    _launch_fused(updates, index, hparams, num_programs, grad_scale)
 
 
 def _scaled_grad(grad: Tensor, grad_scale: Tensor | None) -> Tensor:
@@ -158,7 +353,7 @@ def _eager_adam_bf16_step(
 ):
     """Eager Adam step for one bf16 parameter, seeding its two SR writes with ``sr_seeds``."""
     easq_seed, weight_seed = sr_seeds
-    p_data = to_local(p.detach())
+    p_data = to_local(p).detach()
     grad_fp32 = _scaled_grad(to_local(grad), grad_scale).float()
     exp_avg = to_local(exp_avg)
     exp_avg_sq = to_local(exp_avg_sq)
@@ -186,7 +381,8 @@ def _eager_adam_bf16_step(
 class AdamWBF16(torch.optim.Optimizer):
     """AdamW with stochastically rounded bf16 weights and moments.
 
-    bf16 params take the fused Triton step (eager with ``use_triton=False`` or off CUDA); fp32 params
+    bf16 params take the fused Triton step (eager with ``use_triton=False`` or off CUDA), many per launch on sm_100/103
+    and one per launch elsewhere; fp32 params
     (``fp32_router`` / ``fp32_experts``) take plain in-place AdamW.
     """
 
@@ -236,12 +432,11 @@ class AdamWBF16(torch.optim.Optimizer):
                 loss = closure()
 
         grad_scale, self._grad_scale = self._grad_scale, None
+        # Updates waiting for a launch, by group key; a full launch goes out at once, so the GPU starts on it
+        # while the host builds the rest.
+        pending: dict[tuple, list[_FusedUpdate]] = defaultdict(list)
+        fused_params = []
         for group in self.param_groups:
-            beta1, beta2 = group["betas"]
-            lr = group["lr"]
-            eps = group["eps"]
-            wd = group["weight_decay"]
-
             for p, name in zip(group["params"], group["param_names"], strict=True):
                 # The step count advances for every param, including one with no grad, so replicas
                 # whose grad presence differs still agree on the step a param's seed is keyed by.
@@ -254,13 +449,21 @@ class AdamWBF16(torch.optim.Optimizer):
                 if p.grad is None:
                     continue
 
-                step = state["step"]
-                bc2_sqrt = math.sqrt(1.0 - beta2**step)
-                step_size = lr / (1.0 - beta1**step)
+                # Triton needs CUDA storage, so the param's own device picks the path.
+                if p.dtype == torch.bfloat16 and self._use_triton and p.is_cuda:
+                    fused_params.append(p)
+                    update = _fused_update(p, name, state, group)
+                    if not update.tensors[0].numel():
+                        continue
+                    launch = pending[update.group_key]
+                    launch.append(update)
+                    if len(launch) == _tensors_per_launch(update.tensors[0].device):
+                        _fused_adam_bf16_step(launch, grad_scale)
+                        launch.clear()
+                    continue
+                beta1, beta2, step_size, bc2_sqrt, eps, wd_factor = _step_hparams(group, state["step"])
                 if p.dtype == torch.bfloat16:
-                    # Triton needs CUDA storage, so the param's own device picks the path.
-                    update_fn = _triton_adam_bf16_step if self._use_triton and p.is_cuda else _eager_adam_bf16_step
-                    update_fn(
+                    _eager_adam_bf16_step(
                         p,
                         p.grad,
                         state["exp_avg"],
@@ -268,27 +471,32 @@ class AdamWBF16(torch.optim.Optimizer):
                         step_size,
                         bc2_sqrt,
                         eps,
-                        1.0 - lr * wd,
+                        wd_factor,
                         beta1,
                         beta2,
-                        sr_seed_pair(_SR_KEY, step, sr_param_index(name)),
+                        sr_seed_pair(_SR_KEY, state["step"], sr_param_index(name)),
                         grad_scale,
                     )
                     continue
 
                 # Per param, not _foreach_*: FSDP2 DTensor params cannot mix with plain tensors. All four
                 # tensors share one sharding, so the pointwise update on local shards writes through.
-                p_data = to_local(p.detach())
+                p_data = to_local(p).detach()
                 exp_avg = to_local(state["exp_avg"])
                 exp_avg_sq = to_local(state["exp_avg_sq"])
                 grad_fp32 = _scaled_grad(to_local(p.grad), grad_scale).float()
                 exp_avg.mul_(beta1).add_(grad_fp32, alpha=1.0 - beta1)
                 exp_avg_sq.mul_(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)
-                if wd != 0.0:
-                    p_data.mul_(1.0 - lr * wd)
+                if group["weight_decay"] != 0.0:
+                    p_data.mul_(wd_factor)
                 denom = (exp_avg_sq.sqrt() / bc2_sqrt).add_(eps)
                 p_data.addcdiv_(exp_avg, denom, value=-step_size)
 
+        for launch in pending.values():
+            if launch:
+                _fused_adam_bf16_step(launch, grad_scale)
+        if fused_params:
+            torch.autograd.graph.increment_version(fused_params)
         return loss
 
 

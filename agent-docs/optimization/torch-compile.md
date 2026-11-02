@@ -1,6 +1,6 @@
 # torch.compile
 
-On EP MoE `torch.compile` gains at most 1%, and in `reduce-overhead` mode — the trainer's fallback when `torch_compile_mode` is unset — it costs throughput. On Qwen3-30B-A3B EP=2 at seq 16384, batch 1, `default` mode gains **1%** without Liger and **0.3%** on top of it, `reduce-overhead` is **7% slower** alone and **10% slower** on top of Liger, and Liger alone adds **27%** ([Benchmark results](#benchmark-results)). At that shape keep `torch_compile` off and [Liger kernels](liger-kernels.md) on.
+On EP MoE `torch.compile` gains at most 1%, and in `reduce-overhead` mode it costs throughput, so the trainer falls back to `default` when `torch_compile_mode` is unset. On Qwen3-30B-A3B EP=2 at seq 16384, batch 1, `default` mode gains **1%** without Liger and **0.3%** on top of it, `reduce-overhead` is **7% slower** alone and **10% slower** on top of Liger, and Liger alone adds **27%** ([Benchmark results](#benchmark-results)). At that shape keep `torch_compile` off and [Liger kernels](liger-kernels.md) on.
 
 What fusion buys and what it does not: [GPU Training Theory §5](../reference/gpu-training-theory.md#what-fusion-does-not-buy).
 
@@ -24,9 +24,9 @@ torch_compile_backend: inductor
 
 Or via CLI: `torchrun ... scripts/training/sft.py --torch_compile=true --torch_compile_mode=default`.
 
-`torch_compile_mode` and `torch_compile_backend` are HF `TrainingArguments` fields, both `None` by default. Left unset, the mixin's own compile call falls back to `reduce-overhead` / `inductor` (`_apply_torch_compile`); the accelerate-managed path (no custom parallelism) leaves the mode at inductor's default instead.
+`torch_compile_mode` and `torch_compile_backend` are HF `TrainingArguments` fields, both `None` by default. Left unset, the mixin's compile call (`_apply_torch_compile`) uses `default` / `inductor`. On an accelerate-managed launch the mixin compiles in `__init__`, before Accelerate's `prepare`: a single-process `prepare` does not compile it again, while a multi-process DDP one wraps it and compiles the DDP wrapper with its `TorchDynamoPlugin`, which takes the same `torch_compile_mode` and also resolves an unset one to `default`. `reduce-overhead` (CUDA graphs) runs only when set explicitly.
 
-`DistributedTrainerMixin` applies compilation **after FSDP wrapping** (`_apply_torch_compile`, at the end of
+On the mixin-managed path `DistributedTrainerMixin` applies compilation **after FSDP wrapping** (`_apply_torch_compile`, at the end of
 `_configure_distributed_modes`) — compiling before FSDP fails because FSDP restructures the parameter layout. To
 stop HF Trainer from compiling too early, the mixin clears Accelerate's `ACCELERATE_DYNAMO_*` env vars while
 building its plain accelerator and re-applies `torch.compile` itself, assigning both `self.model` and
@@ -68,7 +68,7 @@ Compile fuses the spans between graph breaks (norms, projections), not across th
 
 ## Running benchmarks
 
-`tests/gpu/profiling/benchmark_torch_compile.py` runs one cell of the Liger × compile matrix per process (`--mode neither|liger_only|compile_only|liger_compile`, required). Liger patches the model classes process-wide, so a second cell in the same process would inherit the first one's kernels. `--compile_mode` picks the compile mode (default `reduce-overhead`, the trainer's fallback):
+`tests/gpu/profiling/benchmark_torch_compile.py` runs one cell of the Liger × compile matrix per process (`--mode neither|liger_only|compile_only|liger_compile`, required). Liger patches the model classes process-wide, so a second cell in the same process would inherit the first one's kernels. `--compile_mode` picks the compile mode (default `default`, the trainer's fallback):
 
 ```bash
 for mode in neither liger_only compile_only liger_compile; do
@@ -77,5 +77,5 @@ for mode in neither liger_only compile_only liger_compile; do
       --steps 20 --warmup 5 --mode "$mode"
 done
 
-# the default-mode rows: add --compile_mode default; 8-GPU: --nproc_per_node=8 --ep 8
+# the reduce-overhead rows: add --compile_mode reduce-overhead; 8-GPU: --nproc_per_node=8 --ep 8
 ```

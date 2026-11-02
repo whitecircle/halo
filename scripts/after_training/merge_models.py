@@ -13,10 +13,11 @@ common weight-space methods:
 
 Merging streams one tensor at a time across the input checkpoints (each key is loaded from every
 model, merged, then written), so peak host memory is every input's copy of the costliest tensor (the
-largest, in practice), the method's float32 working set over it, and one pending output shard, never
-the merged model. Output is HF-sharded safetensors (``--max_shard_size`` sets the per-file cap).
-Config, tokenizer and any remote-code modules are copied from ``--tokenizer_source`` (default: the base
-model, or the first model), a local directory like every other source.
+largest, in practice), the method's float32 working set over it, and the output shard being filled
+plus one per write thread, never the merged model. Output is HF-sharded safetensors
+(``--max_shard_size`` sets the per-file cap). Config, tokenizer and any remote-code modules are
+copied from ``--tokenizer_source`` (default: the base model, or the first model), a local directory
+like every other source.
 
 Examples:
     # Weighted linear average (weights normalized by their sum)

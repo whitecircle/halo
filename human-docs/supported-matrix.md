@@ -105,7 +105,7 @@ naming the family and the reason.
 | Dense families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 | Yes | Yes |
 | Laguna, Step-3.7 Flash | Yes | No (SGLang's loaders assert full coverage per call) |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No |
-| Inkling, GLM-5 Next, Cohere2 MoE | No | No (no online RL at all) |
+| Inkling, GLM-5 Next, Qwen3-Next, Cohere2 MoE | No | No (no online RL at all) |
 
 `rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only. SGLang must
 be served from this repo's image. Setup, ports, weight sync and
@@ -143,6 +143,7 @@ advanced parallelism. What each family is for:
 | Qwen3-VL (text) | — | — | Yes | No | No | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
 | Qwen3.5 / Qwen3.6 (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower |
+| Qwen3-Next | Yes | Yes | No | No | No | EP and ETP pass tiny-model GPU tests only |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | No | |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | No | ETP passes tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
@@ -158,10 +159,9 @@ advanced parallelism. What each family is for:
 | Step-3.7 Flash | Yes | Yes | No | No | Yes | composite VLM, SDPA only; sharded EP saves refused |
 | Any other HF causal LM | — | — | No | if the model has a `tp_plan` | No | a dense model without a TP plan raises under TP |
 
-EP+CP runs where EP and CP both do, EP+TP where EP and TP both do. GPT-OSS
-turns grouped GEMM off under ETP. Online RL per family:
-[Rollout engines](#rollout-engines). Why a family drops a mode: the
-[model pages](../agent-docs/models/README.md) ↗.
+EP+CP runs where EP and CP both do, EP+TP where EP and TP both do. Online
+RL per family: [Rollout engines](#rollout-engines). Why a family drops a
+mode: the [model pages](../agent-docs/models/README.md) ↗.
 
 ## PEFT, quantization and data
 

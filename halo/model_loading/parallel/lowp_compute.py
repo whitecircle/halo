@@ -12,8 +12,10 @@ from transformers.distributed.tensor_parallel import ALL_PARALLEL_STYLES, _get_p
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.mesh import model_tp_mesh
 from halo.kernels.lowp.linear import LowPrecisionLinear
+from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, QuantFormat, kept_block_indices
 from halo.models.module_tree import decoder_layer_index, find_module_path
+from halo.runtime.dtensor import to_local
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +54,61 @@ def _warn_if_dense_mlp_unmatched(model: nn.Module, precision: str) -> None:
         )
 
 
+def _require_block_aligned(
+    subject: str, contraction: int, precision: str, quant_format: QuantFormat, *, split_by: str | None, opt_out: str
+) -> None:
+    """Raise unless ``contraction`` splits into ``quant_format`` blocks: the fake-quant blocks both GEMM operands
+    along it, so a misaligned axis would fail the first forward instead. ``split_by`` names the parallel size that
+    shards the axis on this run (None where it is whole), ``opt_out`` the flag that keeps the module bf16."""
+    block = FORMAT_BLOCK_SIZE[quant_format]
+    if contraction % block == 0:
+        return
+    fitting = sorted(p for p, r in LOWP_RECIPES.items() if contraction % FORMAT_BLOCK_SIZE[r.quant_format] == 0)
+    lower_split = (
+        f"lower {split_by} (it shards this axis) so each rank's shard is a multiple of {block}, " if split_by else ""
+    )
+    raise ValueError(
+        f"lowp_precision={precision!r} cannot run {subject}: it contracts over {contraction}, which {quant_format} "
+        f"does not split into blocks of {block}. To run it, {lower_split}use a lowp_precision whose block divides "
+        f"{contraction} ({fitting or 'none'}), or set {opt_out}: false."
+    )
+
+
+def _require_block_aligned_experts(
+    name: str, layer: EPMoELayerBase, precision: str, quant_format: QuantFormat
+) -> None:
+    """Check every grouped-GEMM expert weight of ``layer``. Stored ``[E, K, N]``, its contraction is dim 1: the
+    hidden size, or the intermediate, which expert TP shards. LoRA adapters (bf16 under lowp) and biases are
+    exempt."""
+    adapters = {adapter for adapter, _ in layer.expert_lora_named_params()}
+    for weight_name, weight in layer.expert_named_params():
+        if weight_name in adapters or weight.ndim != 3:
+            continue
+        etp_sharded = layer.expert_tp_size > 1 and layer.EXPERT_TP_SHARD_DIMS.get(weight_name) == 1
+        _require_block_aligned(
+            f"{name} expert weight {weight_name} {tuple(weight.shape)}",
+            weight.shape[1],
+            precision,
+            quant_format,
+            split_by="expert_tensor_parallel_size" if etp_sharded else None,
+            opt_out="lowp_apply_moe_experts",
+        )
+
+
+def _require_block_aligned_dense(name: str, linear: nn.Linear, precision: str, quant_format: QuantFormat) -> None:
+    """Check one dense projection. Its contraction is the weight's last axis as this rank holds it: whole under
+    colwise TP, sharded under rowwise, where the fake-quant blocks the local shard."""
+    contraction = to_local(linear.weight).shape[-1]
+    _require_block_aligned(
+        f"{name} {tuple(linear.weight.shape)}",
+        contraction,
+        precision,
+        quant_format,
+        split_by="tensor_parallel_size" if contraction != linear.weight.shape[-1] else None,
+        opt_out="lowp_apply_dense_mlp",
+    )
+
+
 def _convert_dense_linear(linear: nn.Linear, name: str, quant_format: QuantFormat, tp_plan: dict, tp_mesh) -> None:
     """Retype one dense projection in place, keeping its TP forward transforms: transformers' TP installs them
     as an instance-level ``forward`` closed over the bound ``nn.Linear.forward``, which a class retype cannot
@@ -73,7 +130,7 @@ def _convert_dense_linear(linear: nn.Linear, name: str, quant_format: QuantForma
 
 
 def _convert_dense_mlps(
-    model: nn.Module, quant_format: QuantFormat, kept: set[int], backbone_prefix: str | None
+    model: nn.Module, precision: str, quant_format: QuantFormat, kept: set[int], backbone_prefix: str | None
 ) -> int:
     """Retype the text backbone's dense MLP projections outside the ``kept`` blocks; returns how many."""
     tp_plan = getattr(model, "_tp_plan", None) or {}
@@ -91,7 +148,9 @@ def _convert_dense_mlps(
         for proj in MLP_PROJECTIONS:
             child = getattr(module, proj, None)
             if isinstance(child, nn.Linear) and not isinstance(child, LowPrecisionLinear):
-                _convert_dense_linear(child, f"{name}.{proj}" if name else proj, quant_format, tp_plan, tp_mesh)
+                path = f"{name}.{proj}" if name else proj
+                _require_block_aligned_dense(path, child, precision, quant_format)
+                _convert_dense_linear(child, path, quant_format, tp_plan, tp_mesh)
                 converted += 1
     return converted
 
@@ -117,14 +176,15 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
         for name, module in model.named_modules():
             if isinstance(module, EPMoELayerBase) and decoder_layer_index(name, backbone_prefix) not in kept:
                 moe_count += 1
-                if not module.set_lowp_compute(quant_format, weight_cacheable=expert_weight_cacheable):
+                if module.set_lowp_compute(quant_format, weight_cacheable=expert_weight_cacheable):
+                    _require_block_aligned_experts(name, module, precision, quant_format)
+                else:
                     loop_path_layers += 1
         if loop_path_layers:
             logger.warning(
                 "lowp_precision=%s requested but %d/%d MoE layers run the per-expert LOOP path "
                 "(grouped GEMM disabled) — low precision will NOT apply to those experts. Set "
-                "use_grouped_gemm=true to enable low-precision expert compute (GptOss under ETP "
-                "always loops and cannot honor it).",
+                "use_grouped_gemm=true to enable low-precision expert compute.",
                 precision,
                 loop_path_layers,
                 moe_count,
@@ -132,7 +192,7 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
 
     dense_count = 0
     if lowp.apply_dense_mlp:
-        dense_count = _convert_dense_mlps(model, quant_format, kept, backbone_prefix)
+        dense_count = _convert_dense_mlps(model, precision, quant_format, kept, backbone_prefix)
         if dense_count == 0:
             _warn_if_dense_mlp_unmatched(model, precision)
 

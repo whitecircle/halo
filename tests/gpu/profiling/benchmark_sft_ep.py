@@ -39,10 +39,15 @@ Usage:
     # 8 GPUs at EP=8, then the gathered save's wall time and peak host memory
     torchrun --nproc_per_node=8 \
         tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --measure_save
+
+    # The same save at 0, 1 and 2 background write threads, checked byte-identical
+    torchrun --nproc_per_node=8 \
+        tests/gpu/profiling/benchmark_sft_ep.py --ep 8 --seq 4096 --measure_save --save_write_threads 0 1 2
 """
 
 import argparse
 import os
+import shutil
 import sys
 import time
 import traceback
@@ -67,6 +72,7 @@ from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import axis_tags, create_benchmark_parser, pp_topology_kwargs
+from tests.common.checkpoint_io import file_digests
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (
     cleanup_dirs,
@@ -260,12 +266,22 @@ def main() -> int:
         "time and each rank's peak host memory while it runs.",
     )
     parser.add_argument(
+        "--save_write_threads",
+        type=int,
+        nargs="+",
+        default=None,
+        help="With --measure_save: save once per HALO_CHECKPOINT_WRITE_THREADS value given, in that order, each "
+        "reported under its own `_wt<N>` key, and check that every save wrote byte-identical files (sha256).",
+    )
+    parser.add_argument(
         "--zero3",
         action="store_true",
         help="FSDP2 ZeRO-3 (reshard_after_forward=True) — params resharded after forward, lowest memory. "
         "Default off = ZeRO-2 (reshard_after_forward=False), params kept gathered fwd->bwd.",
     )
     args = parser.parse_args()
+    if args.save_write_threads and not args.measure_save:
+        parser.error("--save_write_threads needs --measure_save")
 
     # --- Distributed setup ---
     rank, world_size, local_rank = init_distributed()
@@ -572,16 +588,32 @@ def main() -> int:
         emit_benchmark(f"sft_ep_{args.model}_{layout}_s{args.seq}", efficiency_cb)
 
         if args.measure_save:
-            # Every rank names rank 0's directory: the gathered save is collective and one rank writes it.
-            save_dir = broadcast_from_rank0(os.path.join(output_dir, "gathered_save"))
-            barrier()
-            reset_host_peak_rss()
-            start = time.perf_counter()
-            trainer.save_model(save_dir)
-            barrier()
-            save_seconds, peak_rss = time.perf_counter() - start, host_peak_rss_gib()
-            log(f"  Gathered save: {save_seconds:.1f}s, rank 0 peak host RSS {peak_rss:.1f} GiB")
-            emit_save_benchmark(f"sft_ep_{args.model}_{layout}_gathered_save", save_seconds, peak_rss)
+            save_key = f"sft_ep_{args.model}_{layout}_gathered_save"
+            digests = {}
+            for threads in args.save_write_threads or [None]:
+                arm = "" if threads is None else f"_wt{threads}"
+                if threads is not None:
+                    os.environ["HALO_CHECKPOINT_WRITE_THREADS"] = str(threads)
+                # Every rank names rank 0's directory: the gathered save is collective and one rank writes it.
+                save_dir = broadcast_from_rank0(os.path.join(output_dir, f"gathered_save{arm}"))
+                # The previous arm's dirty pages are flushed outside the timed window.
+                os.sync()
+                barrier()
+                reset_host_peak_rss()
+                start = time.perf_counter()
+                trainer.save_model(save_dir)
+                barrier()
+                save_seconds, peak_rss = time.perf_counter() - start, host_peak_rss_gib()
+                log(f"  Gathered save{arm}: {save_seconds:.1f}s, rank 0 peak host RSS {peak_rss:.1f} GiB")
+                emit_save_benchmark(f"{save_key}{arm}", save_seconds, peak_rss)
+                if threads is not None and rank == 0:
+                    digests[threads] = file_digests(save_dir)
+                    shutil.rmtree(save_dir)
+            if len(digests) > 1:
+                identical = all(digest == next(iter(digests.values())) for digest in digests.values())
+                log(f"  Gathered saves byte-identical across write threads {sorted(digests)}: {identical}")
+                if not identical:
+                    raise RuntimeError(f"the gathered save's files differ across write-thread counts: {digests}")
 
         if args.comm_profile and rank == 0:
             stats = get_ep_span_timer().stats

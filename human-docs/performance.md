@@ -38,7 +38,8 @@ Set these per run:
   step time on full-attention layers
   ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗).
 - **`liger_kernel_config: {fused_linear_cross_entropy: true}`** past ~16k
-  tokens, which trades a little speed for a lot of logits memory.
+  tokens, which trades a little speed for a lot of logits memory. Under
+  context parallelism the CP wrapper runs it over each rank's chunk.
 - **`fsdp_defer_grad_sync: true` with `fsdp_reshard_after_backward: false`**
   under gradient accumulation: one gradient reduce and one re-gather per
   optimizer step, at an unsharded gradient copy per GPU.

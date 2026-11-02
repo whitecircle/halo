@@ -26,6 +26,7 @@ from halo.models.attention import gpt_oss_sinks
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
 from halo.models.attention.selection import _attn_impl_handles_sinks, validate_attn_implementation
 from halo.models.config_access import (
+    TOOLKIT_STAMP_PREFIX,
     config_export_ready,
     set_config_field_run_scoped,
 )
@@ -336,7 +337,7 @@ def test_toolkit_run_state_never_reaches_the_exported_config():
 
     with config_export_ready(cfg):
         exported = cfg.to_dict()
-        halo_keys = [key for key in exported if key.startswith("_halo_")]
+        halo_keys = [key for key in exported if key.startswith(TOOLKIT_STAMP_PREFIX)]
         assert halo_keys == [], f"run state leaked into the exported config: {halo_keys}"
 
     # The run still decides on its own state after the export window closes.

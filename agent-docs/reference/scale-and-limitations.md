@@ -40,9 +40,10 @@ tensor exceeds it (a fused expert pair on a 100B+ MoE)
 fabric behind one GPU (its NICs over EFA) and the single-producer fan-out below.
 
 **Checkpoint save is synchronous, and the gathered save funnels through one rank.** Training pauses
-during each gathered save — there is no async or overlapped save. Every gathered save streams (EP
-layer by layer, FSDP2/CP/TP chunk by chunk through the shared writer), so all of them are bounded
-by write throughput on one rank rather than by host RAM.
+during each gathered save; there is no async save. Every gathered save streams (EP layer by layer,
+FSDP2/CP/TP chunk by chunk through the shared writer), so all of them are bounded by write throughput
+on one rank rather than by host RAM. `HALO_CHECKPOINT_WRITE_THREADS` (off by default) overlaps the save
+rank's part writes with the next chunk's gather inside that pause ([Checkpoints](checkpoints.md)).
 
 The parallel-write escape hatch covers the flagship pure-EP layouts only. `save_sharded_ep` requires
 a single EP group spanning all ranks (`ep_group_size == world_size`, exactly what
@@ -51,8 +52,8 @@ a single EP group spanning all ranks (`ep_group_size == world_size`, exactly wha
 LoRA. Dense, FSDP2, CP and TP have no parallel-write mode at all.
 
 `merge_ep_shards.py` reassembles the artifact, streaming group by group: peak host RAM is one merged
-MoE layer plus one pending output shard, not the model. `--delete_input_shards` frees the per-rank
-shards once the merged checkpoint is complete.
+MoE layer plus the output shard being filled and one per write thread, not the model.
+`--delete_input_shards` frees the per-rank shards once the merged checkpoint is complete.
 
 Optimizer state escapes the funnel (per-rank shards, written in parallel), but its write copies each
 rank's state to host RAM first (`cpu_offload`): at 120B/EP8 with AdamWBF16 that is ~60 GB/rank,

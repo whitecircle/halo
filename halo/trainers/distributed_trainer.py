@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 
 from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
+from halo.configs.script_arguments import DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS
 from halo.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
 from halo.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
@@ -71,6 +72,7 @@ from halo.trainers.parallelism.mode_setup import ModeSetupMixin, reject_unsynced
 from halo.trainers.parallelism.pipeline_rules import reject_pp_named_optimizer
 from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from halo.trainers.parallelism.tp_leader import TPLeaderBroadcastMixin
+from halo.trainers.step_guard import NonFiniteStepGuardMixin
 from halo.trainers.token_metrics import TokenMetricsMixin
 from halo.trainers.trainer_rules import (
     INERT_AUX_LOSS_DETAIL,
@@ -174,6 +176,7 @@ class DistributedTrainerMixin(
     GradientClippingMixin,
     GradientSyncMixin,
     ModeSetupMixin,
+    NonFiniteStepGuardMixin,
     PipelineTrainerMixin,
     TokenMetricsMixin,
     TPLeaderBroadcastMixin,
@@ -242,6 +245,9 @@ class DistributedTrainerMixin(
         self.save_sharded_ep = kwargs.pop("save_sharded_ep", False)
         self.save_max_shard_size = kwargs.pop("save_max_shard_size", None)
         self.allow_optimizer_warm_restart = kwargs.pop("allow_optimizer_warm_restart", False)
+        self._max_consecutive_nonfinite_steps = kwargs.pop(
+            "max_consecutive_nonfinite_steps", DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS
+        )
         # The PP split gate and the inert-aux-loss refusal key raise-vs-warn off this value.
         self._moe_balancing = kwargs.pop("moe_balancing", "auto")
         # Datasets pre-sharded per DP rank: re-sharding in the DataLoader drops ~(N-1)/N of each slice.
@@ -635,8 +641,8 @@ class DistributedTrainerMixin(
         return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
 
     def create_optimizer(self, model=None):  # base Trainer passes it; the mixin builds from self
-        """Build the run's optimizer (:func:`build_optimizer`, else the stock one) and register the grad-sync
-        step hooks."""
+        """Build the run's optimizer (:func:`build_optimizer`, else the stock one), register the grad-sync step
+        hooks and install the non-finite step skip."""
         if self.optimizer is None:
             # A gathered FSDP2 module registers its transient unsharded params, and an evaluate() before
             # train() leaves it gathered (reshard_after_forward=False; the root never reshards post-forward):
@@ -658,6 +664,7 @@ class DistributedTrainerMixin(
                 super().create_optimizer()
 
         self._register_grad_sync_step_hooks()
+        self._install_nonfinite_step_skip()
         return self.optimizer
 
     def cleanup_ep(self):

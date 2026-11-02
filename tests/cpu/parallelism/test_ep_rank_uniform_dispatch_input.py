@@ -69,7 +69,8 @@ class _RecordingTransport:
     def dispatch(self, x, topk_idx, topk_weights, *, owner):
         self.rows = x.shape[0]
         recv_x, recv_idx, recv_weights = _Dispatch.apply(x, topk_idx, topk_weights, self)
-        return recv_x, recv_idx, recv_weights, None
+        counts = tuple(torch.bincount(recv_idx[recv_idx >= 0], minlength=LOCAL_EXPERTS).tolist())
+        return recv_x, recv_idx, recv_weights, None, counts
 
     def combine(self, x, topk_weights, _handle, *, owner):
         return _Combine.apply(x, topk_weights, self, self.rows)

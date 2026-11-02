@@ -504,32 +504,31 @@ def merge_models(
     if verbose:
         logger.info(f"Merging {len(paths)} models via '{method}' over {len(ref_keys)} tensors → {output_dir}")
 
-    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
+    with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:
+        # Peak RAM is the costliest key, every contributor's copy as stored plus the method's fp32 working
+        # set over it (an integer pass-through key counted as if merged), and the writer's staged output
+        # parts. On disk the artifact is one input's size.
+        working_bytes_per_element = MERGE_METHODS[method].fp32_copies(len(readers)) * torch.float32.itemsize
+        costliest_key_bytes = max(
+            (
+                sum(reader.nbytes(key) for reader in contributors)
+                + math.ceil(working_bytes_per_element * readers[0].numel(key))
+                for key in ref_keys
+            ),
+            default=0,
+        )
+        preflight_resource_warning(
+            "merge_models",
+            output_dir,
+            disk_bytes=sum(os.path.getsize(shard) for shard in set(readers[0].weight_map.values())),
+            ram_bytes=costliest_key_bytes + writer.max_resident_bytes,
+        )
 
-    # Peak RAM is the costliest key, every contributor's copy as stored plus the method's fp32 working
-    # set over it (an integer pass-through key counted as if merged), and the writer's pending output
-    # shard. On disk the artifact is one input's size.
-    working_bytes_per_element = MERGE_METHODS[method].fp32_copies(len(readers)) * torch.float32.itemsize
-    costliest_key_bytes = max(
-        (
-            sum(reader.nbytes(key) for reader in contributors)
-            + math.ceil(working_bytes_per_element * readers[0].numel(key))
-            for key in ref_keys
-        ),
-        default=0,
-    )
-    preflight_resource_warning(
-        "merge_models",
-        output_dir,
-        disk_bytes=sum(os.path.getsize(shard) for shard in set(readers[0].weight_map.values())),
-        ram_bytes=costliest_key_bytes + writer.max_bytes,
-    )
+        _stream_merged_tensors(
+            ref_keys, readers, base_reader, method, weights, knob_values, DTYPE_BY_NAME[dtype], writer, verbose
+        )
 
-    _stream_merged_tensors(
-        ref_keys, readers, base_reader, method, weights, knob_values, DTYPE_BY_NAME[dtype], writer, verbose
-    )
-
-    writer.close_as_hf_checkpoint()
+        writer.close_as_hf_checkpoint()
     if verbose:
         logger.info(f"  wrote merged weights to {output_dir}")
     _copy_aux_files(

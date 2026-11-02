@@ -30,7 +30,6 @@ from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
-    TINY_UNWRAPPED_MOE_FAMILY,
     tiny_family_model,
 )
 
@@ -64,7 +63,6 @@ PACKING_FAMILIES = {
         },
         **TINY_MOE_FAMILIES,
         **TINY_MOE_VLM_FAMILIES,
-        "qwen3_next": TINY_UNWRAPPED_MOE_FAMILY,
     }.items()
     if name != "deepseek_v4"
 }

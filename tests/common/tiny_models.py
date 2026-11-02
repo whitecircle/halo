@@ -58,6 +58,8 @@ from transformers import (
     Mistral3ForConditionalGeneration,
     MistralConfig,
     MistralForCausalLM,
+    MixtralConfig,
+    MixtralForCausalLM,
     Olmo3Config,
     Olmo3ForCausalLM,
     PretrainedConfig,
@@ -77,6 +79,8 @@ from transformers import (
     Qwen3MoeForCausalLM,
     Qwen3NextConfig,
     Qwen3NextForCausalLM,
+    Qwen3VLConfig,
+    Qwen3VLForConditionalGeneration,
     Step3p7Config,
     Step3p7ForConditionalGeneration,
     ZayaConfig,
@@ -113,9 +117,13 @@ from tests.common.models import (
     TINY_LFM2_MOE_CONFIG,
     TINY_MISTRAL4_CONFIG,
     TINY_MISTRAL_SLIDING_CONFIG,
+    TINY_MIXTRAL_CONFIG,
     TINY_PIXTRAL_VISION_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
+    TINY_QWEN3_NEXT_CONFIG,
+    TINY_QWEN3_VL_TEXT_CONFIG,
+    TINY_QWEN3_VL_VISION_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_QWEN35_VISION_CONFIG,
@@ -378,6 +386,8 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
         _causal(Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, TINY_QWEN35_MOE_CONFIG), ulysses_cp=False
     ),
     "qwen3_moe": TinyFamily(_causal(Qwen3MoeConfig, Qwen3MoeForCausalLM, TINY_QWEN3_MOE_CONFIG)),
+    # Gated DeltaNet layers, as Qwen3.5-MoE's.
+    "qwen3_next": TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN3_NEXT_CONFIG), ulysses_cp=False),
     # Its attention is not one the Ulysses wrapper implements.
     "step3p7": TinyFamily(
         _composite(Step3p7Config, Step3p7ForConditionalGeneration, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG),
@@ -481,8 +491,13 @@ TINY_BAILING_RING_FAMILY = TinyFamily(
 TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
     _tiny_bailing(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
 )
-# A MoE family no EP layer class wraps (Qwen3-Next, whose text fields Qwen3.5-MoE kept).
-TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN35_MOE_CONFIG))
+# A MoE family no EP layer class wraps.
+TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(MixtralConfig, MixtralForCausalLM, TINY_MIXTRAL_CONFIG))
+# Dense Qwen3-VL over the tiny Qwen3 text tower: its own text attention class behind a multimodal backbone.
+TINY_QWEN3_VL_FAMILY = TinyFamily(
+    _composite(Qwen3VLConfig, Qwen3VLForConditionalGeneration, TINY_QWEN3_VL_TEXT_CONFIG, TINY_QWEN3_VL_VISION_CONFIG),
+    load_class=AutoModelForImageTextToText,
+)
 
 # Dense attention variants past the dense roster, at its geometry: plain GQA (Llama, Qwen2), a config-level sliding
 # window (Mistral), Gemma 2's attention and final softcaps over alternating sliding layers, and Gemma 3's sliding/full

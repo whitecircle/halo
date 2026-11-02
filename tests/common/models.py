@@ -23,6 +23,7 @@ GLM4_FLASH = "zai-org/GLM-4.7-Flash"
 LFM2_24B_A2B = "LiquidAI/LFM2-24B-A2B"
 QWEN3_5_MOE = "Qwen/Qwen3.5-397B-A17B"
 QWEN3_5_MOE_35B = "Qwen/Qwen3.5-35B-A3B"
+QWEN3_NEXT_80B_A3B = "Qwen/Qwen3-Next-80B-A3B-Instruct"
 QWEN3_5_MOE_122B = "Qwen/Qwen3.5-122B-A10B"
 QWEN3_6_MOE_35B = "Qwen/Qwen3.6-35B-A3B"
 BAILING_MOE_RING_MINI = "inclusionAI/Ring-mini-linear-2.0"
@@ -222,6 +223,23 @@ TINY_QWEN35_MOE_CONFIG = {
     "linear_value_head_dim": 32,
     "linear_num_key_heads": 2,
     "linear_num_value_heads": 4,
+    "max_position_embeddings": 512,
+    "router_aux_loss_coef": 0.0,
+    "tie_word_embeddings": False,
+}
+# Tiny Qwen3-Next: Qwen3.5-MoE's text fields, which ``Qwen3NextConfig`` spells alike, with the router
+# renormalizing (``norm_topk_prob``) as Qwen3-Next-80B-A3B ships it.
+TINY_QWEN3_NEXT_CONFIG = {**TINY_QWEN35_MOE_CONFIG, "norm_topk_prob": True}
+# Tiny Mixtral, a MoE family no EP layer class wraps: two layers of 4 experts top-2, no shared expert.
+TINY_MIXTRAL_CONFIG = {
+    "vocab_size": 1024,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "num_local_experts": 4,
+    "num_experts_per_tok": 2,
     "max_position_embeddings": 512,
     "router_aux_loss_coef": 0.0,
     "tie_word_embeddings": False,
@@ -715,6 +733,17 @@ TINY_QWEN35_VISION_CONFIG = {
     "num_heads": 2,
     "out_hidden_size": TINY_QWEN35_MOE_CONFIG["hidden_size"],
 }
+# Qwen3-VL over the tiny Qwen3 text tower: M-RoPE's three sections split head_dim / 2, and a one-block vision tower
+# without deepstack taps.
+TINY_QWEN3_VL_TEXT_CONFIG = {
+    **TINY_QWEN3_CONFIG,
+    "rope_parameters": {"rope_type": "default", "mrope_section": [8, 4, 4]},
+}
+TINY_QWEN3_VL_VISION_CONFIG = {
+    **TINY_QWEN35_VISION_CONFIG,
+    "out_hidden_size": TINY_QWEN3_CONFIG["hidden_size"],
+    "deepstack_visual_indexes": [],
+}
 # The upstream scale planner (``plan_out_scales``) rejects most tiny shapes; this one builds a valid
 # 4-layer pixel-shuffle stack.
 TINY_INKLING_VISION_CONFIG = {
@@ -790,6 +819,12 @@ MODEL_CONFIGS = {
         "full_params": 122e9,
         "num_experts": 256,
         "top_k": 8,
+    },
+    "qwen3-next-80b-a3b": {
+        "hf_name": QWEN3_NEXT_80B_A3B,
+        "full_params": 79.67e9,
+        "num_experts": 512,
+        "top_k": 10,
     },
     "qwen3-8b": {
         "hf_name": QWEN3_8B,

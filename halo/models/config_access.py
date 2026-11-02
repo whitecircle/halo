@@ -23,6 +23,11 @@ SPECIAL_TOKEN_ID_FIELDS = ("eos_token_id", "bos_token_id", "pad_token_id")
 # run and what an export carries.
 ROUTER_AUX_FIELDS = ("output_router_logits", "router_aux_loss_coef")
 
+# The namespace of toolkit stamps: config attributes recording this run's own decisions (the applied Liger config,
+# the resolved sinks reset), which no artifact describes. ``from_pretrained`` deep-copies the config it is handed,
+# so a stamp written before the load reaches the model's config with no recorded original to restore.
+TOOLKIT_STAMP_PREFIX = "_halo_"
+
 # A field the level did not hold when captured, which the restore removes rather than writes back (a special-token
 # id align_special_tokens planted, a run-scoped field the instance ``__dict__`` lacked).
 _ABSENT = object()
@@ -154,11 +159,29 @@ def set_config_field_run_scoped(cfg, field: str, value) -> None:
     set_config_field(cfg, field, value, only_declared=False)
 
 
+def _toolkit_stamps(level) -> list[str]:
+    """The :data:`TOOLKIT_STAMP_PREFIX` keys in ``level``'s instance ``__dict__``; none without one."""
+    return [key for key in getattr(level, "__dict__", {}) if key.startswith(TOOLKIT_STAMP_PREFIX)]
+
+
+def drop_toolkit_stamps(cfg) -> None:
+    """Remove every :data:`TOOLKIT_STAMP_PREFIX` key a config read from a checkpoint (and its text config) carries,
+    before the run stamps its own. A ``config.json`` serialized outside :func:`config_export_ready` can hold another
+    run's stamps, which transformers reads back as live attributes."""
+    for source in config_sources(cfg):
+        dropped = _toolkit_stamps(source)
+        for key in dropped:
+            del source.__dict__[key]
+        if dropped and is_global_main_process():
+            logger.info(f"Ignoring the toolkit stamps {dropped} the checkpoint's {type(source).__name__} carries.")
+
+
 @contextlib.contextmanager
 def config_export_ready(cfg):
     """Temporarily restore every run-scoped field mutation on ``cfg`` (and its text config) so a
     serialization inside the block writes the artifact's fields; the run state is re-applied on exit.
-    Instance-``__dict__`` based on both sides, mirroring how the run-scoped setter wrote."""
+    Instance-``__dict__`` based on both sides, mirroring how the run-scoped setter wrote. Every
+    :data:`TOOLKIT_STAMP_PREFIX` key is lifted out too, whether or not this config recorded it."""
     if cfg is None:
         yield
         return
@@ -170,6 +193,8 @@ def config_export_ready(cfg):
                 source.__dict__.pop(field, None)
             else:
                 setattr(source, field, original)
+        for field in _toolkit_stamps(source):
+            reapply.append((source, field, source.__dict__.pop(field)))
     try:
         yield
     finally:

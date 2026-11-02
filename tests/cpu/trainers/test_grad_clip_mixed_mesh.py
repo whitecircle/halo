@@ -51,9 +51,7 @@ def _trainer(cls):
     for param in me.model.parameters():
         param.grad = torch.ones_like(param)
     me._mixed_mesh_grads = None
-    me.control = SimpleNamespace(should_log=True)
-    me.state = SimpleNamespace(global_step=0, logging_steps=1, max_steps=1)
-    me.args = SimpleNamespace(max_grad_norm=1.0, logging_strategy="steps", logging_first_step=True)
+    me.args = SimpleNamespace(max_grad_norm=1.0)
     return me
 
 

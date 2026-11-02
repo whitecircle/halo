@@ -1,5 +1,5 @@
-"""Liger-backed cross-entropy scoped to ``transformers.loss.loss_utils``, and the fused-loss forward every
-toolkit causal-LM spec installs."""
+"""Liger-backed cross-entropy scoped to ``transformers.loss.loss_utils``, the fused-loss forward every
+toolkit causal-LM spec installs, and the fused head loss a caller scoring hidden states itself runs."""
 
 from __future__ import annotations
 
@@ -10,12 +10,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from liger_kernel.transformers import LigerCrossEntropyLoss
+from liger_kernel.transformers.functional import liger_fused_linear_cross_entropy
 from liger_kernel.transformers.model.loss_utils import LigerForCausalLMLoss, unpack_cross_entropy_result
 from liger_kernel.transformers.model.output_classes import LigerMoeCausalLMOutputWithPast
 from transformers.loss import loss_utils
 
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.models.config_access import get_config_field
-from halo.models.head_transform import HeadTransform, resolve_head_transform_spec
+from halo.models.head_transform import HeadTransform, resolve_head_transform, resolve_head_transform_spec
+from halo.models.unwrapping import base_transformers_model
 
 # Captured before any patch so the CPU / unsupported-kwarg fallback below cannot recurse.
 _TORCH_CROSS_ENTROPY = F.cross_entropy
@@ -240,3 +243,65 @@ def build_lce_forward(router_aux_loss_in_head: bool = False) -> Callable:
         )
 
     return lce_forward
+
+
+class FusedHeadLossUnavailable(ValueError):
+    """Liger's fused linear cross-entropy cannot reproduce a model's head path; the message says why."""
+
+
+def fused_head_ce_sum(
+    head: nn.Linear, transform: HeadTransform, hidden: torch.Tensor, targets: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The fp32 cross-entropy of ``targets`` ``[N]`` summed over the rows of ``hidden`` ``[N, H]`` under the head
+    path ``transform.project(head, hidden)``, and the argmax of each row a target supervises (``-1`` at an ignored
+    row), through Liger's fused linear cross-entropy.
+
+    No ``[N, V]`` logits plane exists: the kernel projects one token chunk at a time and writes its gradients in the
+    forward, the weight's accumulated in fp32 as the unfused GEMM accumulates it. The logit scale is folded onto
+    the hidden states (``(s·h) @ Wᵀ == s·(h @ Wᵀ)``), which needs a bias-free head (:func:`fused_head_loss`
+    checks); the softcap runs inside the kernel; a vocabulary cut keeps the head's leading rows.
+    """
+    weight, bias = transform.kept_rows(head.weight, head.bias)
+    fused_hidden = transform.scale_hidden(hidden)
+    if transform.logit_scale is not None:
+        fused_hidden = fused_hidden * transform.logit_scale
+    result = liger_fused_linear_cross_entropy(
+        fused_hidden,
+        weight,
+        targets,
+        bias,
+        ignore_index=LABEL_IGNORE_INDEX,
+        reduction="sum",
+        softcap=transform.softcap,
+        accum_dtype=torch.float32,
+        return_predicted_tokens=True,
+    )
+    return result.loss, result.predicted_tokens
+
+
+def fused_head_loss(model: nn.Module) -> Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    """:func:`fused_head_ce_sum` bound to ``model``'s output embedding and verified head transform.
+
+    Raises :class:`FusedHeadLossUnavailable` where the kernel's ``hidden @ weight.T + bias`` cannot stand in for
+    the head: a PEFT tuner or a low-precision module on the output embedding, a head path the transform probe
+    cannot verify, or a logit scale over a biased head.
+    """
+    base = base_transformers_model(model)
+    head = base.get_output_embeddings()
+    if not isinstance(head, nn.Linear) or type(head).forward is not nn.Linear.forward:
+        raise FusedHeadLossUnavailable(
+            f"{type(base).__name__}'s output embedding is a {type(head).__name__}, not a plain nn.Linear"
+        )
+    if any(getattr(module, "base_layer", None) is head for module in base.modules()):
+        raise FusedHeadLossUnavailable(
+            f"a PEFT tuner wraps {type(base).__name__}'s output embedding, whose delta the kernel would drop"
+        )
+    try:
+        transform = resolve_head_transform(base)
+    except (TypeError, ValueError) as error:
+        raise FusedHeadLossUnavailable(str(error)) from error
+    if transform.logit_scale is not None and head.bias is not None:
+        raise FusedHeadLossUnavailable(
+            f"{type(base).__name__}'s logit scale multiplies a biased head, so it cannot fold onto the hidden states"
+        )
+    return functools.partial(fused_head_ce_sum, head, transform)

@@ -39,8 +39,13 @@ Every gather is a collective, so **all** ranks run it. Only the save rank copies
 `EPGatherMixin.gather_layer_state_dict`), so a node pays one writer's copy instead of `gpus_per_node` ×
 model. Every gathered save **streams** through `stream_gathered_checkpoint`: FSDP2, CP and TP one
 conversion-closed chunk (a decoder layer) at a time, EP its non-expert tensors and then each MoE layer as
-it is gathered. The writer holds at most one chunk plus one pending shard, so host memory stays well
-under 1× model ([measured peaks](../parallelism/expert-parallelism.md#checkpointing)).
+it is gathered. The writer holds at most one chunk, the shard it is filling and one shard per background
+write thread (`HALO_CHECKPOINT_WRITE_THREADS`, default `0`), so host memory stays well under 1× model
+([measured peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
+line; a positive count writes the finished parts on that many threads while the next chunk is gathered and
+converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
+rank, through the stream's deferred guard or the finalize's, and no write outlives the save that started it;
+one failing while the save is already raising another error is logged beside it.
 
 The tokenizer is written once per save, before the weights (`save_tokenizer`), so a save stopped after
 its index names the weight files is already loadable with its tokenizer. A failed tokenizer write raises
@@ -175,8 +180,15 @@ reader refuses it.
 The parallel saves (`save_model_config`) and the trainer's base-save fallback serialize the config inside
 `config_export_ready`, which restores the balancing strategy's zeroed `router_aux_loss_coef`, forced
 `output_router_logits` and toolkit stamp before the write: they configure the run, not the artifact, and
-exported they would destroy the hub's aux coefficient for later stages. A new writer that serializes a
-training run's config needs it too; `finalize_exported_config` does not apply it.
+exported they would destroy the hub's aux coefficient for later stages. It also lifts out every `_halo_` key
+(`TOOLKIT_STAMP_PREFIX`: the applied Liger config, the CP fused-loss flag, the resolved sinks reset, the
+router-logits forced-off mark), recorded or not: the loader stamps the config before `from_pretrained`, which hands
+the model a deep copy that no recorded original covers. A `config.json` another writer serialized can still carry
+stamps, which transformers reads back as live attributes, so every load drops them (`drop_toolkit_stamps`) before the
+run stamps its own: the policy and frozen-model loaders from the config they read first, `from_pretrained_verified`
+from a config the load reads from the checkpoint itself, and the default embedding path from the backbone
+sentence-transformers loads. A new writer that serializes a training run's config needs `config_export_ready` too;
+`finalize_exported_config` does not apply it.
 
 Gathered saves also reconcile `tie_word_embeddings`. Tied embeddings can diverge in distributed training
 (independent FSDP2 shards, FLCE training `lm_head` directly), so when the saved `lm_head` and

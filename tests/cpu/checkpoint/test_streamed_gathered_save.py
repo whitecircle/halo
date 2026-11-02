@@ -2,10 +2,11 @@
 """CPU tests for the streamed gathered save (FSDP2 / CP / TP).
 
 ``stream_gathered_checkpoint`` writes a gathered checkpoint chunk by chunk instead of buffering the
-whole state dict, so the save rank's host RAM peaks at one decoder layer plus one pending shard
-rather than the whole model (800 GB at Qwen3.5-397B-A17B). The artifact must hold what converting the
-whole state dict at once gives: the same keys, the same values, the same save-dtype and hub expert
-layout, the same tie-consistency verdict.
+whole state dict, so the save rank's host RAM peaks at one decoder layer plus the writer's staged
+parts (the shard it is filling and one per write thread) rather than the whole model (800 GB at
+Qwen3.5-397B-A17B). The artifact must hold what converting the whole state dict at once gives: the
+same keys, the same values, the same save-dtype and hub expert layout, the same tie-consistency
+verdict.
 
     python tests/cpu/checkpoint/test_streamed_gathered_save.py
 """

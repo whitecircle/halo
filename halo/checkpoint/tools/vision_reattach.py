@@ -132,27 +132,27 @@ def reattach_vision_tower(
         )
     _require_text_tower_keys(input_dir, text_config.model_type, base_text_children)
 
-    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
-    preflight_resource_warning(
-        "reattach_vision_tower",
-        output_dir,
-        disk_bytes=sum(os.path.getsize(s) for s in input_shards + base_shards),
-        ram_bytes=writer.max_bytes,
-    )
-    os.makedirs(output_dir, exist_ok=True)
+    with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:
+        preflight_resource_warning(
+            "reattach_vision_tower",
+            output_dir,
+            disk_bytes=sum(os.path.getsize(s) for s in input_shards + base_shards),
+            ram_bytes=writer.max_resident_bytes,
+        )
+        os.makedirs(output_dir, exist_ok=True)
 
-    trained = 0
-    for key, tensor in iter_checkpoint_tensors(input_dir):
-        if key.startswith(TEXT_PREFIX):
-            key = WRAPPER_TEXT_PREFIX + key[len(TEXT_PREFIX) :]
-        writer.add(key, tensor)  # lm_head.* passes through verbatim
-        trained += 1
+        trained = 0
+        for key, tensor in iter_checkpoint_tensors(input_dir):
+            if key.startswith(TEXT_PREFIX):
+                key = WRAPPER_TEXT_PREFIX + key[len(TEXT_PREFIX) :]
+            writer.add(key, tensor)  # lm_head.* passes through verbatim
+            trained += 1
 
-    carried = 0
-    for key, tensor in iter_checkpoint_tensors(base_dir, predicate=lambda key: key not in superseded):
-        writer.add(key, tensor)
-        carried += 1
-    writer.close_as_hf_checkpoint()
+        carried = 0
+        for key, tensor in iter_checkpoint_tensors(base_dir, predicate=lambda key: key not in superseded):
+            writer.add(key, tensor)
+            carried += 1
+        writer.close_as_hf_checkpoint()
 
     # Tokenizer, template and similar files follow the trained export; the processor files come from
     # the base, which is the only source for them.

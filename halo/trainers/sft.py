@@ -11,7 +11,7 @@ from transformers import Trainer
 from trl import SFTTrainer
 from trl.trainer.utils import entropy_from_logits
 
-from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels
+from halo.distributed.context_parallel.sequence_chunks import cp_local_targets, cp_shift_against_full_labels
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
@@ -57,10 +57,10 @@ def _record_loss_metrics(
     metrics: WorldMetrics, outputs, inputs, labels, cp_shard: tuple[int, int] | None, *, training: bool
 ) -> None:
     """Record one micro-batch's metrics for the per-log flush, issuing no collective and no host read: next-token
-    accuracy and entropy over the supervised tokens (accuracy from Liger's fused loss when the forward skipped the
+    accuracy and entropy over the supervised tokens (accuracy from the fused loss when the forward skipped the
     logits), the batch's attended tokens and the router aux loss. ``cp_shard`` is this rank's ``(cp_rank,
-    cp_size)`` when the logits cover its chunk alone; a non-final rank's last logit then predicts the next chunk's
-    first token, as in the loss."""
+    cp_size)`` when the forward covers its chunk alone; a non-final rank's last position then predicts the next
+    chunk's first token, as in the loss."""
     logits = getattr(outputs, "logits", None)
     if labels is not None and logits is not None:
         if cp_shard is not None:
@@ -73,7 +73,8 @@ def _record_loss_metrics(
         metrics.fraction("mean_token_accuracy", ((shift_logits.argmax(dim=-1) == shift_labels) & mask).sum(), tokens)
         metrics.fraction("entropy", (entropy_from_logits(shift_logits) * mask).sum(), tokens)
     elif labels is not None and getattr(outputs, "token_accuracy", None) is not None:
-        tokens = (labels[:, 1:] != LABEL_IGNORE_INDEX).sum()
+        targets = labels[:, 1:] if cp_shard is None else cp_local_targets(labels, *cp_shard)
+        tokens = (targets != LABEL_IGNORE_INDEX).sum()
         metrics.fraction("mean_token_accuracy", outputs.token_accuracy * tokens, tokens)
     # The whole batch on every rank, padding-free rows by their length: the flush divides the world sum by the ranks
     # sharing a batch. Only train advances the run's counter; eval contributes a structural zero.

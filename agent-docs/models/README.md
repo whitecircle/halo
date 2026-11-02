@@ -15,6 +15,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [Qwen3-VL (text)](qwen3.md#qwen3-vl) | `qwen3_vl_text` | — | — | Yes ² | No | No | — |
 | [Qwen3.5 / Qwen3.6 (dense)](qwen3_5.md) | `qwen3_5_text` | — | — | No | Yes | Yes ⁴ | `examples/*/qwen3_5/*9b*` |
 | [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | `qwen3_5_moe` | Yes | Yes | No | Yes ³ | Yes ⁴ | `examples/sft/qwen3_5/*-a*b-*` |
+| [Qwen3-Next](qwen3-next.md) | `qwen3_next` | Yes ¹¹ | Yes ¹¹ | No | No | No | `examples/sft/qwen3_next/*` |
 | [GPT-OSS](gpt-oss.md) | `gpt_oss` | Yes | Yes | Yes | Yes | Yes | `examples/sft/gptoss/*` |
 | [GLM-4 MoE Lite](glm4.md) | `glm4_moe_lite` | Yes | Yes | Yes | Yes ⁵ | No | `examples/sft/glm4/*` |
 | [Laguna S / XS 2.1](laguna.md) | `laguna` | Yes | Yes ⁶ | No | No | No | `examples/sft/laguna/*` |
@@ -51,6 +52,8 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 ⁹ Without gradient checkpointing, in every mode.
 
 ¹⁰ Text tower only: image data is refused.
+
+¹¹ Tiny-model GPU tests only: no Qwen3-Next checkpoint is trained at full scale here.
 
 ## MoE knobs
 
@@ -106,6 +109,7 @@ Each family page covers its model-specific caveats (attention quirks, checkpoint
 
 - [Qwen3](qwen3.md) — dense and MoE; reference platform for trainers and tests.
 - [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) — hybrid linear/full attention; the shipped EP config trains 35B-A3B.
+- [Qwen3-Next](qwen3-next.md) — Qwen3.5-MoE's block and hybrid attention under a router with a configurable renormalization; per-expert hub checkpoints.
 - [GPT-OSS](gpt-oss.md) — 20B/120B, GLU experts and attention sinks.
 - [GLM-4 MoE Lite](glm4.md) — LoRA-style attention compression, 64 routed + shared experts.
 - [Laguna](laguna.md) — Poolside MoE; its EP layer subclasses GLM-4 MoE Lite's and overrides the top-k weight default plus the hub↔module key spellings.

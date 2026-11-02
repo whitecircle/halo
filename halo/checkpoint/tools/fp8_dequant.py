@@ -85,21 +85,21 @@ def _stream_dequantized_checkpoint(
     """Stream every weight of ``input_shards`` through ``rules.convert`` into a new HF-standard checkpoint;
     returns the bytes written. Keys go in sorted order, so reruns lay the output out identically."""
     os.makedirs(output_dir, exist_ok=False)
-    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=True)
-    for index, shard_path in enumerate(input_shards, start=1):
-        logger.info("Converting input shard %d/%d: %s", index, len(input_shards), os.path.basename(shard_path))
-        with safe_open(shard_path, framework="pt", device="cpu") as shard:
-            keys = set(shard.keys())
-            for name in sorted(keys):
-                if rules.is_sidecar(name):
-                    continue
-                tensor = shard.get_tensor(name)
-                scale_name = f"{name}{rules.scale_suffix}"
-                scale = shard.get_tensor(scale_name) if scale_name in keys else None
-                if scale is None and tensor.dtype == torch.float8_e4m3fn:
-                    raise ValueError(f"FP8 tensor {name} has no co-located {scale_name}")
-                writer.add(name, rules.convert(name, tensor, scale))
-    return writer.close_as_hf_checkpoint()
+    with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:
+        for index, shard_path in enumerate(input_shards, start=1):
+            logger.info("Converting input shard %d/%d: %s", index, len(input_shards), os.path.basename(shard_path))
+            with safe_open(shard_path, framework="pt", device="cpu") as shard:
+                keys = set(shard.keys())
+                for name in sorted(keys):
+                    if rules.is_sidecar(name):
+                        continue
+                    tensor = shard.get_tensor(name)
+                    scale_name = f"{name}{rules.scale_suffix}"
+                    scale = shard.get_tensor(scale_name) if scale_name in keys else None
+                    if scale is None and tensor.dtype == torch.float8_e4m3fn:
+                        raise ValueError(f"FP8 tensor {name} has no co-located {scale_name}")
+                    writer.add(name, rules.convert(name, tensor, scale))
+        return writer.close_as_hf_checkpoint()
 
 
 def _copy_dequantized_assets(source: str, output_dir: str) -> None:

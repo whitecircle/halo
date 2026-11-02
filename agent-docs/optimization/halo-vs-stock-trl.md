@@ -94,9 +94,9 @@ The memory cut grows with sequence while the throughput cost shrinks (EP1: −20
 −7% for −30 GiB at 32k), so **turn FLCE on past ~16k.**
 
 On the dense path it is decisive: EP1 z3 at 128k·b1 is 183 → **67 GiB**, and 256k·b1 goes
-**OOM → 5,728 · 112 GiB**. FLCE is what enables 256k dense at all. Under EP+CP the per-rank sequence is
-already 16–32k, so FLCE is within noise (≤1%): it is a dense-path lever. Per-model applier defaults:
-[Liger Kernels](liger-kernels.md).
+**OOM → 5,728 · 112 GiB**. FLCE is what enables 256k dense at all. Under CP the wrapper runs it on each
+rank's chunk ([fused head loss](../parallelism/context-parallelism.md#fused-head-loss)). Per-model applier
+defaults: [Liger Kernels](liger-kernels.md).
 
 ## Gradient checkpointing on vs off
 

@@ -22,7 +22,7 @@ Halo is an open-source framework built by [White Circle](https://whitecircle.com
 
 The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP, PP, FSDP2, fused kernels, BF16 training, and distributed rollouts.
 
-Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is 115 lines or fewer for every family but GPT-OSS, at 194 ([Model Integration Cost](human-docs/model-integration-cost.md)).
+Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is 115 lines or fewer for every family but GPT-OSS, at 205 ([Model Integration Cost](human-docs/model-integration-cost.md)).
 
 On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL (3.2× at 25% less peak memory when both sides shard ZeRO-3).
 

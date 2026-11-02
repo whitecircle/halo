@@ -182,13 +182,14 @@ def init_training_script(
 def distributed_trainer_kwargs(args, parallelism_config: ParallelismConfig, *, dataset_presharded: bool):
     """The constructor kwargs every ``DistributedTrainerMixin`` trainer takes, all together: a call site
     missing one gathers a save the config asked to shard, re-shards a per-rank dataset, or drops the
-    checkpoint knobs."""
+    checkpoint knobs or the non-finite step limit."""
     return {
         "parallelism_config": parallelism_config,
         "moe_balancing": args.moe_balancing,
         "save_sharded_ep": args.save_sharded_ep,
         "save_max_shard_size": args.save_max_shard_size,
         "allow_optimizer_warm_restart": args.allow_optimizer_warm_restart,
+        "max_consecutive_nonfinite_steps": args.max_consecutive_nonfinite_steps,
         "dataset_presharded": dataset_presharded,
     }
 

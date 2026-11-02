@@ -79,13 +79,13 @@ _TINY_FAMILIES = {
 # The families whose toolkit spec serves `swiglu` on the dense and shared-expert MLPs itself.
 _TOOLKIT_GLU_FAMILIES = {"qwen3_5_moe_text", "qwen3_next"}
 
-# Every way Halo leaves a family's routed experts unwrapped, as ParallelismConfig overrides: Qwen3-MoE and
-# Qwen3.5-MoE have an EP layer class, so only `ep_size: 1` with grouped GEMM off leaves them bare; Mixtral
-# and Qwen3-Next have none, so the grouped-GEMM default leaves them bare too.
+# Every way Halo leaves a family's routed experts unwrapped, as ParallelismConfig overrides: Qwen3-MoE,
+# Qwen3.5-MoE and Qwen3-Next have an EP layer class, so only `ep_size: 1` with grouped GEMM off leaves them
+# bare; Mixtral has none, so the grouped-GEMM default leaves it bare too.
 _UNWRAPPED = {
     "qwen3_moe": {"use_grouped_gemm": False},
     "mixtral": {},
-    "qwen3_next": {},
+    "qwen3_next": {"use_grouped_gemm": False},
     "qwen3_5_moe_text": {"use_grouped_gemm": False},
 }
 

@@ -120,14 +120,14 @@ def test_stock_adamw_refused_where_plain_experts_meet_dtensor_peers():
 def test_stock_adamw_allowed_where_every_param_is_a_dtensor():
     """The refusal is about a plain/DTensor MIX, not about the model being MoE. At ``ep_group_size
     == 1`` with ``fsdp_shard_ep1_experts`` FSDP2 shards the experts too; a dense model has no expert
-    tensors at all; and a MoE family with NO registered EP layer class (qwen3_next) never gets
+    tensors at all; and a MoE family with NO registered EP layer class (Mixtral) never gets
     wrapped, so its experts are ordinary FSDP2 DTensors. Refusing any of the three would block a
     shape that steps fine — which is what makes ``experts_fsdp_managed`` and the registry resolution
     load-bearing rather than decorative."""
     for stub in (
         _optimizer_build_stub(ep_group_size=1, experts_fsdp_managed=True),
         _optimizer_build_stub(ep_group_size=1, moe=False),
-        _optimizer_build_stub(ep_group_size=1, model_type="qwen3_next"),
+        _optimizer_build_stub(ep_group_size=1, model_type="mixtral"),
     ):
         reject_stock_adamw_on_mixed_params("adamw_torch_fused", stub.parallelism_config, stub.model.config)
 
@@ -380,6 +380,7 @@ _BUNDLED_KNOBS = frozenset(
         "save_sharded_ep",
         "save_max_shard_size",
         "allow_optimizer_warm_restart",
+        "max_consecutive_nonfinite_steps",
         "dataset_presharded",
     }
 )
@@ -488,7 +489,11 @@ def test_the_shared_bundle_carries_every_distributed_knob():
     the same silent downgrade.
     """
     args = SimpleNamespace(
-        moe_balancing="aux_loss", save_sharded_ep=True, save_max_shard_size="1GB", allow_optimizer_warm_restart=True
+        moe_balancing="aux_loss",
+        save_sharded_ep=True,
+        save_max_shard_size="1GB",
+        allow_optimizer_warm_restart=True,
+        max_consecutive_nonfinite_steps=7,
     )
     parallelism_config = object()
 
@@ -500,6 +505,7 @@ def test_the_shared_bundle_carries_every_distributed_knob():
     assert bundle["save_sharded_ep"] is True
     assert bundle["save_max_shard_size"] == "1GB"
     assert bundle["allow_optimizer_warm_restart"] is True
+    assert bundle["max_consecutive_nonfinite_steps"] == 7
     assert bundle["dataset_presharded"] is True
 
 

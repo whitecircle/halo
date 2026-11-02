@@ -13,6 +13,7 @@ installed by ``enable_scoped_gradient_checkpointing``:
   handle, and the recompute runs in the forward's scope;
 - two microbatches in flight, as under 1F1B, each replay their own frame;
 - the gradients equal those of the same model unchecked;
+- the recompute's expert compute gets the receive counts the forward's dispatch reported;
 - checkpointing installed without the EP scopes raises, naming the family's layer class.
 
 ``tests/gpu/parallelism/ep/test_ep_replay_cache.py`` runs the replay on real DeepEP dispatch.
@@ -30,7 +31,7 @@ import torch
 
 from halo.distributed.expert_parallel.deepep import dispatcher as ep_dispatcher
 from halo.distributed.expert_parallel.deepep.backends import DeepEPBackend
-from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.models.gradient_checkpointing import active_recompute_scope, enable_scoped_gradient_checkpointing
 from halo.models.moe.family_specs import find_moe_family_spec
@@ -47,11 +48,13 @@ CHECKPOINTED_FAMILIES = tuple(
 class LoopbackBackend(DeepEPBackend):
     """DeepEP's transport ops on a one-rank EP group owning every expert: every token returns to the
     rank that sent it, so each op is the identity. Each op is appended to ``log`` as
-    ``(op, dispatcher, handle)``, and each dispatch hands out a handle of its own."""
+    ``(op, dispatcher, handle)``, each dispatch hands out a handle of its own, and the receive counts each
+    dispatch reports are kept in ``counts``."""
 
     def __init__(self, dispatcher: ep_dispatcher.DeepEPDispatcher, log: list):
         super().__init__(dispatcher)
         self._log = log
+        self.counts: list[tuple[int, ...]] = []
 
     def ensure(self, num_tokens: int, num_topk: int, *, deterministic: bool) -> None:
         pass
@@ -59,7 +62,9 @@ class LoopbackBackend(DeepEPBackend):
     def dispatch_forward(self, x, topk_idx, topk_weights):
         handle = f"handle{len(self._log)}"
         self._log.append(("dispatch_forward", self._d, handle))
-        return x.clone(), topk_idx.clone(), topk_weights.clone(), handle
+        counts = tuple(torch.bincount(topk_idx[topk_idx >= 0], minlength=self._d.num_experts).tolist())
+        self.counts.append(counts)
+        return x.clone(), topk_idx.clone(), topk_weights.clone(), handle, counts
 
     def dispatch_backward(self, grad_recv_x, grad_recv_topk_weights, handle):
         self._log.append(("dispatch_backward", self._d, handle))
@@ -161,6 +166,29 @@ def test_the_recompute_replays_the_forwards_dispatch_and_combine(name, mode):
         (scope, recompute), (replay_scope, replay_recompute) = passes[path]
         assert scope is not None and replay_scope is scope and (recompute, replay_recompute) == (False, True), path
     _assert_same_gradients(model, reference)
+
+
+@pytest.mark.parametrize("mode", CHECKPOINT_MODES)
+@pytest.mark.parametrize("name", CHECKPOINTED_FAMILIES)
+def test_the_recompute_replays_the_forwards_receive_counts(name, mode, monkeypatch):
+    """The grouped sort sizes its compaction off the dispatch's host-side counts, so the recompute's expert
+    compute must get the very counts the forward's dispatch reported, not None and not a second dispatch's."""
+    model = _live_model(name, [], use_reentrant=CHECKPOINT_MODES[mode])
+    seen = defaultdict(list)
+    compute = EPMoELayerBase._compute_experts
+
+    def spy(self, tokens, experts, weights, output_dtype, *, recv_counts):
+        seen[id(self)].append(recv_counts)
+        return compute(self, tokens, experts, weights, output_dtype, recv_counts=recv_counts)
+
+    monkeypatch.setattr(EPMoELayerBase, "_compute_experts", spy)
+    _loss(model, _microbatch(model, seed=1)).backward()
+
+    for path, layer in named_ep_layers(model):
+        (reported,) = layer.dispatcher.backend.counts
+        assert sum(reported) > 0, path
+        forward, recompute = seen[id(layer)]
+        assert forward is reported and recompute is reported, path
 
 
 @pytest.mark.parametrize("mode", CHECKPOINT_MODES)

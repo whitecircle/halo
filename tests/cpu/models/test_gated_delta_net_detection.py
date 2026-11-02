@@ -27,11 +27,12 @@ from halo.models.segment_markers import (
     require_segment_aware_kernels,
     segment_markers_for,
 )
+from tests.common.packed_flash_varlen import PACKING_FAMILIES
+from tests.common.segment_isolation import FAMILIES as SEGMENT_ISOLATION_FAMILIES
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
-    TINY_UNWRAPPED_MOE_FAMILY,
     UnknownHybridConfig,
     tiny_family_model,
 )
@@ -39,7 +40,7 @@ from tests.common.tiny_models import (
 # The name list the derivation replaced, kept as the oracle every roster family's verdict is held to.
 NAMED_GDN_PREFIXES = ("qwen3_5", "qwen3_next")
 SHORT_CONV_PREFIXES = ("lfm2",)
-ROSTER = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES, "qwen3_next": TINY_UNWRAPPED_MOE_FAMILY}
+ROSTER = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 # The transformers configs whose verdict moves: GatedDeltaNet under a name the list never held, and the Qwen3.5
 # vision towers the prefix matched, which hold no GatedDeltaNet layer.
 MOVED = {"olmo_hybrid", "qwen4_exp", "qwen4_exp_text", "qwen3_5_vision", "qwen3_5_moe_vision"}
@@ -78,6 +79,18 @@ def test_the_roster_spans_both_verdicts():
     """A sweep where nothing is detected, or everything is, would pass the per-family pin vacuously."""
     detected = {family for family in ROSTER if segment_markers_for(_roster_config(family)).cu_seq_lens}
     assert detected == {"qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"}
+
+
+def test_every_qwen3_next_fixture_builds_qwen3_next():
+    """The fixture tables that key a family ``qwen3_next`` build Qwen3-Next: an entry building another MoE family
+    under that key would hold it to Qwen3-Next's verdicts."""
+    fixtures = {
+        "roster": ROSTER["qwen3_next"],
+        "segment isolation": SEGMENT_ISOLATION_FAMILIES["qwen3_next"],
+        "packing sweep": PACKING_FAMILIES["qwen3_next"],
+    }
+    built = {table: tiny_family_model(family).config.model_type for table, family in fixtures.items()}
+    assert built == dict.fromkeys(fixtures, "qwen3_next")
 
 
 def test_across_transformers_only_gated_delta_net_layers_decide():

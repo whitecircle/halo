@@ -1,4 +1,7 @@
-"""CPU CP-wrapper fixtures without CUDA attention patching."""
+"""CP-wrapper fixtures: a wrapper without CUDA attention patching, and a probe of the output embedding's inputs."""
+
+import contextlib
+from collections.abc import Iterator
 
 from torch import nn
 
@@ -17,3 +20,17 @@ def unpatched_cp_wrapper(model, *, cp_size=1, cp_rank=0, cp_config=None):
     wrapper.model = model
     wrapper.cp_config = cp_config
     return wrapper
+
+
+@contextlib.contextmanager
+def head_input_lengths(model: nn.Module) -> Iterator[list[int]]:
+    """The sequence length of each input ``model``'s output embedding projects inside the block: how many positions'
+    logits the forward builds."""
+    lengths: list[int] = []
+    handle = model.get_output_embeddings().register_forward_hook(
+        lambda _module, args, _output: lengths.append(args[0].shape[-2])
+    )
+    try:
+        yield lengths
+    finally:
+        handle.remove()

@@ -195,7 +195,7 @@ def _iter_unfused(in_dir: str, layout: tuple[str, str, str] | None):
 
     ``layout=None`` is the already-per-expert checkpoint: every tensor passes through verbatim.
     Streamed rather than accumulated, so peak host memory is one fused expert bank plus the writer's
-    pending shard instead of the whole model.
+    staged parts (the shard it is filling and one per write thread) instead of the whole model.
     """
     if layout is None:
         yield from iter_checkpoint_tensors(in_dir)
@@ -240,24 +240,24 @@ def unfuse_checkpoint(in_dir: str, out_dir: str, max_shard_size: str = DEFAULT_M
 
     input_shards = checkpoint_shard_files(in_dir)
     # Peak RAM is about the largest fused bank plus the per-expert copies split out of it, on top of
-    # the writer's pending output shard. On disk the per-expert artifact is about the input's size.
+    # the writer's staged output parts. On disk the per-expert artifact is about the input's size.
     largest_tensor = max(
         (header_nbytes(reader.get_slice(key)) for _shard, reader, key in iter_checkpoint_shard_entries(in_dir)),
         default=0,
     )
-    writer = StreamingShardWriter(out_dir, max_shard_size, enabled=True)
-    preflight_resource_warning(
-        "unfuse_moe_experts",
-        out_dir,
-        disk_bytes=sum(os.path.getsize(shard) for shard in input_shards),
-        ram_bytes=2 * largest_tensor + writer.max_bytes,
-    )
+    with StreamingShardWriter(out_dir, max_shard_size, enabled=True) as writer:
+        preflight_resource_warning(
+            "unfuse_moe_experts",
+            out_dir,
+            disk_bytes=sum(os.path.getsize(shard) for shard in input_shards),
+            ram_bytes=2 * largest_tensor + writer.max_resident_bytes,
+        )
 
-    # Created past every gate above, so a refusal leaves no directory behind.
-    os.makedirs(out_dir, exist_ok=True)
-    for key, tensor in _iter_unfused(in_dir, layout):
-        writer.add(key, tensor)
-    writer.close_as_hf_checkpoint()
+        # Created past every gate above, so a refusal leaves no directory behind.
+        os.makedirs(out_dir, exist_ok=True)
+        for key, tensor in _iter_unfused(in_dir, layout):
+            writer.add(key, tensor)
+        writer.close_as_hf_checkpoint()
 
     # Non-weight files carry over (config, tokenizer, templates, …), the README.md card gaining the
     # Halo Hub tag; the old safetensors shards and index are not copied, since the writer rewrites them.

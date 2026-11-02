@@ -63,14 +63,19 @@ the others never reach.
 
 ### NaN / Inf loss
 
-1. **Which model + attention impl?** On FA4, the head_dim-256 families (qwen3.5/3.6/Qwen3-Next, GLM-4 MoE
+1. **Did the step guard skip it?** A non-finite global gradient norm skips the optimizer step: rank 0 warns
+   `the update is skipped`, the logs carry `nonfinite_steps_skipped`, the weights stay those of the last applied
+   step, and a logging window with no applied step logs `loss: nan`. Past `max_consecutive_nonfinite_steps` in a
+   row, or with weights already non-finite, it raises on every rank:
+   [Trainer Architecture → Non-finite steps](../../agent-docs/reference/trainer-architecture.md#non-finite-steps).
+2. **Which model + attention impl?** On FA4, the head_dim-256 families (qwen3.5/3.6/Qwen3-Next, GLM-4 MoE
    Lite) need their q/k/v handed contiguous to the dedicated kernel, or it reads them scrambled: wrong outputs
    and gradients, NaN in training. Confirm `install_fa4_contiguous_dedicated_head_inputs` logged its install
    (`halo/models/attention/backend_setup.py`, applied by `apply_family_patches` on every FA4 load).
-2. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
+3. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
    check `fp32_grad_reduce` / `fp32_non_ep_params`.
-3. `assert_rank_uniform` does not find a NaN: it compares a hash across ranks, so a NaN every rank
+4. `assert_rank_uniform` does not find a NaN: it compares a hash across ranks, so a NaN every rank
    computes identically passes. It helps only where ranks that must agree (TP-replicated
    activations) diverge — add the call there, with `strict=True` to raise.
 

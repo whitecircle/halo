@@ -46,7 +46,7 @@ def test_a_model_type_two_specs_claim_is_refused():
 
 def test_lookups_resolve_every_spelling_and_the_text_sub_config():
     assert all(find_moe_family_spec(mt) is spec for spec in MOE_FAMILY_SPECS for mt in spec.model_types)
-    assert find_moe_family_spec("qwen3_next") is None
+    assert find_moe_family_spec("mixtral") is None
     assert find_moe_family_spec(None) is None
 
     class _Text:

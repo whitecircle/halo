@@ -197,6 +197,17 @@ QWEN3_5 = MoEFamilySpec(
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
 )
+# Qwen3.5-MoE's block with a router that renormalizes only under ``norm_topk_prob``; the hub stores the experts
+# one tensor per expert, which transformers fuses on load.
+QWEN3_NEXT = MoEFamilySpec(
+    model_types=("qwen3_next",),
+    expert_layout=ExpertLayout(ExpertLayoutKind.FUSED_SPLIT_PER_EXPERT, SEPARATE_GLU_PROJECTIONS),
+    shared_expert_attrs=("shared_expert",),
+    weight_sync_refusal=(
+        "both pinned rollout engines register Qwen3NextForCausalLM and load the per-expert keys the gather emits, "
+        "but no online update into either has been validated end to end"
+    ),
+)
 STEP3P7 = MoEFamilySpec(
     model_types=("step3p7", "step3p5"),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
@@ -226,6 +237,7 @@ MOE_FAMILY_SPECS: tuple[MoEFamilySpec, ...] = (
     MISTRAL4,
     QWEN3,
     QWEN3_5,
+    QWEN3_NEXT,
     STEP3P7,
     ZAYA,
 )
@@ -266,7 +278,7 @@ def wraps_experts(config, *, ep_layers_requested: bool) -> bool:
     """Whether the run replaces this model's expert FFN with an EP layer.
 
     ``ep_layers_requested`` is the run's intent (``ParallelismConfig.needs_ep_layers``: EP distribution or
-    grouped GEMM); only a family with a spec has a layer to put in place (Qwen3-Next keeps the stock loop).
+    grouped GEMM); only a family with a spec has a layer to put in place (Mixtral keeps the stock experts).
     """
     return ep_layers_requested and has_routed_experts(config) and find_moe_family_spec_for_config(config) is not None
 

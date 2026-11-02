@@ -19,6 +19,10 @@ checkpoint as a PLAIN HF model, whose loss must match the EP model's post-traini
     ``tests/gpu/parallelism/ep/test_lazy_load_converted.py``), trains over text-only conversations
     (dense+sparse MLP span, KDA/DSA interleave), and the fp32 ``e_score_correction_bias``, set to a
     distinctive value after training, lands on disk at fp32 and survives.
+  * ``qwen3_next``: the GatedDeltaNet hybrid on Qwen3.5-MoE's block, whose hub stores the experts one tensor
+    per expert; the lazy loader fuses them, and the gathered save writes them back per expert: its key set
+    equals step 0's plain ``save_pretrained`` key set and every expert tensor on disk is bit-exact against
+    the live gathered one.
   * ``step3p7``: the tiny ``Step3p7ForConditionalGeneration``, saved in transformers' hub layout (no
     ``language_model`` prefix, per-layer fused-but-split ``moe.{gate,up,down}_proj``, ``moe.gate.weight`` +
     ``moe.router_bias``, ``share_expert.*``, the vendor-namespace vision tower) on a heterogeneous config
@@ -41,12 +45,20 @@ import torch
 from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
 from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
 from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
+from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
+from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
 from halo.models.moe.balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR
 from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.ep_sft_roundtrip import EPSftRoundTrip
 from tests.common.harness import gpu_test_main
-from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_STEP3P7_CONFIG
+from tests.common.models import (
+    TINY_COHERE2_MOE_CONFIG,
+    TINY_DSV4_CONFIG,
+    TINY_GLM5_CONFIG,
+    TINY_QWEN3_NEXT_CONFIG,
+    TINY_STEP3P7_CONFIG,
+)
 from tests.common.rank_log import log
 
 _STEP3P7_SPARSE_LAYERS = [i for i, kind in enumerate(TINY_STEP3P7_CONFIG["mlp_layer_types"]) if kind == "sparse"]
@@ -118,6 +130,30 @@ class Glm5NextRoundTrip(EPSftRoundTrip):
     }
     hub_conversion = True
     native_bias_layer = TINY_GLM5_CONFIG["mlp_layer_types"].index("sparse")
+
+
+class Qwen3NextRoundTrip(EPSftRoundTrip):
+    family = "qwen3_next"
+    ep_layer_cls = EPQwen3NextMoELayer
+    num_ep_layers = TINY_QWEN3_NEXT_CONFIG["num_hidden_layers"]
+
+    def after_save(self, ep_layers, base_dir, save_dir):
+        # Collective on every rank.
+        gathered = [ep.gather_expert_state_dict(device="cpu") for ep in ep_layers]
+        written = safetensors_state_dict(save_dir)
+        experts_exact = all(
+            torch.equal(written[f"model.layers.{i}.mlp.{key}"], tensor)
+            for i, layer_state in enumerate(gathered)
+            for key, tensor in layer_state.items()
+        )
+        return {
+            "lazy_loading_admitted": is_lazy_loadable(base_dir) is True,
+            "hub_keyset_matches_plain_save": set(written) == set(safetensors_state_dict(base_dir)),
+            "per_expert_hub_keys": all(
+                f"model.layers.{i}.mlp.experts.0.gate_proj.weight" in written for i in range(self.num_ep_layers)
+            ),
+            "experts_bit_exact": experts_exact,
+        }
 
 
 class Step3p7RoundTrip(EPSftRoundTrip):

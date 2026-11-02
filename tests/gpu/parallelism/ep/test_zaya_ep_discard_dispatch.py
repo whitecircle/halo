@@ -50,9 +50,9 @@ _COMPUTE = EPMoELayerBase._compute_experts
 def count_received_rows(received: list[int]):
     """Append the number of rows each ``_compute_experts`` call assigns to a local expert."""
 
-    def compute(self, tokens, experts, weights, output_dtype):
+    def compute(self, tokens, experts, weights, output_dtype, *, recv_counts):
         received.append(int(((experts >= 0) & (experts < self.experts_per_rank)).sum()))
-        return _COMPUTE(self, tokens, experts, weights, output_dtype)
+        return _COMPUTE(self, tokens, experts, weights, output_dtype, recv_counts=recv_counts)
 
     EPMoELayerBase._compute_experts = compute
     try:

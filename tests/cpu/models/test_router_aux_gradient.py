@@ -10,8 +10,10 @@ natively: with ``moe_balancing: aux_loss`` applied, a checkpointed backward must
 gradient, and an unchecked one must stay exactly native (no term counted twice).
 
 Families differ in router: Qwen3-MoE (softmax over bf16-convention logits), GPT-OSS (biased linear, a
-``(hidden, scores)`` block output), Laguna (sigmoid routing on fp32 logits behind a dense first layer)
-and GLM-5 Next (the composite wrapper, whose text tower is the collecting backbone).
+``(hidden, scores)`` block output), Laguna (sigmoid routing on fp32 logits behind a dense first layer),
+GLM-5 Next (the composite wrapper, whose text tower is the collecting backbone), and Qwen3-Next and
+Qwen3.5-MoE (a top-k router returning logits, scores and indices beside a sigmoid-gated shared expert,
+renormalized under Qwen3-Next's ``norm_topk_prob``).
 
 Run: python tests/cpu/models/test_router_aux_gradient.py
 """
@@ -31,8 +33,9 @@ from halo.callbacks.balancing import apply_balancing_mode
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
+from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
-from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers, ep_claimed_blocks
 from halo.models.config_access import config_export_ready
 from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.moe import router_aux_gradient
@@ -47,6 +50,7 @@ from tests.common.models import (
     TINY_QWEN3_MOE_CONFIG,
 )
 from tests.common.parallelism import single_process_ep_config
+from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 COEF = 0.7
 LAYERS = 4
@@ -76,7 +80,20 @@ def _glm5_next():
     return Glm5NextForConditionalGeneration(Glm5NextConfig(text_config=text, vision_config=TINY_GLM5_VISION_CONFIG))
 
 
-FAMILIES = {"qwen3_moe": _qwen3_moe, "gpt_oss": _gpt_oss, "laguna": _laguna, "glm5_next": _glm5_next}
+def _full_attention(family: str):
+    """``family``'s tiny model with every layer full attention: the gated-DeltaNet conv kernel is CUDA-only."""
+    overrides = {"num_hidden_layers": LAYERS, "layer_types": ["full_attention"] * LAYERS, "router_aux_loss_coef": COEF}
+    return lambda: tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides)
+
+
+FAMILIES = {
+    "qwen3_moe": _qwen3_moe,
+    "gpt_oss": _gpt_oss,
+    "laguna": _laguna,
+    "glm5_next": _glm5_next,
+    "qwen3_next": _full_attention("qwen3_next"),
+    "qwen3_5_moe_text": _full_attention("qwen3_5_moe_text"),
+}
 
 
 def _build(family: str, *, balanced: bool, ep: bool = False):
@@ -213,15 +230,18 @@ def test_gradient_accumulation_and_interleaved_no_grad_forwards(family):
     torch.testing.assert_close(got, native, rtol=1e-5, atol=1e-6)
 
 
-@pytest.mark.parametrize("family", ["qwen3_moe", "gpt_oss"])
+@pytest.mark.parametrize("family", FAMILIES)
 def test_ep_layer_checkpoint_replay(family):
     """The EP layer owns the router at ``ep_size=1`` and replays its dispatch inside a checkpoint
-    scope; the gradient must ride the wrapper's output back to the adopted router."""
+    scope; the gradient must ride the wrapper's output back to the adopted router. Every MoE block the EP
+    roster claims runs its family's EP layer."""
     batches = _batches(_build(family, balanced=False))
     native = _step(_build(family, balanced=False, ep=True), batches)[0]
+    claimed = {path: MOE_LAYER_MAP[type(block).__name__] for path, block in ep_claimed_blocks(FAMILIES[family]())}
 
     model = _build(family, balanced=True, ep=True)
-    assert any(isinstance(module, EPMoELayerBase) for module in model.modules())
+    wrapped = {path: type(module) for path, module in model.named_modules() if isinstance(module, EPMoELayerBase)}
+    assert claimed and wrapped == claimed
     _checkpoint(model, ep=True)
     unrouted = _build(family, balanced=False, ep=True)
     _checkpoint(unrouted, ep=True)

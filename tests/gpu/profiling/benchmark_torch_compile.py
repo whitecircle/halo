@@ -280,9 +280,9 @@ def main() -> int:
     parser.add_argument(
         "--compile_mode",
         type=str,
-        default="reduce-overhead",
+        default="default",
         choices=["default", "reduce-overhead", "max-autotune", "max-autotune-no-cudagraphs"],
-        help="torch.compile mode for the compiled cells (default: reduce-overhead, the trainer's own fallback)",
+        help="torch.compile mode for the compiled cells (default: default, the trainer's own fallback)",
     )
     parser.add_argument("--ep", type=int, default=2, help="Expert parallel size (default: 2)")
     parser.add_argument("--seq", type=int, default=8192, help="Sequence length (default: 8192)")

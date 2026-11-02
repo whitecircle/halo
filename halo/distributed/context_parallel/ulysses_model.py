@@ -3,7 +3,11 @@ and scored with the boundary-aware causal LM loss; its parameter names and state
 
 from __future__ import annotations
 
+import contextlib
+import inspect
 import logging
+from collections.abc import Callable, Iterator
+from functools import cached_property
 
 import torch
 import torch.distributed as dist
@@ -14,12 +18,21 @@ from accelerate.utils import is_peft_model
 from halo.distributed.context_parallel.config import CPConfig, CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
 from halo.distributed.context_parallel.model_rules import reject_unsupported_ulysses_model
-from halo.distributed.context_parallel.sequence_chunks import cp_shift_against_full_labels, split_sequence_for_cp
+from halo.distributed.context_parallel.sequence_chunks import (
+    cp_local_targets,
+    cp_shift_against_full_labels,
+    split_sequence_for_cp,
+)
 from halo.distributed.expert_parallel.deepep.capacity import bump_forward_generation
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.log import warn_once
+from halo.model_loading.liger.cross_entropy import FusedHeadLossUnavailable, fused_head_loss
+from halo.model_loading.liger.dispatch import LIGER_CP_FUSED_LOSS_ATTR
+from halo.models.config_access import get_config_field
 from halo.models.moe.config_fields import require_router_aux_loss_coef
 from halo.models.unwrapping import base_transformers_model, strip_cp_attention_level, unwrap_framework_wrappers
+from halo.runtime.ranks import is_global_main_process
 from halo.subclass_registry import swap_registered_modules
 
 logger = logging.getLogger(__name__)
@@ -79,29 +92,51 @@ class UlyssesModel(nn.Module):
         )
 
     def forward(self, input_ids=None, attention_mask=None, labels=None, position_ids=None, **kwargs):
-        """The wrapped model's outputs on this rank's chunk, with ``loss`` against the full ``labels`` when given."""
+        """The wrapped model's outputs on this rank's chunk, with ``loss`` against the full ``labels`` when given.
+
+        A training forward under the run's fused head loss (:attr:`_fused_head_loss`) keeps one position's logits,
+        scores the backbone's hidden states through the fused kernel, and returns ``logits=None`` with the chunk's
+        ``token_accuracy``.
+        """
         local_input_ids, local_attention_mask, local_position_ids = self._split_inputs(
             input_ids, attention_mask, position_ids, kwargs
         )
+        head_loss = self._fused_head_loss if labels is not None and torch.is_grad_enabled() else None
+        if labels is None and torch.is_grad_enabled() and self._fused_loss_requested and is_global_main_process():
+            warn_once(
+                logger,
+                self._warned,
+                "unlabelled_fused_loss",
+                "Liger fused_linear_cross_entropy resolves on under Context Parallelism, but this training forward "
+                "passed no labels, so its loss is computed from the full logits: only a labelled forward (SFT) "
+                "runs the fused loss.",
+            )
+        if head_loss is not None:
+            kwargs["logits_to_keep"] = 1
         # labels=None: the boundary-aware loss below replaces the model's.
-        outputs = self.model(
-            input_ids=local_input_ids,
-            attention_mask=local_attention_mask,
-            labels=None,
-            position_ids=local_position_ids,
-            **kwargs,
-        )
+        with self._captured_backbone_output(head_loss is not None) as captured:
+            outputs = self.model(
+                input_ids=local_input_ids,
+                attention_mask=local_attention_mask,
+                labels=None,
+                position_ids=local_position_ids,
+                **kwargs,
+            )
         if labels is None:
             return outputs
 
-        loss = self._compute_cp_loss(outputs.logits, labels)
+        if head_loss is None:
+            loss = self._compute_cp_loss(outputs.logits, labels)
+        else:
+            loss, outputs["token_accuracy"] = self._compute_fused_cp_loss(head_loss, captured, labels)
+            outputs["logits"] = None
         # A per-chunk mean: FSDP's CP-rank average already recovers the global mean, so no cp_size factor here
         # (unlike the CE sum term).
         aux_loss = getattr(outputs, "aux_loss", None)
         if aux_loss is not None:
             aux_loss = aux_loss.to(loss.device)
             if not torch.is_grad_enabled() and self.cp_config.process_group is not None:
-                # Eval: rank-uniform like the CE term (see _compute_cp_loss).
+                # Eval: rank-uniform like the CE term (see _cp_mean).
                 aux_loss = aux_loss.detach().clone()
                 dist.all_reduce(aux_loss, op=dist.ReduceOp.AVG, group=self.cp_config.process_group)
             loss = loss + require_router_aux_loss_coef(self.model.config) * aux_loss
@@ -208,21 +243,93 @@ class UlyssesModel(nn.Module):
         local_position_ids = split_sequence_for_cp(position_ids, self.cp_config)
         return local_input_ids, local_attention_mask, local_position_ids
 
+    @cached_property
+    def _warned(self) -> set[str]:
+        """The keys of the once-per-wrapper warnings already logged."""
+        return set()
+
+    @cached_property
+    def _fused_loss_requested(self) -> bool:
+        """Whether the run resolves ``fused_linear_cross_entropy`` on (the Liger stamp); a wrapped module without a
+        transformers config carries none."""
+        config = getattr(base_transformers_model(self.model), "config", None)
+        return config is not None and bool(get_config_field(config, LIGER_CP_FUSED_LOSS_ATTR, False))
+
+    @cached_property
+    def _fused_head_loss(self) -> Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]] | None:
+        """Liger's fused head loss over the wrapped model when the run resolves ``fused_linear_cross_entropy`` on
+        and the head allows it; ``None`` (logged when requested) keeps the fp32 logits loss. Resolved at the first
+        training forward, after any adapter has wrapped the head."""
+        if not self._fused_loss_requested:
+            return None
+        base = base_transformers_model(self.model)
+        try:
+            if "logits_to_keep" not in inspect.signature(base.forward).parameters:
+                raise FusedHeadLossUnavailable(
+                    f"{type(base).__name__}.forward takes no logits_to_keep, so its logits plane would be built anyway"
+                )
+            return fused_head_loss(base)
+        except FusedHeadLossUnavailable as reason:
+            if is_global_main_process():
+                logger.warning(
+                    f"Liger fused_linear_cross_entropy is on, but the CP loss cannot run it: {reason}. Each rank "
+                    f"scores its chunk from fp32 logits instead."
+                )
+            return None
+
+    @contextlib.contextmanager
+    def _captured_backbone_output(self, enabled: bool) -> Iterator[list[torch.Tensor]]:
+        """The ``last_hidden_state`` of each backbone call inside the block, when ``enabled``: the tensor the
+        verified head path projects."""
+        captured: list[torch.Tensor] = []
+        if not enabled:
+            yield captured
+            return
+        handle = base_transformers_model(self.model).base_model.register_forward_hook(
+            lambda _module, _args, output: captured.append(output.last_hidden_state)
+        )
+        try:
+            yield captured
+        finally:
+            handle.remove()
+
+    def _compute_fused_cp_loss(
+        self, head_loss: Callable, captured: list[torch.Tensor], labels: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """:meth:`_compute_cp_loss` scored from the chunk's final hidden states through ``head_loss``, and the
+        chunk's next-token accuracy over its supervised positions."""
+        if len(captured) != 1:
+            raise RuntimeError(
+                f"The CP fused head loss expects the backbone to run once per forward; it ran {len(captured)} times."
+            )
+        (hidden,) = captured
+        # Every chunk position, the final rank's last included: its target is the ignore index.
+        targets = cp_local_targets(labels, self.cp_config.cp_rank, self.cp_config.cp_size).reshape(-1)
+        local_loss_sum, predicted = head_loss(hidden.reshape(-1, hidden.size(-1)), targets)
+        supervised = targets != LABEL_IGNORE_INDEX
+        accuracy = ((predicted == targets) & supervised).sum() / supervised.sum().clamp(min=1)
+        return self._cp_mean(local_loss_sum, targets), accuracy
+
     def _compute_cp_loss(self, logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
         """Causal LM loss of this rank's chunk against the full ``labels``: a non-final rank's last logit predicts
-        the next chunk's first label, and the sum over the group's token count weighs every token equally; the
-        ``cp_size`` factor cancels FSDP's gradient average over the CP ranks."""
+        the next chunk's first label (:meth:`_cp_mean` weighs it)."""
         vocab_size = logits.size(-1)
-        cp_size, group = self.cp_config.cp_size, self.cp_config.process_group
-        shift_logits, shift_labels = cp_shift_against_full_labels(logits, labels, self.cp_config.cp_rank, cp_size)
+        shift_logits, shift_labels = cp_shift_against_full_labels(
+            logits, labels, self.cp_config.cp_rank, self.cp_config.cp_size
+        )
 
         # fp32 CE like HF's ForCausalLMLoss / Liger FLCE: bf16 softmax+CE rounds differently.
         shift_logits = shift_logits.reshape(-1, vocab_size).float()
         shift_labels = shift_labels.reshape(-1)
 
         local_loss_sum = F.cross_entropy(shift_logits, shift_labels, ignore_index=LABEL_IGNORE_INDEX, reduction="sum")
+        return self._cp_mean(local_loss_sum, shift_labels)
 
-        global_tokens = (shift_labels != LABEL_IGNORE_INDEX).sum()
+    def _cp_mean(self, local_loss_sum: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        """This rank's loss term from its chunk's summed loss over ``targets``: the sum over the group's token count
+        weighs every token equally, and the ``cp_size`` factor cancels FSDP's gradient average over the CP ranks."""
+        cp_size, group = self.cp_config.cp_size, self.cp_config.process_group
+        global_tokens = (targets != LABEL_IGNORE_INDEX).sum()
         if group is not None:
             dist.all_reduce(global_tokens, op=dist.ReduceOp.SUM, group=group)
 

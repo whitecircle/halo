@@ -35,6 +35,7 @@ from tests.common.adapters import mixer_linear_leaves, randomize_adapters
 from tests.common.distributed import init_distributed, teardown_distributed
 from tests.common.ep_reference import random_token_batch, roll_expert_banks, sweep_ep_grads
 from tests.common.equivalence.revisions import (
+    common_families,
     export_tree,
     quiet_logs,
     resolve_commit,
@@ -415,27 +416,30 @@ def main(argv: list[str] | None = None) -> int:
         produce(args.produce, LAUNCH_BY_LABEL[args.launch], args.families, args.variants, perturb=args.perturb)
         return 0
 
-    controls = [(launch, control_case(launch, args.families, args.variants)) for launch in LAUNCHES[args.tier]]
-    if bare := [launch.label for launch, case in controls if case is None]:
-        parser.error(
-            f"--families and --variants give {bare} no case outside KNOWN_RAISING to carry the negative control: "
-            f"add a family or variant it runs (the grouped launch runs only {list(FORWARD_VARIANTS)})"
-        )
     base, head = resolve_commit(REPO_ROOT, args.base_ref), resolve_commit(REPO_ROOT, args.head_ref)
     with tempfile.TemporaryDirectory() as scratch:
         trees = {
             label: export_tree(REPO_ROOT, commit, Path(scratch, label))
             for label, commit in (("base", base), ("head", head))
         }
+        families, skipped = common_families(trees, __spec__.name, args.families)
+        controls = [(launch, control_case(launch, families, args.variants)) for launch in LAUNCHES[args.tier]]
+        if bare := [launch.label for launch, case in controls if case is None]:
+            parser.error(
+                f"the families {families} and --variants give {bare} no case outside KNOWN_RAISING to carry the "
+                f"negative control: add a family or variant it runs (the grouped launch runs only "
+                f"{list(FORWARD_VARIANTS)})"
+            )
         outputs = {label: Path(scratch, f"{label}-records") for label in ("base", "head", "control")}
         for launch, (family, variant) in controls:
             for label in ("base", "head"):
-                _produce_in(trees[label], outputs[label], launch, args.families, args.variants)
+                _produce_in(trees[label], outputs[label], launch, families, args.variants)
             _produce_in(trees["head"], outputs["control"], launch, [family], [variant], perturb=True)
         verdict, assessed = assess(outputs["base"], outputs["head"], outputs["control"], args.accept)
     findings = {
         "tier": args.tier,
-        "families": args.families,
+        "families": families,
+        "skipped": skipped,
         "variants": args.variants,
         "launches": [launch.label for launch, _ in controls],
         **assessed,
@@ -444,7 +448,8 @@ def main(argv: list[str] | None = None) -> int:
     print(  # noqa: T201 — the CLI's report
         f"EP bitwise ({args.tier}): {verdict}, {len(assessed['deltas'])} deltas, {len(assessed['accepted'])} "
         f"accepted, {len(assessed['raised'])} records raising, {len(assessed['unexpected_raised'])} cases "
-        f"unexpected, negative control unseen in {len(assessed['negative_control']['unseen'])} ({path})"
+        f"unexpected, negative control unseen in {len(assessed['negative_control']['unseen'])}, skipped as absent "
+        f"from a tree's roster: {skipped or 'none'} ({path})"
     )
     return 0 if verdict == "pass" else 1
 

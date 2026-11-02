@@ -28,6 +28,9 @@ from halo.trainers.trainer_rules import (
 
 logger = logging.getLogger(__name__)
 
+# Accelerate's TorchDynamoPlugin default too; reduce-overhead's CUDA graphs measure slower on EP MoE.
+DEFAULT_TORCH_COMPILE_MODE = "default"
+
 
 class FsdpExclusions(NamedTuple):
     """What an FSDP2 wrap leaves out of its shard groups.
@@ -451,7 +454,7 @@ class ModeSetupMixin:
         if not training_args.torch_compile:
             return
 
-        compile_mode = training_args.torch_compile_mode or "reduce-overhead"
+        compile_mode = training_args.torch_compile_mode or DEFAULT_TORCH_COMPILE_MODE
         compile_backend = training_args.torch_compile_backend or "inductor"
 
         # Packed batches at bs>1 flatten to a variable-width row, so reduce-overhead's CUDA graphs stop applying.

@@ -59,6 +59,7 @@ _EXPECTED = {
         "force_chat_template": "False",
         "freeze_layers_patterns": "None",
         "log_decoded_samples": "False",
+        "max_consecutive_nonfinite_steps": "3",
         "moe_balancing": "'auto'",
         "num_full_model_params": "None",
         "overwrite_output_dir": "False",

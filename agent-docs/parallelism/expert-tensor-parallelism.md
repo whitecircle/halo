@@ -177,7 +177,7 @@ runtime tensors; the family's `ExpertLayout` then writes them as it would withou
 - GptOss re-interleaves.
 - Contiguous-halves families concatenate gate and up along dim 2 and transpose back from matmul
   convention.
-- GLM4/Laguna/LFM2 (`FUSED_SPLIT_PER_EXPERT`) split that to per-expert names.
+- GLM4/Laguna/LFM2/Qwen3-Next (`FUSED_SPLIT_PER_EXPERT`) split that to per-expert names.
 - Qwen3/Bailing (`SEPARATE_GLU`) write per-expert `experts.{i}.{gate,up,down}_proj.weight`.
 
 The result is a standard HuggingFace checkpoint; ETP sharding is re-applied automatically at model
@@ -215,7 +215,6 @@ layer that does the split cannot disagree on which config spelling carries the p
 | `use_hsdp` | rejected — ETP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
 | `use_peft` / attention LoRA | supported — pure ETP leaves attention unsharded, so the adapter is a genuine replica | — |
 | online GRPO `rollout_func` | rejected, as under TP — it replaces the generation that hands every ETP partner its leader's completions, so partners would feed different tokens into the expert-TP all-reduce | `reject_unshared_rollout_func` |
-| `use_grouped_gemm` on GptOss | runs the per-expert loop, reported in the layer's init summary (`grouped_mm=False`) — ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads | `EPGptOssMoELayer._grouped_mm_enabled` |
 
 The same-token invariant ETP depends on — partners must hold identical batches, since
 `ReduceFromExpertTP` sums element-wise in token space — is maintained by the rank layout, the

@@ -42,7 +42,7 @@ class _RecordingDispatcher:
 
     def dispatch(self, flat, experts, weights, *, owner):
         self.events.append(("dispatch",))
-        return flat, experts, weights, None
+        return flat, experts, weights, None, None
 
     def combine(self, output, recv_topk_weights, handle, *, owner):
         self.events.append(("combine",))
@@ -77,7 +77,7 @@ class _RecordingLayer(StubEPLayerBase):
     def _glu_combine(self, gate: torch.Tensor, up: torch.Tensor) -> torch.Tensor:
         return gate * up
 
-    def _compute_experts(self, tokens, experts, weights, output_dtype):
+    def _compute_experts(self, tokens, experts, weights, output_dtype, *, recv_counts):
         self.events.append(("compute",))
         return tokens.to(output_dtype)
 
@@ -247,10 +247,10 @@ class _ScopeCachingLayer(_RecordingLayer):
         super().__init__()
         self.dispatcher = _ScopeCachingDispatcher(self.events)
 
-    def _compute_experts(self, tokens, experts, weights, output_dtype):
+    def _compute_experts(self, tokens, experts, weights, output_dtype, *, recv_counts):
         # Saves its own output, so the non-reentrant checkpoint really has something to unpack —
         # without a saved tensor it never recomputes and the replay path is never entered.
-        return super()._compute_experts(tokens, experts, weights, output_dtype).sigmoid()
+        return super()._compute_experts(tokens, experts, weights, output_dtype, recv_counts=recv_counts).sigmoid()
 
 
 @pytest.mark.parametrize("use_reentrant", (True, False))
@@ -317,6 +317,7 @@ def _gpt_oss_stub(*, grouped_mm: bool, expert_tp_size: int) -> gpt_oss_layer.EPG
         (False, 1, False),  # per-expert loop: halves split straight out of the interleaved pair
         (True, 1, True),  # grouped GEMM: de-interleaved contiguous parameters
         (False, 2, True),  # ETP loop: the same de-interleaved storage
+        (True, 2, True),  # ETP grouped GEMM: the same storage again
     ),
 )
 def test_gptoss_warms_the_activation_its_compute_path_calls(grouped_mm, expert_tp_size, contiguous_halves):

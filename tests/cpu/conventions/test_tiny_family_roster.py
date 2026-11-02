@@ -7,8 +7,8 @@ suite its dense ones from ``TINY_DENSE_FAMILIES``) and their rows from ``tests/g
 in ``halo/distributed/expert_parallel/families`` with no tiny model, or one the rows skip for an adapter
 shape or a layout, would leave its path untested with nothing failing; the roster is therefore held to
 the EP registry, and the rows to the roster (for the sync-exactness suite, the part of it some
-rollout engine takes an online update for). The CP-vs-reference suite runs the CP roster
-(``tests/common/equivalence/cp_equivalence.py``), one tiny model per Ulysses wrapper class.
+rollout engine takes an online update for). The CP-vs-reference and CP fused-loss suites run the CP roster
+(``tests/common/equivalence/cp_equivalence.py``), which covers every Ulysses wrapper class.
 
     python tests/cpu/conventions/test_tiny_family_roster.py
 """
@@ -35,7 +35,7 @@ PRECOMPUTE_PER_FAMILY = (("dpo", "ep2"), ("dpo", "ep1"), ("kto", "ep2"), ("dpo",
 PRECOMPUTE_PER_TP_FAMILY = (("dpo", "tp2"), ("dpo", "ep2tp2"))
 SYNC_EXACTNESS_SUITE = "trainers/lora/test_lora_weight_sync_exact.py"
 DETERMINISM_SUITE = "parallelism/ep/test_ep_deterministic_expert_grads.py"
-CP_SUITE = "parallelism/cp/test_cp_family_vs_reference.py"
+CP_SUITES = ("parallelism/cp/test_cp_family_vs_reference.py", "parallelism/cp/test_cp_fused_head_loss.py")
 # The family the determinism replay runs under every two-rank layout; every other family runs ep2.
 DETERMINISM_LAYOUT_FAMILY = "gpt_oss"
 # What every syncable MoE family runs through the sync-exactness body, as (mode, adapters): both expert
@@ -136,8 +136,9 @@ def test_the_determinism_rows_run_every_family_and_every_layout_once():
     assert len(set(covered)) == len(covered), "a determinism shape runs in two rows"
 
 
-def test_the_cp_rows_run_every_ulysses_wrapper_family_once():
-    families = [shlex.split(args)[1] for args, _ in MANIFEST[CP_SUITE].launches()]
+@pytest.mark.parametrize("suite", CP_SUITES)
+def test_the_cp_rows_run_every_cp_roster_family_once(suite):
+    families = [shlex.split(args)[1] for args, _ in MANIFEST[suite].launches()]
     assert sorted(families) == sorted(CP_FAMILIES), (
         f"CP rows {sorted(families)} != the CP roster {sorted(CP_FAMILIES)}"
     )

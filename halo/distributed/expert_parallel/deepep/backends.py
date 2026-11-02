@@ -245,7 +245,9 @@ class DeepEPBackend(ABC):
 
     @abstractmethod
     def dispatch_forward(self, x, topk_idx, topk_weights):
-        """Dispatch → ``(recv_x, recv_topk_idx, recv_topk_weights, handle)``."""
+        """Dispatch → ``(recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts)``; ``recv_counts`` is the
+        host-side tuple of (token, expert) slots each local expert received, exact at DeepEP's default
+        ``expert_alignment`` of 1."""
 
     @abstractmethod
     def dispatch_backward(self, grad_recv_x, grad_recv_topk_weights, handle):
@@ -368,7 +370,8 @@ class _ElasticBackend(DeepEPBackend):
             num_sms=self._resolved_num_sms,
             num_qps=DEEPEP_NUM_QPS,
         )
-        return self._slice(recv_x), recv_topk_idx, recv_topk_weights, handle
+        recv_counts = tuple(handle.num_recv_tokens_per_expert_list)
+        return self._slice(recv_x), recv_topk_idx, recv_topk_weights, handle, recv_counts
 
     # ``num_qps`` is passed on the combines too: a combine inherits only ``num_sms`` from the handle and
     # recomputes the QP count, so without it the knob would cover only the dispatch half.
@@ -473,7 +476,7 @@ class _LegacyBackend(DeepEPBackend):
         n_per_rank, n_per_rdma, n_per_expert, is_in_rank, _ = self.buffer.get_dispatch_layout(
             topk_idx, self._d.num_experts
         )
-        recv_x, recv_topk_idx, recv_topk_weights, _, handle, _ = self.buffer.dispatch(
+        recv_x, recv_topk_idx, recv_topk_weights, recv_counts, handle, _ = self.buffer.dispatch(
             x,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
@@ -482,7 +485,7 @@ class _LegacyBackend(DeepEPBackend):
             is_token_in_rank=is_in_rank,
             num_tokens_per_expert=n_per_expert,
         )
-        return recv_x, recv_topk_idx, recv_topk_weights, handle
+        return recv_x, recv_topk_idx, recv_topk_weights, handle, tuple(recv_counts)
 
     def dispatch_backward(self, grad_recv_x, grad_recv_topk_weights, handle):
         grad_x, grad_w, _ = self.buffer.combine(grad_recv_x, handle=handle, topk_weights=grad_recv_topk_weights)

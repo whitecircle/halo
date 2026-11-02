@@ -18,7 +18,6 @@ from halo.models.segment_markers import SegmentMarkers
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
-    TINY_UNWRAPPED_MOE_FAMILY,
     tiny_family_model,
 )
 
@@ -37,7 +36,7 @@ PAIRS = (
 # GatedDeltaNet runs through Qwen3-Next: the Qwen3.5/3.6 decoders rotate by M-RoPE, which refuses padding_free.
 FAMILIES = {
     "lfm2": TINY_MOE_FAMILIES["lfm2_moe"],
-    "qwen3_next": TINY_UNWRAPPED_MOE_FAMILY,
+    "qwen3_next": TINY_MOE_FAMILIES["qwen3_next"],
     "qwen3": TINY_DENSE_FAMILIES["qwen3"],
 }
 # Marker subsets under which a family's row must leak, proving the isolation is the markers' doing.

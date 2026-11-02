@@ -73,8 +73,9 @@ def chunked_saveable_tensors(
     only where ``retain``.
 
     The chunk plan is built from names only, so every rank builds the same one; the writer's host RAM
-    peaks at one decoder layer plus one pending shard rather than the whole model. ``fold`` derives each
-    tensor's saved value (an out-of-place LoRA fold) inside its chunk's gather, never all up front.
+    peaks at one decoder layer plus the shard it is filling and one per write thread rather than the whole
+    model. ``fold`` derives each tensor's saved value (an out-of-place LoRA fold) inside its chunk's gather,
+    never all up front.
     """
     pairs = list(saveable_items(model, items))
     # The sinks FA2 dropped from named_parameters() join the walk in their own layer's chunk rather
@@ -125,45 +126,47 @@ def stream_gathered_checkpoint(
 
     ``chunks`` is a retain-gated gather driven to exhaustion on every rank; ``normalize`` brings each
     chunk to its on-disk names and dtypes, which is why the chunks are conversion-closed. Host RAM stays
-    at one chunk plus one pending shard. A failing write is deferred to a collective, so it raises on
+    at one chunk plus the writer's staged parts (:attr:`StreamingShardWriter.max_resident_bytes`: the shard
+    it is filling and one per write thread). A failing write is deferred to a collective, so it raises on
     every rank rather than stranding the peers in the next chunk's gather. Returns ``(tensors, bytes)``
     written, zeros off the save rank.
     """
-    writer = StreamingShardWriter(output_dir, max_shard_size, enabled=is_save_rank)
-    guard = DeferredRankFailure(f"gathered checkpoint write to {output_dir}")
-    # Held across the stream only where the reconcile below can act on them: an untied config makes
-    # it a no-op, and these are two of the largest tensors in the checkpoint.
-    keep_tied = getattr(model, "config", None) is not None and ties_word_embeddings(model.config)
-    tied: dict[str, torch.Tensor] = {}
-    written = 0
+    # Entered, so the parts are written in the background; the exit waits them out before any raise leaves.
+    with StreamingShardWriter(output_dir, max_shard_size, enabled=is_save_rank) as writer:
+        guard = DeferredRankFailure(f"gathered checkpoint write to {output_dir}")
+        # Held across the stream only where the reconcile below can act on them: an untied config makes
+        # it a no-op, and these are two of the largest tensors in the checkpoint.
+        keep_tied = getattr(model, "config", None) is not None and ties_word_embeddings(model.config)
+        tied: dict[str, torch.Tensor] = {}
+        written = 0
 
-    def stage(chunk: dict[str, torch.Tensor]) -> None:
-        nonlocal written
-        for key, tensor in normalize(chunk).items():
-            if keep_tied and is_tie_reconcile_key(key):
-                tied[key] = tensor
-            writer.add(key, tensor)
-            written += 1
+        def stage(chunk: dict[str, torch.Tensor]) -> None:
+            nonlocal written
+            for key, tensor in normalize(chunk).items():
+                if keep_tied and is_tie_reconcile_key(key):
+                    tied[key] = tensor
+                writer.add(key, tensor)
+                written += 1
 
-    for chunk in chunks:
-        # The generator is driven on every rank (its gathers are collective); only the writer has a
-        # chunk to normalize, and only it can fail the deferred guard on one.
+        for chunk in chunks:
+            # The generator is driven on every rank (its gathers are collective); only the writer has a
+            # chunk to normalize, and only it can fail the deferred guard on one.
+            if is_save_rank:
+                guard.run(partial(stage, chunk))
+            del chunk  # released before the next chunk is gathered
+        # Collective. A stream that failed anywhere stops the job here rather than finalizing an index
+        # over tensors that were never written.
+        guard.reject()
+
+        finalize = DeferredRankFailure(f"gathered checkpoint finalize in {output_dir}")
+        total_bytes = 0
         if is_save_rank:
-            guard.run(partial(stage, chunk))
-        del chunk  # released before the next chunk is gathered
-    # Collective. A stream that failed anywhere stops the job here rather than finalizing an index
-    # over tensors that were never written.
-    guard.reject()
-
-    finalize = DeferredRankFailure(f"gathered checkpoint finalize in {output_dir}")
-    total_bytes = 0
-    if is_save_rank:
-        if hasattr(model, "config"):
-            # Must precede the config write, which persists the flag this may clear.
-            reconcile_tie_word_embeddings(model, tied)
-            finalize.run(partial(save_model_config, model, output_dir))
-        # The index is the last thing written: the parts are only a checkpoint once it names them.
-        total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
-    # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
-    finalize.store_reject("checkpoint/gathered_finalize")
+            if hasattr(model, "config"):
+                # Must precede the config write, which persists the flag this may clear.
+                reconcile_tie_word_embeddings(model, tied)
+                finalize.run(partial(save_model_config, model, output_dir))
+            # The index is the last thing written: the parts are only a checkpoint once it names them.
+            total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
+        # Over the store: the peers wait out the writer's last part, unbounded on slow storage.
+        finalize.store_reject("checkpoint/gathered_finalize")
     return written, total_bytes

@@ -95,6 +95,11 @@ YAML and command line leave the field unset:
 - `logging_nan_inf_filter: false`. The upstream filter logs the running average
   in place of a NaN, which hides the step where a run diverged.
 
+The trainers also never apply an optimizer step whose gradient norm is NaN or
+inf: the step is skipped with a warning and training goes on. More than
+`max_consecutive_nonfinite_steps` (default 3) in a row stop the run, as do
+weights that are already NaN.
+
 `strftime` codes in `output_dir` expand at launch (`runs/sft-%m%d-%H%M`). No
 other field expands them.
 

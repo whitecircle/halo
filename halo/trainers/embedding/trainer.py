@@ -40,6 +40,7 @@ from halo.checkpoint.parallel.save import save_checkpoint, save_tokenizer
 from halo.checkpoint.parallel.writing import stream_gathered_checkpoint
 from halo.checkpoint.writing import normalize_gathered_state_dict
 from halo.configs.embedding import EmbeddingConfig
+from halo.configs.script_arguments import DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import warn_once
@@ -191,6 +192,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         moe_balancing: str = "auto",
         save_max_shard_size: str | None = None,
         allow_optimizer_warm_restart: bool = False,
+        max_consecutive_nonfinite_steps: int = DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS,
     ):
         patch_sentence_transformer_gradient_checkpointing()
         # The SentenceTransformer's ``config`` is its backbone's, so the seam sees a MoE's experts.
@@ -202,6 +204,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             moe_balancing=moe_balancing,
             save_max_shard_size=save_max_shard_size,
             allow_optimizer_warm_restart=allow_optimizer_warm_restart,
+            max_consecutive_nonfinite_steps=max_consecutive_nonfinite_steps,
         )
         toolkit_loader = self._needs_custom_dataloader()
         reject_batch_sampler_on_toolkit_loader(args, toolkit_loader=toolkit_loader)

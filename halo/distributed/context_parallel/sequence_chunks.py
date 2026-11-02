@@ -17,14 +17,21 @@ def cp_chunk_bounds(seq_len: int, cp_rank: int, cp_size: int) -> tuple[int, int]
     return cp_rank * chunk_size, (cp_rank + 1) * chunk_size
 
 
+def cp_local_targets(labels: torch.Tensor, cp_rank: int, cp_size: int) -> torch.Tensor:
+    """The next-token targets of CP rank ``cp_rank``'s chunk positions in the full pre-split ``[batch, seq_len]``
+    labels: a non-final rank's last position targets the next chunk's first token, the sequence's last is
+    ignored."""
+    start, end = cp_chunk_bounds(labels.size(1), cp_rank, cp_size)
+    return next_token_targets(labels, start, end - start)
+
+
 def cp_shift_against_full_labels(
     logits: torch.Tensor, labels: torch.Tensor, cp_rank: int, cp_size: int
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """``(shift_logits, shift_labels)`` of CP rank ``cp_rank``'s local logits against the full pre-split
     ``[batch, seq_len]`` labels. A non-final rank's last logit predicts the next chunk's first token, so every
     local logit stays supervised; only the final rank drops its last one."""
-    start, end = cp_chunk_bounds(labels.size(1), cp_rank, cp_size)
-    targets = next_token_targets(labels, start, end - start)
+    targets = cp_local_targets(labels, cp_rank, cp_size)
     if cp_rank == cp_size - 1:
         return logits[:, :-1], targets[:, :-1]
     return logits, targets

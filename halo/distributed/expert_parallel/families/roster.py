@@ -13,6 +13,7 @@ from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer  # noq
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer  # noqa: F401
+from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer  # noqa: F401
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer  # noqa: F401
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase

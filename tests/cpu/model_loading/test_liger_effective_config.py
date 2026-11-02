@@ -11,23 +11,35 @@ config — deciding from the raw user dict either flips the flag off while the m
 """
 
 import inspect
+import json
 import logging
 import types
 
 import pytest
+import torch
 import torch.nn.functional as F
 from liger_kernel.transformers import _apply_liger_kernel_to_instance
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
+from transformers import AutoConfig
 from transformers.loss import loss_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+from transformers.utils import CONFIG_NAME
 
+from halo.checkpoint.config_export import save_model_config
 from halo.model_loading.liger import dispatch
 from halo.model_loading.liger.applier import LigerApplier
 from halo.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_cross_entropy
 from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.models.attention.gpt_oss_sinks import RESOLVED_SINKS_RESET_ATTR, SinksPolicy
+from halo.models.attention.selection import validate_attn_implementation
+from halo.models.config_access import TOOLKIT_STAMP_PREFIX, config_model_types, config_sources, get_config_field
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from tests.common.liger_appliers import liger_applier
+from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, TINY_QWEN3_VL_FAMILY, tiny_family_model
+
+# Every stamp the loader writes on the config before ``from_pretrained``.
+_PRE_LOAD_STAMPS = (dispatch.LIGER_APPLIED_CONFIG_ATTR, dispatch.LIGER_CP_FUSED_LOSS_ATTR, RESOLVED_SINKS_RESET_ATTR)
 
 
 class _RecordingApplier:
@@ -186,14 +198,13 @@ def test_tp_force_off_recorded_as_effective(monkeypatch):
 
 
 def test_cp_force_off_recorded_as_effective(monkeypatch):
-    """Under CP the fused path is unreachable, so the effective config must say so.
+    """Under CP the model's own fused head is unreachable, so the effective config must say so.
 
-    The Ulysses wrapper calls the model with ``labels=None`` and computes a boundary-aware loss from
-    ``outputs.logits`` itself. Every Liger ``lce_forward`` gates on
-    ``skip_logits = self.training and labels is not None``, so FLCE never engages — leaving the flag
-    on reports a memory saving that does not exist and makes the trainer pin ``use_liger_kernel``
-    on that false basis. ``cross_entropy`` goes too: with ``labels=None`` the model's ``loss_utils``
-    path never runs, so the scoped CE patch is inert.
+    The Ulysses wrapper calls the model with ``labels=None`` and computes a boundary-aware loss itself. Every
+    Liger ``lce_forward`` gates on ``skip_logits = self.training and labels is not None``, so a patched head never
+    engages — leaving the flag on makes the trainer pin ``use_liger_kernel`` on a false basis; the wrapper serves
+    an FLCE request itself (the tests below). ``cross_entropy`` goes too: with ``labels=None`` the model's
+    ``loss_utils`` path never runs, so the scoped CE patch is inert.
     """
     applier = _RecordingApplier()
     monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "zaya", applier)
@@ -344,7 +355,7 @@ def test_ep_does_not_strip_a_toolkit_appliers_dense_and_shared_expert_glu(monkey
 def test_the_family_spec_lookup_resolves_through_the_text_config():
     """A family has an EP layer exactly when a spec claims its ``model_type``, at either config level."""
     assert find_moe_family_spec_for_config(types.SimpleNamespace(model_type="qwen3_5_moe")) is not None
-    assert find_moe_family_spec_for_config(types.SimpleNamespace(model_type="qwen3_next")) is None
+    assert find_moe_family_spec_for_config(types.SimpleNamespace(model_type="mixtral")) is None
     composite = types.SimpleNamespace(
         model_type="some_multimodal_wrapper",
         get_text_config=lambda: types.SimpleNamespace(model_type="qwen3_5_moe_text"),
@@ -402,6 +413,111 @@ def test_cp_off_leaves_the_family_default_alone(monkeypatch):
     assert applied["fused_linear_cross_entropy"] is True, (
         "Zaya's family default is FLCE-on; cp_size=1 must leave it on so the CP force-off is provably caused by CP."
     )
+
+
+def test_cp_hands_a_requested_fused_loss_to_its_wrapper_without_a_force_off_warning(monkeypatch, caplog):
+    """The wrapper scores each chunk through the fused kernel, so the request is served, not refused: the stamp
+    the wrapper reads is set, the model's head stays unpatched, and no "forcing it off" warning names FLCE."""
+    applier = _RecordingApplier()
+    monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "zaya", applier)
+    config = _zaya_like_config()
+    with caplog.at_level(logging.WARNING):
+        applied = dispatch.apply_liger_kernel(config, {"fused_linear_cross_entropy": True}, cp_size=2)
+    assert getattr(config, dispatch.LIGER_CP_FUSED_LOSS_ATTR) is True
+    assert applied["fused_linear_cross_entropy"] is False and applier.calls == [applied]
+    assert not [r for r in caplog.records if "fused_linear_cross_entropy" in r.getMessage()]
+
+
+@pytest.mark.parametrize(
+    ("model_type", "user_config", "expected"),
+    [
+        ("zaya", None, True),
+        ("zaya", {"fused_linear_cross_entropy": False}, False),
+        ("qwen3_moe", None, False),
+        ("qwen3_moe", {"fused_linear_cross_entropy": True}, True),
+    ],
+    ids=["family_default_on", "explicit_off", "family_default_off", "explicit_on"],
+)
+def test_cp_resolves_the_fused_loss_as_the_family_and_the_user_resolve_flce(
+    monkeypatch, model_type, user_config, expected
+):
+    applier = _RecordingApplier()
+    monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, model_type, applier)
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, model_type, applier)
+    config = types.SimpleNamespace(model_type=model_type, text_config=None)
+    dispatch.apply_liger_kernel(config, user_config, cp_size=2)
+    assert getattr(config, dispatch.LIGER_CP_FUSED_LOSS_ATTR) is expected
+
+
+def test_cp_keeps_the_logits_loss_where_no_applier_offers_flce(monkeypatch, caplog):
+    """A family Liger has no fused head for: the request is named unsatisfiable and the wrapper keeps the logits
+    loss."""
+
+    def no_flce_applier(rope=True, cross_entropy=True, rms_norm=True):
+        pass
+
+    monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "zaya", no_flce_applier)
+    config = _zaya_like_config()
+    with caplog.at_level(logging.WARNING):
+        dispatch.apply_liger_kernel(config, {"fused_linear_cross_entropy": True}, cp_size=2)
+    assert getattr(config, dispatch.LIGER_CP_FUSED_LOSS_ATTR) is False
+    assert any("fused_linear_cross_entropy" in r.getMessage() and "does not" in r.getMessage() for r in caplog.records)
+
+
+def test_no_cp_leaves_no_fused_loss_stamp(monkeypatch):
+    monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "zaya", _RecordingApplier())
+    config = _zaya_like_config()
+    dispatch.apply_liger_kernel(config, {"fused_linear_cross_entropy": True}, cp_size=1)
+    assert not hasattr(config, dispatch.LIGER_CP_FUSED_LOSS_ATTR)
+
+
+def _is_stamp(key: str) -> bool:
+    return key.startswith(TOOLKIT_STAMP_PREFIX) or key in _PRE_LOAD_STAMPS
+
+
+def _stamped_keys(payload: dict, path: str = "") -> list[str]:
+    """Every key of a serialized config, sub-configs included, that is a toolkit stamp."""
+    found = [f"{path}{key}" for key in payload if _is_stamp(key)]
+    for key, value in payload.items():
+        if isinstance(value, dict):
+            found += _stamped_keys(value, f"{path}{key}.")
+    return found
+
+
+@pytest.mark.parametrize(
+    "family",
+    [TINY_DENSE_FAMILY, TINY_QWEN3_VL_FAMILY, TINY_MOE_FAMILIES["gpt_oss"]],
+    ids=["qwen3", "qwen3_vl", "gpt_oss"],
+)
+def test_an_export_carries_no_run_scoped_halo_keys(monkeypatch, tmp_path, family):
+    """The loader stamps the sinks verdict and the Liger and CP state on the config the load is handed, and
+    ``from_pretrained`` gives the model a deep copy whose stamps have no recorded original. The export must
+    still write none, so a later run on the checkpoint cannot re-arm the fused loss or inherit this run's sinks
+    verdict, while this run keeps reading its own stamps."""
+    torch.manual_seed(0)
+    tiny_family_model(family).save_pretrained(tmp_path / "source")
+    config = AutoConfig.from_pretrained(tmp_path / "source")
+    applier = _RecordingApplier()
+    for model_type in config_model_types(config):
+        monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, model_type, applier)
+        monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, model_type, applier)
+    validate_attn_implementation(config, "eager", SinksPolicy.NEUTRALIZED)
+    # ``use_grouped_gemm``'s default sets ``needs_ep_layers``, so a GPT-OSS run's experts are the EP layer's.
+    applied = dispatch.apply_liger_kernel(
+        config, {"fused_linear_cross_entropy": True}, needs_ep_layers=True, cp_size=2
+    )
+    model = family.load_class.from_pretrained(tmp_path / "source", config=config)
+    assert model.config is not config
+
+    save_model_config(model, str(tmp_path / "export"))
+
+    written = json.loads((tmp_path / "export" / CONFIG_NAME).read_text())
+    assert _stamped_keys(written) == []
+    reloaded = AutoConfig.from_pretrained(tmp_path / "export")
+    assert [key for level in config_sources(reloaded) for key in vars(level) if _is_stamp(key)] == []
+    assert get_config_field(model.config, dispatch.LIGER_CP_FUSED_LOSS_ATTR) is True
+    assert get_config_field(model.config, dispatch.LIGER_APPLIED_CONFIG_ATTR) == applied
+    assert get_config_field(model.config, RESOLVED_SINKS_RESET_ATTR) is True
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "glm4_moe_lite", "zaya"])

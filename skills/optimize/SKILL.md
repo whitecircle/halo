@@ -70,7 +70,9 @@ Mention these only to confirm, not as new advice:
 - **Long-seq OOM at the loss →** **FusedLinearCrossEntropy**
   (`liger_kernel_config: {cross_entropy: false, fused_linear_cross_entropy: true}` — sub-keys of that
   dict, not top-level fields): never materializes the logits plane; SFT-only, no entropy logging, forced
-  off under TP, CP and PP ([Liger](../../agent-docs/optimization/liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy)). GRPO: `use_chunked_grpo_logprobs`
+  off under TP and PP, and run per chunk by the CP wrapper under CP
+  ([Liger](../../agent-docs/optimization/liger-kernels.md#crossentropy-vs-fusedlinearcrossentropy),
+  [CP fused head loss](../../agent-docs/parallelism/context-parallelism.md#fused-head-loss)). GRPO: `use_chunked_grpo_logprobs`
   ([the logits wall](../../agent-docs/training-methods/async-grpo/performance.md#the-logits-wall)).
 - **MoE activation OOM →** keep **GC on** and/or **raise the EP degree** (less expert memory per GPU).
 - **Dense model does not fit one GPU at load →** **TP**: plain FSDP2/DDP loads the whole model onto every

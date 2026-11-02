@@ -144,6 +144,7 @@ _TINY_MOE_FAMILY_MARKERS = {
     "mistral4": "mistral4",
     "qwen3_5_moe_text": "qwen3",
     "qwen3_moe": "qwen3",
+    "qwen3_next": "qwen3",
     "step3p7": "step3p7",
     "zaya": "zaya",
 }
@@ -191,9 +192,25 @@ _PRECOMPUTE_CORE_ROWS = (
 )
 # The core rows cover Qwen3-MoE; the family sweep runs every other family.
 _PRECOMPUTE_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if family != "qwen3_moe")
-# The MoE families of the CP roster, one tiny model per Ulysses wrapper class beside the dense qwen3;
-# tests/cpu/conventions/test_tiny_family_roster.py holds them to tests/common/equivalence/cp_equivalence.py.
-_CP_MOE_FAMILIES = ("bailing_moe", "cohere2_moe", "glm4_moe_lite", "gpt_oss", "mistral4", "qwen3_5_moe_text")
+# The CP roster (tests/common/equivalence/cp_equivalence.py), each row carrying only its own family marker: the dense
+# qwen3 and qwen3_vl, then the MoE families. tests/cpu/conventions/test_tiny_family_roster.py holds the rows to it.
+_CP_MOE_FAMILIES = (
+    "bailing_moe",
+    "cohere2_moe",
+    "glm4_moe_lite",
+    "gpt_oss",
+    "mistral4",
+    "qwen3_5_moe_text",
+    "qwen3_moe",
+)
+_CP_ROSTER_ROWS = (
+    "--family qwen3",
+    Row("--family qwen3_vl", markers=("gpu", "core", "2gpu", "cp", "vlm", "qwen3")),
+    *(
+        Row(f"--family {family}", markers=("gpu", "core", "2gpu", "cp", "moe", _TINY_MOE_FAMILY_MARKERS[family]))
+        for family in _CP_MOE_FAMILIES
+    ),
+)
 # The pipeline-registered MoE families test_pp_family_vs_reference.py runs (GPT-OSS has its own PP suites).
 _PP_MOE_FAMILIES = ("deepseek_v4", "glm5_next", "qwen3_5_moe_text", "step3p7")
 # The families whose attention the selective-TP path shards; tests/cpu/conventions/test_tiny_family_roster.py
@@ -363,6 +380,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_flex_masked_layers.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "step3p7", "gemma4"), timeout=900
     ),
+    "kernels/test_fla_fixed_nb.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
     "kernels/test_family_kernel_stack_numerics.py": TestSpec(
@@ -380,6 +398,7 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_liger_rope_repeated_calls.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=300
     ),
+    "kernels/test_liger_launch_context.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=300),
     "kernels/test_fla_blackwell_autotune.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600),
     "kernels/test_lowp_expert_lora.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "lora", "moe"), timeout=600),
     "kernels/test_packed_broadcast_memory.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
@@ -389,6 +408,8 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_weight_sync_stream_safety.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     # ── optimizers ──
     "optimizers/test_adamw_bf16.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    # Pure FSDP2 (no TP mesh anywhere), so no parallelism-axis marker, like the plain-FSDP entries.
+    "optimizers/test_adamw_bf16_fused.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "optimizers/test_bf16_optimizer_ep.py": TestSpec(
         nproc=8, markers=("gpu", "full", "8gpu", "ep", "moe", "gptoss"), timeout=1000
     ),
@@ -434,6 +455,10 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/combined/test_ep_etp_combo_correctness.py": TestSpec(
         nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "gptoss"), timeout=1000
     ),
+    # ep4 x etp2: grouped GEMM against the per-expert loop over 20 steps, and resuming a loop-path checkpoint.
+    "parallelism/combined/test_gptoss_etp_grouped_gemm.py": TestSpec(
+        nproc=8, markers=("gpu", "full", "8gpu", "ep", "etp", "moe", "gptoss"), timeout=1500
+    ),
     "parallelism/combined/test_ep_etp_fused_glu_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "etp", "mistral4"), timeout=600
     ),
@@ -455,21 +480,13 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/cp/test_cp_vlm.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "vlm", "cp", "qwen3"), timeout=1000
     ),
-    # Tiny models, one per Ulysses wrapper class, each row carrying only its own family marker.
+    # The CP roster's tiny models against themselves unsplit.
     "parallelism/cp/test_cp_family_vs_reference.py": TestSpec(
-        nproc=2,
-        markers=("gpu", "core", "2gpu", "cp", "qwen3"),
-        args_matrix=(
-            "--family qwen3",
-            *(
-                Row(
-                    f"--family {family}",
-                    markers=("gpu", "core", "2gpu", "cp", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
-                )
-                for family in _CP_MOE_FAMILIES
-            ),
-        ),
-        timeout=900,
+        nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), args_matrix=_CP_ROSTER_ROWS, timeout=900
+    ),
+    # The same roster: the fused head loss against the logits loss, and Liger's kernel against the head path.
+    "parallelism/cp/test_cp_fused_head_loss.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "cp", "qwen3"), args_matrix=_CP_ROSTER_ROWS, timeout=900
     ),
     "parallelism/ep/test_ep1_fsdp_shard_experts.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "gptoss"), timeout=1500
@@ -491,7 +508,25 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe"), timeout=300
     ),
     "parallelism/ep/test_ep_sort_sync_free.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe"), timeout=300
+        nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", *_family_markers(("qwen3_moe",))), timeout=300
+    ),
+    # Every tiny family on real DeepEP dispatch: the grouped path on each transport backend, the per-expert loop,
+    # and GptOss's grouped path under expert TP (ep2 x etp2).
+    "parallelism/ep/test_ep_receive_counts.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "ep", "moe", *_family_markers(_TINY_MOE_FAMILIES)),
+        args_matrix=(
+            "--backend elastic",
+            "--backend legacy",
+            "--backend elastic --no-grouped-gemm --expect-path loop",
+            Row(
+                "--backend elastic --family gpt_oss --expert-tp-size 2",
+                nproc=4,
+                markers=("gpu", "core", "4gpu", "ep", "etp", "moe", "gptoss"),
+                timeout=600,
+            ),
+        ),
+        timeout=1200,
     ),
     # Table arithmetic against the installed extension: no model, no buffer, no collective.
     "parallelism/ep/test_deepep_config_ranks_drift.py": TestSpec(
@@ -1549,7 +1584,7 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "ep", "moe"),
         args_matrix=tuple(
             Row(f"--family {family}", markers=("gpu", "core", "2gpu", "ep", "moe", _TINY_MOE_FAMILY_MARKERS[family]))
-            for family in ("cohere2_moe", "deepseek_v4", "glm5_next", "step3p7")
+            for family in ("cohere2_moe", "deepseek_v4", "glm5_next", "qwen3_next", "step3p7")
         ),
         timeout=1200,
     ),
@@ -1679,6 +1714,25 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "full", "2gpu", "moe", "gptoss"),
         args_matrix=("--mode fsdp", "--mode tp", "--mode ep"),
         timeout=1500,
+    ),
+    # A non-finite step skipped on every rank, a streak and corrupted weights raising, on every clip and
+    # sharding path: ep1 DTensor experts, ep2 plain experts, two EP groups' deferred sweep, ETP, dense FSDP2,
+    # TP, CP, QLoRA and PP.
+    "trainers/sft/test_sft_nonfinite_step_guard.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=(
+            Row("--mode ep1", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")),
+            Row("--mode ep2", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")),
+            Row("--mode ep2_dp2", nproc=4, markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3")),
+            Row("--mode etp2", markers=("gpu", "core", "2gpu", "etp", "moe", "qwen3")),
+            "--mode dense",
+            Row("--mode tp", markers=("gpu", "core", "2gpu", "tp", "qwen3")),
+            Row("--mode cp", markers=("gpu", "core", "2gpu", "cp", "qwen3")),
+            Row("--mode qlora", markers=("gpu", "core", "2gpu", "lora", "qwen3")),
+            Row("--mode pp", nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3")),
+        ),
+        timeout=900,
     ),
     "trainers/sft/test_sft_qwen3_modes.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "cp", "qwen3"), timeout=600

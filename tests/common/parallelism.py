@@ -116,6 +116,24 @@ def create_config(**kwargs):
     return make_parallelism_config(**kwargs)
 
 
+def stubbed_rank_ep_config(world_size: int, ep_size: int, rank: int, num_experts: int, **overrides) -> EPConfig:
+    """Rank ``rank``'s :class:`EPConfig` of a ``world_size``-rank job at ``ep_size``-way dispatch EP and the
+    quotient expert TP, built over :func:`stubbed_process_groups`, experts FSDP-ignored as every expert layout
+    spanning more than one rank keeps them, with ``num_experts`` assigned; ``overrides`` are further
+    :class:`EPConfig` fields."""
+    with stubbed_process_groups(world_size, rank):
+        config = EPConfig(
+            ep_size=ep_size,
+            expert_tp_size=world_size // ep_size,
+            stage_world_size=world_size,
+            nvlink_domain_size=world_size,
+            experts_fsdp_managed=False,
+            **overrides,
+        )
+        config.finalize_expert_assignment(num_experts)
+    return config
+
+
 def single_process_ep_config(num_experts: int | None = None, **overrides) -> EPConfig:
     """An :class:`EPConfig` owning every expert on one rank, no process group.
 

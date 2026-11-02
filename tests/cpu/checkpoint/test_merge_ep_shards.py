@@ -51,6 +51,7 @@ from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
 from halo.distributed.expert_parallel.families.mistral4 import EPMistral4MoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.expert_parallel.families.qwen3_5 import EPQwen3_5MoELayer
+from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from halo.models.moe.expert_layout import to_hub_expert_tensors
 from halo.models.moe.family_specs import expert_weight_roots, find_moe_family_spec
@@ -861,6 +862,7 @@ def _roundtrip_vs_gathered(layer_cls, model_type, container):
         (EPGlm4MoELayer, "glm4_moe_lite", "mlp"),
         (EPLagunaMoELayer, "laguna", "mlp"),
         (EPLfm2MoELayer, "lfm2_moe", "feed_forward"),
+        (EPQwen3NextMoELayer, "qwen3_next", "mlp"),
         # Fused hub layouts.
         (EPCohere2MoELayer, "cohere2_moe", "mlp"),
         (EPQwen3_5MoELayer, "qwen3_5_moe", "mlp"),

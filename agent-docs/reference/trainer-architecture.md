@@ -24,6 +24,7 @@ its concern:
 | `parallelism/grad_clipping.py` | `GradientClippingMixin`: the EP / TP / QLoRA `clip_grad_norm_` replacements and the EP/DTensor-aware global norm they reduce; `pp_clip_grad_norm` and the clip primitives |
 | `parallelism/pipeline_trainer.py` | `PipelineTrainerMixin`: the PP split, setup, schedule-driven step and eval, inert unless `pp_size > 1` |
 | `parallelism/tp_leader.py` | `TPLeaderBroadcastMixin`: object and tensor broadcasts from the TP/ETP-group leader (the GRPO generation paths) |
+| `step_guard.py` | `NonFiniteStepGuardMixin`: the optimizer step a non-finite global gradient norm would take, skipped or raised on ([Non-finite steps](#non-finite-steps)) |
 | `trainer_rules.py`, `parallelism/pipeline_rules.py`, `parallelism/adapter_rules.py` | Every construction refusal as a pure `reject_*` over explicit inputs; `pipeline_rules.py` holds the PP ones, and the adapter rules cover LoRA, PEFT and native expert LoRA under the parallelism modes |
 
 Each mixin is a class because it reads live trainer state; the methods a test or a caller reaches as
@@ -225,7 +226,8 @@ class MyDistributedTrainer(DistributedTrainerMixin, SomeBaseTrainer):
 **`_init_distributed_config(kwargs, training_args=None, ctor_args=(), ctor_positions=None, **explicit)`** pops the toolkit-only kwargs
 before the base trainer sees them: `parallelism_config` (a `ParallelismConfig`; passing `None`
 raises `ValueError`), the checkpoint knobs `save_sharded_ep` (default `False`), `save_max_shard_size`
-and `allow_optimizer_warm_restart`, `moe_balancing`, `dataset_presharded`, and `bf16_optimizer`.
+and `allow_optimizer_warm_restart`, `max_consecutive_nonfinite_steps` (the [step guard](#non-finite-steps)'s
+limit), `moe_balancing`, `dataset_presharded`, and `bf16_optimizer`.
 Its `_apply_training_args_overrides` step sets `fsdp = ""` on the training args (the mixin owns sharding)
 and, under EP, `ddp_find_unused_parameters = True`, hands TRL its router aux-loss coefficient, and
 reconciles `save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested
@@ -296,7 +298,7 @@ rank-local firing would hang a job whose microbatch touches different adapters p
 
 The sync is one bucketed all-reduce over every trainable grad per optimizer step, with membership
 agreed by a grad-presence mask so no rank reduces alone. It is ordered ahead of clipping (otherwise
-each rank clips by its own coefficient) and backstopped by a step-pre-hook for `max_grad_norm: 0`.
+each rank clips by its own coefficient) and backstopped by a step-pre-hook for a step that misses the clip.
 
 ## Parallelism modes
 
@@ -374,21 +376,54 @@ FSDP2 does not (`experts_fsdp_managed` false). `aten._fused_adamw_` raises "mixe
 DTensor" over that parameter set at the first step; the message names AdamWBF16 and
 `fp32_non_ep_params` as the two supported shapes.
 
-It then registers three step-pre-hooks (`_register_grad_sync_step_hooks`) so their grad syncs still
-run when `max_grad_norm: 0` skips clipping: the TP replicated-grad sync, the multi-group-EP
-cross-replica sweep, and the QLoRA DP sweep.
+Each grad sweep runs inside the patched `clip_grad_norm_`. At `max_grad_norm <= 0` transformers skips
+the clip but still calls it on every step for an unclipped norm, at an infinite threshold that
+`is_clipping_enabled` treats as no clipping, so no gradient is rescaled; the non-finite step guard reads
+that norm. `create_optimizer` also registers three step-pre-hooks (`_register_grad_sync_step_hooks`) as
+backstops for a step that misses the call: the TP replicated-grad sync, the multi-group-EP cross-replica
+sweep, and the QLoRA DP sweep. Each sweep is marked once per step, so a hook acts only when the clip did
+not run it: the TP hook no-ops when `max_grad_norm > 0`, and the EP hook gates on whether the sweep
+already ran this step, never on `max_grad_norm`. See [BF16 Optimizer](../optimization/bf16-optimizer.md).
 
-The TP hook no-ops when `max_grad_norm > 0`. The EP hook must *not* gate on `max_grad_norm`: on a
-logging step at `max_grad_norm == 0` transformers still reaches the patched `clip_grad_norm_`, so it
-gates on whether the sweep already ran this step.
+## Non-finite steps
 
-At `max_grad_norm <= 0` transformers asks for an unclipped norm purely to log it. The mixin's
-`_get_grad_norm` answers `None` on the steps that log nothing, replicating `DefaultFlowCallback`'s
-rule off replicated trainer state so every rank answers alike, rather than paying a
-`torch._foreach_norm` and an all-reduce per rank per step for a discarded number.
+An optimizer step whose global gradient norm is NaN or inf is never applied (`halo/trainers/step_guard.py`).
+Without the guard one such step writes NaN into every parameter and both Adam moments (the toolkit's clips
+pass a NaN norm through as coefficient 1.0, torch's multiplies it into every gradient), and the model is NaN
+from the next forward on. The norm transformers computes right before `optimizer.step()` is all-reduced by
+every clip path, so every rank reads the same verdict, at the cost of one device-to-host read per optimizer
+step.
 
-The three hooks above are what keeps the grad sweeps running on those steps. See
-[BF16 Optimizer](../optimization/bf16-optimizer.md).
+| Step | Outcome |
+|---|---|
+| Finite norm | Applied. |
+| Non-finite norm, finite weights | Skipped: the step's gradients are discarded through the optimizer's `zero_grad` (which also drops AdamWBF16's deferred clip scale), weights and moments stay as they were, and the step counter, LR schedule and data move on. Rank 0 warns naming the step, and the logs carry `nonfinite_steps_skipped` (counted since launch). |
+| Non-finite norm, non-finite weights | Raised on every rank, naming the parameters: they went bad before this step's gradients, and a skip cannot repair them. |
+| More than `max_consecutive_nonfinite_steps` (default 3) in a row | Raised on every rank. `0` raises at the first. |
+
+The skip is installed on `self.optimizer.step` in `create_optimizer`, so every trainer gets it: before the
+LR scheduler wraps it, or over the scheduler's wrapper when the caller passes a pre-built pair
+(`optimizers=(optimizer, scheduler)`), in which case a skipped step still counts as taken for the scheduler.
+The zero-LR step that materializes state during an optimizer restore always steps.
+
+A skipped step's loss is discarded with its gradients: transformers' loss accumulator returns to its value
+before the step's first micro-batch, so none of the step's micro-batches, finite ones included, adds to its
+window's logged `loss` or to the run's `train_loss`, whatever the logging strategy, and later windows stay
+finite. Both still divide by every step, skipped ones included; a window none of whose steps was applied logs
+`loss: nan`, with `logging_nan_inf_filter` on too, since it has no applied loss to report.
+
+Router balancing biases (the bias-update modes'
+[BalancingBiasCallback](../training-methods/callbacks.md#balancingbiascallback)) still update on a skipped
+step. The update reads no gradient: a sign step of at most `router_balancing_rate` per bias, taken from the
+expert-load counts the step's forward recorded, which are finite token counts whatever the gradients held. A
+skipped step therefore moves a bias no further than an applied one and cannot make it non-finite.
+
+Under fp16, where accelerate's optimizer wrapper steps through the loss scaler, the scaler owns overflow
+steps and the guard stands aside; the toolkit's no-wrap prepare keeps the raw optimizer, so there no scaler
+steps it and the guard stays armed. Async GRPO's trust-region
+[breaker](../training-methods/async-grpo/objective.md#breaker) is the other skip path: it discards the
+gradients in `on_pre_optimizer_step`, after the guard's verdict, and either one discarding them skips the
+step.
 
 ## DataLoader and data parallelism
 
@@ -480,7 +515,8 @@ installed TRL) and records accuracy and entropy over the supervised tokens, Lige
 attended tokens and the router aux loss into a per-mode `WorldMetrics` window (`_record_loss_metrics`) that
 flushes once per log. Under CP, `UlyssesModel.forward()` owns the boundary handling and the globally-normalized
 sum loss ([the two corrections](../parallelism/context-parallelism.md)), and the recorder mirrors the boundary
-handling on the rank's chunk. Every rank records its whole batch's attended tokens, and the flush divides the
+handling on the rank's chunk; under its [fused head loss](../parallelism/context-parallelism.md#fused-head-loss) it
+weighs the chunk's `token_accuracy` by the chunk's own supervised targets. Every rank records its whole batch's attended tokens, and the flush divides the
 world sum by the ranks sharing a batch (`non_dp_replication_factor`). A subclass whose own loss records none of
 these declares `RECORDS_LOSS_METRICS = False` and skips the flush (self-distillation, which stores its terms through
 `StoredMetricsMixin`).

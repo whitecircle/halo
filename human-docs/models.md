@@ -5,7 +5,8 @@ no extra work: point `model_name_or_path` at it and launch.
 
 The families below also have expert, context, tensor or pipeline-parallel
 support ([which, per family](supported-matrix.md#model-families)), a tuned
-recipe and GPU-validated coverage. Fifteen of them are MoE.
+recipe and GPU-validated coverage, except where a row says otherwise. Sixteen
+of them are MoE.
 
 | Family | Hub example | Kind | What to know |
 | --- | --- | --- | --- |
@@ -24,6 +25,7 @@ recipe and GPU-validated coverage. Fifteen of them are MoE.
 | [DeepSeek-V4](../agent-docs/models/deepseek-v4.md) ↗ | `deepseek-ai/DeepSeek-V4-Flash` | MoE | eager attention only; one document per row (`packing` and `padding_free` refused); convert to bf16 first |
 | [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | composite VLM; SDPA only |
+| [Qwen3-Next](../agent-docs/models/qwen3-next.md) ↗ | `Qwen/Qwen3-Next-80B-A3B-Instruct` | MoE | hybrid linear attention; tiny-model GPU tests only |
 | [Qwen3 dense](../agent-docs/models/qwen3.md) ↗ | `Qwen/Qwen3-4B-Instruct-2507` | dense | the reference dense family |
 | Any other HF causal LM | Llama, Mistral, Phi, … | dense | FSDP2 by default; TP needs a `tp_plan` |
 

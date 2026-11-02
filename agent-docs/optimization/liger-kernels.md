@@ -226,7 +226,7 @@ resolved applier's signature does not accept is dropped, with a warning naming i
 | `swiglu` | On | Auto-off where the applier's own default is `False` (GptOss, whose upstream applier has no SwiGLU patch block; Qwen3-VL), and where an **upstream** applier's expert-FFN swap is replaced by an EP layer, which runs Halo's own fused GLU combine instead. A toolkit spec patches the dense and shared-expert MLPs, which survive EP — see below. Forced off, even when requested, wherever upstream's swap would reach [routed experts Halo does not wrap](#routed-experts) |
 | `geglu` | On | Gemma 4. Served by the toolkit's spec on the always-on dense `Gemma4TextMLP`, which survives the EP layer, so it is **not** forced off under EP |
 | `cross_entropy` | On | Keeps logits for metrics. Always the toolkit's scoped patch. Force-off under TP, CP and PP, and defaulted off when the config explicitly requests `fused_linear_cross_entropy` (the two are mutually exclusive; setting both explicitly raises) |
-| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP, CP and PP, and [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper) |
+| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP and PP, and [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper); under CP the [Ulysses wrapper](../parallelism/context-parallelism.md#fused-head-loss) runs it instead of the model's head |
 
 Precedence is generic defaults < per-model defaults < user keys, and user keys win **except** the TP/CP
 force-offs ([below](#ep--cp--tp--pp-behavior)), the wrapper force-off and the [routed-experts](#routed-experts)
@@ -255,6 +255,21 @@ heads × seq ≥ 131072` and `head_dim ≥ 128`, and under `CUTE_DSL_ENABLE_TVM_
 rotates a stale buffer from the second launch of a shape at the latest, backward included.
 `tests/gpu/kernels/test_liger_rope_repeated_calls.py` checks the bound rotary over repeated calls at Qwen3-8B's
 4096-token shape, against a control that runs the CuTe DSL kernel directly.
+
+Liger 0.8.4 wraps each RMSNorm, SwiGLU, GeGLU and fused CE+TVD launch in `liger_kernel.ops.utils.device_context`,
+which enters `torch.cuda.device` on every call so that a tensor on another GPU launches on its own device. On a tensor
+already on the current device that switch is a no-op that still costs host time: on one B300, `LigerRMSNormFunction`
+forward and backward at X `[1, 2048, 4096]` bf16 takes 337 µs of host time with it and 236 µs without, and a profile
+of dense Qwen3-8B CP2 and TP2 training steps (4,096-token rows) puts it at about 11 µs per RMSNorm forward call.
+`pin_liger_device_context` (`halo/model_loading/liger/launch_context.py`), run at both Liger application
+sites, rebinds the name in every Liger ops module that imported the helper to a fast path: a null context when the
+tensor's device is the current CUDA device, Liger's own context otherwise. Kernels and results are unchanged. The
+fast path applies only on Liger 0.8.4, the locked release. On any other release the dependency range admits, or a
+Liger without distribution metadata, nothing is rebound: Liger's own context stays and rank 0 warns once (results
+unchanged, each launch pays the switch's host time). On 0.8.4, a helper that is not Liger's own, a module binding the
+name to anything else, or no module importing it raises. `tests/gpu/kernels/test_liger_launch_context.py` checks that
+the switch is skipped, that results match Liger's context bit for bit, and that inputs on another GPU still launch
+there.
 
 ## CrossEntropy vs FusedLinearCrossEntropy
 
@@ -288,24 +303,30 @@ the family, and the GLU patch being **upstream's** hold.
 Each conjunct is load-bearing. `needs_ep_layers` is `ep_group_size > 1 or use_grouped_gemm` and
 `use_grouped_gemm` defaults **on**, so the flag alone would strip fused SwiGLU from every dense run. A MoE
 family with no EP layer class is never wrapped, so the [routed-experts rules](#routed-experts) govern it
-instead: Mixtral's upstream `swiglu` is forced off, and the Qwen3-Next spec withholds it from upstream. A
-toolkit spec names the dense and shared-expert MLPs, which survive the wrap.
+instead: Mixtral's upstream `swiglu` is forced off. A toolkit spec names the dense and shared-expert MLPs,
+which survive the wrap (Qwen3.5-MoE, Qwen3-Next).
 
 This is a soft gate: an explicit `swiglu`/`geglu` in `liger_kernel_config` survives it, since the swap is inert
 under the EP layer. RoPE, RMSNorm and CE/FLCE stay active under EP — FLCE touches only `lm_head` + the loss,
 which EP does not wrap.
 
-**TP, CP and PP force `cross_entropy` and `fused_linear_cross_entropy` off**, at one decision site,
-`liger_parallelism_overrides`, logged as a warning when either was explicitly enabled.
+**TP, CP and PP force `cross_entropy` and `fused_linear_cross_entropy` off** on the model, at one decision site,
+`liger_parallelism_overrides`, logged as a warning when either was explicitly enabled. Under CP a resolved
+`fused_linear_cross_entropy` is not refused but handed to the Ulysses wrapper, so it is taken out of the patch
+request before the fold and draws no warning.
 
 Under **TP**, `lm_head` is `ColwiseParallel`-sharded into DTensor logits split over the vocab dim, where a
 fused CE would softmax a partial vocab slice and produce a wrong loss.
 
 **CP** and **PP** compute the loss *outside* the model's forward and never pass labels into it: the
-Ulysses wrapper calls the model with `labels=None` and computes a boundary-aware fp32 CE itself, and
+Ulysses wrapper calls the model with `labels=None` and computes a boundary-aware loss itself, and
 PP's last stage chunks its own fp32 CE ([PP fused head](../parallelism/pipeline-parallelism.md#fused-head-and-loss-on-the-last-stage)).
-Liger's `skip_logits` gate never fires, and FLCE would report as applied while the full logits plane
-materializes anyway.
+A patched head's `skip_logits` gate never fires, and FLCE would report as applied while the full logits plane
+materializes anyway. Under CP the dispatch instead stamps whether FLCE resolves on for the family
+(`LIGER_CP_FUSED_LOSS_ATTR`: requested, or the family default, and offered by its applier), and the wrapper then
+scores each chunk's hidden states through Liger's fused kernel itself
+([CP fused head loss](../parallelism/context-parallelism.md#fused-head-loss)). The stamp, like the applied config, is
+run state that no [exported `config.json`](../reference/checkpoints.md#exported-configjson) carries.
 
 `cross_entropy` goes with it: upstream's appliers rebind `torch.nn.functional.cross_entropy` **process-wide**,
 the function the external loss calls, and the toolkit's [scoped patch](#supported-models) follows suit.
@@ -383,9 +404,10 @@ toolkit spec's torch fused norm on `qwen3_moe`'s norms ([above](#upstream-covere
 At this shape FLCE saves only 1.5 GiB more than CE and costs 5% throughput. FLCE's saving is the logits
 plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), ~2.5 GB at 8k. Reach for plain CE when a model's FLCE patch is unavailable.
 
-**Host time per launch.** Liger 0.8.4 adds host time around each RMSNorm and SwiGLU launch: at most ~1.5%
-per step on the most host-bound row measured (dense Qwen3-8B at CP2 on 8× B300, 4,096-token rows), and GPU
-kernel time is unchanged.
+**Host time per launch.** Liger 0.8.4's per-launch device context is host time only (GPU kernel time is
+unchanged), and the toolkit skips it on the current device ([Kernel implementation](#kernel-implementation)). On
+dense Qwen3-8B at 4,096-token rows on 8× B300, the skip measured +2.1% tokens/s at TP2; CP2's +1.2% is inside
+run-to-run spread.
 
 **Measure MoE throughput at batch ≥ 4.** At batch 1 EP MoE is communication-bound and its DeepEP time varies run
 to run, so a batch-1 delta is directional (Liger measures +27% there at seq 16384, [torch.compile](torch-compile.md#benchmark-results)).

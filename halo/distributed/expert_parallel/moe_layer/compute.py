@@ -180,30 +180,54 @@ class EPExpertComputeMixin:
         return self._glu_combine(gate.contiguous(), up.contiguous())
 
     def _compute_experts(
-        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype
+        self,
+        tokens: torch.Tensor,
+        experts: torch.Tensor,
+        weights: torch.Tensor,
+        output_dtype: torch.dtype,
+        *,
+        recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
         """Expert outputs for the dispatched tokens: grouped GEMM when enabled and non-empty, else the
-        per-expert loop. ``experts``/``weights`` are ``[T, top_k]`` local ids and gate weights."""
+        per-expert loop. ``experts``/``weights`` are ``[T, top_k]`` local ids and gate weights;
+        ``recv_counts`` is the dispatch's host-side count per local expert, None at ``ep_size`` 1."""
         if self._grouped_mm_enabled() and tokens.shape[0] > 0:
-            return self._compute_experts_gmm(tokens, experts, weights, output_dtype)
-        return self._compute_experts_weighted(tokens, experts, weights, output_dtype, self._expert_forward)
+            return self._compute_experts_gmm(tokens, experts, weights, output_dtype, recv_counts=recv_counts)
+        return self._compute_experts_weighted(
+            tokens, experts, weights, output_dtype, self._expert_forward, recv_counts=recv_counts
+        )
 
     def _grouped_mm_enabled(self) -> bool:
         """Whether the grouped-GEMM path runs: the hardware/config flag."""
         return self._use_grouped_mm
 
     def _compute_experts_gmm(
-        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype
+        self,
+        tokens: torch.Tensor,
+        experts: torch.Tensor,
+        weights: torch.Tensor,
+        output_dtype: torch.dtype,
+        *,
+        recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
         """Grouped-GEMM GLU experts on either :meth:`_glu_ffn` layout."""
 
         def compute(sorted_tokens, offs, _eids):
             return self._glu_ffn(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
 
-        return self._compute_experts_with_grouped_mm(tokens, experts, weights, output_dtype, compute)
+        return self._compute_experts_with_grouped_mm(
+            tokens, experts, weights, output_dtype, compute, recv_counts=recv_counts
+        )
 
     def _compute_experts_with_grouped_mm(
-        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype, compute_fn
+        self,
+        tokens: torch.Tensor,
+        experts: torch.Tensor,
+        weights: torch.Tensor,
+        output_dtype: torch.dtype,
+        compute_fn,
+        *,
+        recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
         """Sort -> ``compute_fn(sorted_tokens, offs, sorted_expert_ids)`` under autocast -> weighted unpermute.
         ``F.grouped_mm`` does not autocast, so ``compute_fn`` casts its weights to ``output_dtype``."""
@@ -211,7 +235,7 @@ class EPExpertComputeMixin:
             return torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
 
         sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map = (
-            self._sort_tokens_for_grouped_mm(tokens, experts, weights)
+            self._sort_tokens_for_grouped_mm(tokens, experts, weights, recv_counts=recv_counts)
         )
 
         with torch.amp.autocast("cuda", dtype=output_dtype):
@@ -221,7 +245,24 @@ class EPExpertComputeMixin:
             expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
         )
 
-    def _sort_tokens_for_grouped_mm(self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor):
+    def _require_recv_counts(self, recv_counts: tuple[int, ...] | None) -> tuple[int, ...]:
+        """``recv_counts`` when it holds one count per local expert; raises otherwise (``ep_size > 1``, where the
+        expert compute sizes its index reads off them)."""
+        if recv_counts is None or len(recv_counts) != self.experts_per_rank:
+            raise RuntimeError(
+                f"{type(self).__name__}: the expert compute at ep_size={self.ep_size} needs the dispatch's "
+                f"per-local-expert receive counts ({self.experts_per_rank} of them), got {recv_counts!r}."
+            )
+        return recv_counts
+
+    def _sort_tokens_for_grouped_mm(
+        self,
+        tokens: torch.Tensor,
+        experts: torch.Tensor,
+        weights: torch.Tensor,
+        *,
+        recv_counts: tuple[int, ...] | None,
+    ):
         """``(sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map)`` over the valid
         local assignments, by expert; DeepEP's -1 padding is dropped (it would misalign the groups)."""
         N = tokens.shape[0]
@@ -232,10 +273,17 @@ class EPExpertComputeMixin:
         flat_weights = weights.reshape(-1)
         flat_token_idx = torch.arange(N, device=device).unsqueeze(1).expand(-1, width).reshape(-1)
 
-        # DeepEP pads unfilled slots with -1; the host-known ep_size gate avoids a device sync at ep_size==1.
+        # DeepEP pads unfilled slots with -1. The dispatch's host-side counts size the compaction, which a
+        # data-sized nonzero would read back from the device every MoE layer; ep_size 1 has no padding.
         if self.ep_size > 1:
+            num_valid = sum(self._require_recv_counts(recv_counts))
             valid_mask = (flat_indices >= 0) & (flat_indices < self.experts_per_rank)
-            valid_idx = valid_mask.nonzero(as_tuple=True)[0]
+            # Device-side: a count that disagrees with the received ids would silently truncate or
+            # -1-pad the compaction below.
+            torch._assert_async(
+                valid_mask.sum() == num_valid, "DeepEP receive counts disagree with the received expert ids"
+            )
+            valid_idx = torch.nonzero_static(valid_mask, size=num_valid).squeeze(1)
             flat_indices = flat_indices[valid_idx]
             flat_weights = flat_weights[valid_idx]
             flat_token_idx = flat_token_idx[valid_idx]
@@ -288,17 +336,34 @@ class EPExpertComputeMixin:
         )
 
     def _compute_experts_weighted(
-        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype, compute_fn
+        self,
+        tokens: torch.Tensor,
+        experts: torch.Tensor,
+        weights: torch.Tensor,
+        output_dtype: torch.dtype,
+        compute_fn,
+        *,
+        recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
         """The per-expert loop: ``compute_fn(local_idx, x)`` per expert, outputs weighted and accumulated."""
         if tokens.shape[0] == 0:
             return torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
 
+        counts = self._require_recv_counts(recv_counts) if self.ep_size > 1 else None
         output = torch.zeros(tokens.shape, device=tokens.device, dtype=output_dtype)
 
         with torch.amp.autocast("cuda", dtype=output_dtype, enabled=self.fp32_experts):
             for local_idx in range(self.experts_per_rank):
-                top_k_pos, token_idx = torch.where((experts == local_idx).t())
+                slots = (experts == local_idx).t()
+                if counts is None:
+                    top_k_pos, token_idx = torch.where(slots)
+                else:
+                    # Sized off the host count, where torch.where would read the size back per expert. A
+                    # wrong count would drop slots or pad with -1, which indexes the last row.
+                    torch._assert_async(
+                        slots.sum() == counts[local_idx], "DeepEP receive counts disagree with the received expert ids"
+                    )
+                    top_k_pos, token_idx = torch.nonzero_static(slots, size=counts[local_idx]).unbind(1)
                 if token_idx.numel() == 0:
                     continue
                 expert_weights = weights[token_idx, top_k_pos]

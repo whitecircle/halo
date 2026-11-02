@@ -262,21 +262,20 @@ def _grouped_mm_probe(use_grouped_mm: bool, expert_tp_size: int) -> EPGptOssMoEL
     return layer
 
 
-def test_gptoss_etp_disables_grouped_mm():
-    """Expert-TP drops GptOss expert compute to the per-expert loop: ETP stores gate/up under the
-    plain names, not the de-interleaved ``*_gmm`` pair ``_compute_experts_gmm`` reads."""
-    assert _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=2)._grouped_mm_enabled() is False
-    assert _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=1)._grouped_mm_enabled() is True
-    assert _grouped_mm_probe(use_grouped_mm=False, expert_tp_size=1)._grouped_mm_enabled() is False
+@pytest.mark.parametrize("expert_tp_size", [1, 2])
+@pytest.mark.parametrize("use_grouped_mm", [True, False])
+def test_gptoss_runs_the_compute_path_its_run_asks_for(use_grouped_mm, expert_tp_size):
+    """GptOss takes grouped GEMM wherever its run asks for it, expert TP included: the grouped path reads the
+    de-interleaved pair ETP stores under the plain names, as it reads ``*_gmm`` outside ETP."""
+    layer = _grouped_mm_probe(use_grouped_mm=use_grouped_mm, expert_tp_size=expert_tp_size)
+    assert layer._grouped_mm_enabled() is use_grouped_mm
 
 
-def test_init_summary_reports_the_effective_grouped_mm_decision(caplog):
-    """The construction-time line must report what the layer WILL run, not what was requested.
-
-    Reporting ``_use_grouped_mm`` would advertise grouped GEMM on a GptOss ETP layer that silently
-    runs the per-expert loop — an unexplained throughput cliff on a run asking for grouped GEMM.
-    """
-    layer = _grouped_mm_probe(use_grouped_mm=True, expert_tp_size=2)
+@pytest.mark.parametrize("use_grouped_mm", [True, False])
+def test_init_summary_reports_the_effective_grouped_mm_decision(caplog, use_grouped_mm):
+    """The construction-time line reports the compute path the layer runs, read off ``_grouped_mm_enabled``, on a
+    GptOss ETP layer as on any other."""
+    layer = _grouped_mm_probe(use_grouped_mm=use_grouped_mm, expert_tp_size=2)
     layer.ep_rank, layer.expert_start, layer.expert_end, layer.num_experts = 0, 0, E, E
     layer.fp32_router = layer.fp32_experts = False
 
@@ -284,7 +283,7 @@ def test_init_summary_reports_the_effective_grouped_mm_decision(caplog):
         layer._log_init_summary("extra=1")
 
     (record,) = [r for r in caplog.records if r.levelno == logging.INFO]
-    assert "grouped_mm=False" in record.getMessage(), record.getMessage()
+    assert f"grouped_mm={use_grouped_mm}" in record.getMessage(), record.getMessage()
     assert "extra=1" in record.getMessage(), record.getMessage()
 
 

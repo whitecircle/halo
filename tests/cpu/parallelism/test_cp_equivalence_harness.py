@@ -1,7 +1,8 @@
 """The CP equivalence harness: its roster covers every Ulysses wrapper class, its CPU stand-ins for the flash
 kernel and the list all-to-all keep their contracts, two launches of today's CP code match bit for bit, the
 envelope rule judges a base that does not repeat, each seeded change to the CP path shows up in exactly the
-records it touches, and a negative control that raises fails the verdict.
+records it touches, a negative control that raises fails the verdict, a family either tree's roster lacks is
+skipped rather than handed to a producer, and a tree whose harness cannot import fails with its own error.
 
 Run: python tests/cpu/parallelism/test_cp_equivalence_harness.py
 """
@@ -34,7 +35,7 @@ from tests.common.equivalence.cp_equivalence import (
     reference_flash_attn,
     tier_controls,
 )
-from tests.common.equivalence.revisions import run_in_tree
+from tests.common.equivalence.revisions import common_families, run_in_tree
 from tests.common.equivalence.tensor_records import (
     GRADIENT_PREFIX,
     case_of,
@@ -124,10 +125,11 @@ def baseline(tmp_path_factory):
     return _recorded(tmp_path_factory.mktemp("baseline"))
 
 
-def test_the_roster_runs_every_ulysses_wrapper_class_once():
-    wrapped = {}
+def test_the_roster_covers_every_ulysses_wrapper_class_with_one_model_class_per_family():
+    wrapped, model_classes = {}, []
     for name, family in FAMILIES.items():
         model = tiny_family_model(family.tiny, overrides=family.overrides)
+        model_classes.append(type(model))
         wrapped[name] = {
             ULYSSES_ATTENTION_MAP[type(m).__name__]
             for m in model.modules()
@@ -135,7 +137,47 @@ def test_the_roster_runs_every_ulysses_wrapper_class_once():
         }
     assert all(len(classes) == 1 for classes in wrapped.values()), wrapped
     assert set().union(*wrapped.values()) == set(ULYSSES_ATTENTION_MAP.values())
-    assert len(FAMILIES) == len(set(ULYSSES_ATTENTION_MAP.values()))
+    assert len(set(model_classes)) == len(model_classes), f"two roster families build one model class: {model_classes}"
+
+
+def _tree_harness(tree: Path, source: str) -> Path:
+    """A tree whose CP harness module is ``source``."""
+    package = tree
+    for part in MODULE.split(".")[:-1]:
+        package = package / part
+        package.mkdir(parents=True)
+        (package / "__init__.py").touch()
+    (package / f"{MODULE.rsplit('.', 1)[-1]}.py").write_text(source)
+    return tree
+
+
+def test_a_family_a_tree_roster_lacks_is_skipped_rather_than_handed_to_a_producer(tmp_path):
+    """A producer refuses a ``--families`` name its own roster lacks, so the comparison runs the requested families
+    both trees hold and names every family one tree lacks, requested or not; each roster is read off that tree's
+    own harness module."""
+    trees = {
+        "base": _tree_harness(tmp_path / "base", 'FAMILIES = {"qwen3": None, "gpt_oss": None, "glm4": None}\n'),
+        "head": _tree_harness(tmp_path / "head", 'FAMILIES = {"qwen3": None, "qwen3_moe": None, "gpt_oss": None}\n'),
+    }
+
+    assert common_families(trees, MODULE, ["qwen3", "qwen3_moe", "gpt_oss"]) == (
+        ["qwen3", "gpt_oss"],
+        ["qwen3_moe", "glm4"],
+    )
+    with pytest.raises(ValueError, match="no family"):
+        common_families(trees, MODULE, ["qwen3_moe"])
+
+
+def test_a_tree_whose_harness_cannot_import_raises_with_its_own_error(tmp_path):
+    trees = {
+        "base": _tree_harness(
+            tmp_path / "base", 'raise ImportError("the base harness needs a module its tree lacks")\n'
+        ),
+        "head": _tree_harness(tmp_path / "head", 'FAMILIES = {"qwen3": None}\n'),
+    }
+
+    with pytest.raises(RuntimeError, match="needs a module its tree lacks"):
+        common_families(trees, MODULE, ["qwen3"])
 
 
 @pytest.mark.parametrize("window", [None, 5])

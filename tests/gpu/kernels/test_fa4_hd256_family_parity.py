@@ -38,7 +38,6 @@ from tests.common.rank_log import log
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
-    TINY_UNWRAPPED_MOE_FAMILY,
     tiny_family_model,
 )
 
@@ -59,7 +58,7 @@ _ALL_EIGHT_EXPERTS = {"num_experts": 8, "num_experts_per_tok": 8}
 FAMILIES = {
     "qwen3_5": (TINY_DENSE_FAMILIES["qwen3_5"], {**_GQA_256, **_FULL_ATTENTION}),
     "qwen3_5_moe_text": (TINY_MOE_FAMILIES["qwen3_5_moe_text"], {**_GQA_256, **_FULL_ATTENTION, **_ALL_EIGHT_EXPERTS}),
-    "qwen3_next": (TINY_UNWRAPPED_MOE_FAMILY, {**_GQA_256, **_FULL_ATTENTION, **_ALL_EIGHT_EXPERTS}),
+    "qwen3_next": (TINY_MOE_FAMILIES["qwen3_next"], {**_GQA_256, **_FULL_ATTENTION, **_ALL_EIGHT_EXPERTS}),
     "glm4_moe_lite": (
         TINY_MOE_FAMILIES["glm4_moe_lite"],
         {

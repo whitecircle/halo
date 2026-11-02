@@ -380,12 +380,14 @@ class EPMoELayerBase(
         flat = self._rank_uniform_dispatch_input(flat, weights)
 
         with self._perf("ep.dispatch"):
-            recv_x, recv_topk_idx, recv_topk_weights, handle = self.dispatcher.dispatch(
+            recv_x, recv_topk_idx, recv_topk_weights, handle, recv_counts = self.dispatcher.dispatch(
                 flat, experts, weights, owner=self
             )
 
         with self._perf("ep.expert_compute"):
-            output = self._compute_experts(recv_x, recv_topk_idx, recv_topk_weights, input_dtype)
+            output = self._compute_experts(
+                recv_x, recv_topk_idx, recv_topk_weights, input_dtype, recv_counts=recv_counts
+            )
 
         with self._perf("ep.combine"):
             combined = self.dispatcher.combine(output, recv_topk_weights, handle, owner=self)

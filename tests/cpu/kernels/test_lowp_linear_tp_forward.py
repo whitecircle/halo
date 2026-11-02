@@ -6,7 +6,8 @@ with an INSTANCE attribute (``tp_forward``) closed over the bound ``nn.Linear.fo
 ``LowPrecisionLinear.convert_`` retypes the module in place, and an instance attribute shadows the
 class ``forward``: the wrapper keeps calling the captured bf16 forward while
 ``apply_lowp_compute`` reports the module converted — a run under ``lowp_precision: fp8``
-that trains in bf16 with no other symptom.
+that trains in bf16 with no other symptom. The fake-quant blocks each rank's shard, so a rowwise
+shard the format cannot split into blocks is refused at load on every rank.
 
 The TP machinery in play is transformers' own (``apply_tensor_parallelism`` on a fake process group,
 which slices shards locally and turns the collectives into no-ops), so what is pinned is the real
@@ -30,9 +31,12 @@ from halo.kernels.lowp.linear import LowPrecisionLinear, lowp_linear
 from halo.kernels.lowp.quantization import QUANTIZERS, fake_quant
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
 from halo.model_loading.parallel.lowp_compute import apply_lowp_compute
-from tests.common.distributed import fake_process_group_mesh
+from tests.common.distributed import fake_process_group, fake_process_group_mesh
 
 WIDTH = 64  # a multiple of every block size (32 mx, 16 nvfp4)
+# An intermediate whose two-way rowwise shard is 48: the 16-block format divides it, the 32-block ones do not.
+MISALIGNED_INTERMEDIATE = 96
+MISALIGNED_HIDDEN = 48  # the input colwise TP leaves whole, at a width only the 16-block format divides
 TP_PLAN = {
     "layers.*.gate_proj": "colwise",
     "layers.*.up_proj": "colwise",
@@ -41,11 +45,11 @@ TP_PLAN = {
 
 
 class _MLP(nn.Module):
-    def __init__(self):
+    def __init__(self, intermediate: int, hidden: int):
         super().__init__()
-        self.gate_proj = nn.Linear(WIDTH, WIDTH, bias=False)
-        self.up_proj = nn.Linear(WIDTH, WIDTH, bias=False)
-        self.down_proj = nn.Linear(WIDTH, WIDTH, bias=False)
+        self.gate_proj = nn.Linear(hidden, intermediate, bias=False)
+        self.up_proj = nn.Linear(hidden, intermediate, bias=False)
+        self.down_proj = nn.Linear(intermediate, hidden, bias=False)
 
 
 class _Model(nn.Module):
@@ -54,9 +58,21 @@ class _Model(nn.Module):
     tp_plan = TP_PLAN
     _tp_plan = TP_PLAN
 
-    def __init__(self):
+    def __init__(self, intermediate: int = WIDTH, hidden: int = WIDTH):
         super().__init__()
-        self.layers = nn.ModuleList([_MLP()])
+        self.layers = nn.ModuleList([_MLP(intermediate, hidden)])
+
+
+def _tp_model(tp_size: int, intermediate: int, hidden: int = WIDTH) -> _Model:
+    """This rank's shards of a ``_Model`` after transformers' TP load on a ``tp_size``-way mesh; called inside
+    ``fake_process_group``, which sets the rank."""
+    torch.manual_seed(0)
+    # Named like the loader's mesh: the conversion finds the TP mesh through its ``tp`` dim.
+    mesh = init_device_mesh("cpu", (tp_size,), mesh_dim_names=(MeshDim.TP,))
+    model = _Model(intermediate, hidden)
+    apply_tensor_parallelism(model, mesh)
+    model._device_mesh = mesh
+    return model
 
 
 def _shadow_like_transformers(linear: nn.Linear) -> None:
@@ -100,13 +116,8 @@ def test_apply_refuses_a_shadow_it_cannot_reinstall():
 def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
     """After transformers' TP load, every converted projection must compute ``lowp_linear`` through
     the plan's own transforms — in the training (DTensor) path and the no-grad local path alike."""
-    torch.manual_seed(0)
-    with fake_process_group_mesh(0, 1):
-        # Named like the loader's mesh: the conversion finds the TP mesh through its ``tp`` dim.
-        mesh = init_device_mesh("cpu", (1,), mesh_dim_names=(MeshDim.TP,))
-        model = _Model()
-        apply_tensor_parallelism(model, mesh)
-        model._device_mesh = mesh
+    with fake_process_group(0, 1):
+        model = _tp_model(1, WIDTH)
         for proj in ("gate_proj", "up_proj", "down_proj"):
             module = getattr(model.layers[0], proj)
             assert "forward" in vars(module), "premise: transformers installs an instance-level forward"
@@ -139,6 +150,86 @@ def test_apply_reinstalls_the_tp_transforms_around_lowp_linear(precision):
             lowp_linear(x, reference, quant_format=quant_format).sum().backward()
             assert isinstance(module.weight.grad, DTensor)
             assert torch.allclose(module.weight.grad.to_local(), reference.grad)
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize("precision", ["fp8", "mxfp4"])
+def test_apply_refuses_a_rowwise_shard_its_format_cannot_block(precision, rank):
+    """``down_proj`` rowwise at TP 2 over a 96-wide intermediate contracts over a 48-wide shard on each rank,
+    which a 32-block format cannot split: every rank refuses at load, naming the projection, the shard, the
+    block, the TP remedy, the precision whose block divides it and the opt-out."""
+    with fake_process_group(rank, 2):
+        model = _tp_model(2, MISALIGNED_INTERMEDIATE)
+        with pytest.raises(ValueError) as raised:
+            apply_lowp_compute(model, LowpSpec(precision=precision), expert_weight_cacheable=True)
+    message = str(raised.value)
+    for fragment in (
+        "layers.0.down_proj",
+        "over 48",
+        "blocks of 32",
+        "lower tensor_parallel_size",
+        "['fp4']",
+        "lowp_apply_dense_mlp",
+    ):
+        assert fragment in message, f"{fragment!r} missing from: {message}"
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_the_refusal_guards_a_rowwise_matmul_that_fails(rank):
+    """The premise: past the load, that shard's low-precision matmul fails inside the quantizer."""
+    with fake_process_group(rank, 2):
+        weight = _tp_model(2, MISALIGNED_INTERMEDIATE).layers[0].down_proj.weight
+        x = distribute_tensor(
+            torch.randn(4, MISALIGNED_INTERMEDIATE), weight.device_mesh, [Shard(-1)], src_data_rank=None
+        )
+        with pytest.raises(ValueError, match="not divisible by block_size 32"):
+            lowp_linear(x, weight, quant_format="mxfp8")
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+@pytest.mark.parametrize(
+    ("intermediate", "precision"), [(MISALIGNED_INTERMEDIATE, "fp4"), (2 * WIDTH, "fp8"), (2 * WIDTH, "mxfp4")]
+)
+def test_apply_converts_rowwise_shards_its_format_blocks(intermediate, precision, rank):
+    """Shards a multiple of the block: every projection converts, and the rowwise one computes ``lowp_linear`` on
+    this rank's shard (the fake group's all-reduce returns it unchanged)."""
+    with fake_process_group(rank, 2):
+        model = _tp_model(2, intermediate)
+        summary = apply_lowp_compute(model, LowpSpec(precision=precision), expert_weight_cacheable=True)
+        assert summary["dense_linears"] == 3
+        down_proj = model.layers[0].down_proj
+        weight = down_proj.weight.to_local().detach()
+        x = torch.randn(4, intermediate // 2)
+        with torch.no_grad():
+            out = down_proj(x)
+        assert torch.equal(out, lowp_linear(x, weight, quant_format=LOWP_RECIPES[precision].quant_format))
+
+
+def test_apply_refuses_a_whole_axis_without_the_tp_remedy():
+    """No TP: a 48-wide ``down_proj`` input is refused at load, and the error does not offer a smaller
+    ``tensor_parallel_size``, which would not shard it."""
+    model = _Model(MISALIGNED_INTERMEDIATE // 2)
+    with pytest.raises(ValueError) as raised:
+        apply_lowp_compute(model, LowpSpec(precision="fp8"), expert_weight_cacheable=True)
+    message = str(raised.value)
+    for fragment in ("layers.0.down_proj", "over 48", "['fp4']", "lowp_apply_dense_mlp"):
+        assert fragment in message, f"{fragment!r} missing from: {message}"
+    assert "tensor_parallel_size" not in message, message
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_apply_refuses_a_colwise_input_without_the_tp_remedy(rank):
+    """TP 2 over a 48-wide hidden size: colwise ``gate_proj`` contracts over the whole 48 on every rank, so the
+    refusal does not offer a smaller ``tensor_parallel_size``, which leaves that axis whole."""
+    with fake_process_group(rank, 2):
+        model = _tp_model(2, 2 * WIDTH, hidden=MISALIGNED_HIDDEN)
+        assert isinstance(model.layers[0].gate_proj.weight, DTensor), "premise: the projection is TP-sharded"
+        with pytest.raises(ValueError) as raised:
+            apply_lowp_compute(model, LowpSpec(precision="fp8"), expert_weight_cacheable=True)
+    message = str(raised.value)
+    for fragment in ("layers.0.gate_proj", "over 48", "['fp4']", "lowp_apply_dense_mlp"):
+        assert fragment in message, f"{fragment!r} missing from: {message}"
+    assert "tensor_parallel_size" not in message, message
 
 
 @pytest.mark.parametrize("quant_format", sorted(QUANTIZERS))

@@ -1,6 +1,6 @@
 """Gradient synchronization for the distributed trainers: the FSDP2 grad-accum window and post-backward
 completion, the QLoRA / deferred-EP / TP-replicated post-backward sweeps, and the step-pre-hooks that run the
-sweeps on steps where clipping is off.
+sweeps on a step that missed the clip.
 """
 
 import logging
@@ -32,9 +32,10 @@ def register_grad_sync_step_hook(
 ) -> None:
     """Register ``action`` as a once-per-trainer optimizer step-pre-hook, marked by ``flag_attr``.
 
-    Each grad-sync backstop exists because HF skips ``clip_grad_norm_`` at ``max_grad_norm == 0``, and
-    each sits out torch's zero-LR ``_init_optim_state`` step during optimizer-state restore, which carries
-    no gradients. ``enabled`` is a callable so its state reads stay behind the ``optimizer is None`` check.
+    Each sweep lives in the patched ``clip_grad_norm_``, which HF reaches at ``max_grad_norm <= 0`` only through
+    its unclipped norm pass; the sweeps are marked once per step, so a backstop acts only on a step that missed
+    that call. Each sits out torch's zero-LR ``_init_optim_state`` step during optimizer-state restore, which
+    carries no gradients. ``enabled`` is a callable so its state reads stay behind the ``optimizer is None`` check.
     """
     if trainer.optimizer is None or getattr(trainer, flag_attr, False) or not enabled():
         return
@@ -122,7 +123,7 @@ class GradientSyncMixin:
 
     def _register_grad_sync_step_hooks(self) -> None:
         """Back each post-backward sweep (TP-replicated, deferred EP, QLoRA, in that order) with an
-        optimizer step-pre-hook for the steps that never reach the clip. Idempotent."""
+        optimizer step-pre-hook for a step that never reaches the clip. Idempotent."""
 
         def sync_tp_replicated() -> None:
             if is_clipping_enabled(self.args.max_grad_norm):

@@ -109,7 +109,7 @@ class _PaddedGatherUnpermute(torch.autograd.Function):
 
 def _sort(x: torch.Tensor, idx: torch.Tensor, w: torch.Tensor):
     """``_sort_tokens_for_grouped_mm`` at ``ep_size`` 1: the expert-sorted tokens and routing."""
-    return EPMoELayerBase._sort_tokens_for_grouped_mm(_LAYER, x, idx, w)
+    return EPMoELayerBase._sort_tokens_for_grouped_mm(_LAYER, x, idx, w, recv_counts=None)
 
 
 # The sort's own permute swapped for the padded one, so the baseline differs from ``halo`` in the permute alone.

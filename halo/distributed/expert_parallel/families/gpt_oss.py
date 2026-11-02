@@ -36,10 +36,11 @@ class EPGptOssMoELayer(EPMoELayerBase):
     def _adopt_expert_params(self, experts: nn.Module, weights_already_sharded: bool = False):
         """Slice and register expert parameters for this rank.
 
-        GptOss gate_up_proj is interleaved ``[g0,u0,g1,u1,...]``. Under ETP and grouped_mm it is
-        de-interleaved into separate gate_proj/up_proj, because stride-2 slicing on grouped_mm
-        outputs gives NaN backward gradients. ``weights_already_sharded`` skips dim-0 slicing. Expert
-        biases are optional (a bias-less GptOss variant is legal); the weights are not.
+        GptOss gate_up_proj is interleaved ``[g0,u0,g1,u1,...]``. Grouped GEMM and ETP store it
+        de-interleaved, because stride-2 slicing on grouped_mm outputs gives NaN backward gradients:
+        unsharded as ``gate_proj_gmm``/``up_proj_gmm``, ETP-sharded as ``gate_proj``/``up_proj``.
+        ``weights_already_sharded`` skips dim-0 slicing. Expert biases are optional (a bias-less GptOss
+        variant is legal); the weights are not.
         """
         self._require_fused_experts(experts)
         start, end = self._local_expert_range(weights_already_sharded)
@@ -153,18 +154,33 @@ class EPGptOssMoELayer(EPMoELayerBase):
         bias = getattr(self, f"{weight_attr}_bias", None)
         return out if bias is None else out + bias[idx]
 
+    def _deinterleaved_gate_up_attrs(self) -> tuple[str, str]:
+        """The de-interleaved gate/up pair :meth:`_adopt_expert_params` stored: ``*_gmm`` outside ETP, the plain
+        names under it."""
+        return ("gate_proj_gmm", "up_proj_gmm") if hasattr(self, "gate_proj_gmm") else ("gate_proj", "up_proj")
+
     def _compute_experts_gmm(
-        self, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype: torch.dtype
+        self,
+        tokens: torch.Tensor,
+        experts: torch.Tensor,
+        weights: torch.Tensor,
+        output_dtype: torch.dtype,
+        *,
+        recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
-        """Grouped GEMM for GptOss experts: 3 calls (gate + up + down) with de-interleaved weights."""
+        """Grouped GEMM for GptOss experts: 3 calls (gate + up + down) with de-interleaved weights, ETP-sharded
+        or not."""
+        gate_attr, up_attr = self._deinterleaved_gate_up_attrs()
 
         def compute(sorted_tokens, offs, eids):
-            gate = self._gmm_proj_with_bias(sorted_tokens, "gate_proj_gmm", offs, output_dtype, eids)
-            up = self._gmm_proj_with_bias(sorted_tokens, "up_proj_gmm", offs, output_dtype, eids)
+            gate = self._gmm_proj_with_bias(sorted_tokens, gate_attr, offs, output_dtype, eids)
+            up = self._gmm_proj_with_bias(sorted_tokens, up_attr, offs, output_dtype, eids)
             gated = self._gptoss_glu(gate, up)
             return self._gmm_proj_with_bias(gated.to(output_dtype), "down_proj", offs, output_dtype, eids)
 
-        return self._compute_experts_with_grouped_mm(tokens, experts, weights, output_dtype, compute)
+        return self._compute_experts_with_grouped_mm(
+            tokens, experts, weights, output_dtype, compute, recv_counts=recv_counts
+        )
 
     def _gmm_proj_with_bias(
         self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype, eids: torch.Tensor
@@ -174,11 +190,6 @@ class EPGptOssMoELayer(EPMoELayerBase):
         bias = getattr(self, f"{weight_attr}_bias", None)
         # MoEExpertBiasGather's backward is an atomic-free GEMM: index_add's value, no bf16 atomic.
         return out if bias is None else out + MoEExpertBiasGather.apply(bias, eids)
-
-    def _grouped_mm_enabled(self) -> bool:
-        # ETP stores gate/up under the plain gate_proj/up_proj names the per-expert loop reads, not the
-        # gate_proj_gmm/up_proj_gmm pair _compute_experts_gmm needs; _log_init_summary reports the drop.
-        return self._use_grouped_mm and self.expert_tp_size <= 1
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """Warm whichever activation this layer's compute path calls (see the base method).

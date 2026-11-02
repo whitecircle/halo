@@ -10,7 +10,7 @@ Every axis runs on both sizes ([Compatibility matrix](README.md#compatibility-ma
 
 - Routing: custom router returning `(logits, weights, experts)`; softmax top-k with FP32 weights for DeepEP.
 - Storage: interleaved `gate_up_proj [E, H, 2M]` (`[g0, u0, g1, u1, …]`), `down_proj [E, M, H]`, plus the optional expert biases `gate_up_proj_bias [E, 2M]` (interleaved the same way) and `down_proj_bias [E, H]`.
-- Compute: **Grouped GEMM** (default on SM90+) reads de-interleaved `gate_proj_gmm` / `up_proj_gmm` stored as separate contiguous tensors at init, avoiding NaN gradients on the stride-2 slice. The **loop fallback** iterates per expert with `index_add_`.
+- Compute: **Grouped GEMM** (default on SM90+) reads de-interleaved `gate_proj_gmm` / `up_proj_gmm` stored as separate contiguous tensors at init, avoiding NaN gradients on the stride-2 slice; under ETP it reads the sharded pair ETP stores as `gate_proj` / `up_proj`. The **loop fallback** iterates per expert with `index_add_`.
 - Activation: clamped SwiGLU, `(clamp(up) + 1) * clamp(gate) * sigmoid(alpha * clamp(gate))`. Every path — grouped GEMM, ETP and the per-expert loop — runs the same fused Triton kernel (`GluCombine.gptoss`, latched once per layer and logged as `glu_combine=gptoss`, `halo/kernels/fused_glu.py`, forward + backward, fp32 accumulation).
 
     The kernel replaces `torch.compile`, whose recompiles would storm on the varying per-step routed-token count and whose float arguments go stale once shapes are dynamic. The loop path splits the halves out of its interleaved projection output first.
@@ -54,7 +54,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
 - **CP** — `GptOssAttention` → `GptOssUlyssesAttention` (`halo/distributed/context_parallel/families.py`), RoPE before all-to-all and native GQA. Needs `reset_sinks: true`: the CP kernels drop the sink column, so the wrapper raises at the first forward on live sinks rather than normalizing every softmax wrongly.
 - **TP** — a DTensor plan on attention only; `embed_tokens`/`lm_head` stay replicated (sharding them faults with a cuBLAS illegal-memory error under EP+TP), MoE experts belong to EP. See [the selective-TP plan](../parallelism/tensor-parallelism.md#the-selective-tp-plan).
-- **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Expert compute drops to the per-expert loop at `expert_tp_size > 1`: ETP stores the de-interleaved gate/up pair under the plain names the loop reads, not the `*_gmm` pair the grouped path reads (`_grouped_mm_enabled`).
+- **ETP** — the interleaved-GLU layout needs re-interleaving back to `[g0, u0, g1, u1, …]` before the checkpoint write. Each rank stores its slice of the de-interleaved pair as `gate_proj` / `up_proj` (biases likewise, `down_proj_bias` on expert-TP rank 0), which grouped GEMM and the per-expert loop both read, so the storage and its checkpoints do not depend on `use_grouped_gemm`.
 
     See [ETP weight sharding](../parallelism/expert-tensor-parallelism.md#weight-sharding).
 

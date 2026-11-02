@@ -12,7 +12,9 @@ import torch
 import torch.distributed as dist
 from transformers import AutoModelForCausalLM
 
-from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
+from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
+from halo.kernels.histogram import sync_free_bincount
+from halo.kernels.moe_permute import MoEGatherPermute, build_inv_map
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.datasets import CHAT_TEMPLATE_NOW
 from tests.common.memory import cleanup_memory
@@ -25,6 +27,9 @@ from tests.common.tolerances import TOL
 # (``EPMoELayerBase._find_gate_or_router``), so the parameter path is identical in the sharded and
 # the dense model, which makes the two directly comparable.
 _ROUTER_SUFFIXES = ("router.weight", "gate.weight")
+
+# The six tensors ``EPMoELayerBase._sort_tokens_for_grouped_mm`` returns, in order.
+GROUPED_SORT_OUTPUTS = ("sorted_tokens", "offs", "sorted_token_idx", "sorted_weights", "sorted_expert_ids", "inv_map")
 
 # Norm ratio and cosine reported for an EP gradient with nothing to compare: no agreement bound accepts
 # it, which also makes it unfit for a negative control's upper bound.
@@ -195,6 +200,80 @@ def fixed_chat_batch(
         for tensor in (input_ids, attention_mask, labels):
             dist.broadcast(tensor, src=0)
     return input_ids, attention_mask, labels
+
+
+class GroupedSortLayer(SimpleNamespace):
+    """A stand-in carrying only what ``EPMoELayerBase._sort_tokens_for_grouped_mm`` reads off ``self``:
+    ``ep_size``, ``experts_per_rank`` and the receive-count check."""
+
+    _require_recv_counts = EPMoELayerBase._require_recv_counts
+
+
+def received_expert_ids(num_tokens: int, top_k: int, experts_per_rank: int, ep_size: int, seed: int) -> torch.Tensor:
+    """A DeepEP-shaped receive on rank 0: each token's ``top_k`` distinct global experts, kept as local ids where
+    rank 0 owns them and ``-1`` elsewhere, for the tokens with at least one local expert."""
+    g = torch.Generator().manual_seed(seed)
+    picks = torch.rand(num_tokens, experts_per_rank * ep_size, generator=g).argsort(dim=1)[:, :top_k]
+    local = torch.where(picks < experts_per_rank, picks, -1)
+    return local[(local >= 0).any(dim=1)]
+
+
+def receive_counts(experts: torch.Tensor, experts_per_rank: int) -> tuple[int, ...]:
+    """The per-local-expert slot counts a DeepEP dispatch reports for the received ids ``experts`` (``-1`` = not
+    this rank's), read back to the host."""
+    local = experts[(experts >= 0) & (experts < experts_per_rank)]
+    return tuple(torch.bincount(local, minlength=experts_per_rank).tolist())
+
+
+def dispatched_receive_counts(layer, experts: torch.Tensor) -> tuple[int, ...] | None:
+    """The ``recv_counts`` a dispatch hands ``layer``'s expert compute for the received ids ``experts``: their
+    :func:`receive_counts` at ``ep_size > 1``, None at ``ep_size`` 1, where nothing is dispatched."""
+    return receive_counts(experts, layer.experts_per_rank) if layer.ep_size > 1 else None
+
+
+def nonzero_grouped_sort(layer, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor):
+    """The grouped sort compacting DeepEP's padding with a device-sized ``nonzero``: the reference the counted
+    compaction must equal bit for bit."""
+    N, width = experts.shape
+    flat_indices = experts.reshape(-1)
+    flat_weights = weights.reshape(-1)
+    flat_token_idx = torch.arange(N, device=tokens.device).unsqueeze(1).expand(-1, width).reshape(-1)
+    if layer.ep_size > 1:
+        valid_idx = ((flat_indices >= 0) & (flat_indices < layer.experts_per_rank)).nonzero(as_tuple=True)[0]
+        flat_indices = flat_indices[valid_idx]
+        flat_weights = flat_weights[valid_idx]
+        flat_token_idx = flat_token_idx[valid_idx]
+    order = torch.argsort(flat_indices, stable=True)
+    sorted_expert_ids = flat_indices[order]
+    sorted_token_idx = flat_token_idx[order]
+    sorted_weights = flat_weights[order]
+    counts = sync_free_bincount(sorted_expert_ids, layer.experts_per_rank, dtype=torch.long)
+    offs = torch.cumsum(counts, dim=0).to(torch.int32)
+    inv_map = build_inv_map(sorted_token_idx, N, width)
+    sorted_tokens = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
+    return sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map
+
+
+def where_expert_loop(layer, tokens: torch.Tensor, experts: torch.Tensor, weights: torch.Tensor, output_dtype):
+    """``layer``'s per-expert loop selecting each expert's slots with a device-sized ``torch.where`` (its
+    ``ep_size == 1`` branch): the reference the counted loop must equal bit for bit."""
+    ep_size = layer.ep_size
+    layer.ep_size = 1
+    try:
+        return layer._compute_experts_weighted(
+            tokens, experts, weights, output_dtype, layer._expert_forward, recv_counts=None
+        )
+    finally:
+        layer.ep_size = ep_size
+
+
+def grouped_sort_mismatches(got, want) -> list[str]:
+    """The names of the grouped-sort outputs that differ in dtype, shape or any bit."""
+    return [
+        name
+        for name, g, w in zip(GROUPED_SORT_OUTPUTS, got, want, strict=True)
+        if g.dtype != w.dtype or g.shape != w.shape or not torch.equal(g, w)
+    ]
 
 
 def random_token_batch(vocab_size: int, batch: int, seq: int, device, seed: int = 123):

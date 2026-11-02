@@ -48,17 +48,22 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
             router_output = self.gate(self._router_input(flat))
         if not (isinstance(router_output, tuple) and len(router_output) == 3):
             raise RuntimeError(
-                f"Qwen3.5 router returned {type(router_output)} (expected a 3-tuple of "
-                f"logits/scores/indices) — transformers changed the router contract; update EPQwen3_5MoELayer."
+                f"{type(self.gate).__name__} returned {type(router_output)} (expected a 3-tuple of "
+                f"logits/scores/indices) — transformers changed the router contract; update {type(self).__name__}."
             )
         router_logits, topk_weights, topk_indices = router_output
         if self._balancing_bias(router_logits) is None:
             return self._replay_router_choice(router_logits, topk_indices, topk_weights)
-        # Top-k on the bias-adjusted probabilities, gated by the unbiased renormalized softmax at those indices:
-        # Qwen3_5MoeTopKRouter's arithmetic, so a zero bias selects and gates identically up to the router's bf16
-        # cast (this path stays fp32). _deepseek_biased_route applies the routing replay itself.
-        topk_weights, topk_indices = self._deepseek_biased_route(router_logits)
+        topk_indices, topk_weights = self._biased_route(router_logits)
         self._record_expert_load(topk_indices)
+        return topk_indices, topk_weights
+
+    def _biased_route(self, router_logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(topk_indices, topk_weights)`` under a balancing bias: top-k on the bias-adjusted probabilities,
+        gated by the unbiased renormalized softmax at those indices, ``Qwen3_5MoeTopKRouter``'s arithmetic, so a
+        zero bias selects and gates identically up to the router's bf16 cast (this path stays fp32).
+        ``_deepseek_biased_route`` applies the routing replay itself."""
+        topk_weights, topk_indices = self._deepseek_biased_route(router_logits)
         return topk_indices, topk_weights
 
     def _shared_expert_output(self, hidden_states: torch.Tensor) -> torch.Tensor:

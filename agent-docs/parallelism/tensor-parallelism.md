@@ -302,7 +302,8 @@ The NCCL watchdog (`DIST_NCCL_TIMEOUT_MINUTES`) covers the TP mesh too:
 gathers: all TP ranks reconstruct full tensors and one save rank writes a standard HF checkpoint, put
 through `normalize_gathered_state_dict` (hub expert layout, save dtype) like the FSDP2 and CP
 writers. There is no per-rank TP save. The write streams through `stream_gathered_checkpoint`, so
-the save rank's host RAM is bounded by one chunk plus one pending shard rather than the whole model.
+the save rank's host RAM is bounded by one chunk plus the shards it is filling and writing
+([Checkpoints](../reference/checkpoints.md)) rather than the whole model.
 
 `chunked_saveable_tensors` reconstructs every sharded param with `DTensor.full_tensor()` — one walk
 covers both mechanisms — and `gather_hand_sliced_params` (`halo/checkpoint/parallel/writing.py`)
