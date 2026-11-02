@@ -21,7 +21,7 @@ environment_kwargs:
 
 | Knob | Default | Effect |
 |---|---|---|
-| `search_backend` | auto | `serper`, `brave`, `tavily`, `duckduckgo`; auto picks by which API key is set, keyless DuckDuckGo last. Validated at construction |
+| `search_backend` | auto | `serper`, `brave`, `tavily`, `you`, `duckduckgo`; auto picks by which API key is set, keyless DuckDuckGo last. Validated at construction |
 | `include_python_tools` | `false` | `qa_search` only: adds the in-process restricted `python` REPL |
 | `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` closed-book raises |
 | `system_prompt` | class prompt | Replaces the built-in instructions |

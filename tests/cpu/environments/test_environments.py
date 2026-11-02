@@ -1471,6 +1471,89 @@ def test_web_search_raises_on_backend_failure_no_mock_fabrication():
         ws._BACKENDS["serper"] = original
 
 
+def test_you_backend_builds_keyed_post_request(monkeypatch):
+    """The ``you`` backend POSTs the query and count as JSON with the key in ``X-API-Key``."""
+
+    monkeypatch.setenv("YDC_API_KEY", "test-key")
+    spec = ws._YOU
+    assert (spec.method, spec.url, spec.env_key) == ("POST", "https://ydc-index.io/v1/search", "YDC_API_KEY")
+    assert spec.request_kwargs("capital of France", 3) == {
+        "json": {"query": "capital of France", "count": 3},
+        "headers": {"X-API-Key": "test-key", "Content-Type": "application/json"},
+    }
+
+
+def test_you_backend_parses_web_results():
+    """``results.web`` maps to title/url/snippet; ``snippets`` fill in when ``description`` is empty."""
+
+    data = {
+        "results": {
+            "web": [
+                {"url": "https://a.example", "title": "A", "description": "About A", "snippets": ["a1"]},
+                {"url": "https://b.example", "title": "B", "snippets": ["b1", "b2"]},
+                {"url": "https://c.example"},
+            ],
+            "news": [{"url": "https://news.example", "title": "ignored"}],
+        },
+        "metadata": {"query": "q"},
+    }
+    assert ws._YOU.parse(data) == [
+        {"title": "A", "url": "https://a.example", "snippet": "About A"},
+        {"title": "B", "url": "https://b.example", "snippet": "b1 b2"},
+        {"title": "", "url": "https://c.example", "snippet": ""},
+    ]
+    assert ws._YOU.parse({}) == []
+    assert ws._YOU.parse({"results": {}}) == []
+
+
+def test_you_backend_sits_before_duckduckgo_in_auto_select(monkeypatch):
+    """``you`` comes after the other keyed backends and before the keyless fallback."""
+
+    names = list(ws._BACKENDS)
+    assert names.index("tavily") < names.index("you") == names.index("duckduckgo") - 1
+    for key in ("SERPER_API_KEY", "BRAVE_API_KEY", "TAVILY_API_KEY", "YDC_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    assert ws._auto_select_backend() == "duckduckgo"
+    monkeypatch.setenv("YDC_API_KEY", "test-key")
+    assert ws._auto_select_backend() == "you"
+    monkeypatch.setenv("TAVILY_API_KEY", "other-key")
+    assert ws._auto_select_backend() == "tavily"
+
+
+def test_you_backend_end_to_end_without_network(monkeypatch):
+    """A full ``web_search`` call through the ``you`` backend, with httpx stubbed out."""
+
+    seen = {}
+
+    def _fake_request(method, url, **kwargs):
+        seen.update(method=method, url=url, **kwargs)
+        body = {
+            "results": {
+                "web": [{"url": "https://paris.example", "title": "Paris", "description": "Capital of France"}]
+            }
+        }
+        return ws.httpx.Response(200, json=body, request=ws.httpx.Request(method, url))
+
+    monkeypatch.setenv("YDC_API_KEY", "test-key")
+    monkeypatch.setattr(ws.httpx, "request", _fake_request)
+    result = ws.web_search("capital of France", max_results=2, backend="you")
+    assert result == "1. Paris\n   Capital of France\n   https://paris.example"
+    assert seen["method"] == "POST" and seen["json"] == {"query": "capital of France", "count": 2}
+    assert "User-Agent" not in seen["headers"]
+
+
+def test_you_backend_http_error_raises(monkeypatch):
+    """A 401/402/403/429 from You.com surfaces as the module's backend failure, like the other keyed backends."""
+
+    def _fake_request(method, url, **kwargs):
+        return ws.httpx.Response(401, json={"detail": "bad key"}, request=ws.httpx.Request(method, url))
+
+    monkeypatch.setenv("YDC_API_KEY", "bad-key")
+    monkeypatch.setattr(ws.httpx, "request", _fake_request)
+    with pytest.raises(RuntimeError, match="web_search backend 'you' failed"):
+        ws.web_search_raw("anything", backend="you")
+
+
 def test_a_failing_search_backend_is_logged_once_by_the_protocol(monkeypatch, caplog):
     """The backend fault reaches the log through the protocol that ran the tool, traceback included;
     a second warning from the search module would log the same failure twice per call."""

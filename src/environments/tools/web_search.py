@@ -1,7 +1,7 @@
 """Pluggable web search backends for environment tools, auto-selected by available API key.
 
-Priority: Serper (SERPER_API_KEY) → Brave (BRAVE_API_KEY) → Tavily (TAVILY_API_KEY) → DuckDuckGo
-(keyless fallback). Each raw result is ``{"title", "url", "snippet"}``.
+Priority: Serper (SERPER_API_KEY) → Brave (BRAVE_API_KEY) → Tavily (TAVILY_API_KEY) → You.com
+(YDC_API_KEY) → DuckDuckGo (keyless fallback). Each raw result is ``{"title", "url", "snippet"}``.
 """
 
 import asyncio
@@ -117,6 +117,25 @@ _TAVILY = HttpSearchSpec(
     ],
 )
 
+_YOU = HttpSearchSpec(
+    method="POST",
+    url="https://ydc-index.io/v1/search",
+    env_key="YDC_API_KEY",
+    build=lambda query, max_results, key: {
+        "json": {"query": query, "count": max_results},
+        "headers": {"X-API-Key": key, "Content-Type": "application/json"},
+    },
+    # ``description`` is the page summary; ``snippets`` (query-matched fragments) fill in when it is empty.
+    parse=lambda data: [
+        {
+            "title": r.get("title", ""),
+            "url": r.get("url", ""),
+            "snippet": r.get("description") or " ".join(r.get("snippets") or []),
+        }
+        for r in (data.get("results") or {}).get("web") or []
+    ],
+)
+
 
 def _search_mock(query: str, max_results: int) -> list[dict[str, Any]]:
     return [
@@ -161,6 +180,7 @@ _BACKENDS: dict[str, SearchBackend] = {
     "serper": _http_backend(_SERPER),
     "brave": _http_backend(_BRAVE),
     "tavily": _http_backend(_TAVILY),
+    "you": _http_backend(_YOU),
     "duckduckgo": SearchBackend(sync=_search_duckduckgo, async_=_async_search_duckduckgo),
 }
 
