@@ -118,8 +118,10 @@ from tests.common.models import (
     TINY_GLM5_VISION_CONFIG,
     TINY_GPTOSS_CONFIG,
     TINY_INKLING_CONFIG,
+    TINY_INKLING_PP_OVERRIDES,
     TINY_INKLING_VISION_CONFIG,
     TINY_LAGUNA_CONFIG,
+    TINY_LAGUNA_PP_OVERRIDES,
     TINY_LFM2_MOE_CONFIG,
     TINY_MISTRAL4_CONFIG,
     TINY_MISTRAL_SLIDING_CONFIG,
@@ -187,6 +189,14 @@ def module_with_weight_keys(paths: list[str]) -> torch.nn.Module:
             parent = child
         parent.add_module(parts[-2], _WeightLeaf())
     return root
+
+
+def config_only_module(config) -> torch.nn.Module:
+    """A bare module carrying ``config`` and nothing else: what a gate that reads ``model.config`` and walks the
+    module tree sees, without a model behind it."""
+    module = torch.nn.Module()
+    module.config = config
+    return module
 
 
 def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
@@ -498,6 +508,16 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         load_class=AutoModelForImageTextToText,
         ulysses_cp=False,
     ),
+}
+# The text-config overrides under which a family's tiny model splits into two pipeline stages on a layer_types
+# period with a MoE layer on each: Qwen3.5-MoE and Laguna at two periods, Inkling at two of its two-layer periods,
+# GLM-4 MoE Lite past its dense first layer. A family not listed splits as built.
+TINY_PP_SPLIT_OVERRIDES = {
+    "glm4_moe_lite": {"num_hidden_layers": 4},
+    "inkling_mm_model": TINY_INKLING_PP_OVERRIDES,
+    "inkling_text": TINY_INKLING_PP_OVERRIDES,
+    "laguna": TINY_LAGUNA_PP_OVERRIDES,
+    "qwen3_5_moe_text": {"num_hidden_layers": 8},
 }
 
 

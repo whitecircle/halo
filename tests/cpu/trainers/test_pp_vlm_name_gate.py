@@ -24,6 +24,7 @@ from datasets import Dataset
 
 import halo.model_loading.parallel.model_source as model_source
 from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
+from tests.common.tiny_models import config_only_module
 
 _VLM_REJECTION = "Vision-language training is not supported under pipeline parallelism"
 
@@ -57,11 +58,11 @@ def _image_dataset() -> Dataset:
 def _drive(model_type, name, *, vision_config=None):
     """Run the PP preparation over a model whose config declares ``model_type`` and ``name``, with an
     image-bearing train dataset. Returns the gate's own exception, or None when the model got past
-    it (anything raised further down — the split needs a real module — counts as "past")."""
+    it (anything raised further down — the split needs a real model — counts as "past")."""
     config = SimpleNamespace(model_type=model_type, _name_or_path=name)
     if vision_config is not None:
         config.vision_config = vision_config
-    kwargs = {"model": SimpleNamespace(config=config), "train_dataset": _image_dataset()}
+    kwargs = {"model": config_only_module(config), "train_dataset": _image_dataset()}
     try:
         PipelineTrainerMixin._split_pipeline_stage(_mixin(), kwargs, _args())
     except Exception as exc:  # the gate's own raise is what is under test
@@ -97,7 +98,7 @@ def test_registered_multimodal_config_is_still_rejected():
 def test_a_missing_name_field_is_not_an_error():
     """A config built in-process carries no ``_name_or_path``; the gate must degrade to the config
     verdict, not raise an AttributeError before it."""
-    model = SimpleNamespace(config=SimpleNamespace(model_type="qwen3"))
+    model = config_only_module(SimpleNamespace(model_type="qwen3"))
     try:
         PipelineTrainerMixin._split_pipeline_stage(_mixin(), {"model": model}, _args())
     except Exception as exc:  # later failures are fine, faulting on the name is not

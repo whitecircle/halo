@@ -67,13 +67,17 @@ from tests.common.models import (
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
     TINY_GPTOSS_CONFIG,
-    TINY_INKLING_PP_OVERRIDES,
-    TINY_LAGUNA_CONFIG,
     TINY_QWEN3_CONFIG,
 )
 from tests.common.parallelism import single_process_ep_config
 from tests.common.pp_fakes import hand_built_stage, registered_pp_backbones
-from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
+from tests.common.tiny_models import (
+    TINY_DENSE_FAMILIES,
+    TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
+    TINY_PP_SPLIT_OVERRIDES,
+    tiny_family_model,
+)
 
 _PC_MOD = "halo.distributed.parallelism_config"
 
@@ -99,8 +103,7 @@ PER_NODE_FAMILIES = ("qwen3", "inkling_mm_model")
 
 # The PP families whose load renames tensors, and controls that rename none (Inkling's text tower keeps
 # ``embed_norm`` inside the embedding, which only stage 0 may write). Laguna's renames all sit in its EP
-# layer, whose gather already writes them; its attention pattern repeats every four layers, so it is
-# doubled to split in two on a period boundary.
+# layer, whose gather already writes them.
 PP_FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 PP_EXPORT_FAMILIES = (
     "deepseek_v4",
@@ -111,24 +114,15 @@ PP_EXPORT_FAMILIES = (
     "inkling_mm_model",
     "inkling_text",
     "qwen3_moe",
+    "glm4_moe_lite",
 )
-PP_RENAME_FREE = frozenset({"inkling_text", "qwen3_moe"})
+PP_RENAME_FREE = frozenset({"inkling_text", "qwen3_moe", "glm4_moe_lite"})
 # The renaming families as a run without EP layers (``ep_size=1``, no grouped GEMM) holds them: each
 # decoder layer's own tensors carry its reverses, several at once for Inkling's shared experts.
 PP_UNWRAPPED_FAMILIES = ("deepseek_v4", "glm5_next", "step3p7", "mistral3", "inkling_mm_model")
-PP_FAMILY_OVERRIDES = {
-    "laguna": {
-        "num_hidden_layers": 8,
-        "num_attention_heads_per_layer": TINY_LAGUNA_CONFIG["num_attention_heads_per_layer"] * 2,
-        "layer_types": TINY_LAGUNA_CONFIG["layer_types"] * 2,
-        "mlp_layer_types": TINY_LAGUNA_CONFIG["mlp_layer_types"] * 2,
-    },
-    "inkling_text": TINY_INKLING_PP_OVERRIDES,
-    "inkling_mm_model": TINY_INKLING_PP_OVERRIDES,
-}
 PP_FAMILY_SPLITS = {"laguna": [4, 4], "gpt_oss": [4, 4]}
 # The fixture families unregistered for PP: the save and its reads are family-agnostic.
-UNREGISTERED_PP_BACKBONES = ("LagunaModel", "Mistral4Model", "InklingTextModel", "Qwen3MoeModel")
+UNREGISTERED_PP_BACKBONES = ("Mistral4Model",)
 
 
 def _tiny_qwen3() -> Qwen3ForCausalLM:
@@ -734,7 +728,7 @@ def _pp_family_model(name: str, *, ep_wrapped: bool = True):
     """``name``'s tiny model, seeded. ``ep_wrapped`` EP-patches it at ``ep_size=1``, as grouped GEMM does
     every MoE stage; without it the family's own MoE blocks stay, as under ``use_grouped_gemm: false``."""
     torch.manual_seed(SEED)
-    model = tiny_family_model(PP_FAMILIES[name], overrides=PP_FAMILY_OVERRIDES.get(name))
+    model = tiny_family_model(PP_FAMILIES[name], overrides=TINY_PP_SPLIT_OVERRIDES.get(name))
     if ep_wrapped:
         apply_ep_layers(model, single_process_ep_config())
     return model

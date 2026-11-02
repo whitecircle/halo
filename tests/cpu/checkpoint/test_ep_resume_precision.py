@@ -51,7 +51,6 @@ from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
 from tests.common.parallelism import single_process_ep_config
-from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.tiny_models import TINY_MOE_FAMILIES
 
 PartialState()
@@ -439,8 +438,6 @@ def test_resume_missing_selected_master_is_never_randomly_initialized(
         _construct(path, preserve=True, **kwargs)
 
 
-# Qwen3-MoE is unregistered for PP; it stands in as the per-expert checkpoint format here.
-@registered_pp_backbones("Qwen3MoeModel")
 def _construct_pp_stage(
     path, pp_rank, *, fp32_router, fp32_experts, fp32_non_ep, preserve, managed_experts=False, model_class=None
 ):

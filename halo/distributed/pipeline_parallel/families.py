@@ -26,7 +26,7 @@ class PPFamilySpec:
 
     Attributes:
         hf_module_names: the backbone classes (the module holding the decoder-layer list) claimed.
-        refusal: why the family is refused (the state a cut would sever, or the missing validation).
+        refusal: why the family is refused: the state a cut would sever.
         final_norm_attrs: the post-layers norm, probed in order; neutralized off the last stage.
         head_attrs: the model's task head, probed in order; held by the last stage only.
         tail_module_attrs: further post-layers backbone modules (the hyper-connection collapse
@@ -218,9 +218,21 @@ def _reject_severed_dsa_chains(model: nn.Module, partition: list[tuple[int, int]
 
 # A backbone no spec claims: the default probes, unregistered.
 GENERIC_PP = PPFamilySpec()
-# The registered families whose upstream forward splits contiguously as-is.
+# The registered families whose upstream forward splits contiguously as-is: the per-layer inputs are built once
+# before the loop, and its only list-position read is ``config.layer_types[i]``, which validate_partition holds to
+# whole periods. Inkling's embedding module carries ``embed_norm``, so a later stage drops the norm with it.
 STOCK_FORWARD_PP = PPFamilySpec(
-    hf_module_names=("GptOssModel", "Qwen3Model", "Qwen3_5TextModel", "Qwen3_5MoeTextModel", "Step3p7TextModel"),
+    hf_module_names=(
+        "Glm4MoeLiteModel",
+        "GptOssModel",
+        "InklingTextModel",
+        "LagunaModel",
+        "Qwen3Model",
+        "Qwen3MoeModel",
+        "Qwen3_5TextModel",
+        "Qwen3_5MoeTextModel",
+        "Step3p7TextModel",
+    ),
     validated=True,
 )
 ZAYA_PP = PPFamilySpec(
@@ -244,12 +256,6 @@ DEEPSEEK_V4_PP = PPFamilySpec(
     reject_severed_boundaries=_reject_stranded_hash_routers,
     validated=True,
 )
-# Refused pending validation; past the refusal, the generic split: its embedding module carries
-# ``embed_norm``, so the norm leaves later stages with it.
-INKLING_PP = PPFamilySpec(
-    hf_module_names=("InklingTextModel",),
-    refusal="Its stages have loader-only validation: no schedule, end-to-end or save/resume row.",
-)
 GEMMA4_PP = PPFamilySpec(
     hf_module_names=("Gemma4TextModel",),
     refusal=(
@@ -269,7 +275,7 @@ GLM5_NEXT_PP = PPFamilySpec(
     reject_severed_boundaries=_reject_severed_dsa_chains,
     validated=True,
 )
-PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, INKLING_PP, GEMMA4_PP, GLM5_NEXT_PP)
+PP_FAMILY_SPECS = (STOCK_FORWARD_PP, ZAYA_PP, DEEPSEEK_V4_PP, GEMMA4_PP, GLM5_NEXT_PP)
 PP_SPEC_MAP: dict[str, PPFamilySpec] = {name: spec for spec in PP_FAMILY_SPECS for name in spec.hf_module_names}
 if len(PP_SPEC_MAP) != sum(len(spec.hf_module_names) for spec in PP_FAMILY_SPECS):
     raise ValueError("Two PPFamilySpec constants in PP_FAMILY_SPECS claim one HF backbone class name.")

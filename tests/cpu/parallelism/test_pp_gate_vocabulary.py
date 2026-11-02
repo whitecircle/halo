@@ -20,14 +20,19 @@ Run: python tests/cpu/parallelism/test_pp_gate_vocabulary.py  (or pytest -m cpu)
 
 from __future__ import annotations
 
+import inspect
 from types import SimpleNamespace
 
 import pytest
+import torch
+from peft import LoraConfig, PromptTuningConfig, get_peft_model, inject_adapter_in_model
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
-from transformers import PretrainedConfig, PreTrainedTokenizerFast
+from transformers import PretrainedConfig, PreTrainedTokenizerFast, Qwen3Config, Qwen3ForCausalLM
 
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
+from halo.distributed.pipeline_parallel.stage import PipelineStageModule
+from halo.trainers.ctor_slots import resolve_ctor_positions
 from halo.trainers.grpo.offline.offline_rules import reject_offline_pp_options
 from halo.trainers.parallelism.pipeline_rules import (
     reject_missing_precomputed_columns,
@@ -45,6 +50,9 @@ from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from halo.trainers.preference.dpo import DistributedDPOTrainer
 from halo.trainers.preference.kto import DistributedKTOTrainer
 from halo.trainers.preference.preference_rules import reject_smpo_pp_options
+from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.parallelism import make_parallelism_config
+from tests.common.rosters import distributed_trainer_classes
 
 PEFT_SENTINEL = object()
 """Stand-in for a ``peft_config``: the gates test identity against ``None``, never structure."""
@@ -82,6 +90,11 @@ def _training_args(**overrides):
     }
     base.update(overrides)
     return SimpleNamespace(**base)
+
+
+def _tiny_lm() -> Qwen3ForCausalLM:
+    torch.manual_seed(0)
+    return Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
 
 
 def _dpo_args(**overrides):
@@ -356,7 +369,7 @@ def _drive_offline_grpo(peft_config=None, compute_metrics=None):
 def _drive_pipeline_mixin(**overrides):
     """``PipelineTrainerMixin._split_pipeline_stage`` — the shared gate SFT/reward ride."""
     kwargs = {
-        "model": SimpleNamespace(config=SimpleNamespace()),
+        "model": _tiny_lm(),
         "args": _training_args(),
         "parallelism_config": _pp_config(),
     }
@@ -402,6 +415,85 @@ def test_no_pp_trainer_rejects_an_absent_peft_config(site):
         sites[site]()
     except Exception as err:  # noqa: BLE001 — a later gate tripping on the stub is fine; a PEFT one is not
         assert "PEFT/LoRA" not in str(err), f"{site} rejects PEFT with no peft_config: {err}"
+
+
+_PEFT_WRAPS = {
+    "peft_model": lambda model: get_peft_model(model, LoraConfig(r=4, target_modules=["q_proj", "v_proj"])),
+    "injected_tuner_layers": lambda model: inject_adapter_in_model(LoraConfig(r=4, target_modules=["q_proj"]), model),
+    "prompt_learning_peft_model": lambda model: get_peft_model(
+        model, PromptTuningConfig(task_type="CAUSAL_LM", num_virtual_tokens=4)
+    ),
+}
+
+
+def _split(model, *, pp_size: int = 2) -> dict:
+    """The REAL ``_split_pipeline_stage`` on ``model``, through to ``build_pipeline_stage``, as rank 0 of a
+    pp2 x dp2 topology (``pp_size=1``: plain dp4)."""
+    stub = object.__new__(PipelineTrainerMixin)
+    stub.parallelism_config = make_parallelism_config(world_size=4, gpus_per_node=2, pp_size=pp_size)
+    stub.save_sharded_ep = False
+    stub._moe_balancing = "none"
+    args = _training_args(per_device_train_batch_size=2, per_device_eval_batch_size=2, gradient_accumulation_steps=2)
+    return PipelineTrainerMixin._split_pipeline_stage(stub, {"model": model, "args": args}, args)
+
+
+@pytest.mark.parametrize("wrap", sorted(_PEFT_WRAPS))
+def test_a_model_wrapped_before_the_trainer_is_refused_at_the_split(wrap):
+    """A model the caller PEFT-wrapped itself arrives with ``peft_config=None``, past ``reject_pp_peft``.
+
+    Unrefused, the stage builds with the tuner layers inside it and no ``PeftModel`` above, so the
+    saver ladder never finds the adapter and the PP save writes ``base_model.model.*.base_layer.*``
+    keys ``from_pretrained`` cannot load. Each wrap is a distinct detection path: the ``PeftModel``
+    type (prompt learning carries no tuner layer), and tuner layers injected in place (no ``PeftModel``).
+    """
+    with pytest.raises(ValueError, match="already PEFT-wrapped") as err:
+        _split(_PEFT_WRAPS[wrap](_tiny_lm()))
+    assert "fully fine-tune under PP" in str(err.value)
+
+
+@pytest.mark.parametrize("driver", [_drive_dpo, _drive_kto], ids=["dpo", "kto"])
+def test_dpo_and_kto_reach_the_wrapped_model_refusal_past_their_own_hooks(driver):
+    """DPO and KTO run their own PP hook ahead of the shared model gate; a wrapped model passes the hook
+    and must still meet the gate."""
+    with pytest.raises(ValueError, match="already PEFT-wrapped"):
+        driver(model=_PEFT_WRAPS["peft_model"](_tiny_lm()))
+
+
+def test_a_plain_model_passes_the_peft_gate_and_splits():
+    """Anti-vacuity: the gate refuses the wrap, not every model the split takes."""
+    assert isinstance(_split(_tiny_lm())["model"], PipelineStageModule)
+
+
+def test_a_peft_model_without_pp_is_untouched():
+    """The refusal sits behind ``is_pp_mode``: a non-PP run keeps the caller's ``PeftModel`` as given."""
+    model = _PEFT_WRAPS["peft_model"](_tiny_lm())
+    assert _split(model, pp_size=1)["model"] is model
+
+
+def _positional_trl_bases() -> dict[str, type]:
+    """Trainer name → TRL base, for each PP-enabled trainer whose ``__init__`` forwards ``*args`` to that base;
+    one naming ``peft_config`` binds it by name, which ``reject_pp_peft`` reads."""
+    bases = {}
+    for cls in distributed_trainer_classes():
+        params = inspect.signature(cls.__init__).parameters
+        forwards = any(param.kind is param.VAR_POSITIONAL for param in params.values())
+        if cls.PP_REFUSAL is None and forwards and "peft_config" not in params:
+            bases[cls.__name__] = next(base for base in cls.__mro__ if base.__module__.startswith("trl."))
+    return bases
+
+
+def test_positional_trainers_are_found():
+    """Anti-vacuity for the parametrize below."""
+    assert _positional_trl_bases()
+
+
+@pytest.mark.parametrize("trl_base", list(_positional_trl_bases().values()), ids=list(_positional_trl_bases()))
+def test_a_positional_peft_config_implies_a_positional_model(trl_base):
+    """No gate reads a positional ``peft_config``; none needs to while the TRL base takes ``model`` first, since
+    filling the slot by position then leaves no ``model`` keyword, which PP refuses. Read off the installed
+    signature, so a TRL release that moved ``peft_config`` ahead of ``model`` fails here."""
+    slots = resolve_ctor_positions(trl_base, "model", "peft_config")
+    assert slots["model"] < slots["peft_config"], f"{trl_base.__name__} takes peft_config before model"
 
 
 @pytest.mark.parametrize(

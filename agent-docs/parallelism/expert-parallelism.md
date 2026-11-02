@@ -82,7 +82,7 @@ EP surface. The table is pinned against the specs and classes by
 | Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `FAMILY.supports_lazy_loading` |
 | GLM-5 Next | RL weight sync — both pinned engines' expert loaders are per-expert only, and no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Qwen3-Next | RL weight sync — both pinned engines load the per-expert keys the gather emits, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
-| Qwen3.8-Flash-Next | RL weight sync — no sync into either pinned engine is validated, and the host-resident n-gram table is outside the model the sync streams | `FAMILY.weight_sync_refusal` |
+| Qwen3.8-Flash-Next | RL weight sync — no sync into either pinned engine is validated, and on SM100-family GPUs SGLang 0.5.22 caches a padded copy of each hyper-connection mix-up weight that an update leaves stale ([RL weight sync](../models/qwen4_exp.md#rl-weight-sync)) | `FAMILY.weight_sync_refusal` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for

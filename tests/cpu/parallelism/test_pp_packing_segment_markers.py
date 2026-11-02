@@ -29,12 +29,16 @@ from halo.trainers.parallelism.pipeline_trainer import PipelineTrainerMixin
 from tests.common.models import (
     BAILING_MOE_RING_MINI,
     TINY_DSV4_CONFIG,
+    TINY_GLM4_MOE_LITE_CONFIG,
     TINY_GLM5_CONFIG,
     TINY_GLM5_VISION_CONFIG,
     TINY_GPTOSS_CONFIG,
+    TINY_INKLING_CONFIG,
+    TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MISTRAL4_CONFIG,
     TINY_QWEN3_CONFIG,
+    TINY_QWEN3_MOE_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_QWEN35_VISION_CONFIG,
@@ -51,6 +55,11 @@ _REFUSAL = "packing under pipeline parallelism is refused"
 _PP_ROSTER = {
     "Qwen3Model": (lambda: CONFIG_MAPPING["qwen3"](**TINY_QWEN3_CONFIG), False),
     "GptOssModel": (lambda: CONFIG_MAPPING["gpt_oss"](**TINY_GPTOSS_CONFIG), False),
+    "Qwen3MoeModel": (lambda: CONFIG_MAPPING["qwen3_moe"](**TINY_QWEN3_MOE_CONFIG), False),
+    "Glm4MoeLiteModel": (lambda: CONFIG_MAPPING["glm4_moe_lite"](**TINY_GLM4_MOE_LITE_CONFIG), False),
+    "LagunaModel": (lambda: CONFIG_MAPPING["laguna"](**TINY_LAGUNA_CONFIG), False),
+    # Its short convolutions read no document boundary on any path.
+    "InklingTextModel": (lambda: CONFIG_MAPPING["inkling_text"](**TINY_INKLING_CONFIG), True),
     "Step3p7TextModel": (
         lambda: Step3p7Config(text_config=dict(TINY_STEP3P7_CONFIG), vision_config=dict(TINY_STEP3P7_VISION_CONFIG)),
         False,

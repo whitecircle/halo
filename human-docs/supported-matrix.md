@@ -152,16 +152,16 @@ advanced parallelism. What each family is for:
 | Model family | EP | ETP | CP | TP | PP | Notes |
 | --- | :---: | :---: | :---: | :---: | :---: | --- |
 | Qwen3 (dense) | — | — | Yes | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
-| Qwen3 MoE | Yes | Yes | Yes | Yes | No | broadest coverage |
+| Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | broadest coverage; PP passes tiny-model GPU tests only and needs `moe_balancing: none` |
 | Qwen3-VL (text) | — | — | Yes | No | No | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
 | Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower |
 | Qwen3-Next | Yes | Yes | No | No | No | EP and ETP pass tiny-model GPU tests only |
-| Qwen3.8-Flash-Next | Yes | Yes | No | No | No | experimental: EP, pure ETP and EP+ETP pass tiny-model GPU tests, and EP8 trains the release cut to four layers; text rows, packed or padded; the n-gram table stays in host memory |
+| Qwen3.8-Flash-Next | Yes | Yes | No | No | No | experimental: EP, pure ETP and EP+ETP pass tiny-model GPU tests, and EP8 trains the release cut to four layers; full fine-tuning, LoRA and expert LoRA; plain FSDP2 (`ep_size: 1`) loads the whole model on every GPU, so tiny models only; text rows, packed or padded; the n-gram table stays in host memory; no RL weight sync |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
-| GLM-4 MoE Lite | Yes | Yes | Yes | Yes | No | |
-| Laguna S / XS 2.1 | Yes | Yes | No | No | No | ETP passes tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
-| Inkling-Small | Yes | Yes | No | No | No | multimodal MoE; LoRA passes tiny-model GPU tests only |
+| GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | PP passes tiny-model GPU tests only |
+| Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | ETP and PP pass tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
+| Inkling-Small | Yes | Yes | No | No | Yes | multimodal MoE; LoRA and PP pass tiny-model GPU tests only; PP takes the text tower, no packing |
 | Gemma 4 MoE | Yes | Yes | No | No | No | no router balancing; LoRA adapts the language model only |
 | Bailing MoE / Ling | Yes | Yes | Yes | No | No | EP covers Ling 2.0, Ling 3.0 and Ring; CP on Ling 2.0 only, and EP+CP passes a tiny-model LoRA test only; Ling 3.0 refuses `packing` and `padding_free` |
 | LFM-2 MoE | Yes | Yes | No | Yes | No | |

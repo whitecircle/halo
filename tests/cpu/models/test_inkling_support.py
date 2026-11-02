@@ -54,10 +54,10 @@ def test_capability_contracts():
     assert EPInklingMoELayer.FAMILY.hub_conversion_keys == ("inkling_mm_model",)
     assert EPInklingMoELayer.FAMILY.supports_lazy_loading is True
     assert EPInklingMoELayer.FAMILY.weight_sync_refusal is not None
-    # PP: refused until a schedule, end-to-end and save/resume row cover it; otherwise the generic split
-    # (its embedding module carries ``embed_norm``, so the norm leaves later stages with it).
+    # PP: the generic split of the upstream forward (its embedding module carries ``embed_norm``, so the norm
+    # leaves later stages with it), cut on whole layer_types periods.
     spec = PP_SPEC_MAP["InklingTextModel"]
-    assert "loader-only validation" in spec.refusal and not spec.validated
+    assert spec.validated and spec.refusal is None
     assert spec.stream_forward is None and not spec.layer_types_rebase_safe
     # CP: the short convolutions run over the sequence axis; the veto fires before the
     # attention-class scan so the refusal names the mechanism.

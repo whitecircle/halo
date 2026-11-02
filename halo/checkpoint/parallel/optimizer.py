@@ -524,8 +524,9 @@ class OptimizerShardStore:
             return (
                 f"Restored none of the {len(tracked)} replicated expert parameter(s) this shard was deduplicated "
                 f"against from {os.path.basename(path)}: the writer's shard carries no state under any of them "
-                f"(first: {sorted(tracked)[:KEY_PREVIEW_COUNT]}). The writer's state is keyed differently from this "
-                "run's expert parameter names, so resuming would silently reinitialize every expert moment."
+                f"(this run's, first: {sorted(tracked)[:KEY_PREVIEW_COUNT]}; the writer's keys, first: "
+                f"{sorted(writer_state, key=str)[:KEY_PREVIEW_COUNT]}). The writer's state is keyed differently from "
+                "this run's expert parameter names, so resuming would silently reinitialize every expert moment."
             )
         return None
 

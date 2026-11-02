@@ -99,8 +99,9 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 
 
 ## Limits
 
-- No CP or TP: Laguna attention has no wrapper for either. No pipeline parallelism: Laguna is not a
-  registered pipeline family.
+- No CP or TP: Laguna attention has no wrapper for either. Pipeline parallelism cuts only on whole
+  four-layer attention periods and refuses a nonzero aux-loss coefficient (the released checkpoints ship
+  `0.0`).
 - No SGLang weight sync. SGLang 0.5.22's Laguna loader expects every expert weight in every update,
   which a chunked update can't provide. Online RL runs on vLLM.
 - vLLM 0.32.0 drops the exported correction bias. A model trained with `bias_update` never serves on

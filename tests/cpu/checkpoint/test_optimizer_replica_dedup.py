@@ -323,7 +323,10 @@ def test_a_writer_shard_spelling_the_experts_differently_fails_the_read(tmp_path
     follower = _osd(1.0)
     store = _store(_ep_model(REPLICA_SETS[2]), 2, monkeypatch)
     store._drop_replicated_state(follower)
-    assert "keyed differently" in (store._merge_replicated_state(str(tmp_path), follower) or "")
+    refusal = store._merge_replicated_state(str(tmp_path), follower) or ""
+    assert "keyed differently" in refusal
+    # Both sides of the mismatch are shown: this run's names and the writer's own spelling.
+    assert any(f"'{key}'" in refusal for key in drifted["state"]), refusal
 
 
 def test_the_writer_fqns_match_a_real_optimizer_state_dict(monkeypatch):

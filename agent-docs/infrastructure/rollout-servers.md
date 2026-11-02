@@ -216,7 +216,9 @@ The trainer refuses at construction a model the selected engine cannot take a sy
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
   Inkling (no engine run has validated its sync), GLM-5 Next (both engines' per-expert loaders refuse
-  the gathered fused pair), Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE carry on both engines.
+  the gathered fused pair), Qwen3-Next, Qwen3.8-Flash-Next (no engine run has validated its sync, and
+  SGLang caches a hyper-connection weight copy on SM100-family GPUs that an update leaves stale,
+  [RL weight sync](../models/qwen4_exp.md#rl-weight-sync)) and Cohere2 MoE carry on both engines.
 - **A MoE without a live EP layer** (`use_grouped_gemm: false` at `ep_size: 1`), for every family: the
   experts ship in the layout the EP layer's gather emits, and the stock module tree's fused tensors
   under module names are dropped by the engine's loader with no error. `use_grouped_gemm: true` (the

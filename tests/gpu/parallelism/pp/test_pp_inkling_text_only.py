@@ -41,7 +41,6 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_INKLING_CONFIG
-from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.rank_log import log
 
 PP_SIZE = 2
@@ -74,8 +73,6 @@ def _write_checkpoint(ctx) -> str:
     return path
 
 
-# Inkling is refused for PP until a schedule, end-to-end and save/resume row cover it; this is its loader row.
-@registered_pp_backbones("InklingTextModel")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}

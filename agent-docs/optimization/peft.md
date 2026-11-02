@@ -229,13 +229,15 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 | Mode | LoRA | QLoRA | Target restriction | Notes |
 |---|---|---|---|---|
 | DDP / FSDP | Yes | Yes | None | Standard path; QLoRA on a MoE is unverified ([QLoRA](#quantized-training-qlora)) |
+| HSDP | Yes | No | None | Pure DP or CP only, so expert adapters train at `ep_size: 1`; every replica starts from the first one's adapters ([HSDP](../parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel)). QLoRA rejected: `use_hsdp` is refused under QLoRA, which skips FSDP2 ([QLoRA](#quantized-training-qlora)) |
 | EP | Yes | No | Attention + experts | Attention via PEFT; expert FFNs via native grouped adapters. QLoRA rejected: EP loaders materialize plain de-quantized weights, losing `Params4bit` |
 | CP | Yes | Yes* | None | CP shards the sequence, not the weights — adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. *QLoRA only on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
 | TP | **No** | No | — | Rejected — adapters are plain tensors outside the TP graph |
 | EP+CP | Yes | No | Attention + experts | Both active |
 | EP+TP | **No** | No | — | Both adapter kinds rejected: attention LoRA as under TP, native expert LoRA by the gate's `model_has_expert_lora` arm |
 | ETP | Yes | No | Attention only | Expert adapters rejected at config time by `ParallelismConfig` (`expert_tp_size > 1` gives the replicated adapter half a partial, never-synced gradient) |
-| PP | **No** | No | — | Rejected — the adapter save and resume are not stage-aware ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)) |
+| EP+ETP | Yes | No | Attention only | Expert adapters rejected at config time, as under ETP |
+| PP | **No** | No | — | Rejected, as a `peft_config` or an already PEFT-wrapped model — the adapter save and resume are not stage-aware ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)) |
 
 **EP.** The expert names [above](#moe-models--expert-targets-and-full-trained-modules) route to **native grouped
 LoRA** — grouped `[E_local, K, r]`/`[E_local, r, N]` adapters stored alongside each expert weight, applied in

@@ -219,8 +219,9 @@ QWEN4_EXP = MoEFamilySpec(
     expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
     shared_expert_attrs=("shared_expert",),
     weight_sync_refusal=(
-        "no online update into either pinned rollout engine has been validated, and the n-gram table, which the "
-        "toolkit holds in host memory outside the module state, is not part of the model the sync streams"
+        "no online update into either pinned rollout engine has been validated end to end; on SGLang, each "
+        "hyper-connection GatedResidual also caches a padded copy of its mix-up weight on SM100-family GPUs that an "
+        "update leaves stale (agent-docs/models/qwen4_exp.md#rl-weight-sync)"
     ),
 )
 STEP3P7 = MoEFamilySpec(

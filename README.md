@@ -51,7 +51,7 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-10-25 — Halo 1.2.0.** Pipeline parallelism, tree packing, faster parallel steps and a newer
+- **2026-11-02 — Halo 1.2.0.** Pipeline parallelism, tree packing, faster parallel steps and a newer
   stack: pipeline parallelism for SFT, preference, offline GRPO, reward and classification training,
   alone or with EP or ETP inside each stage; SFT tree packing, which stores a prefix that several rows
   share once; faster TP, CP and EP steps from TP linears on their local shards, one Ulysses all-to-all

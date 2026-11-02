@@ -67,7 +67,6 @@ from tests.common import pp_equivalence as ppeq
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
-from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.rank_log import log
 
 PP_SIZE = 2
@@ -116,8 +115,6 @@ def _write_checkpoint(ctx) -> str:
     return path
 
 
-# The --moe_family qwen3_moe rows split a family unregistered for PP; the loader math is family-agnostic.
-@registered_pp_backbones("Qwen3MoeModel")
 def _reference_stage(ckpt: str, pp_rank: int, ep_config, device):
     """The whole-model path: load everything, then drop the other stages' layers."""
     if ep_config is None:
@@ -142,7 +139,6 @@ def _absent_head_is_usable(head: torch.Tensor | None, device) -> bool:
     return bool(torch.equal(rank0, head.float().to(device)))
 
 
-@registered_pp_backbones("Qwen3MoeModel")
 def _stage_aware_stage(ckpt: str, pp_rank: int, ep_config, device):
     """The stage-aware path: stream only this stage's layers, then finish the split.
 

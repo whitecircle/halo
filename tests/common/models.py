@@ -348,6 +348,14 @@ TINY_LAGUNA_CONFIG = {
     "router_aux_loss_coef": 0.0,
     "tie_word_embeddings": False,
 }
+# Its attention pattern repeats every four layers, so a pipeline split in two needs eight layers to cut on a period
+# boundary.
+TINY_LAGUNA_PP_OVERRIDES = {
+    "num_hidden_layers": 8,
+    "num_attention_heads_per_layer": TINY_LAGUNA_CONFIG["num_attention_heads_per_layer"] * 2,
+    "layer_types": TINY_LAGUNA_CONFIG["layer_types"] * 2,
+    "mlp_layer_types": TINY_LAGUNA_CONFIG["mlp_layer_types"] * 2,
+}
 
 # Tiny LFM-2 MoE (``LiquidAI/LFM2-24B-A2B``): the hybrid short-conv / full-attention stack, the first
 # ``num_dense_layers`` layers dense and the rest sparse, sigmoid routing with the ``expert_bias``

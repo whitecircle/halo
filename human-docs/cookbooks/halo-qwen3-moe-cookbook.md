@@ -122,7 +122,8 @@ Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs.
 
 ## Limits
 
-- No pipeline parallelism: Qwen3 MoE is not a registered pipeline family (dense Qwen3 is).
+- Pipeline parallelism needs `moe_balancing: none`: the stage split drops the aux loss, and the router has no
+  bias slot.
 - The general limits apply: LoRA is refused under TP and EP+TP, and expert adapters are refused once
   `expert_tensor_parallel_size > 1`.
 

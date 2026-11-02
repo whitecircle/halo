@@ -160,8 +160,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     if mixed or gathered:
         state = gather_adapter_state(peft_model)
     elif is_cp_mode:
-        # CP without DTensors (QLoRA+CP, or a CP group spanning the world) still needs the manual write for its
-        # changed key paths.
+        # CP without DTensors (QLoRA+CP, which skips FSDP2) still needs the manual write for its changed key paths.
         state = get_peft_model_state_dict(peft_model, save_embedding_layers=_saves_embedding_layers(peft_model))
     if state is not None and is_cp_mode:
         state = {plain_adapter_key(key): tensor for key, tensor in state.items()}

@@ -23,7 +23,12 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
+from halo.models.attention.gpt_oss_sinks import (
+    NEUTRALIZED_TEACHER_SINKS_COST,
+    SINK_CARRYING_ATTN_HINT,
+    SinksPolicy,
+    stamped_sinks_policy,
+)
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distillation.divergences import (
     global_token_mean,
@@ -111,11 +116,10 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         # neutralized value and is a faithful teacher under a live policy.
         if stamped_sinks_policy(teacher_model) is SinksPolicy.NEUTRALIZED:
             raise ValueError(
-                "The GptOss teacher was loaded with its attention sinks neutralized (reset_sinks=True), and a frozen "
-                "pretrained teacher without its sinks predicts far from itself (~6 nats/token KL on gpt-oss-20b), so "
-                "the student would fit a degenerate target. Load the teacher with reset_sinks=False "
-                "(load_frozen_auxiliary_model), on a sink-carrying attention implementation (flash_attention_4 on "
-                "Blackwell; flex_attention or eager)."
+                f"The GptOss teacher was loaded with its attention sinks neutralized (reset_sinks=True), and "
+                f"{NEUTRALIZED_TEACHER_SINKS_COST}, so the student would fit a degenerate target. Load the teacher with "
+                f"reset_sinks=False (load_frozen_auxiliary_model), on a sink-carrying attention implementation "
+                f"({SINK_CARRYING_ATTN_HINT})."
             )
 
         # The student rides through the seam: the reentrant-checkpointing and Liger gates read its config.

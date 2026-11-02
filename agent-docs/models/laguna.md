@@ -4,7 +4,7 @@ Poolside's `LagunaForCausalLM` (`poolside/Laguna-S-2.1`, `poolside/Laguna-XS-2.1
 
 Transformers ships `transformers.models.laguna` natively, and the released checkpoints also load through `auto_map`, so both implementations are reachable: the shipped configs set `trust_remote_code: true` with a pinned `model_revision` (the revisions the EP path was validated against); with it off, the same checkpoints load into the in-library classes, which compute the same forward. The EP layer claims both by class name and by `model_type`, and Liger patches both ([Configs](#configs)).
 
-Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism cuts on whole four-layer `layer_types` periods ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). Under it `aux_loss` with a nonzero coefficient is refused; the released checkpoints ship `0.0`.
 
 ## EP layer
 

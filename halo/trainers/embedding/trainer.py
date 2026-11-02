@@ -32,7 +32,14 @@ from halo.checkpoint.adapters import (
     unmarked_merged_checkpoint_reason,
 )
 from halo.checkpoint.atomic import apply_umask_mode, save_safetensors_file
-from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
+from halo.checkpoint.format import (
+    ADAPTER_SAFETENSORS_FILE,
+    RESUME_ADAPTER_DIR,
+    RESUME_ADAPTER_MARKER_FILE,
+    ST_CARRIED_MODEL_SETTINGS,
+    ST_MODEL_SETTINGS_FILE,
+    ST_MODULES_FILE,
+)
 from halo.checkpoint.parallel.completeness import mark_resume_adapter_complete
 from halo.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
 from halo.checkpoint.parallel.save import save_checkpoint, save_tokenizer
@@ -483,7 +490,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         (:func:`_apply_umask_mode_to_module`)."""
         super()._save(output_dir, state_dict=state_dict)
         output_dir = output_dir if output_dir is not None else self.args.output_dir
-        with open(os.path.join(output_dir, "modules.json")) as f:
+        with open(os.path.join(output_dir, ST_MODULES_FILE)) as f:
             for module in json.load(f):
                 _apply_umask_mode_to_module(output_dir, module["path"])
 
@@ -544,7 +551,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                 _apply_umask_mode_to_module(output_dir, path)
             modules_config.append({"idx": idx, "name": name, "path": path, "type": module_type})
 
-        with open(os.path.join(output_dir, "modules.json"), "w") as f:
+        with open(os.path.join(output_dir, ST_MODULES_FILE), "w") as f:
             json.dump(modules_config, f, indent=2)
 
         st_config = {
@@ -554,9 +561,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
                 "transformers": transformers.__version__,
                 "pytorch": torch.__version__,
             },
-            "prompts": getattr(model, "prompts", {}),
-            "default_prompt_name": getattr(model, "default_prompt_name", None),
-            "similarity_fn_name": getattr(model, "similarity_fn_name", None),
+            **{key: getattr(model, key) for key in ST_CARRIED_MODEL_SETTINGS},
         }
-        with open(os.path.join(output_dir, "config_sentence_transformers.json"), "w") as f:
+        with open(os.path.join(output_dir, ST_MODEL_SETTINGS_FILE), "w") as f:
             json.dump(st_config, f, indent=2)

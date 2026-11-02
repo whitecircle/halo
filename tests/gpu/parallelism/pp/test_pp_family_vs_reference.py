@@ -36,21 +36,28 @@ from tests.common.ep_reference import KIND_SCORED_CHECK, per_layer_grad_floors, 
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.rank_log import log
-from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_PP_SPLIT_OVERRIDES, tiny_family_model
 from tests.common.tolerances import TOL
 
 SEED = 1234
 PP_SIZE = 2
 PER_DEVICE_BATCH = 2  # 2 microbatches of 1 per DP replica
 N_MICROBATCHES = 2
-# Each family's text-config overrides and stage split: Qwen3.5-MoE doubled to two layer_types periods so the cut
-# lands on one, DeepSeek-V4's hash_moe layer (0) on stage 0, GLM-5 Next on its KDA/DSA period with KDA layers on
-# both stages.
+# Each family's text-config overrides and stage split: the shared two-stage overrides (TINY_PP_SPLIT_OVERRIDES),
+# DeepSeek-V4's hash_moe layer (0) on stage 0, GLM-5 Next on its KDA/DSA period with KDA layers on both stages,
+# Inkling at the batch's vocabulary.
 FAMILIES = {
-    "qwen3_5_moe_text": ({"num_hidden_layers": 8}, [4, 4]),
+    "qwen3_5_moe_text": (TINY_PP_SPLIT_OVERRIDES["qwen3_5_moe_text"], [4, 4]),
     "step3p7": ({}, [2, 2]),
     "deepseek_v4": ({}, [2, 1]),
     "glm5_next": ({"num_hidden_layers": 8, "mlp_layer_types": ["dense"] + ["sparse"] * 7}, [4, 4]),
+    "qwen3_moe": ({}, [4, 4]),
+    "glm4_moe_lite": (TINY_PP_SPLIT_OVERRIDES["glm4_moe_lite"], [2, 2]),
+    "laguna": (TINY_PP_SPLIT_OVERRIDES["laguna"], [4, 4]),
+    "inkling_text": (
+        {**TINY_PP_SPLIT_OVERRIDES["inkling_text"], "vocab_size": ppeq.RAGGED_BATCH_VOCAB_SIZE},
+        [2, 2],
+    ),
 }
 
 parser = argparse.ArgumentParser()

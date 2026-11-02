@@ -220,7 +220,16 @@ _CP_ROSTER_ROWS = (
 # offline GRPO CP-resume rows to it.
 _ULYSSES_MOE_FAMILIES = tuple(family for family in _CP_MOE_FAMILIES if family != "qwen3_5_moe_text")
 # The pipeline-registered MoE families test_pp_family_vs_reference.py runs (GPT-OSS has its own PP suites).
-_PP_MOE_FAMILIES = ("deepseek_v4", "glm5_next", "qwen3_5_moe_text", "step3p7")
+_PP_MOE_FAMILIES = (
+    "deepseek_v4",
+    "glm4_moe_lite",
+    "glm5_next",
+    "inkling_text",
+    "laguna",
+    "qwen3_5_moe_text",
+    "qwen3_moe",
+    "step3p7",
+)
 # The families whose attention the selective-TP path shards; tests/cpu/conventions/test_tiny_family_roster.py
 # holds this to halo/distributed/tensor_parallel/parallelize_attention.py.
 _TP_FAMILIES = ("cohere2_moe", "glm4_moe_lite", "gpt_oss", "lfm2_moe", "mistral4", "qwen3_5_moe_text", "qwen3_moe")

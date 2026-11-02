@@ -129,7 +129,7 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 | CP + packing | **rejected** — the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other |
 | PP + padding_free | **rejected** — the flattened width varies per step while the pipeline's P2P buffers are frozen after the first |
 | padding_free on an M-RoPE decoder (Qwen3.5/3.6 text towers included, the Qwen-VL text models) | **rejected** on every backend (`reject_mrope_padding_free`), as is a padding-free collator handed straight to the SFT trainer (`reject_multi_document_collator` in `halo/trainers/trainer_rules.py`) — the flattened M-RoPE row faults the flash varlen kernels; `packing` serves the same rows |
-| PP + packing on a model whose conv / linear-attention layers read segment markers (GatedDeltaNet, LFM-2 ShortConv) or no boundary at all (KDA, Lightning Attention-2) | **rejected** — a stage's forward passes those layers no segment marker, so they cross the kept rows' documents ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
+| PP + packing on a model whose conv / linear-attention layers read segment markers (GatedDeltaNet, LFM-2 ShortConv) or no boundary at all (KDA, Lightning Attention-2, Inkling's short convolutions) | **rejected** — a stage's forward passes those layers no segment marker, so they cross the kept rows' documents ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
 | CP + completion masking | `DataCollatorForCompletionOnlyLM` (CP mode) |
 | CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `padded.py`) |
 | padding_free + completion masking | `DataCollatorWithFlatteningAndCompletionMask` |

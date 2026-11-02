@@ -4,11 +4,14 @@ final collator after it."""
 
 from __future__ import annotations
 
+from accelerate.utils import is_peft_model
+
 from halo.data.collators.packing import DataCollatorWithFlattening, DataCollatorWithPacking
 from halo.data.vlm_detection import VLM_IMAGE_COLUMNS, dataset_image_evidence
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.stage import reject_reentrant_checkpointing
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.models.peft_adapters import tuner_adapter_param_ids
 from halo.models.segment_markers import reject_pipeline_packed_rows
 from halo.optimizers.registry import NAMED_OPTIMIZER_BUILDERS, optim_name
 from halo.runtime.consensus import reject_across_ranks
@@ -87,12 +90,26 @@ def reject_pp_peft(peft_config, explicit_param_trainer: str | None = None) -> No
 
 
 def require_pp_stage_model(kwargs: dict):
-    """The ``model`` keyword the split turns into this rank's stage, refusing a missing or config-less one."""
+    """The ``model`` keyword the split turns into this rank's stage, refusing a missing, config-less or
+    PEFT-wrapped one.
+
+    A positional ``peft_config`` never reaches the split: every TRL base takes ``model`` first, so filling
+    the ``peft_config`` slot by position leaves no ``model`` keyword.
+    """
     model = kwargs.get("model")
     if model is None or not hasattr(model, "config"):
         raise ValueError(
             "Pipeline parallelism requires the model to be passed as the `model` keyword (a "
             "loaded PreTrainedModel), so the trainer can split it into this rank's stage."
+        )
+    if is_peft_model(model) or tuner_adapter_param_ids(model):
+        raise ValueError(
+            "PEFT/LoRA is not supported under pipeline parallelism, and the model passed to the trainer "
+            "is already PEFT-wrapped (a PeftModel, or a model carrying PEFT tuner layers): the stage split "
+            "drops the PeftModel (and any prompt encoder on it) and keeps only the tuner layers inside the "
+            "backbone, so the adapter save never runs and every checkpoint writes the wrapper's "
+            "base_model.model.* / .base_layer names, which from_pretrained cannot load. Pass the plain model "
+            "to fully fine-tune under PP, or train the adapter without pipeline parallelism."
         )
     return model
 

@@ -2,7 +2,7 @@
 
 `Glm4MoeLiteForCausalLM` — MoE with sigmoid routing (group-limited top-k), shared experts, and LoRA-style attention compression (`q_a_proj` / `q_b_proj` + `kv_a_proj_with_mqa` / `kv_b_proj`).
 
-Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Pipeline parallelism splits it at any layer offset ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 Its MLA-style attention (192 + 64 = 256-wide query/key, 256-wide value) runs FA2 on Blackwell in every run, Context Parallelism and `full_determinism` included: the resolver keeps latent attention at that width on FA2 as a precaution ([Flash Attention → Model-specific handling](../optimization/flash-attention.md#model-specific-handling)). FA3 on Hopper.
 

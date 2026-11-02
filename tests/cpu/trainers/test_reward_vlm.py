@@ -42,6 +42,7 @@ from halo.models.seq_cls_heads import multimodal_sequence_classification_model_t
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from tests.common.repo import load_script_module
+from tests.common.tiny_models import config_only_module
 from tests.cpu.data.test_vlm_preference_collator import IMAGE_TOKEN, StubProcessor, StubTokenizer, make_row
 
 # A model id the name heuristic reads as multimodal, so the checkpoint verdict holds offline.
@@ -462,7 +463,7 @@ def test_pipeline_parallelism_refuses_a_multimodal_reward_run_fed_images():
         torch_compile=False,
     )
     kwargs = {
-        "model": SimpleNamespace(config=CONFIG_MAPPING["gemma3"]()),
+        "model": config_only_module(CONFIG_MAPPING["gemma3"]()),
         "train_dataset": Dataset.from_dict({"chosen": ["a"], "rejected": ["b"], "images": [[]]}),
     }
 

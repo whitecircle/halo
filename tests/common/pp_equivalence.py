@@ -44,6 +44,8 @@ from tests.common.numerics import max_abs_rel_err, max_or_nan
 from tests.common.rank_log import log
 
 SEQ_LEN = 64
+# The token-id ceiling of build_ragged_batch's rows: a model under test needs at least this vocabulary.
+RAGGED_BATCH_VOCAB_SIZE = TINY_GPTOSS_CONFIG["vocab_size"]
 LOSS_REL_TOL = 2e-2
 # Per-expert grads gate against the bf16 ep1-wrapper twin (identical routing decisions + grouped-mm
 # kernels — measured ≤0.007 in the pp2×ep1 test), so the gate can be tight. The fp32 raw-HF
@@ -146,7 +148,7 @@ def build_unmasked_batch(vocab_size: int, rows: int, seq_len: int = 32, device=N
 def build_ragged_batch(global_batch: int, seq_len: int = SEQ_LEN, seed: int = 7) -> tuple[torch.Tensor, torch.Tensor]:
     """Fixed random rows with ragged ignore prefixes: replicas hold unequal loss-token counts."""
     g = torch.Generator().manual_seed(seed)
-    rows = torch.randint(4, TINY_GPTOSS_CONFIG["vocab_size"], (global_batch, seq_len), generator=g)
+    rows = torch.randint(4, RAGGED_BATCH_VOCAB_SIZE, (global_batch, seq_len), generator=g)
     labels = rows.clone()
     for i in range(global_batch):
         labels[i, : 4 + 3 * i] = -100

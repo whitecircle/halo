@@ -97,7 +97,6 @@ the trainer.
 - On Blackwell, both engines need an MLA attention backend that accepts GLM's head size:
   `VLLM_ATTENTION_BACKEND=CUTLASS_MLA` or `SGLANG_ATTENTION_BACKEND=triton`. With SGLang's default the
   server exits at startup.
-- No pipeline parallelism: GLM-4 MoE Lite is not a registered pipeline family.
 
 ## Export and serve
 

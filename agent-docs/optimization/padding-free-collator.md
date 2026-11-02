@@ -96,7 +96,7 @@ The table uses `--attn_implementation flash_attention_2`. FA4 is also valid: FA4
 
 CP requires fixed-length sequences for collective synchronization: padding-free (variable-length output) and packing (the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other) are both rejected by `select_data_collator` when `use_context_parallel=True` — use the standard padded collator with `pad_to_multiple_of=cp_size` ([Context Parallelism](../parallelism/context-parallelism.md)).
 
-PP rejects padding-free: its flattened width varies every step, while the pipeline's point-to-point buffers freeze after the first. Packing runs under PP at one packed row per microbatch, except on models whose conv / linear-attention layers need segment markers or read no boundary at all, Qwen3.5 / 3.6 and GLM-5 Next in the PP roster ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
+PP rejects padding-free: its flattened width varies every step, while the pipeline's point-to-point buffers freeze after the first. Packing runs under PP at one packed row per microbatch, except on models whose conv / linear-attention layers need segment markers or read no boundary at all, Qwen3.5 / 3.6, GLM-5 Next and Inkling in the PP roster ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
 
 ## When to use each
 

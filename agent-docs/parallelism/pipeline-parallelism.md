@@ -127,13 +127,16 @@ MTP-carrying checkpoint names that reason first.
 | Qwen3 dense (`Qwen3Model`) | registered | period = `layer_types` pattern when sliding is enabled. 0.6B, 1.7B and 4B ship `tie_word_embeddings=True` and are refused by the tie gate; 8B and up are untied |
 | Qwen3.5 / 3.6 dense and MoE text towers (`Qwen3_5TextModel`, `Qwen3_5MoeTextModel`) | registered | period 4 (`L,L,L,F`), so `pp_size` ≤ 8 for a 32-layer checkpoint, 10 for 40 layers. `text_only_model: true` for the shipped multimodal checkpoints; packing is refused ([Packing](#packing)); the family has no exportable bias slot and `aux_loss` is severed, so balance with `none` |
 | GPT-OSS 20b / 120b (`GptOssModel`) | registered | period 2, so `pp_size` ≤ 12 for 20b (24 layers), 18 for 120b (36 layers). `bias_update` or `none` balancing |
+| Qwen3 MoE (`Qwen3MoeModel`) | registered | any split offset (no `layer_types`). The family has no exportable bias slot and `aux_loss` is severed, so balance with `none`: `auto` resolves to `aux_loss` and is refused at the hub's `router_aux_loss_coef: 0.001` |
+| GLM-4 MoE Lite (`Glm4MoeLiteModel`) | registered | any split offset; layer 0 is dense. `auto` resolves to `bias_update` on the EP layers (`gate.e_score_correction_bias`). The hub's `num_nextn_predict_layers: 1` is metadata and passes |
+| Laguna S / XS 2.1 (`LagunaModel`) | registered | period-4 `full,s,s,s` list, so `pp_size` ≤ 12 for S (48 layers), 10 for XS (40 layers). `auto` resolves to `aux_loss`, which the released `router_aux_loss_coef: 0.0` leaves off; `bias_update` balances and exports through `experts.e_score_correction_bias` |
+| Inkling (`InklingTextModel`) | registered | period 6 (5 sliding : 1 full), so `pp_size` ≤ 7 for Inkling-Small (42 layers). `auto` resolves to `bias_update` on the EP layers; packing is refused ([Packing](#packing)). The shipped composite `InklingForConditionalGeneration` trains text-only, as Step-3.7's does |
 | Step-3.7 Flash text tower (`Step3p7TextModel`) | registered | period-4 `full,s,s,s` list ([split offsets](#split-offset-constraint)). The family ships only the composite `Step3p7ForConditionalGeneration`; a text-only run of it is admitted (tower and projector re-emitted in every checkpoint), image data is refused. The hub's `num_nextn_predict_layers: 3` is metadata and passes |
 | DeepSeek-V4 (`DeepseekV4Model`) | registered | hyper-connection boundary, any split offset. Every `hash_moe` layer (`mlp_layer_types`, the first 3 by default) must sit on stage 0 — its `tid2eid` router reads `input_ids`, which only stage 0 has. `bias_update` or `none` balancing; eager attention only (family) |
 | GLM-5 Next text tower (`Glm5NextTextModel`) | registered | hyper-connection boundary, any split offset; a stage may not begin on a `shared` DSA indexer layer (`indexer_types`; GLM-5.3-Flash ships all `full`). The composite `Glm5NextForConditionalGeneration` trains text-only, as Step-3.7's does; packing is refused ([Packing](#packing)) |
 | Zaya (`ZayaModel`) | refused | two tensors cross every layer boundary — the fp32 residual stream and the accumulating EDA router state (`prev_router_hidden_states`) — a mixed-dtype boundary the single-activation contract does not carry; the loop also selects `layer_types` by list position |
 | Gemma 4 (`Gemma4TextModel`) | refused | per-layer embeddings sliced by enumerate position, and the trailing KV-shared layers read an earlier layer's K/V through a forward-threaded dict |
-| Inkling (`InklingTextModel`) | refused | loader-only validation: no schedule, end-to-end or save/resume row |
-| Any other backbone (Qwen3 MoE, GLM-4 MoE Lite, Bailing, Mistral 4, Laguna, LFM-2, Cohere2 MoE, …) | not registered | refused by name |
+| Any other backbone (Bailing, Mistral 4, LFM-2, Cohere2 MoE, Qwen3-Next, …) | not registered | refused by name |
 
 Models with **live** MTP tail layers are refused: MTP re-embeds `input_ids` mid-backbone, a second
 cross-stage stream. Live means built — the decoder list is longer than `num_hidden_layers` — so an MTP
@@ -165,8 +168,8 @@ traffic; the cut position does not.
 
 ### Split-offset constraint
 
-GptOss, Qwen3, Qwen3.5/3.6 and Step-3.7 select each layer's attention mask by *position in the layer
-list*. A stage starting off a whole number of `layer_types` periods would give sliding-window layers a
+GptOss, Qwen3, Qwen3.5/3.6, Step-3.7, Laguna and Inkling select each layer's attention mask by *position in the
+layer list*. A stage starting off a whole number of `layer_types` periods would give sliding-window layers a
 full causal mask, so `validate_partition` (`partition.py`) raises at split time, on every rank; the
 hyper-connection families (`layer_types_rebase_safe`) are exempt. The period is the
 smallest shift `p` with `layer_types[p:] == layer_types[:-p]`, so a ragged list (Step-3.7-Flash: 45
@@ -243,7 +246,7 @@ before any rank math; the rest by their own gate.
 | PP + `fsdp_reshard_after_forward` / `fsdp_reshard_after_backward: false` | The schedule pins each stage unsharded across the backward and drives FSDP's post-backward itself. |
 | PP + tied embeddings | Stage 0's embedding and the last stage's head diverge from step 1; refused by the structure gate at load, since config validation cannot see the model. |
 | PP + an unregistered or refused family | Refused by the structure gate on the meta shell ([Model support](#model-support)). |
-| PP + PEFT / expert LoRA | The adapter save writes stage-local layer indices from one stage, the PP resume restores no adapter, and `layers_to_transform` / `all-linear` resolve against re-based layers. |
+| PP + PEFT / expert LoRA | The adapter save writes stage-local layer indices from one stage, the PP resume restores no adapter, and `layers_to_transform` / `all-linear` resolve against re-based layers. A model passed already PEFT-wrapped (a `PeftModel`, or tuner layers injected in place) is refused at the split as well: the split drops the `PeftModel` (and any prompt encoder on it) and keeps only the tuner layers inside the backbone, so no adapter is saved and the stage parts carry `base_model.model.*` / `.base_layer` names `from_pretrained` cannot load. |
 | PP + `save_sharded_ep` | The per-rank partial format carries no stage layer offset, so shards from different stages would collide. |
 | PP + `push_to_hub` on per-node output storage across nodes | The Trainer uploads from global rank 0, whose node lacks the other stages' parts. Upload from a shared output directory, or from the [merged](#per-node-export) one. |
 | PP + `torch_compile` | The schedule captures the stage module at setup, so a compiled wrapper installed afterwards never runs. |
@@ -251,7 +254,8 @@ before any rank math; the rest by their own gate.
 | PP + `optim: muon` / `flash_adamw` | The stage-local optimizer build and the per-stage optimizer shards a resume restores are validated with the AdamW family only. |
 | PP + `moe_balancing: bias_update_transient` | The transient side-buffer is a plain attribute the stage split and the PP resume never carry. |
 | PP + `lowp_precision` other than `bf16` | `lowp_keep_first_blocks`/`lowp_keep_last_blocks` would apply to every stage's own ends instead of the network's. |
-| PP + `init_from_scratch` / quantized (QLoRA) loading | Neither gives the stage loader a checkpoint to stream. |
+| PP + `init_from_scratch` | The stage loader has no checkpoint to stream, so every rank would build the whole model. |
+| PP + quantized (QLoRA) loading | The stage loader materializes plain weights, never bitsandbytes `Params4bit`, and the stage's FSDP2 wrap cannot shard `Params4bit` either. The adapter QLoRA trains is PEFT, refused above. |
 | PP + `accelerate launch` | Accelerate owns the FSDP/DDP wrap the pipeline replaces. Launch with `torchrun`. |
 | PP + padding-free collators | Their flattened width varies per batch while the P2P buffers are frozen, and the single row cannot be microbatched. Use [packing](#packing). |
 | PP + `activation_offloading` | TRL implements it by wrapping `training_step`, which the PP schedule never calls. |
@@ -264,7 +268,7 @@ before any rank math; the rest by their own gate.
 | PP + `aux_loss` with a live `router_aux_loss_coef`, or a stage with no MoE layer at `ep_group_size > 1` | The split severs the aux-loss path; a dense stage runs a different collective program than its MoE peers and deadlocks ([PP + EP](#pp--ep-moe)). |
 | PP + `compute_metrics` on DPO, KTO or offline GRPO, or an eval batch size other than the train one | No pipeline reproduces their prediction convention; the P2P shapes are frozen ([Evaluation](#evaluation)). |
 | PP + DPO/KTO with positional `model`/`args`, a live `ref_model`, or reference log-probs not precomputed | The PP reference contract is precompute-only ([Trainer support](#trainer-support)). |
-| PP + `packing` on a model whose conv / linear-attention layers read segment markers or no boundary at all (Qwen3.5 / 3.6 and GLM-5 Next in the roster), or more than one packed row per microbatch | A stage's forward passes no segment marker, and FlashAttention isolates documents only at batch size 1 ([Packing](#packing)). |
+| PP + `packing` on a model whose conv / linear-attention layers read segment markers or no boundary at all (Qwen3.5 / 3.6, GLM-5 Next and Inkling in the roster), or more than one packed row per microbatch | A stage's forward passes no segment marker, and FlashAttention isolates documents only at batch size 1 ([Packing](#packing)). |
 
 ## Fused head and loss on the last stage
 
@@ -319,9 +323,9 @@ rank.
 every batch to `max_length`. A stage's forward passes a model's conv / linear-attention layers no
 segment marker, so packing is refused where those layers need one (`segment_markers_for`: `seq_idx` for
 GatedDeltaNet and LFM-2 ShortConv, `cu_seq_lens` for the delta rule) or read no boundary at all
-(`find_unmarked_sequence_mixer`: KDA, Lightning Attention-2): their state would carry from each document
-of a packed row into the next. In the roster that refuses Qwen3.5 / 3.6 and GLM-5 Next; padded rows hold
-one document each and still run.
+(`find_unmarked_sequence_mixer`: KDA, Lightning Attention-2, Inkling's short convolutions): their state would
+carry from each document of a packed row into the next. In the roster that refuses Qwen3.5 / 3.6, GLM-5 Next
+and Inkling; padded rows hold one document each and still run.
 `reject_pipeline_packed_rows` (`halo/models/segment_markers.py`) holds the rule; the collator factory
 applies it when PP keeps the packed rows, and `reject_pp_collator` again to the trainer's final collator,
 whatever built it.

@@ -11,16 +11,16 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | Model Family | `model_type` | EP | ETP | CP | TP | PP | Training Configs |
 |---|---|:--:|:--:|:--:|:--:|:--:|:--|
 | [Qwen3 (dense)](qwen3.md) | `qwen3` | — | — | Yes | Yes | Yes ¹ | `examples/sft/qwen3/*` |
-| [Qwen3 MoE](qwen3.md#qwen3-moe) | `qwen3_moe` | Yes | Yes | Yes | Yes | No | — |
+| [Qwen3 MoE](qwen3.md#qwen3-moe) | `qwen3_moe` | Yes | Yes | Yes | Yes | Yes ¹³ | — |
 | [Qwen3-VL (text)](qwen3.md#qwen3-vl) | `qwen3_vl_text` | — | — | Yes ² | No | No | — |
 | [Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense)](qwen3_5.md) | `qwen3_5_text` | — | — | No | Yes | Yes ⁴ | `examples/*/qwen3_5/*9b*` |
 | [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | `qwen3_5_moe` | Yes | Yes | No | Yes ³ | Yes ⁴ | `examples/sft/qwen3_5/*-a*b-*` |
 | [Qwen3-Next](qwen3-next.md) | `qwen3_next` | Yes ¹¹ | Yes ¹¹ | No | No | No | `examples/sft/qwen3_next/*` |
 | [Qwen3.8-Flash-Next](qwen4_exp.md) | `qwen4_exp` | Yes ¹² | Yes ¹² | No | No | No | `examples/sft/qwen4_exp/*` |
 | [GPT-OSS](gpt-oss.md) | `gpt_oss` | Yes | Yes | Yes | Yes | Yes | `examples/sft/gptoss/*` |
-| [GLM-4 MoE Lite](glm4.md) | `glm4_moe_lite` | Yes | Yes | Yes | Yes ⁵ | No | `examples/sft/glm4/*` |
-| [Laguna S / XS 2.1](laguna.md) | `laguna` | Yes | Yes ⁶ | No | No | No | `examples/sft/laguna/*` |
-| [Inkling-Small](inkling.md) | `inkling_text` | Yes | Yes | No | No | No | `examples/sft/inkling/*` |
+| [GLM-4 MoE Lite](glm4.md) | `glm4_moe_lite` | Yes | Yes | Yes | Yes ⁵ | Yes ¹³ | `examples/sft/glm4/*` |
+| [Laguna S / XS 2.1](laguna.md) | `laguna` | Yes | Yes ⁶ | No | No | Yes ¹³ | `examples/sft/laguna/*` |
+| [Inkling-Small](inkling.md) | `inkling_text` | Yes | Yes | No | No | Yes ¹⁰ ¹³ | `examples/sft/inkling/*` |
 | [Gemma 4 MoE](gemma4.md) | `gemma4` | Yes | Yes | No | No | No | `examples/sft/gemma4/*` |
 | [Bailing MoE / Ling](bailing.md) | `bailing_moe` | Yes | Yes | Yes ⁷ | No | No | `examples/sft/bailing/*` |
 | [LFM-2 MoE](lfm2.md) | `lfm2_moe` | Yes | Yes | No | Yes | No | `examples/sft/lfm2/*` |
@@ -57,6 +57,8 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 ¹¹ Tiny-model GPU tests only: no Qwen3-Next checkpoint is trained at full scale here.
 
 ¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains, exactly resumes and exports the release cut to four layers under EP8, and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
+
+¹³ Tiny-model GPU tests only: no released checkpoint is trained under PP here. Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
 
 ## MoE knobs
 

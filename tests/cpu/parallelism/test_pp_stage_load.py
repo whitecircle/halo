@@ -25,16 +25,16 @@ from safetensors.torch import save_file
 from transformers import (
     AutoConfig,
     AutoModelForSequenceClassification,
+    MixtralConfig,
+    MixtralForCausalLM,
     Qwen3Config,
     Qwen3ForCausalLM,
-    Qwen3MoeConfig,
-    Qwen3MoeForCausalLM,
 )
 
 from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR
 from halo.model_loading.parallel import pp
 from halo.model_loading.parallel.pp import _load_stage_lazy
-from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN3_MOE_CONFIG
+from tests.common.models import TINY_MIXTRAL_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.pp_fakes import registered_pp_backbones
 
 PP_SIZE = 2
@@ -145,7 +145,7 @@ def unregistered_checkpoint(tmp_path_factory) -> str:
     """A tiny checkpoint of a family no PPFamilySpec registers."""
     torch.manual_seed(0)
     path = tmp_path_factory.mktemp("pp_unregistered_ckpt")
-    Qwen3MoeForCausalLM(Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)).to(torch.bfloat16).save_pretrained(path)
+    MixtralForCausalLM(MixtralConfig(**TINY_MIXTRAL_CONFIG)).to(torch.bfloat16).save_pretrained(path)
     return str(path)
 
 
@@ -167,13 +167,13 @@ def test_an_unregistered_backbone_is_refused_before_any_collective(
 ):
     """Refused on the meta shell by the backbone's name alone, so every rank raises the same verdict
     before the loader's first cross-rank one and before a weight is read."""
-    with pytest.raises(ValueError, match=r"^Qwen3MoeModel is not registered for pipeline parallelism"):
+    with pytest.raises(ValueError, match=r"^MixtralModel is not registered for pipeline parallelism"):
         _load(unregistered_checkpoint, pp_rank, dtype=torch.bfloat16)
 
 
 def test_a_registered_backbone_reaches_the_first_collective(unregistered_checkpoint, first_collective_raises):
     """Anti-vacuity for the test above: past the gate, the loader does reach the patched verdict."""
-    with registered_pp_backbones("Qwen3MoeModel"), pytest.raises(_ReachedCollective):
+    with registered_pp_backbones("MixtralModel"), pytest.raises(_ReachedCollective):
         _load(unregistered_checkpoint, 0, dtype=torch.bfloat16)
 
 

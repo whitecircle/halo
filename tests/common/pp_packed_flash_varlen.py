@@ -40,7 +40,7 @@ from tests.common.packed_flash_varlen import (
     use_flash,
 )
 from tests.common.pp_equivalence import build_runner_stage, gather_stage_grads
-from tests.common.tiny_models import tiny_family_model
+from tests.common.tiny_models import TINY_PP_SPLIT_OVERRIDES, tiny_family_model
 
 PP_SIZE = 2
 # The pipeline's fixed row width: past the tiny GptOss sliding window, so its windowed layers take the window.
@@ -184,7 +184,7 @@ def family_findings(name: str) -> list[str]:
     """What breaks when ``name``'s pipeline stages are handed their packed microbatches' varlen set, then a ``reach:``
     entry counting the attention calls that read it. For a family :func:`seam_sweep_skip` lets through."""
     torch.manual_seed(SEED)
-    model = tiny_family_model(PACKING_FAMILIES[name]).eval()
+    model = tiny_family_model(PACKING_FAMILIES[name], overrides=TINY_PP_SPLIT_OVERRIDES.get(name)).eval()
     config = model.config
     use_flash(config)
     stages = [build_pipeline_stage(copy.deepcopy(model), rank, PP_SIZE) for rank in range(PP_SIZE)]
