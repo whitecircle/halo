@@ -10,6 +10,10 @@ from torch.autograd import Function
 # torch's grouped GEMM reads every operand's trailing stride as a multiple of this; a rank or width
 # below it is refused with a stride error at the first matmul, not at construction.
 GROUPED_MM_STRIDE_ALIGNMENT_BYTES = 16
+# torch's bf16 grouped GEMM (GroupMM.cu, SM 9.x and 10.x) takes a small CUTLASS tile where the rows per group (all rows
+# over the group count; for the weight gradient, ragged along the contraction, the weight's input width) or the output
+# width is at most this, and a large one past both: two kernels per operand layout.
+GROUPED_MM_SMALL_TILE_DIM = 128
 
 
 def grouped_mm_grads(mat_a, mat_b, grad_output, offs, needs_a: bool, needs_b: bool):

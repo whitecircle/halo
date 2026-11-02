@@ -146,7 +146,7 @@ def default_training_rows_attn_implementation(
     - The rows hold several documents (``packing``, ``padding_free``) on a decoder with GatedDeltaNet layers
       (:func:`has_gated_delta_net_layers`: the Qwen3.5/3.6 recipes pack on FA2, Qwen3-Next shares their attention)
       whose heads FA4 trains on its dedicated head_dim-256 backward (:func:`uses_fa4_dedicated_head_dim`), FA4
-      unpinned: FA4 measured no faster than FA2 on packed rows.
+      unpinned: FA4's gain on packed rows is below the 5% a default change needs.
     - The rows hold several documents and the run asks for the deterministic backward that kernel is not validated
       with (:func:`is_fa4_demoted_by_determinism`, ``full_determinism``), FA4 pinned or not: the loader would demote
       FA4 to SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per query head. Padded rows

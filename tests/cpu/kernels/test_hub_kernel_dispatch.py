@@ -177,12 +177,11 @@ def test_a_kernel_package_that_fails_its_own_import_raises(tmp_path, monkeypatch
 
 
 def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
-    """The install has to happen on ``halo`` import, not on first use.
+    """The install happens on ``halo`` import, not on first use.
 
-    Modeling modules capture the fallback factory AT IMPORT, so a shim installed later decorates
-    nothing they already bound. Every test above calls ``ensure_device_aware_kernel_dispatch()``
-    itself and then decorates its own probe, which can only ever observe install-then-bind — this
-    pins the other order. A fresh interpreter is required: this process installed the shim long ago.
+    Every test above calls ``ensure_device_aware_kernel_dispatch()`` itself and then decorates its own
+    probe, which can only ever observe install-then-bind; this pins the install to the import. A fresh
+    interpreter is required: this process installed the shim long ago.
     """
     probe = (
         "import halo;"
@@ -202,6 +201,48 @@ def test_importing_src_installs_the_shim_before_anything_binds_the_factory():
         "importing `halo` no longer installs the device-aware kernel dispatch — every modeling module "
         f"imported afterwards binds the CUDA-only kernel. stdout={result.stdout[-500:]!r}"
     )
+
+
+def test_importing_halo_redecorates_what_a_module_imported_earlier_bound():
+    """A modeling module decorates at its own import, so one imported ahead of ``halo`` holds upstream's capture,
+    the CUDA-only package included, and every later CPU forward of that family dies with ``Expected x.is_cuda()``
+    in whatever test happens to run after the import. The premise check is the negative control: before ``halo``
+    the capture fails on CPU. A fresh interpreter is required: this process installed the shim long ago."""
+    pytest.importorskip("causal_conv1d")
+    script = """
+import torch
+import torch.nn.functional as F
+from transformers.models.qwen3_5 import modeling_qwen3_5
+from transformers.models.qwen3_5.modeling_qwen3_5 import causal_conv1d_fn
+
+x, weight = torch.randn(1, 4, 6), torch.randn(4, 3)
+reference = F.silu(F.conv1d(x, weight.unsqueeze(1), padding=2, groups=4)[..., :6])
+
+
+def cpu_error(fn):
+    try:
+        out = fn(x, weight, None, activation="silu")
+    except RuntimeError as exc:
+        return str(exc)
+    return None if torch.allclose(out, reference) else "a CPU result off the torch conv"
+
+
+findings = []
+if cpu_error(modeling_qwen3_5.causal_conv1d_fn) is None:
+    findings.append("premise: the capture bound ahead of halo ran on CPU, so a missed re-decoration would pass unseen")
+
+# After the modeling module, as a test module whose third-party imports sort above its first-party ones.
+import halo
+
+for where, fn in (("the modeling module", modeling_qwen3_5.causal_conv1d_fn), ("a by-name import", causal_conv1d_fn)):
+    if error := cpu_error(fn):
+        findings.append(f"{where} still holds upstream's capture after importing halo: {error}")
+if causal_conv1d_fn is not modeling_qwen3_5.causal_conv1d_fn:
+    findings.append("the by-name import was re-decorated apart from its source")
+print("FINDINGS:" + "|".join(findings))
+"""
+    findings = probe_findings(script, "FINDINGS:")
+    assert not findings, "\n".join(findings)
 
 
 if __name__ == "__main__":

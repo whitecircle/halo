@@ -315,7 +315,7 @@ def tokenize_vlm_row(
         )
         # No truncation: cutting expanded image placeholders desyncs text from vision.
         result = run_vlm_processor(
-            processor, [render_vlm_text(processor, history)], images, padding=False, truncation=False
+            processor, [render_vlm_text(processor, history)], [images], padding=False, truncation=False
         )
         # Text-only rows may drop such extras, being derivable from input_ids alone.
         unsupported = set(result) - set(VLM_OUTPUT_FEATURES)

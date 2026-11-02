@@ -55,9 +55,10 @@ LoRA. Dense, FSDP2, CP and TP have no parallel-write mode at all.
 MoE layer plus the output shard being filled and one per write thread, not the model.
 `--delete_input_shards` frees the per-rank shards once the merged checkpoint is complete.
 
-Optimizer state escapes the funnel (per-rank shards, written in parallel), but its write copies each
-rank's state to host RAM first (`cpu_offload`): at 120B/EP8 with AdamWBF16 that is ~60 GB/rank,
-~480 GB per 8-GPU node transient at every save and again at resume. Preflight free host RAM
+Optimizer state escapes the funnel (per-rank shards), but its write copies each rank's state to host
+RAM first (`cpu_offload`): ~60 GB/rank at 120B/EP8 with AdamWBF16. The save and the resume read run
+inside the node's `max_concurrent_loading` throttle, so a node holds that many copies at once: ~240 GB
+per 8-GPU node at the default 4, ~480 GB at `0` (all ranks at once). Preflight free host RAM
 accordingly.
 
 Where `save_sharded_ep` does not qualify, tune `save_steps` — at 400B a gathered save is one rank
@@ -80,7 +81,7 @@ drops the optimizer shards but not the funnel.
 | **Context-parallel trainer and model limits** | CP runs only under SFT, SMPO and offline GRPO full fine-tuning; every other trainer refuses it, as do families with sequence-mixing layers or no CP wrapper. | Requirements, including the head-count rule, in [Context Parallelism](../parallelism/context-parallelism.md#requirements). |
 | **Full logits at long context** | GRPO without chunked log-probs, and SFT without fused linear cross-entropy (off by default on most families), materialize the full `[B, T, vocab]` logits, which EP does not shard. | `use_chunked_grpo_logprobs` ([The logits wall](../training-methods/async-grpo/performance.md#the-logits-wall)); `fused_linear_cross_entropy: true` for SFT where it is not forced off ([Liger configuration](../optimization/liger-kernels.md#configuration)). |
 | **Async GRPO trajectories are never truncated** | A trajectory grows across turns up to the context window; a row over it raises on every rank and ends the run. | Budget the episode under the served `max_model_len`: [Context budget](../training-methods/async-grpo/performance.md#context-budget); the rule: [Trajectory length](../training-methods/async-grpo/episodes.md#trajectory-length). |
-| **Vision-language runs** | An image-bearing run refuses CP and cannot pack. The toolkit's VLM collators do not truncate: a runtime batch over `max_length` raises, and offline preparation drops over-length rows. DPO's and KTO's TRL collators truncate. GRPO, classification and embedding have no vision path. | [SFT — VLMs](../training-methods/sft.md#vision-language-models), [Pre-Processing](../data/dataset-preparation.md) and [Modality support](trainer-architecture.md#modality-support). |
+| **Vision-language runs** | An image-bearing run refuses CP and cannot pack. The toolkit's VLM collators do not truncate: a runtime batch over `max_length` raises, and offline preparation drops over-length rows. DPO's and KTO's TRL collators truncate. GRPO, classification and embedding have no vision path. PaliGemma trains on images through SFT and the distillation scripts only, never on a flash kernel, and every row of its image run carries an image. | [SFT — VLMs](../training-methods/sft.md#vision-language-models), [Pre-Processing](../data/dataset-preparation.md) and [Modality support](trainer-architecture.md#modality-support). |
 
 ## Choosing a large-scale layout
 

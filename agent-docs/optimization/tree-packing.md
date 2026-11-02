@@ -150,6 +150,9 @@ against its run alone, the selection against the stock indexer on every path, an
 against the dense masked softmax; `tests/gpu/kernels/test_tree_sparse_attention.py` its CUDA kernels. Both CPU
 suites train a tree row of every admitted family under gradient checkpointing, reentrant and not, to the
 logits and gradients of the run without it.
+`tests/gpu/data/test_tree_packing_e2e.py` trains Qwen3-0.6B both ways through `scripts/training/sft.py` under
+FSDP2 on two ranks, each step one whole epoch, and holds the tree run's per-step loss and gradient norm to the flat
+run's.
 
 ## What differs from flat packing
 

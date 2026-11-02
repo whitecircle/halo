@@ -7,7 +7,13 @@ combinations none can serve; all of them share the span resolver and label rule 
 `halo/data/completion_spans.py` and the turn terminators in `halo/data/turn_markers.py`.
 
 The per-method leaves (`smpo.py`, `vlm.py`, `self_distill.py`, `classification.py`,
-`offline_grpo.py`, `vlm_preference.py`) are built by their own trainers and scripts.
+`offline_grpo.py`, `vlm_preference.py`) are built by their own trainers and scripts. On a prefix-LM model
+(PaliGemma) the VLM collators of `vlm.py` and `self_distill.py` write `token_type_ids` from the labels, so
+every trained token sits in the causal suffix, refuse a chat template that renders `<bos>` (the processor puts one
+after each row's last image) and never train the newline the processor appends to each row
+([SFT → Vision-language models](../training-methods/sft.md#vision-language-models)).
+Every VLM collator hands the processor one image list per row (`run_vlm_processor`): Gemma 3 and Gemma 4
+processors read a flat list as one row's images and refuse a batch of several rows.
 `fixed_shape.py` wraps any of them for a consumer whose buffer shapes freeze on the first batch.
 
 | Collator | Packing | Padding-Free | Completion Masking | Position IDs |
@@ -260,10 +266,17 @@ they score packed rows under the same masks the student does.
 - **Completion masking requires `assistant_message_template`** matching the tokenizer's exact
   assistant-header encoding; unmatched sequences are dropped from the loss.
 
-    A marker the chat template never renders is refused by `select_data_collator` and the
-    self-distillation collator: it would mask every label and the run would train zero tokens at
-    loss ≈ 0. The probe renders both a plain and a `thinking` assistant turn, so a marker gpt-oss
-    harmony emits only under thinking passes it and is caught per batch instead.
+    A marker the chat template never renders is refused by `select_data_collator`, the
+    self-distillation collators and the VLM collator: it would mask every label and the run would train
+    zero tokens at loss ≈ 0. The text probe renders both a plain and a `thinking` assistant turn, so a
+    marker gpt-oss harmony emits only under thinking passes it and is caught per batch instead.
+
+    The VLM collators also refuse assistant turns that end in no turn terminator
+    (`reject_untrainable_completions`): they render two exchanges through the processor's template
+    and mask them under their own span policy, so a template borrowed from another family (a Gemma
+    template on PaliGemma, whose turns close with `<end_of_turn>` while its eos is `<eos>`) is refused
+    until `eos_token` names the token it closes a turn with. The self-distillation policy runs a
+    terminator-less span to the row end, so it passes there.
 
 ## EOS, pad, and the response template
 

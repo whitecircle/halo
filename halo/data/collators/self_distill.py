@@ -299,17 +299,16 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
         if self.builds_teacher_branch:
             # Never truncated either: the hinted teacher is the longer branch, so truncation would cut response
             # tokens the student keeps and break OPD row alignment.
-            teacher_batch = self._process_batch(
+            teacher_batch = self._collate(
                 examples,
                 lambda example: self._teacher_history(example.get("history", []), example),
                 "teacher branch (student history + privileged hint)",
             )
             batch["teacher_input_ids"] = teacher_batch["input_ids"]
             batch["teacher_attention_mask"] = teacher_batch["attention_mask"]
-            batch["teacher_labels"] = self._build_labels(
-                teacher_batch["input_ids"], teacher_batch.get("attention_mask")
-            )
-            # Per-token tensors (GLM-4.6V mm_token_type_ids) must be the teacher's own — its sequence is longer.
+            batch["teacher_labels"] = teacher_batch["labels"]
+            # Per-token tensors (GLM-4.6V mm_token_type_ids, a prefix LM's token_type_ids) must be the teacher's
+            # own — its sequence is longer.
             for key in SEQUENCE_ALIGNED_VISION_KEYS:
                 if key in teacher_batch:
                     batch[f"teacher_{key}"] = teacher_batch[key]

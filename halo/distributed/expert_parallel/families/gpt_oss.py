@@ -159,28 +159,20 @@ class EPGptOssMoELayer(EPMoELayerBase):
         names under it."""
         return ("gate_proj_gmm", "up_proj_gmm") if hasattr(self, "gate_proj_gmm") else ("gate_proj", "up_proj")
 
-    def _compute_experts_gmm(
+    def _grouped_expert_ffn(
         self,
-        tokens: torch.Tensor,
-        experts: torch.Tensor,
-        weights: torch.Tensor,
+        sorted_tokens: torch.Tensor,
+        offs: torch.Tensor,
+        sorted_expert_ids: torch.Tensor,
         output_dtype: torch.dtype,
-        *,
-        recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
         """Grouped GEMM for GptOss experts: 3 calls (gate + up + down) with de-interleaved weights, ETP-sharded
-        or not."""
+        or not, each plus its expert bias."""
         gate_attr, up_attr = self._deinterleaved_gate_up_attrs()
-
-        def compute(sorted_tokens, offs, eids):
-            gate = self._gmm_proj_with_bias(sorted_tokens, gate_attr, offs, output_dtype, eids)
-            up = self._gmm_proj_with_bias(sorted_tokens, up_attr, offs, output_dtype, eids)
-            gated = self._gptoss_glu(gate, up)
-            return self._gmm_proj_with_bias(gated.to(output_dtype), "down_proj", offs, output_dtype, eids)
-
-        return self._compute_experts_with_grouped_mm(
-            tokens, experts, weights, output_dtype, compute, recv_counts=recv_counts
-        )
+        gate = self._gmm_proj_with_bias(sorted_tokens, gate_attr, offs, output_dtype, sorted_expert_ids)
+        up = self._gmm_proj_with_bias(sorted_tokens, up_attr, offs, output_dtype, sorted_expert_ids)
+        gated = self._gptoss_glu(gate, up)
+        return self._gmm_proj_with_bias(gated.to(output_dtype), "down_proj", offs, output_dtype, sorted_expert_ids)
 
     def _gmm_proj_with_bias(
         self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype, eids: torch.Tensor

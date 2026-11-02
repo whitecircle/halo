@@ -1,13 +1,19 @@
 """Completion spans: the marker-to-terminator span search, the named span policies every completion-only
-path selects, and the completion-only labels built over them."""
+path selects, the completion-only labels built over them, and the refusal of a setup they would train nothing in."""
 
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import torch
 from transformers import PreTrainedTokenizerBase
 
-from halo.data.turn_markers import reject_missing_response_marker, resolve_eos_token_ids, tokenize_response_template
+from halo.data.turn_markers import (
+    reject_missing_response_marker,
+    resolve_eos_token_ids,
+    tokenize_response_template,
+    verify_marker_renders,
+)
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 
 _WARN_DECODE_TOKENS = 128
@@ -329,11 +335,44 @@ def build_completion_only_labels(
         train_on_last_assistant_only=False,
         response_prompt_template=response_prompt_template,
         tokenizer=tokenizer,
-        span_policy=SELF_DISTILL_SPAN_POLICY if span_policy is None else span_policy,
+        span_policy=_label_span_policy(span_policy),
         attention_mask=attention_mask,
         extra_ignore_token_ids=extra_ignore_token_ids,
     )
     return batch["labels"]
+
+
+def _label_span_policy(span_policy: dict[str, bool] | None) -> dict[str, bool]:
+    """The policy :func:`build_completion_only_labels` masks under: ``span_policy``, or the self-distill one."""
+    return SELF_DISTILL_SPAN_POLICY if span_policy is None else span_policy
+
+
+def reject_untrainable_completions(
+    render: Callable[[list[dict[str, Any]]], Any],
+    probe_conversation: list[dict[str, Any]],
+    tokenizer,
+    response_prompt_template: str,
+    eos_token_ids: frozenset[int],
+    span_policy: dict[str, bool] | None,
+    subject: str,
+) -> None:
+    """Refuse completion-only labels that would train no token of ``probe_conversation`` as ``render`` renders it,
+    as :func:`build_completion_only_labels` masks it under ``span_policy``: a marker the template never emits, or no
+    assistant turn ending in one of ``eos_token_ids``, as with a template borrowed from another family until
+    ``eos_token`` names the token it closes a turn with."""
+    response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
+    for text in verify_marker_renders(render, (probe_conversation,), response_prompt_template):
+        input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
+        starts, ends = resolve_completion_spans(
+            input_ids, response_token_ids, eos_token_ids, **_label_span_policy(span_policy)
+        )
+        if starts and all(end == -1 for end in ends):
+            terminators = sorted(tokenizer.convert_ids_to_tokens(sorted(eos_token_ids)))
+            raise ValueError(
+                f"{subject}: no assistant turn of the chat template ends in a turn terminator {terminators}, so "
+                f"completion-only masking would train no token; the template renders {text!r}. Set eos_token to "
+                f"the token the template closes an assistant turn with, or set train_on_completions_only: false."
+            )
 
 
 def completion_labels(input_ids: torch.Tensor, completion_mask: torch.Tensor) -> torch.Tensor:

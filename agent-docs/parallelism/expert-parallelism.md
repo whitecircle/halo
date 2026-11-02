@@ -407,22 +407,32 @@ Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size
 its **first forward, before that forward's dispatch** (`_warm_activation_graphs`): one grad-enabled
 pass with a backward and one under `no_grad`, outside inference mode, so a first forward under
 `torch.inference_mode()` still warms the backward kernels a later training forward runs. Where the fused permute runs (every grouped-GEMM path), the
-same pass runs the routing sort at the layer's `top_k` and local expert count (`warm_route_sort_kernels`,
-`halo/kernels/moe_route_sort.py`), the permute's backward and the weighted unpermute's forward and backward
-(`warm_permute_kernels`, `halo/kernels/moe_permute.py`). One token count
+same pass runs the routing sort, forward and backward, at the layer's `top_k` and local expert count
+(`warm_route_sort_kernels`, `halo/kernels/moe_route_sort.py`), the permute's backward and the weighted unpermute's
+forward and backward (`warm_permute_kernels`, `halo/kernels/moe_permute.py`). One token count
 covers every dispatch size: the kernels take their row, block and slot counts with `do_not_specialize`, so
 Triton compiles no separate binary per class of them (1, a multiple of 16, neither). The weighted unpermute's
 backward takes its routing-weight-gradient switch the same way, so the one warm compile also serves
-routing weights that need no gradient.
+routing weights that need no gradient. A first launch also loads its kernel (CUDA lazy loading). `index_select`
+takes a separate kernel for an index of up to 16 rows, so the routing sort's backward reads the gate-weight
+gradient through `gather`, one kernel at every receive size. The token permute and GptOss's expert-bias gather run
+`index_select`, so the permute warm-up also launches it with an index of one row and of seventeen, at the run dtype
+and at fp32, the expert biases' dtype under `fp32_experts` (`_warm_index_select`). The bf16 grouped GEMM's forward
+and input gradient take one of two CUTLASS tiles by the mean rows per local expert, which follow the routing, small at
+128 or fewer ([Grouped GEMM](../optimization/grouped-gemm.md#tile-selection)), so the same pass runs the layer's own
+expert FFN, forward and backward, at one row per local expert and at 129 (`_warm_expert_gemm`), with the expert
+adapters on even when that first forward has them off.
 
-The inputs are zeros rather than a draw, and the backward runs under identity saved-tensor hooks.
+The inputs are zeros rather than a draw, and the backward runs under identity saved-tensor hooks. The expert FFN's
+LoRA dropout draws, so the GEMM warm-up restores the RNG after it, and its backward leaves no gradient.
 The warm-up sits inside the gradient-checkpointed block, whose recompute restores the RNG to region
 entry and whose non-reentrant form would otherwise recompute the whole block mid-forward.
 
-Without the warm-up, a cold kernel compiles between `dispatch` and `combine`, where every peer
+Without the warm-up, a cold kernel compiles or loads between `dispatch` and `combine`, where every peer
 of the group is already inside DeepEP's barrier, and that barrier's budget bounds rank *skew*, not
-idle time. At `ep_size == 1` the dispatcher is a no-op, so there is no barrier to stall and no
-warm-up.
+idle time. At `ep_size == 1` the dispatcher is a no-op, so there is no barrier to stall, and only the grouped GEMM
+warms: its rows per expert follow the micro-batch's token count, so a rank first loading the other tile in a later
+step holds up the expert-TP reduce or FSDP's next collective.
 
 ## Model loading
 

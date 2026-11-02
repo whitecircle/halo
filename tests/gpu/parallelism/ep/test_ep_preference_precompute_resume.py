@@ -7,8 +7,10 @@ dense Qwen3 under FSDP2 DP, TP and an attention-LoRA resume that builds the poli
 and without its KL term. The full rows: every other family of
 :data:`~tests.common.tiny_models.TINY_MOE_FAMILIES` under each two-rank layout (TP and EP+TP where its
 attention has a TP plan), and every family at ep2etp2, an expert group of four ranks, each expert on one of
-two dispatch ranks with its FFN split two ways. ``tests/cpu/conventions/test_tiny_family_roster.py`` holds
-the rows to the registry.
+two dispatch ranks with its FFN split two ways; both trainers under FULL_SHARD, HSDP and TP x DP on the dense
+model and under FULL_SHARD and whole ep1 experts, two EP groups (in one domain and one per simulated domain)
+and TP x DP on the tiny Qwen3-MoE; attention LoRA under expert TP where the family's projections are not
+spelled ``*_proj``. ``tests/cpu/conventions/test_tiny_family_roster.py`` holds the rows to the registry.
 
 Run: torchrun --nproc_per_node=2 tests/gpu/parallelism/ep/test_ep_preference_precompute_resume.py \\
          --trainer dpo --family qwen3_moe --mode ep2

@@ -261,10 +261,12 @@ the expert layout. vLLM 0.32.0 raises on a SigLIP tower key that lacks its `visi
 
 **Un-fuse experts.** transformers keeps MoE experts fused in memory (`experts.gate_up_proj` /
 `experts.down_proj`). Most hub checkpoints are per-expert, and `from_pretrained` fuses them on load;
-Qwen3.5/3.6 and Zaya ship the fused pair. Writers without an EP layer and the base-Trainer save write the
-layout the model was loaded from (a model with no record reverts through the family's mapping —
-per-expert for Qwen3.5/3.6); an EP-gathered save writes whatever the family's gather emits — the fused
-pair for Qwen3.5/3.6, DeepSeek-V4, Cohere2 MoE and GLM-5 Next. A reload into a built model maps any of
+Qwen3.5/3.6, Qwen3.8-Flash-Next and Zaya ship the fused pair. Writers without an EP layer and the
+base-Trainer save write the layout the model was loaded from (a model with no record reverts through the
+family's mapping — per-expert for Qwen3.5/3.6); an EP-gathered save writes the layout the family spec
+declares (`MoEFamilySpec.expert_layout`, `halo/models/moe/family_specs.py`): the fused pair under the
+default `FUSED` layout, which DeepSeek-V4, Cohere2 MoE and GLM-5 Next keep although their hubs are
+per-expert. A reload into a built model maps any of
 these back ([Resuming training](#resuming-training)). Rewrite such a checkpoint only for a
 per-expert-only serving loader, with `scripts/after_training/unfuse_moe_experts.py`; Step-3.7 Flash needs
 no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` namespace,
@@ -273,6 +275,7 @@ no rewrite (its EP-gathered save lands in the hub's per-layer-stacked `moe.*` na
 | Serving loader | Families | Fused `gate_up_proj` / `down_proj` |
 |---|---|---|
 | vLLM 0.32.0 `RoutedExperts` | Qwen3.5/3.6, Gemma 4, Cohere2 MoE ([Command A+](../models/cohere2-moe.md#loading-and-serving)), Laguna, Bailing/Ling 2.0 | loaded directly |
+| vLLM 0.32.0 `Qwen4ExpForCausalLM` | Qwen3.8-Flash-Next | loaded directly, the n-gram table included ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#checkpoints-and-serving)) |
 | vLLM 0.32.0 `step3p5` | Step-3.7 Flash | not needed — the EP-gathered save writes the hub `moe.*` tensors |
 | vLLM 0.32.0 per-expert-only | GLM-4 MoE Lite (raises), LFM-2 (drops it silently), GLM-5 Next (raises), DeepSeek-V4 (the release's `w1/w2/w3` names) | un-fuse first; GLM-5 Next and DeepSeek-V4 unverified end to end ([DeepSeek-V4](../models/deepseek-v4.md)) |
 | vLLM 0.32.0 `bailing_moe_v3` | Ling 3.0 (`bailing_hybrid`) | per-expert loader; no export served end to end ([Bailing](../models/bailing.md)) |

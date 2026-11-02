@@ -1,8 +1,8 @@
 """Repair of transformers' ``use_kernel_func_from_hub_with_fallback``: route each call by its first
 tensor's device (upstream calls the CUDA-only package on CPU too), and import the mapped submodule chain
 ahead of upstream, which turns any failure of that import into a silent capture of the ~10x slower torch
-body: a broken kernel package raises instead. Installed by the ``halo`` package init, before any modeling
-module binds it.
+body: a broken kernel package raises instead. Installed by the ``halo`` package init, which re-decorates
+through it what modules imported earlier already bound.
 """
 
 import functools
@@ -10,6 +10,8 @@ import importlib
 import importlib.util
 import inspect
 import logging
+import sys
+import types
 
 import torch
 import transformers.integrations
@@ -20,6 +22,9 @@ from halo.log import warn_once
 logger = logging.getLogger(__name__)
 
 _PATCHED_FLAG = "_halo_device_aware_kernel_dispatch"
+# A kernel and package name no install provides: decorated once by upstream's factory, it yields the code object every
+# function that factory returns shares.
+_CAPTURE_PROBE = "_halo_hub_kernel_capture_probe"
 _warned_torch_captures: set[tuple[str, str]] = set()
 
 
@@ -125,6 +130,25 @@ def _warn_if_torch_captured(dispatched, torch_function, func_name: str, package:
         )
 
 
+def _redecorate_earlier_captures(original_factory, factory) -> None:
+    """Re-decorate through ``factory`` each module global ``original_factory`` returned before the install. A modeling
+    module decorates at its own import, so one imported ahead of ``halo`` (by a module whose third-party imports sort
+    above its ``halo`` ones, or by liger's model patches) would keep the CUDA-only package for every call. One
+    re-decoration per capture keeps a name imported from another module the same function as its source."""
+    capture_code = original_factory(_CAPTURE_PROBE, _CAPTURE_PROBE)(lambda: None).__code__
+    redecorated = {}
+    for module in list(sys.modules.values()):
+        if not isinstance(module, types.ModuleType):
+            continue
+        for name, value in list(vars(module).items()):
+            if type(value) is not types.FunctionType or value.__code__ is not capture_code:
+                continue
+            if value not in redecorated:
+                captured = inspect.getclosurevars(value).nonlocals
+                redecorated[value] = factory(captured["func_name"], captured["package"])(captured["torch_function"])
+            setattr(module, name, redecorated[value])
+
+
 def ensure_device_aware_kernel_dispatch() -> None:
     """Install the repaired factory in ``hub_kernels`` and any materialized re-export, once."""
     if getattr(hub_kernels, _PATCHED_FLAG, False):
@@ -158,6 +182,7 @@ def ensure_device_aware_kernel_dispatch() -> None:
     # The lazy ``transformers.integrations`` package caches resolved attributes in its __dict__.
     if "use_kernel_func_from_hub_with_fallback" in vars(transformers.integrations):
         transformers.integrations.use_kernel_func_from_hub_with_fallback = device_aware_factory
+    _redecorate_earlier_captures(original_factory, device_aware_factory)
     setattr(hub_kernels, _PATCHED_FLAG, True)
 
 

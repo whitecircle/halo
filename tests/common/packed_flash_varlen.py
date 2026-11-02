@@ -7,10 +7,6 @@ family's production flash patches are applied, so the sweep rebinds process-glob
 interpreter per family (:func:`main`, :func:`report`) and reports through one ``FINDINGS:`` line.
 """
 
-# The device-aware kernel-dispatch shim must land before the modeling modules bind transformers' hub-kernel
-# fallback factory at import, or a CPU forward reaches the CUDA-only kernels.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 import functools
 import os
 import sys

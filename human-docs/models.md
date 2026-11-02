@@ -26,7 +26,7 @@ of them are MoE.
 | [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | composite VLM; SDPA only |
 | [Qwen3-Next](../agent-docs/models/qwen3-next.md) ↗ | `Qwen/Qwen3-Next-80B-A3B-Instruct` | MoE | hybrid linear attention; tiny-model GPU tests only |
-| [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: SFT only, GPU-tested on tiny models only (EP+ETP untested); the n-gram table stays in host memory |
+| [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: SFT recipes; GPU-tested on tiny models and on the release cut to four layers; the n-gram table stays in host memory |
 | [Qwen3.8 dense](../agent-docs/models/qwen3_5.md#qwen38-27b) ↗ | `Qwen/Qwen3.8-27B` | dense | the Qwen3.5 dense path; the hub chat template refuses `reasoning_effort: high`; no recipe, no GPU run yet |
 | [Qwen3 dense](../agent-docs/models/qwen3.md) ↗ | `Qwen/Qwen3-4B-Instruct-2507` | dense | the reference dense family |
 | Any other HF causal LM | Llama, Mistral, Phi, … | dense | FSDP2 by default; TP needs a `tp_plan` |
@@ -57,10 +57,10 @@ checkpoint:
 To load a multimodal checkpoint as text-only, set `text_only_model: true`. GLM-5
 Next, Step-3.7 Flash and Gemma 4 have no text-only variant and refuse it.
 
-Image data works for SFT, DPO, KTO, SMPO and both distillation trainers. Reward
-modeling takes images only on checkpoints with a multimodal sequence-classification
-head, such as Gemma 4 and Qwen3.5/3.6. Classification, the GRPO trainers and
-embedding are text-only.
+Image data works for SFT, DPO, KTO, SMPO and both distillation trainers; PaliGemma takes it
+through SFT and distillation only. Reward modeling takes images only on checkpoints with a
+multimodal sequence-classification head, such as Gemma 4 and Qwen3.5/3.6. Classification, the
+GRPO trainers and embedding are text-only.
 
 ## Adding a family
 

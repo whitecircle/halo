@@ -108,6 +108,10 @@ The bf16 primitive `grouped_mm()` in `halo/kernels/grouped_mm.py`, where `expert
 
 An empty group takes a fresh `torch.empty` instead of `.contiguous()`: at `M == 0` the copy is a no-op that keeps the `[0, 0]` strides the kernel still validates, reachable under EP whenever a rank routes zero tokens.
 
+### Tile selection
+
+On SM 9.x and 10.x, torch's bf16 grouped GEMM runs a CUTLASS kernel per operand layout (the forward, the input gradient and the weight gradient each have their own) at one of two tiles (`aten/src/ATen/native/cuda/GroupMM.cu`): the small one where the rows per group or the output width is 128 or fewer, the large one past both (on SM10x a 1-SM 128×256 tile and a 2-SM 256×256 one, on SM90 a ping-pong 64×128 and a cooperative 128×256). For the forward and the input gradient the rows per group are the received rows over the local expert count (their mean, not any one expert's), which change with every receive: under EP with the routing, at `ep_size` 1 with the micro-batch's token count. The weight gradient is ragged along its contraction, so its tile follows the weight's shape alone. Other dtypes and other architectures take a per-group matmul loop that reads the offsets back to the host. CUDA loads a kernel on its first launch, so the EP warm-up runs the expert FFN on both sides of the switch before the first dispatch ([Expert Parallelism](../parallelism/expert-parallelism.md#kernels)).
+
 ### Detection and disabling
 
 At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `True` (default) and `supports_grouped_mm()` (`halo/hardware.py`) holds — CUDA is available and compute capability is ≥ 9.0. That predicate is the single authority; a test asking for grouped GEMM on pre-SM90 hardware still gets the loop path. A failing capability read raises rather than answering: the answer picks the expert weight layout, which every rank must share. Opt out with `use_grouped_gemm: false` in the YAML config.

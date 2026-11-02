@@ -42,7 +42,7 @@ from halo.entrypoints.script import (
 from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process
@@ -73,6 +73,22 @@ def _load_distill_teacher(
         device_map={"": local_rank} if is_vlm else None,
         download_tag="teacher_model",
     )
+
+
+def _reject_neutralized_teacher_sinks(teacher_config: PretrainedConfig, *, reset_sinks: bool) -> None:
+    """Refuse ``reset_sinks: true`` with a GptOss teacher, before any weight loads.
+
+    The flag neutralizes the sinks of both models. A student fine-tunes away from them, but a frozen teacher never
+    trains back: pretrained gpt-oss-20b with its sinks neutralized predicts ~6 nats/token (KL) from itself, so the
+    student would fit a degenerate distribution.
+    """
+    if reset_sinks and uses_gpt_oss_sinks(teacher_config):
+        raise ValueError(
+            "reset_sinks: true would neutralize the attention sinks of the GptOss teacher too, and a frozen "
+            "pretrained teacher without its sinks predicts far from itself (~6 nats/token KL on gpt-oss-20b). Set "
+            "reset_sinks: false: both models keep the sinks their checkpoints hold, frozen, on a sink-carrying "
+            "attention implementation (flash_attention_4 on Blackwell; flex_attention or eager)."
+        )
 
 
 def _load_teacher_metadata(*, args, model_config) -> tuple[PreTrainedTokenizerBase, PretrainedConfig]:
@@ -125,6 +141,7 @@ def main():
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
     teacher_tokenizer, teacher_config = _load_teacher_metadata(args=args, model_config=model_config)
+    _reject_neutralized_teacher_sinks(teacher_config, reset_sinks=args.reset_sinks)
     # One request for both loads, decided on both checkpoints, so the two forwards compared token by
     # token take the same backend wherever both models accept it.
     attn_default = default_padded_attn_implementation(

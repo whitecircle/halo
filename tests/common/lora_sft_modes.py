@@ -17,12 +17,14 @@ from safetensors.torch import load_file
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.parallel.adapters import restore_adapters
 from halo.distributed.fsdp import reshard_fsdp2_modules
+from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.collectives import barrier
 from tests.common.adapters import (
     adapter_param_items,
     adapter_save_checks,
     assert_adapters_moved,
     assert_only_adapters_trainable,
+    load_peft_model,
     portable_adapter_key,
     snapshot_adapters,
     unwrap,
@@ -68,13 +70,15 @@ MODELS = {
         {"learning_rate": 2e-4, "max_length": 2048},
     ),
 }
-# ``ParallelismConfig`` kwargs per mode, on WORLD_SIZE ranks.
+# ``ParallelismConfig`` kwargs per mode, on WORLD_SIZE ranks. ``dp_stock_experts`` is plain data parallelism with
+# a MoE's experts left on the stock modules (no grouped-GEMM EP layers), the one MoE shape QLoRA loads under.
 MODES = {
     "ep": {"ep_size": 2},
     "ep_cp": {"ep_size": 2, "cp_size": 2},
     "etp": {"ep_size": 1, "expert_tp_size": 2},
     "cp": {"cp_size": 2},
     "fsdp": {},
+    "dp_stock_experts": {"use_grouped_gemm": False},
 }
 
 
@@ -145,8 +149,32 @@ def _adapter_restore_checks(trainer, save_dir: str) -> dict[str, bool]:
     }
 
 
+def _params4bit_checks(model) -> dict[str, bool]:
+    """A 4-bit run still holds bitsandbytes ``Params4bit`` weights after training: a loader or wrap that
+    de-quantized them trains a plain bf16 base under adapters, which QLoRA's memory claim rests on."""
+    quantized = sum(1 for param in model.parameters() if type(param).__name__ == "Params4bit")
+    log(f"  Params4bit weights after training: {quantized}")
+    return {"params4bit_kept": quantized > 0}
+
+
+def qlora_grouped_gemm_refusal(model_name: str, attn_implementation: str) -> dict[str, bool]:
+    """The QLoRA load of a MoE on the grouped-GEMM EP layers (the default ``use_grouped_gemm``) refused before any
+    weight is read, naming the knob that admits it."""
+    try:
+        load_peft_model(
+            "qlora",
+            ParallelismConfig(),
+            model_name=model_name,
+            attn_implementation=attn_implementation,
+            use_liger_kernel=False,
+        )
+    except ValueError as error:
+        return {"qlora_on_grouped_gemm_experts_refused_naming_the_knob": "use_grouped_gemm: false" in str(error)}
+    return {"qlora_on_grouped_gemm_experts_refused_naming_the_knob": False}
+
+
 def _adapter_checks(
-    trainer, *, model_name: str, save_dir: str | None, resume: bool, convergence: bool
+    trainer, *, model_name: str, save_dir: str | None, resume: bool, convergence: bool, qlora: bool
 ) -> TrainerChecks:
     """Read the built run's adapters (only they train) and return the checks to run after training: every adapter
     moved, and the row's own checks."""
@@ -161,6 +189,8 @@ def _adapter_checks(
         moved, why = assert_adapters_moved(before, trained, require_all=True)
         log(f"  Every adapter moved: {'PASS' if moved else 'FAIL'} ({why})")
         checks = {"only_adapters_trainable": trainable, "every_adapter_moved": moved}
+        if qlora:
+            checks |= _params4bit_checks(peft_model)
         if convergence:
             checks |= _loss_window_checks(trainer)
         if save_dir is not None:
@@ -205,7 +235,15 @@ def run_lora_sft(
         attn_implementation=attn,
         adapters={"mode": "qlora" if qlora else "lora", "lora_target_modules": list(spec.lora_target_modules)},
         before_train=partial(
-            _adapter_checks, model_name=spec.name, save_dir=save_dir, resume=resume, convergence=convergence
+            _adapter_checks,
+            model_name=spec.name,
+            save_dir=save_dir,
+            resume=resume,
+            convergence=convergence,
+            qlora=qlora,
         ),
     )
-    return {"checks": run_sft_mode(ctx, suite, mode, sft_mode, load_suite_tokenizer(ctx, spec.name))}
+    checks = {}
+    if qlora and MODES[mode].get("use_grouped_gemm") is False:
+        checks |= qlora_grouped_gemm_refusal(spec.name, spec.attn_implementation)
+    return {"checks": checks | run_sft_mode(ctx, suite, mode, sft_mode, load_suite_tokenizer(ctx, spec.name))}

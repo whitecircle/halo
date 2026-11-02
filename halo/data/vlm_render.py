@@ -41,13 +41,16 @@ def render_vlm_text(processor, history: list[dict[str, Any]], *, tools: list | N
     return processor.apply_chat_template(history, tokenize=False, add_generation_prompt=False, **template_kwargs)
 
 
-def run_vlm_processor(processor, texts, images, **overrides):
+def run_vlm_processor(processor, texts, row_images, **overrides):
     """Run a VLM processor over rendered text with ``add_special_tokens=False`` (the render carries them).
+
+    ``row_images`` holds one image list per text, the layout transformers' processors batch: Gemma 3/4 read a flat
+    list as one text's images and refuse a batch of several texts, and the processors that flatten take either.
     A ``StopIteration`` (placeholder vs image count mismatch) re-raises as ``ValueError``, since one leaked
     from a collator ends the dataloader silently."""
     kwargs = {"text": texts, "return_tensors": "pt", "add_special_tokens": False, **overrides}
-    if images:
-        kwargs["images"] = images
+    if any(row_images):
+        kwargs["images"] = [list(images) for images in row_images]
     try:
         return processor(**kwargs)
     except StopIteration as exc:

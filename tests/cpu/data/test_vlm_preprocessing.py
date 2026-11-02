@@ -413,8 +413,9 @@ class _ImageCountingVLMProcessor(_FakeVLMProcessor):
     """
 
     def __call__(self, text, images=None, **kwargs):
-        marker = " ".join(["<image>"] * len(images or []))
-        return super().__call__([f"{marker} {t}" for t in text], images=images, **kwargs)
+        row_images = images or [[] for _ in text]
+        marked = [f"{' '.join(['<image>'] * len(one))} {t}" for t, one in zip(text, row_images, strict=True)]
+        return super().__call__(marked, images=images, **kwargs)
 
 
 def _tiny_image_data_uri() -> str:

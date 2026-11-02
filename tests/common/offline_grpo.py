@@ -189,15 +189,25 @@ def offline_grpo_trainer(
 
 
 def build_offline_grpo_trainer(
-    ctx, source, parallelism, args, train, evaluation=None, *, checkpoint=None, tokenizer=None
+    ctx,
+    source,
+    parallelism,
+    args,
+    train,
+    evaluation=None,
+    *,
+    checkpoint=None,
+    tokenizer=None,
+    trust_remote_code: bool = False,
 ) -> OfflineGRPOTrainer:
     """:func:`offline_grpo_trainer` on ``source`` loaded through the production loader at bf16 with FA2; a
-    resume (``checkpoint``) also requires every stored fp32 master to be restored."""
+    resume (``checkpoint``) also requires every stored fp32 master to be restored. ``trust_remote_code`` for a
+    family whose classes the checkpoint ships."""
     model, _ = load_distributed_model(
         model_name_or_path=source,
         parallelism_config=parallelism,
         dtype=torch.bfloat16,
-        trust_remote_code=False,
+        trust_remote_code=trust_remote_code,
         attn_implementation="flash_attention_2",
         use_liger_kernel=False,
         preserve_checkpoint_precision=checkpoint is not None,

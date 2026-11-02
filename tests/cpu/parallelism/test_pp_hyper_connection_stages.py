@@ -9,9 +9,7 @@ upstream forward re-widens whatever ``inputs_embeds`` it receives), and per-fami
 check is BITWISE chained equivalence: stage-0 forward → boundary stream → stage-1 forward must equal
 the unsplit model exactly — any lossy boundary (a mean-collapse re-widened by replication) fails it.
 
-GLM-5's chained checks run an all-DSA ``layer_types`` stack: the KDA linear-attention path dispatches
-to the CUDA-only ``causal_conv1d`` package even on CPU (transformers' with-fallback kernel wrapper
-prefers the installed package unconditionally), so the KDA interleave stays out of these CPU checks.
+GLM-5's chained checks run KDA linear-attention and DSA layers on both stages.
 
 Run: python tests/cpu/parallelism/test_pp_hyper_connection_stages.py
 """
@@ -37,8 +35,8 @@ from tests.common.models import TINY_DSV4_CONFIG, TINY_GLM5_CONFIG, TINY_GLM5_VI
 # accept the declared-but-never-built tail (the tree below holds exactly num_hidden_layers layers).
 _DSV4_CONFIG = dict(TINY_DSV4_CONFIG)
 
-# All-DSA stack for the CPU-runnable chained checks (see module docstring for why no KDA here).
-_GLM5_TEXT_CONFIG = {**TINY_GLM5_CONFIG, "layer_types": ["indexed_attention"] * 4}
+# A KDA and a DSA layer on each stage of the [2, 2] split.
+_GLM5_TEXT_CONFIG = {**TINY_GLM5_CONFIG, "layer_types": ["linear_attention", "indexed_attention"] * 2}
 
 _BATCH, _SEQ = 2, 16
 
@@ -168,11 +166,14 @@ def test_hash_moe_layers_are_pinned_to_stage_zero():
 def test_glm5_shared_indexer_chain_may_not_be_severed():
     """A stage beginning on a "shared" DSA layer would raise mid-schedule ("Shared DSA layers
     require top-k indices"); the partition gate must move that failure to build time."""
-    shared_types = ["full", "full", "shared", "full"]
+
+    def shared_chain():
+        return _glm5_model(layer_types=["indexed_attention"] * 4, indexer_types=["full", "full", "shared", "full"])
+
     with pytest.raises(ValueError, match="severs a DSA indexer chain"):
-        build_pipeline_stage(_glm5_model(indexer_types=shared_types), 0, 2, moe_balancing="none", pp_split=[2, 2])
+        build_pipeline_stage(shared_chain(), 0, 2, moe_balancing="none", pp_split=[2, 2])
     # The chain kept whole on one stage passes.
-    build_pipeline_stage(_glm5_model(indexer_types=shared_types), 0, 2, moe_balancing="none", pp_split=[3, 1])
+    build_pipeline_stage(shared_chain(), 0, 2, moe_balancing="none", pp_split=[3, 1])
 
 
 def test_rebase_safe_families_skip_the_layer_type_offset_gate():

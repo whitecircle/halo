@@ -21,7 +21,7 @@ from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.models.attention.gpt_oss_sinks import (
     RESOLVED_SINKS_RESET_ATTR,
     SinksPolicy,
-    install_local_flash_for_sinks,
+    holds_unneutralized_sinks,
     install_sdpa_for_reset_sinks,
     uses_gpt_oss_sinks,
 )
@@ -32,6 +32,7 @@ from halo.models.attention.layout import (
     resolve_head_dim,
     resolve_qk_v_head_dims,
 )
+from halo.models.attention.prefix_lm import has_prefix_lm_attention
 from halo.models.config_access import get_config_field, set_config_field_run_scoped, text_config
 from halo.models.model_classes import mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
@@ -247,8 +248,11 @@ def declares_attention_backends(model_config) -> bool:
 
 
 def declares_flash_attention(model_config) -> bool:
-    """Whether the model class accepts a flash label (``_supports_flash_attn``); a remote-code config is taken to,
-    and its build raises if it does not."""
+    """Whether the model runs a flash label: its class accepts one (``_supports_flash_attn``; a remote-code config is
+    taken to, and its build raises if it does not) and its decoder is no prefix LM (:func:`has_prefix_lm_attention`),
+    whose mask no flash kernel reads, so its trained tokens would attend to the tokens they are scored on."""
+    if has_prefix_lm_attention(model_config):
+        return False
     return getattr(declared_model_class(model_config), "_supports_flash_attn", True)
 
 
@@ -326,12 +330,15 @@ def validate_attn_implementation(
         except ValueError:
             continue  # a config that validates the assignment refused this candidate
         if candidate != attn_impl and is_global_main_process():
+            reason = (
+                " (a prefix-LM decoder: flash kernels never read its token_type_ids mask)"
+                if is_flash_attn_implementation(attn_impl) and has_prefix_lm_attention(model_config)
+                else ""
+            )
             logger.warning(
                 f"Model {type(model_config).__name__} does not support "
-                f"attn_implementation='{attn_impl}', using '{candidate}'"
+                f"attn_implementation='{attn_impl}'{reason}, using '{candidate}'"
             )
-        if is_flash_attn_implementation(candidate):
-            install_local_flash_for_sinks(model_config)
         return candidate
     raise ValueError(
         f"{type(model_config).__name__} accepts none of the attention implementations tried "
@@ -345,6 +352,26 @@ def revalidate_attn_kwarg(model_kwargs: dict, model_config) -> None:
     attn_impl = model_kwargs.pop("attn_implementation", None)
     if attn_impl is not None:
         model_kwargs["attn_implementation"] = validate_attn_implementation(model_config, attn_impl)
+
+
+def verify_live_sinks_carried(model) -> None:
+    """Raise when a built GptOss model's attention implementation drops live sinks it holds.
+
+    Read off the built model, so it holds for a backend no validator chose; such a kernel shifts every logprob by
+    nats with nothing logged. Neutralized sinks (``None``, ``dtype.min``) carry no softmax mass and pass.
+    """
+    config = getattr(model, "config", None)
+    if config is None or not uses_gpt_oss_sinks(config):
+        return
+    attn_impl = effective_attn_implementation(config)
+    if _attn_impl_handles_sinks(attn_impl) or not holds_unneutralized_sinks(model):
+        return
+    raise ValueError(
+        f"This GptOss model runs attn_implementation={attn_impl!r}, which drops its attention sinks, while the "
+        f"sinks are live: every logprob would shift by nats against the served model. Use a sink-carrying "
+        f"implementation (flash_attention_4 on Blackwell; flex_attention or eager), or neutralize the sinks first "
+        f"(reset_sinks: true for a training run)."
+    )
 
 
 def resolve_attn_implementation(

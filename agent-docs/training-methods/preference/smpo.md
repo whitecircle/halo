@@ -19,7 +19,7 @@ The concat (`concatenate_pairs` in `halo/data/collators/smpo.py`) rolls every ro
 
 ```yaml
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_2   # FA2 takes no sink argument; keep reset_sinks on
+attn_implementation: flash_attention_4   # the padded scripts' unset pick on Blackwell; sinks stay reset
 dataset: allenai/llama-3.1-tulu-3-8b-preference-mixture
 expert_parallel_size: 8
 
@@ -34,7 +34,7 @@ gradient_accumulation_steps: 8
 learning_rate: 5.0e-06             # the shipped recipes' value; the config default is 1e-6
 max_length: 4096
 max_prompt_length: 2048
-gradient_checkpointing: true
+gradient_checkpointing: false      # a 2 × 4,096 pair holds ~33 GB of activations
 output_dir: checkpoints/smpo-gptoss-20b-tulu3-prefmix-ep
 ```
 
@@ -69,7 +69,7 @@ torchrun --nproc_per_node=8 scripts/training/preference/smpo.py \
 
 The model class follows the **checkpoint**: a multimodal config loads through `AutoModelForImageTextToText` plus its processor wherever the checkpoint ships one ([SFT — VLMs](../sft.md#vision-language-models)), so the run's checkpoints carry that `processor_config.json` (unless `text_only_model` forced the text class). The data path follows the **run** — VLM only when the dataset declares images in an `images`/`image` column. Text pairs on a multimodal checkpoint are a text run, and keep CP and `padding_free`.
 
-A dataset carrying images inside its messages alone reads as text, and the renderer refuses it rather than training on pixel-less placeholders.
+A dataset carrying images inside its messages alone reads as text, and the renderer refuses it rather than training on pixel-less placeholders. A prefix-LM checkpoint (PaliGemma) is refused on image rows before the model load ([Modality support](../../reference/trainer-architecture.md#modality-support)); train it on images with SFT or distillation.
 
 A VLM run hands its rows to the trainer untouched: it chat-templates them and selects `DataCollatorForVLMSMPO`, which processes images at collation, keeping pixels out of the Arrow cache. The row map pins its Arrow schema, so text-only and image rows mix in one dataset, and a dataset counts as already prepared only with every column the map writes, `prompt_overlap` included; one missing a column that no longer carries the raw `chosen`/`rejected` to re-tokenize is refused with the missing columns named. Completions split off the prompt jointly, as on the text path; when a token merges across the boundary, the row's `prompt_overlap` counts the prompt tokens the completions start with, and the collator ends the prompt before them. Completions must be text-only, and prompts are never truncated — one expanding past `max_prompt_length` raises, since cutting expanded placeholders desyncs them from `pixel_values`.
 

@@ -62,9 +62,6 @@ def _config(**overrides) -> Qwen3NextConfig:
 
 
 def _build(config: PretrainedConfig) -> PreTrainedModel:
-    """Built through the auto class, so the modeling module binds its hub kernels only after the ``halo`` package
-    init installed the device-aware dispatch, as in a run; bound before it, its GatedDeltaNet layers call the
-    CUDA-only kernels on CPU for the rest of the process."""
     torch.manual_seed(0)
     return AutoModelForCausalLM.from_config(config).eval()
 

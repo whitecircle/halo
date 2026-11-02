@@ -17,7 +17,6 @@ from trl import GRPOConfig
 
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.distributed.fsdp import reshard_fsdp2_modules
-from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
@@ -29,9 +28,9 @@ from tests.common.memory import cleanup_memory
 from tests.common.on_policy_e2e import (
     RESUME_MAX_STEPS,
     RESUME_SAVE_STEP,
+    PolicyLayout,
     adapter_file_agreement,
     expert_lora_under_etp_refusal,
-    fresh_parallelism_config,
     frozen_base_weights,
     load_policy,
     local_view,
@@ -40,6 +39,7 @@ from tests.common.on_policy_e2e import (
     probe_top_logprobs,
     qa_dataset,
     record_adapter_training,
+    record_dp_layout,
     record_optimizer_restore,
     record_parallelism_engaged,
     record_resume_continuity,
@@ -66,7 +66,7 @@ PER_DEVICE_BATCH_SIZE = 2
 
 @dataclass(frozen=True)
 class _Mode:
-    """One row's shape: the axes it engages and which adapter (if any) it trains.
+    """One row's shape: the parallel layout it trains under, its world size and which adapter (if any) it trains.
 
     ``adapter`` is the ``adapters`` mode name: ``None`` (full fine-tune), ``"lora"`` (stock PEFT
     handed to the trainer as ``peft_config``) or ``"expert_lora"`` (native grouped expert adapters
@@ -77,6 +77,10 @@ class _Mode:
 
     ``beta`` is the KL coefficient; non-zero on a full fine-tune, the row holds a frozen reference.
 
+    ``world_size`` is the ranks the row runs on: two by default, more where the layout adds DP replicas past its
+    model axes (TP x DP, several EP groups, EP x ETP, HSDP over two simulated NVLink domains), one for a
+    single-process row.
+
     ``checkpoint_optimizer`` carries the optimizer and scheduler into the resume checkpoint, which
     makes the continuity assertions possible. Off for a full fine-tune of the MoE policy, where that
     state is 4 B/param of AdamWBF16 moments (over a hundred GB of disk, and the same again in host RAM
@@ -85,9 +89,8 @@ class _Mode:
     """
 
     family: str
-    ep_size: int = 1
-    expert_tp_size: int = 1
-    tp_size: int = 1
+    layout: PolicyLayout = PolicyLayout()
+    world_size: int = 2
     adapter: str | None = None
     refuses_lora_under_tp: bool = False
     rejects_expert_lora: bool = False
@@ -101,17 +104,29 @@ class _Mode:
 
 
 MODES = {
-    "full_ep2": _Mode("moe", ep_size=2, checkpoint_optimizer=False),
-    "lora_ep2": _Mode("moe", ep_size=2, adapter="lora"),
-    "expert_lora_ep2": _Mode("moe", ep_size=2, adapter="expert_lora"),
-    "lora_etp2": _Mode("moe", expert_tp_size=2, adapter="lora", rejects_expert_lora=True),
-    "full_tp2": _Mode("dense", tp_size=2),
+    "full_ep2": _Mode("moe", PolicyLayout(ep_size=2), checkpoint_optimizer=False),
+    "lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="lora"),
+    "expert_lora_ep2": _Mode("moe", PolicyLayout(ep_size=2), adapter="expert_lora"),
+    "lora_etp2": _Mode("moe", PolicyLayout(expert_tp_size=2), adapter="lora", rejects_expert_lora=True),
+    # ep1: the experts in the FSDP2 shard as DTensors, or kept whole and FSDP-ignored.
+    "full_ep1": _Mode("moe", checkpoint_optimizer=False),
+    "full_ep1_unsharded": _Mode("moe", PolicyLayout(shard_ep1_experts=False), checkpoint_optimizer=False),
+    "full_ep2_tp2": _Mode("moe", PolicyLayout(ep_size=2, tp_size=2), checkpoint_optimizer=False),
+    # Four ranks: two EP groups (in one domain, and one per simulated NVLink domain), and EP x ETP.
+    "full_ep2_dp2": _Mode("moe", PolicyLayout(ep_size=2), world_size=4, checkpoint_optimizer=False),
+    "full_ep2x2dom": _Mode("moe", PolicyLayout(ep_size=2, gpus_per_node=2), world_size=4, checkpoint_optimizer=False),
+    "full_ep2_etp2": _Mode("moe", PolicyLayout(ep_size=2, expert_tp_size=2), world_size=4, checkpoint_optimizer=False),
+    "full_tp2": _Mode("dense", PolicyLayout(tp_size=2)),
     "lora_fsdp": _Mode("dense", adapter="lora"),
-    "lora_tp2_rejected": _Mode("dense", tp_size=2, adapter="lora", refuses_lora_under_tp=True),
+    "lora_tp2_rejected": _Mode("dense", PolicyLayout(tp_size=2), adapter="lora", refuses_lora_under_tp=True),
     "full_fsdp_kl": _Mode("dense", beta=0.01),
+    "full_fsdp_zero3": _Mode("dense", PolicyLayout(reshard_after_forward=True)),
+    "full_tp2_dp2": _Mode("dense", PolicyLayout(tp_size=2), world_size=4),
+    # HSDP: two simulated NVLink domains of two, sharded within each and replicated across them.
+    "full_hsdp": _Mode("dense", PolicyLayout(use_hsdp=True, gpus_per_node=2), world_size=4),
     # One process and no FSDP wrap: the common small-model path.
-    "full_world1": _Mode("world1"),
-    "lora_world1": _Mode("world1", adapter="lora"),
+    "full_world1": _Mode("world1", world_size=1),
+    "lora_world1": _Mode("world1", world_size=1, adapter="lora"),
 }
 
 
@@ -127,10 +142,6 @@ def reward_len(completions, **kwargs):
     adapter-movement and the SDPG OPD assertions would then measure nothing.
     """
     return [-abs(len(str(completion)) - 32) / 32.0 for completion in completions]
-
-
-def _config_for(spec: _Mode) -> ParallelismConfig:
-    return fresh_parallelism_config(spec.ep_size, spec.tp_size, spec.expert_tp_size)
 
 
 def _grpo_config(spec: _Mode, *, output_dir, server_url, group_port, max_steps, save_steps) -> GRPOConfig:
@@ -182,7 +193,7 @@ def _build_trainer(
     ``weights_source`` is where the weights come from: the hub id normally, or the checkpoint
     directory on a resume whose loader expects the model to be constructed from it.
     """
-    parallelism_config = _config_for(spec)
+    parallelism_config = spec.layout.parallelism_config()
     model, peft_config = load_policy(weights_source or model_name, parallelism_config, spec.adapter)
     kwargs = {
         "model": model,
@@ -390,11 +401,12 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
     trainer.add_callback(_CheckpointOnce(RESUME_SAVE_STEP))
     saved = _RestorePoint("save", trainer, spec, capture_optimizer=spec.checkpoint_optimizer)
     trainer.add_callback(saved)
-    record_parallelism_engaged(ctx, trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size, checks)
+    record_parallelism_engaged(ctx, trainer, spec.layout, checks)
 
     trainer.train()
     record_step_losses(trainer, checks)
     reshard_fsdp2_modules(unwrap(trainer.model))
+    record_dp_layout(ctx, trainer, spec.layout, checks)
     phase1_lrs = logged_lrs(trainer)
     checks["checkpoint_captured_at_the_save_step"] = (
         saved.captured is not None and saved.captured["global_step"] == RESUME_SAVE_STEP
@@ -438,7 +450,7 @@ def _run_resume(ctx, *, trainer_kind, spec: _Mode, model_name, tokenizer, server
     # ``_last_loaded_step`` back at its ``-1`` sentinel. The production rule rather than a test-local
     # one: under the EP/CP wrappers a full checkpoint's weights load only at construction, while an
     # adapter-only checkpoint keeps the base and has its adapters restored.
-    parallelism_config = _config_for(spec)
+    parallelism_config = spec.layout.parallelism_config()
     weights_source = resolve_resume_weights_source(
         checkpoint, SimpleNamespace(model_name_or_path=model_name), parallelism_config
     )
@@ -524,7 +536,7 @@ def run_online_grpo_e2e(
     log(f"\n  row: trainer={trainer_kind} mode={mode} resume={resume} model={model_name} server={server_url}")
 
     if spec.rejects_expert_lora:
-        refusal = expert_lora_under_etp_refusal(spec.expert_tp_size)
+        refusal = expert_lora_under_etp_refusal(spec.layout.expert_tp_size)
         checks["expert_lora_under_etp_refused"] = bool(refusal)
         checks["etp_refusal_names_expert_tensor_parallel_size"] = "expert_tensor_parallel_size > 1" in refusal
 
@@ -564,7 +576,7 @@ def run_online_grpo_e2e(
 
     trainer, _ = _build_trainer(**build_kwargs, max_steps=MAX_STEPS, save_steps=0)
     ctx.on_teardown(lambda: _release(trainer))
-    record_parallelism_engaged(ctx, trainer, spec.ep_size, spec.tp_size, spec.expert_tp_size, checks)
+    record_parallelism_engaged(ctx, trainer, spec.layout, checks)
 
     adapters_before, base_before = {}, {}
     if spec.adapter:
@@ -585,6 +597,7 @@ def run_online_grpo_e2e(
         moved = moved_parameters(base_before, frozen_base_weights(unwrap(trainer.model)))
         checks["training_syncs_left_the_base_weights_alone"] = bool(base_before) and not moved
         log(f"  frozen base weights the training syncs moved: {len(moved)}/{len(base_before)} {moved[:3]}")
+    record_dp_layout(ctx, trainer, spec.layout, checks)
 
     ctx.barrier()
     before = probe_top_logprobs(server_url, model_name) if ctx.rank == 0 else {}

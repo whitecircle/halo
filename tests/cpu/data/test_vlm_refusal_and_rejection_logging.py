@@ -51,6 +51,7 @@ class _UnsupportedKeysVLMProcessor(FakeVLMProcessorBase):
 
     def __call__(self, text, return_tensors="pt", images=None, videos=None, add_special_tokens=True, **kwargs):
         result = self.encode_batch(text)
+        images = [image for row_images in images or () for image in row_images]
         if images:
             result["pixel_values"] = torch.zeros(len(images), 4)
             # The key the preprocessed schema cannot store — must trigger the refusal.

@@ -5,16 +5,24 @@ the tiny-model suites cannot show at the release's widths.
 ``--mode layers``: the lazy EP load reads only those layers (each rank's peak host RSS below ``LOAD_RSS_GIB``) and
 attaches the n-gram table outside the module state; on a ``--seq``-token document the tiled QSA selects
 transformers' key blocks, a near-tie swapping at most one block pair on a few queries, and computes its attention
-within the bf16 bar; each document of a packed row computes its logits alone; and the EP loss on one batch is the
-unsharded (``ep_size = 1``) model's. A whole-model logits bar admits the few positions a bf16 near-tie routes to
-another expert (``ROUTING_FLIP_MAX_FRACTION``); a leak or a wrong weight moves most of them.
+within the bf16 bar; the EP loss on one batch is the unsharded (``ep_size = 1``) model's; and on an fp32 unsharded
+load each document of a packed row computes its logits alone, while the same row without the ``cu_seq_lens`` set
+carries every document after the first into the next (the packing check's negative arm). The packing runs in fp32:
+in bf16 the rounding of the matmul shape alone flips top-10-of-512 routing near-ties, and the flips compound over the
+layers until most positions of even a row's first document leave any logits bar. In fp32 a whole-document bar admits
+the few positions a near-tie still routes to another expert (``ROUTING_FLIP_MAX_FRACTION``); a leak moves most of
+them.
 
 ``--mode export``: after ``--steps`` SGD steps on a batch every rank shares, the gathered save carries the hub's
 keys (the n-gram table's ``shard_*`` parts, no MTP head), ``split_ngram_parts`` and no run stamp, and a stock
-``from_pretrained`` of it on the CPU computes the trained model's logits. At ``--steps 0`` every exported tensor
-is the release's own, byte for byte: with ``--layers 48 --export-dir DIR`` that is the identity export a served
-comparison against the release starts from. Rank 0's stock reload and byte comparison of the whole release outlast
-the default NCCL watchdog its peers wait under: raise ``DIST_NCCL_TIMEOUT_MINUTES`` for that row.
+``from_pretrained`` of it on the CPU scores real text (the tree's own docs) at the trained model's mean NLL, and on
+the four-layer cut at its per-token log-probs up to the floor's quantiles. No per-position bound holds there: the
+CPU and the EP forward round apart, and at full depth the routing flips reach every position while the mean NLL
+agrees. At ``--steps 0`` every exported tensor is the release's own, byte for
+byte: with ``--layers 48 --export-dir DIR`` that is the identity export a served comparison against the release
+starts from. Rank 0's stock reload, its real-text score (~3.5 min per row on one CPU thread at full depth) and byte
+comparison of the whole release outlast the default NCCL watchdog its peers wait under: raise
+``DIST_NCCL_TIMEOUT_MINUTES`` for that row.
 
 ``--mode resume``: full fine-tuning from a gathered save of the cut model checkpoints every 3 steps, and a trainer
 built from step 3's checkpoint trains to step 6 with its optimizer restored bit for bit, the unbroken run's losses
@@ -56,7 +64,7 @@ from halo.models.external_tables import EXTERNAL_TABLES_STAMP, named_external_ta
 from halo.models.qwen4_exp.sparse_attention import qsa_attention_forward, select_qsa_keys
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import loading_problems, save_context, save_schedule
-from tests.common.datasets import create_sft_dataset
+from tests.common.datasets import create_sft_dataset, repository_text_rows
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
 from tests.common.ep_reference import random_token_batch
 from tests.common.harness import gpu_test_main
@@ -76,18 +84,30 @@ QSA_DOCUMENT = 3000
 # how far: one block pair swapped.
 QSA_TIE_ROWS_MAX_FRACTION = 1e-2
 QSA_TIE_SWAPPED_BLOCKS = 1
-# bf16 bars, as fractions of the reference's largest magnitude: the tiled attention against transformers', a packed
-# document against itself alone, and a CPU reload against the trained model on the GPU.
+# The tiled attention against transformers' in bf16, as a fraction of the reference's largest magnitude.
 QSA_OUTPUT_REL_MAX = 2e-2
+# A packed document against itself alone in fp32, as a fraction of the alone logits' largest magnitude, and the
+# positions allowed past it: the tokens a near-tie still routes to another expert.
 ISOLATED_REL_MAX = 2e-2
-EXPORT_LOGITS_REL_MAX = 1e-2
-# Positions of a whole-model comparison allowed past its bar: the tokens a bf16 near-tie routes to another expert.
 ROUTING_FLIP_MAX_FRACTION = 2e-2
 # EP's loss against the unsharded model's on one batch.
 EP_LOSS_ABS_MAX = 1e-2
 LOSS_TOKENS = 1024
-PROBE_TOKENS = 256
 EXPORT_LR = 1e-3
+# Real-text rows the stock reload and the trained model both score, and how far their mean NLLs may part, in nats.
+# The same weights part by 0.0002 on the four-layer cut (the CPU forward in bf16 against fp32) and by 0.0066 at full
+# depth (the EP model against the served release), one 2048-token row alone by up to 0.014 there.
+EXPORT_TEXT_ROWS = 4
+EXPORT_TEXT_LENGTH = 2048
+EXPORT_NLL_ABS_MAX = 2e-2
+LOGPROB_DIFF_QUANTILES = {"p50": 0.5, "p90": 0.9, "p99": 0.99}
+# Per-token |log-prob difference| bars by exported depth, where its floor is measured. A mean NLL hides a corrupted
+# layer whose errors cancel (one layer's expert bank reversed on the four-layer cut: gap +0.002, p50 0.17), the
+# per-token quantiles do not: on that cut the CPU forward in bf16 against fp32 parts by p50 0.010 / p90 0.034 (the
+# check's own pair, the EP model against the CPU reload, logs its quantiles), and reversing any one layer's experts
+# moves them to p50 >= 0.14 / p90 >= 0.47. Past the cut the routing flips widen the floor (p50 0.066 / p90 0.52 at
+# full depth), so a depth without an entry is held to the mean bar alone, with byte identity at --steps 0.
+EXPORT_LOGPROB_DIFF_MAX = {4: {"p50": 0.05, "p90": 0.15}}
 RESUME_MAX_LENGTH = 512
 RESUME_LR = 1e-4
 SAVE_STEP = 3
@@ -112,12 +132,12 @@ def _depth_overrides(source: str, layers: int) -> dict | None:
     return {"num_hidden_layers": layers, "layer_types": config.layer_types[:layers]}
 
 
-def _load(source: str, parallelism_config: ParallelismConfig, layers: int):
+def _load(source: str, parallelism_config: ParallelismConfig, layers: int, dtype: torch.dtype = torch.bfloat16):
     """COLLECTIVE. ``source`` cut to ``layers`` as the training scripts load it: its text class, on SDPA."""
     return load_distributed_model(
         source,
         parallelism_config,
-        dtype=torch.bfloat16,
+        dtype=dtype,
         trust_remote_code=False,
         attn_implementation="sdpa",
         model_config_overrides=_depth_overrides(source, layers),
@@ -193,25 +213,39 @@ def _logits(model, input_ids: torch.Tensor, **kwargs) -> torch.Tensor:
 
 
 def _packing_checks(model, seq: int, device) -> tuple[dict[str, bool], dict[str, float]]:
-    """COLLECTIVE. Each document of a packed row, the middle one past the indexer budget, against itself alone."""
+    """Each document of a packed row, the middle one past the indexer budget, against itself alone; and the negative
+    arm, the same row without the ``cu_seq_lens`` set, whose GatedDeltaNet layers then carry each document into the
+    next."""
     lengths = [seq // 6, seq - 2 * (seq // 6), seq // 6]
     generator = torch.Generator().manual_seed(SEED + 1)
     ids = torch.randint(0, model.config.vocab_size, (1, seq), generator=generator).to(device)
     positions = packed_positions([lengths]).to(device)
     packed = _logits(model, ids, position_ids=positions, **packed_markers(model.config, positions))
-    worst, beyond, start = 0.0, 0.0, 0
+    crossing = _logits(
+        model, ids, position_ids=positions, **packed_markers(model.config, positions, cu_seq_lens=False)
+    )
+    worst, isolated, crossed, start = 0.0, [], [], 0
     for length in lengths:
-        alone = _logits(model, ids[:, start : start + length])
-        worst = max(worst, _relative(packed[start : start + length], alone))
-        beyond = max(beyond, _beyond(packed[start : start + length], alone, ISOLATED_REL_MAX))
+        document = slice(start, start + length)
+        alone = _logits(model, ids[:, document])
+        worst = max(worst, _relative(packed[document], alone))
+        isolated.append(_beyond(packed[document], alone, ISOLATED_REL_MAX))
+        crossed.append(_beyond(crossing[document], alone, ISOLATED_REL_MAX))
         start += length
     log(
-        f"  packed {lengths}: each document against itself alone {worst:.3e} of its scale, {beyond:.2%} of positions "
-        f"past {ISOLATED_REL_MAX:.0e}"
+        f"  packed {lengths} in {model.dtype}: each document against itself alone {worst:.3e} of its scale; positions past "
+        f"{ISOLATED_REL_MAX:.0e} per document {' / '.join(f'{v:.2%}' for v in isolated)}, without cu_seq_lens "
+        f"{' / '.join(f'{v:.2%}' for v in crossed)}"
     )
-    return {"packed_documents_compute_their_logits_alone": beyond <= ROUTING_FLIP_MAX_FRACTION}, {
+    return {
+        "packed_documents_compute_their_logits_alone": max(isolated) <= ROUTING_FLIP_MAX_FRACTION,
+        # The first document has nothing before it to leak from; every later one must show the crossing.
+        "packed_row_without_cu_seq_lens_leaks_past_the_first_document": crossed[0] <= ROUTING_FLIP_MAX_FRACTION
+        and min(crossed[1:]) > ROUTING_FLIP_MAX_FRACTION,
+    }, {
         "packed_vs_alone_rel": worst,
-        "packed_vs_alone_positions_beyond": beyond,
+        "packed_vs_alone_positions_beyond": max(isolated),
+        "packed_without_cu_seq_lens_positions_beyond": min(crossed[1:]),
     }
 
 
@@ -233,9 +267,6 @@ def run_layers(ctx, source: str, args) -> dict:
         qsa, qsa_metrics = _qsa_checks(model, ctx.device)
         metrics |= qsa_metrics
     checks |= ctx.broadcast_checks(qsa)
-    packing, packing_metrics = _packing_checks(model, args.seq, ctx.device)
-    checks |= packing
-    metrics |= packing_metrics
 
     batch = random_token_batch(model.config.vocab_size, batch=1, seq=LOSS_TOKENS, device=ctx.device, seed=SEED + 2)
     ep_loss = _loss(model, batch)
@@ -246,6 +277,14 @@ def run_layers(ctx, source: str, args) -> dict:
     log(f"  loss on one batch: EP {ep_loss:.6f}, unsharded {reference_loss:.6f}")
     checks["ep_loss_matches_unsharded"] = abs(ep_loss - reference_loss) <= EP_LOSS_ABS_MAX
     metrics |= {"ep_loss": ep_loss, "unsharded_loss": reference_loss}
+    del reference
+    cleanup_memory()
+
+    # Every rank holds the collective load, so each runs the packing forwards itself.
+    reference, _ = _load(source, ParallelismConfig(ep_size=1), args.layers, dtype=torch.float32)
+    packing, packing_metrics = _packing_checks(reference.eval(), args.seq, ctx.device)
+    checks |= packing
+    metrics |= packing_metrics
     return {"checks": checks, "metrics": metrics}
 
 
@@ -278,9 +317,22 @@ def _identity_checks(export: str, source: str) -> dict[str, bool]:
     return {"export_keys_are_the_release_keys": not unmatched, "export_tensors_are_the_release_tensors": not differing}
 
 
-def _artifact_checks(export: str, source: str, probe: torch.Tensor, trained_logits: torch.Tensor) -> dict[str, bool]:
-    """The gathered save as the hub layout serves it, and a stock CPU load of it computing ``trained_logits``.
-    Rank 0."""
+def _token_logprobs(model, rows: torch.Tensor) -> torch.Tensor:
+    """``[rows, length - 1]`` fp32 log-probabilities, on the CPU, that ``model`` gives each next token of ``rows`` (on
+    the model's device), one row per forward."""
+    scores = []
+    for row in rows:
+        logits = _logits(model, row[None]).float()
+        scores.append(torch.log_softmax(logits[:-1], dim=-1).gather(-1, row[1:, None])[:, 0].cpu())
+    return torch.stack(scores)
+
+
+def _artifact_checks(
+    export: str, source: str, rows: torch.Tensor, trained: torch.Tensor
+) -> tuple[dict[str, bool], dict[str, float]]:
+    """The gathered save as the hub layout serves it, and a stock CPU load of it scoring ``rows`` (real text) at the
+    trained model's mean NLL (``trained``: its per-token log-probabilities) and, at a depth with a measured floor,
+    token by token (:data:`EXPORT_LOGPROB_DIFF_MAX`). Rank 0."""
     with open(os.path.join(export, SAFETENSORS_INDEX_FILE)) as handle:
         keys = set(json.load(handle)["weight_map"])
     with open(os.path.join(export, "config.json")) as handle:
@@ -297,16 +349,33 @@ def _artifact_checks(export: str, source: str, probe: torch.Tensor, trained_logi
     }
     reloaded, info = AutoModelForCausalLM.from_pretrained(export, dtype=torch.bfloat16, output_loading_info=True)
     problems = loading_problems(info)
-    reloaded_logits = _logits(reloaded.eval(), probe.cpu())
-    reload_rel = _relative(reloaded_logits, trained_logits)
-    beyond = _beyond(reloaded_logits, trained_logits, EXPORT_LOGITS_REL_MAX)
+    reloaded_scores = _token_logprobs(reloaded.eval(), rows)
+    reload_nll, trained_nll = -reloaded_scores.mean().item(), -trained.mean().item()
+    row_gaps = trained.mean(-1) - reloaded_scores.mean(-1)
+    gap = reload_nll - trained_nll
+    per_token = (reloaded_scores - trained).abs().flatten()
+    levels = torch.tensor(list(LOGPROB_DIFF_QUANTILES.values()))
+    quantiles = dict(zip(LOGPROB_DIFF_QUANTILES, torch.quantile(per_token, levels).tolist(), strict=True))
     log(
-        f"  stock CPU reload: problems {problems or 'none'}, logits {reload_rel:.3e} of their scale, {beyond:.2%} of "
-        f"positions past {EXPORT_LOGITS_REL_MAX:.0e}"
+        f"  stock CPU reload: problems {problems or 'none'}; mean NLL on {per_token.numel()} real-text tokens "
+        f"{reload_nll:.5f} vs trained {trained_nll:.5f} (gap {gap:+.5f}, per row [{row_gaps.min().item():+.4f}, "
+        f"{row_gaps.max().item():+.4f}]); per-token |logprob difference| "
+        + ", ".join(f"{name} {value:.4f}" for name, value in quantiles.items())
     )
     checks["stock_reload_loads_every_weight"] = not problems
-    checks["stock_reload_computes_the_trained_logits"] = beyond <= ROUTING_FLIP_MAX_FRACTION
-    return checks
+    checks["stock_reload_scores_real_text_at_the_trained_nll"] = abs(gap) <= EXPORT_NLL_ABS_MAX
+    depth = text_config(reloaded.config).num_hidden_layers
+    if (bars := EXPORT_LOGPROB_DIFF_MAX.get(depth)) is not None:
+        checks["stock_reload_scores_each_token_at_the_trained_logprob"] = all(
+            quantiles[name] <= bar for name, bar in bars.items()
+        )
+        log(f"  per-token bars at {depth} layers: {bars}")
+    return checks, {
+        "export_reload_nll": reload_nll,
+        "export_trained_nll": trained_nll,
+        "export_nll_gap": gap,
+        **{f"export_logprob_abs_diff_{name}": value for name, value in quantiles.items()},
+    }
 
 
 def _save_gathered(ctx, model, parallelism_config: ParallelismConfig, tokenizer, directory: str) -> None:
@@ -330,21 +399,19 @@ def run_export(ctx, source: str, args) -> dict:
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
             log(f"  step {step + 1}: loss {loss.item():.6f}")
-    probe = torch.randint(
-        0, model.config.vocab_size, (1, PROBE_TOKENS), generator=torch.Generator().manual_seed(SEED + 3)
-    ).to(ctx.device)
-    trained_logits = _logits(model.eval(), probe).float().cpu()
+    rows = torch.tensor(repository_text_rows(tokenizer, EXPORT_TEXT_ROWS, EXPORT_TEXT_LENGTH))
+    trained = _token_logprobs(model.eval(), rows.to(ctx.device))
 
     export = args.export_dir or os.path.join(shared_output_dir(ctx), "export")
     _save_gathered(ctx, model, parallelism_config, tokenizer, export)
     del model
     cleanup_memory()
-    checks = {}
+    checks, metrics = {}, {}
     if ctx.rank == 0:
-        checks = _artifact_checks(export, source, probe, trained_logits)
+        checks, metrics = _artifact_checks(export, source, rows, trained)
         if not args.steps:
             checks |= _identity_checks(export, source)
-    return {"checks": ctx.broadcast_checks(checks)}
+    return {"checks": ctx.broadcast_checks(checks), "metrics": metrics}
 
 
 def run_resume(ctx, source: str, args) -> dict:

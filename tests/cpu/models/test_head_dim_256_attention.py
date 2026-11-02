@@ -85,12 +85,13 @@ def _resolved(family: str, arch: str, collator: str) -> str:
         return _resolve(config, request)
 
 
-# (family, arch) -> (packed, padded). On Blackwell both shapes take the loader's pick: Gemma 2/3 and GLM-4.7-Flash
-# (MLA) leave FA4 for FA2 by head width, Gemma 1, PaliGemma and GPT-J (hd256, no softcap, no window) and the hd128
-# families keep it, and Gemma 4's 512-wide heads fit no flash kernel; the head_dim-256 GatedDeltaNet families take
-# FA2 on packed rows only. A softcapped policy's padded batch requests FA2 on Blackwell, which trains its softcap,
-# and SDPA on Hopper, which the softcap turns into FA3; a remote-code checkpoint's requests SDPA, as every padded
-# script does on Hopper, where GPT-J's class (no SDPA path) turns it into eager. A remote-code config's packed row keeps the loader's pick, which its build may refuse.
+# (family, arch) -> (packed, padded). On Blackwell both shapes take the loader's pick: Gemma 2/3 and GLM-4.7-Flash (MLA)
+# leave FA4 for FA2 by head width, Gemma 1 and GPT-J (hd256, no softcap, no window) and the hd128 families keep it,
+# PaliGemma's prefix-LM mask reaches no flash kernel, and Gemma 4's 512-wide heads fit none; the head_dim-256
+# GatedDeltaNet families take FA2 on packed rows only. A softcapped policy's padded batch requests FA2 on Blackwell,
+# which trains its softcap, and SDPA on Hopper, which the softcap turns into FA3; a remote-code checkpoint's requests
+# SDPA, as every padded script does on Hopper, where GPT-J's class (no SDPA path) turns it into eager. A remote-code
+# config's packed row keeps the loader's pick, which its build may refuse.
 _EXPECTED = {
     ("gemma2", "blackwell"): (FA2, FA2),
     ("gemma2", "hopper"): (FA3, FA3),
@@ -100,8 +101,8 @@ _EXPECTED = {
     ("gemma3", "hopper"): (FA3, SDPA),
     ("gemma", "blackwell"): (FA4, FA4),
     ("gemma", "hopper"): (FA3, SDPA),
-    ("paligemma", "blackwell"): (FA4, FA4),
-    ("paligemma", "hopper"): (FA3, SDPA),
+    ("paligemma", "blackwell"): (SDPA, SDPA),
+    ("paligemma", "hopper"): (SDPA, SDPA),
     ("gptj", "blackwell"): (FA4, FA4),
     ("gptj", "hopper"): (FA3, EAGER),
     ("qwen3", "blackwell"): (FA4, FA4),

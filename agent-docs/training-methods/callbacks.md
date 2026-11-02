@@ -36,8 +36,8 @@ Tracks token throughput, step time and GPU memory; tokens/s/GPU is the headline.
 | Key (each as `step_*` and `avg_*`) | Meaning |
 |---|---|
 | `tokens_per_second` | `cluster_tokens_per_second` / world size — the headline, comparable across every parallel layout |
-| `cluster_tokens_per_second` | Unique cluster tokens over step compute time: each data-parallel replica's batch once, however many TP, expert-TP, CP or pipeline ranks share it |
-| `step_time_seconds` | Optimizer-step time between CUDA events recorded on the current stream at the step boundaries: the step's device work and any device wait on the host inside it, not its launch |
+| `cluster_tokens_per_second` | Unique cluster tokens over step time: each data-parallel replica's batch once, however many TP, expert-TP, CP or pipeline ranks share it |
+| `step_time_seconds` | Optimizer-step time from the previous step's end to this one's, between CUDA events on the current stream: the host time between two steps (the log, the next batch's fetch) counts, so the steps sum to the wall clock they span, and nothing drains the device for it. The run's first step, and the first of each epoch or after an evaluation or a save, start at their own begin |
 | `mfu_percent`, `tflops_per_sec` | Against the device peak in `halo/hardware.py`; `0.0`, with a startup warning, for an undetected GPU or a GPU/precision pair it lacks |
 | `smfu_percent`, `smfu_tflops_per_sec` | MoE-aware twin, crediting only the experts that fire; sparse models only |
 

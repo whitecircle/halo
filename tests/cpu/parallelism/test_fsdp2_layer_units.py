@@ -19,10 +19,6 @@ unit that mixes trainable dtypes fails FSDP2's dtype check.
     python tests/cpu/parallelism/test_fsdp2_layer_units.py
 """
 
-# The device-aware kernel-dispatch shim must land before the modeling modules bind transformers'
-# hub-kernel fallback at import, or the gated DeltaNet layers' CPU forward reaches CUDA.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 import contextlib
 import dataclasses
 import datetime

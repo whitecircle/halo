@@ -6,13 +6,19 @@ tests check what ``gather_and_send_weights`` produces, never that a real engine 
 that accepts an update and silently reverts it makes every sync a no-op — the served policy frozen for a
 whole RL run while the training loss moves normally. ``--mode`` picks the policy, and with it the server:
 
-    MoE (Qwen3-30B-A3B, ``VLLM_SERVER_URL``, two ranks, 2 GPUs of >=140 GB):
+    MoE (Qwen3-30B-A3B, ``VLLM_SERVER_URL``, two ranks unless noted, GPUs of >=140 GB):
     full_ep2            full fine-tune at ``ep_size=2`` — the EP expert gather into the engine
     lora_ep2            attention PEFT under EP — the sync's fold → strip
     expert_lora_ep2     native grouped expert LoRA — the ``merge_lora=True`` fold in the expert gather,
                         the only route an expert adapter has into the engine
     lora_etp2           attention PEFT at ``ep_size=1, expert_tp_size=2``, plus the config-time refusal
                         of native expert LoRA under expert TP
+    full_ep1            full fine-tune at ``ep_size=1``, the experts DTensors in the FSDP2 shard
+    full_ep1_unsharded  the same with ``fsdp_shard_ep1_experts=False``: whole, FSDP-ignored experts
+    full_ep2_tp2        EP with attention TP: DTensor attention beside plain expert tensors
+    full_ep2_dp2        four ranks, two EP groups in one NVLink domain (the deferred replica sweep)
+    full_ep2x2dom       four ranks, one EP group per simulated two-GPU NVLink domain
+    full_ep2_etp2       four ranks, EP x expert TP: each rank a slice of half the experts
 
     dense (Qwen3-0.6B, ``HALO_TEST_VLLM_DENSE_SERVER_URL``, two ranks):
     full_tp2            full fine-tune at ``tp_size=2`` — the sync gathers DTensor shards
@@ -20,6 +26,9 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
     lora_tp2_rejected   ``tp_size=2`` + attention LoRA must raise at construction, naming TP
     full_fsdp_kl        full fine-tune under plain FSDP2 DP at ``beta=0.01`` — TRL scores the KL against the
                         frozen reference the trainer hands it
+    full_fsdp_zero3     full fine-tune under FSDP2 FULL_SHARD (``fsdp_reshard_after_forward``)
+    full_tp2_dp2        four ranks, TP x DP
+    full_hsdp           four ranks, HSDP over two simulated NVLink domains of two
 
     one process, no FSDP wrap (Qwen3-0.6B, the first ``--servers`` URLs of ``HALO_TEST_VLLM_SERVER_URLS``):
     full_world1, lora_world1   ``--trainer environmental`` runs the ReAct math environment through
@@ -29,7 +38,10 @@ whole RL run while the training loss moves normally. ``--mode`` picks the policy
                         cold rounds, pop a prefetched round on every later step, and score the IS
                         log-ratio on every step
 
-``--resume`` (two-rank modes only) drives the two-phase resume invariant: the checkpoint's weights must generate
+Each row also reads its layout's data-parallel half off the trained policy (``record_dp_layout``): FULL_SHARD
+resharding after a forward, where ep1 experts live, the HSDP mesh, the EP groups' expert replicas in step.
+
+``--resume`` (multi-rank modes only) drives the two-phase resume invariant: the checkpoint's weights must generate
 the first resumed rollout. Each server must serve the SAME checkpoint the row trains, with ``--moe-backend triton``
 for MoE, on a GPU outside ``CUDA_VISIBLE_DEVICES`` (a rank cannot NCCL broadcast to itself).
 
@@ -48,6 +60,7 @@ from halo.env import env_str
 from tests.common.env_grpo_e2e import run_env_grpo_e2e
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.models import QWEN3_0_6B, QWEN3_30B_A3B
+from tests.common.on_policy_e2e import PolicyLayout
 from tests.common.online_grpo_e2e import MODES, modes_for, run_online_grpo_e2e
 from tests.common.ports import free_port
 from tests.common.rank_log import log
@@ -113,7 +126,7 @@ def _run_one_process(ctx) -> dict:
             backend="vllm",
             server_url=servers[0],
             group_port=free_port(),
-            ep_size=1,
+            layout=PolicyLayout(),
             peft=MODES[ARGS.mode].adapter,
             model_name=DENSE_MODEL,
             environment_type="react_math",
@@ -133,7 +146,7 @@ def _run_one_process(ctx) -> dict:
     return {**result, "checks": checks | result["checks"]}
 
 
-@gpu_test_main(exact_world_size=1 if POLICY == "world1" else 2, prefix=f"online_grpo_vllm_{POLICY}_e2e")
+@gpu_test_main(exact_world_size=MODES[ARGS.mode].world_size, prefix=f"online_grpo_vllm_{POLICY}_e2e")
 def run(ctx) -> dict:
     if POLICY == "world1":
         return _run_one_process(ctx)

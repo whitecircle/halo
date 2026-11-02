@@ -21,6 +21,7 @@ closes holds its trainer-side port for the life of the process.
 
 import math
 import os
+from dataclasses import dataclass
 
 import requests
 import torch
@@ -44,7 +45,8 @@ from tests.common.adapters import (
     snapshot_adapters,
     unwrap,
 )
-from tests.common.ep_reference import ep_layers
+from tests.common.dp_layout import dp_layout_checks, probe_forward
+from tests.common.ep_reference import ep_layers, named_router_weights
 from tests.common.numerics import max_or_nan
 from tests.common.optimizer_state import optimizer_state_matches
 from tests.common.rank_log import log
@@ -74,8 +76,6 @@ ADAPTER_PERTURBATION = 0.05
 # Attention sinks move by a whole logit: they enter softmax alongside the attention scores, so a
 # change small against those is invisible in the served logprobs the sink round compares.
 SINK_PERTURBATION = 1.0
-# Tokens in the throwaway forward that puts the FSDP2 modules back in their end-of-step state.
-UNSHARD_FORWARD_TOKENS = 8
 
 _QA_PAIRS = (
     ("What is 2 + 2?", "4"),
@@ -158,10 +158,48 @@ def record_served_baseline(server_url: str, model_name: str, checks: dict[str, b
     return baseline
 
 
-def fresh_parallelism_config(ep_size: int, tp_size: int = 1, expert_tp_size: int = 1) -> ParallelismConfig:
-    """A fresh config per phase: ``ep_config`` caches the ``EPConfig`` it builds, so a resumed
-    phase reusing phase 1's object would rebuild its model against phase 1's expert groups."""
-    return ParallelismConfig(ep_size=ep_size, tp_size=tp_size, expert_tp_size=expert_tp_size)
+@dataclass(frozen=True)
+class PolicyLayout:
+    """The parallel shape an on-policy row trains its policy under.
+
+    The model axes (``ep_size``, ``tp_size``, ``expert_tp_size``); FSDP2 FULL_SHARD (``reshard_after_forward``)
+    and whether ep1 experts join its shards (``shard_ep1_experts``); HSDP; the fp32 router and expert masters;
+    and ``gpus_per_node``, which simulates NVLink domains of that width on one host (0: the launch's own).
+    """
+
+    ep_size: int = 1
+    tp_size: int = 1
+    expert_tp_size: int = 1
+    reshard_after_forward: bool = False
+    shard_ep1_experts: bool = True
+    use_hsdp: bool = False
+    gpus_per_node: int = 0
+    fp32_router: bool = False
+    fp32_experts: bool = False
+
+    def config_fields(self) -> dict[str, object]:
+        """The ``ParallelismConfig`` fields this layout requests."""
+        return {
+            "ep_size": self.ep_size,
+            "tp_size": self.tp_size,
+            "expert_tp_size": self.expert_tp_size,
+            "fsdp_reshard_after_forward": self.reshard_after_forward,
+            "fsdp_shard_ep1_experts": self.shard_ep1_experts,
+            "use_hsdp": self.use_hsdp,
+            "gpus_per_node": self.gpus_per_node,
+            "ep_fp32_router": self.fp32_router,
+            "ep_fp32_experts": self.fp32_experts,
+        }
+
+    def parallelism_config(self) -> ParallelismConfig:
+        """A fresh config per phase: ``ep_config`` caches the ``EPConfig`` it builds, so a resumed phase
+        reusing phase 1's object would rebuild its model against phase 1's expert groups."""
+        return ParallelismConfig(**self.config_fields())
+
+    @property
+    def replicates_experts(self) -> bool:
+        """The experts are replicated on every rank (no EP, no expert TP)."""
+        return self.ep_size == 1 and self.expert_tp_size == 1
 
 
 def expert_lora_under_etp_refusal(expert_tp_size: int) -> str:
@@ -217,8 +255,8 @@ def load_policy(
     return model, peft_config
 
 
-def parallelism_engaged(trainer, ep_size: int, tp_size: int, expert_tp_size: int) -> bool:
-    """Whether every requested axis is realized on the built model, not merely requested.
+def parallelism_engaged(trainer, layout: PolicyLayout) -> bool:
+    """Whether every model axis ``layout`` requests is realized on the built model, not merely requested.
 
     The modes are told apart by what the model is: an ignored size would otherwise let a row re-run
     the ep1 path and pass. Conjunctive rather than first-match, since a 4-rank row asks for two axes
@@ -227,19 +265,19 @@ def parallelism_engaged(trainer, ep_size: int, tp_size: int, expert_tp_size: int
     """
     config = trainer.parallelism_config
     realized = []
-    if tp_size > 1:
+    if layout.tp_size > 1:
         # Toolkit TP shards attention into DTensors; the config alone would not prove it was applied.
         realized.append(config.is_tp_mode and any(isinstance(p.data, DTensor) for p in trainer.model.parameters()))
-    if expert_tp_size > 1:
+    if layout.expert_tp_size > 1:
         # Only the layers' own expert-TP width separates a sharded expert FFN from a replicated one.
         realized.append(
             config.is_expert_tp_mode
-            and any(getattr(layer, "expert_tp_size", 1) == expert_tp_size for layer in ep_layers(trainer.model))
+            and any(getattr(layer, "expert_tp_size", 1) == layout.expert_tp_size for layer in ep_layers(trainer.model))
         )
-    if ep_size > 1:
-        realized.append(trainer._ep_config is not None and trainer._ep_config.ep_size == ep_size)
+    if layout.ep_size > 1:
+        realized.append(trainer._ep_config is not None and trainer._ep_config.ep_size == layout.ep_size)
     if not realized:
-        # ep1 keeps experts in the FSDP2 shard (fsdp_shard_ep1_experts), so they are DTensors.
+        # FSDP2 shards the rest of the policy (ep1 experts included, under fsdp_shard_ep1_experts) into DTensors.
         return any(isinstance(p.data, DTensor) for p in trainer.model.parameters())
     return all(realized)
 
@@ -263,7 +301,7 @@ def _perturbation_targets(model, adapter: str | None) -> tuple[str, list[torch.n
     """``(stream, tensors to move, how many of that stream they carry)``.
 
     Handles rather than an in-place walk, because they are taken while the model is resharded and
-    written through after :func:`_unshard_with_a_forward` (see :func:`perturbation_round`).
+    written through after a :func:`~tests.common.dp_layout.probe_forward` (see :func:`perturbation_round`).
     """
     if adapter is not None:
         adapters = [param for _, param in _adapter_b_params(model)]
@@ -298,18 +336,6 @@ def _apply_perturbation(targets: list[torch.nn.Parameter], adapter: str | None) 
                 param.mul_(WEIGHT_PERTURBATION)
             else:
                 param.add_(ADAPTER_PERTURBATION)
-
-
-def _unshard_with_a_forward(model, device: torch.device) -> None:
-    """One tiny no-grad forward, to leave the FSDP2 modules holding their transient unsharded params.
-
-    That is the state every training step ends in and the state the next step's weight sync reads,
-    and it makes the sync check discriminating: the perturbation is written through handles onto the
-    shards, so a sync that forwards the registered params instead of resharding first ships the
-    pre-perturbation copy and the served policy does not move.
-    """
-    with torch.no_grad():
-        model(input_ids=torch.ones(1, UNSHARD_FORWARD_TOKENS, dtype=torch.long, device=device))
 
 
 def frozen_base_weights(model) -> dict[str, torch.Tensor]:
@@ -356,7 +382,10 @@ def perturbation_round(
     reshard_fsdp2_modules(unwrap(model))
     what, targets, stream_count = _perturbation_targets(model, adapter)
     base = frozen_base_weights(model) if adapter is not None and check_base_untouched else {}
-    _unshard_with_a_forward(model, ctx.device)
+    # The state every training step ends in and the next step's sync reads: the forward leaves the FSDP2
+    # modules holding transient unsharded params, so a sync that forwards those instead of resharding first
+    # ships the pre-perturbation copy and the served policy does not move.
+    probe_forward(model, ctx.device)
     _apply_perturbation(targets, adapter)
     # Guard on the number that can go missing: a full fine-tune of a MoE policy has to move expert
     # tensors, and zero of them means no EP layer carried any, so the served-policy check would rest
@@ -413,7 +442,7 @@ def expert_round(ctx, model, *, server_url: str, model_name: str, push, checks: 
     checks["expert_perturbation_engaged"] = bool(experts)
     if not experts:
         return False
-    _unshard_with_a_forward(model, ctx.device)
+    probe_forward(model, ctx.device)
     _apply_perturbation(experts, None)
     _push_moves_served_policy(
         ctx,
@@ -559,8 +588,41 @@ def record_optimizer_restore(checks: dict[str, bool], saved: dict, restored: dic
         log(f"  optimizer state was NOT continued: {detail}")
 
 
-def record_parallelism_engaged(ctx, trainer, ep_size: int, tp_size: int, expert_tp_size: int, checks: dict) -> None:
+def record_parallelism_engaged(ctx, trainer, layout: PolicyLayout, checks: dict) -> None:
     """Record :func:`parallelism_engaged` in ``checks``; a single process shards nothing, so it has no axis to realize."""
     if ctx.world_size > 1:
-        checks["parallelism_engaged"] = parallelism_engaged(trainer, ep_size, tp_size, expert_tp_size)
+        checks["parallelism_engaged"] = parallelism_engaged(trainer, layout)
         log(f"  parallelism engaged: {checks['parallelism_engaged']}")
+
+
+def _fp32_master_checks(model, layout: PolicyLayout) -> dict[str, bool]:
+    """The fp32 router and expert masters the layout asks for are still fp32 after the run's optimizer steps."""
+    checks = {}
+    if layout.fp32_router:
+        routers = named_router_weights(model)
+        checks["router_masters_fp32"] = bool(routers) and all(p.dtype == torch.float32 for _, p in routers)
+    if layout.fp32_experts:
+        experts = [param for layer in ep_layers(model) for _, param in layer.expert_named_params()]
+        checks["expert_masters_fp32"] = bool(experts) and all(p.dtype == torch.float32 for p in experts)
+    if checks:
+        log(f"  fp32 masters: {checks}")
+    return checks
+
+
+def record_dp_layout(ctx, trainer, layout: PolicyLayout, checks: dict) -> None:
+    """The data-parallel half of ``layout``, read off the trained policy (:mod:`tests.common.dp_layout`).
+
+    FULL_SHARD resharding every group below the root after a forward; ep1 experts where
+    ``fsdp_shard_ep1_experts`` puts them; HSDP's mesh and its replicas in step; several EP groups' expert
+    replicas in step; TP params over their DP replicas; the fp32 masters still fp32. Collective (the forward,
+    the replica gathers): every rank runs it, after ``train()``.
+    """
+    model = unwrap(trainer.model)
+    checks |= dp_layout_checks(
+        model,
+        layout.config_fields(),
+        world_size=ctx.world_size,
+        ep_config=trainer._ep_config,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
+    checks |= _fp32_master_checks(model, layout)

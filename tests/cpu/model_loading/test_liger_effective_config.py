@@ -36,6 +36,7 @@ from halo.models.attention.selection import validate_attn_implementation
 from halo.models.config_access import TOOLKIT_STAMP_PREFIX, config_model_types, config_sources, get_config_field
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from tests.common.liger_appliers import liger_applier
+from tests.common.prefix_lm import tiny_paligemma_config, tiny_paligemma_processor
 from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, TINY_QWEN3_VL_FAMILY, tiny_family_model
 
 # Every stamp the loader writes on the config before ``from_pretrained``.
@@ -170,6 +171,34 @@ def test_an_upstream_applier_gets_cross_entropy_off_and_the_scoped_patch(monkeyp
     assert applied["cross_entropy"] is True
     assert applier.calls[0]["cross_entropy"] is False
     assert F.cross_entropy is _TORCH_CROSS_ENTROPY
+
+
+def test_a_prefix_lm_never_gets_the_fused_loss(monkeypatch, caplog):
+    """Upstream's PaliGemma fused forward replaces the wrapper's own, the one that builds the prefix-LM mask from
+    ``token_type_ids``. A request is forced off with a warning at both application sites (the load and the trainer's
+    re-sanitize), and the cross-entropy kernel keeps the loss."""
+    applier = _RecordingApplier()
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "paligemma", applier)
+    config = tiny_paligemma_config(tiny_paligemma_processor())
+    request = {"fused_linear_cross_entropy": True}
+    original = loss_utils.nn
+    try:
+        with caplog.at_level(logging.WARNING, logger="halo.model_loading.liger.dispatch"):
+            applied = dispatch.apply_liger_kernel(config, request)
+    finally:
+        loss_utils.nn = original
+    assert applier.calls[0]["fused_linear_cross_entropy"] is False
+    assert applied["fused_linear_cross_entropy"] is False and applied["cross_entropy"] is True
+    assert any("prefix LM" in record.getMessage() for record in caplog.records)
+    resanitized = dispatch.sanitize_liger_config(request, needs_ep_layers=False, model_config=config)
+    assert resanitized["fused_linear_cross_entropy"] is False
+
+    # Anti-vacuity: the same applier and request on a model that is no prefix LM fuse the head.
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "family_upstream_covers", applier)
+    applied = dispatch.apply_liger_kernel(
+        types.SimpleNamespace(model_type="family_upstream_covers", text_config=None), request
+    )
+    assert applied["fused_linear_cross_entropy"] is True and applier.calls[1]["fused_linear_cross_entropy"] is True
 
 
 def test_per_model_defaults_recorded_as_effective(monkeypatch):

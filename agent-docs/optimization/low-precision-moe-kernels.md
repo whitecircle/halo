@@ -18,9 +18,9 @@ The `lowp_*` keys build one `LowpSpec` (`halo/kernels/lowp/spec.py`), carried as
 
 The apply step is `apply_lowp_compute(model, lowp, *, expert_weight_cacheable)` (`halo/model_loading/parallel/lowp_compute.py`), called pre-FSDP in `load_distributed_model`: it converts the dense MLP `gate_proj`/`up_proj`/`down_proj` (attention, embeddings, `lm_head`, and norms stay bf16) and sets each EP layer's expert quant format (`set_lowp_compute`) per `lowp_apply_*`. `lowp_keep_first_blocks` / `lowp_keep_last_blocks` exempt whole blocks, counted over the text backbone only so a vision tower's `layers.N` is not miscounted.
 
-**The dense conversion is in place, not a rebuild.** `LowPrecisionLinear.convert_` (`halo/kernels/lowp/linear.py`) retypes the existing `nn.Linear` (`linear.__class__ = cls`) and attaches one attribute.
+**The dense conversion is in place, not a rebuild.** `LowPrecisionLinear.convert_` (`halo/kernels/lowp/linear.py`) retypes the existing `nn.Linear` (`linear.__class__ = cls`) and attaches one attribute, so the module keeps the DTensor parameters and the `_is_hooked` marker tensor parallelism attached to it.
 
-It must not construct a replacement: HF-native tensor parallelism carries its semantics in state attached to the module — an instance-level `module.forward` holding the DTensor redistributes that *are* Colwise's and Rowwise's collectives, a full backward hook for the replicated-grad all-reduce, and the `_is_hooked` marker — so a rebuilt module silently drops them and the model trains on unsynced partial sums.
+Under TP a projection also carries an instance-level `forward`: the [local-shard forward](../parallelism/tensor-parallelism.md#local-shard-linears) that runs Colwise's and Rowwise's collectives as explicit c10d calls. It would shadow the retyped class's `forward` and keep the module computing in bf16, so `convert_` refuses a module that still carries one, and `apply_lowp_compute` strips it, retypes, and re-installs it around the low-precision matmul (transformers' own forward for a style the local-shard path does not cover). An instance-level `forward` that is not a TP-plan style raises.
 
 ## Why bf16 wins
 

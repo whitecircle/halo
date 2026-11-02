@@ -8,7 +8,7 @@ tier and the image build scripts import.
 
 import shutil
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import torch
@@ -95,6 +95,7 @@ from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextPLELaye
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
 from halo.models.param_roles import fp32_pinned_names
 from halo.models.seq_cls_heads import Gemma4TextForSequenceClassification
 from tests.common.distributed import shared_scratch_dir
@@ -498,6 +499,18 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         ulysses_cp=False,
     ),
 }
+
+
+def _flex_wide_heads(family: TinyFamily) -> TinyFamily:
+    """``family`` with its heads :data:`FLEX_MIN_HEAD_DIM` wide, the narrowest FlexAttention runs."""
+    return replace(family, text_overrides={**family.text_overrides, "head_dim": FLEX_MIN_HEAD_DIM})
+
+
+# The roster's tiny Gemma 4 with its sliding heads as wide as FlexAttention runs (its 8 keeps SDPA): a CUDA load
+# builds Gemma 4 on ``sdpa`` as the flex-sliding variant, as it does a released one, so a suite that means its
+# sliding layers to run FlexAttention takes these models.
+TINY_GEMMA4_TEXT_FLEX_FAMILY = _flex_wide_heads(TINY_MOE_FAMILIES["gemma4_text"])
+TINY_GEMMA4_FLEX_FAMILY = _flex_wide_heads(TINY_MOE_VLM_FAMILIES["gemma4"])
 # Dense models with sliding-window layers, keyed by ``model_type``: a window on the config alone (Mistral), NoPE
 # full layers (Cohere2), q/k norm over the whole projection (OLMo 3).
 TINY_SLIDING_DENSE_FAMILIES: dict[str, TinyFamily] = {

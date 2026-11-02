@@ -7,10 +7,6 @@ family (:func:`main`) and reports through one ``FINDINGS:`` line. :func:`run_sch
 over a stage group, on those kernels over gloo or on a device's own flash kernels.
 """
 
-# The device-aware kernel-dispatch shim must land before the modeling modules bind transformers' hub-kernel
-# fallback factory at import, or a CPU forward reaches the CUDA-only kernels.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 import contextlib
 import copy
 import functools

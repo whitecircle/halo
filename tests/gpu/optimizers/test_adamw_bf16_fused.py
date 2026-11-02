@@ -21,9 +21,14 @@ Checks, each on both ranks:
    (399 aligned tensors, two launches), at 64 ranks (147 aligned, 252 not: the 2-element q/k norm shards move every
    later grad of a layer off the 8-element boundary) and 180 of its layers at 32 ranks (1980 tensors in nine
    launches, its 4-element norm shards unaligned).
+7. queue: where one launch steps many tensors (sm_100/103), the host gets ahead of the stream on the fused step at
+   every scale shape; a step it cannot get ahead of blocks the host, as a synchronizing copy would.
 
 Metrics: host ms per step at 400 params, and the GPU ms of one step at each scale shape, fused against
-per-parameter launches, with the launches queued back to back so host overhead stays out of the GPU figure.
+per-parameter launches, with the launches queued back to back so host overhead stays out of the GPU figure. A step
+issuing more launches than the CUDA launch queue holds (the per-parameter step over 1980 tensors, and the fused one
+where it launches one parameter at a time) cannot be queued whole; it is timed as it runs, host launch gaps
+included, under a ``_host_bound`` key.
 
 Run: torchrun --nproc_per_node=2 tests/gpu/optimizers/test_adamw_bf16_fused.py
 """
@@ -37,7 +42,7 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.fsdp import fully_shard
 
-from halo.optimizers.adamw_bf16 import AdamWBF16
+from halo.optimizers.adamw_bf16 import AdamWBF16, _tensors_per_launch
 from halo.runtime.dtensor import to_local
 from tests.common.adamw_bf16_reference import PerParameterAdamWBF16, fused_kernel_mismatches
 from tests.common.device_step_skip import adamw_bf16_builder, device_skip_mismatches
@@ -75,7 +80,16 @@ _QWEN3_8B_LAYER = (
     (4096,),
 )
 _QWEN3_8B_VOCAB = 151936
+# Each scale shape: its world size, decoder layers, and whether the embedding, head and final norm unit is included.
+_SCALE_SHAPES = {
+    "qwen3_8b_fsdp8": (8, 36, True),
+    "qwen3_8b_fsdp64": (64, 36, True),
+    "qwen3_8b_180_layers_fsdp32": (32, 180, False),
+}
 _GPU_TIMING_REPS = 5
+# How many times over a sleep must outlast a step's own unslept enqueue before a host still finishing after it is
+# taken to be held by a full launch queue rather than by too short a sleep.
+_SLEEP_PAST_ENQUEUE = 4
 
 
 def _named_params(device: str) -> list[tuple[str, nn.Parameter]]:
@@ -253,29 +267,54 @@ def _scale_case(units: list[list[tuple[int, ...]]]) -> tuple[AdamWBF16, PerParam
     return optimizers[0], optimizers[1]
 
 
-def _gpu_ms_per_step(optimizer: torch.optim.Optimizer) -> float:
-    """Median GPU time of one ``optimizer.step()``. A sleep holds the stream while the host enqueues the step, so
-    the step's launches and copies run back to back; a sleep that ends first is lengthened and the rep redone."""
-    times, cycles = [], 1 << 27
+def _timed_step(optimizer: torch.optim.Optimizer, sleep_cycles: int) -> tuple[float, bool, float]:
+    """One ``optimizer.step()`` behind a ``sleep_cycles`` sleep on the stream (none at 0): its GPU ms, whether the
+    host finished enqueueing it before the stream reached it, and the sleep's own GPU ms."""
+    torch.cuda.synchronize()
+    slept, start, end = (torch.cuda.Event(enable_timing=True) for _ in range(3))
+    slept.record()
+    if sleep_cycles:
+        torch.cuda._sleep(sleep_cycles)
+    start.record()
+    optimizer.step()
+    end.record()
+    ahead = not start.query()
+    end.synchronize()
+    return start.elapsed_time(end), ahead, slept.elapsed_time(start)
+
+
+def _gpu_ms_per_step(optimizer: torch.optim.Optimizer) -> tuple[float, bool]:
+    """Median GPU time of one ``optimizer.step()``, and whether its launches ran back to back.
+
+    A sleep holds the stream while the host enqueues the step, so its launches and copies run back to back; a sleep
+    that ends first is lengthened and the rep redone. A step issuing more launches than the CUDA launch queue holds
+    blocks the host until the stream drains, however long the sleep: when, before any rep got ahead, two reps in a
+    row outlast the step's unslept enqueue :data:`_SLEEP_PAST_ENQUEUE` times over and the host still finishes after
+    them, the step is timed without the sleep, its host launch gaps included.
+    """
+    torch.cuda.synchronize()
+    begin = time.perf_counter()
+    optimizer.step()
+    enqueue_ms = (time.perf_counter() - begin) * 1e3
+    times, cycles, held = [], 1 << 27, 0
     while len(times) < _GPU_TIMING_REPS:
-        torch.cuda.synchronize()
-        start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
-        torch.cuda._sleep(cycles)
-        start.record()
-        optimizer.step()
-        end.record()
-        if start.query():
-            cycles *= 2
-            assert cycles < 1 << 36, "the host never got ahead of the stream"
+        ms, ahead, slept_ms = _timed_step(optimizer, cycles)
+        if ahead:
+            times.append(ms)
             continue
-        end.synchronize()
-        times.append(start.elapsed_time(end))
-    return statistics.median(times)
+        held = held + 1 if not times and slept_ms > _SLEEP_PAST_ENQUEUE * enqueue_ms else 0
+        if held == 2:
+            unslept = [_timed_step(optimizer, 0)[0] for _ in range(_GPU_TIMING_REPS)]
+            return statistics.median(unslept), False
+        cycles *= 2
+        assert cycles < 1 << 36, f"the host never got ahead of a {slept_ms:.0f} ms sleep"
+    return statistics.median(times), True
 
 
 def _scale_mismatches(label: str, units: list[list[tuple[int, ...]]], metrics: dict) -> list[str]:
-    """Two steps of the fused and oracle optimizers over ``units`` compared bit for bit, then each one's GPU step
-    time recorded under ``label``."""
+    """Two steps of the fused and oracle optimizers over ``units`` compared bit for bit and, where they match, each
+    one's GPU step time recorded under ``label``: ``gpu_ms_per_step_*`` for launches that ran back to back,
+    ``*_host_bound`` for a step the launch queue held the host on, the ratio only where both ran back to back."""
     fused, oracle = _scale_case(units)
     params_f, params_o = fused.param_groups[0]["params"], oracle.param_groups[0]["params"]
     found = []
@@ -283,21 +322,34 @@ def _scale_mismatches(label: str, units: list[list[tuple[int, ...]]], metrics: d
         fused.step()
         oracle.step()
         found += _state_mismatches(fused, oracle, params_f, params_o, f"{label} step {step}")
-    for name, optimizer in (("fused", fused), ("per_parameter", oracle)):
-        metrics[f"gpu_ms_per_step_{label}_{name}"] = _gpu_ms_per_step(optimizer)
-    metrics[f"gpu_time_ratio_{label}"] = (
-        metrics[f"gpu_ms_per_step_{label}_fused"] / metrics[f"gpu_ms_per_step_{label}_per_parameter"]
-    )
+    if not found:
+        back_to_back = {}
+        for name, optimizer in (("fused", fused), ("per_parameter", oracle)):
+            ms, back_to_back[name] = _gpu_ms_per_step(optimizer)
+            metrics[f"gpu_ms_per_step_{label}_{name}{'' if back_to_back[name] else '_host_bound'}"] = ms
+        if all(back_to_back.values()):
+            metrics[f"gpu_time_ratio_{label}"] = (
+                metrics[f"gpu_ms_per_step_{label}_fused"] / metrics[f"gpu_ms_per_step_{label}_per_parameter"]
+            )
     del fused, oracle, params_f, params_o
     torch.cuda.empty_cache()
     return found
 
 
 def _check_scale_shapes(metrics: dict) -> None:
-    found = _scale_mismatches("qwen3_8b_fsdp8", _fsdp_shards(8, 36, embeddings=True), metrics)
-    found += _scale_mismatches("qwen3_8b_fsdp64", _fsdp_shards(64, 36, embeddings=True), metrics)
-    found += _scale_mismatches("qwen3_8b_180_layers_fsdp32", _fsdp_shards(32, 180, embeddings=False), metrics)
+    found = []
+    for label, (world, layers, embeddings) in _SCALE_SHAPES.items():
+        found += _scale_mismatches(label, _fsdp_shards(world, layers, embeddings=embeddings), metrics)
     assert not found, found[:20]
+
+
+def _check_fused_scale_steps_back_to_back(metrics: dict) -> None:
+    """Where one launch steps many tensors, the fused step is a few launches and pinned copies, so the host gets
+    ahead of the stream at every scale shape: one it does not means the step blocks the host."""
+    if _tensors_per_launch(torch.device("cuda", torch.cuda.current_device())) == 1:
+        return
+    unqueued = [label for label in _SCALE_SHAPES if f"gpu_ms_per_step_{label}_fused" not in metrics]
+    assert not unqueued, f"the fused step did not run back to back at {unqueued}"
 
 
 def _host_ms_per_step(optimizer_cls) -> float:
@@ -329,6 +381,7 @@ def run(ctx) -> dict:
         f"host_ms_per_step_{_TIMING_PARAMS}_params_per_parameter": _host_ms_per_step(PerParameterAdamWBF16),
     }
     record_check(checks, "scale_shapes_match", lambda: _check_scale_shapes(metrics))
+    record_check(checks, "fused_scale_steps_run_back_to_back", lambda: _check_fused_scale_steps_back_to_back(metrics))
     return {"checks": checks, "metrics": metrics}
 
 

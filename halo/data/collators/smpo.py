@@ -71,8 +71,7 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
         vision_features: dict[str, list[torch.Tensor]] = {}
         sequence_features: dict[str, list[torch.Tensor]] = {}
         for example in examples:
-            images = example.get("images") or []
-            encoded = run_vlm_processor(self.processor, example["prompt_text"], images)
+            encoded = run_vlm_processor(self.processor, example["prompt_text"], [example.get("images") or []])
             prompt_length = encoded["input_ids"].size(1) - example[PROMPT_OVERLAP_COLUMN]
 
             # run_vlm_processor tokenizes with add_special_tokens=False, so the BOS the tokenizer's

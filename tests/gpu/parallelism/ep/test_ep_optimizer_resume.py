@@ -56,13 +56,13 @@ from trl import SFTConfig
 import halo.checkpoint.parallel.optimizer as optimizer_store_mod
 from halo.checkpoint.parallel.optimizer_meta import OptimizerStateFingerprint
 from halo.checkpoint.reading import load_full_state_dict
-from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
+from tests.common.fp32_masters import fp32_master_groups
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import QWEN3_0_6B
@@ -211,20 +211,7 @@ def _trainable_weights(model) -> dict[str, torch.Tensor]:
 def _configured_master_checks(model, mode: str) -> dict[str, bool]:
     """Live parameter identities separate routers, experts and the remaining parameters; each group
     :data:`FP32_MASTER_GROUPS` names for ``mode`` must hold fp32 masters carrying more than bf16 precision."""
-    reshard_fsdp2_modules(model)
-    layers = list(named_ep_layers(model))
-    experts = {id(parameter) for _, layer in layers for _, parameter in layer.expert_named_params()}
-    routers = {
-        id(parameter)
-        for _, layer in layers
-        if (router := layer._live_router_module()) is not None
-        for parameter in router.parameters()
-    }
-    groups = {"expert": {}, "router": {}, "non_expert": {}}
-    for name, parameter in model.named_parameters():
-        if parameter.requires_grad:
-            group = "expert" if id(parameter) in experts else "router" if id(parameter) in routers else "non_expert"
-            groups[group][name] = parameter
+    groups = fp32_master_groups(model)
     expected = FP32_MASTER_GROUPS[mode]
     checks = {
         "master_parameter_groups_present": {group for group, parameters in groups.items() if parameters} == expected

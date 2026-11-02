@@ -31,6 +31,10 @@ from tests.common.repo import REPO_ROOT, load_script_module
 
 _TRAINING_DIR = REPO_ROOT / "scripts" / "training"
 
+# The run verdict's seam, and the preference scripts' form of it, which also reads the checkpoint config they refuse
+# a prefix LM on.
+_VLM_RUN_SEAMS = {"resolve_vlm_run", "resolve_preference_vlm_run"}
+
 # Every script whose data path branches on modality. One seam, not four copies of it.
 _DISPATCHING_SCRIPTS = [
     "sft.py",
@@ -361,7 +365,7 @@ def test_data_dispatch_goes_through_the_shared_seam(script):
     called = {
         node.func.id for node in ast.walk(tree) if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "resolve_vlm_run" in called, f"{script} decides its data path without the shared resolve_vlm_run seam"
+    assert called & _VLM_RUN_SEAMS, f"{script} decides its data path without the shared resolve_vlm_run seam"
 
 
 # Every script that loads a possibly-multimodal checkpoint through the modality-aware loader.
@@ -389,7 +393,7 @@ def test_every_model_load_takes_the_run_verdict(script):
         for node in ast.walk(tree)
         if isinstance(node, ast.Assign)
         and isinstance(node.value, ast.Call)
-        and getattr(node.value.func, "id", None) == "resolve_vlm_run"
+        and getattr(node.value.func, "id", None) in _VLM_RUN_SEAMS
         for target in node.targets
         if isinstance(target, ast.Name)
     }

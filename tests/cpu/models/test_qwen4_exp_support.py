@@ -57,8 +57,6 @@ def _config(**overrides) -> Qwen4ExpTextConfig:
 
 
 def _tiny_model(**overrides) -> PreTrainedModel:
-    """Built through the auto class, so the modeling module binds its hub kernels after the ``halo`` package init
-    installed the device-aware dispatch, as in a run."""
     torch.manual_seed(0)
     return AutoModelForCausalLM.from_config(_config(**overrides)).eval()
 

@@ -1,8 +1,9 @@
-"""Synthetic dataset generators shared across test files.
+"""Synthetic dataset generators, and one real-text source, shared across test files.
 
-One generator per task shape (SFT, preference, offline GRPO, VLM preference, benchmark corpus), plus
-the writer of a text-mode ``prepare_dataset`` artifact. A generator only one test needs, because its
-dataset shape is the subject of that test, stays inline in that file.
+One generator per task shape (SFT, preference, offline GRPO, VLM preference, benchmark corpus), the
+tree's own prose as token rows for a real-text score, plus the writer of a text-mode ``prepare_dataset``
+artifact. A generator only one test needs, because its dataset shape is the subject of that test, stays
+inline in that file.
 """
 
 import random
@@ -15,6 +16,7 @@ from PIL import Image, ImageDraw
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from tests.common.models import QWEN3_0_6B
+from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
 
 # The clock every synthetic dataset and fixed batch is rendered against. gpt-oss's harmony template stamps
@@ -388,6 +390,24 @@ def create_benchmark_dataset(tokenizer, seq_len: int, num_samples: int = 64, see
     return Dataset.from_dict(
         {"input_ids": rows, "attention_mask": [[1] * seq_len for _ in rows], "labels": [list(row) for row in rows]}
     )
+
+
+# Real text (the tree's own prose)
+
+
+def repository_text_rows(tokenizer, rows: int, length: int) -> list[list[int]]:
+    """``rows`` consecutive windows of ``length`` token ids over real English prose: the tree's ``agent-docs``
+    pages in path order, each tokenized without special tokens. Every process of one tree reads the same rows.
+
+    Raises:
+        ValueError: the pages hold fewer than ``rows * length`` tokens.
+    """
+    ids: list[int] = []
+    for page in sorted((REPO_ROOT / "agent-docs").rglob("*.md"), key=str):
+        ids += tokenizer(page.read_text(encoding="utf-8"), add_special_tokens=False)["input_ids"]
+        if len(ids) >= rows * length:
+            return [ids[row * length : (row + 1) * length] for row in range(rows)]
+    raise ValueError(f"agent-docs holds {len(ids)} tokens, fewer than {rows} rows of {length}")
 
 
 def digit_image(d: int, size: int = 64) -> Image.Image:

@@ -21,6 +21,7 @@ from halo.data.vlm_detection import dataset_declares_images, is_vlm_run, reject_
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import RUN_LOG_DIR_NAME
 from halo.model_loading.parallel.model_source import probe_checkpoint
+from halo.models.attention.prefix_lm import has_prefix_lm_attention
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 
@@ -118,6 +119,40 @@ def resolve_vlm_run(
             trust_remote_code=model_config.trust_remote_code,
         )
     return is_vlm_run(args, model_config.model_name_or_path, datasets, vlm_checkpoint=vlm_checkpoint)
+
+
+def reject_prefix_lm_image_preference(checkpoint_config, model_name_or_path: str, method: str) -> None:
+    """Refuse an image preference run on a prefix-LM checkpoint (PaliGemma), off the ``checkpoint_config``
+    :func:`probe_checkpoint` read (``None`` passes), before any weight loads.
+
+    Its decoder needs ``token_type_ids`` marking each completion as the causal suffix, and no vision preference
+    collator writes them: TRL's (DPO, KTO) calls the processor on the completions without images, which PaliGemma's
+    raises on, and SMPO's marks the whole row as prefix, so every completion would attend to its own next tokens.
+    """
+    if has_prefix_lm_attention(checkpoint_config):
+        raise ValueError(
+            f"{method} on image data cannot train {model_name_or_path!r} "
+            f"(model_type={checkpoint_config.model_type!r}): its decoder is a prefix LM, and the {method} vision "
+            f"collator marks no completion as the causal suffix in token_type_ids, so each completion would score "
+            f"with its own next tokens in view. Train it with SFT or distillation on images, or with {method} on "
+            f"text-only pairs."
+        )
+
+
+def resolve_preference_vlm_run(args, model_config, datasets, *, text_only_model: bool, method: str) -> bool:
+    """:func:`resolve_vlm_run` for a preference ``method``, off one checkpoint probe that also refuses an image run
+    on a prefix-LM checkpoint (:func:`reject_prefix_lm_image_preference`)."""
+    checkpoint_config, vlm_checkpoint = probe_checkpoint(
+        model_config.model_name_or_path,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    is_vlm = resolve_vlm_run(
+        args, model_config, datasets, text_only_model=text_only_model, vlm_checkpoint=vlm_checkpoint
+    )
+    if is_vlm:
+        reject_prefix_lm_image_preference(checkpoint_config, model_config.model_name_or_path, method)
+    return is_vlm
 
 
 def _write_decoded_samples(

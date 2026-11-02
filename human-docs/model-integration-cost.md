@@ -27,7 +27,7 @@ one import line in the family roster.
   Qwen3-Next reuses Qwen3.5-MoE's in 32, and Qwen3.8-Flash-Next reuses
   Qwen3-Next's in 17.
 - Every other EP layer file is 115 lines or fewer.
-- GPT-OSS is the outlier at 205, because of its interleaved, biased gate/up
+- GPT-OSS is the outlier at 197, because of its interleaved, biased gate/up
   weights and its own clamped SwiGLU compute.
 
 Context parallelism works the same way: one `UlyssesAttention` subclass in

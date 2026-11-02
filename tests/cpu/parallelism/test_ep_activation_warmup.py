@@ -8,31 +8,59 @@ call. Left cold it compiles BETWEEN the two collectives, while every peer of the
 barrier — whose budget bounds rank SKEW, not idle time.
 
 Asserted here: the warmup runs to completion before the first dispatch on a real dispatch group
-(``ep_size > 1``; at ``ep_size == 1`` the dispatcher is a no-op with no barrier to stall), exactly
-once per layer, in both grad modes AND with a real backward (the backward kernel is a separate
-compilation, built only when a grad is first requested), even when that first forward runs under
+(``ep_size > 1``), exactly once per layer, in both grad modes AND with a real backward (the backward kernel is a
+separate compilation, built only when a grad is first requested), even when that first forward runs under
 inference mode; it warms the routing-sort and permute kernels wherever the compute path runs them; the
-kernels take their row count unspecialized, so one warm count covers every dispatch size; and each family's own
-warm hook reaches the callable its compute path actually calls, with the operands that path produces.
+kernels take their row count unspecialized, so one warm count covers every dispatch size; every gather of the grouped
+compute, at any receive size, launches an index_select kernel the warm-up launched (index_select picks one of two by
+index length, and CUDA loads a kernel on its first launch); and each family's own warm hook reaches the callable its compute
+path actually calls, with the operands that path produces.
+
+The grouped GEMM warms at every ``ep_size`` (at ``ep_size == 1`` the dispatcher is a no-op and nothing else warms):
+torch's bf16 grouped GEMM picks one of two CUTLASS tiles by the rows per expert, so every grouped GEMM the expert
+compute of a real layer launches, forward and backward, over receives of one row per expert to past the switch,
+is a kernel class the warm-up launched, for GptOss's de-interleaved pair with biases, Qwen3's separate halves and
+Qwen3.5's fused pair, at ep1, ep2, pure expert TP and ep4 x etp2, with fp32 expert masters, expert LoRA and
+fake-quantized mxfp8, and after a first forward with the expert adapters off. The warm-up runs each of those GEMMs at
+one row per expert and at one past the switch, leaves the RNG its LoRA dropout draws from where it was, and leaves no
+gradient.
 
 Run: pytest tests/cpu/parallelism/test_ep_activation_warmup.py
 """
 
 import contextlib
+from collections import defaultdict
 
 import pytest
 import torch
 import torch.nn as nn
 from torch.utils.checkpoint import checkpoint
 
+from halo.distributed.expert_parallel.deepep.capacity import padded_wire_hidden
 from halo.distributed.expert_parallel.families import gpt_oss as gpt_oss_layer
 from halo.distributed.expert_parallel.moe_layer import compute
 from halo.distributed.expert_parallel.moe_layer.compute import _WARMUP_TOKENS
 from halo.kernels import fused_glu, moe_permute, moe_route_sort
 from halo.models.gradient_checkpointing import active_recompute_scope, scoped_checkpoint_func
 from tests.common.ep_stubs import StubEPLayerBase
+from tests.common.grouped_gemm_layers import (
+    GEMM_FAMILIES,
+    GEMM_LAYOUTS,
+    SWEPT_ROWS_PER_EXPERT,
+    gemm_layer,
+    routed_receive,
+)
+from tests.common.kernel_launches import GROUPED_MM_SMALL_TILE_DIM, INDEX_SELECT_SMALL_INDEX_ROWS, KernelLaunches
 
-HIDDEN, INTER, LOCAL_EXPERTS = 6, 4, 2
+# Widths whose fp32 rows span a multiple of 16 bytes, which the grouped GEMM requires of every operand.
+HIDDEN, INTER, LOCAL_EXPERTS = 8, 4, 2
+# Every expert layout in every rank layout, and each variant with a dispatch group.
+GEMM_CASES = (
+    *((family, layout, "defaults") for family in GEMM_FAMILIES for layout in GEMM_LAYOUTS),
+    *((family, "ep2", variant) for family in GEMM_FAMILIES for variant in ("fp32_experts", "expert_lora", "mxfp8")),
+)
+# (family, rank layout) of the grouped-GEMM check's negative controls.
+NEGATIVE_CONTROL_CASES = (("gpt_oss", "ep2"), ("qwen3_moe", "ep1"), ("qwen3_5_moe", "ep4_etp2"))
 
 
 class _RecordingDispatcher:
@@ -62,11 +90,19 @@ class _RecordingLayer(StubEPLayerBase):
         self._capture_routing = False
         self._activation_warmed = False
         self._use_grouped_mm = True
+        self._lowp_quant_format = None
+        self._lowp_weight_cacheable = True
+        self._expert_adapters_enabled = True
         self._perf = lambda _label: contextlib.nullcontext()
         self.gate_up_proj = nn.Parameter(torch.randn(LOCAL_EXPERTS, HIDDEN, 2 * INTER))
         self.down_proj = nn.Parameter(torch.randn(LOCAL_EXPERTS, INTER, HIDDEN))
         self.events: list[tuple] = []
         self.dispatcher = _RecordingDispatcher(self.events)
+
+    def _grouped_expert_ffn(self, sorted_tokens, offs, sorted_expert_ids, output_dtype):
+        """The real grouped FFN, logged with its rows per expert: only the warm-up calls it, the compute being stubbed."""
+        self.events.append(("warm_gemm", sorted_tokens.shape[0] // self.experts_per_rank))
+        return super()._grouped_expert_ffn(sorted_tokens, offs, sorted_expert_ids, output_dtype)
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         self.events.append(("warm", tuple(gate_up.shape), torch.is_grad_enabled()))
@@ -98,6 +134,7 @@ def test_activation_is_warmed_before_the_first_dispatch():
     dispatch = names.index("dispatch")
     warms = [index for index, name in enumerate(names) if name.startswith("warm")]
     assert warms and max(warms) < dispatch, "the warmup must finish before the dispatch"
+    assert "warm_gemm" in names, "the grouped GEMM must warm too"
     assert names[-3:] == ["dispatch", "compute", "combine"]
 
 
@@ -136,10 +173,25 @@ def test_warmup_backward_leaves_no_gradient_on_expert_params():
     assert layer.down_proj.grad is None
 
 
-def test_no_dispatch_group_means_no_warmup():
-    """``ep_size == 1`` runs the no-op dispatcher: no barrier to stall, so the warmup would only
-    move the same compilation earlier."""
+def test_without_a_dispatch_group_only_the_grouped_gemm_warms():
+    """``ep_size == 1`` runs the no-op dispatcher, with no barrier for a cold activation, sort or permute kernel to
+    stall. The grouped GEMM still warms, at one row per expert and at one past the tile switch: which tile a step runs
+    follows its rows per expert, so a rank could load one in any step and hold up the next collective."""
     layer = _RecordingLayer(ep_size=1)
+    _run_forward(layer)
+    assert layer.events == [
+        ("warm_gemm", 1),
+        ("warm_gemm", GROUPED_MM_SMALL_TILE_DIM + 1),
+        ("dispatch",),
+        ("compute",),
+        ("combine",),
+    ]
+
+
+def test_the_per_expert_loop_without_a_dispatch_group_warms_nothing():
+    """At ``ep_size == 1`` the per-expert loop runs no grouped GEMM and has no barrier: nothing to warm."""
+    layer = _RecordingLayer(ep_size=1)
+    layer._use_grouped_mm = False
     _run_forward(layer)
     assert [event[0] for event in layer.events] == ["dispatch", "compute", "combine"]
 
@@ -241,6 +293,173 @@ def test_a_first_forward_under_inference_mode_warms_every_kernel(monkeypatch):
     layer.events.clear()
     _run_forward(layer)
     assert [event[0] for event in layer.events] == ["dispatch", "compute", "combine"]
+
+
+def _gather_kernels(top_k: int, local_slots: int) -> set[tuple]:
+    """The kernels the grouped compute's gathers launch for a receive of ``local_slots`` local slots over rows of
+    ``top_k``: the permute's at bf16 off the padded receive's row-strided view, and the expert-bias gather's at bf16 and
+    at fp32 masters."""
+    rows = -(-local_slots // top_k)
+    tokens = torch.zeros(rows, padded_wire_hidden(HIDDEN), dtype=torch.bfloat16)[:, :HIDDEN]
+    token_idx = torch.arange(local_slots) % rows
+    inv_map = torch.zeros(rows, top_k, dtype=torch.long)
+    expert_ids = torch.arange(local_slots) % LOCAL_EXPERTS
+    biases = [torch.zeros(LOCAL_EXPERTS, HIDDEN, dtype=dtype) for dtype in (torch.bfloat16, torch.float32)]
+    with KernelLaunches() as launches:
+        moe_permute.MoEGatherPermute.apply(tokens, token_idx, inv_map)
+        for bias in biases:
+            moe_permute.MoEExpertBiasGather.apply(bias, expert_ids)
+    return launches.kernels
+
+
+def _gathers_left_cold(top_k: int) -> set[tuple]:
+    """The kernels the grouped compute's gathers launch, over receives of one local slot to past the index_select
+    cut-off, that the permute warm-up at ``top_k`` did not."""
+    with KernelLaunches() as warm:
+        moe_permute.warm_permute_kernels(_WARMUP_TOKENS, HIDDEN, top_k, torch.device("cpu"), torch.bfloat16)
+    slots = range(1, 2 * INDEX_SELECT_SMALL_INDEX_ROWS + 2)
+    return set().union(*(_gather_kernels(top_k, local_slots) for local_slots in slots)) - warm.kernels
+
+
+@pytest.mark.parametrize("top_k", (1, 4, 8))
+def test_every_gather_of_the_grouped_compute_launches_a_kernel_the_warm_up_launched(top_k):
+    """index_select reads an index of up to 16 rows with a kernel of its own, and a gather's index is as long as the
+    receive's local slots, which the routing sets: from one slot to past the cut-off, the permute's gather of bf16
+    tokens and GptOss's expert-bias gather (bf16, or fp32 masters under ``fp32_experts``) launch only kernels the
+    permute warm-up launched, at ``top_k`` 1 too, where the warm-up's own permute reads exactly 16 rows."""
+    assert _gathers_left_cold(top_k) == set()
+
+
+@pytest.mark.parametrize("top_k", (1, 4))
+def test_the_gather_check_fails_its_negative_control(monkeypatch, top_k):
+    """The warm-up without its index_select launches: at ``top_k`` 4 its permute reads 64 rows and leaves the
+    small-index kernel cold, at ``top_k`` 1 it reads 16 and leaves the long-index one cold, and fp32 cold at both."""
+    monkeypatch.setattr(moe_permute, "_warm_index_select", lambda *args: None)
+    cold = _gathers_left_cold(top_k)
+    path = "small, rank 2" if top_k > 1 else "gather"
+    assert ("index_select", torch.bfloat16, torch.int64, path) in cold, cold
+    assert any(kernel[1] == torch.float32 for kernel in cold), cold
+
+
+def _warm_up_launches(layer) -> KernelLaunches:
+    """The kernels ``layer``'s warm-up launches."""
+    with KernelLaunches() as launches:
+        layer._warm_activation_graphs(torch.device("cpu"), torch.bfloat16, layer.hidden_dim, layer.top_k)
+    return launches
+
+
+def _compute_gemm_kernels(layer) -> set[tuple]:
+    """The grouped-GEMM kernel classes ``layer``'s expert compute launches, forward and backward, over receives of
+    :data:`SWEPT_ROWS_PER_EXPERT` local slots per local expert."""
+    with KernelLaunches() as launches:
+        for rows_per_expert in SWEPT_ROWS_PER_EXPERT:
+            tokens, experts, weights, counts = routed_receive(layer, rows_per_expert)
+            out = layer._compute_experts(tokens, experts, weights, torch.bfloat16, recv_counts=counts)
+            out.float().sum().backward()
+    layer.zero_grad(set_to_none=True)
+    return {kernel for kernel in launches.kernels if kernel[0] == "grouped_mm"}
+
+
+@pytest.mark.parametrize(("family", "layout", "variant"), GEMM_CASES, ids="-".join)
+def test_every_grouped_gemm_of_the_expert_compute_launches_a_kernel_the_warm_up_launched(family, layout, variant):
+    """torch's bf16 grouped GEMM runs one of two CUTLASS tiles per operand layout, picked for the forward and the input
+    gradient by the mean rows per expert, which change with every receive, and CUDA loads a kernel on its first launch:
+    over receives from one row per expert to past the switch, the expert compute's grouped GEMMs, forward, input and
+    weight gradient, launch only kernels the warm-up launched."""
+    layer = gemm_layer(family, layout, variant)
+    warm = _warm_up_launches(layer).kernels
+    compute_kernels = _compute_gemm_kernels(layer)
+    assert {kernel[3] for kernel in compute_kernels} == {"small", "large"}, "the receives must cross the tile switch"
+    assert compute_kernels - warm == set()
+
+
+@pytest.mark.parametrize(("family", "layout", "variant"), GEMM_CASES, ids="-".join)
+def test_the_warm_up_runs_every_grouped_gemm_on_both_sides_of_the_tile_switch(family, layout, variant):
+    """The warm-up's own grouped GEMMs, by operand layout (the forward, the input gradient and the weight gradient), run
+    at one row per expert and at one past the switch."""
+    rows_by_layout = defaultdict(set)
+    for kernel, rows_per_expert in _warm_up_launches(gemm_layer(family, layout, variant)).grouped_mm_calls:
+        rows_by_layout[kernel[2]].add(rows_per_expert)
+    both = {1, GROUPED_MM_SMALL_TILE_DIM + 1}
+    assert rows_by_layout == {
+        "a row-major, b row-major": both,
+        "a row-major, b column-major": both,
+        "a column-major, b row-major": both,
+    }
+
+
+@pytest.mark.parametrize(("family", "layout"), NEGATIVE_CONTROL_CASES, ids="-".join)
+def test_the_grouped_gemm_check_fails_without_the_gemm_warm_up(monkeypatch, family, layout):
+    """The rest of the warm-up runs no grouped GEMM: without :meth:`_warm_expert_gemm` every grouped-GEMM kernel the
+    expert compute launches is one the warm-up did not."""
+    compute_kernels = _compute_gemm_kernels(gemm_layer(family, layout, "defaults"))
+    monkeypatch.setattr(compute.EPExpertComputeMixin, "_warm_expert_gemm", lambda *args: None)
+    assert compute_kernels - _warm_up_launches(gemm_layer(family, layout, "defaults")).kernels == compute_kernels
+
+
+@pytest.mark.parametrize(("family", "layout"), NEGATIVE_CONTROL_CASES, ids="-".join)
+def test_the_grouped_gemm_check_fails_with_one_row_per_expert_only(monkeypatch, family, layout):
+    """A warm-up at one row per expert only leaves every large-tile kernel the expert compute launches cold."""
+    compute_kernels = _compute_gemm_kernels(gemm_layer(family, layout, "defaults"))
+    monkeypatch.setattr(compute, "GROUPED_MM_SMALL_TILE_DIM", 0)
+    cold = compute_kernels - _warm_up_launches(gemm_layer(family, layout, "defaults")).kernels
+    assert cold and {kernel[3] for kernel in cold} == {"large"}, cold
+
+
+def _adapters_off_warm_up_kernels(layer) -> set[tuple]:
+    """The kernels the warm-up launches latching on a first forward with ``layer``'s expert adapters off, as a reference
+    pass runs it; the adapters are back on after, as training runs them."""
+    layer._expert_adapters_enabled = False
+    warm = _warm_up_launches(layer).kernels
+    assert layer._expert_adapters_enabled is False, "the warm-up must leave the adapters as it found them"
+    layer._expert_adapters_enabled = True
+    return warm
+
+
+@pytest.mark.parametrize("family", tuple(GEMM_FAMILIES))
+def test_a_first_forward_with_the_adapters_off_warms_the_adapter_gemms(family):
+    """A reference pass runs the expert adapters off, and the warm-up latches on it: the adapter GEMMs training runs
+    still warm, the adapters' weight gradient among them, which takes a kernel of its own with the base frozen."""
+    layer = gemm_layer(family, "ep2", "expert_lora")
+    warm = _adapters_off_warm_up_kernels(layer)
+    assert _compute_gemm_kernels(layer) - warm == set()
+
+
+def test_the_adapter_check_fails_its_negative_control(monkeypatch):
+    """An expert FFN run with the adapters off leaves the adapters' weight-gradient kernel cold."""
+    layer = gemm_layer("qwen3_moe", "ep2", "expert_lora")
+    ffn = type(layer)._grouped_expert_ffn
+
+    def adapters_off(self, *args):
+        self._expert_adapters_enabled = False
+        return ffn(self, *args)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(type(layer), "_grouped_expert_ffn", adapters_off)
+        warm = _adapters_off_warm_up_kernels(layer)
+    cold = _compute_gemm_kernels(layer) - warm
+    assert ("grouped_mm", torch.bfloat16, "a column-major, b row-major", "small") in cold, cold
+
+
+@pytest.mark.parametrize("layout", ("ep1", "ep2"))
+def test_the_grouped_gemm_warm_up_leaves_the_rng_and_no_gradient(layout):
+    """Expert-LoRA dropout draws inside the warm-up's FFN, which runs inside the checkpointed block: the generator is
+    restored after it, so the latched warm-up shifts no later draw the recompute replays. Nor does its backward leave a
+    gradient on a weight, base or adapter."""
+    layer = gemm_layer("qwen3_moe", layout, "expert_lora")
+    before = torch.random.get_rng_state()
+    _warm_up_launches(layer)
+    assert torch.equal(torch.random.get_rng_state(), before)
+    assert [name for name, parameter in layer.named_parameters() if parameter.grad is not None] == []
+
+
+def test_the_rng_check_fails_its_negative_control(monkeypatch):
+    """Without the generator restored, the warm-up's LoRA dropout moves it."""
+    monkeypatch.setattr(torch.random, "fork_rng", lambda **kwargs: contextlib.nullcontext())
+    layer = gemm_layer("qwen3_moe", "ep2", "expert_lora")
+    before = torch.random.get_rng_state()
+    _warm_up_launches(layer)
+    assert not torch.equal(torch.random.get_rng_state(), before)
 
 
 class _ScopeCachingDispatcher(_RecordingDispatcher):

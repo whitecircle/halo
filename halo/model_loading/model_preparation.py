@@ -29,11 +29,13 @@ from halo.models.attention.backend_setup import (
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
+from halo.models.attention.prefix_lm import apply_prefix_lm_causal_decoder
 from halo.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
 from halo.models.attention.selection import (
     fa4_varlen_refusal,
     has_head_dim_beyond_flash,
     is_flash_attn_implementation,
+    verify_live_sinks_carried,
 )
 from halo.models.config_access import drop_toolkit_stamps, model_type_matches
 from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
@@ -220,13 +222,17 @@ def sanitize_generation_config(model: PreTrainedModel) -> None:
 def apply_run_model_policies(
     model, model_config, *, sinks_policy: SinksPolicy, attn_implementation: str, sinks_pretrained: bool = True
 ) -> None:
-    """The sharding-agnostic run policies every loaded model takes, policy and frozen reference alike.
+    """The sharding-agnostic run policies every loaded model takes, policy and frozen reference alike: the Hub
+    tags, a sane generation config, a prefix-LM decoder's causal default and the sinks policy.
 
     ``sinks_pretrained=False`` (a from-scratch build) skips only the neutralized sinks policy: there are
     no pretrained sinks to neutralize. The Hub tags go on ``model_tags`` for the card writers that read
-    nothing else (PEFT's adapter save, ``push_to_hub``).
+    nothing else (PEFT's adapter save, ``push_to_hub``). A sink-dropping backend over the live sinks the policy
+    leaves raises.
     """
     model.add_model_tags(list(HUB_TAGS))
     sanitize_generation_config(model)
+    apply_prefix_lm_causal_decoder(model, model_config)
     if sinks_pretrained or sinks_policy is not SinksPolicy.NEUTRALIZED:
         apply_sinks_policy(model, model_config, policy=sinks_policy, attn_implementation=attn_implementation)
+    verify_live_sinks_carried(model)

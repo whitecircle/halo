@@ -14,6 +14,8 @@ import triton.language as tl
 from halo.kernels.histogram import sync_free_bincount
 
 _BLOCK_H = 1024
+# index_select reads an index of up to this many rows with a kernel of its own, and a longer one through gather's.
+_SMALL_INDEX_ROWS = 16
 
 
 # ``n_src`` (the dispatch's sorted-row count) changes every step; see ``fused_glu._glu_fwd_kernel``.
@@ -229,7 +231,7 @@ class MoEExpertBiasGather(torch.autograd.Function):
 def warm_permute_kernels(num_tokens: int, hidden: int, top_k: int, device: torch.device, dtype: torch.dtype) -> None:
     """Run the fused permute's backward and the weighted unpermute forward and backward once, over
     ``num_tokens`` tokens each routed to ``top_k`` rows (the unpermute forward is the same kernel in both
-    grad modes). Call with grad enabled.
+    grad modes), and both kernels of the gathers' index_select (:func:`_warm_index_select`). Call with grad enabled.
 
     The operands are zeros, drawn from no generator, so a call inside a recompute region leaves the RNG
     where the recompute expects it; the kernels compile on shape and dtype alone.
@@ -243,3 +245,16 @@ def warm_permute_kernels(num_tokens: int, hidden: int, top_k: int, device: torch
     permuted = MoEGatherPermute.apply(tokens, sorted_token_idx, inv_map)
     unpermuted = MoEWeightedUnpermute.apply(expert_out, weights, sorted_token_idx, inv_map)
     torch.autograd.grad(permuted.sum() + unpermuted.sum(), (tokens, expert_out, weights))
+    _warm_index_select(hidden, device, dtype)
+
+
+def _warm_index_select(width: int, device: torch.device, dtype: torch.dtype) -> None:
+    """Run index_select over rows of ``width`` with an index of one row and of more than :data:`_SMALL_INDEX_ROWS`, at
+    ``dtype`` and at fp32: :class:`MoEGatherPermute` gathers tokens at the run dtype and :class:`MoEExpertBiasGather`
+    expert biases at theirs, fp32 masters under ``fp32_experts``. Which of the two kernels a gather takes follows the
+    routing, and CUDA loads a kernel on its first launch, which mid-step blocks the host while every peer waits in the
+    next combine."""
+    for value_dtype in dict.fromkeys((dtype, torch.float32)):
+        rows = torch.zeros((1, width), device=device, dtype=value_dtype)
+        for count in (1, _SMALL_INDEX_ROWS + 1):
+            rows.index_select(0, torch.zeros(count, dtype=torch.long, device=device))

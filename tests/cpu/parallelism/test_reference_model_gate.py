@@ -277,7 +277,7 @@ def test_the_dpo_script_hands_the_loaded_reference_to_the_trainer(tmp_path):
         "init_training_script": mock.Mock(return_value=runtime),
         "load_script_datasets": mock.Mock(return_value=(None, False)),
         "alias_images_column": lambda ds, *a, **k: ds,
-        "resolve_vlm_run": mock.Mock(return_value=False),
+        "resolve_preference_vlm_run": mock.Mock(return_value=False),
         "apply_text_path_padding_side": mock.Mock(),
         "prepare_script_preference_data": mock.Mock(return_value=(None, None, None)),
         "configure_balancing_and_build_callbacks": mock.Mock(return_value=[]),

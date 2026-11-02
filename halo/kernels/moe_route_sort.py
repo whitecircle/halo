@@ -183,8 +183,9 @@ class _CountingSort(torch.autograd.Function):
         if sorted_weights_grad is None:
             return None, None, None, None
         (dest,) = ctx.saved_tensors
-        # The zero padded on at position n_valid is every non-local slot's gradient.
-        grad = F.pad(sorted_weights_grad, (0, 1)).index_select(0, dest)
+        # The zero padded on at position n_valid is every non-local slot's gradient. gather, not index_select, which takes
+        # a separate kernel for an index of up to 16 rows: one kernel at every receive size, loaded by the warm-up.
+        grad = F.pad(sorted_weights_grad, (0, 1)).gather(0, dest)
         return grad.view(ctx.weights_shape), None, None, None
 
 
@@ -247,9 +248,12 @@ def sort_routing_by_expert(
 
 
 def warm_route_sort_kernels(top_k: int, num_local_experts: int, device: torch.device) -> None:
-    """Sort one synthetic receive on ``device`` with counts: on CUDA that compiles the counting sort's kernels for this
-    ``top_k`` and expert count, and they take their row, block and slot counts unspecialized, so one call covers every
+    """Sort one synthetic receive on ``device`` with counts, forward and backward; call with grad enabled. On CUDA that
+    compiles the counting sort's kernels for this ``top_k`` and expert count, which take their row, block and slot
+    counts unspecialized, and loads the backward's gather, one kernel at every slot count: one call covers every
     dispatch size. The ids and weights carry the dtypes DeepEP hands back: ``topk_idx_t`` (int64) and fp32."""
     experts = torch.zeros((1, top_k), dtype=torch.long, device=device)
-    weights = torch.zeros((1, top_k), dtype=torch.float32, device=device)
-    sort_routing_by_expert(experts, weights, num_local_experts, (top_k,) + (0,) * (num_local_experts - 1))
+    weights = torch.zeros((1, top_k), dtype=torch.float32, device=device, requires_grad=True)
+    counts = (top_k,) + (0,) * (num_local_experts - 1)
+    sorted_weights = sort_routing_by_expert(experts, weights, num_local_experts, counts)[1]
+    torch.autograd.grad(sorted_weights.sum(), weights)

@@ -11,6 +11,8 @@ Each row trains ``DistributedSFTTrainer`` on one clip and sharding path:
     TP-replicated sync together.
   * ``--mode ep2_cp2``: ep2 and Ulysses CP over the same two ranks (padded rows).
   * ``--mode etp2``: pure expert-tensor parallelism, each expert FFN split over both ranks.
+  * ``--mode ep2_etp2``: ep2 x expert TP 2 on four ranks, one EP group of two dispatch groups: each rank holds an
+    ETP slice of half the experts, and the clip reduces the ETP shards' norms with the rest.
   * ``--mode dense``: dense Qwen3-0.6B under FSDP2; also launchable through ``accelerate launch``, whose
     optimizer wrapper the guard steps through.
   * ``--mode tp``: dense Qwen3-0.6B at ``tp_size=2``, whose TP clip reduces DTensor and replicated norms.
@@ -48,11 +50,21 @@ Such a row also trains one step clipping at a threshold no norm reaches, and mus
 gradients the optimizer took and the logged norm. A sweep that runs at neither call, or twice, moves the
 gradients; one that runs only after the norm was read moves the norm.
 
+``--fp32-masters`` (``ep2``, ``ep2_dp2``) sets all three fp32-master knobs (``ep_fp32_router``,
+``ep_fp32_experts``, ``fp32_non_ep_params``), as the shipped ep8 fp32-master recipes do, so every routed expert,
+router and other parameter is an fp32 master, which AdamWBF16 steps on its fp32 path: there a skip rides the update's
+own operands (a ``-0.0`` gradient, unit decays, an infinite ``eps``) instead of the bf16 kernel's early exit. Phase 1
+also checks that every master and both its moments are fp32, so the skip checks above read that path, and that
+masters of every kind trained on the steps after the skip.
+
 Run:
     torchrun --nproc_per_node=2 tests/gpu/trainers/sft/test_sft_nonfinite_step_guard.py --mode ep1
     torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_nonfinite_step_guard.py --mode ep2_dp2
     torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_nonfinite_step_guard.py --mode ep2_dp2 \\
         --max-grad-norm 0
+    torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_nonfinite_step_guard.py --mode ep2_dp2 \\
+        --fp32-masters
+    torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_nonfinite_step_guard.py --mode ep2_etp2
     torchrun --nproc_per_node=4 tests/gpu/trainers/sft/test_sft_nonfinite_step_guard.py --mode pp
     accelerate launch --config_file launcher-configs/accelerate/fsdp2_gradop_config.yaml --num_processes=2 \\
         tests/gpu/trainers/sft/test_sft_nonfinite_step_guard.py --mode dense
@@ -84,6 +96,7 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.adapters import load_peft_model
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import group_max_abs_diff, shared_output_dir
+from tests.common.fp32_masters import fp32_master_groups
 from tests.common.harness import gpu_test_main
 from tests.common.memory import finish_phase
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
@@ -128,6 +141,8 @@ MODES = {
     # Node-local EP+CP needs ep_group_size == the NVLink domain, so on two ranks EP and CP share them.
     "ep2_cp2": _Mode(2, "moe", {"ep_size": 2, "cp_size": 2}),
     "etp2": _Mode(2, "moe", {"ep_size": 1, "expert_tp_size": 2}),
+    # One EP group of four filling the domain: dispatch groups [0, 1] and [2, 3], expert-TP groups [0, 2] and [1, 3].
+    "ep2_etp2": _Mode(4, "moe", {"ep_size": 2, "expert_tp_size": 2}),
     "dense": _Mode(2, "dense", {}),
     "tp": _Mode(2, "dense", {"tp_size": 2}),
     "cp": _Mode(2, "dense", {"cp_size": 2}),
@@ -136,6 +151,10 @@ MODES = {
     "pp": _Mode(4, "pp", {"pp_size": 2, "gpus_per_node": 2, "nvlink_domain_size": 2}),
     "pp_ep": _Mode(4, "pp_moe", {"pp_size": 2, "ep_size": 2, "gpus_per_node": 2, "nvlink_domain_size": 2}),
 }
+# One EP group, the shape of the shipped fp32-master recipes, and two as DP replicas.
+FP32_MASTER_MODES = ("ep2", "ep2_dp2")
+FP32_MASTER_AXES = {"ep_fp32_router": True, "ep_fp32_experts": True, "fp32_non_ep_params": True}
+MOMENTS = ("exp_avg", "exp_avg_sq")
 
 _PARSER = argparse.ArgumentParser(description=__doc__)
 _PARSER.add_argument("--mode", choices=MODES, required=True)
@@ -145,8 +164,16 @@ _PARSER.add_argument(
     default=1.0,
     help="the run's max_grad_norm (transformers' default 1.0); 0 leaves only the norm-only pass",
 )
+_PARSER.add_argument(
+    "--fp32-masters",
+    action="store_true",
+    help="ep_fp32_router, ep_fp32_experts and fp32_non_ep_params: every parameter an fp32 master",
+)
 ARGS = _PARSER.parse_args()
+if ARGS.fp32_masters and ARGS.mode not in FP32_MASTER_MODES:
+    _PARSER.error(f"--fp32-masters runs at --mode {' or '.join(FP32_MASTER_MODES)}")
 MODE = MODES[ARGS.mode]
+AXES = MODE.axes | (FP32_MASTER_AXES if ARGS.fp32_masters else {})
 NORM_ONLY = ARGS.max_grad_norm <= 0
 
 
@@ -193,7 +220,7 @@ def _local_state(trainer) -> tuple[dict[str, torch.Tensor], list[torch.Tensor]]:
         to_local(value).clone()
         for state in trainer.optimizer.state.values()
         for key, value in sorted(state.items())
-        if key in ("exp_avg", "exp_avg_sq")
+        if key in MOMENTS
     ]
     return shards, moments
 
@@ -398,6 +425,31 @@ def _replica_checks(trainer, pc: ParallelismConfig, metrics: dict) -> dict[str, 
     return checks
 
 
+def _fp32_master_checks(trainer, around: _AroundStep, metrics: dict) -> dict[str, bool]:
+    """COLLECTIVE. Every trainable parameter of each fp32-master group, and both its moments, held at fp32, so the
+    skipped-step checks read AdamWBF16's fp32 path; and masters of every group trained on the steps after the skip
+    ``around`` watched."""
+    groups = fp32_master_groups(trainer.model)
+    state = _stepped_optimizer(trainer).state
+    metrics |= {f"fp32_masters_{group}": len(params) for group, params in groups.items()}
+    held = all(groups.values()) and all(
+        param.dtype == torch.float32
+        and all(key in state.get(param, {}) and state[param][key].dtype == torch.float32 for key in MOMENTS)
+        for params in groups.values()
+        for param in params.values()
+    )
+    after = around.after[0] if around.after is not None else {}
+    final = _local_state(trainer)[0]
+    trained = bool(after) and all(
+        any(not torch.equal(after[name], final[name]) for name in params) for params in groups.values()
+    )
+    log(f"  fp32 masters: {', '.join(f'{len(params)} {group}' for group, params in groups.items())}")
+    return {
+        "fp32_masters_held_at_fp32": rank_consensus(held).all_ok,
+        "fp32_masters_of_every_group_trained_after_the_skip": rank_consensus(trained).all_ok,
+    }
+
+
 @gpu_test_main(exact_world_size=MODE.world_size, prefix=f"sft_nonfinite_step_guard_{ARGS.mode}")
 def run(ctx):
     torch.cuda.set_device(ctx.device)
@@ -409,7 +461,7 @@ def run(ctx):
     ):
         # Seeds every random draw of a row's build (QLoRA's adapters), so two runs of one row take the same steps.
         torch.manual_seed(SEED)
-        pc = ParallelismConfig(**MODE.axes)
+        pc = ParallelismConfig(**AXES)
         trainer = DistributedSFTTrainer(
             args=_sft_config(out, logging_steps=logging_steps, max_grad_norm=max_grad_norm, max_steps=max_steps),
             parallelism_config=pc,
@@ -467,6 +519,8 @@ def run(ctx):
     pc = trainer.parallelism_config
     if pc.pp_size == 1 and ((pc.ep_size > 1 and pc.num_ep_groups > 1) or pc.tp_size > 1):
         checks |= _replica_checks(trainer, pc, metrics)
+    if ARGS.fp32_masters:
+        checks |= _fp32_master_checks(trainer, around, metrics)
     finish_phase(trainer)
     ctx.barrier()
 

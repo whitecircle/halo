@@ -201,7 +201,7 @@ def test_unclassified_experts_are_a_delta_in_every_moe_case(monkeypatch, tmp_pat
 def test_a_changed_flops_rule_is_a_delta_in_every_case(monkeypatch, tmp_path):
     baseline = _reports(tmp_path / "baseline", SAMPLE)
     monkeypatch.setattr(
-        model_flops, "_training_flops_per_token", lambda trainable, frozen: 6.0 * trainable + 2.0 * frozen + 1.0
+        model_flops, "_training_flops_per_token", lambda trainable, frozen: 6.0 * trainable + 2.0 * frozen + 1000.0
     )
 
     deltas = compare_outputs(baseline, _reports(tmp_path / "mutated", SAMPLE))

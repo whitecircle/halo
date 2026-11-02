@@ -9,7 +9,11 @@ from typing import Any
 import numpy as np
 import torch
 
-from halo.data.completion_spans import COLLATOR_SPAN_POLICY, build_completion_only_labels
+from halo.data.completion_spans import (
+    COLLATOR_SPAN_POLICY,
+    build_completion_only_labels,
+    reject_untrainable_completions,
+)
 from halo.data.turn_markers import reject_missing_response_marker, resolve_eos_token_ids
 from halo.data.vlm_render import (
     VLM_OUTPUT_FEATURES,
@@ -21,8 +25,28 @@ from halo.data.vlm_render import (
 )
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.log import warn_once
+from halo.models.attention.prefix_lm import has_prefix_lm_attention, prefix_lm_token_type_ids
 
 logger = logging.getLogger(__name__)
+
+# What the construction-time template checks render: two exchanges in the parts form the VLM render receives, so a
+# template ending each assistant turn at the next turn's role marker (GLM) closes the first one.
+_PROBE_CONVERSATION = [
+    {"role": role, "content": [{"type": "text", "text": text}]}
+    for role, text in (("user", "q"), ("assistant", "a"), ("user", "q"), ("assistant", "a"))
+]
+
+
+def _reject_rendered_bos(processor, tokenizer) -> None:
+    """Refuse a chat template that renders ``<bos>`` for a prefix-LM processor, which puts one after each row's
+    last image itself: a row would hold two, as would every prompt the same template renders for serving."""
+    bos = tokenizer.bos_token
+    if bos and bos in render_vlm_text(processor, _PROBE_CONVERSATION):
+        raise ValueError(
+            f"The chat template renders {bos}, which this prefix-LM (PaliGemma) processor already puts after each "
+            f"row's last image, so every row would hold two. Remove the BOS from the chat template (a Gemma "
+            f"template opens with {{{{ bos_token }}}})."
+        )
 
 
 class VLMDataCollator:
@@ -51,25 +75,64 @@ class VLMDataCollator:
         # Construction-time, like the eos set: the union reads the tokenizer's full vocab dict, which
         # is a per-batch cost of the vocabulary's size for a verdict that cannot change between batches.
         self.image_token_ids = tuple(resolve_image_token_ids(tokenizer, processor))
+        # The processor marks no suffix in a rendered conversation (all 0: one bidirectional prefix).
+        self.prefix_lm = has_prefix_lm_attention(model_config)
+        if self.prefix_lm:
+            _reject_rendered_bos(processor, tokenizer)
+        if train_on_completions_only:
+            reject_untrainable_completions(
+                lambda conversation: render_vlm_text(processor, conversation),
+                _PROBE_CONVERSATION,
+                tokenizer,
+                response_prompt_template,
+                self.eos_token_ids,
+                self._COMPLETION_SPAN_POLICY,
+                type(self).__name__,
+            )
 
     def __call__(self, examples):
-        batch = self._process_batch(examples, lambda example: example.get("history", []), "batch")
+        return self._collate(examples, lambda example: example.get("history", []), "batch")
+
+    def _collate(self, examples, history_of: Callable[[dict[str, Any]], list], subject: str):
+        """The processed ``history_of`` batch with its labels, and a prefix-LM model's ``token_type_ids``
+        (:func:`~halo.models.attention.prefix_lm.prefix_lm_token_type_ids`)."""
+        batch = self._process_batch(examples, history_of, subject)
         batch["labels"] = self._build_labels(batch["input_ids"], batch.get("attention_mask"))
+        if self.prefix_lm:
+            self._mask_appended_newline(batch)
+            batch["token_type_ids"] = prefix_lm_token_type_ids(batch["labels"])
         return batch
 
     def _process_batch(self, examples, history_of: Callable[[dict[str, Any]], list], subject: str):
         """Render each row's ``history_of`` conversation and run the processor over the batch, refusing an
         over-length sequence: truncating would desync expanded image placeholders from the vision tensors,
         and a runtime batch cannot drop rows without desyncing DP ranks."""
+        if self.prefix_lm and not all(example.get("images") for example in examples):
+            # PaliGemma's processor puts <bos> after each row's last <image>: in a row without one it lands
+            # six characters into the text, and a batch without any image raises inside the processor.
+            raise ValueError(
+                f"VLM {subject} holds a row without an image on a prefix-LM (PaliGemma) model, whose processor "
+                f"splices <bos> into such a row's text. Drop the text-only rows from the image dataset, or train "
+                f"them in a separate text-only run."
+            )
         texts = [self._render(history_of(example), example) for example in examples]
-        images = [image for example in examples for image in example.get("images") or ()]
-        batch = run_vlm_processor(self.processor, texts, images, padding=True)
+        row_images = [example.get("images") or () for example in examples]
+        batch = run_vlm_processor(self.processor, texts, row_images, padding=True)
         reject_over_length_vlm_batch(batch, self.max_length, subject)
         return batch
 
     def _render(self, history: list[dict[str, Any]], example: dict[str, Any]) -> str:
         """Chat-template one conversation with the row's tools."""
         return render_vlm_text(self.processor, history, tools=vlm_row_tools(example))
+
+    def _mask_appended_newline(self, batch) -> None:
+        """Mask the label of each row's last token where it holds the newline a prefix-LM processor appends to the
+        text (PaliGemma's prefix/suffix separator), which lands after the rendered conversation ends."""
+        attention_mask = batch["attention_mask"]
+        last_positions = attention_mask.shape[1] - 1 - attention_mask.flip(-1).argmax(dim=-1)
+        for row, position in enumerate(last_positions.tolist()):
+            if self.tokenizer.decode([int(batch["input_ids"][row, position])]).endswith("\n"):
+                batch["labels"][row, position] = LABEL_IGNORE_INDEX
 
     def _build_labels(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
         """Pad and image tokens masked, and with ``train_on_completions_only`` everything outside the completions."""

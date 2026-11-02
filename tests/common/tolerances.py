@@ -115,11 +115,41 @@ class _Tolerances:
     # the norm ratio stays tight enough that a missing or doubled /world_size divide (2.0 / 0.5) fails.
     ep_grad_cosine_min: float = 0.9
     ep_grad_norm_ratio_band: tuple[float, float] = (0.67, 1.5)
-    # A reference gradient this small against the whole compared set has no reliable direction: GatedDeltaNet's
-    # A_log on a hard-decaying head is a sum of ~1e-9 terms that cancel 5-29x, so every FLA kernel config lands a
-    # different rounding pattern on it (cos 0.71-0.85 against fp32). Such a pair is held to its absolute error
-    # against the set's norm instead of its cosine and ratio.
-    grad_negligible_norm_fraction: float = 1e-6
+    # A reference gradient this small against the largest in its decoder layer has no reliable direction, so the
+    # TP and PP family suites hold it to its absolute error under that floor instead of its cosine and ratio:
+    # GatedDeltaNet's A_log on a hard-decaying head is a sum of ~1e-9 terms that cancel 5-29x, so every FLA kernel
+    # config lands a different rounding pattern on it. On the PP suite's batch, layer 5's A_log / dt_bias sit at
+    # 1.5e-7..2.5e-7 of it and its in_proj_a at 2.3e-6.
+    # On the TP suite's, Qwen3.5's A_log / dt_bias on layers 1, 5 and 6, whose heads all decay hard,
+    # sit at 3e-9..7e-7 of it, where on GPU the bf16 unsharded model itself scores cos 0.17-0.85 against fp32 and two
+    # fp32 runs 0.11-0.36 against each other; on layers 0, 2 and 4 they sit at 1.6e-5..8e-4, where a dropped or doubled
+    # TP reduce moves the norm ratio by 2; every other parameter sits at 1.5e-6 or more.
+    grad_negligible_layer_fraction: float = 1e-6
+    # A near-cancelled pair outside the EP bars above whose distance from an fp32 copy of the reference stays within
+    # this multiple of the parameter's measured bf16 noise (the bf16 reference's largest distance from the fp32 one over
+    # the run's steps) is rounding, not a sync fault. The 1-8 element hyper-connection vectors of DeepSeek-V4 and GLM-5
+    # Next cancel to 3e-5..1e-2 of their layer's largest gradient: there the bf16 reference misses fp32 by up to 3.3x
+    # their norm, and an EP policy's own rounding lands up to 1.96x (DeepSeek-V4) and 3.04x (GLM-5 Next) that noise from
+    # fp32, while a doubled or halved gradient on any hc kind fails up to a factor of 5.
+    bf16_noise_excuse_factor: float = 4.0
+    # Near-cancelled for that excuse: a bf16 reference under this fraction of the largest bf16 reference gradient in its
+    # decoder layer. The fp32 reference routes some tokens differently, so a router's or an expert bank's noise reaches
+    # 5-31% of its norm, inside the factor of a halved gradient; on DeepSeek-V4 and GLM-5 Next the routers sit at
+    # 4e-2..7e-2 of their layer and the banks at 0.48 or more, while the pairs the excuse must take (hc vectors there,
+    # Qwen3.5's GatedDeltaNet A_log and dt_bias) sit at 4e-6..1.7e-3.
+    bf16_noise_excusable_layer_fraction: float = 3e-3
+    # How far a parallel run's top-k pick may sit below the reference router's own k-th logit, on a tiny GptOss
+    # whose router logits spread ~0.3: bf16 reduction order flips only near-ties (measured worst 4.4e-3 at etp2,
+    # a few bf16 ULPs at these magnitudes), while a wrong selection falls short by a top-k gap (median 0.06-0.17
+    # per block; the third-best expert picked for the second misses by up to 0.66). On the reentrant suite's rows, for
+    # each family whose references route on the policy's picks (GptOss and the Qwen3, Qwen3.5, Qwen3-Next and Qwen4-Exp
+    # MoE), a bf16 copy routed on an fp32 copy's picks falls at most 1e-2 short, while on every layer some token's
+    # (k+1)-th best expert falls 0.085 or more short.
+    router_near_tie_logit_abs: float = 3e-2
+    # How far a router's own top-k pick may sit below its k-th logit: a router selecting on fp32 softmax probabilities
+    # rounds logits an fp32 step or two apart (~3e-8 at these magnitudes) to one probability and breaks the tie by
+    # index, while a selection on anything but those logits misses by a top-k gap.
+    router_own_pick_logit_abs: float = 1e-6
 
     # ── Exact-objective pins ────────────────────────────────────────────────
     # A test's independent reimplementation of its trainer's objective (offline GRPO, distillation,

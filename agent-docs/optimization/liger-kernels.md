@@ -92,6 +92,12 @@ asks them for it: an upstream-resolved family is applied with `cross_entropy=Fal
 patch instead, and a delegating spec withholds the flag from upstream the same way. The effective config
 still records `cross_entropy: true`; it is the same fused kernel at the same call site.
 
+`layer_norm` is forced off on every upstream applier that declares it, an explicit `true` included (warned), for
+the same reason: called before the model is built, upstream's VLM appliers (Gemma 3, PaliGemma, Mllama, InternVL,
+SmolVLM) install it by rebinding `torch.nn.LayerNorm`, the class every model the process builds afterwards would
+construct. Their vision towers keep torch's LayerNorm, the effective config records `layer_norm: false`, and an
+application that still leaves `torch.nn.LayerNorm` rebound raises. No toolkit spec declares the key.
+
 **One fused head for the roster.** Every family declaring a fused loss installs the same forward
 (`halo/model_loading/liger/cross_entropy.py`), which applies the head transform the family's `HeadTransformSpec`
 declares ([Adding a Model](../models/adding-a-model.md#declare-the-head-transform)): a logit scale (Cohere's
@@ -120,6 +126,12 @@ RMSNorm, the fused GLU, RoPE and CE all reach the decoder as usual. For the fuse
 checkpoint (`model_type` = the text tower's), or load a wrapper checkpoint that admits it text-only
 (`text_only_model: true`, as `qwen4_exp` does): `AutoModelForCausalLM` then builds the text tower's `*ForCausalLM`
 on the text sub-config, which is the config Liger is applied to, so the fused loss engages.
+
+A prefix LM (PaliGemma, PaliGemma 2) resolves upstream's own `paligemma` applier, whose fused loss replaces
+`PaliGemmaForConditionalGeneration.forward` with one that calls the decoder directly, so the prefix-LM mask
+transformers builds from `token_type_ids` is never built (against transformers 5.20 the replacement raises at its
+first forward). `liger_prefix_lm_overrides` forces `fused_linear_cross_entropy` off there at both application
+sites, warning on a request, and `cross_entropy` serves the loss.
 
 **Not covered:** `glm4_moe` (full GLM-4.5/4.7) has no EP layer, doc page or example in this toolkit, so it
 has no spec either.
@@ -220,8 +232,9 @@ liger_kernel_config:
   fused_linear_cross_entropy: true
 ```
 
-Keys: `rope`, `cross_entropy`, `fused_linear_cross_entropy`, `rms_norm`, `swiglu`, `geglu`. A key the
+Keys: `rope`, `cross_entropy`, `fused_linear_cross_entropy`, `rms_norm`, `swiglu`, `geglu`, `layer_norm`. A key the
 resolved applier's signature does not accept is dropped, with a warning naming it — that path runs eager.
+`layer_norm` never applies: it is [forced off](#supported-models) wherever an applier declares it.
 
 | Kernel | Default | Notes |
 |---|---|---|
@@ -230,11 +243,11 @@ resolved applier's signature does not accept is dropped, with a warning naming i
 | `swiglu` | On | Auto-off where the applier's own default is `False` (GptOss, whose upstream applier has no SwiGLU patch block; Qwen3-VL), and where an **upstream** applier's expert-FFN swap is replaced by an EP layer, which runs Halo's own fused GLU combine instead. A toolkit spec patches the dense and shared-expert MLPs, which survive EP — see below. Forced off, even when requested, wherever upstream's swap would reach [routed experts Halo does not wrap](#routed-experts) |
 | `geglu` | On | Gemma 4. Served by the toolkit's spec on the always-on dense `Gemma4TextMLP`, which survives the EP layer, so it is **not** forced off under EP |
 | `cross_entropy` | On | Keeps logits for metrics. Always the toolkit's scoped patch. Force-off under TP, CP and PP, and defaulted off when the config explicitly requests `fused_linear_cross_entropy` (the two are mutually exclusive; setting both explicitly raises) |
-| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP and PP, and [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper); under CP the [Ulysses wrapper](../parallelism/context-parallelism.md#fused-head-loss) runs it instead of the model's head |
+| `fused_linear_cross_entropy` | **Off** (On for Zaya, DeepSeek-V4 and GLM-4.7-Flash) | Fuses lm_head + CE, no logits materialization. Mutually exclusive with `cross_entropy`. Force-off under TP and PP, [under a multimodal wrapper](#fused-loss-under-a-multimodal-wrapper) and on a prefix LM (PaliGemma, same section); under CP the [Ulysses wrapper](../parallelism/context-parallelism.md#fused-head-loss) runs it instead of the model's head |
 
 Precedence is generic defaults < per-model defaults < user keys, and user keys win **except** the TP/CP
-force-offs ([below](#ep--cp--tp--pp-behavior)), the wrapper force-off and the [routed-experts](#routed-experts)
-force-off, which overwrite an explicit `true`.
+force-offs ([below](#ep--cp--tp--pp-behavior)), the wrapper and prefix-LM force-offs, the
+[routed-experts](#routed-experts) force-off and the `layer_norm` force-off, which overwrite an explicit `true`.
 
 Per-model defaults are read off each applier's own signature (`_PER_MODEL_DEFAULTS`), derived from the spec's
 `flce_default`, set by the three large-vocab families above and nothing else.

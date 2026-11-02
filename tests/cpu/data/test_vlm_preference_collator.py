@@ -95,20 +95,22 @@ class StubProcessor:
         assert padding is True, "the whole chosen⧺rejected block is padded in one call"
         assert isinstance(text, list), "the collator must hand the processor the whole text block"
 
+        row_images = images or [[] for _ in text]
+        assert len(row_images) == len(text), "one image list per text, as transformers' processors batch them"
         image_token_id = self.tokenizer.vocab[IMAGE_TOKEN]
-        expanded, placeholders = [], 0
-        for one in text:
-            row = []
+        expanded = []
+        for one, one_images in zip(text, row_images, strict=True):
+            row, placeholders = [], 0
             for token_id in self.tokenizer(one)["input_ids"]:
                 if token_id == image_token_id:
                     row.extend([self.tokenizer.vocab[IMAGE_PAD_TOKEN]] * PATCHES_PER_IMAGE)
                     placeholders += 1
                 else:
                     row.append(token_id)
+            if placeholders != len(one_images):
+                raise ValueError(f"{placeholders} image placeholders but {len(one_images)} images in a row")
             expanded.append(row)
-        images = images or []
-        if placeholders != len(images):
-            raise ValueError(f"{placeholders} image placeholders but {len(images)} images")
+        images = [image for one_images in row_images for image in one_images]
 
         width = max(len(row) for row in expanded)
         out = {

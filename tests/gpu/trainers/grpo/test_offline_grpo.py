@@ -16,10 +16,15 @@ Test Phases:
    ``compute_loss`` on one group's batch matches the objective recomputed independently from
    full-vocabulary logits, so a wrong-but-finite loss fails
 
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/grpo/test_offline_grpo.py
+``--hsdp`` trains under HSDP over two simulated NVLink domains of ``world // 2`` ranks and reads the 2-D mesh and
+its replicas in step off the model.
+
+Run:
+    torchrun --nproc_per_node=2 tests/gpu/trainers/grpo/test_offline_grpo.py
+    torchrun --nproc_per_node=4 tests/gpu/trainers/grpo/test_offline_grpo.py --hsdp
 """
+
+import argparse
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -29,6 +34,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.datasets import create_offline_grpo_dataset
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
@@ -180,7 +186,8 @@ def run(ctx) -> dict:
         dataloader_drop_last=True,
     )
 
-    parallelism_config = ParallelismConfig()
+    layout = hsdp_layout(ctx.world_size) if ARGS.hsdp else {}
+    parallelism_config = ParallelismConfig(**layout)
 
     trainer = OfflineGRPOTrainer(
         model=model,
@@ -214,11 +221,21 @@ def run(ctx) -> dict:
     # ── Assertions ──────────────────────────────────────────────────
     log("\n  --- Assertions ---")
     checks = training_run_checks(train_result, trainer, MAX_STEPS)
+    checks |= dp_layout_checks(
+        trainer.model,
+        layout,
+        world_size=ctx.world_size,
+        ep_config=None,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
     checks.update(objective_oracle_checks(trainer))
     return {"checks": checks}
 
 
-main = gpu_test_main(min_world_size=2, prefix="offline_grpo")(run)
+parser = argparse.ArgumentParser()
+parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
+ARGS = parser.parse_args()
+main = gpu_test_main(min_world_size=4 if ARGS.hsdp else 2, prefix="offline_grpo")(run)
 
 if __name__ == "__main__":
     main()

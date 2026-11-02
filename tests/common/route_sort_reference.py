@@ -2,8 +2,9 @@
 torch construction they replace (:func:`counting_sort_mismatches`, on CUDA or under ``TRITON_INTERPRET=1`` on CPU),
 that comparison's and the count check's negative controls (:func:`control_findings`, CPU only: on CUDA the check is a
 device-side assert, which ends the process's CUDA context), the Triton specialization of every launch against the
-warm-up's (:func:`launch_key_findings`, under ``TRITON_INTERPRET=1``), and the counts of the kernels' compiled binaries
-and of the pinned host blocks handed out.
+warm-up's (:func:`launch_key_findings`, under ``TRITON_INTERPRET=1``), the backward's kernels against the warm-up's
+(:func:`backward_kernel_findings`, likewise), and the counts of the kernels' compiled binaries and of the pinned host
+blocks handed out.
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ from halo.kernels.moe_route_sort import (
     _scan_kernel,
     warm_route_sort_kernels,
 )
+from tests.common.kernel_launches import KernelLaunches
 
 OUTPUTS = ("sorted_token_idx", "sorted_weights", "sorted_expert_ids", "offs", "inv_map")
 SORT_KERNELS = (_histogram_kernel, _scan_kernel, _place_kernel)
@@ -248,6 +250,31 @@ def launch_key_findings(shapes: tuple[tuple[int, int], ...] = LAUNCH_SHAPES) -> 
                             f"{name} at top_k {top_k}, {local_experts} local experts, {rows} rows, {n_valid} local "
                             f"slots: specialized apart from the warm-up on {', '.join(moved)}"
                         )
+    return findings
+
+
+def backward_kernel_findings(shapes: tuple[tuple[int, int], ...] = LAUNCH_SHAPES) -> list[str]:
+    """Each kernel the counting sort's backward launches, over :func:`swept_receives` at every ``(top_k, local experts)``
+    of ``shapes``, that the layer warm-up at the same shape did not launch (:class:`KernelLaunches` classes): CUDA would
+    load it on that first launch, mid-step, between a dispatch and its combine. Under ``TRITON_INTERPRET=1``, the
+    warm-up routed through the counting sort."""
+    if not isinstance(moe_route_sort._place_kernel, InterpretedFunction):
+        raise RuntimeError("backward_kernel_findings runs the kernels under TRITON_INTERPRET=1")
+    findings = []
+    with mock.patch.object(moe_route_sort, "sort_routing_by_expert", _counting_sort):
+        for top_k, local_experts in shapes:
+            with KernelLaunches() as warm:
+                warm_route_sort_kernels(top_k, local_experts, torch.device("cpu"))
+            for rows, n_valid, inputs in swept_receives(top_k, local_experts):
+                leaf = inputs.weights.clone().requires_grad_(True)
+                sorted_weights = _counting_sort(inputs.experts, leaf, local_experts, inputs.counts)[1]
+                with KernelLaunches() as backward:
+                    torch.autograd.grad(sorted_weights, leaf, inputs.upstream)
+                findings += [
+                    f"top_k {top_k}, {local_experts} local experts, {rows} rows, {n_valid} local slots: the backward "
+                    f"launches {kernel}, which the warm-up did not"
+                    for kernel in sorted(backward.kernels - warm.kernels, key=str)
+                ]
     return findings
 
 

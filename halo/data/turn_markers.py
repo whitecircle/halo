@@ -3,6 +3,7 @@ it, and the construction-time refusals of a marker no path could find."""
 
 import logging
 import warnings
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from transformers import PreTrainedTokenizerBase
@@ -52,18 +53,34 @@ def verify_marker_renders_in_chat_template(
 ) -> None:
     """Raise when ``assistant_message_template`` occurs in no rendered probe, which would mask every label.
 
-    Probes the rendered text, since templates assemble the marker from pieces, with and without
-    ``thinking`` (gpt-oss harmony emits the marker only for a thinking message).
+    Probes with and without ``thinking`` (gpt-oss harmony emits the marker only for a thinking message).
     """
     probe_conversations = (
         [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}],
         [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a", "thinking": "t"}],
     )
+    verify_marker_renders(
+        lambda conversation: tokenizer.apply_chat_template(conversation, tokenize=False),
+        probe_conversations,
+        assistant_message_template,
+    )
+
+
+def verify_marker_renders(
+    render: Callable[[list[dict[str, Any]]], Any],
+    probe_conversations: Sequence[list[dict[str, Any]]],
+    assistant_message_template: str,
+) -> list[str]:
+    """Raise when ``assistant_message_template`` occurs in none of ``probe_conversations`` as ``render`` renders
+    them, which would mask every label; returns the rendered probes, empty (with a warning) where none rendered.
+
+    Probes the rendered text, since templates assemble the marker from pieces.
+    """
     rendered_texts = []
     probe_failures = []
     for conversation in probe_conversations:
         try:
-            rendered = tokenizer.apply_chat_template(conversation, tokenize=False)
+            rendered = render(conversation)
         except Exception as exc:  # template requires inputs this synthetic variant lacks; skip it
             probe_failures.append(f"{type(exc).__name__}: {exc}")
             continue
@@ -89,6 +106,7 @@ def verify_marker_renders_in_chat_template(
             f"tokenizer.apply_chat_template on one conversation), or set "
             f"train_on_completions_only: false."
         )
+    return rendered_texts
 
 
 def reject_unusable_response_marker(

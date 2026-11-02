@@ -5,11 +5,8 @@ with the family patches on its config, so its n-gram table is a host-resident ex
 ``finalize_loaded_model`` attaches; the inputs the tests feed it; the keys a QSA selection attends; transformers' own
 forwards for a stock reference; and an allocation probe."""
 
-# The device-aware kernel-dispatch shim must land before the modeling module binds transformers' hub-kernel
-# fallback factory at import: after it, a CPU forward with segment markers reaches the CUDA-only kernels.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 import contextlib
+import dataclasses
 
 import torch
 import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
@@ -69,9 +66,13 @@ def packed_seq_idx(position_ids: torch.Tensor) -> torch.Tensor:
     return document_ids(position_ids).to(torch.int32)
 
 
-def packed_markers(config, position_ids: torch.Tensor) -> dict:
-    """Every segment marker the packing collators emit for ``config``'s family on a ``[1, total]`` packed row."""
-    return segment_marker_kwargs(position_ids, segment_markers_for(config))
+def packed_markers(config, position_ids: torch.Tensor, *, cu_seq_lens: bool = True) -> dict:
+    """Every segment marker the packing collators emit for ``config``'s family on a ``[1, total]`` packed row;
+    ``cu_seq_lens=False`` leaves out the varlen set GatedDeltaNet's chunked delta rule reads."""
+    markers = segment_markers_for(config)
+    if not cu_seq_lens:
+        markers = dataclasses.replace(markers, cu_seq_lens=False)
+    return segment_marker_kwargs(position_ids, markers)
 
 
 def selection_keys(selection: QSASelection, batch: int, length: int) -> torch.Tensor:

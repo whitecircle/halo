@@ -13,8 +13,6 @@ of them).
 Run: pytest tests/cpu/parallelism/test_fsdp2_real_shard_multimodal_lora.py
 """
 
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 import pytest
 import torch
 import torch.distributed as dist

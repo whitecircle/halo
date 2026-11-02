@@ -34,6 +34,7 @@ from transformers import (
     AutoModelForImageTextToText,
     Gemma2Config,
     GemmaConfig,
+    GptOssConfig,
     PretrainedConfig,
     PreTrainedTokenizerBase,
     Qwen3Config,
@@ -225,6 +226,7 @@ def _softcapped() -> Gemma2Config:
 
 
 _NATIVE, _REMOTE, _HEAD_DIM_256, _SOFTCAPPED = Qwen3Config(), _RemoteCodeConfig(), GemmaConfig(), _softcapped()
+_GPT_OSS = GptOssConfig()
 
 
 @pytest.mark.parametrize(
@@ -293,6 +295,24 @@ def test_a_softcapped_student_on_fa4_is_refused_on_padded_rows_before_any_weight
             assert reached == {}, "the student load was reached"
         else:
             assert run(requests=reached) == ("flash_attention_4", "flash_attention_4")
+
+
+@pytest.mark.parametrize(
+    ("yaml_body", "refused"), [("", True), ("reset_sinks: false\n", False)], ids=["reset", "live"]
+)
+def test_a_gptoss_teacher_is_refused_neutralized_sinks_before_any_weight_loads(yaml_body, refused, tmp_path):
+    """``reset_sinks`` reaches the frozen teacher too, which never trains back from neutralized sinks: gpt-oss-20b
+    without them predicts ~6 nats/token (KL) from its pretrained self, a degenerate target."""
+    run = functools.partial(
+        _main_requests, tmp_path, student_config=_NATIVE, teacher_config=_GPT_OSS, yaml_body=yaml_body
+    )
+    reached: dict = {}
+    if refused:
+        with pytest.raises(ValueError, match="neutralize the attention sinks of the GptOss teacher"):
+            run(requests=reached)
+        assert reached == {}, "a load was reached"
+    else:
+        assert run(requests=reached) == (None, None)
 
 
 @pytest.mark.parametrize("reset_sinks", [True, False])

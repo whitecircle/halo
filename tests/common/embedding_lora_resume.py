@@ -40,11 +40,16 @@ embedding alone, or DoRA on the attention projections (:data:`LORA_TARGETS`):
 
 Modes (:data:`MODES`): ``single`` (one process), ``fsdp`` (torchrun: mixin FSDP2, DTensor params),
 ``ddp`` (what ``accelerate launch`` with a MULTI_GPU config runs: accelerate's DDP over plain
-tensors), ``presharded`` (FSDP2 over per-rank dataset slices, batched by the toolkit's loader), ``tp``,
-``tpdp`` (TP over FSDP2, four ranks) and ``ep`` (the script's TP / EP loader). Under LoRA, ``tp``,
-``tpdp`` and ``ep`` only check that the trainer refuses the injected adapters at construction. With ``head`` a row
-only builds the trainer over a pipeline carrying a projection head after the pooling, which the
-sharded and parallel shapes must refuse and a single process or DDP accept.
+tensors), ``presharded`` (FSDP2 over per-rank dataset slices, batched by the toolkit's loader), the FSDP2
+knobs of :data:`DP_MODES` (``zero3`` FULL_SHARD, ``hsdp`` over two simulated NVLink domains on four ranks,
+``ep1`` and ``ep1_unsharded``: a MoE on the grouped-GEMM EP layers with its experts FSDP-sharded or whole and
+FSDP-ignored, a full fine-tune included), and the parallel shapes of :data:`PARALLEL_MODES` (``tp``, ``tpdp``
+for TP over FSDP2 on four ranks, ``ep``, ``etp``, ``eptp``, ``epetp`` on four ranks, ``ep2dp2`` and
+``ep2x2dom`` for two EP groups on four ranks, in one NVLink domain and one per simulated domain). Under LoRA the
+parallel shapes only check that the trainer refuses the injected adapters at construction. The non-default
+shapes read their layout off the model. With ``head`` a row only builds the trainer over a pipeline carrying a
+projection head after the pooling, which the sharded and parallel shapes must refuse and a single process or
+DDP accept.
 """
 
 import os
@@ -77,12 +82,15 @@ from scripts.training.embedding import build_sentence_transformer, inject_lora
 from tests.common.adapters import LORA_ALPHA, LORA_R, injected_lora_fold
 from tests.common.checkpoint_io import RestorePointSnapshot, loading_problems
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.memory import finish_phase
 from tests.common.models import PARAPHRASE_MINILM
 from tests.common.numerics import min_or_nan, relative_l2, tensors_equal_at_narrower_dtype
+from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.rank_log import log
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
+    TINY_GEMMA4_TEXT_FLEX_FAMILY,
     TINY_MOE_FAMILIES,
     TinyFamily,
     shared_tiny_family_checkpoint,
@@ -112,19 +120,39 @@ FAMILIES = {
         name: Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", tiny)
         for name, tiny in TINY_DENSE_FAMILIES.items()
     },
-    # FA4, the EP / TP loader's Blackwell default, does not compile the tiny config's head_dim of 8.
+    # FA4, the EP / TP loader's Blackwell default, does not compile the tiny heads. A CUDA load builds Gemma 4 on
+    # ``sdpa`` as the flex-sliding variant, whose FlexAttention takes heads of 16 or more.
     "gemma4": Family(
-        ("q_proj", "v_proj"), "embed_tokens", "lasttoken", TINY_MOE_FAMILIES["gemma4_text"], attn_implementation="sdpa"
+        ("q_proj", "v_proj"), "embed_tokens", "lasttoken", TINY_GEMMA4_TEXT_FLEX_FAMILY, attn_implementation="sdpa"
     ),
     "gpt_oss": Family(("q_proj", "v_proj"), "embed_tokens", "lasttoken", TINY_MOE_FAMILIES["gpt_oss"]),
 }
 # What ``--lora`` adapts, and how (``dora``); ``off`` is a full fine-tune.
 LORA_TARGETS = ("attention", "mixed", "embedding", "dora", "off")
 TRAIN_MODES = ("single", "fsdp", "ddp", "presharded")
+# The FSDP2 shapes past the default, adapters and full fine-tunes alike: their ParallelismConfig fields. The ep1
+# shapes keep the EP layers (grouped GEMM) on a full fine-tune too, which every other data-parallel shape drops.
+DP_MODES = {
+    "zero3": {"fsdp_reshard_after_forward": True},
+    "hsdp": hsdp_layout(4),
+    "ep1": {"use_grouped_gemm": True},
+    "ep1_unsharded": {"use_grouped_gemm": True, "fsdp_shard_ep1_experts": False},
+}
 # Refused under LoRA, trained under a full fine-tune. ``tpdp`` is TP over FSDP2 (four ranks: tp 2, dp 2).
-PARALLEL_MODES = {"tp": {"tp_size": 2}, "tpdp": {"tp_size": 2}, "ep": {"ep_size": 2}}
-MODES = TRAIN_MODES + tuple(PARALLEL_MODES)
-WORLD_SIZES = {mode: {"single": 1, "tpdp": 4}.get(mode, 2) for mode in MODES}
+PARALLEL_MODES = {
+    "tp": {"tp_size": 2},
+    "tpdp": {"tp_size": 2},
+    "ep": {"ep_size": 2},
+    "etp": {"expert_tp_size": 2},
+    "eptp": {"ep_size": 2, "tp_size": 2},
+    "epetp": {"ep_size": 2, "expert_tp_size": 2},
+    "ep2dp2": {"ep_size": 2},
+    "ep2x2dom": {"ep_size": 2, "gpus_per_node": 2},
+}
+MODES = TRAIN_MODES + tuple(DP_MODES) + tuple(PARALLEL_MODES)
+WORLD_SIZES = {
+    mode: {"single": 1, "tpdp": 4, "hsdp": 4, "epetp": 4, "ep2dp2": 4, "ep2x2dom": 4}.get(mode, 2) for mode in MODES
+}
 
 SEED = 42
 TOTAL_STEPS = 6
@@ -172,12 +200,17 @@ def _model_config(family: Family, source: str, lora: str) -> ModelArguments:
     )
 
 
-def _parallelism_config(mode: str, lora: str) -> ParallelismConfig:
+def _requested_fields(mode: str, lora: str) -> dict:
+    """The ``ParallelismConfig`` fields the row asks for."""
     if mode in PARALLEL_MODES:
-        return ParallelismConfig(**PARALLEL_MODES[mode])
+        return PARALLEL_MODES[mode]
     # A full fine-tune without EP layers keeps the resolver on the base, so its resume reads the
     # checkpoint into a model that does not hold it.
-    return ParallelismConfig(use_grouped_gemm=lora != "off")
+    return {"use_grouped_gemm": lora != "off", **DP_MODES.get(mode, {})}
+
+
+def _parallelism_config(mode: str, lora: str) -> ParallelismConfig:
+    return ParallelismConfig(**_requested_fields(mode, lora))
 
 
 def _pair_texts() -> tuple[list[str], list[str]]:
@@ -327,6 +360,9 @@ def _mode_checks(ctx, mode: str, lora: str, trainer: EmbeddingTrainer) -> dict[s
         )
     elif mode == "ep":
         checks["mode_is_ep"] = trainer.parallelism_config.has_ep_group and bool(trainer._ep_layers())
+    elif mode in PARALLEL_MODES or mode in DP_MODES:
+        # Axes the shared probes read off the model before training; the data-parallel half after it.
+        checks |= parallel_shape_checks(trainer._backbone_model(), _parallelism_config(mode, lora))
     else:
         checks["mode_is_fsdp2_with_dtensor_params"] = trainer._fsdp_wrapped and all(
             isinstance(param.data, DTensor) for param in trainable
@@ -505,6 +541,15 @@ def _uninterrupted(ctx, family: Family, mode: str, lora: str, base_source: str, 
     trainer.add_callback(at_save)
     trainer.train()
     losses = step_losses(trainer)
+    if mode in DP_MODES or mode in PARALLEL_MODES:
+        backbone = trainer._backbone_model()
+        checks |= dp_layout_checks(
+            backbone,
+            _requested_fields(mode, lora),
+            world_size=ctx.world_size,
+            ep_config=trainer._ep_config,
+            forward=lambda: probe_forward(backbone, ctx.device),
+        )
     final = snapshot_trainable(trainer.model)
     saved = at_save.captured or {}
     checks["uninterrupted_ran_all_steps"] = len(losses) == TOTAL_STEPS
@@ -552,7 +597,8 @@ def _full_finetune_row(ctx, family: Family, mode: str, base_source: str, shared_
     source = resolve_resume_weights_source(
         checkpoint, SimpleNamespace(model_name_or_path=base_source), parallelism_config
     )
-    rebuilds_from_checkpoint = mode in PARALLEL_MODES
+    # TP and EP build from the checkpoint, as does any model the grouped-GEMM EP layers wrap.
+    rebuilds_from_checkpoint = mode in PARALLEL_MODES or bool(run.expert_weights)
     checks["policy_source_is_the_expected_one"] = source == (checkpoint if rebuilds_from_checkpoint else base_source)
     trainer = _make_trainer(ctx, family, mode, "off", source, os.path.join(shared_dir, "resume_out"), save=False)
     restored = _RestorePoint("train_begin", trainer)
@@ -604,7 +650,7 @@ def run_embedding_lora_resume(ctx, family_name: str, mode: str, lora: str, head:
     )
     if mode == "ddp":
         os.environ.update(ACCELERATE_LAUNCH_ENV)
-    if mode == "ep":
+    if PARALLEL_MODES.get(mode, {}).get("ep_size", 1) > 1:
         pin_deterministic_ep_dispatch()
     shared_dir = shared_output_dir(ctx)
     base_source = _base_source(ctx, family_name)

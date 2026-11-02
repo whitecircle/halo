@@ -16,7 +16,8 @@ design). Doc A is perturbed and precedes the measured doc B (causality alone alr
 document). Isolated, doc B reads as doc B alone; the control withholds the isolation (one continuous
 position ramp and a dense mask) and must move doc B by far more than the isolated drift, or the zero
 would be vacuous. Packed rows carry the segment markers the packing collator emits for the family. On a dense
-label doc B is scored against doc B alone on an fp32 load (``FP32_ISOLATED_REL_MAX``).
+label doc B is scored against doc B alone on an fp32 load (``FP32_ISOLATED_REL_MAX``, or the family's own bar
+where its kernels round below fp32).
 
     torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family bailing_moe
     torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family bailing_moe_linear
@@ -44,22 +45,6 @@ from tests.common.tiny_models import (
     word_level_tokenizer,
 )
 
-
-@dataclass(frozen=True)
-class _FamilyRow:
-    family: TinyFamily
-    overrides: dict = field(default_factory=dict)
-    isolates: bool = True
-
-
-FAMILIES = {
-    "bailing_moe": _FamilyRow(TINY_MOE_FAMILIES["bailing_moe"]),
-    "bailing_moe_linear": _FamilyRow(TINY_BAILING_RING_FAMILY, isolates=False),
-    # Zaya's tiny head_dim 16 is below what the FA3/FA4 kernels take.
-    "zaya": _FamilyRow(TINY_MOE_FAMILIES["zaya"], {"head_dim": 64}),
-    # Its class declares no flash kernel: SDPA under the tiled QSA.
-    "qwen4_exp_text": _FamilyRow(TINY_MOE_FAMILIES["qwen4_exp_text"]),
-}
 SEED = 0
 DOC_A, DOC_B = 48, 40
 INIT_STD = 0.1
@@ -72,6 +57,31 @@ LEAK_REL_MIN = 1e-1
 # kernels, whose bf16 rounding alone moves doc B by ~1e-1 of its scale, past the bf16 bar and onto the leak's;
 # at fp32 the two agree to ~1e-6, so that comparison runs on an fp32 load.
 FP32_ISOLATED_REL_MAX = 1e-4
+# Qwen3.8-Flash-Next's packed and lone doc B run different kernel paths (varlen GatedDeltaNet chunks, the tiled QSA),
+# and its GatedDeltaNet Triton kernels take their dots at TF32 even on fp32 inputs (Triton's default), so the two
+# part at 1.06e-4 of scale while changing doc A moves doc B by exactly 0 and the control by ~1.5: the bar sits
+# above that floor and three orders of magnitude under the leak.
+QWEN4_EXP_FP32_ISOLATED_REL_MAX = 5e-4
+
+
+@dataclass(frozen=True)
+class _FamilyRow:
+    family: TinyFamily
+    overrides: dict = field(default_factory=dict)
+    isolates: bool = True
+    fp32_isolated_rel_max: float = FP32_ISOLATED_REL_MAX
+
+
+FAMILIES = {
+    "bailing_moe": _FamilyRow(TINY_MOE_FAMILIES["bailing_moe"]),
+    "bailing_moe_linear": _FamilyRow(TINY_BAILING_RING_FAMILY, isolates=False),
+    # Zaya's tiny head_dim 16 is below what the FA3/FA4 kernels take.
+    "zaya": _FamilyRow(TINY_MOE_FAMILIES["zaya"], {"head_dim": 64}),
+    # Its class declares no flash kernel: SDPA under the tiled QSA.
+    "qwen4_exp_text": _FamilyRow(
+        TINY_MOE_FAMILIES["qwen4_exp_text"], fp32_isolated_rel_max=QWEN4_EXP_FP32_ISOLATED_REL_MAX
+    ),
+}
 
 
 def _randomize(model) -> None:
@@ -191,7 +201,7 @@ def run(ctx) -> dict:
             packed_b, alone_b, versus_alone_max, scored_on = isolated[0], alone, ISOLATED_REL_MAX, "bf16"
         else:
             packed_b, alone_b = _fp32_doc_b_versus_alone(ckpt, label, batches[0], doc_b, ctx.device)
-            versus_alone_max, scored_on = FP32_ISOLATED_REL_MAX, "fp32"
+            versus_alone_max, scored_on = row.fp32_isolated_rel_max, "fp32"
         metrics["versus_alone_rel"] = (packed_b - alone_b).abs().max().item() / alone_b.abs().max().item()
         metrics["leak_rel"] = (leaky[0] - leaky[1]).abs().max().item() / scale
         log(

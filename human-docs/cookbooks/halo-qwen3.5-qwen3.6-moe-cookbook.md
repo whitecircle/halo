@@ -160,9 +160,10 @@ VLLM_TOOL_PARSER=qwen3_xml \
 ```
 
 `text_only_model: true` trains through the text-only class and drops the vision tower from the export.
-Its export, and a merge of its LoRA adapter, carry the run's tokenizer but no processor files. SGLang
-serves that export as it is. vLLM needs the vision tower back first, which also restores the processor
-files:
+Its export, and a merge of its LoRA adapter, carry the run's tokenizer but no processor files. Both
+pinned engines (vLLM 0.32.0, SGLang 0.5.22) register the text-only class and read that export as it is,
+though no engine has served one end to end here. To rebuild the multimodal checkpoint, with the vision
+tower and the processor files:
 
 ```bash
 halo run reattach-vision-tower --input_dir /data/checkpoints/<text-only-export> \

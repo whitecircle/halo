@@ -24,6 +24,8 @@ torchrun \
 
 On one node the launch drops `--nnodes`, `--node_rank` and `--master_*`: `torchrun --nproc_per_node=8 scripts/training/sft.py <config> --expert_parallel_size=8`. Each axis is one `--*_parallel_size` flag, in the YAML or on the CLI, combinable where [Supported combinations](README.md#supported-combinations) allows, and each needs `torchrun` ([Two launchers](data-parallelism.md#two-launchers)): `accelerate launch`, detected through `ACCELERATE_MIXED_PRECISION` or `ACCELERATE_USE_FSDP` (`is_accelerate_launch`), raises on any of them. A plain `python` launch trains on the one GPU it binds however many are visible: `init_training_script` pins `n_gpu` to 1, so HF never wraps the model in `nn.DataParallel`. `halo launch` is single-node only.
 
+On a multi-socket host, add `--numa-binding node` to each `torchrun`: it runs every rank on its GPU's NUMA node, a gain on host-bound TP, CP and small-batch EP runs ([NUMA binding](../optimization/throughput-benchmarks.md#numa-binding)).
+
 The log-writing rank (global rank 0 on a shared output filesystem, each node's local rank 0 otherwise) tees its stdout and stderr to `<output_dir>/log/run.log`, so a detached run keeps its console without a redirect. Redirecting the launch (`> "$D/<job>.log" 2>&1`, as the [detached Docker launch](../infrastructure/docker.md#standard-training-launch) does) also captures the other ranks, such as a crash off rank 0. A log directory or `tee` that cannot be set up is warned on that rank, and the run continues without the file.
 
 ## SLURM

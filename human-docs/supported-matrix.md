@@ -49,6 +49,11 @@ SDPA or eager where no flash kernel serves the family.
   varlen kernels are not validated with a softcap.
 - **Gemma 4**: no flash path (FA2 caps head_dim at 256, FA4 overflows tensor
   memory at its 512-wide global layers).
+- **PaliGemma / PaliGemma 2**: no flash path, even when pinned, since no flash
+  kernel reads the prefix-LM mask in `token_type_ids`. PaliGemma runs SDPA and
+  the softcapped PaliGemma 2 runs `flex_attention`; a pinned flash label falls
+  back with a warning
+  ([why](../agent-docs/optimization/flash-attention.md#model-specific-handling) ↗).
 - **Qwen3.5/3.6, Qwen3-Next**: FA4 on Blackwell, FA3 on Hopper. Under
   `full_determinism`, SDPA on Blackwell. Packed SFT takes FA2 on Blackwell in
   either case.
@@ -152,7 +157,7 @@ advanced parallelism. What each family is for:
 | Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower |
 | Qwen3-Next | Yes | Yes | No | No | No | EP and ETP pass tiny-model GPU tests only |
-| Qwen3.8-Flash-Next | Yes | Yes | No | No | No | experimental: EP and pure ETP pass tiny-model GPU tests only, EP+ETP is untested; text rows, packed or padded; the n-gram table stays in host memory |
+| Qwen3.8-Flash-Next | Yes | Yes | No | No | No | experimental: EP, pure ETP and EP+ETP pass tiny-model GPU tests, and EP8 trains the release cut to four layers; text rows, packed or padded; the n-gram table stays in host memory |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | No | |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | No | ETP passes tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |

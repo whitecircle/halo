@@ -30,7 +30,11 @@ from halo.configs.script_arguments import ModelArguments
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.render_columns import alias_images_column, reject_missing_render_column
 from halo.data.vlm_detection import dataset_declares_images
-from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples, resolve_vlm_run
+from halo.entrypoints.data_setup import (
+    load_script_datasets,
+    log_script_dataset_examples,
+    resolve_preference_vlm_run,
+)
 from halo.entrypoints.model_setup import load_preference_models
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -126,7 +130,9 @@ def main():
     # Vision routing keys on the dataset, not the checkpoint: a natively-multimodal model trains
     # text-only unpaired data through TRL's text path. Decided before the model load, which requires
     # the checkpoint's processor for a vision run.
-    is_vlm_data = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
+    is_vlm_data = resolve_preference_vlm_run(
+        args, model_config, ds, text_only_model=args.text_only_model, method="KTO"
+    )
     _reject_embedded_image_parts(ds, args.completion_field)
 
     models = load_preference_models(context, kto_config, model_config, args, vlm_run=is_vlm_data, method="KTO")

@@ -9,16 +9,21 @@ unchanged), the configuration a loop-path ETP checkpoint carries, fingerprint in
 2. Loop, 10 steps and a checkpoint, with this rank's optimizer state and trainable weights snapshotted.
 3. The floor: the loop, 20 steps from the same init with every trainable weight perturbed by about one bf16 ULP.
 4. Grouped GEMM, 20 steps from the same init: every EP layer on grouped GEMM. Its step-1 loss and gradient norm
-   match the loop's (a forward or backward error shows there, before any drift), and over all 20 steps it strays
-   from the loop's trajectory no further than the floor does, scaled by a margin.
+   match the loop's (a forward or backward error shows there, before any drift), and over the steps before the
+   loop's gradient norm surges it strays from the loop's trajectory no further than the floor does, scaled by a
+   margin.
 5. The control: grouped GEMM with every rank's expert bank rotated by one expert, one step. Its step-1 loss must
    miss the loop's by over twice the step-1 bound, or that bound could not see a wrong expert.
 6. Grouped GEMM resuming step 2's checkpoint: optimizer state and weights restored exactly, no fingerprint
    warm restart, steps 11-20 on the loop's trajectory.
 
 From step 7 the loop's gradient norm surges (to about 12 at step 13): there any difference of start or reduction
-order grows, and the perturbed loop strays from its own reference as far as grouped GEMM does. A fixed trajectory
-bound would fail on that growth with no defect present, hence the measured floor.
+order grows chaotically, and one perturbed run of the loop strays from its reference further or less far than
+grouped GEMM by chance (on 8x B300 the floor's largest gradient-norm ratio is 1.75 against grouped GEMM's 2.85,
+where before the surge they are 1.03 and 1.12). A fixed trajectory bound would fail on that growth with no defect
+present, and one sample of it bounds nothing, hence the measured floor over the steps before the surge. Past them
+grouped GEMM's losses and gradient norms must stay finite, and the resumed arm holds steps 11-20, from the loop's
+own state, to the fixed trajectory bound.
 
 DeepEP dispatch is pinned deterministic, so the arms differ in the expert compute alone. A tiny random-init
 GptOss (8 experts: two per dispatch rank, each FFN sharded two ways) keeps the runs cheap.
@@ -27,6 +32,7 @@ GptOss (8 experts: two per dispatch rank, each FFN sharded two ways) keeps the r
 """
 
 import functools
+import math
 
 import torch
 import torch.distributed as dist
@@ -63,17 +69,23 @@ BATCH_SIZE = 2
 LEARNING_RATE = 3e-4
 MAX_SEQ_LENGTH = 256
 NUM_SAMPLES = 256
-# The step-1 forward differs by reduction order and the loop's bf16 index_add_ rounding only (1.1e-3 measured); a
-# rotated expert bank moves it by about 3.6e-2 (an fp32 CPU forward of this model and batch), past the control bound
-# of twice this.
-FIRST_STEP_LOSS_TOL = 1e-2
+# The step-1 forward differs by reduction order and the loop's bf16 index_add_ rounding only: 1.09e-3 on 8x B300,
+# bitwise across reruns. This bound sits 2.7x over that; the rotated-bank control moves the step-1 loss by 1.46e-2
+# there (13x the measured delta), 2.4x past the control bound of twice this.
+FIRST_STEP_LOSS_TOL = 3e-3
 FIRST_STEP_GRAD_NORM_RATIO_MAX = TOL.grad_norm_ratio_max
 # The floor arm's perturbation, about one bf16 ULP: it moves about half the weights by one ULP, where 2e-3 moves 0.15%
 # and 5e-4 none.
 FLOOR_PERTURBATION = 4e-3
-# Grouped GEMM may stray from the loop's trajectory this many times as far as the floor arm does.
+# Grouped GEMM may stray from the loop's trajectory this many times as far as the floor arm does, over the steps
+# before the loop's gradient norm surges.
 FLOOR_LOSS_DELTA_FACTOR = 2.0
 FLOOR_GRAD_NORM_RATIO_FACTOR = 1.25
+# The loop's surge: the first step whose gradient norm rises past this factor over the lowest before it. On 8x B300
+# that is step 7 (4.21 over 2.66) for any factor from 1.08 to 1.58.
+SURGE_GRAD_NORM_RISE = 1.25
+# Steps the window before the surge must hold for the floor comparison to see past step 1's own checks.
+MIN_PRE_SURGE_STEPS = 3
 # The resumed arm starts from the loop's own step-10 state, so it stays inside a fixed bound.
 TRAJECTORY_LOSS_TOL = TOL.parallel_vs_baseline_train_loss_abs
 
@@ -170,13 +182,22 @@ def _deltas(reference: list[float], candidate: list[float]) -> list[float]:
     return [abs(a - b) for a, b in zip(reference, candidate, strict=True)]
 
 
+def _pre_surge_steps(norms: list[float]) -> int:
+    """How many steps run before the first whose gradient norm rises past :data:`SURGE_GRAD_NORM_RISE` times the
+    lowest before it; all of them when none does."""
+    for step in range(1, len(norms)):
+        if norms[step] > SURGE_GRAD_NORM_RISE * min(norms[:step]):
+            return step
+    return len(norms)
+
+
 def _trajectory_checks(reference: list[float], candidate: list[float], label: str, metrics: dict) -> dict[str, bool]:
     deltas = _deltas(reference, candidate)
     metrics[f"{label}_loss_max_delta"] = max_or_nan(deltas)
     log(f"  {label}: reference {[f'{x:.4f}' for x in reference]}")
     worst = metrics[f"{label}_loss_max_delta"]
     log(f"  {label}: candidate {[f'{x:.4f}' for x in candidate]}  max |delta| {worst:.5f}")
-    return {f"{label}_losses_track_the_loop": bool(deltas) and max(deltas) <= TRAJECTORY_LOSS_TOL}
+    return {f"{label}_losses_track_the_loop": bool(deltas) and worst <= TRAJECTORY_LOSS_TOL}
 
 
 def _train_arm(ctx, tiny_dir, tokenizer, dataset, train_out, steps: int, *, grouped: bool, label: str, edit=None):
@@ -249,7 +270,7 @@ def run(ctx):
     checks |= arm_checks
 
     log("\n--- 5. control: grouped GEMM with every expert bank rotated by one expert, 1 step ---")
-    arm_checks, control_losses, _, rotated = arm(1, grouped=True, label="control", edit=roll_expert_banks)
+    arm_checks, control_losses, control_norms, rotated = arm(1, grouped=True, label="control", edit=roll_expert_banks)
     checks |= arm_checks
     checks["control_rotated_every_bank"] = world_all(rotated > 0, ctx.device)
 
@@ -262,20 +283,26 @@ def run(ctx):
             metrics["first_step_grad_norm_ratio"] <= FIRST_STEP_GRAD_NORM_RATIO_MAX
         )
         metrics["control_first_step_loss_delta"] = abs(control_losses[0] - loop_losses[0])
+        metrics["control_first_step_grad_norm_ratio"] = _ratio(control_norms[0], loop_norms[0])
         checks["control_misses_the_first_step_loss"] = metrics["control_first_step_loss_delta"] > (
             TOL.control_min_loss_shift(FIRST_STEP_LOSS_TOL)
         )
 
-        metrics["floor_loss_max_delta"] = max_or_nan(_deltas(loop_losses, floor_losses))
-        metrics["grouped_loss_max_delta"] = max_or_nan(_deltas(loop_losses, grouped_losses))
-        metrics["floor_grad_norm_max_ratio"] = max_or_nan(map(_ratio, floor_norms, loop_norms))
-        metrics["grouped_grad_norm_max_ratio"] = max_or_nan(map(_ratio, grouped_norms, loop_norms))
+        window = _pre_surge_steps(loop_norms)
+        metrics["pre_surge_steps"] = window
+        checks["loop_surge_leaves_a_window"] = window >= MIN_PRE_SURGE_STEPS
+        for label, losses, norms in (("floor", floor_losses, floor_norms), ("grouped", grouped_losses, grouped_norms)):
+            metrics[f"{label}_loss_max_delta"] = max_or_nan(_deltas(loop_losses[:window], losses[:window]))
+            metrics[f"{label}_grad_norm_max_ratio"] = max_or_nan(map(_ratio, norms[:window], loop_norms[:window]))
+            metrics[f"{label}_loss_max_delta_all_steps"] = max_or_nan(_deltas(loop_losses, losses))
+            metrics[f"{label}_grad_norm_max_ratio_all_steps"] = max_or_nan(map(_ratio, norms, loop_norms))
         log(f"  loop    losses {[f'{x:.4f}' for x in loop_losses]}")
         log(f"  floor   losses {[f'{x:.4f}' for x in floor_losses]}")
         log(f"  grouped losses {[f'{x:.4f}' for x in grouped_losses]}")
         log(f"  grad norms: loop {[f'{x:.3f}' for x in loop_norms]}")
         log(f"  grad norms: floor {[f'{x:.3f}' for x in floor_norms]}")
         log(f"  grad norms: grouped {[f'{x:.3f}' for x in grouped_norms]}")
+        log(f"  floor compared over the {window} steps before the loop's gradient-norm surge")
         checks["floor_moved_the_trajectory"] = metrics["floor_loss_max_delta"] > 0
         checks["grouped_losses_inside_the_floor"] = (
             metrics["grouped_loss_max_delta"] <= FLOOR_LOSS_DELTA_FACTOR * metrics["floor_loss_max_delta"]
@@ -283,6 +310,9 @@ def run(ctx):
         checks["grouped_grad_norms_inside_the_floor"] = (
             metrics["grouped_grad_norm_max_ratio"]
             <= FLOOR_GRAD_NORM_RATIO_FACTOR * metrics["floor_grad_norm_max_ratio"]
+        )
+        checks["grouped_all_steps_finite"] = all(
+            math.isfinite(metrics[f"grouped_{name}_all_steps"]) for name in ("loss_max_delta", "grad_norm_max_ratio")
         )
 
     log(f"\n--- 6. grouped GEMM resuming the loop's checkpoint-{SAVE_AT_STEP} ---")

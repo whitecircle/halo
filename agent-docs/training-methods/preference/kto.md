@@ -49,7 +49,7 @@ torchrun --nproc_per_node=8 scripts/training/preference/kto.py \
 
 ## Vision-language
 
-Add an `images`/`image` column — or name one with `images_field` — to train a VLM checkpoint on `{prompt, completion, label, images}` rows. Text-only data on a multimodal checkpoint stays on the text path.
+Add an `images`/`image` column — or name one with `images_field` — to train a VLM checkpoint on `{prompt, completion, label, images}` rows. Text-only data on a multimodal checkpoint stays on the text path. A prefix-LM checkpoint (PaliGemma) is refused on image rows before the model load ([Modality support](../../reference/trainer-architecture.md#modality-support)); train it on images with SFT or distillation.
 
 A dataset that embeds `{"type": "image"}` parts in its messages while shipping no image column is refused: TRL would template them as text, expanding each part into pixel-less placeholder tokens. Move the images into an `images` column, or drop the parts.
 

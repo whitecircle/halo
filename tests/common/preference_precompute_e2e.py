@@ -8,8 +8,9 @@ columns (``reference_logps.pt``), per split, and a trainer handed the resume che
 construction attaches them instead of sweeping. A LoRA resume builds the policy from the base, so
 there the sweep scores untrained weights and stays correct. The policy is a family's tiny model
 (:data:`~tests.common.tiny_models.TINY_MOE_FAMILIES`, or the dense
-:data:`~tests.common.tiny_models.TINY_DENSE_FAMILY`) on a layout of ``MODES`` (two ranks, four for the
-expert group of ``ep2etp2``), and the train split rides with two named eval splits, which TRL precomputes under their ``eval_dataset`` keys.
+:data:`~tests.common.tiny_models.TINY_DENSE_FAMILY`) on a layout of ``MODES`` at that layout's world size, and the
+train split rides with two named eval splits, which TRL precomputes under their ``eval_dataset`` keys. Phase 1 also
+reads the layout's data-parallel half off the trained policy (:func:`~tests.common.dp_layout.dp_layout_checks`).
 
 One checkpoint, four phases, the resume taken the production way (the policy source from
 ``resolve_resume_weights_source``, the trainer told the checkpoint and whether the policy came from it):
@@ -31,6 +32,7 @@ import math
 import os
 import shutil
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 from datasets import Dataset, load_from_disk
@@ -42,6 +44,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from tests.common.adapters import load_peft_model
 from tests.common.distributed import shared_scratch_dir
+from tests.common.dp_layout import dp_layout_checks, probe_forward
 from tests.common.memory import cleanup_memory, finish_phase
 from tests.common.models import QWEN3_0_6B
 from tests.common.preference_precompute import TRAINERS, column
@@ -49,18 +52,27 @@ from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_DENSE_FAMILY, TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
 
-# The layouts: plain FSDP2 DP (dp2, the dense model's), plain per-rank experts (ep2), FSDP-sharded
-# DTensor experts over DP=2 (ep1), attention and MLP sharded over the TP mesh (tp2), the expert FFN
-# sharded (etp2), per-rank experts under attention TP (ep2tp2), and per-rank experts each split two ways
-# (ep2etp2, an expert group of four).
+# Each layout's world size and ParallelismConfig fields: plain FSDP2 DP (dp2, the dense model's), plain per-rank
+# experts (ep2), FSDP-sharded DTensor experts over DP=2 (ep1), attention and MLP sharded over the TP mesh (tp2), the
+# expert FFN sharded (etp2), per-rank experts under attention TP (ep2tp2), per-rank experts each split two ways
+# (ep2etp2, an expert group of four); FULL_SHARD (dp2_zero3, ep1_zero3), whole FSDP-ignored ep1 experts
+# (ep1_unsharded), HSDP over two simulated NVLink domains of two (hsdp), two EP groups in one domain (ep2dp2) and
+# one per simulated domain (ep2x2dom), and TP with two DP replicas (tp2dp2).
 MODES = {
-    "dp2": {},
-    "ep2": {"ep_size": 2},
-    "ep1": {"ep_size": 1},
-    "tp2": {"tp_size": 2},
-    "etp2": {"ep_size": 1, "expert_tp_size": 2},
-    "ep2tp2": {"ep_size": 2, "tp_size": 2},
-    "ep2etp2": {"ep_size": 2, "expert_tp_size": 2},
+    "dp2": (2, {}),
+    "ep2": (2, {"ep_size": 2}),
+    "ep1": (2, {"ep_size": 1}),
+    "tp2": (2, {"tp_size": 2}),
+    "etp2": (2, {"ep_size": 1, "expert_tp_size": 2}),
+    "ep2tp2": (2, {"ep_size": 2, "tp_size": 2}),
+    "ep2etp2": (4, {"ep_size": 2, "expert_tp_size": 2}),
+    "dp2_zero3": (2, {"fsdp_reshard_after_forward": True}),
+    "ep1_zero3": (2, {"ep_size": 1, "fsdp_reshard_after_forward": True}),
+    "ep1_unsharded": (2, {"ep_size": 1, "fsdp_shard_ep1_experts": False}),
+    "hsdp": (4, {"use_hsdp": True, "gpus_per_node": 2}),
+    "ep2dp2": (4, {"ep_size": 2}),
+    "ep2x2dom": (4, {"ep_size": 2, "gpus_per_node": 2}),
+    "tp2dp2": (4, {"tp_size": 2}),
 }
 DENSE = "dense"
 # KTO's own loss computes a KL term from mismatched completions; ``apo_zero_unpaired`` has none.
@@ -76,15 +88,26 @@ MAX_LENGTH = 96
 # Large enough that two steps move the policy's log-probs well off the reference, so a resume that
 # re-derived the reference from the trained weights lands visibly elsewhere.
 LEARNING_RATE = 2e-3
-# The control's sweep of the trained policy misses the base run's reference columns by at least 1 nat
-# on every family and layout, so half of that separates it from a restore, which is bit for bit.
-CONTROL_MIN_LOGP_DELTA = 0.5
+# The control's sweep of the trained policy against the base run's reference columns. Phase 2 holds a restore to
+# them bit for bit, and a sweep of unchanged weights under full determinism reproduces them bit for bit (the LoRA
+# control), so the miss only has to come from the two trained steps: they move the smallest split's columns by
+# 0.49 (KTO, Qwen3.8-Flash-Next at etp2) to 0.86 nats (the same at ep1), and this sits well under that and orders of
+# magnitude over a sequence log-prob's fp32 rounding.
+CONTROL_MIN_LOGP_DELTA = 0.1
+# ``full_determinism`` cannot run on the ``sdpa_flex_sliding`` variant a CUDA load builds for ``sdpa`` on a family
+# with sliding-window layers: its FlexAttention graphs compile at load outside deterministic mode, and the trainer
+# refuses the pair. Plain SDPA, the remedy that refusal names, keeps every family on the one attention.
+PLAIN_SDPA_ENV = {"HALO_FLEX_SLIDING": "0"}
 
 
 def world_size(mode: str) -> int:
-    """Ranks ``mode`` runs on: its expert group, never fewer than two."""
-    layout = MODES[mode]
-    return max(2, layout.get("ep_size", 1) * layout.get("expert_tp_size", 1))
+    """Ranks ``mode`` runs on."""
+    return MODES[mode][0]
+
+
+def config_fields(mode: str) -> dict:
+    """The ``ParallelismConfig`` fields ``mode`` requests."""
+    return MODES[mode][1]
 
 
 def precompute_resume_parser() -> argparse.ArgumentParser:
@@ -184,8 +207,10 @@ def _columns_equal(actual: dict, reference: dict) -> bool:
     )
 
 
+@patch.dict(os.environ, PLAIN_SDPA_ENV)
 def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bool, kto_loss: str) -> dict:
-    """The four phases above for one trainer, family and layout; returns the harness result.
+    """The four phases above for one trainer, family and layout, on plain SDPA (:data:`PLAIN_SDPA_ENV`); returns
+    the harness result.
 
     ``family`` is a :data:`TINY_MOE_FAMILIES` key or ``"dense"``; ``peft`` trains attention LoRA over
     a frozen base, whose disabled adapters are the reference.
@@ -214,7 +239,7 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
             Dataset.from_dict(_build_rows(kind, n, start)).save_to_disk(dataset_dirs[name])
             start += n
     ctx.barrier()
-    pc = ParallelismConfig(**MODES[mode])
+    pc = ParallelismConfig(**config_fields(mode))
     log(f"  {label}: {pc.mode_string or 'dp'}, data_parallel_size={pc.data_parallel_size}")
     first_resumed_step = SAVE_AT_STEP + 1
 
@@ -223,7 +248,13 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
         the ``train`` split and the named eval splits."""
         if peft:
             model, tokenizer, peft_config = load_peft_model(
-                "lora", pc, model_name=weights_dir, attn_implementation="sdpa", use_liger_kernel=False
+                "lora",
+                pc,
+                model_name=weights_dir,
+                attn_implementation="sdpa",
+                use_liger_kernel=False,
+                # Where the checkpoint index cannot name the attention projections (not spelled *_proj).
+                lora_target_modules=list(tiny.attention_targets) or None,
             )
         else:
             model, tokenizer = load_distributed_model(
@@ -261,6 +292,13 @@ def run_precompute_resume(ctx, *, trainer: str, family: str, mode: str, peft: bo
     )
     built.train()
     continuous = _losses_by_step(built)
+    checks |= dp_layout_checks(
+        built.model,
+        config_fields(mode),
+        world_size=ctx.world_size,
+        ep_config=built._ep_config,
+        forward=lambda: probe_forward(built.model, ctx.device),
+    )
     finish_phase(built)
     ctx.barrier()
     checks["continuous_ran_all_steps"] = sorted(continuous) == list(range(1, TOTAL_STEPS + 1))

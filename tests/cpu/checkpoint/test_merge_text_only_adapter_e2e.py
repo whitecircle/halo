@@ -20,10 +20,6 @@ reloads every artifact through the toolkit loader.
 
 from __future__ import annotations
 
-# Ahead of the Qwen3.5 modeling modules, which bind transformers' hub-kernel fallback at import: the
-# chain test runs CPU forwards, which otherwise reach the CUDA-only causal_conv1d kernel.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 import tempfile
 from pathlib import Path
 from typing import NamedTuple

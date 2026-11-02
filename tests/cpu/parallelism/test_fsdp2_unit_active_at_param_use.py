@@ -20,11 +20,6 @@ seam (:func:`build_peft_config`), so the towers PEFT cannot adapt are excluded e
 Run: pytest tests/cpu/parallelism/test_fsdp2_unit_active_at_param_use.py
 """
 
-# The device-aware kernel-dispatch shim must land before the modeling modules below bind transformers'
-# hub-kernel fallback at import, or a CPU forward of a conv / linear-attention family reaches the
-# CUDA-only causal_conv1d kernel.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 from types import SimpleNamespace
 from unittest.mock import patch
 

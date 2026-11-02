@@ -106,7 +106,9 @@ class StubProcessor:
         assert return_tensors == "pt"
         assert add_special_tokens is False, "collator must disable special tokens (template carries them)"
         ids = self.tokenizer(text)["input_ids"]
-        images = images or []
+        row_images = images or [[]]
+        assert len(row_images) == 1, "one image list for the one prompt text"
+        images = row_images[0]
         image_token_id = self.tokenizer.vocab[IMAGE_TOKEN]
         pad_id = self.tokenizer.vocab[IMAGE_PAD_TOKEN]
         expanded, placeholders = [], 0
@@ -417,7 +419,7 @@ def test_collated_pair_is_the_conversation_tokenized_whole(tokenizer_cls, overla
     for side in ("chosen", "rejected"):
         # The stub renders turn by turn, so the conversation is the prompt's render plus the reply's.
         conversation = row["prompt_text"] + tokenizer.apply_chat_template(features[side])
-        expected = run_vlm_processor(processor, conversation, features["images"])["input_ids"][0].tolist()
+        expected = run_vlm_processor(processor, conversation, [features["images"]])["input_ids"][0].tolist()
         assert prompt_ids + batch[f"{side}_input_ids"][0].tolist() == [*expected, EOS_ID], side
 
 

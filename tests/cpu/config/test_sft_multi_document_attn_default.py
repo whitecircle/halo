@@ -2,7 +2,7 @@
 """SFT's multi-document rows load on FA2 where FA4's head_dim-256 kernel would run them on a GatedDeltaNet family, or
 would leave them to SDPA.
 
-That kernel is no faster than FA2 on packed rows, and a deterministic run (``FLASH_ATTENTION_DETERMINISTIC``, set by
+That kernel gains under 5% over FA2 on packed rows, and a deterministic run (``FLASH_ATTENTION_DETERMINISTIC``, set by
 ``full_determinism``), whose backward it cannot take, demotes FA4, pinned or not, to SDPA, which runs a packed row as
 one dense ``[L, L]`` mask with K/V repeated per query head. ``default_training_rows_attn_implementation`` asks for FA2,
 which consumes the ``cu_seq_lens`` those rows already carry: on an unpinned GatedDeltaNet family in either run, and on

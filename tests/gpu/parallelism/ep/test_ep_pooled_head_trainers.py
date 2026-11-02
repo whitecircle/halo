@@ -1,6 +1,11 @@
 #!/usr/bin/env python
-"""Reward (Bradley-Terry) and Classification on a tiny Qwen3-MoE under EP (ep2), attention TP (tp2) and expert
-TP (etp2), each on two ranks.
+"""Reward (Bradley-Terry) and Classification on a tiny Qwen3-MoE across the parallel layouts of ``MODES``.
+
+Two ranks: EP (ep2), attention TP (tp2), expert TP (etp2), EP under attention TP (ep2tp2), and ep1 with the
+experts FSDP-sharded (ep1), under FULL_SHARD (ep1_zero3) or whole and FSDP-ignored (ep1_unsharded). Four ranks:
+EP x expert TP (ep2etp2), TP x DP (tp2dp2), two EP groups in one NVLink domain (ep2dp2) and one per simulated
+two-GPU domain (ep2x2dom). Each layout's data-parallel half is read off the trained model
+(:func:`~tests.common.dp_layout.dp_layout_checks`).
 
 These two are the only supported trainers whose loss reads a single pooled position per row instead of
 per-token logits: the parallel MoE forward has to reproduce the dense output at exactly the token the
@@ -52,6 +57,7 @@ from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.checkpoint_io import save_schedule
 from tests.common.distributed import pin_deterministic_ep_dispatch, shared_output_dir, world_mean
+from tests.common.dp_layout import dp_layout_checks, probe_forward
 from tests.common.ep_reference import ep_layers
 from tests.common.harness import gpu_test_main
 from tests.common.memory import finish_phase
@@ -60,8 +66,21 @@ from tests.common.parallel_shape import parallel_shape_checks
 from tests.common.rank_log import log
 from tests.common.resume_export import ResumeExportRoute, load_route_model, run_resume_export, save_base_checkpoint
 
-# Each row's parallel shape on its two ranks; tp2 keeps the experts on the grouped-GEMM EP layers at ep_size 1.
-MODES = {"ep2": {"ep_size": 2}, "tp2": {"tp_size": 2}, "etp2": {"expert_tp_size": 2}}
+# Each row's world size and ParallelismConfig fields; the ep1 and TP layouts keep the experts on the grouped-GEMM EP
+# layers at ep_size 1.
+MODES = {
+    "ep2": (2, {"ep_size": 2}),
+    "tp2": (2, {"tp_size": 2}),
+    "etp2": (2, {"expert_tp_size": 2}),
+    "ep1": (2, {"ep_size": 1}),
+    "ep1_zero3": (2, {"ep_size": 1, "fsdp_reshard_after_forward": True}),
+    "ep1_unsharded": (2, {"ep_size": 1, "fsdp_shard_ep1_experts": False}),
+    "ep2tp2": (2, {"ep_size": 2, "tp_size": 2}),
+    "ep2etp2": (4, {"ep_size": 2, "expert_tp_size": 2}),
+    "tp2dp2": (4, {"tp_size": 2}),
+    "ep2dp2": (4, {"ep_size": 2}),
+    "ep2x2dom": (4, {"ep_size": 2, "gpus_per_node": 2}),
+}
 N_ROWS = 32
 N_STEPS = 6
 # Midway through N_STEPS, which lands mid-epoch on every row (4 or more steps per epoch).
@@ -182,13 +201,16 @@ def build_trainer(kind: str, model, dataset, tokenizer, config, output_dir, *, m
     )
 
 
-@gpu_test_main(exact_world_size=2, prefix="ep_pooled_head")
+parser = argparse.ArgumentParser()
+parser.add_argument("--trainer", choices=("reward", "classification"), default="reward")
+parser.add_argument("--mode", choices=sorted(MODES), default="ep2")
+ARGS = parser.parse_args()
+WORLD_SIZE, LAYOUT = MODES[ARGS.mode]
+
+
+@gpu_test_main(exact_world_size=WORLD_SIZE, prefix="ep_pooled_head")
 def run(ctx):
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--trainer", choices=("reward", "classification"), default="reward")
-    parser.add_argument("--mode", choices=sorted(MODES), default="ep2")
-    cli = parser.parse_args()
-    kind = cli.trainer
+    kind = ARGS.trainer
 
     checks, metrics = {}, {}
     tokenizer = AutoTokenizer.from_pretrained(QWEN3_0_6B)
@@ -197,7 +219,7 @@ def run(ctx):
     tokenizer.pad_token = tokenizer.convert_ids_to_tokens(PAD_ID)
 
     num_labels = 1 if kind == "reward" else NUM_LABELS
-    config = ParallelismConfig(**MODES[cli.mode])
+    config = ParallelismConfig(**LAYOUT)
     if config.ep_size > 1:
         # The resume phase replays a run exactly, which DeepEP's atomic receive order would not.
         pin_deterministic_ep_dispatch()
@@ -250,10 +272,17 @@ def run(ctx):
     checks["grad_norm_nonzero"] = bool(grad_norms) and min(grad_norms) > 1e-6
     checks["loss_responded_to_updates"] = abs(losses[-1] - losses[0]) > 1e-3
     metrics["first_loss"], metrics["last_loss"] = losses[0], losses[-1]
+    checks |= dp_layout_checks(
+        trainer.model,
+        LAYOUT,
+        world_size=ctx.world_size,
+        ep_config=trainer._ep_config,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
 
     # ── Step-1 loss vs the exact objective on a DENSE copy of the init weights. The logged loss is
-    # the world mean over ranks, each holding its own DP shard (or, under tp2 and etp2, the same batch),
-    # so the reference is averaged the same way.
+    # the world mean over ranks, each holding its own DP shard (or, inside a TP or expert-TP group, the same
+    # batch), so the reference is averaged the same way.
     checks["captured_step1_batch"] = bool(captured)
     reference_model = build_model(num_labels).to(ctx.device).eval()
     scores = pooled_logits(reference_model, captured, ctx.device)

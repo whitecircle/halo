@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 import typer
+from torch.distributed.run import parse_args
+from torch.numa.binding import AffinityMode
 from typer.testing import CliRunner
 
 from halo.cli import app, build_launch_command, resolve_config, tool_commands, training_methods
@@ -626,6 +628,134 @@ def test_the_child_imports_the_root_tree_first(tmp_path, monkeypatch, verb):
 
     assert result.exit_code == 0, result.output
     assert envs[0]["PYTHONPATH"].split(os.pathsep) == [str(tmp_path.resolve()), "/inherited"]
+
+
+@pytest.mark.parametrize(
+    "typed",
+    [
+        ["--numa-binding", "node", "--learning_rate=1e-5"],
+        ["--numa-binding=node", "--learning_rate=1e-5"],
+        ["--numa_binding", "node", "--learning_rate=1e-5"],
+        ["--learning_rate=1e-5", "--numa-binding", "node"],
+    ],
+)
+def test_numa_binding_reaches_torchrun_not_the_script(tmp_path, typed):
+    """torchrun reads its own options only before the script; one after it is the script's argument,
+    which the training parser rejects as an unknown field. Parsed with torchrun's parser, the flag is
+    torchrun's and the script keeps only its config and overrides."""
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+
+    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", "-n", "8", *typed])
+    parsed = parse_args(tokens[1:])
+
+    assert tokens[0] == "torchrun"
+    assert parsed.numa_binding == "node"
+    assert parsed.nproc_per_node == "8"
+    assert parsed.training_script == str(tmp_path / "scripts/training/sft.py")
+    assert parsed.training_script_args == [str((tmp_path / "config.yaml").resolve()), "--learning_rate=1e-5"]
+
+
+def test_torchrun_reads_numa_binding_only_before_the_script():
+    """Control for the placement test: the same flag after the script is not torchrun's."""
+    parsed = parse_args(["--nproc_per_node=8", "sft.py", "config.yaml", "--numa-binding", "node"])
+
+    assert parsed.numa_binding is None
+    assert parsed.training_script_args == ["config.yaml", "--numa-binding", "node"]
+
+
+@pytest.mark.parametrize("mode", [mode.value for mode in AffinityMode])
+def test_every_numa_mode_reaches_torchrun(tmp_path, mode):
+    """torchrun's choices are these modes; its parser exits on a value it does not take."""
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+
+    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", "-n", "2", "--port", "29752", "--numa-binding", mode])
+
+    assert parse_args(tokens[1:]).numa_binding == mode
+    assert tokens[:4] == ["torchrun", "--nproc_per_node=2", "--master_port=29752", f"--numa-binding={mode}"]
+
+
+def test_an_unknown_numa_mode_is_refused_before_launch(tmp_path):
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+
+    result = runner.invoke(
+        app,
+        ["launch", "sft", "config.yaml", "-n", "8", "--numa-binding", "bogus", "--dry_run", "--root", str(tmp_path)],
+    )
+
+    assert result.exit_code != 0
+    assert "bogus" in result.output and "node" in result.output
+    assert "sft.py" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    "launcher",
+    [
+        [],
+        ["-n", "1"],
+        ["--accelerate", "accelerate.yaml"],
+        ["--accelerate", "accelerate.yaml", "-n", "8"],
+    ],
+    ids=["python", "python-n1", "accelerate", "accelerate-n8"],
+)
+def test_numa_binding_is_refused_for_a_launch_without_torchrun(tmp_path, launcher):
+    """``accelerate launch`` and ``python`` have no NUMA binding: the flag fails loud rather than being
+    dropped (an unbound run) or forwarded (an unknown field in the script's parser)."""
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+    write_config(tmp_path / "accelerate.yaml")
+
+    result = runner.invoke(
+        app,
+        ["launch", "sft", "config.yaml", *launcher, "--numa-binding", "node", "--dry_run", "--root", str(tmp_path)],
+    )
+
+    output = " ".join(result.output.split())
+    assert result.exit_code != 0, output
+    assert "--numa-binding is a torchrun option" in output
+    assert "sft.py" not in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("nproc", "accelerate_config"), [(1, None), (8, Path("launcher-configs/accelerate/fsdp2_gradop_config.yaml"))]
+)
+def test_command_rejects_numa_binding_off_torchrun(nproc, accelerate_config):
+    with pytest.raises(typer.BadParameter, match="--numa-binding is a torchrun option"):
+        build_launch_command(
+            Path("scripts/training/sft.py"),
+            Path("config.yaml"),
+            nproc=nproc,
+            args=[],
+            accelerate_config=accelerate_config,
+            numa_binding=AffinityMode.NODE,
+        )
+
+
+@pytest.mark.parametrize(
+    ("launcher", "expected"),
+    [
+        (["-n", "8"], ["torchrun", "--nproc_per_node=8"]),
+        ([], [sys.executable]),
+        (["--accelerate", "accelerate.yaml"], ["accelerate", "launch", "--config_file", "{root}/accelerate.yaml"]),
+    ],
+    ids=["torchrun", "python", "accelerate"],
+)
+def test_a_launch_without_numa_binding_is_unchanged(tmp_path, launcher, expected):
+    write_script(tmp_path / "scripts/training/sft.py")
+    write_config(tmp_path / "config.yaml")
+    write_config(tmp_path / "accelerate.yaml")
+
+    tokens = _dry_run(tmp_path, ["launch", "sft", "config.yaml", *launcher, "--packing"])
+
+    root = str(tmp_path.resolve())
+    assert tokens == [
+        *(part.format(root=root) for part in expected),
+        str(tmp_path / "scripts/training/sft.py"),
+        str((tmp_path / "config.yaml").resolve()),
+        "--packing",
+    ]
 
 
 if __name__ == "__main__":

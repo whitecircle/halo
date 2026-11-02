@@ -151,8 +151,10 @@ _TINY_MOE_FAMILY_MARKERS = {
     "zaya": "zaya",
 }
 _TINY_MOE_FAMILIES = tuple(_TINY_MOE_FAMILY_MARKERS)
-# The families the reentrant-recompute suite scores row by row: one per expert layout it crosses.
+# The families the reentrant-recompute suite scores row by row on every layout and adapter: one per expert
+# layout it crosses. Every other family runs its full fine-tune on ep1 and on two EP groups.
 _REENTRANT_FAMILIES = ("qwen3_moe", "gpt_oss", "gemma4_text")
+_REENTRANT_SWEEP_FAMILIES = tuple(family for family in _TINY_MOE_FAMILIES if family not in _REENTRANT_FAMILIES)
 
 
 def _family_markers(families) -> tuple[str, ...]:
@@ -213,6 +215,10 @@ _CP_ROSTER_ROWS = (
         for family in _CP_MOE_FAMILIES
     ),
 )
+# The MoE families Ulysses CP takes (TinyFamily.ulysses_cp): the CP roster but Qwen3.5-MoE, which the CP suites run
+# with its gated DeltaNet layers swapped for attention. tests/cpu/conventions/test_tiny_family_roster.py holds the
+# offline GRPO CP-resume rows to it.
+_ULYSSES_MOE_FAMILIES = tuple(family for family in _CP_MOE_FAMILIES if family != "qwen3_5_moe_text")
 # The pipeline-registered MoE families test_pp_family_vs_reference.py runs (GPT-OSS has its own PP suites).
 _PP_MOE_FAMILIES = ("deepseek_v4", "glm5_next", "qwen3_5_moe_text", "step3p7")
 # The families whose attention the selective-TP path shards; tests/cpu/conventions/test_tiny_family_roster.py
@@ -266,6 +272,7 @@ _LORA_SFT_ROWS = {
         "ep --attn flash_attention_2",
         "ep_cp --save-reload",
         "etp --save-reload",
+        "dp_stock_experts --qlora --save-reload",
     ),
     "qwen3_0_6b": (
         "fsdp --save-reload",
@@ -317,6 +324,17 @@ MANIFEST: dict[str, TestSpec] = {
     # ── data ──
     "data/test_cache_isolation.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "data/test_coordinated_processing.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
+    # padding_free SFT's first step against the padded batch's, under FSDP2, TP2 and EP2.
+    "data/test_padding_free_sft.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "tp", "ep", "moe", "qwen3"),
+        args_matrix=(
+            Row("--mode dense", markers=("gpu", "full", "2gpu", "qwen3")),
+            Row("--mode tp2", markers=("gpu", "full", "2gpu", "tp", "qwen3")),
+            Row("--mode ep2", markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+        ),
+        timeout=900,
+    ),
     "data/test_packing_isolation.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "data/test_family_packing_isolation.py": TestSpec(
         nproc=1,
@@ -341,6 +359,11 @@ MANIFEST: dict[str, TestSpec] = {
     "data/test_packing_batch_gt1.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=1800),
     "data/test_sft_caching_e2e.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "data/test_sharded_distributed_load.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
+    # Flat against tree packing, each arm a `halo launch sft` run; the row runs the file as one process, which
+    # starts the ranks. Two launches plus the CPU row-count probe, with room for the FA4 split-form warm-up.
+    "data/test_tree_packing_e2e.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=1200, launcher="python"
+    ),
     # ── kernels ──
     "kernels/test_chunked_logprob_precision.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_deepgemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
@@ -414,14 +437,22 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fla_blackwell_autotune.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600),
     "kernels/test_lowp_expert_lora.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "lora", "moe"), timeout=600),
     "kernels/test_packed_broadcast_memory.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    # EP expert weights re-quantized after every fused AdamWBF16 step: versions advance, losses match the uncached run.
+    "kernels/test_lowp_ep_trainer.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=("--precision fp8", "--precision mxfp4"),
+        timeout=900,
+    ),
     "kernels/test_lowp_fsdp2_weight_cache.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     "kernels/test_lowp_production.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_weight_sync_param_buffer_cuda.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     "kernels/test_weight_sync_stream_safety.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=300),
     # ── models ──
     # Qwen3.8-Flash-Next's release cut to four layers under ep8 (the local Hub cache's snapshot; skips without it):
-    # the lazy load, tiled QSA at the release's widths, packed isolation and the unsharded loss; the gathered export
-    # a stock CPU load reads back; full fine-tuning's exact resume. The cut model holds ~20 GB of experts; each
+    # the lazy load, tiled QSA at the release's widths and the unsharded loss, packed isolation on an fp32 unsharded
+    # load beside its no-cu_seq_lens leak; the gathered export, whose stock CPU load scores real text at the trained
+    # model's mean NLL; full fine-tuning's exact resume. The cut model holds ~20 GB of experts; each
     # export or resume checkpoint is ~125 GB, ~100 GB of it the n-gram table, written once and hard-linked after.
     "models/test_qwen4_exp_real_checkpoint.py": TestSpec(
         nproc=8,
@@ -438,6 +469,20 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "optimizers/test_flash_adamw.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "optimizers/test_lowp_master_feasibility.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
+    # Muon and FlashAdamW through the trainer under the parallel layouts: a poisoned step skipped on every leg,
+    # replicas in step, and save, exact resume and export.
+    "optimizers/test_muon_parallel.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "tp", "etp", "moe", "qwen3"),
+        args_matrix=("--mode ep2", "--mode tp2", "--mode etp2"),
+        timeout=900,
+    ),
+    "optimizers/test_flash_adamw_parallel.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=("--mode ep2", "--mode fsdp", "--mode uneven"),
+        timeout=900,
+    ),
     "optimizers/test_muon.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     # Pure FSDP2 (no TP mesh anywhere), so no parallelism-axis marker, like the plain-FSDP entries.
     "optimizers/test_muon_fsdp.py": TestSpec(nproc=2, markers=("gpu", "full", "2gpu"), timeout=1000),
@@ -530,8 +575,11 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/ep/test_ep_buffer_gc_safety.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe"), timeout=300
     ),
+    # Six fresh-interpreter lazy-load probes on top of the in-process checks.
     "parallelism/ep/test_ep_sort_sync_free.py": TestSpec(
-        nproc=1, markers=("gpu", "core", "1gpu", "ep", "moe", *_family_markers(("qwen3_moe",))), timeout=300
+        nproc=1,
+        markers=("gpu", "core", "1gpu", "ep", "moe", *_family_markers(("gpt_oss", "qwen3_5_moe_text", "qwen3_moe"))),
+        timeout=900,
     ),
     # Every tiny family on real DeepEP dispatch: the grouped path on each transport backend, the per-expert loop,
     # GptOss's grouped path under expert TP (ep2 x etp2), and at ep8 every family whose expert count 8 divides.
@@ -624,11 +672,36 @@ MANIFEST: dict[str, TestSpec] = {
                 nproc=4,
                 markers=("gpu", "full", "4gpu", "ep", "etp", "moe", *_family_markers(_TINY_MOE_FAMILIES)),
             ),
+            # The FSDP2 knobs, HSDP, several EP groups and TP x DP, for both trainers.
+            *(
+                Row(f"--trainer {trainer} --family {family} --mode {mode}", nproc=nproc, markers=markers)
+                for trainer in ("dpo", "kto")
+                for family, mode, nproc, markers in (
+                    ("dense", "dp2_zero3", 2, ("gpu", "full", "2gpu", "qwen3")),
+                    ("dense", "hsdp", 4, ("gpu", "full", "4gpu", "hsdp", "qwen3")),
+                    ("dense", "tp2dp2", 4, ("gpu", "full", "4gpu", "tp", "qwen3")),
+                    ("qwen3_moe", "ep1_zero3", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+                    ("qwen3_moe", "ep1_unsharded", 2, ("gpu", "full", "2gpu", "ep", "moe", "qwen3")),
+                    ("qwen3_moe", "ep2dp2", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
+                    ("qwen3_moe", "ep2x2dom", 4, ("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
+                    ("qwen3_moe", "tp2dp2", 4, ("gpu", "full", "4gpu", "tp", "moe", "qwen3")),
+                )
+            ),
+            # Attention LoRA under expert TP on the families whose projections the index cannot name.
+            *(
+                Row(f"--trainer dpo --family {family} --mode {mode} --peft", nproc=nproc, markers=markers)
+                for family, mode, nproc, markers in (
+                    ("deepseek_v4", "etp2", 2, ("gpu", "full", "2gpu", "etp", "lora", "moe", "deepseek_v4")),
+                    ("zaya", "etp2", 2, ("gpu", "full", "2gpu", "etp", "lora", "moe", "zaya")),
+                    ("bailing_moe", "ep2etp2", 4, ("gpu", "full", "4gpu", "ep", "etp", "lora", "moe", "bailing")),
+                )
+            ),
         ),
         timeout=900,
     ),
-    # The two pooled-head trainers on a tiny Qwen3-MoE under ep2 (the bare rows), tp2 and etp2: the step-1 loss
-    # against the dense objective, then save, exact resume and export.
+    # The two pooled-head trainers on a tiny Qwen3-MoE under ep2 (the bare rows), tp2, etp2, the ep1 FSDP knobs and
+    # EP+TP on two ranks, and EP+ETP, TP x DP and two EP groups on four: the step-1 loss against the dense
+    # objective, the layout read off the model, then save, exact resume and export.
     "parallelism/ep/test_ep_pooled_head_trainers.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
@@ -636,8 +709,23 @@ MANIFEST: dict[str, TestSpec] = {
             "--trainer reward",
             "--trainer classification",
             *(
-                Row(f"--trainer {trainer} --mode {mode}", markers=("gpu", "full", "2gpu", axis, "moe", "qwen3"))
-                for mode, axis in (("tp2", "tp"), ("etp2", "etp"))
+                Row(
+                    f"--trainer {trainer} --mode {mode}",
+                    nproc=nproc,
+                    markers=("gpu", "full", f"{nproc}gpu", *axes, "moe", "qwen3"),
+                )
+                for mode, nproc, axes in (
+                    ("tp2", 2, ("tp",)),
+                    ("etp2", 2, ("etp",)),
+                    ("ep1", 2, ("ep",)),
+                    ("ep1_zero3", 2, ("ep",)),
+                    ("ep1_unsharded", 2, ("ep",)),
+                    ("ep2tp2", 2, ("ep", "tp")),
+                    ("ep2etp2", 4, ("ep", "etp")),
+                    ("tp2dp2", 4, ("tp",)),
+                    ("ep2dp2", 4, ("ep",)),
+                    ("ep2x2dom", 4, ("ep",)),
+                )
                 for trainer in ("reward", "classification")
             ),
         ),
@@ -723,10 +811,20 @@ MANIFEST: dict[str, TestSpec] = {
                     markers=("gpu", "full", "4gpu", "ep", "etp", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
                     timeout=900,
                 )
-                for family in ("inkling_text", "qwen4_exp_text")
+                for family in ("gpt_oss", "inkling_text", "qwen4_exp_text")
             ),
         ),
         timeout=1500,
+    ),
+    # Qwen3.5-MoE and Gemma 4 composites at EP2 on their processors' image batches, against the replicated composite.
+    "parallelism/ep/test_ep_vlm_composites.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "qwen3", "gemma4"),
+        args_matrix=(
+            Row("--family qwen3_5_moe", markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "qwen3")),
+            Row("--family gemma4", markers=("gpu", "full", "2gpu", "ep", "vlm", "moe", "gemma4")),
+        ),
+        timeout=900,
     ),
     "parallelism/ep/test_ep_vlm_inkling.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "vlm", "inkling"), timeout=900
@@ -850,7 +948,7 @@ MANIFEST: dict[str, TestSpec] = {
     # ep1 twin: Qwen3.5-MoE on the ep1 grouped-GEMM EP layers, and each family with its experts distributed.
     "parallelism/pp/test_pp_family_vs_reference.py": TestSpec(
         nproc=4,
-        markers=("gpu", "full", "4gpu", "pp", "ep", "moe", *_family_markers(_PP_MOE_FAMILIES)),
+        markers=("gpu", "full", "4gpu", "pp", "ep", "etp", "moe", *_family_markers(_PP_MOE_FAMILIES)),
         timeout=1500,
         args_matrix=(
             Row("--family qwen3_5_moe_text --ep-size 1", markers=("gpu", "full", "4gpu", "pp", "moe", "qwen3")),
@@ -858,6 +956,13 @@ MANIFEST: dict[str, TestSpec] = {
                 Row(
                     f"--family {family} --ep-size 2",
                     markers=("gpu", "full", "4gpu", "pp", "ep", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family in _PP_MOE_FAMILIES
+            ),
+            *(
+                Row(
+                    f"--family {family} --ep-size 1 --etp-size 2",
+                    markers=("gpu", "full", "4gpu", "pp", "etp", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
                 )
                 for family in _PP_MOE_FAMILIES
             ),
@@ -956,10 +1061,23 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600
     ),
     # Per-row scoring under FSDP2 and reentrant checkpointing: ep1 (ZeRO-2 and ZeRO-3, a nested fp32-router group)
-    # on two ranks, one EP group of four and two EP groups of two on four, each full and LoRA.
+    # on two ranks, one EP group of four and two EP groups of two on four, each full and LoRA; every other tiny
+    # family full fine-tuned on ep1 and two EP groups (Zaya without checkpointing, which it refuses); expert TP, EP x
+    # ETP, EP x TP, TP x DP and HSDP on Qwen3-MoE and GPT-OSS.
     "parallelism/test_fsdp2_reentrant_recompute.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "ep", "moe", "lora", *_family_markers(_REENTRANT_FAMILIES)),
+        markers=(
+            "gpu",
+            "full",
+            "2gpu",
+            "ep",
+            "etp",
+            "tp",
+            "hsdp",
+            "moe",
+            "lora",
+            *_family_markers(_TINY_MOE_FAMILIES),
+        ),
         timeout=900,
         args_matrix=(
             *(
@@ -993,6 +1111,30 @@ MANIFEST: dict[str, TestSpec] = {
                 for layout in ("ep_single", "ep_multi")
                 for adapter in ("full", "lora")
             ),
+            *(
+                Row(
+                    f"--family {family} --layout {layout} --adapter full",
+                    nproc=nproc,
+                    markers=("gpu", "full", f"{nproc}gpu", "ep", "moe", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family in _REENTRANT_SWEEP_FAMILIES
+                for layout, nproc in (("ep1", 2), ("ep_multi", 4))
+            ),
+            *(
+                Row(
+                    f"--family {family} --layout {layout}",
+                    nproc=nproc,
+                    markers=("gpu", "full", f"{nproc}gpu", *axes, "moe", _TINY_MOE_FAMILY_MARKERS[family]),
+                )
+                for family in ("qwen3_moe", "gpt_oss")
+                for layout, nproc, axes in (
+                    ("etp", 2, ("etp",)),
+                    ("ep_etp", 4, ("ep", "etp")),
+                    ("ep_tp", 4, ("ep", "tp")),
+                    ("tp_dp", 4, ("tp",)),
+                    ("hsdp", 4, ("hsdp",)),
+                )
+            ),
         ),
     ),
     # One node per family and mode; the markers are the union over the rows. EP+TP needs a single dispatch group
@@ -1023,6 +1165,36 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     # nproc=2 is pure TP; also valid at nproc=4 (TP+DP), where FSDP2 hides the plain-slice/replica
     # distinction the TP grad-norm classification depends on.
+    # Every TP-capable family's step against the unsharded model: the dense families on transformers' plan at TP2,
+    # the MoE families on the toolkit's attention plan at TP2 and beside EP2.
+    "parallelism/tp/test_tp_family_vs_reference.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "tp"),
+        args_matrix=(
+            *(
+                f"--family {family} --mode tp2"
+                for family in ("cohere2", "gemma2", "gemma3_text", "llama", "mistral", "olmo3", "qwen2")
+            ),
+            Row("--family qwen3_5 --mode tp2", markers=("gpu", "full", "2gpu", "tp", "qwen3")),
+            *(
+                Row(
+                    f"--family {family} --mode {mode}",
+                    markers=(
+                        "gpu",
+                        "full",
+                        "2gpu",
+                        "tp",
+                        *(("ep",) if mode == "ep2tp2" else ()),
+                        "moe",
+                        _TINY_MOE_FAMILY_MARKERS[family],
+                    ),
+                )
+                for family in _TP_FAMILIES
+                for mode in ("tp2", "ep2tp2")
+            ),
+        ),
+        timeout=900,
+    ),
     "parallelism/tp/test_tp_correctness.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "qwen3"), timeout=600
     ),
@@ -1040,11 +1212,16 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=1, markers=("gpu", "full", "1gpu", "qwen3", "vllm_server"), timeout=600
     ),
     # FSDP2 ZeRO-3 over two ranks; no rollout server: the round is built in place. The wall-clock speedup bound
-    # (``--timed``) runs in the full tier only.
+    # (``--timed``) runs in the full tier only. ``--moe`` deals a tiny Qwen3-MoE at ep2 (DeepEP, FSDP2 over the
+    # dense parameters) under routing replay, each row's R2 capture and R3 engine routing moving with it.
     "trainers/grpo/test_env_length_ordered_rows.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "qwen3"),
-        args_matrix=("", Row("--timed", markers=("gpu", "full", "2gpu", "qwen3"))),
+        args_matrix=(
+            "",
+            Row("--timed", markers=("gpu", "full", "2gpu", "qwen3")),
+            Row("--moe", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")),
+        ),
         timeout=900,
     ),
     "trainers/grpo/test_sglang_weight_sync_e2e.py": TestSpec(
@@ -1055,13 +1232,19 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "ep", "moe", "step3p7", "vllm_server"), timeout=1200
     ),
+    # Every row trains on the draw task of tests/common/env_grpo_e2e.py, whose groups spread on every policy, so step 1
+    # must carry a gradient, and every R3 row holds the flip rate of each step trained on its own weights' rollouts to a
+    # bar it measures on its own policy (a bf16-noise floor against a misplaced mask).
     # Every row asserts the served policy changed, so the server must run the checkpoint the row trains:
     # on vLLM Qwen3-30B on two ranks and gpt-oss on four, so those are separate marker passes
     # (SERVER_TIER='moe and not gptoss' / 'moe and gptoss'), on SGLang gpt-oss; HALO_TEST_ENV_GRPO_MODEL /
     # HALO_TEST_ENV_GRPO_SGLANG_MODEL point the two-rank rows at another family for a per-family pass.
     # --ep-size 1 gathers DTensor experts out of the FSDP2 shard, --ep-size 2 gathers FSDP-ignored plain
     # tensors; both must land in the engine's loader. The three bare vLLM rows are the per-family server
-    # arms (a family pass runs them with -k "not peft and not resume and not routing and not prefetch"); the
+    # arms (a family pass runs them with -k "not peft and not resume and not routing and not prefetch and not
+    # zero3 and not unsharded and not world and not servers"); the --zero3 / --unsharded-ep1-experts rows train
+    # the shipped full-ep1 recipes' FSDP shapes, the --world rows add DP replicas past the expert group and the
+    # --servers row pushes through a two-server pool; the
     # --peft / --resume rows are the Qwen3-30B pass, and the --prefetch-depth rows prefetch on the one server
     # (enable_prefetch: true), on vLLM at depth 2 too, and beside R3 on both backends. The --chunked R3 rows
     # run the length deal against a --length-ordered false arm, compared on routing_replay_flip_rate_max.
@@ -1100,12 +1283,38 @@ MANIFEST: dict[str, TestSpec] = {
                     "--ep-size 1 --routing-replay rollout --chunked --length-ordered false",
                     "--ep-size 2 --routing-replay rollout --chunked",
                     "--ep-size 2 --routing-replay rollout --chunked --length-ordered false",
+                    "--ep-size 1 --zero3",
+                    "--ep-size 1 --zero3 --routing-replay rollout --chunked",
+                    "--ep-size 1 --unsharded-ep1-experts",
                 )
+            ),
+            # Two vLLM servers of the row's checkpoint in HALO_TEST_VLLM_SERVER_URLS; skips with fewer.
+            Row(
+                "--backend vllm --ep-size 2 --servers 2 --prefetch-depth 1",
+                markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3", "vllm_server"),
             ),
             *_rows(
                 (f"--backend vllm {args}" for args in _ENV_GRPO_4GPU_ROWS),
                 nproc=4,
                 markers=("gpu", "full", "4gpu", "ep", "etp", "tp", "lora", "moe", "gptoss", "vllm_server"),
+                timeout=1800,
+            ),
+            # DP replicas past the expert group: TP x DP, two EP groups (one domain, then one per simulated
+            # domain), HSDP over two simulated domains, and the shipped ep4 recipe's fp32 masters under the
+            # chunked prefetch.
+            *_rows(
+                (
+                    f"--backend vllm {args}"
+                    for args in (
+                        "--tp-size 2 --world 4",
+                        "--ep-size 2 --world 4",
+                        "--ep-size 2 --world 4 --gpus-per-node 2",
+                        "--world 4 --hsdp",
+                        "--ep-size 4 --chunked --prefetch-depth 1 --fp32-router --fp32-experts",
+                    )
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "tp", "hsdp", "moe", "gptoss", "vllm_server"),
                 timeout=1800,
             ),
             *_rows(
@@ -1128,6 +1337,7 @@ MANIFEST: dict[str, TestSpec] = {
                         "--ep-size 1 --routing-replay rollout --prefetch-depth 1",
                         "--ep-size 1 --routing-replay rollout --chunked",
                         "--ep-size 1 --routing-replay rollout --chunked --length-ordered false",
+                        "--ep-size 1 --zero3",
                     )
                 ),
                 markers=("gpu", "full", "2gpu", "ep", "tp", "lora", "moe", "gptoss", "sglang_server"),
@@ -1142,7 +1352,12 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=2400,
     ),
-    "trainers/grpo/test_offline_grpo.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
+    "trainers/grpo/test_offline_grpo.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=("", Row("--hsdp", nproc=4, markers=("gpu", "full", "4gpu", "hsdp", "qwen3"))),
+        timeout=600,
+    ),
     "trainers/grpo/test_offline_grpo_bnpo.py": TestSpec(
         # FSDP then TP=2 in one process; 900s covers the one-time FA2 compile + both modes + evals.
         nproc=2,
@@ -1156,14 +1371,28 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "qwen3"),
         timeout=900,
     ),
+    # Pure CP and EP2+CP2 with fp32 expert masters on every MoE family Ulysses takes, the dense model's CP x DP,
+    # FULL_SHARD, whole ep1 experts, and two EP groups (one per simulated NVLink domain on the last row).
     "trainers/grpo/test_offline_grpo_cp_resume.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "cp", "ep", "moe", "qwen3", "gptoss", "cohere2_moe"),
+        markers=("gpu", "full", "2gpu", "cp", "ep", "moe", "qwen3", *_family_markers(_ULYSSES_MOE_FAMILIES)),
         args_matrix=(
             "--cp-size 1",
             "--cp-size 2",
-            "--cp-size 2 --ep-size 2 --family gpt_oss --fp32-masters",
-            "--cp-size 2 --ep-size 2 --family cohere2_moe --fp32-masters",
+            *(f"--cp-size 2 --family {family}" for family in _ULYSSES_MOE_FAMILIES),
+            *(f"--cp-size 2 --ep-size 2 --family {family} --fp32-masters" for family in _ULYSSES_MOE_FAMILIES),
+            "--cp-size 1 --zero3",
+            "--cp-size 1 --family qwen3_moe --zero3",
+            "--cp-size 1 --family qwen3_moe --unsharded-ep1-experts",
+            *_rows(
+                (
+                    "--cp-size 2 --world 4",
+                    "--cp-size 1 --family qwen3_moe --ep-size 2 --world 4",
+                    "--cp-size 1 --family qwen3_moe --ep-size 2 --world 4 --gpus-per-node 2",
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "cp", "ep", "moe", "qwen3"),
+            ),
         ),
         timeout=2400,
     ),
@@ -1182,7 +1411,11 @@ MANIFEST: dict[str, TestSpec] = {
         args_matrix=(
             "--mode ep8 --ep-loading lazy",
             "--mode ep8 --ep-loading eager",
-            *_rows(("--mode tp", "--mode etp"), nproc=4, markers=("gpu", "full", "4gpu", "tp", "etp", "moe", "qwen3")),
+            *_rows(
+                ("--mode tp", "--mode etp", "--mode ep_tp", "--mode ep_etp"),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "tp", "etp", "moe", "qwen3"),
+            ),
         ),
         timeout=1800,
     ),
@@ -1218,6 +1451,34 @@ MANIFEST: dict[str, TestSpec] = {
             "--trainer online --mode expert_lora_ep2 --resume",
             "--trainer sdpg --mode expert_lora_ep2 --resume",
             "--trainer sdpg --mode full_ep2 --resume",
+            *(
+                f"--trainer {trainer} --mode {mode}"
+                for mode in ("full_ep1", "full_ep1_unsharded")
+                for trainer in ("online", "sdpg")
+            ),
+            *_rows(
+                ("--trainer online --mode full_ep2_tp2", "--trainer sdpg --mode full_ep2_tp2"),
+                markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "qwen3", "vllm_server"),
+            ),
+            *_rows(
+                (
+                    f"--trainer {trainer} --mode {mode}"
+                    for mode in ("full_ep2_dp2", "full_ep2x2dom", "full_ep2_etp2")
+                    for trainer in ("online", "sdpg")
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "qwen3", "vllm_server"),
+            ),
+            *_rows(
+                (
+                    f"--trainer {trainer} --mode {mode}"
+                    for mode in ("full_tp2_dp2", "full_hsdp")
+                    for trainer in ("online", "sdpg")
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "tp", "hsdp", "qwen3", "vllm_server"),
+                timeout=900,
+            ),
             *_rows(
                 (
                     "--trainer online --mode full_tp2",
@@ -1227,6 +1488,8 @@ MANIFEST: dict[str, TestSpec] = {
                     "--trainer online --mode lora_tp2_rejected",
                     "--trainer sdpg --mode lora_tp2_rejected",
                     "--trainer online --mode full_fsdp_kl",
+                    "--trainer online --mode full_fsdp_zero3",
+                    "--trainer sdpg --mode full_fsdp_zero3",
                     "--trainer online --mode full_tp2 --resume",
                     "--trainer sdpg --mode full_tp2 --resume",
                     "--trainer online --mode lora_fsdp --resume",
@@ -1281,6 +1544,36 @@ MANIFEST: dict[str, TestSpec] = {
                 (f"--family {family} --mode tpdp --lora off" for family in _EMBEDDING_TP_FAMILIES),
                 nproc=4,
                 markers=("gpu", "full", "4gpu", "tp", "moe", "qwen3", "gptoss"),
+            ),
+            # FULL_SHARD, the ep1 EP layers (experts sharded or whole) and the expert-parallel shapes past EP2,
+            # full fine-tunes and, where the shape takes them, adapters; HSDP and the four-rank shapes below.
+            *_rows(
+                (
+                    "--family qwen3 --mode zero3",
+                    "--family qwen3 --mode zero3 --lora off",
+                    "--family gpt_oss --mode zero3 --lora off",
+                    "--family gpt_oss --mode ep1 --lora off",
+                    "--family gemma4 --mode ep1 --lora off",
+                    "--family gpt_oss --mode ep1_unsharded",
+                    "--family gpt_oss --mode ep1_unsharded --lora off",
+                    "--family gpt_oss --mode etp",
+                    "--family gpt_oss --mode etp --lora off",
+                    "--family gpt_oss --mode eptp --lora off",
+                ),
+                markers=("gpu", "full", "2gpu", "lora", "ep", "etp", "tp", "moe", "qwen3", "gemma4", "gptoss"),
+                timeout=1200,
+            ),
+            *_rows(
+                (
+                    "--family qwen3 --mode hsdp",
+                    "--family qwen3 --mode hsdp --lora off",
+                    "--family gpt_oss --mode epetp --lora off",
+                    "--family gpt_oss --mode ep2dp2 --lora off",
+                    "--family gpt_oss --mode ep2x2dom --lora off",
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "lora", "ep", "etp", "hsdp", "moe", "qwen3", "gptoss"),
+                timeout=1200,
             ),
             *_rows(
                 (
@@ -1443,11 +1736,51 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/lora/test_lora_reference_pass_fsdp2.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "lora", "qwen3"), timeout=600
     ),
+    # Adapters and full fine-tuning under every layout: the OPD term above the unhinted floor, the trained tensors
+    # moved, the layout read off the model and a checkpoint round trip.
     "trainers/lora/test_lora_self_distill.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "lora", "ep", "moe", "gptoss", "qwen3"),
-        args_matrix=("--mode lora", "--mode qlora", "--mode lora_ep", "--mode expert_lora"),
+        markers=("gpu", "full", "2gpu", "lora", "ep", "etp", "tp", "moe", "gptoss", "qwen3"),
+        args_matrix=(
+            *(
+                f"--mode {mode}"
+                for mode in (
+                    "lora",
+                    "qlora",
+                    "lora_ep",
+                    "expert_lora",
+                    "lora_etp",
+                    "full_ep1",
+                    "ep1_unsharded",
+                    "full_ep2_tp2",
+                    "full_tp2",
+                    "zero3",
+                )
+            ),
+            *_rows(
+                (
+                    "--mode lora_ep_etp",
+                    "--mode hsdp",
+                    "--mode full_tp2 --world 4",
+                    "--mode lora_ep --world 4",
+                    "--mode lora_ep --world 4 --gpus-per-node 2",
+                ),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "lora", "ep", "etp", "tp", "hsdp", "moe", "gptoss", "qwen3"),
+            ),
+        ),
         timeout=1500,
+    ),
+    # A tied model's grown vocabulary saved with the adapters and restored under both tied names, then exported.
+    "trainers/lora/test_lora_tied_vocab_resume.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "lora", "qwen3"),
+        args_matrix=(
+            Row("--mode single", nproc=1, markers=("gpu", "full", "1gpu", "lora", "qwen3")),
+            "--mode fsdp",
+            Row("--mode cp2", markers=("gpu", "full", "2gpu", "cp", "lora", "qwen3")),
+        ),
+        timeout=900,
     ),
     "trainers/lora/test_lora_pref_heads.py": TestSpec(
         nproc=2,
@@ -1496,10 +1829,42 @@ MANIFEST: dict[str, TestSpec] = {
             "--mode etp",
         ),
     ),
-    "trainers/other/test_classification.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
-    "trainers/other/test_distillation.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
+    "trainers/other/test_classification.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=(
+            "",
+            Row("--world 1", nproc=1, markers=("gpu", "full", "1gpu", "qwen3")),
+            Row("--hsdp", nproc=4, markers=("gpu", "full", "4gpu", "hsdp", "qwen3")),
+        ),
+        timeout=600,
+    ),
+    "trainers/other/test_distillation.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=(
+            "",
+            Row("--world 1", nproc=1, markers=("gpu", "full", "1gpu", "qwen3")),
+            Row("--zero3", markers=("gpu", "full", "2gpu", "qwen3")),
+            Row("--hsdp", nproc=4, markers=("gpu", "full", "4gpu", "hsdp", "qwen3")),
+        ),
+        timeout=600,
+    ),
+    # One row per student layout: the step-1 KL against the identical teacher, the KL moving off it, the layout
+    # read off the model and the saved student loading back complete.
     "trainers/other/test_distillation_oss20b.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "ep", "tp", "moe", "gptoss"), timeout=1500
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "tp", "etp", "moe", "gptoss"),
+        args_matrix=(
+            *(f"--mode {mode}" for mode in ("fsdp", "fsdp_unsharded", "ep", "tp", "ep_tp", "etp")),
+            *_rows(
+                ("--mode ep_etp", "--mode ep_dp2", "--mode ep_dp2 --gpus-per-node 2"),
+                nproc=4,
+                markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "gptoss"),
+            ),
+            Row("--mode tp_dp2", nproc=4, markers=("gpu", "full", "4gpu", "tp", "moe", "gptoss")),
+        ),
+        timeout=1500,
     ),
     "trainers/other/test_embedding.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
     # One row per method under scripts/training, which tests/cpu/config/test_entry_script_recipes.py holds them
@@ -1544,7 +1909,16 @@ MANIFEST: dict[str, TestSpec] = {
         timeout=1500,
         launcher="python",
     ),
-    "trainers/other/test_reward.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "qwen3"), timeout=600),
+    "trainers/other/test_reward.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "qwen3"),
+        args_matrix=(
+            "",
+            Row("--world 1", nproc=1, markers=("gpu", "full", "1gpu", "qwen3")),
+            Row("--hsdp", nproc=4, markers=("gpu", "full", "4gpu", "hsdp", "qwen3")),
+        ),
+        timeout=600,
+    ),
     "trainers/other/test_reward_vlm_e2e.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "vlm"), timeout=1200),
     # The non-finite step guard's late verdict waits for its asynchronous copy and adds no host sync to a step.
     "trainers/other/test_step_guard_device_verdict.py": TestSpec(
@@ -1580,6 +1954,30 @@ MANIFEST: dict[str, TestSpec] = {
         markers=("gpu", "core", "2gpu", "qwen3"),
         args_matrix=("--mode fsdp", "--mode padding_free"),
         timeout=600,
+    ),
+    # SMPO's first step against an undistributed recompute, then save, exact resume and export, on every layout:
+    # the tiny Qwen3-MoE under EP, the ep1 FSDP knobs, expert TP and EP+TP on two ranks and EP+ETP and two EP
+    # groups on four, the tiny dense Qwen3 under FULL_SHARD and HSDP.
+    "trainers/preference/test_smpo_layouts.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
+        args_matrix=tuple(
+            Row(f"--mode {mode}", nproc=nproc, markers=("gpu", "full", f"{nproc}gpu", *axes, "qwen3"))
+            for mode, nproc, axes in (
+                ("ep2", 2, ("ep", "moe")),
+                ("ep1", 2, ("ep", "moe")),
+                ("ep1_zero3", 2, ("ep", "moe")),
+                ("ep1_unsharded", 2, ("ep", "moe")),
+                ("etp2", 2, ("etp", "moe")),
+                ("ep2tp2", 2, ("ep", "tp", "moe")),
+                ("ep2etp2", 4, ("ep", "etp", "moe")),
+                ("ep2dp2", 4, ("ep", "moe")),
+                ("ep2x2dom", 4, ("ep", "moe")),
+                ("zero3", 2, ()),
+                ("hsdp", 4, ("hsdp",)),
+            )
+        ),
+        timeout=900,
     ),
     "trainers/preference/test_smpo_padding_free_segments.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "lfm2", "qwen3"), timeout=600
@@ -1654,7 +2052,7 @@ MANIFEST: dict[str, TestSpec] = {
         nproc=2,
         # The markers are the union over the rows, so `-m "gpu and cp"` selects the fsdp and tp rows
         # too.
-        markers=("gpu", "core", "2gpu", "cp", "tp", "qwen3", "gptoss"),
+        markers=("gpu", "core", "2gpu", "cp", "tp", "ep", "moe", "qwen3", "gptoss"),
         args_matrix=("--mode fsdp", "--mode fsdp_base", "--mode cp", "--mode tp", "--mode ep"),
         # 2400s: the cp row trains at a 4096-token cap on auto-selected FA4, which JITs per shape, and
         # every mode runs the same 6-step two-phase resume plus two host copies of its optimizer state.
@@ -1793,14 +2191,15 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "trainers/sft/test_sft_gptoss_trainable_sinks.py": TestSpec(
         nproc=2,
-        markers=("gpu", "full", "2gpu", "moe", "gptoss"),
+        markers=("gpu", "full", "2gpu", "tp", "ep", "moe", "gptoss"),
         args_matrix=("--mode fsdp", "--mode tp", "--mode ep"),
         timeout=1500,
     ),
     # A non-finite step skipped on every rank, its verdict read at its own log and a step late, a streak and
     # corrupted weights raising, on every clip and sharding path: ep1 DTensor experts, ep2 plain experts, two EP
-    # groups' deferred sweep, ETP, dense FSDP2, TP, CP, QLoRA and PP; in the full tier EP+TP, EP+CP, PP+EP, and
-    # clipping off (`--max-grad-norm 0`, the norm-only pass) on the deferred sweep and the TP sync.
+    # groups' deferred sweep, both with every parameter an fp32 master (`--fp32-masters`), ETP, dense FSDP2, TP,
+    # CP, QLoRA and PP; in the full tier EP+TP, EP+CP, EP+ETP, PP+EP, and clipping off (`--max-grad-norm 0`, the
+    # norm-only pass) on the deferred sweep and the TP sync.
     "trainers/sft/test_sft_nonfinite_step_guard.py": TestSpec(
         nproc=2,
         markers=("gpu", "core", "2gpu", "qwen3"),
@@ -1808,6 +2207,8 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--mode ep1", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")),
             Row("--mode ep2", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")),
             Row("--mode ep2_dp2", nproc=4, markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3")),
+            Row("--mode ep2 --fp32-masters", markers=("gpu", "core", "2gpu", "ep", "moe", "qwen3")),
+            Row("--mode ep2_dp2 --fp32-masters", nproc=4, markers=("gpu", "core", "4gpu", "ep", "moe", "qwen3")),
             Row("--mode etp2", markers=("gpu", "core", "2gpu", "etp", "moe", "qwen3")),
             "--mode dense",
             Row("--mode tp", markers=("gpu", "core", "2gpu", "tp", "qwen3")),
@@ -1816,6 +2217,7 @@ MANIFEST: dict[str, TestSpec] = {
             Row("--mode pp", nproc=4, markers=("gpu", "core", "4gpu", "pp", "qwen3")),
             Row("--mode ep2_tp2", nproc=4, markers=("gpu", "full", "4gpu", "ep", "tp", "moe", "qwen3")),
             Row("--mode ep2_cp2", markers=("gpu", "full", "2gpu", "ep", "cp", "moe", "qwen3")),
+            Row("--mode ep2_etp2", nproc=4, markers=("gpu", "full", "4gpu", "ep", "etp", "moe", "qwen3")),
             Row("--mode pp_ep", nproc=4, markers=("gpu", "full", "4gpu", "pp", "ep", "moe", "gptoss")),
             Row("--mode ep2_dp2 --max-grad-norm 0", nproc=4, markers=("gpu", "full", "4gpu", "ep", "moe", "qwen3")),
             Row("--mode tp --max-grad-norm 0", markers=("gpu", "full", "2gpu", "tp", "qwen3")),
@@ -1826,6 +2228,23 @@ MANIFEST: dict[str, TestSpec] = {
             ),
         ),
         timeout=1200,
+    ),
+    # PaliGemma's prefix-LM training: resolved off flash, a causal decoder, the collator's token_type_ids at the
+    # forward and the mask on the CUDA backend, alone and under FSDP2 with gradient checkpointing.
+    "trainers/sft/test_sft_prefix_lm.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu", "vlm"),
+        args_matrix=(
+            "--family paligemma",
+            "--family paligemma2",
+            Row("--family paligemma --layout fsdp-gc", nproc=2, markers=("gpu", "core", "2gpu", "vlm")),
+            Row("--family paligemma2 --layout fsdp-gc", nproc=2, markers=("gpu", "core", "2gpu", "vlm")),
+        ),
+        timeout=900,
+    ),
+    # Packed varlen bounds reach the TP-sharded attention on both ranks, and bind it.
+    "trainers/sft/test_sft_tp_packed_varlen.py": TestSpec(
+        nproc=2, markers=("gpu", "full", "2gpu", "tp", "qwen3"), timeout=900
     ),
     "trainers/sft/test_sft_qwen3_modes.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "cp", "qwen3"), timeout=600

@@ -22,11 +22,15 @@ the two are identical, the KL term is exactly 0 and every control agrees with th
 Every batch pairs a few supervised tokens of low KL with hundreds of higher KL, so the per-row control
 is separated by construction rather than by a lucky draw of row lengths.
 
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_distillation.py
+The student trains on one rank (``--world 1``, no FSDP wrap), under FSDP2 data parallelism, FSDP2 FULL_SHARD
+(``--zero3``) or HSDP over two simulated NVLink domains (``--hsdp``), whose effects are read off the model.
+
+Run:
+    torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_distillation.py
+    torchrun --nproc_per_node=4 tests/gpu/trainers/other/test_distillation.py --hsdp
 """
 
+import argparse
 import random
 
 import torch
@@ -40,6 +44,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_all, world_mean
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
@@ -194,10 +199,18 @@ def clm_term(student_logits, hard_labels) -> float:
     return float(total / valid)
 
 
-@gpu_test_main(min_world_size=2, prefix="test_distill")
+parser = argparse.ArgumentParser()
+parser.add_argument("--zero3", action="store_true", help="fsdp_reshard_after_forward=True (FULL_SHARD)")
+parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
+parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+ARGS = parser.parse_args()
+
+
+@gpu_test_main(min_world_size=4 if ARGS.hsdp else 1, exact_world_size=ARGS.world, prefix="test_distill")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
+    layout = {**(hsdp_layout(ctx.world_size) if ARGS.hsdp else {}), "fsdp_reshard_after_forward": ARGS.zero3}
 
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -239,7 +252,7 @@ def run(ctx):
         train_dataset=dataset,
         data_collator=DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False),
         processing_class=tokenizer,
-        parallelism_config=ParallelismConfig(),
+        parallelism_config=ParallelismConfig(**layout),
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
@@ -262,6 +275,13 @@ def run(ctx):
     losses = step_losses(trainer)
     checks["ran_all_steps"] = trainer.state.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
+    checks |= dp_layout_checks(
+        trainer.model,
+        layout,
+        world_size=ctx.world_size,
+        ep_config=None,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
     # Early return, not a bare check: without the capture every line below raises KeyError and the
     # harness reports `error`, so this check could never be the thing that says FAIL.
     checks["pinned_step_captured"] = bool(captured) and bool(weights)

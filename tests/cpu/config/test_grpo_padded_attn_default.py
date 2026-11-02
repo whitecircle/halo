@@ -108,9 +108,9 @@ def _requested_attn(
             if hasattr(module, name):
                 stack.enter_context(mock.patch.object(module, name, fake))
         # SMPO reads its data before the model load to decide the run's modality: a text run here.
-        if hasattr(module, "resolve_vlm_run"):
+        if hasattr(module, "resolve_preference_vlm_run"):
             stack.enter_context(mock.patch.object(module, "load_script_datasets", return_value=(None, False)))
-            stack.enter_context(mock.patch.object(module, "resolve_vlm_run", return_value=False))
+            stack.enter_context(mock.patch.object(module, "resolve_preference_vlm_run", return_value=False))
         # Offline GRPO refuses splits its run-start reference cannot read before the model load.
         elif rel_path == "grpo/offline.py":
             splits = DatasetDict(train=offline_grpo_dataset(2), test=offline_grpo_dataset(2, offset=2))

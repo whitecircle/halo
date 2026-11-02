@@ -1,10 +1,16 @@
 #!/usr/bin/env python
-"""The Liger cross-entropy patch must reach ``transformers.loss.loss_utils`` and NOTHING else.
+"""The Liger cross-entropy patch must reach ``transformers.loss.loss_utils`` and NOTHING else, and no Liger
+application may rebind ``torch.nn.LayerNorm``.
 
 Rebinding ``torch.nn.functional.cross_entropy`` (what upstream Liger's own appliers do) swaps the
 kernel under every caller in the process. ``liger_cross_entropy`` serves only 2-D hard-label calls,
 so a 3-D or soft-target caller elsewhere — CP's own fp32 loss, a reward head, third-party code —
 would start raising, while the applier's docstring still promises the narrow scope.
+
+Upstream's VLM appliers called before the model exists install ``layer_norm`` by rebinding ``torch.nn.LayerNorm``
+(their ``modeling_<family>.nn`` is ``torch.nn``), so every LayerNorm the process builds afterwards — a teacher, a
+reference — would be Liger's, whose signature takes no ``elementwise_affine``/``device``/``dtype`` and defaults
+``eps`` to 1e-6.
 
 Run: pytest tests/cpu/model_loading/test_liger_patch_scoping.py
 """
@@ -15,6 +21,7 @@ import re
 import pytest
 import torch
 import torch.nn.functional as F
+from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.loss import loss_utils
 
 import halo.model_loading.liger.cross_entropy as ce_module
@@ -23,6 +30,7 @@ from halo.model_loading.liger.cross_entropy import (
     liger_cross_entropy,
     patch_loss_utils_cross_entropy,
 )
+from halo.model_loading.liger.dispatch import _apply_liger_for_standard_models
 from tests.common.repo import probe_findings
 
 
@@ -153,6 +161,80 @@ print("FAILURES:" + "|".join(failures))
 """
     failures = probe_findings(script, "FAILURES:")
     assert not failures, "\n".join(failures)
+
+
+def test_no_upstream_family_rebinds_the_process_wide_layer_norm():
+    """Every family whose dispatched applier is upstream's and declares ``layer_norm`` is applied as the loader
+    applies it, and ``torch.nn.LayerNorm`` stays torch's class, with ``layer_norm: false`` recorded as applied.
+
+    Swept off Liger's registry, so a family upstream adds is covered. Anti-vacuity: called raw, before the
+    model exists, at least one of those appliers does rebind it. Subprocess: the appliers rebind module classes.
+    """
+    script = """
+import inspect
+
+import torch
+from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
+
+from halo.model_loading.liger.dispatch import (
+    _TOOLKIT_LIGER_APPLIERS,
+    _liger_model_types,
+    _resolve_applier,
+    apply_liger_kernel,
+)
+
+TORCH_LAYER_NORM = torch.nn.modules.normalization.LayerNorm
+swept = {}
+for model_type in sorted(MODEL_TYPE_TO_APPLY_LIGER_FN):
+    if model_type not in CONFIG_MAPPING:
+        continue
+    config = CONFIG_MAPPING[model_type]()
+    resolved, applier = _resolve_applier(*_liger_model_types(config))
+    if resolved not in _TOOLKIT_LIGER_APPLIERS and "layer_norm" in inspect.signature(applier).parameters:
+        swept[model_type] = (config, applier)
+
+failures = [] if swept else ["no upstream family declares layer_norm: the sweep tests nothing"]
+for model_type, (config, _) in swept.items():
+    try:
+        applied = apply_liger_kernel(config)
+    except Exception as exc:
+        failures.append(f"{model_type}: the dispatch raised {type(exc).__name__}: {exc}")
+        applied = None
+    if torch.nn.LayerNorm is not TORCH_LAYER_NORM:
+        failures.append(f"{model_type}: the dispatch rebound torch.nn.LayerNorm")
+    elif applied is not None and applied.get("layer_norm") is not False:
+        failures.append(f"{model_type}: the applied config does not record layer_norm off: {applied}")
+    torch.nn.LayerNorm = TORCH_LAYER_NORM
+
+rebinding = []
+for model_type, (_, applier) in swept.items():
+    applier(model=None)
+    if torch.nn.LayerNorm is not TORCH_LAYER_NORM:
+        rebinding.append(model_type)
+    torch.nn.LayerNorm = TORCH_LAYER_NORM
+if not rebinding:
+    failures.append("premise: no swept applier rebinds torch.nn.LayerNorm when called raw")
+print("FAILURES:" + "|".join(failures))
+"""
+    failures = probe_findings(script, "FAILURES:")
+    assert not failures, "\n".join(failures)
+
+
+def test_an_applier_that_rebinds_the_layer_norm_is_refused(monkeypatch):
+    """The dispatch checks the class after every application, so an applier rebinding ``torch.nn.LayerNorm``
+    under any flag fails the load instead of reaching every later build."""
+
+    class _SwappedLayerNorm(torch.nn.LayerNorm):
+        pass
+
+    def rebinding_applier(rope: bool = True, model=None):
+        torch.nn.LayerNorm = _SwappedLayerNorm
+
+    monkeypatch.setattr(torch.nn, "LayerNorm", torch.nn.LayerNorm)  # restored after the test
+    monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "halo_test_layer_norm_swap", rebinding_applier)
+    with pytest.raises(RuntimeError, match="rebound torch.nn.LayerNorm to _SwappedLayerNorm"):
+        _apply_liger_for_standard_models("halo_test_layer_norm_swap", {})
 
 
 def test_hf_loss_path_numerics_unchanged_on_cpu(patched):

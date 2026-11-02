@@ -10,40 +10,57 @@ request for GptOss ONLY under a neutralized ``SinksPolicy``; with live sinks eve
     python tests/cpu/models/test_gptoss_sdpa.py
 """
 
+import functools
 import sys
 import types
 
 import pytest
 import torch
-from transformers import AutoModelForCausalLM, GptOssConfig, LlamaConfig, PreTrainedModel
-from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
+from transformers import (
+    AutoModelForCausalLM,
+    GptOssConfig,
+    GptOssForCausalLM,
+    GptOssForSequenceClassification,
+    LlamaConfig,
+    PreTrainedModel,
+)
 
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.entrypoints import reward_scoring
 from halo.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
+from halo.model_loading.model_preparation import apply_run_model_policies
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
 from halo.models.attention import gpt_oss_sinks
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
-from halo.models.attention.selection import _attn_impl_handles_sinks, validate_attn_implementation
+from halo.models.attention.selection import (
+    _attn_impl_handles_sinks,
+    validate_attn_implementation,
+    verify_live_sinks_carried,
+)
 from halo.models.config_access import (
     TOOLKIT_STAMP_PREFIX,
     config_export_ready,
     set_config_field_run_scoped,
 )
+from tests.common.repo import probe_findings
+from tests.common.tiny_models import CONTENT_ONLY_CHAT_TEMPLATE, word_level_tokenizer
+
+_TINY_GPTOSS = {
+    "num_hidden_layers": 1,
+    "hidden_size": 64,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "intermediate_size": 128,
+    "num_local_experts": 2,
+    "num_experts_per_tok": 1,
+    "vocab_size": 128,
+}
 
 
 def _gptoss():
-    return GptOssConfig(
-        num_hidden_layers=1,
-        hidden_size=64,
-        num_attention_heads=4,
-        num_key_value_heads=2,
-        head_dim=16,
-        intermediate_size=128,
-        num_local_experts=2,
-        num_experts_per_tok=1,
-        vocab_size=128,
-    )
+    return GptOssConfig(**_TINY_GPTOSS)
 
 
 def _llama():
@@ -70,15 +87,140 @@ def test_sink_dropping_impls_rejected_for_gptoss_without_reset():
     assert validate_attn_implementation(_gptoss(), "flex_attention", SinksPolicy.LIVE) == "flex_attention"
 
 
-@pytest.mark.parametrize("backend", ["flash_attention_2", "flash_attention_3"])
-def test_a_local_flash_build_is_not_swapped_for_the_hub_kernel(monkeypatch, backend):
-    """transformers swaps a GptOss flash implementation its compatible list does not name for the list's
-    first entry, the kernel-hub vllm-flash-attn3 build; the validator keeps the local build it chose."""
-    monkeypatch.setattr(
-        GptOssPreTrainedModel, "_compatible_flash_implementations", ["kernels-community/vllm-flash-attn3"]
+# A tiny GptOss built in a fresh interpreter after importing ``module`` (empty: transformers alone), then the label
+# transformers' own check settles each flash request on. The kernel import and the device check are stubbed, so the
+# label decision is all that runs.
+_FLASH_LABEL_PROBE = """
+import importlib
+if {module!r}:
+    importlib.import_module({module!r})
+import transformers.modeling_utils as modeling_utils
+from transformers import GptOssConfig, GptOssForCausalLM
+modeling_utils.lazy_import_flash_attention = lambda *args, **kwargs: None
+model = GptOssForCausalLM(GptOssConfig(**{config!r}))
+model._flash_attn_can_dispatch = lambda *args, **kwargs: True
+labels = [model._check_and_adjust_attn_implementation(label) for label in ("flash_attention_2", "flash_attention_3")]
+print("LABELS:" + "|".join(labels))
+"""
+
+
+def _flash_labels(module: str) -> list[str]:
+    return probe_findings(_FLASH_LABEL_PROBE.format(module=module, config=_TINY_GPTOSS), "LABELS:")
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        "halo.model_loading.checkpoint_coverage",
+        "halo.entrypoints.reward_scoring",
+        "halo.checkpoint.tools.adapter_merge",
+        "scripts.training.embedding",
+    ],
+)
+def test_a_gptoss_flash_label_stays_on_the_local_build_wherever_the_toolkit_builds_one(module):
+    """transformers swaps a GptOss FA2/FA3 label for the kernel-hub vllm-flash-attn3, whose ``kernels`` package the
+    image does not ship. The reward scorer, the adapter merge and the sentence-transformers backbone build with the
+    user's label and no validator, and every verified load goes through ``checkpoint_coverage``, so importing any of
+    them must drop the swap for every build in the process."""
+    assert _flash_labels(module) == ["flash_attention_2", "flash_attention_3"]
+
+
+def test_transformers_alone_swaps_a_gptoss_flash_label_for_the_hub_kernel():
+    """The probe's control: without a toolkit import the swap happens, so the cases above read the toolkit's doing."""
+    assert _flash_labels("") == ["kernels-community/vllm-flash-attn3"] * 2
+
+
+def _labelled_gptoss(model_class, attn_implementation: str, sinks: str):
+    """A tiny fp32 GptOss as a build under ``attn_implementation`` leaves it, its sinks ``live``, ``neutralized``
+    (``dtype.min``), ``neutralized_bf16`` (bf16's minimum, a bf16 save read at fp32) or ``removed`` (``None``, the
+    FA2 reset). Built eager: no flash kernel runs on CPU."""
+    model = model_class(GptOssConfig(**_TINY_GPTOSS, num_labels=1, pad_token_id=0))
+    model.config._attn_implementation = attn_implementation
+    values = {
+        "live": 0.5,
+        "neutralized": torch.finfo(torch.float32).min,
+        "neutralized_bf16": torch.finfo(torch.bfloat16).min,
+    }
+    for layer in model.model.layers:
+        attn = layer.self_attn
+        if sinks == "removed":
+            attn.sinks = None
+        else:
+            attn.sinks.data.fill_(values[sinks])
+    return model
+
+
+@pytest.mark.parametrize(
+    ("attn_implementation", "sinks", "refused"),
+    [
+        ("flash_attention_2", "live", True),
+        ("sdpa", "live", True),
+        ("flash_attention_2", "removed", False),
+        ("flash_attention_2", "neutralized", False),
+        ("flash_attention_2", "neutralized_bf16", False),
+        ("sdpa", "neutralized", False),
+        ("eager", "live", False),
+        ("flex_attention", "live", False),
+    ],
+)
+def test_a_built_gptoss_that_drops_its_live_sinks_is_refused(attn_implementation, sinks, refused):
+    """A sink-dropping backend is exact over neutralized sinks and shifts every logprob by nats over live ones."""
+    model = _labelled_gptoss(GptOssForCausalLM, attn_implementation, sinks)
+    if refused:
+        with pytest.raises(ValueError, match="drops its attention sinks"):
+            verify_live_sinks_carried(model)
+    else:
+        verify_live_sinks_carried(model)
+
+
+@pytest.mark.parametrize(("policy", "refused"), [(SinksPolicy.LIVE, True), (SinksPolicy.NEUTRALIZED, False)])
+def test_the_run_policies_refuse_a_backend_that_drops_the_sinks_the_policy_keeps(policy, refused):
+    """The policies every loader applies end in the check, so a build no validator chose a backend for (the
+    sentence-transformers backbone on a pinned FA2) cannot keep live sinks it drops."""
+    model = _labelled_gptoss(GptOssForCausalLM, "flash_attention_2", "live")
+    apply = functools.partial(
+        apply_run_model_policies, model, model.config, sinks_policy=policy, attn_implementation="flash_attention_2"
     )
-    assert validate_attn_implementation(_gptoss(), backend, SinksPolicy.NEUTRALIZED) == backend
-    assert GptOssPreTrainedModel._compatible_flash_implementations is None
+    if refused:
+        with pytest.raises(ValueError, match="drops its attention sinks"):
+            apply()
+    else:
+        apply()
+        assert all(layer.self_attn.sinks is None for layer in model.model.layers)
+
+
+@pytest.mark.parametrize(("sinks", "refused"), [("live", True), ("neutralized", False)])
+def test_the_reward_scorer_refuses_a_flash_label_over_a_checkpoint_with_live_sinks(
+    monkeypatch, tmp_path, sinks, refused
+):
+    """The scorer applies no sinks policy: a GptOss reward model trained with live sinks keeps them in its checkpoint,
+    and ``--rm_attn_implementation flash_attention_2`` would drop them from every score."""
+    tokenizer = word_level_tokenizer(("a", "b"))
+    tokenizer.chat_template = CONTENT_ONLY_CHAT_TEMPLATE
+    _labelled_gptoss(GptOssForSequenceClassification, "eager", sinks).save_pretrained(tmp_path)
+    tokenizer.save_pretrained(tmp_path)
+    build = reward_scoring.from_pretrained_verified
+
+    def build_labelled(model_class, path, *, attn_implementation, **kwargs):
+        model = build(model_class, path, attn_implementation="eager", **kwargs)
+        model.config._attn_implementation = attn_implementation
+        return model
+
+    monkeypatch.setattr(reward_scoring, "from_pretrained_verified", build_labelled)
+    load = functools.partial(
+        reward_scoring.load_reward_model,
+        str(tmp_path),
+        "flash_attention_2",
+        64,
+        "cpu",
+        "float32",
+        trust_remote_code=False,
+    )
+    if refused:
+        with pytest.raises(ValueError, match="drops its attention sinks"):
+            load()
+    else:
+        assert load()[1].config._attn_implementation == "flash_attention_2"
 
 
 def test_install_sdpa_for_reset_sinks_is_idempotent():

@@ -8,7 +8,8 @@ in ``halo/distributed/expert_parallel/families`` with no tiny model, or one the 
 shape or a layout, would leave its path untested with nothing failing; the roster is therefore held to
 the EP registry, and the rows to the roster (for the sync-exactness suite, the part of it some
 rollout engine takes an online update for). The CP-vs-reference and CP fused-loss suites run the CP roster
-(``tests/common/equivalence/cp_equivalence.py``), which covers every Ulysses wrapper class.
+(``tests/common/equivalence/cp_equivalence.py``), which covers every Ulysses wrapper class, and the FSDP2
+reentrant-recompute suite trains every family on ep1 and on two EP groups.
 
     python tests/cpu/conventions/test_tiny_family_roster.py
 """
@@ -36,6 +37,12 @@ PRECOMPUTE_PER_TP_FAMILY = (("dpo", "tp2"), ("dpo", "ep2tp2"))
 SYNC_EXACTNESS_SUITE = "trainers/lora/test_lora_weight_sync_exact.py"
 DETERMINISM_SUITE = "parallelism/ep/test_ep_deterministic_expert_grads.py"
 CP_SUITES = ("parallelism/cp/test_cp_family_vs_reference.py", "parallelism/cp/test_cp_fused_head_loss.py")
+REENTRANT_SUITE = "parallelism/test_fsdp2_reentrant_recompute.py"
+OFFLINE_GRPO_CP_SUITE = "trainers/grpo/test_offline_grpo_cp_resume.py"
+TP_REFERENCE_SUITE = "parallelism/tp/test_tp_family_vs_reference.py"
+# The layouts every family's full fine-tune runs under FSDP2 against the unsharded reference: experts in the FSDP2
+# shard, and two EP groups whose replicas the deferred sweep keeps in step.
+REENTRANT_PER_FAMILY_LAYOUTS = ("ep1", "ep_multi")
 # The family the determinism replay runs under every two-rank layout; every other family runs ep2.
 DETERMINISM_LAYOUT_FAMILY = "gpt_oss"
 # What every syncable MoE family runs through the sync-exactness body, as (mode, adapters): both expert
@@ -134,6 +141,43 @@ def test_the_determinism_rows_run_every_family_and_every_layout_once():
     missing = sorted(expected - set(covered))
     assert not missing, f"family x layout no determinism row runs: {missing}"
     assert len(set(covered)) == len(covered), "a determinism shape runs in two rows"
+
+
+def _flag(argv: list[str], flag: str, default: str | None = None) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv else default
+
+
+def test_the_reentrant_rows_run_every_family_full_on_ep1_and_two_ep_groups():
+    rows = [shlex.split(args) for args, _ in MANIFEST[REENTRANT_SUITE].launches()]
+    covered = {
+        (_flag(row, "--family"), _flag(row, "--layout")) for row in rows if _flag(row, "--adapter", "full") == "full"
+    }
+    expected = {(family, layout) for family in TINY_MOE_FAMILIES for layout in REENTRANT_PER_FAMILY_LAYOUTS}
+    assert not sorted(expected - covered), f"family x layout no reentrant row trains: {sorted(expected - covered)}"
+
+
+def test_the_offline_grpo_cp_rows_run_every_ulysses_moe_family_pure_and_under_ep():
+    rows = [shlex.split(args) for args, _ in MANIFEST[OFFLINE_GRPO_CP_SUITE].launches()]
+    covered = {
+        (_flag(row, "--family"), _flag(row, "--ep-size", "1"))
+        for row in rows
+        if _flag(row, "--cp-size") == "2" and "--family" in row
+    }
+    expected = {
+        (family, ep_size) for family, tiny in TINY_MOE_FAMILIES.items() if tiny.ulysses_cp for ep_size in ("1", "2")
+    }
+    assert covered == expected, (
+        f"offline GRPO CP rows {sorted(covered)} != every Ulysses family x ep {sorted(expected)}"
+    )
+
+
+def test_the_tp_reference_rows_run_every_tp_planned_moe_family_alone_and_beside_ep():
+    rows = [shlex.split(args) for args, _ in MANIFEST[TP_REFERENCE_SUITE].launches()]
+    moe = {
+        (_flag(row, "--family"), _flag(row, "--mode")) for row in rows if _flag(row, "--family") in TINY_MOE_FAMILIES
+    }
+    expected = {(family, mode) for family in TINY_MOE_FAMILIES if _has_tp_plan(family) for mode in ("tp2", "ep2tp2")}
+    assert moe == expected, f"TP reference MoE rows {sorted(moe)} != every TP-planned family x mode {sorted(expected)}"
 
 
 @pytest.mark.parametrize("suite", CP_SUITES)

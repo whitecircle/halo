@@ -14,6 +14,7 @@ from typing import Annotated
 
 import click
 import typer
+from torch.numa.binding import AffinityMode
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 _SCRIPTS_ROOT = Path("scripts")
@@ -140,6 +141,7 @@ def build_launch_command(
     args: list[str],
     accelerate_config: Path | None = None,
     port: int | None = None,
+    numa_binding: AffinityMode | None = None,
 ) -> list[str]:
     """Build the process argv.
 
@@ -148,7 +150,13 @@ def build_launch_command(
     otherwise plain Python. ``nproc`` maps to ``--num_processes`` under accelerate and
     ``--nproc_per_node`` under torchrun; ``port`` to ``--main_process_port`` / ``--master_port``
     (concurrent multi-process launches collide on the default rendezvous port without it).
+    ``numa_binding`` is torchrun's ``--numa-binding``, refused for the other two launchers.
     """
+    if numa_binding is not None and (accelerate_config is not None or nproc <= 1):
+        raise typer.BadParameter(
+            "--numa-binding is a torchrun option and needs a torchrun launch (--nproc > 1 without "
+            "--accelerate): accelerate launch and python have no NUMA binding"
+        )
     if accelerate_config is not None:
         launcher = ["accelerate", "launch", "--config_file", str(accelerate_config)]
         if nproc > 1:
@@ -159,6 +167,8 @@ def build_launch_command(
         launcher = ["torchrun", f"--nproc_per_node={nproc}"]
         if port is not None:
             launcher.append(f"--master_port={port}")
+        if numa_binding is not None:
+            launcher.append(f"--numa-binding={numa_binding.value}")
     else:
         if port is not None:
             raise typer.BadParameter(
@@ -266,6 +276,14 @@ def launch(
         int | None,
         typer.Option("--port", "-p", help="Rendezvous port (torchrun --master_port / accelerate --main_process_port)"),
     ] = None,
+    numa_binding: Annotated[
+        AffinityMode | None,
+        typer.Option(
+            "--numa-binding",
+            "--numa_binding",
+            help="torchrun --numa-binding: run each rank on CPUs near its GPU (torchrun launches only)",
+        ),
+    ] = None,
     list_methods: Annotated[bool, typer.Option("--list", help="List indexed training methods")] = False,
     dry_run: Annotated[bool, typer.Option("--dry_run", help="Print command without executing")] = False,
     root: Annotated[Path, typer.Option("--root", help="Repository root")] = REPO_ROOT,
@@ -305,6 +323,7 @@ def launch(
         args=ctx.args,
         accelerate_config=accelerate_config,
         port=port,
+        numa_binding=numa_binding,
     )
     _execute(argv, root, cwd=root, dry_run=dry_run)
 

@@ -14,6 +14,11 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
     Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks). Its fused linear cross-entropy also reads the batch's non-ignored target count to the host in every forward, a host sync inside each fused-loss micro-batch (upstream; on Halo's paths the count feeds only token accuracy).
 
+- **Release**: every table here was measured on Halo 1.1.0 code or earlier (the framework comparison on the main
+  branch of 2026-09-24), except the NUMA A/B, measured on a 1.2.0 development build. The rows predate 1.2.0's MoE
+  route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP, ep1
+  and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower tok/s
+  than the clock these rows used.
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes). Both are rank 0's.
 
@@ -388,6 +393,14 @@ Batch is the dominant lever — raise it with GC off while it fits. At a fixed 3
 | EP8 | 1–6 GB lower | ~1.5% lower |
 
 The dense runs hold 13–14% less, so the dense SFT, DPO and SMPO examples launch with it. Under EP the saving is small and costs throughput, so the EP examples leave it off and an EP run sets it only to fit. How to set it: [Configuration Reference → Environment variables](../reference/configuration-reference.md#environment-variables).
+
+## NUMA binding
+
+On a multi-socket host, launch with `torchrun --numa-binding node` (or `halo launch <method> <config> -n 8 --numa-binding node`). Each local rank then runs on the CPUs of the NUMA node that holds `cuda:<local_rank>`, which torchrun reads from the host topology (the GPU's PCI `numa_node` in sysfs), so the flag needs no per-host mapping. torchrun intersects that set with the CPUs the process may use (a container `--cpuset-cpus`) and fails the launch when nothing is left.
+
+On 8× B300 with two NUMA nodes, against an unbound launch (two runs per arm): TP2 Qwen3-8B at s4096 gains **3.4%** tok/s/GPU with disjoint run ranges and a narrower spread, Qwen3.5-35B-A3B EP8 at s4096 1.4% (disjoint), and CP2 0.8%, inside the spread. Step-1 loss is bitwise equal and peak memory unchanged. The gain lands on host-bound rows (TP, CP, small-batch EP); GPU-bound rows are flat.
+
+Only `torchrun` takes the flag. `halo launch --numa-binding <mode>` takes torchrun's modes and places the flag on its `torchrun` line, ahead of the script; with `--accelerate` or a single process it refuses the flag, since `accelerate launch` and `python` have no NUMA binding. `HALO_DATASET_NUM_PROC`'s default counts each rank's bound CPUs.
 
 ## Using EfficiencyCallback
 

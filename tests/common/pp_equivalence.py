@@ -455,22 +455,33 @@ def _loaded_fla_autotuners() -> list[Autotuner]:
     return list(found.values())
 
 
-def pin_fla_autotune_single_config(ctx) -> None:
-    """Run every ``fla`` kernel in this process on its first autotune config.
+def _launch_once(kernel_call, quantiles) -> list[float]:
+    """An autotune benchmarker that launches a config once and scores every config that launches alike."""
+    kernel_call()
+    return [0.0] * len(quantiles)
+
+
+def pin_fla_autotune_first_fit(ctx) -> None:
+    """Run every ``fla`` kernel in this process on the first of its autotune configs that launches.
 
     The unsplit reference runs the whole batch while the pipeline stages run one microbatch at a time,
     and fla's autotuners key on the batch size (``chunk_local_cumsum_vector_kernel`` among them), so a
     cold cache picks a config per key on timing noise. Two picks are each fp32-correct but round
-    differently, and near-tied top-k picks then flip downstream. Call it after the model is built, which
-    is what imports fla.
+    differently, and near-tied top-k picks then flip downstream. Each autotuner keeps its config list and
+    still launches every config once per key, so one the device cannot launch scores ``inf`` as in stock
+    tuning (``chunk_gated_delta_rule_bwd_kernel_dhu_blockdim64``'s first config needs more shared memory
+    than sm_90 and sm_10x have in fp32), and every other scores alike, so the pick is the first in list
+    order. The disk cache is off while pinned: it would hand back a timed pick. Call it after the model is
+    built, which is what imports fla.
     """
-    pinned = [(tuner, tuner.configs, tuner.cache) for tuner in _loaded_fla_autotuners()]
-    for tuner, configs, _ in pinned:
-        tuner.configs, tuner.cache = configs[:1], {}
+    pinned = [(tuner, tuner.cache, tuner.cache_results) for tuner in _loaded_fla_autotuners()]
+    for tuner, _, _ in pinned:
+        tuner.cache, tuner.cache_results, tuner.do_bench = {}, False, _launch_once
 
     def restore() -> None:
-        for tuner, configs, cache in pinned:
-            tuner.configs, tuner.cache = configs, cache
+        for tuner, cache, cache_results in pinned:
+            tuner.cache, tuner.cache_results = cache, cache_results
+            del tuner.do_bench
 
     ctx.on_teardown(restore)
 

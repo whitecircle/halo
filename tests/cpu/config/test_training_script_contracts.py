@@ -383,12 +383,12 @@ def test_smpo_refuses_a_vlm_run_under_cp_or_pp_before_the_model_load(tmp_path, a
         mock.patch.object(module, "load_policy_model", side_effect=AssertionError("the model load ran")),
     ):
         with (
-            mock.patch.object(module, "resolve_vlm_run", return_value=True),
+            mock.patch.object(module, "resolve_preference_vlm_run", return_value=True),
             pytest.raises(ValueError, match=f"SMPO VLM mode does not support {axis_name}"),
         ):
             _run_main_with_yaml(module, yaml_body, tmp_path)
         with (
-            mock.patch.object(module, "resolve_vlm_run", return_value=False),
+            mock.patch.object(module, "resolve_preference_vlm_run", return_value=False),
             pytest.raises(AssertionError, match="the model load ran"),
         ):
             _run_main_with_yaml(module, yaml_body, tmp_path)

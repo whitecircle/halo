@@ -39,6 +39,10 @@ _TRAINABLE_SINK_ATTN_IMPLEMENTATIONS = ("flash_attention_4", "eager")
 # Marker on the wrapped ``flash_attn.cute`` entry points.
 _FA4_RESCALE_ATTR = "_halo_trainable_sink_rescale"
 
+# The fraction of a dtype's most negative value at or below which a sink reads as neutralized: a bf16 dtype-min sink
+# loaded at fp32 sits just above fp32's own minimum.
+_NEUTRALIZED_SINK_FLOOR = 0.99
+
 
 class SinksPolicy(enum.StrEnum):
     """The sink state a GptOss run trains under, shared by the trainer gates, the adapter's
@@ -107,22 +111,19 @@ def install_sdpa_for_reset_sinks(model_config) -> bool:
     return flipped
 
 
-def install_local_flash_for_sinks(model_config: AutoConfig) -> None:
-    """Keep the local flash build the validator chose for a GptOss model; call before ``from_pretrained``.
+def ensure_gpt_oss_local_flash() -> None:
+    """Keep every flash label a GptOss build is given on the local build (idempotent).
 
-    transformers would swap it for the class's compatible-list entry, the kernel-hub vllm-flash-attn3:
-    SM 9.0 binaries that crash on Blackwell, a download an offline run cannot make, and not the build
-    the sink checks validated.
+    transformers swaps a label its class's compatible list does not name (FA2, FA3) for the list's first
+    entry, the kernel-hub vllm-flash-attn3: SM 9.0 binaries that crash on Blackwell, fetched through the
+    ``kernels`` package the image does not ship, and not the build the sink checks validated.
     """
-    if not uses_gpt_oss_sinks(model_config):
-        return
-    if GptOssPreTrainedModel._compatible_flash_implementations is not None:
-        GptOssPreTrainedModel._compatible_flash_implementations = None
-        if is_global_main_process():
-            logger.info(
-                "Disabled GptOss flash-attn auto-fallback "
-                "(use locally-installed flash_attention_2 directly, no kernel-hub swap)"
-            )
+    GptOssPreTrainedModel._compatible_flash_implementations = None
+
+
+# At import rather than per load: transformers decides the swap in each model's __init__, so a build no attention
+# validator ran for would otherwise take it.
+ensure_gpt_oss_local_flash()
 
 
 def _gpt_oss_sink_attentions(model, model_config=None):
@@ -310,6 +311,16 @@ def has_live_attention_sinks(model) -> bool:
         return policy.live
     config = getattr(model, "config", None)
     return config is not None and uses_gpt_oss_sinks(config)
+
+
+def holds_unneutralized_sinks(model) -> bool:
+    """Whether a GptOss attention of ``model`` holds a sink above the neutralized value, read off the tensors rather
+    than the policy stamp, so a model loaded without a policy answers with the sinks its checkpoint carries."""
+    for _, attn in _gpt_oss_sink_attentions(model):
+        sinks = getattr(attn, "sinks", None)
+        if sinks is not None and bool((sinks.detach() > _NEUTRALIZED_SINK_FLOOR * torch.finfo(sinks.dtype).min).any()):
+            return True
+    return False
 
 
 def neutralized_gpt_oss_sinks(model) -> dict:

@@ -130,13 +130,29 @@ def _peaked(
     return cb
 
 
-def _measured_step(monkeypatch, cb, *, tokens=1000, step_time=0.5, step=1) -> None:
+class _HostClock:
+    """The callback's clock without a GPU, advanced by hand."""
+
+    def __init__(self):
+        self.now = 0.0
+
+    def perf_counter(self) -> float:
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch) -> _HostClock:
+    host = _HostClock()
+    monkeypatch.setattr(efficiency, "time", host)
+    return host
+
+
+def _measured_step(clock: _HostClock, cb, *, tokens=1000, step_time=0.5, step=1) -> None:
     """Optimizer step ``step`` through the hooks, then its log, where the callback records it: ``tokens`` cluster
-    tokens (``None``: uncounted) in ``step_time`` seconds."""
-    clock = iter((0.0, step_time))
-    monkeypatch.setattr(efficiency, "time", SimpleNamespace(perf_counter=lambda: next(clock)))
+    tokens (``None``: uncounted) in ``step_time`` seconds of ``clock``, which runs on from the previous step."""
     cb.training_args = cb.training_args or MockTrainingArgs()
     cb.on_step_begin(cb.training_args, MockTrainerState(global_step=step - 1), None)
+    clock.now += step_time
     cb.on_step_end(cb.training_args, MockTrainerState(global_step=step, num_input_tokens_seen=tokens), None)
     cb.on_log(cb.training_args, MockTrainerState(global_step=step), None, logs={})
 
@@ -350,13 +366,13 @@ def test_warmup_skipping():
     assert cb.time == StepTimeMetrics(), "a warmup step was measured"
 
 
-def test_the_measured_step_times_are_every_step_after_warmup_unrounded(monkeypatch):
+def test_the_measured_step_times_are_every_step_after_warmup_unrounded(clock):
     """The benchmarks read the step-time median off them, finer than the logged two decimals."""
     cb = EfficiencyCallback(_NO_PARALLELISM, n_warmup_steps=1)
     for step, step_time in enumerate((9.0, 0.123456, 0.5), start=1):
-        _measured_step(monkeypatch, cb, tokens=1000 * step, step_time=step_time, step=step)
+        _measured_step(clock, cb, tokens=1000 * step, step_time=step_time, step=step)
 
-    assert cb.measured_step_times == (0.123456, 0.5)
+    assert cb.measured_step_times == pytest.approx((0.123456, 0.5), rel=1e-12)
     assert cb.time.avg_step_time_seconds == 0.31
 
 
@@ -377,36 +393,36 @@ def test_estimate_model_flops_includes_attention():
     assert flops == expected, f"expected {expected}, got {flops}"
 
 
-def test_mfu_value(monkeypatch):
+def test_mfu_value(clock):
     """MFU% = (tokens * flops_per_token / step_time) / peak * 100, exactly."""
     cb = _peaked()
-    _measured_step(monkeypatch, cb, tokens=1000, step_time=0.5)
+    _measured_step(clock, cb, tokens=1000, step_time=0.5)
     # step_flops = 1000 * 6e9 = 6e12; /0.5s = 1.2e13 flops/s; /1e15 *100 = 1.2%
     assert cb.mfu.step_mfu_percent == pytest.approx(1.2, abs=1e-6)
     assert cb.mfu.step_tflops_per_sec == pytest.approx(12.0, abs=1e-6)  # 1.2e13 / 1e12 TFLOPS
     assert cb.mfu.avg_tflops_per_sec == cb.mfu.step_tflops_per_sec, "one step: the average is the step"
 
 
-def test_mfu_distributed_efficiency(monkeypatch):
+def test_mfu_distributed_efficiency(clock):
     """params_ratio > 1.05 turns MFU into a distributed-efficiency speedup figure."""
     cb = _peaked(replace(_DENSE_FLOPS, full_params=4.0e9, params_ratio=4.0))  # local is 1/4 of the full model
-    _measured_step(monkeypatch, cb, tokens=1000, step_time=0.5)
+    _measured_step(clock, cb, tokens=1000, step_time=0.5)
     # step_mfu = 1.2% → distributed_efficiency = 4.0 * 1.2 / 100 = 0.048
     assert cb.mfu.step_distributed_efficiency == pytest.approx(0.05, abs=1e-2)
 
 
 @pytest.mark.parametrize(("flops", "peak"), [(None, 1.0e15), (_DENSE_FLOPS, None)])
-def test_mfu_zeroed_when_unconfigured(monkeypatch, flops, peak):
+def test_mfu_zeroed_when_unconfigured(clock, flops, peak):
     """No peak flops / no model flops → all MFU fields zeroed (not stale)."""
     cb = _peaked(flops, peak)
-    _measured_step(monkeypatch, cb)
+    _measured_step(clock, cb)
     assert cb.mfu == MFUMetrics(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 
-def test_smfu_sparse_value(monkeypatch):
+def test_smfu_sparse_value(clock):
     """S-MFU uses the active (sparse) flops/token, which is lower than dense MFU."""
     cb = _peaked(replace(_DENSE_FLOPS, active_model_flops_per_token=1.5e9, sparsity_factor=0.25))
-    _measured_step(monkeypatch, cb, tokens=1000, step_time=0.5)
+    _measured_step(clock, cb, tokens=1000, step_time=0.5)
     # step_active_flops = 1000 * 1.5e9 = 1.5e12; /0.5 = 3e12; /1e15*100 = 0.3%
     assert cb.smfu.step_smfu_percent == pytest.approx(0.3, abs=1e-6)
     assert cb.smfu.step_smfu_tflops_per_sec == pytest.approx(3.0, abs=1e-6)
@@ -440,7 +456,7 @@ def test_the_throughput_rows_cover_every_supported_axis_set():
 
 
 @pytest.mark.parametrize("axis", sorted(_AXES))
-def test_token_throughput_counts_each_shared_batch_once(monkeypatch, axis):
+def test_token_throughput_counts_each_shared_batch_once(monkeypatch, clock, axis):
     """Every rank counts the batch its replica shares into HF's world-summed counter. The cluster figure is each
     replica's batch once, tokens/s/GPU is that over the world size, and MFU charges the rank every token it
     runs through its parameter slice: the whole batch under TP, expert-TP and PP, its 1/cp share under CP."""
@@ -448,7 +464,7 @@ def test_token_throughput_counts_each_shared_batch_once(monkeypatch, axis):
     batch_tokens, step_time = 8000, 2.0
     cb = _peaked(parallelism=_axis_config(axis))
     monkeypatch.setattr(efficiency, "get_global_world_size", lambda: world)
-    _measured_step(monkeypatch, cb, tokens=batch_tokens * world, step_time=step_time)
+    _measured_step(clock, cb, tokens=batch_tokens * world, step_time=step_time)
 
     cluster = batch_tokens * replicas / step_time
     assert cb.tps.step_cluster_tokens_per_second == pytest.approx(cluster)
@@ -575,7 +591,7 @@ def test_on_log_skips_during_warmup():
     assert logs == {}
 
 
-def test_the_wired_length_bound_spans_the_training_config_and_the_script_args(monkeypatch):
+def test_the_wired_length_bound_spans_the_training_config_and_the_script_args(clock):
     """GRPO's config declares neither max_length nor max_prompt_length and the scripts carry the
     prompt budget on their own args, so the bound the wired callback measures against reads both:
     an uncounted step falls back to ``batch x accumulation x 150 x fill`` tokens."""
@@ -604,7 +620,7 @@ def test_the_wired_length_bound_spans_the_training_config_and_the_script_args(mo
         script_args, training_config, model, _NO_PARALLELISM, balancing_mode="none"
     )
     callback.on_init_end(training_config, MockTrainerState(), None)
-    _measured_step(monkeypatch, callback, tokens=None, step_time=1.0, step=3)  # past the default warmup
+    _measured_step(clock, callback, tokens=None, step_time=1.0, step=3)  # past the default warmup
     assert callback.tps.step_tokens_per_second == int(150 * efficiency._ESTIMATE_FILL_FRACTION)
 
 

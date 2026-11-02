@@ -13,6 +13,7 @@ from transformers.activations import ACT2FN
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.expert_gemm import expert_gemm
 from halo.kernels.fused_glu import GluCombine, fused_glu_enabled, resolve_fused_glu_mul
+from halo.kernels.grouped_mm import GROUPED_MM_SMALL_TILE_DIM
 from halo.kernels.lowp.spec import QuantFormat
 from halo.kernels.moe_permute import MoEGatherPermute, MoEWeightedUnpermute, warm_permute_kernels
 from halo.kernels.moe_route_sort import RECEIVE_COUNTS_DISAGREE, sort_routing_by_expert, warm_route_sort_kernels
@@ -151,9 +152,13 @@ class EPExpertComputeMixin:
             logger.info(f"{type(self).__name__}: FP32 experts (compute stays BF16)")
 
     def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
-        """Compile this layer's Triton expert, routing-sort and permute kernels, forward and backward, before its
-        first dispatch: compiled inside the span they stall every peer in DeepEP's barrier (no barrier at ep1)."""
-        if self._activation_warmed or self.ep_size <= 1:
+        """Launch this layer's expert kernels, forward and backward, before its first dispatch: a kernel's first launch
+        compiles it (Triton) and loads it (CUDA lazy loading), and inside the span either stalls every peer in DeepEP's
+        barrier. At ``ep_size`` 1, with no barrier, only the grouped GEMM warms (:meth:`_warm_expert_gemm`): its tile
+        follows the rows per expert, which a micro-batch of another token count changes, so a rank can first need one
+        in a later step, holding up the expert-TP reduce or FSDP's next collective."""
+        grouped, dispatched = self._use_grouped_mm, self.ep_size > 1
+        if self._activation_warmed or not (grouped or dispatched):
             return
         self._activation_warmed = True
         width = 2 * self.down_proj.shape[1]  # down_proj is [E, M, H] on every layout, ETP included
@@ -164,13 +169,38 @@ class EPExpertComputeMixin:
             # Identity saved-tensor hooks: under a non-reentrant checkpoint the backward below would unpack a
             # packed tensor, run the recompute mid-forward and replay a dispatch the original pass has not made.
             with torch.enable_grad(), torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
-                gate_up = torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype, requires_grad=True)
-                torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
-                if self._use_grouped_mm:  # the routing sort and fused permute run only on the grouped path
+                if grouped:
+                    self._warm_expert_gemm(device, dtype, hidden)
+                if dispatched:
+                    gate_up = torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype, requires_grad=True)
+                    torch.autograd.grad(self._warm_expert_activation(gate_up).sum(), gate_up)
+                if grouped and dispatched:  # the routing sort and fused permute run only on the grouped path
                     warm_route_sort_kernels(top_k, self.experts_per_rank, device)
                     warm_permute_kernels(_WARMUP_TOKENS, hidden, top_k, device, dtype)
-            with torch.no_grad():
-                self._warm_expert_activation(torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype))
+            if dispatched:
+                with torch.no_grad():
+                    self._warm_expert_activation(torch.zeros((_WARMUP_TOKENS, width), device=device, dtype=dtype))
+
+    def _warm_expert_gemm(self, device: torch.device, dtype: torch.dtype, hidden: int) -> None:
+        """Run :meth:`_grouped_expert_ffn`, forward and backward, over zero tokens at one row per local expert and at
+        one past :data:`GROUPED_MM_SMALL_TILE_DIM`: torch's bf16 grouped GEMM picks the tile of the forward and the
+        input gradient by the mean rows per group, which change with every receive. The backward computes the weight
+        gradients the run does and discards them; the RNG is restored after, since expert-LoRA dropout draws. The
+        expert adapters run even when the first forward has them off (a reference pass), as training runs them."""
+        experts, adapters_enabled = self.experts_per_rank, self._expert_adapters_enabled
+        self._expert_adapters_enabled = True
+        try:
+            with torch.random.fork_rng(devices=[device] if device.type == "cuda" else []):
+                for rows_per_expert in (1, GROUPED_MM_SMALL_TILE_DIM + 1):
+                    rows = experts * rows_per_expert
+                    tokens = torch.zeros((rows, hidden), device=device, dtype=dtype, requires_grad=True)
+                    offs = torch.arange(1, experts + 1, device=device, dtype=torch.int32) * rows_per_expert
+                    expert_ids = torch.arange(rows, device=device) // rows_per_expert
+                    with torch.amp.autocast("cuda", dtype=dtype):
+                        out = self._grouped_expert_ffn(tokens, offs, expert_ids, dtype)
+                    torch.autograd.grad(out.sum(), tokens)
+        finally:
+            self._expert_adapters_enabled = adapters_enabled
 
     def _warm_expert_activation(self, gate_up: torch.Tensor) -> torch.Tensor:
         """The expert activation over a synthetic ``[T, 2M]``, in the operand layout the compute path hands
@@ -207,14 +237,25 @@ class EPExpertComputeMixin:
         *,
         recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
-        """Grouped-GEMM GLU experts on either :meth:`_glu_ffn` layout."""
+        """Grouped-GEMM experts: :meth:`_grouped_expert_ffn` over the dispatched tokens sorted by expert."""
 
-        def compute(sorted_tokens, offs, _eids):
-            return self._glu_ffn(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
+        def compute(sorted_tokens, offs, eids):
+            return self._grouped_expert_ffn(sorted_tokens, offs, eids, output_dtype)
 
         return self._compute_experts_with_grouped_mm(
             tokens, experts, weights, output_dtype, compute, recv_counts=recv_counts
         )
+
+    def _grouped_expert_ffn(
+        self,
+        sorted_tokens: torch.Tensor,
+        offs: torch.Tensor,
+        sorted_expert_ids: torch.Tensor,
+        output_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """The expert FFN over tokens sorted by expert, ``offs`` their int32 group ends and ``sorted_expert_ids`` each
+        token's local expert, on either :meth:`_glu_ffn` layout."""
+        return self._glu_ffn(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
 
     def _compute_experts_with_grouped_mm(
         self,

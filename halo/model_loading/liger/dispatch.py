@@ -1,8 +1,8 @@
 """Liger Kernel dispatch: resolve the applier per ``model_type`` (the toolkit spec for it or its text sub-config's,
 then Liger's registry in the same order) and apply it with the per-family defaults and the parallelism safety rules.
 
-Cross-entropy is always the toolkit's scoped patch: an upstream applier's CE branch rebinds
-``torch.nn.functional.cross_entropy`` process-wide, under every caller that is not the model's loss."""
+Cross-entropy is always the toolkit's scoped patch and an upstream applier's ``layer_norm`` stays off: upstream installs
+both process-wide (``torch.nn.functional.cross_entropy``, and before the model exists ``torch.nn.LayerNorm``)."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import inspect
 import logging
 from collections.abc import Callable
 
+import torch
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers import AutoConfig
 
@@ -17,6 +18,7 @@ from halo.kernels.jit_cache import pin_liger_impls
 from halo.model_loading.liger.applier import LigerApplier, build_liger_appliers
 from halo.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
+from halo.models.attention.prefix_lm import has_prefix_lm_attention
 from halo.models.config_access import set_config_field_run_scoped, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
@@ -150,6 +152,19 @@ def liger_routed_expert_overrides(needs_ep_layers: bool, model_config) -> dict[s
     }
 
 
+def liger_prefix_lm_overrides(model_config) -> dict[str, str]:
+    """``{"fused_linear_cross_entropy": reason}`` on a prefix-LM model (:func:`has_prefix_lm_attention`): upstream's
+    fused forward replaces the wrapper's, so the decoder never builds the prefix-LM mask from ``token_type_ids``."""
+    if not has_prefix_lm_attention(model_config):
+        return {}
+    return {
+        "fused_linear_cross_entropy": (
+            f"{model_config.model_type} is a prefix LM, and upstream liger-kernel's fused forward replaces its own, "
+            f"so the decoder would never build the prefix-LM mask from token_type_ids"
+        )
+    }
+
+
 def liger_parallelism_overrides(
     *,
     has_ep_wrapped_experts: bool = False,
@@ -203,8 +218,8 @@ def sanitize_liger_config(
     Both Liger applications (model load, and the trainer's before HF Trainer re-applies) call this, since a
     rule present at one site only is undone by whichever runs second. The parallelism rules yield to an
     explicit ``swiglu``/``geglu`` request, which they make inert rather than wrong; the routed-experts
-    rule does not. It also pins the Liger implementations (:func:`pin_liger_impls`), since a model passed to
-    the trainer reaches only the second site.
+    and prefix-LM rules do not. It also pins the Liger implementations (:func:`pin_liger_impls`), since a
+    model passed to the trainer reaches only the second site.
     """
     pin_liger_impls()
     forced_off = liger_parallelism_overrides(
@@ -221,7 +236,7 @@ def sanitize_liger_config(
     if is_global_main_process():
         for key, reason in routed_expert_overrides.items():
             logger.info(f"Liger {key} off: {reason}")
-    return config
+    return _force_off(config, liger_prefix_lm_overrides(model_config), yields_to_request=())
 
 
 def trl_reapplication_config(model_config, applied: dict) -> dict:
@@ -379,16 +394,34 @@ def _apply_liger_for_standard_models(
         return None
 
     filtered_config = _build_liger_config(apply_fn, model_type, user_overrides, requested_kernels, wrapper_head)
+    upstream = model_type not in _TOOLKIT_LIGER_APPLIERS
+
+    # Called before the model exists, an upstream applier swaps LayerNorm by rebinding `torch.nn.LayerNorm` (its
+    # `modeling_<family>.nn` is `torch.nn`) under every model the process builds afterwards.
+    if upstream and "layer_norm" in inspect.signature(apply_fn).parameters:
+        if filtered_config.get("layer_norm") and is_global_main_process():
+            logger.warning(
+                f"Liger layer_norm was requested for {model_type}, but its upstream applier installs it before the "
+                f"model is built by rebinding torch.nn.LayerNorm for the whole process; forcing it off."
+            )
+        filtered_config["layer_norm"] = False
 
     # The scoped CE patch serves an upstream applier's CE; a toolkit applier withholds the flag itself.
     call_config = dict(filtered_config)
-    if model_type not in _TOOLKIT_LIGER_APPLIERS and call_config.get("cross_entropy"):
+    if upstream and call_config.get("cross_entropy"):
         call_config["cross_entropy"] = False
         patch_loss_utils_cross_entropy()
 
     if is_global_main_process():
         logger.info(f"Applying Liger Kernel for {model_type}: {filtered_config}")
     apply_fn(**call_config)
+    if torch.nn.LayerNorm is not torch.nn.modules.normalization.LayerNorm:
+        raise RuntimeError(
+            f"The Liger applier for {model_type} rebound torch.nn.LayerNorm to {torch.nn.LayerNorm.__name__} for "
+            f"the whole process, so every LayerNorm built afterwards (a teacher, a reference, a vision tower) would "
+            f"run that class. Set the flag that installs it to false in liger_kernel_config, or set "
+            f"use_liger_kernel: false."
+        )
     if is_global_main_process():
         logger.info(f"✓ Liger Kernel applied for {model_type}")
     return filtered_config

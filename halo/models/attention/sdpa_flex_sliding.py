@@ -56,6 +56,9 @@ _TUNED_HEAD_DIM = 256
 
 # FlexAttention's block-sparsity tile.
 _TILE = 128
+# The narrowest query/key or value head Inductor's FlexAttention kernel takes (``tl.dot``'s minimum); a narrower
+# one keeps SDPA, as a head wider than FLASH_MAX_HEAD_DIM does.
+FLEX_MIN_HEAD_DIM = 16
 # Query rows of a dense mask reduced to key runs per pass (see ``key_intervals``).
 _INTERVAL_ROWS = 256
 
@@ -376,10 +379,16 @@ def _varlen_causal_attention(
     return out.view(batch, seq, heads, dim)
 
 
+def _flex_widths(head_dim: int, v_head_dim: int) -> bool:
+    """Whether FlexAttention runs heads this wide: query/key and value at least FLEX_MIN_HEAD_DIM, and query/key
+    no wider than FLASH_MAX_HEAD_DIM."""
+    return min(head_dim, v_head_dim) >= FLEX_MIN_HEAD_DIM and head_dim <= FLASH_MAX_HEAD_DIM
+
+
 def _flex_runs(call: AttentionCall) -> bool:
-    """Whether FlexAttention serves ``call``: a head no wider than FLASH_MAX_HEAD_DIM, and no softcap, which
-    keeps SDPA."""
-    return call.head_dim <= FLASH_MAX_HEAD_DIM and call.softcap is None
+    """Whether FlexAttention serves ``call``: heads of a width it runs (:func:`_flex_widths`), and no softcap,
+    which keeps SDPA."""
+    return _flex_widths(call.head_dim, call.v_head_dim) and call.softcap is None
 
 
 def _flex_call(module: torch.nn.Module) -> AttentionCall | None:
@@ -399,7 +408,7 @@ def _flex_serves(
     scaling: float | None,
 ) -> bool:
     """Whether FlexAttention takes a masked call: one mask row per batch row over exactly the call's queries
-    and keys, a head no wider than FLASH_MAX_HEAD_DIM (the widest it runs here), more queries than the window
+    and keys, heads of a width it runs (:func:`_flex_widths`), more queries than the window
     and one tile (below either no tile is skipped, and a single-tile row gives the block mask size-1 dims,
     which Dynamo specializes on), and the heads, widths and scaling of the call the warm-up compiles for the
     module, so no call compiles mid-run. Tensor parallelism hands a call the rank's share of the heads, which
@@ -407,7 +416,7 @@ def _flex_serves(
     if not (
         attention_mask is not None
         and attention_mask.shape == (query.shape[0], 1, query.shape[-2], key.shape[-2])
-        and query.shape[-1] <= FLASH_MAX_HEAD_DIM
+        and _flex_widths(query.shape[-1], value.shape[-1])
         and query.shape[-2] > max(window or 0, _TILE)
     ):
         return False
@@ -538,8 +547,7 @@ def resolve_flex_sliding_attn_implementation(model_config, attn_implementation: 
 
 def flex_attention_calls(model: torch.nn.Module) -> set[AttentionCall]:
     """The distinct calls ``model``'s causal attention modules make on FlexAttention (a sliding layer, or a full
-    layer no wider than FLASH_MAX_HEAD_DIM, neither softcapped): the call arguments the compiled kernel's guards
-    key on."""
+    layer, with heads of a width it runs and no softcap): the call arguments the compiled kernel's guards key on."""
     return {call for call in attention_calls(model) if _flex_runs(call)}
 
 

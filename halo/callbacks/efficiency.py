@@ -41,6 +41,7 @@ _BoundaryMark = torch.cuda.Event | float
 class _RunState:
     n_warmup_steps: int = 0
     global_start_step: int = 0
+    # Where the next step's time starts: the last step's end, or its own begin where none precedes it (``None``).
     step_start: _BoundaryMark | None = None
     step_start_tokens_seen: int = 0
     elapsed_time: float = 0.0
@@ -202,6 +203,10 @@ def _detect_precision(model: torch.nn.Module | None, training_args, lowp_precisi
 class EfficiencyCallback(transformers.TrainerCallback):
     """Step time, token throughput, MFU / S-MFU and GPU memory, merged into the logs dict.
 
+    Step time runs from the previous step's end to this one's, so the host time between two steps (the log, the
+    next batch's fetch) books to the later one and the steps sum to the wall clock they span. An epoch's turnover, an
+    evaluation or a save is not a step: the step after one, like the run's first, starts at its own begin.
+
     Token accounting: ``num_input_tokens_seen`` is summed across ranks (a toolkit trainer sums it when this
     callback drains the step's work from it), and every rank counts the batch its data-parallel replica
     shares. The rank's own tokens, what MFU multiplies by its local FLOPs per token, divide that sum by
@@ -267,12 +272,17 @@ class EfficiencyCallback(transformers.TrainerCallback):
     def on_train_begin(self, args, state, control, **kwargs):
         self._initialize_once_model_arrives(args, kwargs)
         self._run.global_start_step = state.global_step
+        self._run.step_start = None
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
+    def on_epoch_begin(self, args, state, control, **kwargs):
+        self._run.step_start = None
+
     def on_step_begin(self, args, state, control, **kwargs):
         self._initialize_once_model_arrives(args, kwargs)
-        self._run.step_start = _mark_boundary()
+        if self._run.step_start is None:
+            self._run.step_start = _mark_boundary()
         if torch.cuda.is_available():
             torch.cuda.reset_peak_memory_stats()
 
@@ -288,8 +298,15 @@ class EfficiencyCallback(transformers.TrainerCallback):
                 _PendingStep(self._run.step_start, step_end, rank_tokens, cluster_tokens, measured_attention_flops)
             )
             self._record_memory()
+        self._run.step_start = step_end
         if state.num_input_tokens_seen is not None:
             self._run.step_start_tokens_seen = state.num_input_tokens_seen
+
+    def on_evaluate(self, args, state, control, **kwargs):
+        self._run.step_start = None
+
+    def on_save(self, args, state, control, **kwargs):
+        self._run.step_start = None
 
     def on_log(self, args, state, control, logs, **kwargs):
         if self._is_warmup_step(state):

@@ -22,8 +22,8 @@ class DataCollatorForVLMPreference(DataCollatorMixin):
     load-bearing: ``RewardTrainer.compute_loss`` chunks the pooled scores in two and reads the first
     half as chosen, so a swapped half inverts every preference without changing a shape.
 
-    Both sides of a pair render the same prompt and therefore the same images, so the image list is
-    the batch's row-major images repeated once per half, matching the text block it feeds.
+    Both sides of a pair render the same prompt and therefore the same images, so the per-row image
+    lists repeat once per half, matching the text block they feed.
     """
 
     processor: ProcessorMixin | None = None
@@ -40,9 +40,8 @@ class DataCollatorForVLMPreference(DataCollatorMixin):
     def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
         texts = [example["chosen_text"] for example in examples] + [example["rejected_text"] for example in examples]
         per_row_images = [list(example.get("images") or []) for example in examples]
-        images = [image for row_images in per_row_images + per_row_images for image in row_images]
 
-        batch = dict(run_vlm_processor(self.processor, texts, images, padding=True))
+        batch = dict(run_vlm_processor(self.processor, texts, per_row_images + per_row_images, padding=True))
         # The dataset map already drops rows whose text alone is over budget; this is the backstop
         # for rows that image expansion pushes over it.
         reject_over_length_vlm_batch(batch, self.max_length, "preference batch")

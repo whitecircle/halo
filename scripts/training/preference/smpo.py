@@ -25,7 +25,11 @@ from halo.config_validation import reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import SMPOConfig, SMPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
+from halo.entrypoints.data_setup import (
+    load_script_datasets,
+    prepare_script_preference_data,
+    resolve_preference_vlm_run,
+)
 from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
@@ -63,7 +67,7 @@ def main():
     # pairs is a text run, and CP / padding_free / PP stay legal for it. Decided before the model
     # load, which needs the checkpoint's processor for a VLM run, so the CP and PP refusals below
     # raise before any weight is read (the trainer repeats them and adds padding_free).
-    is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
+    is_vlm = resolve_preference_vlm_run(args, model_config, ds, text_only_model=args.text_only_model, method="SMPO")
     if dist_args.context_parallel_size > 1 and is_vlm:
         raise ValueError("SMPO VLM mode does not support Context Parallelism — drop --context_parallel_size.")
     if dist_args.pipeline_parallel_size > 1 and is_vlm:

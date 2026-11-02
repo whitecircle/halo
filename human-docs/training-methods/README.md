@@ -32,7 +32,8 @@ have to the trainer that reads it.
   which ones also take context or pipeline parallelism is in the
   [Supported matrix](../supported-matrix.md#training-methods).
 - **HuggingFace in, HuggingFace out.** Checkpoints load with `from_pretrained` and upload to the Hub
-  as written. Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
+  without their training state ([Uploading](../checkpoints.md#uploading-to-the-huggingface-hub)).
+  Some MoE families need a conversion before vLLM or SGLang can serve them. A LoRA run
   writes an adapter you merge with one command; expert LoRA under EP folds into the weights at save
   time instead (`merge_expert_lora_on_save: true`). See [Checkpoints & Export](../checkpoints.md).
 

@@ -24,7 +24,6 @@ Run: ``python tests/cpu/parallelism/test_gptoss_etp_grouped_mm.py`` (or ``pytest
 from __future__ import annotations
 
 import copy
-from unittest.mock import patch
 
 import pytest
 import torch
@@ -32,13 +31,11 @@ import torch.nn as nn
 from transformers.models.gpt_oss.configuration_gpt_oss import GptOssConfig
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssMLP
 
-from halo.distributed.expert_parallel import config as ep_config_module
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.moe_layer import compute as compute_module
-from halo.distributed.expert_parallel.moe_layer import layer as layer_module
 from halo.models.moe.expert_layout import split_interleaved_gate_up
 from tests.common.ep_reference import dispatched_receive_counts
-from tests.common.parallelism import stubbed_rank_ep_config
+from tests.common.ep_stubs import stubbed_rank_ep_layer
 
 E, H, M, K = 16, 16, 32, 2  # experts, hidden, expert intermediate, top_k
 TOKENS = 24
@@ -53,13 +50,6 @@ RELATIVE_BAND = 2e-6
 # The storage every ETP rank holds on either compute path, which its checkpoints carry.
 ETP_STORAGE = ("router.weight", "router.bias", "gate_proj", "up_proj", "gate_proj_bias", "up_proj_bias", "down_proj")
 ETP_RANK0_ONLY = ("down_proj_bias",)
-
-
-class _NoDispatcher:
-    """DeepEP's stand-in: the tests call the expert compute on a dispatched view, never the dispatch."""
-
-    def __init__(self, *args, **kwargs):
-        pass
 
 
 def _block() -> GptOssMLP:
@@ -84,14 +74,10 @@ def _block() -> GptOssMLP:
 
 
 def _rank_layer(block: GptOssMLP, layout: str, rank: int, *, grouped_at_build: bool = False) -> EPGptOssMoELayer:
-    """Rank ``rank``'s layer around a copy of ``block``. Built outside the stubbed groups, so no grad-sync hook
-    registers. ``grouped_at_build`` makes ``EPConfig.grouped_gemm_enabled`` hold at construction, as on SM90+."""
-    config = stubbed_rank_ep_config(*LAYOUTS[layout], rank, E)
-    with (
-        patch.object(layer_module, "DeepEPDispatcher", _NoDispatcher),
-        patch.object(ep_config_module, "supports_grouped_mm", return_value=grouped_at_build),
-    ):
-        return EPGptOssMoELayer(copy.deepcopy(block), config)
+    """Rank ``rank``'s layer around a copy of ``block`` (:func:`stubbed_rank_ep_layer`)."""
+    return stubbed_rank_ep_layer(
+        EPGptOssMoELayer, copy.deepcopy(block), *LAYOUTS[layout], rank, grouped=grouped_at_build
+    )
 
 
 def _all_rank_layers(block: GptOssMLP, layout: str) -> list[EPGptOssMoELayer]:

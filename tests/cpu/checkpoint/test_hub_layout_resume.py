@@ -26,10 +26,6 @@ the fused Qwen3.5/3.6 hub.
     python tests/cpu/checkpoint/test_hub_layout_resume.py
 """
 
-# The device-aware kernel-dispatch shim must land before the modeling modules bind transformers'
-# hub-kernel fallback at import, or a CPU forward of a conv / linear-attention family reaches CUDA.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 import itertools
 import os
 import shutil

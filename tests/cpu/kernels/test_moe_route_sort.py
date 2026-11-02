@@ -4,7 +4,8 @@ construction it replaces at ``ep_size > 1``: every output and the gate-weight gr
 shapes (top_k 1 to 10, 1 to 128 local experts, an idle expert, rows with no local slot, a receive with none at all, a
 zero-token rank), at the launch's tiling and at one that spreads each receive over many blocks and scan chunks; and
 every launch's Triton specialization over a sweep of row, block and slot counts against the layer warm-up's, so the
-binaries the warm-up compiles serve every dispatch.
+binaries the warm-up compiles serve every dispatch; and every kernel the gate-weight backward launches over the same
+sweep against the warm-up's, so none is loaded mid-step.
 
 The kernels run under Triton's interpreter in a fresh process (``TRITON_INTERPRET`` is read when a kernel is defined).
 The CUDA leg is ``tests/gpu/parallelism/ep/test_ep_sort_sync_free.py``, and
@@ -71,6 +72,26 @@ def test_the_launch_key_check_fails_its_negative_control():
     findings = probe_findings(probe, _MARKER)
     assert findings and all(finding.startswith("_place_kernel") for finding in findings), findings
     assert any("n_rows" in finding for finding in findings) and any("n_valid" in finding for finding in findings)
+
+
+def test_every_receive_size_backward_launches_only_kernels_the_warm_up_loaded():
+    """The gate-weight backward runs between a dispatch and its combine, where a kernel's first launch (CUDA lazy
+    loading) stalls every peer: over the sweep of receives, one local slot to many, it launches only kernels the layer
+    warm-up launched at the same layout."""
+    probe = _PROBE.format(setup=_TILINGS["many_blocks"], check="backward_kernel_findings", marker=_MARKER, args="")
+    assert probe_findings(probe, _MARKER) == []
+
+
+def test_the_backward_kernel_check_fails_its_negative_control():
+    """The backward's gather read through ``index_select`` instead, which takes a separate kernel for an index of up to
+    16 rows: the warm-up's one-row receive launches that one, every receive past 16 slots the other, and the check
+    names it."""
+    rebind = "import torch\ntorch.Tensor.gather = lambda self, dim, index: self.index_select(dim, index)\n"
+    probe = _PROBE.format(
+        setup=_TILINGS["many_blocks"] + rebind, check="backward_kernel_findings", marker=_MARKER, args=""
+    )
+    findings = probe_findings(probe, _MARKER)
+    assert findings and all("index_select" in finding for finding in findings), findings
 
 
 def test_mis_sized_counts_raise():

@@ -107,7 +107,9 @@ on NVLink. `cp_size=3` on an 8-GPU domain is rejected at config time, before the
 **Attention impl** — a real Flash Attention is required. `reject_unsupported_ulysses_model` raises
 `CPConfigError` for any `_attn_implementation` outside `SUPPORTED_ATTN_IMPLEMENTATIONS` (FA2,
 FA3, FA4): `eager`, `sdpa` and a hub kernel label are rejected, and `flex_attention` is
-auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrapper declaring
+auto-switched to the arch's flash kernel (FA4 on Blackwell, FA3 on Hopper, else FA2;
+[Flash Attention → Context Parallelism](../optimization/flash-attention.md#model-specific-handling)) by
+`load_distributed_model` when CP is active. A wrapper declaring
 `REQUIRES_FLASH_ATTN_LABEL = False` waives the check (Bailing; see
 [bailing.md](../models/bailing.md#cp-wrapper)).
 

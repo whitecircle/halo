@@ -1,12 +1,13 @@
 #!/usr/bin/env python
-"""``EfficiencyCallback`` times a step between CUDA events at its boundaries and never drains the device for it.
+"""``EfficiencyCallback`` times each step from the previous step's end to its own, on CUDA events, and never drains
+the device for it.
 
-A host clock read at a step boundary is only right once the device has run everything queued, so a clock built on
-it synchronizes twice per optimizer step: the GPU then idles while the host fetches the next batch and logs. The
-callback records an event at each boundary instead and reads the elapsed time at the next step end or at the log,
-waiting only for an end event the device has not reached. A scripted device stands in for CUDA: kernels the host
-launches run behind the work already queued, an event completes when the device reaches it, and every wait is
-counted.
+The host time between two steps (the step end's drain of the step's work, the log, the next batch's fetch) is part of
+the run's wall clock, so a step's time starts where the previous one ended and the measured steps sum to the wall clock
+of the window they span, as a probe that synchronizes only at the window's two ends reads it. Each boundary is an event
+recorded behind the work queued so far and read at the next step end or at the log, waiting only for an end event the
+device has not reached. A scripted device stands in for CUDA: kernels the host launches run behind the work already
+queued, an event completes when the device reaches it, and every wait is counted.
 
     python tests/cpu/callbacks/test_efficiency_step_clock.py
 """
@@ -21,6 +22,11 @@ from halo.callbacks.efficiency import EfficiencyCallback
 from tests.common.parallelism import make_parallelism_config
 
 STEP_TOKENS = 1000
+# A device-bound dense step and the host work around it, in seconds: the next batch's fetch before the step begins,
+# the host's launch inside it, then the step end's drain and the log, each reading a small collective back.
+FETCH, LAUNCH, KERNELS, DRAIN, LOG, COLLECTIVE = 0.002, 0.01, 0.3, 0.0005, 0.003, 0.001
+# The probed window, as the bench rows read it: the wall clock from the end of WINDOW_START to the end of WINDOW_END.
+WARMUP_STEPS, WINDOW_START, WINDOW_END = 3, 5, 20
 
 
 class _Device:
@@ -41,6 +47,11 @@ class _Device:
 
     def synchronize(self) -> None:
         self.drains += 1
+        self.read_back()
+
+    def read_back(self) -> None:
+        """A host read of a device value (a loss ``item()``, a probe's synchronize): the host waits for the queue,
+        which is not the callback's wait."""
         self.now = max(self.now, self.busy_until)
 
     def event(self, *args, **kwargs) -> "_Event":
@@ -68,6 +79,20 @@ class _Event:
         return (end.at - self.at) * 1000.0
 
 
+class _StepWorkSource:
+    """The trainer's per-step work as the callback drains it after the step's end mark: an all-reduce of the step's
+    counts, read back on the host."""
+
+    def __init__(self, device: _Device):
+        self.device = device
+
+    def drain_step_work(self) -> tuple[float, int]:
+        self.device.launch(COLLECTIVE)
+        self.device.read_back()
+        self.device.now += DRAIN
+        return 0.0, 0
+
+
 @pytest.fixture
 def device(monkeypatch) -> _Device:
     scripted = _Device()
@@ -80,9 +105,12 @@ def device(monkeypatch) -> _Device:
     return scripted
 
 
-def _callback() -> EfficiencyCallback:
-    callback = EfficiencyCallback(make_parallelism_config(world_size=1, gpus_per_node=1), n_warmup_steps=0)
+def _callback(n_warmup_steps: int = 0) -> EfficiencyCallback:
+    callback = EfficiencyCallback(
+        make_parallelism_config(world_size=1, gpus_per_node=1), n_warmup_steps=n_warmup_steps
+    )
     callback.training_args = SimpleNamespace(per_device_train_batch_size=1, gradient_accumulation_steps=1)
+    callback.on_train_begin(None, SimpleNamespace(global_step=0), None)
     return callback
 
 
@@ -101,8 +129,8 @@ def _log(callback: EfficiencyCallback, step: int) -> dict:
 
 
 def test_a_step_is_timed_over_its_own_device_work_without_draining_the_device(device):
-    """The previous step's tail is still running when this step begins and the host launches inside it: the step
-    spans its kernels alone, and only the log waits, for the one end event the device has not reached."""
+    """Work queued before the run's first step is still running when it begins, and the host launches inside it: the
+    step spans its kernels alone, and only the log waits, for the one end event the device has not reached."""
     callback = _callback()
     device.launch(5.0)
 
@@ -118,21 +146,81 @@ def test_a_step_is_timed_over_its_own_device_work_without_draining_the_device(de
 
 
 def test_each_step_is_read_one_step_later_without_a_wait(device):
-    """A host-bound run: the device finishes each step while the host prepares the next one, so the earlier end
-    marks have passed when the next step end reads them. A step finds the device idle and spans its launch too, the
-    time the device waited on the host inside the step."""
+    """A host-bound run: the device finishes each step while the host fetches the next batch, so the earlier end
+    marks have passed when the next step end reads them. A step runs from where the device finished the previous one
+    to where it finishes its own, so the fetch between them counts and the steps add up to the run's wall clock."""
     callback = _callback()
-    launch, kernels = 0.1, (0.5, 0.7, 0.2, 0.9)
+    launch, kernels, fetch = 0.1, (0.5, 0.7, 0.2, 0.9), 1.0
+    device.now += fetch
+    first_begin = device.now
+    ends = []
     for step, seconds in enumerate(kernels, start=1):
         _step(callback, device, step, launch=launch, kernels=seconds)
-        device.now += 1.0  # the host prepares the next batch while the queue drains
+        ends.append(device.busy_until)
+        device.now += fetch
     logs = _log(callback, len(kernels))
 
-    spans = [launch + seconds for seconds in kernels]
+    spans = [end - start for start, end in zip([first_begin, *ends[:-1]], ends, strict=True)]
     assert device.drains == 0 and device.event_waits == 0
     assert callback.measured_step_times == pytest.approx(spans)
+    assert sum(callback.measured_step_times) == pytest.approx(ends[-1] - first_begin)
     assert logs["avg_step_time_seconds"] == round(sum(spans) / len(spans), 2)
     assert logs["avg_tokens_per_second"] == round(len(spans) * STEP_TOKENS / sum(spans), 2)
+
+
+def test_the_steps_sum_to_the_wall_clock_of_the_window_they_span(device):
+    """A device-bound run whose host fetches each batch before the step begins, drains the step's work at its end and
+    logs after it, each read back behind a collective: the wall clock of steps WINDOW_START+1..WINDOW_END,
+    synchronized at the window's two ends only, equals the callback's measured times for those steps. A clock that
+    ran from each step's begin to its end would miss the fetch, the drain and the log, about 2% of every step here,
+    and one that restarted after the drain would still miss the drain."""
+    callback = _callback(WARMUP_STEPS)
+    # Held for the run: the callback keeps only a weak reference to its source.
+    source = _StepWorkSource(device)
+    callback.bind_attention_work_source(source)
+    wall, counted = {}, {}
+    for step in range(1, WINDOW_END + 1):
+        device.now += FETCH
+        _step(callback, device, step, launch=LAUNCH, kernels=KERNELS)
+        if step in (WINDOW_START, WINDOW_END):
+            device.read_back()
+            wall[step], counted[step] = device.now, len(callback.measured_step_times)
+        device.launch(COLLECTIVE)
+        device.read_back()
+        device.now += LOG
+        _log(callback, step)
+
+    window = wall[WINDOW_END] - wall[WINDOW_START]
+    steps = WINDOW_END - WINDOW_START
+    in_step_spans = steps * (LAUNCH + KERNELS)
+    assert window > 1.01 * in_step_spans, "the premise: the host time between steps is over 1% of the window"
+    measured = callback.measured_step_times[counted[WINDOW_START] : counted[WINDOW_END]]
+    assert len(measured) == steps
+    assert sum(measured) == pytest.approx(window, rel=1e-12)
+    assert device.drains == 0 and device.event_waits == 0
+
+
+@pytest.mark.parametrize("hook", ["on_epoch_begin", "on_evaluate", "on_save", "on_train_begin"])
+def test_a_step_after_a_new_epoch_an_evaluation_a_save_or_a_new_run_starts_at_its_own_begin(device, hook):
+    """A new epoch (its dataloader workers respawned), an evaluation, a save or a new ``train()`` between two steps is
+    not training: the next step starts at its own begin rather than at the previous step's end, while the steps around
+    it keep the fetch before them."""
+    callback = _callback()
+
+    def train(steps) -> None:
+        for step in steps:
+            device.now += FETCH
+            _step(callback, device, step, launch=LAUNCH, kernels=KERNELS)
+            device.read_back()
+
+    train((1, 2))
+    device.now += 30.0
+    getattr(callback, hook)(None, SimpleNamespace(global_step=2), None)
+    train((3, 4))
+    _log(callback, 4)
+
+    own_span, chained = LAUNCH + KERNELS, FETCH + LAUNCH + KERNELS
+    assert callback.measured_step_times == pytest.approx((own_span, chained, own_span, chained))
 
 
 def test_a_log_waits_for_the_latest_step_only(device):

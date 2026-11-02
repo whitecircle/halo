@@ -56,9 +56,6 @@ COEF = 0.7
 LAYERS = 4
 BATCH, SEQ = 2, 24
 
-# The GLM-5 Next text tower without its linear-attention layers, whose conv kernel is CUDA-only.
-_GLM5_TEXT = {**TINY_GLM5_CONFIG, "layer_types": ["indexed_attention"] * TINY_GLM5_CONFIG["num_hidden_layers"]}
-
 
 def _qwen3_moe():
     config = {**TINY_QWEN3_MOE_CONFIG, "num_hidden_layers": LAYERS, "router_aux_loss_coef": COEF}
@@ -76,13 +73,12 @@ def _laguna():
 
 
 def _glm5_next():
-    text = {**_GLM5_TEXT, "router_aux_loss_coef": COEF}
+    text = {**TINY_GLM5_CONFIG, "router_aux_loss_coef": COEF}
     return Glm5NextForConditionalGeneration(Glm5NextConfig(text_config=text, vision_config=TINY_GLM5_VISION_CONFIG))
 
 
-def _full_attention(family: str):
-    """``family``'s tiny model with every layer full attention: the gated-DeltaNet conv kernel is CUDA-only."""
-    overrides = {"num_hidden_layers": LAYERS, "layer_types": ["full_attention"] * LAYERS, "router_aux_loss_coef": COEF}
+def _tiny(family: str):
+    overrides = {"num_hidden_layers": LAYERS, "router_aux_loss_coef": COEF}
     return lambda: tiny_family_model(TINY_MOE_FAMILIES[family], overrides=overrides)
 
 
@@ -91,8 +87,8 @@ FAMILIES = {
     "gpt_oss": _gpt_oss,
     "laguna": _laguna,
     "glm5_next": _glm5_next,
-    "qwen3_next": _full_attention("qwen3_next"),
-    "qwen3_5_moe_text": _full_attention("qwen3_5_moe_text"),
+    "qwen3_next": _tiny("qwen3_next"),
+    "qwen3_5_moe_text": _tiny("qwen3_5_moe_text"),
 }
 
 

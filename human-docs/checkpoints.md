@@ -85,7 +85,7 @@ flags.
 | `quantize-to-lowp` | write block-scaled mxfp8 / mxfp4 / nvfp4 weights; serving engines do not load its manifest as-is |
 | `unfuse-moe-experts` | rewrite fused expert weights to the family's per-expert layout, for a serving loader that reads only that layout |
 | `reset-sinks` | disable the attention sinks in a GPT-OSS checkpoint |
-| `reattach-vision-tower` | restore the vision tower to a `text_only_model` Qwen3.5/3.6 export, the layout vLLM loads |
+| `reattach-vision-tower` | restore the vision tower, MTP head and processor files to a `text_only_model` export; SGLang needs it for a Qwen3.8-Flash-Next export |
 
 The tools write to a new directory (only `reset-sinks` takes `--in_place`) and
 reject a sharded EP save until `merge-ep-shards` has run. The conversions keep a

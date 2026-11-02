@@ -5,10 +5,10 @@ help at MoE shapes.
 
 ## Rough numbers
 
-On 8× B300 with the Blackwell image, GPT-OSS 20B trains at about 28,700
-tokens/s per GPU at `ep1` (batch 4 × 4096, no checkpointing) and Qwen3.5-35B-A3B
-at about 16,400 at `ep2` with checkpointing on. Every measured shape, from one
-dense GPU to 32k-token EP + CP, is in
+On 8× B300 with the Blackwell image, Halo 1.1.0 trains GPT-OSS 20B at about
+28,700 tokens/s per GPU at `ep1` (batch 4 × 4096, no checkpointing) and
+Qwen3.5-35B-A3B at about 16,400 at `ep2` with checkpointing on. Every measured
+shape, from one dense GPU to 32k-token EP + CP, is in
 [Throughput Benchmarks](../agent-docs/optimization/throughput-benchmarks.md) ↗.
 
 In short:
@@ -47,6 +47,13 @@ Set these per run:
   dense SFT, DPO and SMPO examples carry it. Under EP it costs throughput, so
   set it there only to fit
   ([Allocator](../agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments) ↗).
+- **`torchrun --numa-binding node`** on a multi-socket host: each rank runs on
+  the CPUs next to its GPU. Host-bound runs (TP, CP, small-batch EP) gain up to
+  ~3%; GPU-bound runs are flat.
+  `halo launch <method> <config> -n 8 --numa-binding node` passes it to
+  `torchrun`; an `accelerate` or single-process launch has no NUMA binding and
+  refuses the flag
+  ([NUMA binding](../agent-docs/optimization/throughput-benchmarks.md#numa-binding) ↗).
 - **`fsdp_defer_grad_sync: true` with `fsdp_reshard_after_backward: false`**
   under gradient accumulation: one gradient reduce and one re-gather per
   optimizer step, at an unsharded gradient copy per GPU.
@@ -77,10 +84,10 @@ The fix is a bigger `M`, not a faster kernel.
 
 ## Compared with stock TRL
 
-Halo trains GPT-OSS 20B at 2.6–3.5× stock TRL (dense and `ep2`) on the same 8
-B300s, with the same kernels on both sides, and both reach the same loss. Most
-of the gap is structural: expert parallelism, no per-micro-step parameter
-re-gather, and 6-byte optimizer state
+Halo 1.1.0 trains GPT-OSS 20B at 2.6–3.5× stock TRL (dense and `ep2`) on the
+same 8 B300s, with the same kernels on both sides, and both reach the same
+loss. Most of the gap is structural: expert parallelism, no per-micro-step
+parameter re-gather, and 6-byte optimizer state
 ([full comparison](../agent-docs/optimization/halo-vs-stock-trl.md) ↗).
 
 For memory rather than speed, start at [Parallelism](parallelism.md). For a run

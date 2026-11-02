@@ -21,11 +21,16 @@ constructed copy of the model holding the weight snapshot the trainer had at the
     cross-entropy on the same logits (or the modulator is inert), and must NOT equal the variant whose
     modulator is built from the WEIGHTED cross-entropy (the mistake the implementation documents).
 
+The trainer runs on one rank (no FSDP wrap), under FSDP2 data parallelism, or with ``--hsdp`` under HSDP over
+two simulated NVLink domains of ``world // 2`` ranks, whose 2-D mesh and replicas in step are read off the model;
+above one rank it also refuses CP at construction.
+
 Usage:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_classification.py
+    torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_classification.py
+    torchrun --nproc_per_node=4 tests/gpu/trainers/other/test_classification.py --hsdp
 """
 
+import argparse
 import math
 import random
 
@@ -41,6 +46,7 @@ from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_shard
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.distributed import ensure_model_downloaded, snapshot_full_weights, world_any, world_mean
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
@@ -201,8 +207,9 @@ def make_config(output_dir: str, **overrides) -> ClassificationConfig:
     return ClassificationConfig(**base)
 
 
-def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int):
-    """Train, capturing the batch and the FULL weights held at ``pinned_step``.
+def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int, layout: dict):
+    """Train under the ``ParallelismConfig`` fields ``layout``, capturing the batch and the FULL weights held at
+    ``pinned_step``.
 
     Returns ``(trainer, captured_batch, weights, logged_losses)``.
     """
@@ -211,7 +218,7 @@ def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int):
         args=config,
         train_dataset=dataset,
         processing_class=tokenizer,
-        parallelism_config=ParallelismConfig(),
+        parallelism_config=ParallelismConfig(**layout),
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
@@ -231,10 +238,17 @@ def train_and_capture(ctx, tokenizer, dataset, config, pinned_step: int):
     return trainer, captured, weights, step_losses(trainer)
 
 
-@gpu_test_main(min_world_size=2, prefix="classification")
+parser = argparse.ArgumentParser()
+parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
+parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+ARGS = parser.parse_args()
+
+
+@gpu_test_main(min_world_size=4 if ARGS.hsdp else 1, exact_world_size=ARGS.world, prefix="classification")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
+    layout = hsdp_layout(ctx.world_size) if ARGS.hsdp else {}
 
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -245,25 +259,34 @@ def run(ctx):
 
     # ── Cross-entropy leg (the default path: the trainer's own unweighted fp32 CE) ──────────────
     trainer, captured, weights, losses = train_and_capture(
-        ctx, tokenizer, dataset, make_config(ctx.output_dir), PINNED_STEP
+        ctx, tokenizer, dataset, make_config(ctx.output_dir), PINNED_STEP, layout
+    )
+    checks |= dp_layout_checks(
+        trainer.model,
+        layout,
+        world_size=ctx.world_size,
+        ep_config=None,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
     )
     loss = trainer._classification_loss
     checks["cross_entropy_builds_unweighted_ce"] = (
         not loss.multi_label and loss.focal_gamma is None and loss.weight is None and loss.label_smoothing == 0.0
     )
     # Constructing with cp_size=1 and then asserting is_cp_mode is False only restates the test's own
-    # input. What matters is that the trainer REJECTS CP (SUPPORTS_CP is False), so ask it to.
-    try:
-        ClassificationTrainer(
-            model=build_model(tokenizer),
-            args=make_config(ctx.output_dir + "/cp"),
-            train_dataset=dataset,
-            processing_class=tokenizer,
-            parallelism_config=ParallelismConfig(cp_size=ctx.world_size),
-        )
-        checks["cp_rejected_at_construction"] = False
-    except ValueError as exc:
-        checks["cp_rejected_at_construction"] = "Context Parallelism" in str(exc)
+    # input. What matters is that the trainer REJECTS CP (SUPPORTS_CP is False), so ask it to, where the
+    # world holds a CP group at all.
+    if ctx.world_size > 1:
+        try:
+            ClassificationTrainer(
+                model=build_model(tokenizer),
+                args=make_config(ctx.output_dir + "/cp"),
+                train_dataset=dataset,
+                processing_class=tokenizer,
+                parallelism_config=ParallelismConfig(cp_size=ctx.world_size),
+            )
+            checks["cp_rejected_at_construction"] = False
+        except ValueError as exc:
+            checks["cp_rejected_at_construction"] = "Context Parallelism" in str(exc)
     checks["ran_all_steps"] = trainer.state.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
     # Early return, not a bare check: without the capture every line below raises KeyError and the
@@ -335,6 +358,7 @@ def run(ctx):
             class_weights=FOCAL_CLASS_WEIGHTS,
         ),
         FOCAL_STEPS,
+        layout,
     )
     checks["focal_selects_focal_loss_fn"] = focal_trainer._classification_loss.focal_gamma == FOCAL_GAMMA
 

@@ -95,11 +95,14 @@ def _fp32_sweep(
     hidden, weight, targets, grad, bias=None, temperature=1.0, logit_scale=None, softcap=None, compute_entropy=False
 ):
     """``(logps, entropy, fp32 grad hidden, fp32 grad weight, fp32 grad bias or None)`` of the kernel's
-    forward and backward."""
+    forward and backward, every gradient asked for."""
     logps, log_z, entropy = _logprobs_forward(
         hidden, weight, targets, bias, temperature, logit_scale, softcap, compute_entropy
     )
-    dh, dw, db = _logprobs_backward(hidden, weight, targets, bias, log_z, grad, temperature, logit_scale, softcap)
+    needs_grad = (True, True, bias is not None)
+    dh, dw, db = _logprobs_backward(
+        hidden, weight, targets, bias, log_z, grad, temperature, logit_scale, softcap, needs_grad
+    )
     return logps, entropy, dh, dw, db
 
 

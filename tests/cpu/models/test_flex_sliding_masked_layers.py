@@ -12,6 +12,8 @@ and keys its warm-up on what each attention module calls with.
 * FlexAttention takes a masked call only over exactly its mask's queries and keys and with the heads, widths
   and scaling its module declares: a tensor-parallel rank's share of the heads, another value width or scale,
   or a module declaring no call keeps SDPA, with one warning.
+* A head narrower than Inductor's FlexAttention kernel takes (query/key or value) is neither warmed nor served: such
+  a model runs SDPA on every layer.
 * A full layer's packed (document-causal) mask, with a padded tail, reduces to block masks whose tiles are
   exactly the ones the dense mask touches, and whose full tiles are exactly the ones it fills; the
   uncompiled FlexAttention over them matches per-document fp64 attention.
@@ -62,13 +64,23 @@ from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 from tests.common.numerics import fro_rel_err
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
+    TINY_GEMMA4_FLEX_FAMILY,
+    TINY_GEMMA4_TEXT_FLEX_FAMILY,
     TINY_MOE_FAMILIES,
     TINY_MOE_VLM_FAMILIES,
     TINY_SLIDING_DENSE_FAMILIES,
     tiny_family_model,
 )
 
-ROSTER = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES, **TINY_DENSE_FAMILIES, **TINY_SLIDING_DENSE_FAMILIES}
+# Gemma 4 with its sliding heads as wide as FlexAttention runs, so its sliding layers take it as a released one's do.
+ROSTER = {
+    **TINY_MOE_FAMILIES,
+    **TINY_MOE_VLM_FAMILIES,
+    **TINY_DENSE_FAMILIES,
+    **TINY_SLIDING_DENSE_FAMILIES,
+    "gemma4": TINY_GEMMA4_FLEX_FAMILY,
+    "gemma4_text": TINY_GEMMA4_TEXT_FLEX_FAMILY,
+}
 # The tiny families with sliding-window layers whose every call FlexAttention may take. DeepSeek-V4 resolves
 # here too, but its family spec forces eager before this step; GptOss carries sinks on every call; Inkling a
 # dense relative bias; Bailing is remote code with no sliding layer.
@@ -327,6 +339,17 @@ def test_flex_takes_only_the_call_the_warmup_compiles(caplog):
     assert not _flex_serves(q, k, mask, None, module=bare)
 
 
+@pytest.mark.parametrize(
+    ("head_dim", "v_head_dim", "runs"),
+    [(8, 8, False), (16, 8, False), (8, 16, False), (16, 16, True), (256, 32, True), (512, 512, False)],
+)
+def test_flex_runs_only_head_widths_its_kernel_takes(head_dim, v_head_dim, runs):
+    """Inductor's FlexAttention kernel takes no query/key or value head narrower than FLEX_MIN_HEAD_DIM (it raises
+    NYI at compile), and the implementation runs no query/key head wider than FLASH_MAX_HEAD_DIM."""
+    call = AttentionCall(4, 2, head_dim, v_head_dim, 128, 0.125, None)
+    assert sdpa_flex_sliding._flex_runs(call) is runs
+
+
 def test_full_layer_flex_matches_per_document_attention():
     """Uncompiled FlexAttention over a packed full layer's block masks, GQA and a padded tail included, in fp64
     and under ``no_grad``: each real query must attend exactly its own document's prefix."""
@@ -469,6 +492,33 @@ def test_the_flex_model_matches_the_sdpa_model(family, batch, lengths):
     assert grads.keys() == ref_grads.keys()
     for name, grad in ref_grads.items():
         assert fro_rel_err(grads[name], grad) < 1e-4, name
+
+
+@pytest.mark.parametrize("head_dim", [8, sdpa_flex_sliding.FLEX_MIN_HEAD_DIM])
+def test_heads_narrower_than_flex_takes_keep_sdpa(head_dim):
+    """A model whose heads are narrower than FLEX_MIN_HEAD_DIM has no FlexAttention call to warm and runs every
+    layer of a packed row on SDPA, reproducing the SDPA model; at FLEX_MIN_HEAD_DIM every layer takes FlexAttention."""
+    register_flex_sliding_attention()
+    torch.manual_seed(0)
+    overrides = {"head_dim": head_dim}
+    reference = tiny_family_model(ROSTER["mistral"], overrides=overrides)
+    candidate = tiny_family_model(ROSTER["mistral"], overrides=overrides)
+    candidate.load_state_dict(reference.state_dict())
+    text_config = candidate.config.get_text_config()
+    text_config._attn_implementation = SDPA_FLEX_SLIDING
+    inputs = _packed([150, 30, 90], text_config.vocab_size)
+    calls = []
+    with (
+        patch.object(flex_attention_module, "_validate_device", no_device_check),
+        patch.object(sdpa_flex_sliding, "_compiled_flex", _uncompiled_kernel(calls)),
+        patch.dict(ALL_ATTENTION_FUNCTIONS._global_mapping, {SDPA_FLEX_SLIDING: flex_sliding_on_cpu}),
+    ):
+        loss, _ = _loss_and_grads(candidate, inputs)
+    ref_loss, _ = _loss_and_grads(reference, inputs)
+    runs = head_dim >= sdpa_flex_sliding.FLEX_MIN_HEAD_DIM
+    assert bool(flex_attention_calls(candidate)) is runs
+    assert len(calls) == (text_config.num_hidden_layers if runs else 0)
+    torch.testing.assert_close(loss, ref_loss, rtol=1e-5, atol=1e-6)
 
 
 def _batch(*rows: torch.Tensor) -> torch.Tensor:

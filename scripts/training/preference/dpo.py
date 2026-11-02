@@ -29,7 +29,11 @@ from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import DPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.render_columns import alias_images_column
-from halo.entrypoints.data_setup import load_script_datasets, prepare_script_preference_data, resolve_vlm_run
+from halo.entrypoints.data_setup import (
+    load_script_datasets,
+    prepare_script_preference_data,
+    resolve_preference_vlm_run,
+)
 from halo.entrypoints.model_setup import apply_text_path_padding_side, load_preference_models
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -68,7 +72,9 @@ def main():
     # vision path. There the rows pass through untouched: TRL tokenizes them, auto-selects
     # DataCollatorForVisionPreference and applies no hub-shape normalization of its own. Decided
     # before the model load, which requires the checkpoint's processor for a vision run.
-    is_vlm_data = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
+    is_vlm_data = resolve_preference_vlm_run(
+        args, model_config, ds, text_only_model=args.text_only_model, method="DPO"
+    )
     if is_vlm_data:
         # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
         # tools column would survive the signature filter and render toolless.

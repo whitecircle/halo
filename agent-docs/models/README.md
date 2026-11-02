@@ -32,7 +32,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [Step-3.7 Flash](step3p7.md) | `step3p7` | Yes | Yes | No | No | Yes ¹⁰ | `examples/sft/step3p7/*` |
 | Any other HF model with a `tp_plan` (Llama, Mistral, Phi, …) | — | — | — | No | Yes | No | — |
 
-The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). LoRA adapters train under FSDP/DP and on every axis a row runs except TP, EP+TP and PP, which reject them; expert adapters are also refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). GPU rows train every MoE family's adapters under EP (`ep1` and `ep2`) and, where CP runs, EP+CP; pure-ETP LoRA is verified on every EP family except Command A+, DeepSeek-V4, GLM-5 Next, Inkling, Mistral4 and Zaya. Inkling and Command A+ LoRA is tiny-model verified only. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
+The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP where EP and TP do, EP+ETP on every EP family; their topology rules are in [Supported combinations](../parallelism/README.md#supported-combinations). LoRA adapters train under FSDP/DP and on every axis a row runs except TP, EP+TP and PP, which reject them; expert adapters are also refused at `expert_tp_size > 1` ([PEFT](../optimization/peft.md)). GPU rows train every MoE family's adapters under EP (`ep1` and `ep2`) and, where CP runs, EP+CP; pure-ETP LoRA is verified on every EP family except Command A+, GLM-5 Next, Inkling, Mistral4, Qwen3-Next and Qwen3.8-Flash-Next. Inkling and Command A+ LoRA is tiny-model verified only. Why a family drops an axis is on its page; trainer support is in [Trainer Compatibility](../reference/trainer-architecture.md#trainer-compatibility).
 
 ¹ The tied 0.6B, 1.7B and 4B checkpoints are refused by the tie gate; 8B and up split.
 
@@ -56,7 +56,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹¹ Tiny-model GPU tests only: no Qwen3-Next checkpoint is trained at full scale here.
 
-¹² Experimental: EP and pure ETP pass GPU tests on tiny models only; EP+ETP is untested, and no real-weight run has trained the family. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
+¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains and exports the release cut to four layers under EP8 (its exact resume has no GPU run), and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
 
 ## MoE knobs
 

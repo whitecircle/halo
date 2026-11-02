@@ -23,11 +23,15 @@ snapshot the trainer had at the pinned step — and:
     swapping the two halves (the chunk-order inversion), dropping the sign, and pooling at the last
     *padded* position instead of the last real token.
 
-Run with 2 GPUs:
-    torchrun --nproc_per_node=2 \
-        tests/gpu/trainers/other/test_reward.py
+The trainer runs on one rank (no FSDP wrap), under FSDP2 data parallelism, or with ``--hsdp`` under HSDP over
+two simulated NVLink domains of ``world // 2`` ranks, whose 2-D mesh and replicas in step are read off the model.
+
+Run:
+    torchrun --nproc_per_node=2 tests/gpu/trainers/other/test_reward.py
+    torchrun --nproc_per_node=4 tests/gpu/trainers/other/test_reward.py --hsdp
 """
 
+import argparse
 import random
 
 import torch
@@ -48,6 +52,7 @@ from tests.common.distributed import (
     world_mean,
     world_min,
 )
+from tests.common.dp_layout import dp_layout_checks, hsdp_layout, probe_forward
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
@@ -213,10 +218,17 @@ def bt_objective(rewards: torch.Tensor, *, swap: bool = False, drop_sign: bool =
     return float(difference.sigmoid().log().mean() if drop_sign else -F.logsigmoid(difference).mean())
 
 
-@gpu_test_main(min_world_size=2, prefix="test_reward")
+parser = argparse.ArgumentParser()
+parser.add_argument("--hsdp", action="store_true", help="HSDP over two simulated NVLink domains (4+ ranks)")
+parser.add_argument("--world", type=int, default=None, help="the exact rank count (1: one process, no FSDP wrap)")
+ARGS = parser.parse_args()
+
+
+@gpu_test_main(min_world_size=4 if ARGS.hsdp else 1, exact_world_size=ARGS.world, prefix="test_reward")
 def run(ctx):
     checks: dict[str, bool] = {}
     metrics: dict[str, float] = {}
+    layout = hsdp_layout(ctx.world_size) if ARGS.hsdp else {}
 
     ensure_model_downloaded(MODEL_NAME, ctx.rank)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
@@ -248,7 +260,7 @@ def run(ctx):
         train_dataset=create_reward_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED),
         eval_dataset=create_reward_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 1),
         processing_class=tokenizer,
-        parallelism_config=ParallelismConfig(),
+        parallelism_config=ParallelismConfig(**layout),
     )
     ctx.on_teardown(trainer.cleanup_ep)
 
@@ -270,6 +282,13 @@ def run(ctx):
     losses = step_losses(trainer)
     checks["ran_all_steps"] = trainer.state.global_step == NUM_TRAIN_STEPS and len(losses) == NUM_TRAIN_STEPS
     checks["losses_finite"] = bool(torch.isfinite(torch.tensor(losses)).all())
+    checks |= dp_layout_checks(
+        trainer.model,
+        layout,
+        world_size=ctx.world_size,
+        ep_config=None,
+        forward=lambda: probe_forward(trainer.model, ctx.device),
+    )
     # Early return, not a bare check: without the capture every line below raises KeyError and the
     # harness reports `error` instead of this check failing.
     checks["pinned_step_captured"] = bool(captured) and bool(weights)

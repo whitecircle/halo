@@ -22,7 +22,7 @@ Halo is an open-source framework built by [White Circle](https://whitecircle.com
 
 The same codebase runs on one GPU or across multiple nodes, with EP, CP, TP, ETP, PP, FSDP2, fused kernels, BF16 training, and distributed rollouts.
 
-Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is 115 lines or fewer for every family but GPT-OSS, at 205 ([Model Integration Cost](human-docs/model-integration-cost.md)).
+Halo trains Hugging Face models directly. Checkpoints still load with `from_pretrained`, and the EP layer a MoE family adds is 115 lines or fewer for every family but GPT-OSS, at 197 ([Model Integration Cost](human-docs/model-integration-cost.md)).
 
 On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL (3.2× at 25% less peak memory when both sides shard ZeRO-3).
 
@@ -51,12 +51,16 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 <!-- Newest first. This feed and GitHub Releases are Halo's changelog. -->
 
-- **2026-10-25 — Halo 1.2.0.** Pipeline parallelism, tree packing and a newer stack: pipeline
-  parallelism for SFT, preference, offline GRPO, reward and classification training, alone or with EP
-  or ETP inside each stage; SFT tree packing, which stores a prefix that several rows share once;
-  the Qwen3-Next and experimental Qwen3.8-Flash-Next families; a step guard that skips an optimizer
-  step whose gradient norm is not finite instead of writing NaN into the weights; transformers 5.20 and
-  TRL 1.14, with rollouts on vLLM 0.32 or SGLang 0.5.22; and the import package renamed to `halo`.
+- **2026-10-25 — Halo 1.2.0.** Pipeline parallelism, tree packing, faster parallel steps and a newer
+  stack: pipeline parallelism for SFT, preference, offline GRPO, reward and classification training,
+  alone or with EP or ETP inside each stage; SFT tree packing, which stores a prefix that several rows
+  share once; faster TP, CP and EP steps from TP linears on their local shards, one Ulysses all-to-all
+  per exchange, a sync-free MoE routing sort and two decoder layers per FSDP2 shard group, plus grouped
+  GEMM for gpt-oss under expert-tensor parallelism; the Qwen3-Next and experimental Qwen3.8-Flash-Next
+  families; a step guard that skips an optimizer step whose gradient norm is not finite instead of
+  writing NaN into the weights; PaliGemma SFT and distillation with a causal mask over the trained
+  tokens, which 1.1.0 let attend to the tokens after them; transformers 5.20 and TRL 1.14, with
+  rollouts on vLLM 0.32 or SGLang 0.5.22; and the import package renamed to `halo`.
 - **2026-10-11 — Halo 1.1.0.** Faster MoE training, exact resume and more reliable async RL: fused
   MoE kernels and FlexAttention on sliding-window layers (1.67× over Halo 1.0.0 for Gemma 4 26B-A4B on
   two GPUs), an atomic-free expert permute (up to 27% faster for gpt-oss at EP8), checkpoint and resume
@@ -220,9 +224,10 @@ A typical run is: **pick an `examples/` config → `halo launch <method> <config
 
 ## Benchmarks
 
-Benchmarks below were run on 8× B300 with the Blackwell image unless a row says otherwise. The stock TRL
-baseline uses `trl.SFTTrainer` with Transformers v5 and FSDP2 ZeRO-3, with the same model, data, bf16
-precision, FlashAttention 4, Liger kernels, and grouped GEMM.
+Benchmarks below were run on Halo 1.1.0 (the 256k-context row on 1.0.0), on 8× B300 with the Blackwell
+image unless a row says otherwise. The stock TRL baseline uses `trl.SFTTrainer` with Transformers v5 and
+FSDP2 ZeRO-3, with the same model, data, bf16 precision, FlashAttention 4, Liger kernels, and grouped
+GEMM.
 
 | Result | Configuration |
 |---|---|

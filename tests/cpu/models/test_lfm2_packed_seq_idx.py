@@ -10,12 +10,6 @@ attention itself correctly isolated.
     python tests/cpu/models/test_lfm2_packed_seq_idx.py
 """
 
-# The device-aware kernel-dispatch shim installs on `halo` import and must land BEFORE the lfm2
-# modeling module below, which binds transformers' hub-kernel fallback factory at import. Ordered
-# after it (where isort puts first-party), this file's CPU forward reaches the CUDA-only
-# causal_conv1d kernel and dies with `Expected x.is_cuda()` on a standalone run.
-import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
-
 from unittest.mock import MagicMock
 
 import pytest

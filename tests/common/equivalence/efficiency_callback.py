@@ -78,8 +78,9 @@ STEP_TOKENS = (3500, 3200, 3900, 3700, 3600)
 OUTLIER_TOKENS = 10**6
 OUTLIER_STEP = 3
 STEP_DOCUMENTS = ((1024, 1024, 900, 552), (800, 800, 800, 800), (1024, 1024, 1024, 828), (2000, 1700), (3600,))
-# Where each step starts on the scripted clock, and the tick the negative control moves the last step by.
-STEP_INTERVAL = 1.0
+# Host time before each step begins (its batch's fetch), which the step carries from the previous step's end, and
+# the tick the negative control moves the last step by.
+BATCH_FETCH_SECONDS = 4e-7
 CLOCK_TICK = 1e-7
 PERTURBED_STEP = len(STEP_SECONDS) - 1
 ALLOCATED_GIB = (1.25, 1.5, 1.375, 1.625, 1.5)
@@ -406,7 +407,8 @@ def run_case(case: EfficiencyCase, scratch: str, *, perturb: bool = False) -> di
             if scenario.measured_attention:
                 work.layout = callback.bind_attention_work_source(work)
             for step, seconds in enumerate(STEP_SECONDS):
-                device.step, device.now = step, step * STEP_INTERVAL
+                device.step = step
+                device.now += BATCH_FETCH_SECONDS
                 callback.on_step_begin(args, state, control, model=model)
                 work.documents = STEP_DOCUMENTS[step]
                 state.global_step += 1

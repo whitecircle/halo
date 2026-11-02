@@ -29,6 +29,7 @@ from halo.model_loading.dtype import DTYPE_BY_NAME
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
+from halo.models.attention.selection import verify_live_sinks_carried
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,8 @@ def load_reward_model(
     # ``Module.to(dtype=...)`` downcasts float buffers too, so repairing first would write the fp32
     # rotary table and then round it to bf16.
     finalize_loaded_model(model)
+    # No run policy applies here: the checkpoint's own sinks decide whether --rm_attn_implementation may drop them.
+    verify_live_sinks_carried(model)
     return tokenizer, model, device
 
 
