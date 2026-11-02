@@ -53,7 +53,7 @@ def test_the_warmup_compiles_what_the_sliding_layers_call_with():
     model = Gemma4ForCausalLM(_gemma4(head_dim=256, global_head_dim=2 * FLASH_MAX_HEAD_DIM))
     sliding = [m for m in model.modules() if isinstance(m, Gemma4TextAttention) and m.sliding_window]
     assert {m.scaling for m in sliding} == {1.0}  # premise: not the default head_dim ** -0.5
-    assert flex_attention_calls(model) == {AttentionCall(4, 2, 256, 32, 1.0, None)}
+    assert flex_attention_calls(model) == {AttentionCall(4, 2, 256, 256, 32, 1.0, None)}
 
 
 if __name__ == "__main__":

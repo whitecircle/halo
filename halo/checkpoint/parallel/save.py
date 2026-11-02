@@ -2,7 +2,7 @@
 
 Every rung is rank-uniform, so all ranks pick the same saver, and ``None`` falls through to
 ``Trainer.save_model``. PP precedes the full-model rungs because a stage is a partial model, and EP
-precedes CP so an EP+CP save gathers its experts. The FSDP2, CP and TP rungs share one streamed body.
+precedes CP so an EP+CP save gathers its experts. The FSDP2, CP, TP and unsharded rungs share one streamed body.
 """
 
 from __future__ import annotations
@@ -26,6 +26,7 @@ from halo.checkpoint.parallel.writing import (
 )
 from halo.checkpoint.writing import normalize_gathered_state_dict
 from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes
+from halo.models.external_tables import named_external_tables
 from halo.models.unwrapping import find_peft_model, unwrap_toolkit_wrappers
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.filesystem import fs_aware_makedirs
@@ -61,7 +62,7 @@ def save_tokenizer(ctx: CheckpointContext, output_dir: str) -> None:
 
 def select_checkpoint_saver(ctx: CheckpointContext) -> CheckpointSaver | None:
     """The first rung that owns the save — PEFT adapters, PP, expert-LoRA adapters, EP sharded or
-    gathered, CP, TP, FSDP2 — or ``None``."""
+    gathered, CP, TP, FSDP2, an unsharded model holding an external table — or ``None``."""
     config = ctx.parallelism_config
     # A merged-base save takes the mode's saver even with adapters, and under accelerate FSDP v1 the
     # adapters are flat-param shards whose layout the base Trainer's save owns.
@@ -82,6 +83,10 @@ def select_checkpoint_saver(ctx: CheckpointContext) -> CheckpointSaver | None:
         return save_tp_checkpoint
     if ctx.toolkit_fsdp2:
         return save_fsdp2_checkpoint
+    # transformers' save_pretrained writes the state dict alone, which holds no external table; accelerate-managed
+    # FSDP's flat parameters stay with it, and the trainer refuses that shape at construction.
+    if not ctx.accelerate_manages_fsdp and next(named_external_tables(ctx.model), None) is not None:
+        return save_unsharded_checkpoint
     return None
 
 
@@ -111,6 +116,13 @@ def save_fsdp2_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     """COLLECTIVE: mixin-managed FSDP2, every DTensor param gathered whole."""
     chunks = chunked_saveable_tensors(ctx.model, retain=ctx.is_save_rank)
     _streamed_save(ctx, output_dir, ctx.model, chunks, f"Saved FSDP2 model to {output_dir}")
+
+
+def save_unsharded_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
+    """COLLECTIVE: a model every rank holds whole (one process, DDP) that holds an external table, through the
+    gathered writer, which writes the tables beside the weights."""
+    chunks = chunked_saveable_tensors(ctx.model, retain=ctx.is_save_rank)
+    _streamed_save(ctx, output_dir, ctx.model, chunks, f"Saved {type(ctx.model).__name__} to {output_dir}")
 
 
 def save_cp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:

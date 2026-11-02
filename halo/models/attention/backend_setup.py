@@ -31,8 +31,9 @@ logger = logging.getLogger(__name__)
 WARMUP_MIN_SEQ_LEN = 512
 _WARMUP_WINDOW_MARGIN = 8
 
-# Marker on the wrapped ``flash_attn.cute`` entry points.
+# Markers on the wrapped ``flash_attn.cute`` entry points.
 _FA4_CONTIGUOUS_ATTR = "_halo_fa4_contiguous_dedicated_head"
+_FA4_VARLEN_SOFTCAP_ATTR = "_halo_fa4_varlen_softcap_refusal"
 
 
 def patch_transformers_flash_varlen_int_seqlen() -> None:
@@ -91,6 +92,35 @@ def install_fa4_contiguous_dedicated_head_inputs() -> bool:
         _FA4_CONTIGUOUS_ATTR,
         lambda fn, _varlen: fa4_contiguous_dedicated_head_inputs(fn),
         f"contiguous q/k/v for the dedicated head_dim-{FA4_DEDICATED_HEAD_DIM} kernel",
+    )
+
+
+def fa4_varlen_softcap_refusal(fn, varlen: bool):
+    """``fn`` (an FA4 entry point), its varlen one raising on a softcapped call: that kernel's backward takes no
+    softcap, and on B300 its forward with one does not finish. The dense entry point, which takes it, is returned
+    as is."""
+    if not varlen:
+        return fn
+
+    @functools.wraps(fn)
+    def wrapped(*args, **kwargs):
+        if kwargs.get("softcap"):
+            raise RuntimeError(
+                "A softcapped attention call reached FlashAttention-4's varlen kernels, which take no attention "
+                "logit softcapping (the backward asserts, and on B300 the forward does not finish). A packed, "
+                "padding-free or padded batch, training or evaluation, reaches them. Leave attn_implementation "
+                "unset or set flash_attention_2; FA4 trains a softcapped model only on one unpadded row per batch."
+            )
+        return fn(*args, **kwargs)
+
+    return wrapped
+
+
+def install_fa4_varlen_softcap_refusal() -> bool:
+    """Make FA4's varlen entry point refuse a softcapped call (:func:`fa4_varlen_softcap_refusal`) instead of
+    hanging or failing in the backward (idempotent). False when ``flash_attn.cute`` is not importable."""
+    return wrap_fa4_entry_points(
+        _FA4_VARLEN_SOFTCAP_ATTR, fa4_varlen_softcap_refusal, "the softcap refusal on the varlen kernel"
     )
 
 
@@ -163,7 +193,8 @@ def warm_fa4_kernels(model: PreTrainedModel, *, dtype: torch.dtype, device: torc
             return
 
         # Each layer's own geometry, both with and without its window: a row no longer than the window
-        # dispatches the windowless kernel.
+        # dispatches the windowless kernel. The value takes the query/key width, which transformers' flash
+        # path pads it up to, so the value width keys no kernel of its own.
         windows: dict[tuple[int, int, int, float | None], set[int | None]] = {}
         for call in attention_calls(model):
             windows.setdefault((call.heads, call.kv_heads, call.head_dim, call.softcap), {None}).add(call.window)

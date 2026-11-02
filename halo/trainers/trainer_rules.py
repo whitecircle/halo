@@ -9,6 +9,7 @@ from halo.data.collators.packing import DataCollatorWithFlattening, DataCollator
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.models.attention.gpt_oss_sinks import has_live_attention_sinks
+from halo.models.external_tables import named_external_tables
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
 from halo.models.segment_markers import reject_compressed_kv_rows, reject_unmarked_linear_attention_rows
@@ -249,6 +250,25 @@ def reject_unreloadable_best_model(training_args, config, model) -> None:
             "reload is refused. Drop load_best_model_at_end and export the best checkpoint "
             "directly, or run pure TP (tensor_parallel_size == world size), where the reload is "
             "supported."
+        )
+
+
+def reject_unsaveable_external_tables(model, *, accelerate_manages_fsdp: bool) -> None:
+    """Refuse, before training, a model holding an external table that no save of the run could write.
+
+    Under accelerate-managed FSDP the base Trainer saves the flat-parameter state dict through transformers'
+    ``save_pretrained``, which holds no table, so the end of the run would leave no checkpoint that loads. A PEFT run
+    saves its adapters alone, which need no table.
+    """
+    if not accelerate_manages_fsdp or find_peft_model(model) is not None:
+        return
+    tables = [name for name, _ in named_external_tables(model)]
+    if tables:
+        raise ValueError(
+            f"{type(model).__name__} holds external tables ({', '.join(tables[:2])}), which no state dict carries, "
+            f"and under accelerate-managed FSDP every save of it goes through transformers' save_pretrained: no "
+            f"checkpoint of this run would load. Launch with torchrun (FSDP2, or one process), whose gathered save "
+            f"writes the tables, or train adapters (use_peft: true)."
         )
 
 

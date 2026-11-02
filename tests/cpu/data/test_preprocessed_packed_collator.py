@@ -118,7 +118,14 @@ def _prepare_preprocessed(packed: bool, train_on_completions_only: bool = False)
             tree_packing=False,
             allow_cross_document_linear_attention=False,
         )
-        sft_config = SimpleNamespace(max_length=64, packing=False, padding_free=False, per_device_train_batch_size=1)
+        sft_config = SimpleNamespace(
+            max_length=64,
+            packing=False,
+            padding_free=False,
+            per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            eval_strategy="no",
+        )
         model_config = SimpleNamespace(model_name_or_path="stub-model")
         parallelism_config = SimpleNamespace(is_cp_mode=False, cp_size=1, pp_size=1)
 

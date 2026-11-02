@@ -136,9 +136,10 @@ def is_ep_shard(name: str) -> bool:
     return _EP_SHARD_FILE_RE.match(name) is not None
 
 
-def hf_shard_filename(part: int, total_parts: int) -> str:
-    """HF's own name for part ``part`` of ``total_parts``: the unsharded file when there is only one."""
-    suffix = "" if total_parts == 1 else f"-{part:05d}-of-{total_parts:05d}"
+def hf_shard_filename(part: int, total_parts: int, *, indexed: bool = False) -> str:
+    """HF's own name for part ``part`` of ``total_parts``: the unsharded file when there is only one and no index
+    names other files beside it, since ``from_pretrained`` reads a ``model.safetensors`` over an index."""
+    suffix = "" if total_parts == 1 and not indexed else f"-{part:05d}-of-{total_parts:05d}"
     return SAFETENSORS_SHARD_PATTERN.format(suffix=suffix)
 
 

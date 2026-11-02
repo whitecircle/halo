@@ -7,7 +7,8 @@ sequence and relies on its bottom-right causal and window alignment, in forward 
 shape neither upstream nor the stock packed path exercises. The split form reads the fused-sink
 log-sum-exp and backpropagates through it. A GatedDeltaNet layer runs its delta-rule kernel with one
 initial state per varlen sequence and a gradient through both states, and its convolution over a
-gathered row.
+gathered row. Each model is finalized as a loaded one is (``finalize_loaded_model``), so the delta-rule kernel
+autotunes under the FLA Blackwell restriction a training run gets.
 
 One tiny bf16 model per kernel shape — GPT-OSS (live sinks, a window shorter than the branches),
 Qwen3 MoE (no sink, no window), Qwen3.5 MoE at its release head shapes (FA4's head_dim-256 kernel, gather only,
@@ -31,6 +32,7 @@ from transformers import modeling_flash_attention_utils as flash_utils
 from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.models.attention.backend_setup import (
     install_fa4_contiguous_dedicated_head_inputs,
     patch_transformers_flash_varlen_int_seqlen,
@@ -218,6 +220,7 @@ def _gather_accumulation_errors() -> tuple[float, float]:
 def _family_checks(name: str, row: dict[str, torch.Tensor]) -> dict[str, bool]:
     torch.manual_seed(0)
     model = tiny_family_model(TINY_MOE_FAMILIES[name], overrides=FAMILIES[name])
+    finalize_loaded_model(model)
     randomize_sinks(model)
     family = TREE_FAMILIES[name]
     recurrence_states = _record_recurrence_states(family) if family.stateful else None

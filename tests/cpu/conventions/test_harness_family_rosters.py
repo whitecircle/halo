@@ -1,6 +1,7 @@
-"""The checkpoint and EP comparison harnesses compare only the families both trees' rosters hold: a family one
-commit adds, drops or renames never reaches the ``--families`` of a tree without it, whose parser refuses it as an
-invalid choice, and the evidence names it under ``skipped`` even when no request named it.
+"""The checkpoint, EP and CP comparison harnesses compare only the families both trees' rosters hold, read through
+the one roster helper (``revisions.common_families``): a family one commit adds, drops or renames never reaches the
+``--families`` of a tree without it, whose parser refuses it as an invalid choice, and the evidence names it under
+``skipped`` even when no request named it.
 
 Each tree here is a stub of the harness module: its ``FAMILIES`` roster and a parser that refuses any other
 family, run through the harness's real producer launches.
@@ -13,11 +14,12 @@ from pathlib import Path
 
 import pytest
 
-from tests.common.equivalence import checkpoint_artifacts, ep_bitwise
+from tests.common.equivalence import checkpoint_artifacts, cp_equivalence, ep_bitwise
 from tests.common.sample_tree import write_sample_tree
 
 HARNESSES = [
-    pytest.param(module, id=module.__name__.rpartition(".")[2]) for module in (ep_bitwise, checkpoint_artifacts)
+    pytest.param(module, id=module.__name__.rpartition(".")[2])
+    for module in (ep_bitwise, checkpoint_artifacts, cp_equivalence)
 ]
 PACKAGES = ("tests", "tests/common", "tests/common/equivalence")
 STUB = """

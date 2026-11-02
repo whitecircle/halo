@@ -3,7 +3,7 @@
 
 ``tests/cpu/peft/test_peft_cp_adapter_keys.py`` pins the key algebra (normalize / remap) and
 ``test_adapter_state_includes_buffers.py`` pins ``gather_adapter_state``, but both stop short of
-the artifact: neither calls :func:`save_peft_adapters` nor :func:`_load_peft_adapter_state`, the
+the artifact: neither calls :func:`save_peft_adapters` nor :func:`restore_adapters`, the
 function resume actually runs. So the three contracts that only hold END TO END are pinned here:
 
 * a ``modules_to_save`` router's balancing buffer reaches ``adapter_model.safetensors`` — a filter
@@ -11,9 +11,8 @@ function resume actually runs. So the three contracts that only hold END TO END 
 * that buffer stays **fp32** in the adapter file while its LoRA neighbours cast to bf16 — the
   export-contract cast is applied by the writer, over keys the writer itself produced (the dtype
   test feeds hand-written keys, which cannot catch a respelling upstream of the cast);
-* the saved keys load back onto a freshly built CP+PEFT model through the loader's own function,
-  with zero unexpected keys — the shape the loader turns into a hard "adapter would resume from
-  zero-init" failure.
+* the saved keys load back onto a freshly built CP+PEFT model through the resume's own function,
+  which refuses, before any copy, a file whose keys or shapes do not match the live adapters.
 
 Plus the provenance seam ``save`` owns: a stamped run must leave ``training_provenance.json`` next
 to the adapter (a merge cannot recover the sinks policy from the tensors), an unstamped one must
@@ -37,11 +36,7 @@ from safetensors.torch import load_file
 from transformers import AutoConfig, AutoModelForCausalLM
 
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, TRAINING_PROVENANCE_FILE
-from halo.checkpoint.parallel.adapters import (
-    _load_peft_adapter_state,
-    remap_cp_adapter_keys_to_live,
-    save_peft_adapters,
-)
+from halo.checkpoint.parallel.adapters import restore_adapters, save_peft_adapters
 from halo.checkpoint.sidecars import PROVENANCE_GPT_OSS_SINKS
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
@@ -192,17 +187,12 @@ def test_writer_keeps_the_balancing_buffer_fp32_while_lora_casts_to_bf16():
 
 
 def test_resume_restores_every_saved_tensor_through_the_loader():
-    """Save → remap → :func:`_load_peft_adapter_state`, the exact resume path.
-
-    Zero unexpected keys (the loader turns "all unexpected" into a hard raise and a partial miss
-    into a warning that leaves those layers at init), and every trained tensor — LoRA weights AND
-    the router's balancing buffer — equal to what was saved.
+    """Save → :func:`restore_adapters`, the resume path: the CP-normalized keys map back onto the live CP-wrapped
+    names (a key that missed would fail the restore's layout check), and every trained tensor — LoRA weights AND
+    the router's balancing buffer — equals what was saved.
     """
     trained = _cp_peft_model()
     _train_adapters(trained)
-    with tempfile.TemporaryDirectory() as tmp:
-        saved = _save_adapter(trained, tmp)
-
     fresh = _cp_peft_model()
     live_before = _live_adapter_tensors(fresh)
     live_trained = _live_adapter_tensors(trained)
@@ -211,9 +201,9 @@ def test_resume_restores_every_saved_tensor_through_the_loader():
         "the fresh model already matches the trained one — the restore below would be unfalsifiable"
     )
 
-    remapped = remap_cp_adapter_keys_to_live(saved, fresh)
-    unexpected = _load_peft_adapter_state(fresh, remapped)
-    assert not unexpected, f"{len(unexpected)}/{len(remapped)} saved keys unexpected, e.g. {unexpected[:3]}"
+    with tempfile.TemporaryDirectory() as tmp:
+        _save_adapter(trained, tmp)
+        assert restore_adapters(tmp, fresh, is_cp_mode=True) is not None
 
     # Exact, not approximate: the writer casts everything but the balancing tensors to the bf16 save
     # dtype, so the value resume owes back is the trained one put through that same round trip.
@@ -231,16 +221,14 @@ def test_resume_restores_the_balancing_buffer_at_full_precision():
     reports it unexpected and silently leaves the router at its init bias."""
     trained = _cp_peft_model()
     _train_adapters(trained)
-    with tempfile.TemporaryDirectory() as tmp:
-        saved = _save_adapter(trained, tmp)
-
     fresh = _cp_peft_model()
     with torch.no_grad():  # clear it, so "restored" cannot mean "was already right"
         for _, buffer in persistent_buffers(fresh):
             buffer.zero_()
 
-    unexpected = _load_peft_adapter_state(fresh, remap_cp_adapter_keys_to_live(saved, fresh))
-    assert not unexpected
+    with tempfile.TemporaryDirectory() as tmp:
+        _save_adapter(trained, tmp)
+        assert restore_adapters(tmp, fresh, is_cp_mode=True) is not None
 
     # The ``modules_to_save`` clone is the copy the wrapped module's forward runs, so it is the one
     # that has to come back — the frozen original is never consulted again.

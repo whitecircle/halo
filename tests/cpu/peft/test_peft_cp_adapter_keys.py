@@ -24,10 +24,14 @@ import itertools
 import pytest
 import torch
 from peft import LoraConfig, PeftModel, get_peft_model
-from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
+from peft.utils import get_peft_model_state_dict
 from transformers import AutoConfig, AutoModelForCausalLM
 
-from halo.checkpoint.parallel.adapters import remap_cp_adapter_keys_to_live
+from halo.checkpoint.parallel.adapters import (
+    _load_peft_adapter_state,
+    remap_cp_adapter_keys_to_live,
+    saved_adapter_tensors,
+)
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
@@ -137,7 +141,7 @@ def test_resume_remap_recovers_live_keys():
     saved = _plain_keys(get_peft_model_state_dict(peft_model))
     assert saved, "no adapter tensors to save"
 
-    remapped = remap_cp_adapter_keys_to_live(saved, peft_model)
+    remapped = remap_cp_adapter_keys_to_live(saved, saved_adapter_tensors(peft_model))
 
     expected_live = {name.replace(".default.", ".") for name in _live_lora_keys(peft_model)}
     assert set(remapped) == expected_live, "remap did not recover the exact live key set"
@@ -146,10 +150,9 @@ def test_resume_remap_recovers_live_keys():
 
 
 def test_resume_roundtrip_loads_every_saved_tensor():
-    """Loader-level round trip — save-normalized keys → remap → ``set_peft_model_state_dict``, the
-    exact non-DTensor path ``_load_peft_adapter_state`` runs on resume. Zero unexpected keys and
-    every live LoRA tensor equal to the saved one. A mis-spelled remap leaves 100% unexpected and the
-    loader raises "CP-remap regression"."""
+    """Loader-level round trip — save-normalized keys → remap → ``_load_peft_adapter_state``, the copy resume
+    runs: every remapped key names a live tensor and every live LoRA tensor equals the saved one. A mis-spelled
+    remap leaves the keys in portable spelling, which the copy cannot place."""
     trained = _cp_peft_model()
     with torch.no_grad():  # make adapters non-zero so a successful restore is detectable (B inits 0)
         for name, param in trained.named_parameters():
@@ -165,10 +168,11 @@ def test_resume_roundtrip_loads_every_saved_tensor():
         "fresh adapters already equal trained — the restore below would be unfalsifiable"
     )
 
-    remapped = remap_cp_adapter_keys_to_live(saved, fresh)
-    load_result = set_peft_model_state_dict(fresh, remapped)
-    unexpected = list(getattr(load_result, "unexpected_keys", None) or [])
-    assert not unexpected, f"{len(unexpected)}/{len(remapped)} adapter keys unexpected, e.g. {unexpected[:3]}"
+    saved_tensors = saved_adapter_tensors(fresh)
+    remapped = remap_cp_adapter_keys_to_live(saved, saved_tensors)
+    unplaced = sorted(set(remapped) - set(saved_tensors))
+    assert not unplaced, f"{len(unplaced)}/{len(remapped)} adapter keys name no live tensor, e.g. {unplaced[:3]}"
+    _load_peft_adapter_state(saved_tensors, remapped)
 
     not_restored = [n for n in trained_lora if not torch.equal(fresh_lora[n], trained_lora[n])]
     assert not not_restored, (
@@ -192,7 +196,7 @@ def test_resume_remap_covers_modules_to_save_buffers():
         "modules_to_save clone did not serialize its persistent buffer — the remap case is vacuous"
     )
 
-    remapped = remap_cp_adapter_keys_to_live(saved, peft_model)
+    remapped = remap_cp_adapter_keys_to_live(saved, saved_adapter_tensors(peft_model))
     live = {
         name.replace(".modules_to_save.default.", ".").replace(".default.", ".")
         for name, _ in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
@@ -215,7 +219,7 @@ def test_resume_remap_covers_embedding_adapters():
     assert live_embedding, "no ParameterDict embedding adapter was injected — the case is vacuous"
 
     saved = _plain_keys(get_peft_model_state_dict(peft_model))
-    remapped = remap_cp_adapter_keys_to_live(saved, peft_model)
+    remapped = remap_cp_adapter_keys_to_live(saved, saved_adapter_tensors(peft_model))
 
     expected = {name.removesuffix(".default") for name in live_embedding}
     assert expected <= set(remapped), (
@@ -224,11 +228,26 @@ def test_resume_remap_covers_embedding_adapters():
     )
 
 
+def test_resume_remap_covers_dora_magnitudes():
+    """PEFT saves a DoRA magnitude as ``…lora_magnitude_vector``, dropping both the adapter name and the
+    ``.weight`` its live ``…lora_magnitude_vector.default.weight`` carries. The remap reads the inverse off PEFT's
+    own selection, so the saved spelling maps back onto the live tensor instead of passing through unplaced."""
+    wrapper = UlyssesModel(_tiny_qwen3(), CPConfig(1, stage_world_size=1, stage_base_rank=0, nvlink_domain_size=1))
+    peft_model = get_peft_model(wrapper, LoraConfig(**{**_LORA_KWARGS, "use_dora": True}))
+    saved = _plain_keys(get_peft_model_state_dict(peft_model))
+    magnitudes = [key for key in saved if key.endswith("lora_magnitude_vector")]
+    assert magnitudes, "no DoRA magnitude was saved — the case is vacuous"
+
+    saved_tensors = saved_adapter_tensors(peft_model)
+    remapped = remap_cp_adapter_keys_to_live(saved, saved_tensors)
+    assert set(remapped) == set(saved_tensors), sorted(set(remapped) ^ set(saved_tensors))[:4]
+
+
 def test_resume_remap_passes_through_unmatched_saved_key():
-    """A saved key with no live match falls back to identity pass-through; downstream reports it
-    unexpected and drops it (documented gap — a future warn/raise updates this test)."""
+    """A saved key with no live match passes through unchanged, for the restore's layout check to name and refuse
+    (``tests/cpu/peft/test_adapter_restore_strict.py``)."""
     orphan = "base_model.model.model.layers.99.self_attn.q_proj.lora_A.weight"
-    assert remap_cp_adapter_keys_to_live({orphan: 123}, _cp_peft_model()) == {orphan: 123}
+    assert remap_cp_adapter_keys_to_live({orphan: 123}, saved_adapter_tensors(_cp_peft_model())) == {orphan: 123}
 
 
 if __name__ == "__main__":

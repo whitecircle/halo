@@ -558,6 +558,7 @@ _UNREGISTERED_FAMILIES = (
     "mistral4",
     "qwen3_moe",
     "qwen3_next",
+    "qwen4_exp_text",
 )
 
 

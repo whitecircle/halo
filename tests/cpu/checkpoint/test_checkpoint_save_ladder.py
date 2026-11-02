@@ -4,7 +4,8 @@
 ``select_checkpoint_saver`` follows one precedence exactly — PEFT adapters first (unless a merged
 base or accelerate's FSDP owns the save), then PP (a stage is a partial model), standalone expert
 LoRA adapters, EP (sharded past one rank when asked, else gathered; incl. EP+TP / EP+CP) before CP,
-CP before TP, TP before plain FSDP2, and ``None`` when no mode owns the save. A drift here silently
+CP before TP, TP before plain FSDP2, an unsharded model holding an external table (which transformers'
+``save_pretrained`` cannot write) after that, and ``None`` when no mode owns the save. A drift here silently
 routes a save through the wrong gather path, so this asserts the ROUTE — the function that will
 run — for every mode combination.
 
@@ -24,8 +25,10 @@ from halo.checkpoint.parallel.save import (
     save_cp_checkpoint,
     save_fsdp2_checkpoint,
     save_tp_checkpoint,
+    save_unsharded_checkpoint,
     select_checkpoint_saver,
 )
+from halo.models.external_tables import ExternalTable
 from halo.models.unwrapping import find_peft_model
 from tests.common.checkpoint_io import save_context
 from tests.common.parallelism import make_parallelism_config
@@ -38,16 +41,23 @@ _EP_TP = {"world_size": 4, "gpus_per_node": 4, "ep_size": 2, "tp_size": 2}
 _MERGE = {"world_size": 1, "gpus_per_node": 1, "merge_expert_lora_on_save": True}
 
 
+class _Table(ExternalTable):
+    part_key_format = "shard_{index}.weight"
+
+
 class _Tiny(nn.Module):
-    def __init__(self):
+    def __init__(self, *, table: bool = False):
         super().__init__()
         self.proj = nn.Linear(2, 2)
+        if table:
+            self.table = _Table(rows=4, dim=2, part_count=1)
 
 
-def _ctx(topology: dict | None = None, *, peft: bool = False, **fields):
+def _ctx(topology: dict | None = None, *, peft: bool = False, table: bool = False, **fields):
     """A saver context on the real config of ``topology`` (one process when omitted), ``fields`` set;
-    ``peft`` hands it a PeftModel."""
-    model = get_peft_model(_Tiny(), LoraConfig(r=1, target_modules=["proj"])) if peft else _Tiny()
+    ``peft`` hands it a PeftModel, ``table`` a model holding an external table."""
+    model = _Tiny(table=table)
+    model = get_peft_model(model, LoraConfig(r=1, target_modules=["proj"])) if peft else model
     config = make_parallelism_config(**topology) if topology else None
     return save_context(model, config, is_save_rank=True, **fields)
 
@@ -91,6 +101,15 @@ CASES = [
     ("FSDP2 dense", None, {"toolkit_fsdp2": True}, save_fsdp2_checkpoint),
     ("accelerate-managed FSDP", None, {"accelerate_manages_fsdp": True}, None),
     ("plain / DDP", None, {}, None),
+    ("plain / DDP holding an external table", None, {"table": True}, save_unsharded_checkpoint),
+    ("FSDP2 holding an external table", None, {"table": True, "toolkit_fsdp2": True}, save_fsdp2_checkpoint),
+    ("PEFT adapters of a model holding an external table", None, {"table": True, "peft": True}, save_peft_adapters),
+    (
+        "accelerate-managed FSDP holding an external table falls through (refused at trainer construction)",
+        None,
+        {"table": True, "accelerate_manages_fsdp": True},
+        None,
+    ),
 ]
 
 
@@ -115,6 +134,7 @@ def test_save_checkpoint_reports_whether_a_mode_owned_the_save(desc, topology, f
         "save_cp_checkpoint",
         "save_tp_checkpoint",
         "save_fsdp2_checkpoint",
+        "save_unsharded_checkpoint",
     ):
         monkeypatch.setattr(save_mod, name, lambda ctx, out, _n=name: ran.append(_n))
 

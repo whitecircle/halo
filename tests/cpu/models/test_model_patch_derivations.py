@@ -37,11 +37,14 @@ def _config(model_type: str):
     return transformers.CONFIG_MAPPING[model_type]()
 
 
-# The families whose attention runs FA4's dedicated head_dim-256 kernel, MLA (GLM-4.7-Flash) included.
-_FA4_HEAD_DIM_256_MODEL_TYPES = ("qwen3_next", "qwen3_5", "qwen3_5_moe", "glm4_moe_lite", "gemma3_text")
+# The families FA4 trains on its dedicated head_dim-256 kernel.
+_FA4_HEAD_DIM_256_MODEL_TYPES = ("qwen3_next", "qwen3_5", "qwen3_5_moe")
+# The head_dim-256 families that kernel does not train: GLM-4.7-Flash's latent attention, Gemma 3's windows and
+# Gemma 2's softcap.
+_FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES = ("glm4_moe_lite", "gemma3_text", "gemma2")
 
 
-@pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES)
+@pytest.mark.parametrize("model_type", _FA4_HEAD_DIM_256_MODEL_TYPES + _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES)
 def test_a_deterministic_run_refuses_fa4_at_head_dim_256(model_type, monkeypatch):
     """The dedicated kernel's backward asserts ``not deterministic``, which transformers passes under
     ``FLASH_ATTENTION_DETERMINISTIC``: such a run would stop at its first backward."""
@@ -54,6 +57,14 @@ def test_head_dim_256_keeps_fa4_outside_a_deterministic_run(model_type, monkeypa
     """With q/k/v made contiguous for that kernel, nothing else refuses it."""
     monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
     assert supports_fa4_backward(_config(model_type)) is True
+
+
+@pytest.mark.parametrize("model_type", _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES)
+def test_fa4_does_not_train_a_refused_head_dim_256_attention_in_any_run(model_type, monkeypatch):
+    """The dedicated kernel's refusals hold outside a deterministic run too, so Context Parallelism, whose Ulysses
+    kernel reads this verdict, never runs FA4 on them."""
+    monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
+    assert supports_fa4_backward(_config(model_type)) is False
 
 
 @pytest.mark.parametrize("model_type", ["qwen3", "llama", "gpt_oss", "mistral4"])
@@ -81,13 +92,24 @@ def test_transformers_pads_the_value_head_to_the_query_key_width(monkeypatch):
     assert out.shape[-1] == 128
 
 
-def test_the_deterministic_refusal_reads_the_query_key_width_alone(monkeypatch):
-    """An MLA with 256-wide q/k and a 128-wide v reaches the dedicated kernel with its value padded to 256, so a
-    deterministic run refuses FA4 there too."""
-    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
-    config = transformers.Glm4MoeLiteConfig(v_head_dim=128)
+class _NarrowValueConfig(transformers.PretrainedConfig):
+    """A 256-wide query/key head over a 128-wide value, with no latent (so no latent-attention refusal)."""
+
+    model_type = "halo_test_narrow_value"
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.hidden_size, self.num_attention_heads, self.head_dim, self.v_head_dim = 2048, 16, 256, 128
+
+
+@pytest.mark.parametrize(("deterministic", "supported"), [("1", False), ("0", True)])
+def test_the_deterministic_refusal_reads_the_query_key_width_alone(deterministic, supported, monkeypatch):
+    """A 256-wide q/k over a 128-wide v reaches the dedicated kernel with its value padded to 256, so a
+    deterministic run refuses FA4 there too, and an ordinary one keeps it."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
+    config = _NarrowValueConfig()
     assert resolve_qk_v_head_dims(config) == (256, 128)
-    assert supports_fa4_backward(config) is False
+    assert supports_fa4_backward(config) is supported
 
 
 @pytest.mark.parametrize(

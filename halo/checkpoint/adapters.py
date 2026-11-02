@@ -24,6 +24,7 @@ from halo.checkpoint.format import (
     RESUME_ADAPTER_MARKER_FILE,
 )
 from halo.checkpoint.reading import read_checkpoint_config
+from halo.log import KEY_PREVIEW_COUNT
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.models.unwrapping import PEFT_BASE_MODEL_PREFIX
 
@@ -233,6 +234,26 @@ def lora_scaling_mismatch(adapter_dir: str, attention: Mapping | None, expert: M
         f"the adapter at {adapter_dir} was trained at another LoRA scaling than this run ({'; '.join(changed)}): "
         f"its tensors would restore by name and shape and every delta would be rescaled. Resume with the "
         f"{' / '.join(dict.fromkeys(changed.values()))} it was saved with."
+    )
+
+
+def adapter_layout_mismatch(saved: Mapping[str, torch.Tensor], expected: Mapping[str, tuple[int, ...]]) -> str | None:
+    """Why the ``saved`` adapter tensors do not restore a model expecting ``expected`` (saved key → saved shape) one for
+    one, or None: a tensor left out would resume from its initialization, one no live tensor takes would be dropped,
+    and a copy across shapes broadcasts or fails part-way through the restore."""
+    missing = sorted(expected.keys() - saved.keys())
+    unexpected = sorted(saved.keys() - expected.keys())
+    reshaped = [
+        f"{key}: saved {tuple(saved[key].shape)}, live {tuple(expected[key])}"
+        for key in sorted(expected.keys() & saved.keys())
+        if tuple(saved[key].shape) != tuple(expected[key])
+    ]
+    if not (missing or unexpected or reshaped):
+        return None
+    return (
+        f"{len(missing)} live tensor(s) missing from the file {missing[:KEY_PREVIEW_COUNT]}, {len(unexpected)} saved "
+        f"tensor(s) no live tensor takes {unexpected[:KEY_PREVIEW_COUNT]}, {len(reshaped)} reshaped "
+        f"{reshaped[:KEY_PREVIEW_COUNT]}"
     )
 
 

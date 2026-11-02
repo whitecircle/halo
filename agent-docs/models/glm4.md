@@ -4,7 +4,7 @@
 
 Per-axis support: [Compatibility matrix](README.md#compatibility-matrix).
 
-Its MLA-style attention (192 + 64 = 256-wide query/key, 256-wide value) runs FlashAttention-4's dedicated head_dim-256 kernel on Blackwell, which the loader hands contiguous q/k/v; under `full_determinism` it falls back from FA4 to SDPA (`supports_fa4_backward`), or to FA2 under Context Parallelism. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
+Its MLA-style attention (192 + 64 = 256-wide query/key, 256-wide value) runs FA2 on Blackwell in every run, Context Parallelism and `full_determinism` included: trained on FlashAttention-4's dedicated head_dim-256 kernel, its step-2 gradients come out about 4x FA2's, so the resolver keeps latent attention at that width off FA4. FA3 on Hopper. See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 
 ## EP layer
 

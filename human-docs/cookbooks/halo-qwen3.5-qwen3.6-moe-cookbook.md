@@ -108,7 +108,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 ## Settings that matter
 
 - **Attention.** The SFT recipe pins `flash_attention_2`, and the GRPO recipes pin `sdpa`. Unpinned,
-  Blackwell runs FA4; under `full_determinism` Halo replaces it with SDPA.
+  Blackwell runs FA4, and FA2 on packed SFT rows; under `full_determinism` Halo replaces FA4 with SDPA.
 - **Packing, not padding-free.** Halo refuses `padding_free: true` on this family: its variable-length path
   crashes FA2 on the multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
   (`tree_packing: true` with `tree_full_attention: gather`;

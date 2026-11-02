@@ -24,6 +24,7 @@ LFM2_24B_A2B = "LiquidAI/LFM2-24B-A2B"
 QWEN3_5_MOE = "Qwen/Qwen3.5-397B-A17B"
 QWEN3_5_MOE_35B = "Qwen/Qwen3.5-35B-A3B"
 QWEN3_NEXT_80B_A3B = "Qwen/Qwen3-Next-80B-A3B-Instruct"
+QWEN3_8_FLASH_NEXT = "Qwen/Qwen3.8-Flash-Next"
 QWEN3_5_MOE_122B = "Qwen/Qwen3.5-122B-A10B"
 QWEN3_6_MOE_35B = "Qwen/Qwen3.6-35B-A3B"
 BAILING_MOE_RING_MINI = "inclusionAI/Ring-mini-linear-2.0"
@@ -230,6 +231,53 @@ TINY_QWEN35_MOE_CONFIG = {
 # Tiny Qwen3-Next: Qwen3.5-MoE's text fields, which ``Qwen3NextConfig`` spells alike, with the router
 # renormalizing (``norm_topk_prob``) as Qwen3-Next-80B-A3B ships it.
 TINY_QWEN3_NEXT_CONFIG = {**TINY_QWEN35_MOE_CONFIG, "norm_topk_prob": True}
+# Tiny Qwen3.8-Flash-Next text tower (``qwen4_exp_text``) cut from the release config: one period of three
+# GatedDeltaNet layers and a QSA layer (the hub's ``full_attention`` spelling), four hyper-connection streams, PLE
+# on the second layer over a 4-part n-gram table, a sigmoid-gated shared expert beside 8 routed experts (top-3)
+# and interleaved M-RoPE. An 8-token ``indexer_budget`` lets a short document cross it.
+TINY_QWEN4_EXP_CONFIG = {
+    "vocab_size": 1024,
+    "hidden_size": 64,
+    "num_hidden_layers": 4,
+    "layer_types": ["linear_attention"] * 3 + ["full_attention"],
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "rope_parameters": {
+        "rope_type": "default",
+        "rope_theta": 10000000,
+        "partial_rotary_factor": 0.25,
+        "mrope_section": [3, 3, 2],
+        "mrope_interleaved": True,
+    },
+    "linear_conv_kernel_dim": 4,
+    "linear_key_head_dim": 16,
+    "linear_value_head_dim": 16,
+    "linear_num_key_heads": 2,
+    "linear_num_value_heads": 6,
+    "num_experts": 8,
+    "num_experts_per_tok": 3,
+    "moe_intermediate_size": 32,
+    "shared_expert_intermediate_size": 32,
+    "norm_topk_prob": True,
+    "hc_count": 4,
+    "hc_lowrank": 16,
+    "ple_layer_ids": [2],
+    "ple_embed_dim": 64,
+    "ngram_size": 3,
+    "heads_per_ngram": 2,
+    "ngram_vocab_size_base": 997,
+    "split_ngram_parts": 4,
+    "indexer_n_heads": 2,
+    "indexer_kv_heads": 1,
+    "indexer_head_dim": 16,
+    "indexer_budget": 8,
+    "indexer_compress_ratio": 4,
+    "eos_token_id": 1,
+    "max_position_embeddings": 4096,
+    "router_aux_loss_coef": 0.0,
+    "tie_word_embeddings": False,
+}
 # Tiny Mixtral, a MoE family no EP layer class wraps: two layers of 4 experts top-2, no shared expert.
 TINY_MIXTRAL_CONFIG = {
     "vocab_size": 1024,
@@ -743,6 +791,15 @@ TINY_QWEN3_VL_VISION_CONFIG = {
     **TINY_QWEN35_VISION_CONFIG,
     "out_hidden_size": TINY_QWEN3_CONFIG["hidden_size"],
     "deepstack_visual_indexes": [],
+}
+# Two vision blocks at the release's patch geometry.
+TINY_QWEN4_EXP_VISION_CONFIG = {
+    "depth": 2,
+    "hidden_size": 32,
+    "intermediate_size": 64,
+    "num_heads": 2,
+    "num_position_embeddings": 64,
+    "out_hidden_size": TINY_QWEN4_EXP_CONFIG["hidden_size"],
 }
 # The upstream scale planner (``plan_out_scales``) rejects most tiny shapes; this one builds a valid
 # 4-layer pixel-shuffle stack.

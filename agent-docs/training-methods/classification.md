@@ -37,7 +37,7 @@ output_dir: checkpoints/clf-qwen3.5-9b-mage
 
 `class_weights` and `derive_class_weights` are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own `ClassificationLoss` (`halo/trainers/reward/classification_loss.py`), evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
 
-Batches are right-padded, so an unpinned `attn_implementation` takes the padded-batch default: the loader's own pick on Blackwell (SDPA for a remote-code or head_dim-256 checkpoint and for a softcapped policy, which the softcap turns into FA2), SDPA elsewhere ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). Under `reset_sinks: false` it requests nothing and lets the resolver auto-select, which there accepts only a sink-carrying backend.
+Batches are right-padded, so an unpinned `attn_implementation` takes the padded-batch default: the loader's own pick on Blackwell (SDPA for a remote-code checkpoint and for a softcapped policy, which the softcap turns into FA2), SDPA elsewhere ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). Under `reset_sinks: false` it requests nothing and lets the resolver auto-select, which there accepts only a sink-carrying backend.
 
 ## Launch
 

@@ -211,7 +211,7 @@ Each row becomes a group of `num_generations` completions. Under TP and ETP ever
 ## vLLM on Blackwell (B200)
 
 - **Server:** `VLLM_ATTENTION_BACKEND=FLASH_ATTN` only where FlashInfer JIT-fails on SM 10.0 ([Rollout Servers](../../infrastructure/rollout-servers.md#throughput)).
-- **Trainer:** all three GRPO scripts give an unset `attn_implementation` the padded-batch default — the loader's own pick on Blackwell (SDPA for a remote-code or head_dim-256 checkpoint and for a softcapped policy, which the softcap turns into FA2), **SDPA** elsewhere — and request nothing under `reset_sinks: false` and offline GRPO under CP ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). A pinned value wins.
+- **Trainer:** all three GRPO scripts give an unset `attn_implementation` the padded-batch default — the loader's own pick on Blackwell (SDPA for a remote-code checkpoint and for a softcapped policy, which the softcap turns into FA2), **SDPA** elsewhere — and request nothing under `reset_sinks: false` and offline GRPO under CP ([padded workloads](../../optimization/flash-attention.md#model-specific-handling)). A pinned value wins.
 
 ## Testing a setup
 

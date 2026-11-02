@@ -15,6 +15,7 @@ Run: torchrun --nproc_per_node=1 tests/gpu/kernels/test_reward_scorer_flex_slidi
 """
 
 import asyncio
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from unittest.mock import patch
@@ -52,8 +53,9 @@ def _conversations() -> list[list[dict]]:
     return conversations
 
 
-def _score(executor, checkpoint: str, device: str, dtype: str, *, flex: bool) -> tuple[np.ndarray, str]:
-    """The scores and the built attention implementation of a ``load_reward_model`` load on the scripts' path."""
+def _score(executor, checkpoint: str, device: str, dtype: str, *, flex: bool) -> tuple[np.ndarray, str, int]:
+    """The scores, the built attention implementation and the number of attention modules FlexAttention serves a
+    call of, of a ``load_reward_model`` load on the scripts' path."""
     env = {} if flex else {"HALO_FLEX_SLIDING": "0"}
     with patch.dict(os.environ, env):
         tokenizer, model, rm_device = load_reward_model(
@@ -62,7 +64,8 @@ def _score(executor, checkpoint: str, device: str, dtype: str, *, flex: bool) ->
     scores = asyncio.run(
         score_conversations_offloaded(executor, tokenizer, model, rm_device, _conversations(), None, BATCH_SIZE)
     )
-    return scores, model.config._attn_implementation
+    flex_modules = sum(sdpa_flex_sliding._flex_call(module) is not None for module in model.modules())
+    return scores, model.config._attn_implementation, flex_modules
 
 
 def _relative_error(scores: np.ndarray, reference: np.ndarray) -> float:
@@ -85,15 +88,18 @@ def test_flex_sliding_scores_match_sdpa(ctx) -> None:
         ThreadPoolExecutor(max_workers=1) as executor,
         patch.object(sdpa_flex_sliding, "_block_sparse_attention", counting),
     ):
-        reference, reference_impl = _score(executor, checkpoint, device, "float32", flex=False)
-        sdpa, sdpa_impl = _score(executor, checkpoint, device, "bfloat16", flex=False)
+        reference, reference_impl, _ = _score(executor, checkpoint, device, "float32", flex=False)
+        sdpa, sdpa_impl, _ = _score(executor, checkpoint, device, "bfloat16", flex=False)
         assert flex_calls == [], f"{len(flex_calls)} FlexAttention calls with HALO_FLEX_SLIDING=0"
-        flex_fp32, flex_fp32_impl = _score(executor, checkpoint, device, "float32", flex=True)
-        flex, flex_impl = _score(executor, checkpoint, device, "bfloat16", flex=True)
+        flex_fp32, flex_fp32_impl, flex_fp32_modules = _score(executor, checkpoint, device, "float32", flex=True)
+        flex, flex_impl, flex_modules = _score(executor, checkpoint, device, "bfloat16", flex=True)
     assert (reference_impl, sdpa_impl) == ("sdpa", "sdpa")
     assert flex_fp32_impl == flex_impl == SDPA_FLEX_SLIDING
-    # One sliding layer per batch, in each of the two flex loads; the 512-wide global layer never runs FlexAttention.
-    assert len(flex_calls) == 2 * len(CONVERSATION_WORDS), "every batch's sliding layer must run FlexAttention"
+    # FlexAttention serves the sliding layer; the 512-wide global layer runs matmul attention.
+    assert (flex_fp32_modules, flex_modules) == (1, 1), "premise: one module FlexAttention serves per load"
+    # Every batch is right-padded past the window and the tile, so each served module runs FlexAttention once.
+    batches = math.ceil(len(_conversations()) / BATCH_SIZE)
+    assert len(flex_calls) == batches * (flex_fp32_modules + flex_modules), "every batch's sliding layer must run it"
     assert all(np.isfinite(scores).all() for scores in (flex_fp32, flex, sdpa))
     fp32_error = _relative_error(flex_fp32, reference)
     flex_error, sdpa_error = _relative_error(flex, reference), _relative_error(sdpa, reference)

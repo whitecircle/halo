@@ -1,0 +1,72 @@
+# Qwen3.8-Flash-Next (qwen4_exp, 180B total, 123B of it routed experts) — EP=8 full fine-tuning SFT on UltraChat
+# 200K, one 8x B300 node: the expert weights, gradients and AdamWBF16 moments alone take ~125 GB per GPU at EP=8.
+# The 95 GiB n-gram table stays in host memory outside the module state and trains frozen: one page-cache copy per
+# node, so keep that much host RAM free beside the ranks' own. See agent-docs/models/qwen4_exp.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: Qwen/Qwen3.8-Flash-Next
+text_only_model: true                 # Qwen4ExpForCausalLM: no vision tower or MTP head, and the fused loss applies
+# The class declares no flash support; the sparse (QSA) layers run the toolkit's tiled kernel on SDPA.
+attn_implementation: sdpa
+# Trainer-side bias balancing: the router has no exportable bias slot, so exported checkpoints serve without the
+# trained bias (near-tie top-k flips vs training). aux_loss, the balancing that exports, needs output_router_logits,
+# which the fused loss below refuses on this head.
+moe_balancing: bias_update_transient
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8               # 512 routed experts -> 64/rank; one dispatch group on 8 GPUs
+fp32_router: true                     # cheap; stabilizes routing
+fp32_grad_reduce: true                # fp32 grad reduction for the replicated non-expert parameters
+# Experts stay bf16 (AdamWBF16, 6 B/param): fp32 masters plus moments would cost 16 B/param.
+
+# --- Attention & sequence ---
+# Packed rows keep their documents apart in every mixer: QSA and the PLE n-gram history and conv read seq_idx, the
+# GatedDeltaNet kernels cu_seq_lens; the packing collator emits both for this family.
+packing: true
+max_length: 8192                      # a starting point; raise after measuring free memory on the node
+liger_kernel_config:
+  fused_linear_cross_entropy: true    # no [tokens x 248k] logits; refuses output_router_logits on this head
+
+# --- Training ---
+per_device_train_batch_size: 1        # batch>1 flattens into one wider row; scale with GA
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8        # 1 x 8 x 8 GPUs = a 64-sequence effective batch
+num_train_epochs: 1.0
+
+# --- Optimizer & LR schedule ---
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+
+# --- Checkpointing & evaluation ---
+save_steps: 1000                      # each save ~360 GB, ~100 GB of it the n-gram table, hard-linked from the last
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/qwen3.8-flash-next-ep8-full
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: wandb
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false
+
+# --- Tokens & chat template ---
+# The tokenizer ships <|im_end|> as eos and <|endoftext|> as pad. eos_token stays unset: the run would record it
+# on the model config, whose eos_token_id (<|endoftext|>) the PLE n-gram history resets at, and every export would
+# carry the change. The hub template injects a reasoning-effort system turn whenever thinking is on.
+assistant_message_template: "<|im_start|>assistant\n"
+chat_template: jinja-templates/qwen3/qwen3-multiturn.jinja  # ultrachat is multi-turn; drops system turns
+force_chat_template: true

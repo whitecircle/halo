@@ -11,13 +11,16 @@ import torch.nn as nn
 from peft import LoraConfig
 from peft.tuners.tuners_utils import BaseTunerLayer
 
-from halo.checkpoint.adapters import missing_resume_adapter_reason, resume_adapter_on_own_weights_reason
+from halo.checkpoint.adapters import (
+    adapter_layout_mismatch,
+    missing_resume_adapter_reason,
+    resume_adapter_on_own_weights_reason,
+)
 from halo.checkpoint.format import RESUME_ADAPTER_DIR
 from halo.checkpoint.parallel.adapters import read_adapter_across_ranks
 from halo.checkpoint.parallel.resume_weights import built_from_checkpoint_across_ranks
 from halo.checkpoint.parallel.writing import chunked_saveable_tensors
 from halo.distributed.fsdp import reshard_fsdp2_modules
-from halo.log import KEY_PREVIEW_COUNT
 from halo.models.param_roles import persistent_buffers
 from halo.models.peft_adapters import lora_fold_targets, lora_folded_data, tuner_adapter_param_ids
 from halo.models.unwrapping import strip_base_layer_segment
@@ -71,24 +74,13 @@ def trainable_tensors(model: nn.Module) -> dict[str, torch.Tensor]:
 
 
 def _resume_adapter_mismatch(saved: dict[str, torch.Tensor], live: dict[str, torch.Tensor], path: str) -> str | None:
-    """Why the resume adapter at ``path`` cannot restore ``live`` exactly, or None.
-
-    Names and full shapes must match one for one: a tensor left out would resume from
-    initialization, and ``copy_`` would broadcast a saved rank-1 adapter into a wider one.
-    """
-    missing = sorted(live.keys() - saved.keys())
-    unexpected = sorted(saved.keys() - live.keys())
-    reshaped = [
-        f"{name}: saved {tuple(saved[name].shape)}, live {tuple(live[name].shape)}"
-        for name in sorted(live.keys() & saved.keys())
-        if saved[name].shape != live[name].shape
-    ]
-    if not (missing or unexpected or reshaped):
-        return None
-    return (
-        f"the resume adapter at {path} does not match this run's trainable tensors (was the run "
-        f"relaunched with other lora_target_modules or lora_r?): missing {missing[:KEY_PREVIEW_COUNT]}, "
-        f"unexpected {unexpected[:KEY_PREVIEW_COUNT]}, reshaped {reshaped[:KEY_PREVIEW_COUNT]}"
+    """Why the resume adapter at ``path`` cannot restore ``live`` exactly, or None: names and full shapes must match
+    one for one (:func:`~halo.checkpoint.adapters.adapter_layout_mismatch`), since a tensor left out would resume from
+    initialization and ``copy_`` would broadcast a saved rank-1 adapter into a wider one."""
+    mismatch = adapter_layout_mismatch(saved, {name: tuple(tensor.shape) for name, tensor in live.items()})
+    return mismatch and (
+        f"the resume adapter at {path} does not match this run's trainable tensors (was the run relaunched with "
+        f"other lora_target_modules or lora_r?): {mismatch}"
     )
 
 

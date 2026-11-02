@@ -9,6 +9,7 @@ clip, and the sharded save with global names. It fails when any of those seams b
   * the signature-column pin (without it HF silently drops input_ids/labels from the dataset)
   * gradient_accumulation_steps -> microbatch conversion (double accumulation shows as a stalled LR)
   * the loss broadcast (ranks would log different losses)
+  * gradient checkpointing, which ``train`` enables on the stage: its layers must checkpoint
   * the per-stage safetensors save + merged index (reload into the unsplit class must round-trip,
     at the artifact contract's save dtype — the writer routes every tensor through save_dtype_caster)
 
@@ -31,7 +32,13 @@ from tests.common.distributed import shared_output_dir
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.pp_equivalence import build_dense_model, full_batch_eval_loss
-from tests.common.pp_trainers import build_pp_args, build_pp_trainer, build_sft_rows, losses_identical_across_ranks
+from tests.common.pp_trainers import (
+    CheckpointCallsInTrain,
+    build_pp_args,
+    build_pp_trainer,
+    build_sft_rows,
+    losses_identical_across_ranks,
+)
 from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 
@@ -79,7 +86,10 @@ def run(ctx):
         args.gradient_accumulation_steps == 1 and trainer._pp_n_microbatches == 2
     )
 
+    checkpointed = CheckpointCallsInTrain(trainer)
     trainer.train()
+    checks["train_checkpointed_the_stage_layers"] = checkpointed.calls > 0
+    metrics["checkpointed_layer_calls"] = checkpointed.calls
 
     # Chain consistency: every rank of a pipeline chain must consume the same batch (stage 0 embeds
     # the rows whose labels the last stage scores). Accelerate's default global-rank sharding breaks

@@ -55,7 +55,7 @@ from tests.common.pp_packed_flash_varlen import (
     seam_findings,
     seam_withheld,
 )
-from tests.common.pp_trainers import build_pp_args, tiny_vocab_tokenizer
+from tests.common.pp_trainers import build_pp_args, enable_gradient_checkpointing_as_train_does, tiny_vocab_tokenizer
 from tests.common.rank_log import log
 from tests.common.tiny_models import tiny_family_model
 
@@ -106,7 +106,8 @@ def _runner_arm(ctx, config, groups, reads, attn_implementation: str) -> tuple[S
 
 
 def _trainer_arm(ctx, config, reads, attn_implementation: str) -> tuple[ScheduleArm, int]:
-    """One step of the real SFT trainer on this replica's packed rows, through the collator the trainer wraps."""
+    """One step of the real SFT trainer on this replica's packed rows, through the collator the trainer wraps, with
+    checkpointing enabled where ``train`` would enable it."""
     torch.manual_seed(SEED)
     family = "gpt_oss" if EP_SIZE > 1 else "dense:qwen3"
     model = ppeq.build_patched_moe_model(config) if EP_SIZE > 1 else tiny_family_model(PACKING_FAMILIES[family])
@@ -135,6 +136,7 @@ def _trainer_arm(ctx, config, reads, attn_implementation: str) -> tuple[Schedule
         parallelism_config=config,
     )
     try:
+        enable_gradient_checkpointing_as_train_does(trainer)
         checkpointed = ppeq.count_checkpoint_calls(trainer.model) if GC else [0]
         batch = trainer.data_collator([dict(row) for row in rows])
         counts = install_loaded_flash(reads, attn_implementation)

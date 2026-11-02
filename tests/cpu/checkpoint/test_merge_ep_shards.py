@@ -872,6 +872,7 @@ def _roundtrip_vs_gathered(layer_cls, model_type, container):
         (EPZayaMoELayer, "zaya", "mlp"),
         # Bare keys: the layer replaces the expert container itself.
         (EPGemma4MoELayer, "gemma4", "mlp.experts"),
+        # No Qwen3.8-Flash-Next row: its sharded save is refused, since the merge has no n-gram table to carry.
     ],
 )
 def test_full_merge_matches_gathered_save(layer_cls, model_type, container):

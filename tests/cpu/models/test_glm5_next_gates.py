@@ -38,8 +38,8 @@ from halo.distributed.tensor_parallel.parallelize_attention import (
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import (
+    declares_flash_attention,
     resolve_attn_implementation,
-    supports_fa4_backward,
     validate_attn_implementation,
 )
 from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
@@ -160,9 +160,10 @@ def test_tp_shards_zero_layers_and_raises():
 def test_attention_resolution_lands_on_sdpa():
     """``Glm5NextForConditionalGeneration._supports_flash_attn = False`` — the resolver must divert
     every flash request to sdpa itself; returning flash defers the failure to transformers' model
-    build, after the whole checkpoint has been fetched. Not the FA4 backward refusal: this one
-    derives from the class flag and covers FA2/FA3 too."""
-    assert supports_fa4_backward(Glm5NextConfig()) is True
+    build, after the whole checkpoint has been fetched. Not FA4's own refusals, though its 256-wide
+    latent attention is one FA4 does not train: they bind only a class that runs a flash label, so an
+    FA4 request reaches the class flag, which covers FA2/FA3 too, with no FA2 build needed."""
+    assert not declares_flash_attention(Glm5NextConfig())  # premise
     expected = {
         None: "sdpa",
         "flash_attention_4": "sdpa",

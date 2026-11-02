@@ -57,6 +57,8 @@ def _sft_config() -> SimpleNamespace:
         padding_free=False,
         dataset_num_proc=None,
         per_device_train_batch_size=1,
+        per_device_eval_batch_size=1,
+        eval_strategy="no",
     )
 
 

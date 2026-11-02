@@ -101,6 +101,7 @@ models/
 !halo/models/
 !agent-docs/models/
 !tests/cpu/models/
+!tests/gpu/models/
 
 # Run output (training scripts and profiling write these at the repo root)
 out/

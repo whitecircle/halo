@@ -415,7 +415,7 @@ def _flex_serves(
     ):
         return False
     call = _flex_call(module)
-    expected = None if call is None else (call.heads, call.kv_heads, call.head_dim, call.head_dim, call.scaling)
+    expected = None if call is None else (call.heads, call.kv_heads, call.head_dim, call.v_head_dim, call.scaling)
     made = (query.shape[1], key.shape[1], query.shape[-1], value.shape[-1], scaling)
     if made == expected:
         return True
@@ -566,11 +566,12 @@ def warm_flex_sliding_kernels(model: torch.nn.Module, *, dtype: torch.dtype) -> 
         if call.window:
             mask &= positions[:, None] - positions[None] < call.window
         block_masks = row_block_masks(mask[None, None])
-        q_shape, kv_shape = (1, call.heads, seq, call.head_dim), (1, call.kv_heads, seq, call.head_dim)
+        q_shape, k_shape = (1, call.heads, seq, call.head_dim), (1, call.kv_heads, seq, call.head_dim)
+        v_shape = (1, call.kv_heads, seq, call.v_head_dim)
         for records_grad in (True, False):
             q = torch.zeros(q_shape, device=device, dtype=dtype, requires_grad=records_grad)
-            k = torch.zeros(kv_shape, device=device, dtype=dtype, requires_grad=records_grad)
-            v = torch.zeros(kv_shape, device=device, dtype=dtype, requires_grad=records_grad)
+            k = torch.zeros(k_shape, device=device, dtype=dtype, requires_grad=records_grad)
+            v = torch.zeros(v_shape, device=device, dtype=dtype, requires_grad=records_grad)
             out = _block_sparse_attention(q, k, v, block_masks, call.scaling)
             if records_grad:
                 out.sum().backward()

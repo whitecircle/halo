@@ -30,24 +30,28 @@ before the model load, against the backend the loader will resolve for the check
 
 That catches every model the loader routes off Flash Attention: DeepSeek-V4 (eager-only), Gemma 4
 (`head_dim=512`), the families whose upstream class declares no flash support (Ling 3.0, GLM-5 Next,
-Step-3.7 Flash, Inkling), and Qwen3.5/3.6 and GLM-4 MoE Lite when FA4 falls them back to SDPA. The full map
+Step-3.7 Flash, Inkling), and a pinned `flash_attention_4` on a head_dim-256 model under `full_determinism`,
+which falls back to SDPA (unpinned, Qwen3-Next's multi-document rows load FA2). The full map
 is in [Flash Attention](flash-attention.md#choosing-a-backend). A softcapped model (Gemma 2) runs both on FA2 on
-Blackwell, since FA4's varlen backward takes no softcap; a pinned `flash_attention_4` the load keeps (Gemma 2 27B)
+Blackwell, since FA4's varlen kernels take no softcap; a pinned `flash_attention_4` the load keeps (Gemma 2 27B)
 is refused there.
-
-`padding_free` is also rejected on an M-RoPE decoder (Qwen3.5/3.6, text towers included, and the Qwen-VL text
-models) on every backend, by the SFT script before the model load, the SFT collator factory, the SFT trainer (for
-a collator handed to it) and the SMPO trainer alike (`reject_mrope_padding_free`): the flattened M-RoPE row faults
-the flash varlen kernels. Turn `padding_free` off there; under SFT, `packing` serves the same rows (SMPO has no
-`packing` field and pads instead).
 
 Use packing or padded batches there: packing raises tokens per row on any kernel, so off a varlen backend it
 only **warns**. gpt-oss, the Bailing family (Ling 2.0, Ring, Ling 3.0) and GLM-5 Next are the exceptions. Their
 forwards never pass the packed `position_ids` into mask construction, so the row would run as one dense causal
 sequence with documents attending across each other, and packing off a varlen backend is **rejected** there.
 DeepSeek-V4 rejects packing too, on every backend: its compressors cut KV windows at row indices, so a later packed
-document reads the row's first windows
+document reads the row's first windows. A model whose linear-attention layers no segment marker reaches (Ring's
+Lightning Attention-2) refuses packing and `padding_free` on every backend, flash included, unless the run sets
+`allow_cross_document_linear_attention: true`; Ling 3.0 (no flash class, and its SDPA mask attends across documents)
+and GLM-5 Next's flat rows stay refused either way
 ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+
+`padding_free` is also rejected on an M-RoPE decoder (Qwen3.5/3.6, text towers included, and the Qwen-VL text
+models) on every backend, by the SFT script before the model load, the SFT collator factory, the SFT trainer (for
+a collator handed to it) and the SMPO trainer alike (`reject_mrope_padding_free`): the flattened M-RoPE row faults
+the flash varlen kernels. Turn `padding_free` off there; under SFT, `packing` serves the same rows (SMPO has no
+`packing` field and pads instead).
 
 Both collators emit `position_ids` that reset per document; whether a family's forward turns those into an
 isolating mask is per-family, and the exceptions are tabulated in

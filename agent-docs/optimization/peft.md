@@ -424,17 +424,24 @@ holding `.experts.<attr>.lora_{A,B}` keys is refused too.
 
 **Resume:** EP/CP rebuild the base with zero-initialized adapters at init, so trained adapters are restored
 from the checkpoint's `adapter_model.safetensors` (a merged checkpoint's `resume_adapter/`; not from the base reload) by
-`restore_adapters` (`halo/checkpoint/parallel/adapters.py`), which `load_resume_weights` calls. Resuming expert adapters into a run that does not build them (EP off,
-`use_grouped_gemm: false`, or the expert projections dropped from `lora_target_modules`) raises rather than
-discarding them. So does a changed LoRA scaling: resume compares the scaling inputs the saved
-`adapter_config.json` records (`lora_alpha`, `use_rslora`, `use_dora`, `alpha_pattern`, and the expert
-half's `lora_alpha` and `use_rslora`) with the live run's, since names and shapes would still match and
-the delta would silently rescale. A missing `adapter_config.json` raises too.
+`restore_adapters` (`halo/checkpoint/parallel/adapters.py`), which `load_resume_weights` calls; a single-process
+or DDP run's adapter-only checkpoint takes it too, keeping the adapters at their live dtype where PEFT's
+`load_adapter` would recast bf16 adapters to fp32. Before any copy, every rank matches the file to the tensors a
+save of the live model writes, key for key at the saved shape (PEFT's own selection for the attention adapters,
+`modules_to_save` and their buffers; the gathered layout for the expert adapters), and the verdict is joined: a
+missing, unexpected or reshaped tensor raises on every rank with nothing written. That covers resuming expert
+adapters into a run that does not build them (EP off, `use_grouped_gemm: false`, or the expert projections
+dropped from `lora_target_modules`), a run that builds them from a file without them, and a changed `lora_r`.
+A changed LoRA scaling raises too: resume compares the scaling inputs the saved `adapter_config.json` records
+(`lora_alpha`, `use_rslora`, `use_dora`, `alpha_pattern`, and the expert half's `lora_alpha` and
+`use_rslora`) with the live run's, since names and shapes would still match and the delta would silently
+rescale. A missing `adapter_config.json` raises too.
 
 Under CP `remap_cp_adapter_keys_to_live` maps the saved, normalized keys back onto the live wrapper
-spelling, matching all three adapter-name spellings PEFT writes (`lora_A.default.weight`,
-`modules_to_save.default.weight`, `lora_embedding_A.default`); a missed spelling would resume that adapter
-at initialization, silently. See [Checkpoints](../reference/checkpoints.md#resume-by-parallelism-mode).
+spelling, read off the same PEFT selection the save made, so every adapter-name spelling PEFT writes
+(`lora_A.default.weight`, `modules_to_save.default.weight`, `lora_embedding_A.default`, a DoRA magnitude) maps
+back; a key it does not produce fails the check above. See
+[Checkpoints](../reference/checkpoints.md#resume-by-parallelism-mode).
 
 ## Merging adapters
 

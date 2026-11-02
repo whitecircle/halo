@@ -37,6 +37,7 @@ HEAD_DIM = 8
 
 class _FakeConfig:
     model_type = "qwen3_moe"
+    hidden_size = HIDDEN
     num_attention_heads = NUM_Q_HEADS
     num_key_value_heads = NUM_KV_HEADS
 

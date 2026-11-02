@@ -361,6 +361,11 @@ def _load_streamed(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_be
     return True
 
 
+def _weight_files_present(checkpoint_dir: str) -> tuple[bool, bool]:
+    """Whether ``checkpoint_dir`` holds whole-model weights, and whether it holds an adapter weight file."""
+    return has_whole_model_weight_file(checkpoint_dir), has_adapter_weight_file(checkpoint_dir)
+
+
 def load_resume_weights(
     ctx: CheckpointLoadContext, checkpoint_dir: str, model=None, *, for_best_model: bool = False
 ) -> bool:
@@ -373,8 +378,11 @@ def load_resume_weights(
     - Mixin-managed FSDP2: ``set_model_state_dict`` distributes rank 0's full tensors.
     - TP, and a single-process or DDP transformers model with whole weights: each rank streams its
       node's copy into its own (possibly TP-sharded) params.
-    - Anything else (accelerate-managed FSDP, a PEFT-wrapped single process, sentence-transformers'
-      own rebuild, a non-transformers model): False.
+    - A single-process or DDP PEFT model with an adapter-only checkpoint: its adapters restore in place
+      (:func:`restore_adapters`), at the live dtype, where the base loader's ``load_adapter`` would recast them
+      to fp32 before the optimizer is built over them.
+    - Anything else (accelerate-managed FSDP, sentence-transformers' own rebuild, a non-transformers model):
+      False.
 
     ``for_best_model`` is ``load_best_model_at_end``: the constructed-from-checkpoint skips never apply,
     since the live weights trained past it.
@@ -389,14 +397,23 @@ def load_resume_weights(
         return True
     if ctx.fsdp_wrapped and not ctx.parallelism_config.is_tp_mode:
         return _load_fsdp2(ctx, checkpoint_dir, model, for_best_model=for_best_model)
-    # The base loader would reload an unsharded transformers model by raw key; a reload it owns
-    # (``base_owns_whole_weight_load``) and a non-transformers model stay with it.
-    if ctx.parallelism_config.is_tp_mode or (
-        not ctx.base_owns_whole_weight_load
-        and isinstance(unwrap_framework_wrappers(model), PreTrainedModel)
-        and rank0_verdict(
-            partial(has_whole_model_weight_file, checkpoint_dir), f"Probing {checkpoint_dir} for whole-model weights"
-        )
-    ):
+    if ctx.parallelism_config.is_tp_mode:
+        return _load_streamed(ctx, checkpoint_dir, model, for_best_model=for_best_model)
+    # The base loader would reload an unsharded transformers model by raw key and an adapter-only checkpoint
+    # through an fp32 recast; a reload it owns (``base_owns_whole_weight_load``) and a non-transformers model
+    # stay with it.
+    unwrapped = unwrap_framework_wrappers(model)
+    trains_peft = find_peft_model(unwrapped) is not None
+    if ctx.base_owns_whole_weight_load or not (trains_peft or isinstance(unwrapped, PreTrainedModel)):
+        return False
+    whole_weights, adapter_weights = rank0_verdict(
+        partial(_weight_files_present, checkpoint_dir), f"Probing {checkpoint_dir} for model weights"
+    )
+    if trains_peft:
+        if whole_weights or not adapter_weights:
+            return False
+        restore_adapters(checkpoint_dir, model, is_cp_mode=False)
+        return True
+    if whole_weights:
         return _load_streamed(ctx, checkpoint_dir, model, for_best_model=for_best_model)
     return False

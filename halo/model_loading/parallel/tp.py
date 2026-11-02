@@ -116,7 +116,7 @@ def load_tp_model(
     precision_guard.reject()
     finish_hf_tp_load(model, device_mesh, tp_size)
     # After finish_hf_tp_load's tie check: the seam re-ties, which would mask a load that left the pair untied.
-    finalize_loaded_model(model)
+    finalize_loaded_model(model, weights_dir=source.local_dir)
 
     if is_global_main_process():
         logger.info(f"Model loaded with TP (tp_size={tp_size})")

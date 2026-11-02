@@ -32,6 +32,8 @@ halo/trainers/**
 # Checkpoint artifact layout the savers and the weight sync share
 halo/checkpoint/hub_layout.py
 halo/checkpoint/writing.py
+halo/checkpoint/external_tables.py
+halo/models/external_tables.py
 halo/checkpoint/adapters.py
 halo/checkpoint/sidecars.py
 halo/checkpoint/weights_source.py

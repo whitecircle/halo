@@ -38,6 +38,7 @@ reason:
 | DeepSeek-V4 | `deepseek_v4` | — no parity test covers the swap; the loaders cast the fp32-pinned weights to the run dtype, where the eager norm matches the kernel's output dtype | — clamped SwiGLU | — interleaved partial | ✅ | ✅ **default** |
 | GLM-4.7-Flash | `glm4_moe_lite` | ✅ torch's fused `F.rms_norm` in the llama casting mode (`rms_norm_kernel="native"`) | ✅ | — dual interleave/plain MLA | ✅ | ✅ **default** |
 | Laguna | `laguna` | ✅ | ✅ | — half-width on full-attention layers, full on sliding | ✅ | ✅ |
+| Qwen3.8-Flash-Next | `qwen4_exp_text` (the `qwen4_exp` wrapper resolves here) | — one class also runs the hyper-connection norms grouped per stream | — the EP layer owns the experts; the shared expert stays eager | — interleaved mrope | ✅ | ✅ text-only; [forced off under the wrapper](#fused-loss-under-a-multimodal-wrapper) |
 | GLM-5.3-Flash | `glm5_next`, `glm5_next_text` | ✅ the two plain norms **+ the GDN gated norm** (fla) | — clamped at `swiglu_limit` | — NoPE text tower | ✅ | — no `*ForCausalLM`; the `*ForConditionalGeneration` head adds the router aux loss after the projection |
 | Inkling | `inkling_text`, `inkling_mm_model` | ✅ | — trained `global_scale` on the MLP output | — no rotary (learned relative bias) | ✅ | — head divides by `logits_mup_width_multiplier` and truncates to `unpadded_vocab_size` |
 | LFM-2 / LFM-2 MoE | `lfm2`, `lfm2_moe` | ✅ | — `w1`/`w3`/`w2`, no `act_fn` | ✅ **the only family whose rotary is Liger's** | ✅ | ✅ text-only; [forced off under `lfm2_vl`](#fused-loss-under-a-multimodal-wrapper) |
@@ -96,16 +97,17 @@ still records `cross_entropy: true`; it is the same fused kernel at the same cal
 declares ([Adding a Model](../models/adding-a-model.md#declare-the-head-transform)): a logit scale (Cohere's
 `logit_scale`) folds onto the hidden states. It refuses the shapes it cannot reproduce: a softcap or a vocabulary
 cut, an `lm_head` bias, and `output_router_logits` on a family whose head adds the router aux loss *after* the
-projection the fused loss replaces (DeepSeek-V4, Laguna — declared `router_aux_loss_in_head`).
+projection the fused loss replaces (DeepSeek-V4, Laguna, Qwen3.8-Flash-Next — declared `router_aux_loss_in_head`).
 
-There the term would silently leave the objective, so use `moe_balancing: bias_update`. A head that only
+There the term would silently leave the objective, so use `moe_balancing: bias_update`, or
+`bias_update_transient` on Qwen3.8-Flash-Next, which has no bias slot. A head that only
 forwards the flag (Zaya, Mistral 4, LFM-2, Cohere 2) passes it through to the backbone, whose router logits
 reach the output as they do unfused.
 
 ### Fused loss under a multimodal wrapper
 
 A checkpoint whose `model_type` is a multimodal wrapper — `gemma4`, `lfm2_vl`, `cohere2_vision`, `mistral3`
-(every Mistral Small 3.x / 4 checkpoint) — loads as its `*ForConditionalGeneration` class, whose own forward
+(every Mistral Small 3.x / 4 checkpoint), `qwen4_exp` — loads as its `*ForConditionalGeneration` class, whose own forward
 runs `lm_head` and the loss. The applier resolved through `text_config.model_type` patches the text tower's
 `*ForCausalLM`, which that model never instantiates.
 
@@ -115,7 +117,9 @@ whenever it resolved through the text config, warning if the config requested it
 on.
 
 RMSNorm, the fused GLU, RoPE and CE all reach the decoder as usual. For the fused head, train a text-only
-checkpoint (`model_type` = the text tower's).
+checkpoint (`model_type` = the text tower's), or load a wrapper checkpoint that admits it text-only
+(`text_only_model: true`, as `qwen4_exp` does): `AutoModelForCausalLM` then builds the text tower's `*ForCausalLM`
+on the text sub-config, which is the config Liger is applied to, so the fused loss engages.
 
 **Not covered:** `glm4_moe` (full GLM-4.5/4.7) has no EP layer, doc page or example in this toolkit, so it
 has no spec either.
@@ -256,21 +260,6 @@ rotates a stale buffer from the second launch of a shape at the latest, backward
 `tests/gpu/kernels/test_liger_rope_repeated_calls.py` checks the bound rotary over repeated calls at Qwen3-8B's
 4096-token shape, against a control that runs the CuTe DSL kernel directly.
 
-Liger 0.8.4 wraps each RMSNorm, SwiGLU, GeGLU and fused CE+TVD launch in `liger_kernel.ops.utils.device_context`,
-which enters `torch.cuda.device` on every call so that a tensor on another GPU launches on its own device. On a tensor
-already on the current device that switch is a no-op that still costs host time: on one B300, `LigerRMSNormFunction`
-forward and backward at X `[1, 2048, 4096]` bf16 takes 337 µs of host time with it and 236 µs without, and a profile
-of dense Qwen3-8B CP2 and TP2 training steps (4,096-token rows) puts it at about 11 µs per RMSNorm forward call.
-`pin_liger_device_context` (`halo/model_loading/liger/launch_context.py`), run at both Liger application
-sites, rebinds the name in every Liger ops module that imported the helper to a fast path: a null context when the
-tensor's device is the current CUDA device, Liger's own context otherwise. Kernels and results are unchanged. The
-fast path applies only on Liger 0.8.4, the locked release. On any other release the dependency range admits, or a
-Liger without distribution metadata, nothing is rebound: Liger's own context stays and rank 0 warns once (results
-unchanged, each launch pays the switch's host time). On 0.8.4, a helper that is not Liger's own, a module binding the
-name to anything else, or no module importing it raises. `tests/gpu/kernels/test_liger_launch_context.py` checks that
-the switch is skipped, that results match Liger's context bit for bit, and that inputs on another GPU still launch
-there.
-
 ## CrossEntropy vs FusedLinearCrossEntropy
 
 **CrossEntropy** (default) replaces only the loss function; the model still materializes the
@@ -404,10 +393,9 @@ toolkit spec's torch fused norm on `qwen3_moe`'s norms ([above](#upstream-covere
 At this shape FLCE saves only 1.5 GiB more than CE and costs 5% throughput. FLCE's saving is the logits
 plane: on Qwen3-8B activations at 32k it is 24.3 GB forward (32.2 vs 56.5 GB), ~2.5 GB at 8k. Reach for plain CE when a model's FLCE patch is unavailable.
 
-**Host time per launch.** Liger 0.8.4's per-launch device context is host time only (GPU kernel time is
-unchanged), and the toolkit skips it on the current device ([Kernel implementation](#kernel-implementation)). On
-dense Qwen3-8B at 4,096-token rows on 8× B300, the skip measured +2.1% tokens/s at TP2; CP2's +1.2% is inside
-run-to-run spread.
+**Host time per launch.** Liger 0.8.4 adds host time around each RMSNorm and SwiGLU launch: at most ~1.5%
+per step on the most host-bound row measured (dense Qwen3-8B at CP2 on 8× B300, 4,096-token rows), and GPU
+kernel time is unchanged.
 
 **Measure MoE throughput at batch ≥ 4.** At batch 1 EP MoE is communication-bound and its DeepEP time varies run
 to run, so a batch-1 delta is directional (Liger measures +27% there at seq 16384, [torch.compile](torch-compile.md#benchmark-results)).

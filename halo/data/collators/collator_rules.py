@@ -8,7 +8,7 @@ from halo.models.attention.layout import has_mrope_rotary
 from halo.models.attention.selection import (
     VARLEN_ATTN_IMPLEMENTATIONS,
     effective_attn_implementation,
-    fa4_varlen_backward_refusal,
+    fa4_varlen_refusal,
     is_flash_attn_implementation,
 )
 from halo.models.segment_markers import (
@@ -23,28 +23,39 @@ from halo.runtime.ranks import is_global_main_process
 logger = logging.getLogger(__name__)
 
 
-def rows_reach_varlen_kernel(*, packing: bool, padding_free: bool, per_device_train_batch_size: int) -> bool:
-    """Whether a training batch reaches FlashAttention's varlen call: packed and padding-free rows hold several
-    documents, and transformers unpads any batch holding a padding token, which more than one row per batch does."""
-    return packing or padding_free or per_device_train_batch_size > 1
+def rows_reach_varlen_kernel(
+    *, packing: bool, padding_free: bool, per_device_train_batch_size: int, per_device_eval_batch_size: int = 0
+) -> bool:
+    """Whether the run's batches reach FlashAttention's varlen call: packed and padding-free rows hold several
+    documents, and transformers unpads any batch holding a padding token, which more than one row per batch does,
+    a training batch or an evaluation one (``per_device_eval_batch_size``, :func:`evaluation_batch_size`)."""
+    return packing or padding_free or max(per_device_train_batch_size, per_device_eval_batch_size) > 1
+
+
+def evaluation_batch_size(training_args) -> int:
+    """The rows per device of the run's evaluation batches, 0 for a run that never evaluates."""
+    return training_args.per_device_eval_batch_size if training_args.eval_strategy != "no" else 0
 
 
 def reject_fa4_varlen_training(model_config, *, varlen_rows: bool, attn_impl: str | None = None) -> None:
-    """Refuse FA4 on training rows that reach its varlen call (``varlen_rows``) when its varlen backward refuses the
-    model's attention (:func:`fa4_varlen_backward_refusal`): the first backward would raise. ``attn_impl`` is the
-    backend the load resolves, read off ``model_config`` when omitted."""
+    """Refuse FA4 on batches that reach its varlen call (``varlen_rows``, training or evaluation) when its varlen
+    kernels refuse the model's attention (:func:`fa4_varlen_refusal`): on B300 the first such forward would not
+    finish, elsewhere the first backward would raise. ``attn_impl`` is the backend the load resolves, read off
+    ``model_config`` when omitted."""
     if attn_impl is None:
         attn_impl = effective_attn_implementation(model_config)
     if attn_impl != "flash_attention_4" or not varlen_rows:
         return
-    refused = fa4_varlen_backward_refusal(model_config)
+    refused = fa4_varlen_refusal(model_config)
     if refused is None:
         return
     raise ValueError(
         f"attn_implementation='flash_attention_4' cannot train this model on packed, padding-free or padded rows: "
-        f"they reach FA4's varlen kernel, whose backward takes no {refused}, so the first backward would raise. "
+        f"they reach FA4's varlen kernels, which take no {refused} (the backward asserts, and on B300 the forward "
+        f"does not finish). "
         f"Leave attn_implementation unset (these rows then take flash_attention_2) or set flash_attention_2, or "
-        f"train unpacked at per_device_train_batch_size: 1, whose rows run FA4's dense kernel."
+        f"train unpacked at per_device_train_batch_size: 1 (and per_device_eval_batch_size: 1 where the run "
+        f"evaluates), whose rows run FA4's dense kernel."
     )
 
 
@@ -141,6 +152,7 @@ def reject_unsupported_collator_options(
     per_device_train_batch_size: int,
     keeps_packed_rows: bool,
     allow_cross_document_linear_attention: bool = False,
+    per_device_eval_batch_size: int = 0,
 ) -> None:
     """Refuse (or warn about) the option combinations no collator can serve, reading only the caller's
     arguments, the model's attention backend and its segment markers."""
@@ -164,7 +176,10 @@ def reject_unsupported_collator_options(
     reject_fa4_varlen_training(
         model_config,
         varlen_rows=rows_reach_varlen_kernel(
-            packing=packing, padding_free=padding_free, per_device_train_batch_size=per_device_train_batch_size
+            packing=packing,
+            padding_free=padding_free,
+            per_device_train_batch_size=per_device_train_batch_size,
+            per_device_eval_batch_size=per_device_eval_batch_size,
         ),
     )
     reject_unusable_response_marker(

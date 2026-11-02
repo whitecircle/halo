@@ -21,6 +21,7 @@ from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.lazy_safetensors.materialization import materialize_weight_plan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
+from halo.model_loading.model_preparation import apply_family_patches
 from halo.model_loading.parallel.expert_fuser import ExpertFuser
 from halo.model_loading.parallel.lazy_plan import ExpertKeyLayout, WeightPlanner
 from halo.models.moe.config_fields import require_expert_count
@@ -118,6 +119,8 @@ def engines(case: str) -> Engines:
     with tempfile.TemporaryDirectory() as directory:
         _save_checkpoint(case, directory)
         config = AutoConfig.from_pretrained(directory, trust_remote_code=family.trust_remote_code)
+        # As the loaders do before the shell: a family patch may move a tensor out of the module state.
+        apply_family_patches(config, "sdpa")
         shell = instantiate_on_meta(
             directory,
             shell_class or family.load_class,

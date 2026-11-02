@@ -65,6 +65,12 @@ _BOUNDED_KINDS = frozenset({_AttentionKind.WINDOW, _AttentionKind.CHUNKED, _Atte
 
 # The layer types that select their keys through a QK-only indexer bounded by ``index_topk``.
 _INDEXED_LAYER_TYPES = frozenset({"indexed_attention", "compressed_sparse_attention"})
+# An indexer's (query heads, head width, keys pooled per scored key) in each config spelling: the ``index_*``
+# token indexers and the ``indexer_*`` block indexer, which scores pooled blocks of ``indexer_compress_ratio``.
+_INDEXER_FIELDS = (
+    ("index_n_heads", "index_head_dim", "index_kpool"),
+    ("indexer_n_heads", "indexer_head_dim", "indexer_compress_ratio"),
+)
 
 # A decoder layer's own declaration of its type, read before ``config.layer_types`` because a sliced
 # pipeline stage re-bases list positions.
@@ -222,12 +228,23 @@ def _score_width(decoder, index: int) -> float:
 
 
 def _indexer(decoder, index: int) -> tuple[float, int]:
-    """Width and key pooling of a sparse / compressed layer's QK-only indexer (0, 1 without one)."""
-    heads = _layer_field(decoder, index, "index_n_heads")
-    dim = _layer_field(decoder, index, "index_head_dim")
-    if not heads or not dim:
-        return 0.0, 1
-    return float(heads) * float(dim), int(_layer_field(decoder, index, "index_kpool") or 1)
+    """Width and key pooling of a sparse / compressed layer's QK-only indexer (0, 1 without one), in the first
+    spelling of :data:`_INDEXER_FIELDS` the config declares."""
+    for heads_field, dim_field, pool_field in _INDEXER_FIELDS:
+        heads = _layer_field(decoder, index, heads_field)
+        dim = _layer_field(decoder, index, dim_field)
+        if heads and dim:
+            return float(heads) * float(dim), int(_layer_field(decoder, index, pool_field) or 1)
+    return 0.0, 1
+
+
+def _sparse_keys(decoder, index: int, layer_type: str) -> int:
+    """Keys a sparse layer attends: ``index_topk``, or a block indexer's ``indexer_budget`` plus the incomplete
+    tail block (up to ``indexer_compress_ratio - 1`` tokens) it always keeps."""
+    if _layer_field(decoder, index, "index_topk") is None and _layer_field(decoder, index, "indexer_budget"):
+        budget = _positive(decoder, index, "indexer_budget", layer_type)
+        return budget + _positive(decoder, index, "indexer_compress_ratio", layer_type) - 1
+    return _positive(decoder, index, "index_topk", layer_type)
 
 
 def _layer_attention(decoder, layer_type: str, index: int) -> LayerAttention:
@@ -252,7 +269,7 @@ def _layer_attention(decoder, layer_type: str, index: int) -> LayerAttention:
         return LayerAttention(
             kind,
             width,
-            keys=_positive(decoder, index, "index_topk", layer_type),
+            keys=_sparse_keys(decoder, index, layer_type),
             index_width=index_width,
             index_pool=index_pool,
         )
@@ -335,6 +352,12 @@ def resolve_qk_v_head_dims(cfg) -> tuple[int, int]:
     return int(qk_dim), int(v_dim)
 
 
+def has_latent_attention(cfg) -> bool:
+    """Whether the decoder runs multi-head latent attention: keys and values expanded from a ``kv_lora_rank`` latent
+    (DeepSeek-V3, GLM-4.7-Flash, Mistral4, MiniCPM3)."""
+    return bool(get_config_field(cfg, "kv_lora_rank"))
+
+
 def has_sliding_window_layers(cfg) -> bool:
     """Whether some decoder layer attends a sliding window, by ``layer_types`` or, where a family declares
     none, :func:`_uniform_layer_type`. Unlike the cost layout it does not raise on an entry outside
@@ -365,12 +388,14 @@ def has_mrope_rotary(cfg) -> bool:
 
 class AttentionCall(NamedTuple):
     """The geometry one causal attention module hands its kernel, which a compiled kernel keys on. ``head_dim`` is
-    the query/key width (MLA's ``qk_head_dim``), ``window`` ``None`` on a full-attention layer, ``softcap`` the
-    logit cap it passes (Gemma 2), whose value FA4 hashes into its kernel key."""
+    the query/key width (MLA's ``qk_head_dim``) and ``v_head_dim`` the value width, which transformers' flash path
+    pads up to ``head_dim`` and SDPA takes as it is; ``window`` is ``None`` on a full-attention layer, ``softcap``
+    the logit cap it passes (Gemma 2), whose value FA4 hashes into its kernel key."""
 
     heads: int
     kv_heads: int
     head_dim: int
+    v_head_dim: int
     window: int | None
     scaling: float | None
     softcap: float | None
@@ -398,10 +423,12 @@ def attention_call(module: torch.nn.Module) -> AttentionCall | None:
     if not getattr(module, "is_causal", False) or not hasattr(module, "num_key_value_groups"):
         return None
     heads = _module_heads(module)
+    head_dim = getattr(module, "qk_head_dim", None) or module.head_dim
     return AttentionCall(
         heads=heads,
         kv_heads=heads // module.num_key_value_groups,
-        head_dim=getattr(module, "qk_head_dim", None) or module.head_dim,
+        head_dim=head_dim,
+        v_head_dim=getattr(module, "v_head_dim", None) or head_dim,
         window=_module_window(module),
         scaling=getattr(module, "scaling", None),
         softcap=getattr(module, "attn_logit_softcapping", None) or None,

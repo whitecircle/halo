@@ -95,7 +95,7 @@ def test_dtensor_adapter_tensors_are_distributed_in_sorted_key_order(single_rank
         )[1],
     )
 
-    assert _load_peft_adapter_state(model, state) == []
+    _load_peft_adapter_state(dict(model.named_parameters()), state)
     assert issued == sorted(issued), (
         f"distribute_tensor ran in adapter-file order {issued}, not sorted key order: two ranks "
         f"reading differently-ordered adapter files would deadlock in the mesh collective."

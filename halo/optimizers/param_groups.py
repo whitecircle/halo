@@ -55,10 +55,12 @@ def build_tensor_type_grouped_optimizer(
     decay_parameters: Sequence[str],
     get_optimizer_cls_and_kwargs: Callable[[Any, torch.nn.Module], tuple[type, dict]],
 ):
-    """The args' optimizer over groups split by (weight decay, dtype, tensor type), single-tensor mode.
+    """The args' optimizer over groups split by (weight decay, dtype, tensor type): each group fused when the
+    args ask for a fused optimizer, single-tensor otherwise.
 
-    FSDP2 params are DTensors and FSDP-ignored EP params plain tensors, which a foreach/fused update
-    cannot mix; the dtype axis covers ``fp32_non_ep_params``.
+    FSDP2 params are DTensors and FSDP-ignored EP params plain tensors, which one foreach/fused update
+    cannot mix, while a group of one dtype and one tensor type is one a fused update takes whole. foreach
+    stays off, since torch refuses it beside fused. The dtype axis covers ``fp32_non_ep_params``.
     """
     decay_names = set(decay_parameters)
     groups: dict[tuple, list] = {}
@@ -68,14 +70,13 @@ def build_tensor_type_grouped_optimizer(
         wd = args.weight_decay if n in decay_names else 0.0
         groups.setdefault((wd, p.dtype, isinstance(p, DTensor)), []).append(p)
 
-    grouped = [
-        {"params": params, "weight_decay": wd, "foreach": False, "fused": False}
-        for (wd, _dtype, _is_dt), params in groups.items()
-    ]
-
     optimizer_cls, optimizer_kwargs = get_optimizer_cls_and_kwargs(args, model)
     optimizer_kwargs.pop("foreach", None)
-    optimizer_kwargs.pop("fused", None)
+    fused = bool(optimizer_kwargs.pop("fused", False))
+    grouped = [
+        {"params": params, "weight_decay": wd, "foreach": False, "fused": fused}
+        for (wd, _dtype, _is_dt), params in groups.items()
+    ]
     # Factory-style optimizers (GaLore/LOMO/layerwise) couple kwargs to the model or a fixed param
     # list; forwarding those alongside the grouped params here would bind the params twice.
     coupled = {"params", "model", "optimizer_dict"} & set(optimizer_kwargs)
@@ -91,6 +92,7 @@ def build_tensor_type_grouped_optimizer(
         for (wd, dtype, is_dt), params in groups.items():
             count = sum(p.numel() for p in params)
             logger.info(
-                f"  Optimizer group: {dtype} {'DTensor' if is_dt else 'Tensor'}, wd={wd}, {count / 1e6:.1f}M params"
+                f"  Optimizer group: {dtype} {'DTensor' if is_dt else 'Tensor'}, wd={wd}, {count / 1e6:.1f}M params, "
+                f"{'fused' if fused else 'single-tensor'}"
             )
     return optimizer

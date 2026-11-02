@@ -34,7 +34,9 @@ Each runs phases 1-3.
 ``--fp32-masters`` enables router, expert and non-expert masters together. The ``ep1`` row needs
 ``--unsharded-ep1-experts``: managed EP1 experts cannot combine with ``fp32_non_ep_params``.
 ``--eager-loading`` selects the non-lazy EP loader. Each master row checks live dtypes and that
-trained values outside BF16's representable set survive resume bit for bit.
+trained values outside BF16's representable set survive resume bit for bit. ``--fused-adamw`` (with
+``--fp32-masters``) turns AdamWBF16 off, so the trainer builds its tensor-type-grouped optimizer under the default
+``optim: adamw_torch_fused``: every group must step fused, and the same phases hold for it.
 
 Usage:
     torchrun --nproc_per_node=2 \
@@ -105,6 +107,9 @@ def optimizer_resume_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--unsharded-ep1-experts", action="store_true", help="keep EP1 experts outside FSDP2's shard groups"
     )
+    parser.add_argument(
+        "--fused-adamw", action="store_true", help="AdamWBF16 off: the grouped fused torch AdamW (with --fp32-masters)"
+    )
     return parser
 
 
@@ -115,9 +120,12 @@ def _parallelism_config(
     fp32_masters: bool = False,
     eager_loading: bool = False,
     unsharded_ep1_experts: bool = False,
+    fused_adamw: bool = False,
 ) -> ParallelismConfig:
     if unsharded_ep1_experts and mode != "ep1":
         raise ValueError("--unsharded-ep1-experts applies only to --mode ep1")
+    if fused_adamw and not fp32_masters:
+        raise ValueError("--fused-adamw needs --fp32-masters, the shape that builds the tensor-type-grouped optimizer")
     return ParallelismConfig(
         ep_size=world_size if mode in ("ep", "ep_cp") else 1,
         cp_size=world_size if mode in ("cp", "ep_cp") else 1,
@@ -127,6 +135,7 @@ def _parallelism_config(
         fp32_non_ep_params=fp32_masters,
         ep_lazy_loading=not eager_loading,
         fsdp_shard_ep1_experts=not unsharded_ep1_experts,
+        bf16_optimizer=False if fused_adamw else None,
     )
 
 
@@ -343,6 +352,7 @@ def run(ctx):
         fp32_masters=args.fp32_masters,
         eager_loading=args.eager_loading,
         unsharded_ep1_experts=args.unsharded_ep1_experts,
+        fused_adamw=args.fused_adamw,
     )
     if pc.ep_size > 1:
         pin_deterministic_ep_dispatch()
@@ -377,6 +387,11 @@ def run(ctx):
             f"saved_{name}": world_all(ok, device)
             for name, ok in _configured_master_checks(trainer.model, mode).items()
         }
+    if args.fused_adamw:
+        groups = trainer.optimizer.param_groups
+        checks["every_optimizer_group_fused"] = bool(groups) and all(
+            group["fused"] and not group["foreach"] for group in groups
+        )
     checks["saved_state_nonempty"] = any(
         torch.is_tensor(v) and v.dtype.is_floating_point and (v != 0).any() for _, v in _snapshot_values(snapshot_ref)
     )

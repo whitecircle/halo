@@ -5,7 +5,7 @@ Blackwell.
 On sm_10x under Triton 3.6 the state kernel ``chunk_gated_delta_rule_fwd_kernel_h_blockdim64`` gives run-to-run
 different, at some positions wrong, outputs on ``cu_seqlens`` rows with its ``num_warps=4`` configs, and the stock
 autotuner picks them at Qwen3.5/3.6 shapes; ``finalize_loaded_model`` keeps it on ``num_warps=2``
-(``halo.kernels.fla_autotune``). This runs the restriction through that seam with an empty autotune cache, then one
+(``halo.kernels.fla_launch``). This runs the restriction through that seam with an empty autotune cache, then one
 packed row at Qwen3.5/3.6-35B-A3B's linear-attention width repeatedly, forward and backward, and checks every repeat
 bitwise against the first and against FLA's fp32 naive recurrence per document.
 
@@ -25,7 +25,7 @@ from fla.ops.common import chunk_delta_h
 from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 
-from halo.kernels import fla_autotune
+from halo.kernels.fla_launch import triton_autotuner
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import cos_sim, max_abs_rel_err
@@ -113,7 +113,7 @@ def _repeat_and_score(leaves, reference, repeats: int) -> tuple[bool, float, flo
 
 
 def _fwd_h_autotuner():
-    return fla_autotune.triton_autotuner(chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64)
+    return triton_autotuner(chunk_delta_h.chunk_gated_delta_rule_fwd_kernel_h_blockdim64)
 
 
 def _check_restricted(leaves, reference) -> None:
@@ -141,7 +141,7 @@ def _check_control(leaves, reference) -> None:
     log(f"  control {CONTROL_CONFIG}: stable={stable} o max-rel={worst_rel:.2e} worst grad cos={worst_cos:.6f}")
     assert not (stable and worst_rel < TOL_O_MAXREL), (
         f"the num_warps=4 control was repeatable and within {TOL_O_MAXREL:.0e} over {CONTROL_REPEATS} calls: the "
-        f"race no longer reproduces here, so halo/kernels/fla_autotune.py may be obsolete"
+        f"race no longer reproduces here, so the Blackwell restriction in halo/kernels/fla_launch.py may be obsolete"
     )
 
 

@@ -81,12 +81,17 @@ from transformers import (
     Qwen3NextForCausalLM,
     Qwen3VLConfig,
     Qwen3VLForConditionalGeneration,
+    Qwen4ExpConfig,
+    Qwen4ExpForCausalLM,
+    Qwen4ExpForConditionalGeneration,
+    Qwen4ExpTextConfig,
     Step3p7Config,
     Step3p7ForConditionalGeneration,
     ZayaConfig,
     ZayaForCausalLM,
 )
 from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
+from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextPLELayer
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
@@ -124,6 +129,8 @@ from tests.common.models import (
     TINY_QWEN3_NEXT_CONFIG,
     TINY_QWEN3_VL_TEXT_CONFIG,
     TINY_QWEN3_VL_VISION_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
+    TINY_QWEN4_EXP_VISION_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_QWEN35_VISION_CONFIG,
@@ -332,6 +339,15 @@ def _tiny_zaya(overrides: dict) -> PreTrainedModel:
     return model
 
 
+def _with_live_ple_convs(model: PreTrainedModel) -> PreTrainedModel:
+    """Random init zeroes every PLE layer's depthwise conv, which a released checkpoint carries learned; without
+    it the conv's output, and every gradient into it, is zero."""
+    for module in model.modules():
+        if isinstance(module, Qwen4ExpTextPLELayer):
+            torch.nn.init.normal_(module.conv1d.weight, std=model.config.get_text_config().initializer_range)
+    return model
+
+
 def _tiny_bailing(repo: str, tiny: dict) -> Callable[[dict], PreTrainedModel]:
     """Bailing is remote code: its config and model classes come from the module the release ``repo``
     ships, which imports names transformers 5 dropped until the toolkit's shims restore them."""
@@ -388,6 +404,13 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "qwen3_moe": TinyFamily(_causal(Qwen3MoeConfig, Qwen3MoeForCausalLM, TINY_QWEN3_MOE_CONFIG)),
     # Gated DeltaNet layers, as Qwen3.5-MoE's.
     "qwen3_next": TinyFamily(_causal(Qwen3NextConfig, Qwen3NextForCausalLM, TINY_QWEN3_NEXT_CONFIG), ulysses_cp=False),
+    # Gated DeltaNet layers and the PLE conv along the sequence.
+    "qwen4_exp_text": TinyFamily(
+        lambda overrides: _with_live_ple_convs(
+            _causal(Qwen4ExpTextConfig, Qwen4ExpForCausalLM, TINY_QWEN4_EXP_CONFIG)(overrides)
+        ),
+        ulysses_cp=False,
+    ),
     # Its attention is not one the Ulysses wrapper implements.
     "step3p7": TinyFamily(
         _composite(Step3p7Config, Step3p7ForConditionalGeneration, TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG),
@@ -461,6 +484,15 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
     "qwen3_5_moe": TinyFamily(
         _composite(
             Qwen3_5MoeConfig, Qwen3_5MoeForConditionalGeneration, TINY_QWEN35_MOE_CONFIG, TINY_QWEN35_VISION_CONFIG
+        ),
+        load_class=AutoModelForImageTextToText,
+        ulysses_cp=False,
+    ),
+    "qwen4_exp": TinyFamily(
+        lambda overrides: _with_live_ple_convs(
+            _composite(
+                Qwen4ExpConfig, Qwen4ExpForConditionalGeneration, TINY_QWEN4_EXP_CONFIG, TINY_QWEN4_EXP_VISION_CONFIG
+            )(overrides)
         ),
         load_class=AutoModelForImageTextToText,
         ulysses_cp=False,

@@ -208,6 +208,16 @@ QWEN3_NEXT = MoEFamilySpec(
         "but no online update into either has been validated end to end"
     ),
 )
+# Qwen3.8-Flash-Next: Qwen3-Next's router over Qwen3.5-MoE's block, its experts fused on the hub too.
+QWEN4_EXP = MoEFamilySpec(
+    model_types=("qwen4_exp", "qwen4_exp_text"),
+    expert_layout=ExpertLayout(per_expert_keys=SEPARATE_GLU_PROJECTIONS),
+    shared_expert_attrs=("shared_expert",),
+    weight_sync_refusal=(
+        "no online update into either pinned rollout engine has been validated, and the n-gram table, which the "
+        "toolkit holds in host memory outside the module state, is not part of the model the sync streams"
+    ),
+)
 STEP3P7 = MoEFamilySpec(
     model_types=("step3p7", "step3p5"),
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
@@ -238,6 +248,7 @@ MOE_FAMILY_SPECS: tuple[MoEFamilySpec, ...] = (
     QWEN3,
     QWEN3_5,
     QWEN3_NEXT,
+    QWEN4_EXP,
     STEP3P7,
     ZAYA,
 )

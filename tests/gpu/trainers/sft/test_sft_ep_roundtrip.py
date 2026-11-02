@@ -23,6 +23,11 @@ checkpoint as a PLAIN HF model, whose loss must match the EP model's post-traini
     per expert; the lazy loader fuses them, and the gathered save writes them back per expert: its key set
     equals step 0's plain ``save_pretrained`` key set and every expert tensor on disk is bit-exact against
     the live gathered one.
+  * ``qwen4_exp_text``: Qwen3.8-Flash-Next's text tower, whose n-gram table the load holds in host memory
+    outside the module state (no parameter, attached from the base checkpoint) while the experts train
+    under EP; the gathered save writes the table back as the base's ``ngram_embedding.shard_*`` keys,
+    bit-exact against the base (it trains frozen), beside the fused hub expert banks, and the plain reload
+    concatenates it into the stock embedding.
   * ``step3p7``: the tiny ``Step3p7ForConditionalGeneration``, saved in transformers' hub layout (no
     ``language_model`` prefix, per-layer fused-but-split ``moe.{gate,up,down}_proj``, ``moe.gate.weight`` +
     ``moe.router_bias``, ``share_expert.*``, the vendor-namespace vision tower) on a heterogeneous config
@@ -39,6 +44,7 @@ Run with 2 GPUs:
 """
 
 import argparse
+import os
 
 import torch
 
@@ -46,8 +52,10 @@ from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELa
 from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
 from halo.distributed.expert_parallel.families.glm5_next import EPGlm5NextMoELayer
 from halo.distributed.expert_parallel.families.qwen3_next import EPQwen3NextMoELayer
+from halo.distributed.expert_parallel.families.qwen4_exp import EPQwen4ExpMoELayer
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
 from halo.model_loading.parallel.lazy_plan import is_lazy_loadable
+from halo.models.external_tables import EXTERNAL_TABLES_STAMP, named_external_tables
 from halo.models.moe.balancing import NATIVE_BALANCING_BIAS_ADOPTED_ATTR
 from tests.common.checkpoint_io import safetensors_state_dict
 from tests.common.ep_sft_roundtrip import EPSftRoundTrip
@@ -57,6 +65,7 @@ from tests.common.models import (
     TINY_DSV4_CONFIG,
     TINY_GLM5_CONFIG,
     TINY_QWEN3_NEXT_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
     TINY_STEP3P7_CONFIG,
 )
 from tests.common.rank_log import log
@@ -153,6 +162,36 @@ class Qwen3NextRoundTrip(EPSftRoundTrip):
                 f"model.layers.{i}.mlp.experts.0.gate_proj.weight" in written for i in range(self.num_ep_layers)
             ),
             "experts_bit_exact": experts_exact,
+        }
+
+
+class Qwen4ExpRoundTrip(EPSftRoundTrip):
+    family = "qwen4_exp_text"
+    ep_layer_cls = EPQwen4ExpMoELayer
+    num_ep_layers = TINY_QWEN4_EXP_CONFIG["num_hidden_layers"]
+
+    def after_load(self, model, ep_layers):
+        tables = [table for _, table in named_external_tables(model)]
+        return {
+            "ngram_table_attached": len(tables) == 1 and tables[0].is_attached,
+            "ngram_table_outside_parameters": not any(
+                "ngram_embedding" in name for name, _ in model.named_parameters()
+            ),
+        }
+
+    def after_save(self, ep_layers, base_dir, save_dir):
+        written, base = safetensors_state_dict(save_dir), safetensors_state_dict(base_dir)
+        table_keys = {key for key in base if ".ngram_embedding.shard_" in key}
+        with open(os.path.join(save_dir, "config.json")) as handle:
+            config = handle.read()
+        return {
+            "ngram_table_keys_written": bool(table_keys)
+            and {key for key in written if ".ngram_embedding." in key} == table_keys,
+            "ngram_table_bit_exact": all(torch.equal(written[key], base[key]) for key in table_keys),
+            "fused_hub_expert_banks": all(
+                f"model.layers.{i}.mlp.experts.gate_up_proj" in written for i in range(self.num_ep_layers)
+            ),
+            "no_run_stamp_in_config": EXTERNAL_TABLES_STAMP not in config,
         }
 
 

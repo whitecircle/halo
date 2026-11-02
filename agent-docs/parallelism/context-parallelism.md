@@ -107,10 +107,11 @@ auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrappe
 [bailing.md](../models/bailing.md#cp-wrapper)).
 
 That check reads the *declared* implementation. The kernel CP calls is arch-matched, with FA4 refused where
-the run cannot train the model on it (`supports_fa4_backward`: a deterministic run at head_dim 256,
+the run cannot train the model on it (`supports_fa4_backward`: GLM-4 MoE Lite's latent attention in every run,
+head_dim-256 attention in a deterministic one,
 [Flash Attention → Supported backends](../optimization/flash-attention.md#supported-backends)), and
-under CP the loader labels such a model with that kernel (FA2 on Blackwell, for GLM-4 MoE Lite) where
-it would otherwise fall back to SDPA, so the auto-detected default passes the check. Leave
+under CP the loader labels such a model with that kernel (FA2 on Blackwell) where a deterministic run
+would otherwise fall back to SDPA, so the auto-detected default passes the check. Leave
 `attn_implementation` at it.
 
 The Ulysses call hands that kernel the `deterministic` flag transformers passes its own flash calls

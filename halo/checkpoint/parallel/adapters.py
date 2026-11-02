@@ -10,14 +10,16 @@ import copy
 import itertools
 import logging
 import os
+from collections.abc import Iterable
 from dataclasses import replace
 
 import torch
 from peft import PeftModel
-from peft.utils import get_peft_model_state_dict, set_peft_model_state_dict
+from peft.utils import get_peft_model_state_dict
 from torch.distributed.tensor import DTensor
 
 from halo.checkpoint.adapters import (
+    adapter_layout_mismatch,
     adapter_weight_paths,
     expert_lora_adapter_config,
     expert_lora_config_fields,
@@ -49,7 +51,6 @@ from halo.models.unwrapping import (
     base_transformers_model,
     find_peft_model,
     plain_adapter_key,
-    strip_peft_adapter_segment,
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
 )
@@ -251,70 +252,86 @@ def read_adapter_across_ranks(
     return state, path
 
 
-def _load_peft_adapter_state(peft_model, attn_state: dict) -> list[str]:
-    """Load PEFT attention-adapter tensors into the live model; returns unmatched saved keys.
+def saved_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
+    """The live tensor behind every key a PEFT save of ``peft_model`` writes: PEFT's own selection over the model's
+    parameters (a tie under each of its names) and persistent buffers, as its ``state_dict()`` holds them. An FSDP2
+    DTensor stays as it is, so its ``shape`` is the saved full one."""
+    live = dict(itertools.chain(peft_model.named_parameters(remove_duplicate=False), persistent_buffers(peft_model)))
+    return get_peft_model_state_dict(peft_model, state_dict=live)
 
-    Under FSDP2 the adapter params are DTensors, and PEFT's ``set_peft_model_state_dict`` (plain
-    ``copy_``) raises "mixed torch.Tensor and DTensor" — distribute each full tensor to the
-    param's placements instead. Plain params keep the PEFT loader (which handles modules_to_save).
-    Persistent buffers join the live map because the adapter save carries them (a
-    ``modules_to_save`` router's balancing buffer) — parameters-only here would drop the saved
-    buffer as "unexpected" and resume it at init.
+
+def _with_tied_aliases(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> dict:
+    """``attn_state`` with each live key it lacks taken from a key it holds for the same live tensor: a gathered save
+    writes one name per tied tensor (a resized tied embedding's ``lm_head``), where PEFT's selection names each."""
+    held: dict[int, str] = {}
+    for key in sorted(attn_state):
+        if key in saved_tensors:
+            held.setdefault(id(saved_tensors[key]), key)
+    aliases = {
+        key: attn_state[held[id(tensor)]]
+        for key, tensor in saved_tensors.items()
+        if key not in attn_state and id(tensor) in held
+    }
+    return {**attn_state, **aliases}
+
+
+def _load_peft_adapter_state(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> None:
+    """Copy each saved attention-adapter tensor into the live tensor behind its key in ``saved_tensors``
+    (:func:`saved_adapter_tensors`), a tied tensor once.
+
+    An FSDP2 DTensor target takes ``distribute_tensor``, a mesh collective, so the keys go in sorted order: a
+    dict's own order is its file's, and the adapter file can differ per rank on a non-shared filesystem.
     """
-    live = dict(itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model)))
-    has_dtensor = any(isinstance(p.data, DTensor) for n, p in live.items() if ".lora_" in n)
-    if not has_dtensor:
-        load_result = set_peft_model_state_dict(peft_model, attn_state)
-        return list(getattr(load_result, "unexpected_keys", None) or [])
-
-    # Saved keys omit the adapter segment: ...lora_A.weight ↔ live ...lora_A.default.weight.
-    normalized_live = {strip_peft_adapter_segment(name): name for name in live}
-
-    unexpected = []
+    copied: set[int] = set()
     with torch.no_grad():
-        # Sorted: distribute_tensor issues mesh collectives — same key order on every rank, exactly
-        # as the sibling weight loaders enforce. A dict's own order is the file's, and the adapter
-        # file can differ per rank on a non-shared filesystem.
         for key, value in sorted(attn_state.items()):
-            param = live.get(key)
-            if param is None and key in normalized_live:
-                param = live[normalized_live[key]]
-            if param is None:
-                unexpected.append(key)
-                continue
-            copy_full_tensor(param, value)
-    return unexpected
+            target = saved_tensors[key]
+            if id(target) not in copied:
+                copied.add(id(target))
+                copy_full_tensor(target, value)
 
 
-def remap_cp_adapter_keys_to_live(state: dict, peft_model: PeftModel) -> dict:
-    """Map CP-normalized adapter keys back onto the live CP-wrapped PeftModel's keys on resume.
+def _attention_adapter_mismatch(saved_tensors: dict | None, attn_state: dict, checkpoint: str) -> str | None:
+    """Why ``attn_state`` does not restore the live adapters, ``modules_to_save`` and persistent buffers a save
+    selects (``saved_tensors``, None without a PeftModel) one for one at the saved shapes, or None."""
+    if saved_tensors is None:
+        if not attn_state:
+            return None
+        return (
+            f"Adapter checkpoint at {checkpoint} contains {len(attn_state)} attention/PEFT adapter tensors but the "
+            f"model has no PEFT adapters — resume would silently continue from base weights. Enable use_peft (with "
+            f"the same lora_target_modules as at save) or resume from a full checkpoint. First few: "
+            f"{sorted(attn_state)[:KEY_PREVIEW_COUNT]}"
+        )
+    mismatch = adapter_layout_mismatch(attn_state, {key: tuple(tensor.shape) for key, tensor in saved_tensors.items()})
+    return mismatch and (
+        f"The PEFT adapter at {checkpoint} does not match the adapters this model builds: {mismatch}. Resume with "
+        f"the lora_target_modules, lora_r and modules_to_save it was saved with, from a complete checkpoint."
+    )
 
-    Saver normalizes CP keys for non-CP portability; on resume the model is CP-wrapped again, so live
-    keys carry ``.original_attention.`` / extra ``model.`` paths. Without remapping, every saved key
-    is unexpected and adapters stay zero-init. The live map comes from ``named_parameters()`` plus
-    ``persistent_buffers()`` — the same population the saver serializes (a ``modules_to_save`` router
-    carries its balancing buffer) — never from a ``state_dict()``-derived view, which a wrapper
-    override can respell. Saved keys carry no adapter-name segment, so ``.default`` is
-    dropped here exactly as ``_load_peft_adapter_state`` re-inserts it.
+
+def remap_cp_adapter_keys_to_live(state: dict, live_keys: Iterable[str]) -> dict:
+    """Map CP-normalized adapter keys back onto ``live_keys``, the keys a save of the live CP-wrapped PeftModel
+    selects (:func:`saved_adapter_tensors`).
+
+    The saver writes :func:`~halo.models.unwrapping.plain_adapter_key` of each of those keys, for a non-CP reload; on
+    resume the model is CP-wrapped again, so its keys carry ``.original_attention.`` / extra ``model.`` paths. A key
+    the selection does not produce passes through, for the restore's layout check to name.
     """
-    normalized_to_live = {}
-    for name, _ in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model)):
-        if not _is_adapter_relevant(name):
-            continue
-        live_key = strip_peft_adapter_segment(name)
-        normalized_to_live[plain_adapter_key(live_key)] = live_key
+    normalized_to_live = {plain_adapter_key(key): key for key in live_keys}
     return {normalized_to_live.get(key, key): value for key, value in state.items()}
 
 
 def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
-    """Restore LoRA adapters when base-weight reload is skipped (EP/CP).
+    """COLLECTIVE. Restore LoRA adapters onto a model whose base weights stay as built: an EP/CP rebuild, or the
+    adapter-only checkpoint of a PEFT run.
 
-    EP/CP rebuild the model with zero-init adapters, so trained weights must reload here or resume
-    continues from the untrained adapter. Handles native EP expert adapters (sliced per rank by
-    :func:`load_expert_lora_adapters`) and PEFT attention adapters. Refuses, on every rank, an adapter
-    whose recorded LoRA scaling differs from the live run's (:func:`lora_scaling_mismatch`). Returns
-    the adapter file restored from, or ``None`` when ``checkpoint`` holds none on any rank (a no-op);
-    rank-uniform either way.
+    Handles native EP expert adapters (sliced per rank by :func:`load_expert_lora_adapters`) and PEFT attention
+    adapters, copied into the live tensors at their dtype (DTensors through
+    :func:`~halo.runtime.dtensor.copy_full_tensor`). Refuses, on every rank and before any tensor is copied, an
+    adapter whose recorded LoRA scaling differs from the live run's (:func:`lora_scaling_mismatch`) and one that does
+    not match the live adapters key for key at the saved shapes. Returns the adapter file restored from, or ``None``
+    when ``checkpoint`` holds none on any rank (a no-op); rank-uniform either way.
     """
     unwrapped = unwrap_framework_wrappers(model)
     peft_model = find_peft_model(unwrapped)
@@ -332,36 +349,22 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
         return None  # no adapters anywhere: full fine-tuning
 
     expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
-    # Unconditional: the apply is collective at ep_size==1 and decides "nothing to load" rank-uniformly.
+    attn_state = {k: v for k, v in state.items() if k not in expert_state}
+    saved_tensors = saved_adapter_tensors(peft_model) if peft_model is not None else None
+    # Saver wrote CP-normalized keys; remap to live CP-wrapped names or all keys miss.
+    if is_cp_mode and saved_tensors is not None:
+        attn_state = remap_cp_adapter_keys_to_live(attn_state, saved_tensors)
+    if saved_tensors is not None:
+        attn_state = _with_tied_aliases(saved_tensors, attn_state)
+    # Joined before the expert load, whose own join precedes its first copy: neither population writes until both
+    # have matched on every rank.
+    reject_across_ranks(
+        _attention_adapter_mismatch(saved_tensors, attn_state, checkpoint), f"PEFT adapter resume from {checkpoint}"
+    )
     # Inner model, matching the saver: the CP wrapper's extra 'model.' level makes keys miss.
     load_expert_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
-
-    attn_state = {k: v for k, v in state.items() if k not in expert_state}
     if attn_state:
-        if peft_model is None:
-            # Attention tensors with no PeftModel would be dropped silently — base-weight resume.
-            raise RuntimeError(
-                f"Adapter checkpoint at {checkpoint} contains {len(attn_state)} attention/PEFT "
-                f"adapter tensors but the model has no PEFT adapters — resume would silently "
-                f"continue from base weights. Enable use_peft (with the same lora_target_modules "
-                f"as at save) or resume from a full checkpoint. First few: {sorted(attn_state)[:KEY_PREVIEW_COUNT]}"
-            )
-        # Saver wrote CP-normalized keys; remap to live CP-wrapped names or all keys miss.
-        if is_cp_mode:
-            attn_state = remap_cp_adapter_keys_to_live(attn_state, peft_model)
-        unexpected = _load_peft_adapter_state(peft_model, attn_state)
-        if unexpected and len(unexpected) == len(attn_state):
-            raise RuntimeError(
-                f"PEFT adapter resume from {checkpoint}: all {len(attn_state)} saved adapter "
-                f"keys were unexpected — the adapter would resume from zero-init, not the "
-                f"trained weights. Likely a key mismatch (CP-remap regression, or different "
-                f"lora_target_modules than at save). First few: {unexpected[:KEY_PREVIEW_COUNT]}"
-            )
-        if unexpected and is_global_main_process():
-            logger.warning(
-                f"PEFT adapter resume: {len(unexpected)} of {len(attn_state)} saved adapter "
-                f"keys were unexpected and dropped (those layers stay at init): {unexpected[:KEY_PREVIEW_COUNT]}"
-            )
+        _load_peft_adapter_state(saved_tensors, attn_state)
 
     if is_global_main_process():
         logger.info(

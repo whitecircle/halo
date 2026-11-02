@@ -12,7 +12,11 @@ from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, PreTrained
 from halo.configs.distillation import TeacherDistillationConfig, TeacherDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.collators.collator_rules import reject_fa4_varlen_training, rows_reach_varlen_kernel
+from halo.data.collators.collator_rules import (
+    evaluation_batch_size,
+    reject_fa4_varlen_training,
+    rows_reach_varlen_kernel,
+)
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
 from halo.entrypoints.data_setup import (
@@ -137,6 +141,7 @@ def main():
             packing=False,
             padding_free=False,
             per_device_train_batch_size=training_config.per_device_train_batch_size,
+            per_device_eval_batch_size=evaluation_batch_size(training_config),
         ),
     )
     tokenizer = apply_max_length(training_config, args, student_model, policy.tokenizer)

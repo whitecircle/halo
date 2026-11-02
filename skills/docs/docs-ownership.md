@@ -109,13 +109,15 @@ changes.
 |---|---|
 | `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/models/adding-a-model.md`, `agent-docs/models/README.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`; the attention facts also `agent-docs/optimization/flash-attention.md` |
 | `halo/distributed/expert_parallel/families/zaya.py`, `halo/models/zaya.py` | `agent-docs/models/zaya.md` |
+| `halo/distributed/expert_parallel/families/qwen3_next.py` | `agent-docs/models/qwen3-next.md` |
+| `halo/distributed/expert_parallel/families/qwen4_exp.py`, `halo/models/qwen4_exp/` | `agent-docs/models/qwen4_exp.md` |
+| `halo/models/external_tables.py`, `halo/model_loading/external_tables.py`, `halo/checkpoint/external_tables.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/models/qwen4_exp.md` |
 | `halo/model_loading/parallel/loader.py`, `halo/model_loading/parallel/load_rules.py`, `halo/model_loading/parallel/whole_model.py`, `halo/model_loading/model_preparation.py`, `halo/model_loading/remote_code.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md`, the affected per-family page; `agent-docs/optimization/flash-attention.md` |
 | `halo/models/seq_cls_heads.py` | `agent-docs/training-methods/classification.md`, `agent-docs/training-methods/reward-modeling.md` |
 | `halo/model_loading/tokenizer_setup.py`, `halo/models/context_window.py` | `agent-docs/reference/configuration-reference.md` |
 | `halo/model_loading/buffer_repair.py` | `agent-docs/models/README.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/kernels/hub_kernel_dispatch.py` | `agent-docs/models/README.md`, `agent-docs/models/qwen3_5.md` |
-| `halo/kernels/fla_autotune.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/models/bailing.md`, `agent-docs/models/glm5-next.md` |
-| `halo/kernels/fla_fixed_nb.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/reference/configuration-reference.md` |
+| `halo/kernels/fla_launch.py` | `agent-docs/models/qwen3_5.md`, `agent-docs/models/bailing.md`, `agent-docs/models/glm5-next.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/model_loading/checkpoint_coverage.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/reference/troubleshooting.md`; the full-weight loads under accelerate FSDP also `agent-docs/parallelism/data-parallelism.md` |
 | `halo/model_loading/dtype.py` | `agent-docs/models/README.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/models/config_access.py` | `agent-docs/models/README.md`, `agent-docs/reference/checkpoints.md`, `agent-docs/training-methods/callbacks.md` |

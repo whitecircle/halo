@@ -1,10 +1,10 @@
 #!/usr/bin/env python
-"""The SFT, self-distillation and embedding scripts request FA2 for a softcapped model whose training rows reach FA4's
-varlen call, and refuse a pinned FA4 there.
+"""The SFT, self-distillation and embedding scripts request FA2 for a softcapped model whose training or evaluation rows
+reach FA4's varlen call, and refuse a pinned FA4 there.
 
-FA4's varlen backward takes no softcap, and packed, padding-free and padded rows (more than one per batch) all reach
-it, so Gemma 2 27B (head_dim 128, which FA4's general kernel otherwise runs) trains on FA4 only one unpadded row per
-batch. Driven through ``main()`` (the embedding EP/TP pipeline through its builder) on a Blackwell host up to the policy
+FA4's varlen kernels take no softcap (the backward asserts, and on B300 the forward does not finish), and packed,
+padding-free and padded rows (more than one per batch) all reach them, so Gemma 2 27B (head_dim 128, which FA4's
+general kernel otherwise runs) trains on FA4 only one unpadded row per batch. Driven through ``main()`` (the embedding EP/TP pipeline through its builder) on a Blackwell host up to the policy
 load: the request must be decided on the rows the collator will build (a pre-processed corpus as it was baked), before
 any weight loads, and reach every model the run loads on it.
 
@@ -132,6 +132,29 @@ def test_the_sft_policy_load_takes_fa2_on_rows_reaching_the_varlen_call(tmp_path
     assert [load["attn_default"] for load in loads] == [expected]
 
 
+@pytest.mark.parametrize(
+    ("yaml_body", "expected"),
+    [
+        ("eval_strategy: steps\nper_device_eval_batch_size: 8\n", FA2),
+        ("eval_strategy: steps\nper_device_eval_batch_size: 1\n", None),
+        ("eval_strategy: 'no'\nper_device_eval_batch_size: 8\n", None),
+    ],
+    ids=["evaluates-bs8", "evaluates-bs1", "never-evaluates"],
+)
+def test_padded_evaluation_batches_take_the_sft_policy_off_fa4(tmp_path, yaml_body, expected):
+    """One unpadded training row keeps FA4 only when the run's evaluation batches stay unpadded too: an evaluation
+    batch of eight unpads to the varlen call, which on B300 would hang at the first evaluation."""
+    loads = _sft_request(tmp_path, f"per_device_train_batch_size: 1\n{yaml_body}", _gemma2(128))
+    assert [load["attn_default"] for load in loads] == [expected]
+
+
+def test_a_pinned_fa4_with_padded_evaluation_batches_is_refused_before_the_load(tmp_path):
+    yaml_body = f"attn_implementation: {FA4}\nper_device_train_batch_size: 1\neval_strategy: steps\n"
+    with pytest.raises(ValueError, match="per_device_eval_batch_size: 1"):
+        loads = _sft_request(tmp_path, f"{yaml_body}per_device_eval_batch_size: 8\n", _gemma2(128))
+        pytest.fail(f"reached the policy load: {loads}")
+
+
 @pytest.mark.parametrize(("packed_corpus", "expected"), [(True, FA2), (False, None)])
 def test_a_preprocessed_corpus_is_judged_as_it_was_baked(tmp_path, packed_corpus, expected):
     """``packing`` is off in the YAML, but a corpus baked packed reaches the packing collator."""
@@ -140,7 +163,7 @@ def test_a_preprocessed_corpus_is_judged_as_it_was_baked(tmp_path, packed_corpus
 
 
 def test_a_pinned_fa4_on_packed_rows_is_refused_before_the_load(tmp_path):
-    with pytest.raises(ValueError, match="whose backward takes no attention logit softcapping"):
+    with pytest.raises(ValueError, match="which take no attention logit softcapping"):
         loads = _sft_request(tmp_path, f"attn_implementation: {FA4}\npacking: true\n", _gemma2(128))
         pytest.fail(f"reached the policy load: {loads}")
 
@@ -224,7 +247,7 @@ def test_the_self_distillation_policy_takes_fa2_on_padded_rows(tmp_path, yaml_bo
 
 
 def test_a_self_distillation_policy_loaded_on_fa4_with_padded_rows_is_refused(tmp_path):
-    with pytest.raises(ValueError, match="whose backward takes no attention logit softcapping"):
+    with pytest.raises(ValueError, match="which take no attention logit softcapping"):
         _self_distill_request(
             tmp_path, f"attn_implementation: {FA4}\nper_device_train_batch_size: 2\n", loaded_backend=FA4
         )
@@ -267,6 +290,7 @@ def _embedding_backbone_loads(
     loaded_backend: str = FA2,
     dtype=torch.bfloat16,
     head_dim: int = 128,
+    eval_strategy: str = "no",
 ) -> list[dict]:
     """The keyword arguments of the backbone load ``_assemble_preloaded_pipeline`` makes, its checkpoint Gemma 2 27B
     (2B/9B at ``head_dim`` 256); the stubbed load hands back a backbone resolved to ``loaded_backend``."""
@@ -288,7 +312,9 @@ def _embedding_backbone_loads(
     ):
         module._assemble_preloaded_pipeline(
             None,
-            types.SimpleNamespace(per_device_train_batch_size=batch_size),
+            types.SimpleNamespace(
+                per_device_train_batch_size=batch_size, per_device_eval_batch_size=8, eval_strategy=eval_strategy
+            ),
             types.SimpleNamespace(attn_implementation=pinned, model_name_or_path=_MODEL_ID),
             None,
         )
@@ -301,8 +327,13 @@ def test_the_embedding_backbone_takes_fa2_on_padded_rows(batch_size, expected):
     assert [load.get("attn_default") for load in _embedding_backbone_loads(batch_size=batch_size)] == [expected]
 
 
+def test_padded_evaluation_batches_take_the_embedding_backbone_off_fa4():
+    loads = _embedding_backbone_loads(batch_size=1, eval_strategy="steps")
+    assert [load.get("attn_default") for load in loads] == [FA2]
+
+
 def test_an_embedding_backbone_loaded_on_fa4_with_padded_rows_is_refused():
-    with pytest.raises(ValueError, match="whose backward takes no attention logit softcapping"):
+    with pytest.raises(ValueError, match="which take no attention logit softcapping"):
         _embedding_backbone_loads(batch_size=2, pinned=FA4, loaded_backend=FA4)
 
 

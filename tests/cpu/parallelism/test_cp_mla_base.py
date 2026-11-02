@@ -34,6 +34,7 @@ KV_LORA_RANK = 12
 
 
 class _FakeConfig:
+    hidden_size = HIDDEN
     num_attention_heads = NUM_Q_HEADS
     num_key_value_heads = NUM_KV_HEADS
     rope_interleave = False
@@ -49,6 +50,7 @@ class _RopelessConfig:
     Not a subclass: the attribute would be inherited and the omission would not be one.
     """
 
+    hidden_size = HIDDEN
     num_attention_heads = NUM_Q_HEADS
     num_key_value_heads = NUM_KV_HEADS
     rope_parameters = _FakeConfig.rope_parameters

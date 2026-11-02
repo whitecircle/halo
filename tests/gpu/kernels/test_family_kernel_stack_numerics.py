@@ -33,12 +33,18 @@ Two comparisons, both against the stock Hugging Face model built from the same w
   implementations already differ. A per-parameter bound would not hold: the hyper-connection scales of
   DeepSeek-V4 and GLM-5 Next are sums with heavy cancellation, where every bf16 run is noise.
 
+The stock reference is finalized as a loaded model is (``finalize_loaded_model``); the FLA kernel restrictions
+and launch options it applies are process-wide, so every model below runs under them. ``--fla-fixed-nb`` sets
+``HALO_FLA_FIXED_NB`` first: before the first forward every FLA norm kernel the flag covers must launch at a fixed
+``NB``, and every check holds as without the flag.
+
 GLM-5 Next's sparse-attention indexer picks KV blocks by a top-k (``index_topk``) that fp32
 reduction-order noise flips on some inputs, which moves a few gradients wholesale. The fixed seed below
 sits near such a tie: two of the eight one-ulp nudges of the stock model flip it (the median spread
 absorbs them), while the stack's own reduction order does not.
 
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_family_kernel_stack_numerics.py --family qwen3_moe
+    torchrun --nproc_per_node=1 tests/gpu/kernels/test_family_kernel_stack_numerics.py --family glm5_next --fla-fixed-nb
 """
 
 from __future__ import annotations
@@ -54,6 +60,9 @@ from safetensors.torch import save_file
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
+from halo.kernels import fla_launch
+from halo.kernels.fla_launch import FIXED_NB_FLAG, FIXED_NB_KERNELS, triton_autotuner
+from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
 from halo.models.config_access import text_config
 from halo.models.moe.config_fields import require_expert_count
@@ -129,6 +138,17 @@ def _stack_model(model_cls: type, config, state: dict, dtype: torch.dtype):
     return model
 
 
+def _fixed_nb_launches() -> dict[str, bool]:
+    """Per kernel :data:`~halo.kernels.fla_launch.FIXED_NB_KERNELS` names, whether its autotuner launches it at a
+    fixed ``NB``; one that is no longer autotuned reads ``False``."""
+    launches = {}
+    for module, kernel_names in FIXED_NB_KERNELS.items():
+        for kernel_name in kernel_names:
+            launched = getattr(triton_autotuner(getattr(module, kernel_name, None)), "fn", None)
+            launches[f"{module.__name__}.{kernel_name}"] = isinstance(launched, fla_launch._FixedNB)
+    return launches
+
+
 def _round_off_probe(model_cls: type, config, state: dict, probe: int):
     """The fp32 stock model with every parameter moved to an adjacent fp32 value, up or down per element."""
     model = _stock_model(model_cls, config, state, torch.float32)
@@ -166,6 +186,8 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     family = TINY_MOE_FAMILIES[model_type]
     torch.manual_seed(seed)
     reference = tiny_family_model(family).cuda().float()
+    finalize_loaded_model(reference)
+    fixed_nb_launches = _fixed_nb_launches()
     model_cls, config = type(reference), reference.config
     vocab = text_config(config).vocab_size
     input_ids = torch.randint(0, vocab, (BATCH, SEQ), generator=torch.Generator().manual_seed(seed)).cuda()
@@ -176,7 +198,12 @@ def run_family(model_type: str, seed: int = SEED) -> dict:
     del reference
 
     applied = apply_liger_kernel(copy.deepcopy(config), None, needs_ep_layers=True)
-    result = {"model_type": model_type, "ref_loss": ref_loss, "round_off_spread": spread}
+    result = {
+        "model_type": model_type,
+        "ref_loss": ref_loss,
+        "round_off_spread": spread,
+        "fixed_nb_launches": fixed_nb_launches,
+    }
     for label, dtype in (("fp32", torch.float32), ("bf16", torch.bfloat16)):
         model = _stack_model(model_cls, config, state, dtype)
         layers = named_ep_layers(model)
@@ -259,9 +286,17 @@ def check_family_stack_matches_the_stock_model(model_type: str, result: dict) ->
 def run(ctx) -> dict:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
-    model_type = parser.parse_args().family
+    parser.add_argument("--fla-fixed-nb", action="store_true", help=f"set {FIXED_NB_FLAG} first")
+    args = parser.parse_args()
+    model_type = args.family
+    if args.fla_fixed_nb:
+        os.environ[FIXED_NB_FLAG] = "1"
     checks: dict[str, bool] = {}
     result = run_family(model_type)
+    if args.fla_fixed_nb:
+        launches = result["fixed_nb_launches"]
+        log(f"{model_type}: fixed-NB launches before the first forward {launches}")
+        checks["fla_norm_kernels_launch_at_a_fixed_nb"] = bool(launches) and all(launches.values())
     fixed = (FP32_GRAD_COS_MIN, FP32_GRAD_NORM_RTOL)
     widened = {n: _fp32_bounds(s) for n, s in result["round_off_spread"].items() if _fp32_bounds(s) != fixed}
     if widened:

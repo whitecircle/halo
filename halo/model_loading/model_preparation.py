@@ -21,14 +21,20 @@ from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import (
     install_fa4_contiguous_dedicated_head_inputs,
+    install_fa4_varlen_softcap_refusal,
     patch_sdpa_for_wide_heads,
     patch_transformers_flash_varlen_int_seqlen,
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
 from halo.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
-from halo.models.attention.selection import has_head_dim_beyond_flash, is_flash_attn_implementation
+from halo.models.attention.selection import (
+    fa4_varlen_refusal,
+    has_head_dim_beyond_flash,
+    is_flash_attn_implementation,
+)
 from halo.models.config_access import model_type_matches
+from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
 from halo.models.zaya import apply_zaya_patches
 from halo.runtime.ranks import is_global_main_process
 
@@ -124,14 +130,15 @@ def auto_load_model(
     return from_pretrained_verified(model_class, model_name_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
 
-def apply_family_patches(model_config, attn_implementation: str) -> str:
+def apply_family_patches(model_config, attn_implementation: str | None) -> str | None:
     """Apply the family/backend-keyed patches every loaded model needs, trainable or frozen, and return
     the implementation to build it with.
 
     Keyed on each model's own config, so a frozen teacher or reference of another family gets its own
     patches. The patches key on the resolved backend, the build on its variant
     (:func:`resolve_flex_sliding_attn_implementation`), which still hands SDPA some calls, so a
-    wide-head model keeps the SDPA pin under it.
+    wide-head model keeps the SDPA pin under it. ``attn_implementation`` None (a build that picks its own
+    backend) applies only the patches no backend keys and returns None.
     """
     if attn_implementation == "sdpa" and has_head_dim_beyond_flash(model_config):
         patch_sdpa_for_wide_heads()
@@ -143,11 +150,17 @@ def apply_family_patches(model_config, attn_implementation: str) -> str:
     # its model forward lacks (it never passes position_ids down to attention or the CCA convs).
     if model_type_matches(model_config, "zaya"):
         apply_zaya_patches()
-    # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor, and its
-    # head_dim-256 forward misreads a head-major q/k.
+    # Else the 95 GiB n-gram table is a trainable parameter every wrap, cast, optimizer and save would carry, every
+    # sparse layer reads a [T, T] mask, and packed documents leak through the per-layer embedding.
+    if model_type_matches(model_config, "qwen4_exp"):
+        apply_qwen4_exp_patches(model_config)
+    # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor, its
+    # head_dim-256 forward misreads a head-major q/k, and a softcapped batch that unpads hangs its varlen forward.
     if attn_implementation == "flash_attention_4":
         patch_transformers_flash_varlen_int_seqlen()
         install_fa4_contiguous_dedicated_head_inputs()
+        if fa4_varlen_refusal(model_config):
+            install_fa4_varlen_softcap_refusal()
     return resolve_flex_sliding_attn_implementation(model_config, attn_implementation)
 
 

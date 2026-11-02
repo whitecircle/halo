@@ -48,6 +48,8 @@ from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
+from halo.model_loading.model_preparation import apply_family_patches
+from halo.models.external_tables import named_external_tables
 from halo.models.moe.family_specs import expert_weight_roots, experts_container_attrs, moe_model_types
 from halo.models.param_roles import persistent_buffers
 from halo.trainers.grpo.rollout.weight_push import _dense_params, gather_and_send_weights
@@ -316,11 +318,19 @@ def test_unfuse_turns_the_gathered_save_into_the_hub_checkpoint(name, tmp_path):
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_lazy_loader_maps_the_gathered_save(name, tmp_path):
-    """Continuing from an export runs the EP lazy loader over it: every key outside the expert banks
-    (whose per-expert form the expert fuser owns) must land on a live tensor, the SigLIP towers'
+    """Continuing from an export runs the EP lazy loader over it, on the shell a run builds (the family patches
+    applied to its config): every key outside the expert banks (whose per-expert form the expert fuser owns)
+    and the external tables (which the load attaches) must land on a live tensor, the SigLIP towers'
     ``vision_model`` level included."""
     loaded = _loaded(name, tmp_path)
-    shell = tiny_family_model(loaded.family)
+    stock = tiny_family_model(loaded.family)
+    apply_family_patches(stock.config, "sdpa")
+    shell = type(stock)(stock.config)
+    tables = {
+        f"{path}.{table.part_key(index)}"
+        for path, table in named_external_tables(shell)
+        for index in range(table.part_count)
+    }
     disk_to_model, fanout = family_key_mapping(shell, list(loaded.saved))
 
     live = set(shell.state_dict())
@@ -335,7 +345,7 @@ def test_lazy_loader_maps_the_gathered_save(name, tmp_path):
     }
     unmapped = sorted(
         key
-        for key in _outside_expert_banks(loaded, loaded.saved)
+        for key in _outside_expert_banks(loaded, loaded.saved) - tables
         if disk_to_model[key] not in live and key not in fan_in
     )
     assert unmapped == [], f"{name}: the lazy loader maps no live tensor for {unmapped[:5]}"

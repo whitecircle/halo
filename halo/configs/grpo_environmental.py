@@ -394,7 +394,7 @@ class AsyncRolloutConfig(
     enable_prefetch: bool | None = field(
         default=None,
         metadata={
-            "help": "Roll the next rounds out while this one trains, so each round trains prefetch_depth steps stale "
+            "help": "Roll the next rounds out while this one trains, so each round trains prefetch_depth rounds stale "
             "(the sampling-logprob IS ratio corrects it). Unset = on with two or more rollout servers, off with one; "
             "true prefetches on a single server too, false never. "
             "See agent-docs/training-methods/async-grpo/setup.md#multiple-servers-and-prefetch."

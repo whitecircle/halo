@@ -15,7 +15,6 @@ check would pass vacuously).
 """
 
 import os
-import sys
 from collections import Counter
 
 import torch
@@ -23,8 +22,7 @@ from fla.modules import FusedRMSNormGated
 from fla.modules.l2norm import l2norm
 from triton import knobs
 
-from halo.kernels.fla_autotune import triton_autotuner
-from halo.kernels.fla_fixed_nb import FIXED_NB_FLAG, FIXED_NB_KERNELS
+from halo.kernels.fla_launch import FIXED_NB_FLAG, FIXED_NB_KERNELS, triton_autotuner
 from halo.model_loading.buffer_repair import finalize_loaded_model
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log
@@ -37,10 +35,10 @@ TOKEN_COUNTS = (2048, 6144, 10240, 14336)
 
 
 def _kernels():
-    """``(qualname, Autotuner)`` for every table kernel; importing ``fla.modules`` above loads their modules."""
-    for module_name, kernel_names in FIXED_NB_KERNELS.items():
+    """``(qualname, Autotuner)`` for every table kernel."""
+    for module, kernel_names in FIXED_NB_KERNELS.items():
         for kernel_name in kernel_names:
-            yield f"{module_name}.{kernel_name}", triton_autotuner(getattr(sys.modules[module_name], kernel_name))
+            yield f"{module.__name__}.{kernel_name}", triton_autotuner(getattr(module, kernel_name))
 
 
 def _inputs(device) -> list[dict[str, torch.Tensor]]:

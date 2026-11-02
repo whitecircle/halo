@@ -295,5 +295,36 @@ def test_every_fa4_load_installs_the_contiguity_shim(monkeypatch, tmp_path, qwen
     assert builds == [(FA4, dict.fromkeys(_FA4_LOAD_PATCHES, 1))]
 
 
+def test_an_unpinned_embedding_load_takes_the_backend_independent_family_patches(
+    monkeypatch, tmp_path, qwen3_5_text_checkpoint
+):
+    """Unpinned, sentence-transformers picks the backend at its own build, yet the patches no backend keys (Zaya's
+    checkpointing refusal and document isolation) still apply, as on the policy, frozen and trainer-path loads."""
+    patched = []
+    monkeypatch.setattr(
+        embedding_script, "apply_family_patches", lambda config, attn: patched.append((config.model_type, attn))
+    )
+    builds = []
+
+    def build(kwargs):
+        builds.append(kwargs)
+        raise _Built
+
+    monkeypatch.setattr(embedding_script, "SentenceTransformer", lambda path, **kwargs: build(kwargs["model_kwargs"]))
+    runtime = types.SimpleNamespace(
+        parallelism_config=types.SimpleNamespace(has_ep_group=False, is_tp_mode=False, max_concurrent_loading=None),
+        model_source=qwen3_5_text_checkpoint,
+    )
+    with pytest.raises(_Built):
+        embedding_script.build_sentence_transformer(
+            runtime,
+            EmbeddingConfig(output_dir=str(tmp_path), bf16=False, use_cpu=True),
+            ModelArguments(model_name_or_path=qwen3_5_text_checkpoint),
+            types.SimpleNamespace(reset_sinks=True, train_sinks=False),
+        )
+    assert patched == [("qwen3_5_text", None)]
+    assert "attn_implementation" not in builds[0], "an unpinned load left the backend to sentence-transformers"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

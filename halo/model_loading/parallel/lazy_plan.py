@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from enum import Enum, auto
 
@@ -113,12 +113,18 @@ class WeightPlanner:
         disk_to_model: dict[str, str],
         model_keys: set[str],
         fanout: dict[str, tuple] | None = None,
+        ignore_unexpected: Iterable[str] = (),
     ) -> list[WeightPlan]:
-        """One plan per checkpoint key that aligns to a model tensor (a fan-out key, one per target)."""
+        """One plan per checkpoint key that aligns to a model tensor (a fan-out key, one per target).
+
+        A key that aligns to none is warned unless it matches one of the ``ignore_unexpected`` patterns (the model's
+        ``_keys_to_ignore_on_load_unexpected``, which ``from_pretrained`` leaves out of its report too).
+        """
         plans: list[WeightPlan] = []
         claimed_by: dict[str, str] = {}
         unexpected: list[str] = []
         fanout = fanout or {}
+        ignored = [re.compile(pattern) for pattern in ignore_unexpected]
         # A fan-in's siblings are read by its first source's plan (the leading Concat), never on their own.
         consumed = {
             sibling
@@ -168,7 +174,11 @@ class WeightPlanner:
                 claimed_by[model_key] = disk_key
                 claimed = True
 
-            if not claimed and not self._is_expected_per_expert_key(disk_key):
+            if not (
+                claimed
+                or self._is_expected_per_expert_key(disk_key)
+                or any(pattern.search(disk_key) for pattern in ignored)
+            ):
                 unexpected.append(disk_key)
 
         if unexpected:
@@ -264,7 +274,13 @@ def lazy_load_prologue(
 
     model_keys = set(model.state_dict().keys())
     disk_to_model, conversion_fanout = family_key_mapping(model, list(weight_map.keys()))
-    plans = WeightPlanner(ep_config).build(weight_map, disk_to_model, model_keys, fanout=conversion_fanout)
+    plans = WeightPlanner(ep_config).build(
+        weight_map,
+        disk_to_model,
+        model_keys,
+        fanout=conversion_fanout,
+        ignore_unexpected=getattr(model, "_keys_to_ignore_on_load_unexpected", None) or (),
+    )
     return LazyLoadPlan(
         model=model,
         plans=plans,

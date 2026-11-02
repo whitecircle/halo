@@ -82,6 +82,7 @@ from halo.trainers.trainer_rules import (
     reject_sync_ref_model_on_sharded_policy,
     reject_trainer_router_aux_loss_coef,
     reject_unreloadable_best_model,
+    reject_unsaveable_external_tables,
 )
 from halo.trainers.training_args_overrides import align_save_on_each_node, disable_trl_liger
 
@@ -367,6 +368,9 @@ class DistributedTrainerMixin(
             reject_lora_under_tp(self._top_level_model())
         self._disable_inert_router_logits()
         reject_unreloadable_best_model(self.args, config, self.model)
+        reject_unsaveable_external_tables(
+            self._top_level_model(), accelerate_manages_fsdp=self._accelerate_manages_fsdp
+        )
         # FSDP2 needs one dtype per group; before the fp32_non_ep upcast so that mode wins.
         self._cast_peft_params_to_compute_dtype()
         # FP32 master weights before FSDP2 wrapping so it sees fp32 params and produces fp32 grads.

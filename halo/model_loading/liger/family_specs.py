@@ -220,6 +220,16 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         delegates_to_upstream=True,
         upstream_off=("swiglu",),
     ),
+    # Qwen3.8-Flash-Next, the text tower: the head only, which adds the router aux loss after the projection.
+    # Its one norm class also runs the hyper-connection norms grouped per residual stream, which LigerRMSNorm
+    # cannot express, and its rotary is interleaved mrope. The multimodal wrapper resolves through
+    # `text_config` and keeps its own head.
+    LigerFamilySpec(
+        model_types=("qwen4_exp_text",),
+        modeling_module="transformers.models.qwen4_exp.modeling_qwen4_exp",
+        causal_lm=("Qwen4ExpForCausalLM",),
+        router_aux_loss_in_head=True,
+    ),
     # Qwen3 MoE: upstream owns every role but the norms, which take torch's fused kernel in the llama mode
     # (a launch-bound kernel at these shapes, cheaper per call than LigerRMSNorm).
     LigerFamilySpec(

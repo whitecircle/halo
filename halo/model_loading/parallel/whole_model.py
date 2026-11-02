@@ -98,7 +98,7 @@ def load_whole_model(
                 model = before_move(model)
             model = move_model_to_local_device(model)
     precision_guard.reject()
-    finalize_loaded_model(model)
+    finalize_loaded_model(model, weights_dir=source.local_dir)
     return model
 
 
@@ -106,7 +106,8 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     """COLLECTIVE for a path string: the model a trainer constructor was handed, loaded from the agreed
     source, cast and its attention kernels warmed when it is a path.
 
-    A pinned ``attn_implementation`` takes the family patches. The cast keeps stored fp32 values where
+    Every load takes the family patches the policy loader applies; a pinned ``attn_implementation`` also takes
+    the backend-keyed ones and builds with what they return. The cast keeps stored fp32 values where
     ``parallelism_config`` (None without one) sets ``fp32_non_ep_params``. ``model_class`` None takes the
     widest Auto class. An instantiated model must come without ``model_init_kwargs``.
     """
@@ -119,19 +120,17 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     model_id = model
     model_init_kwargs = getattr(args, "model_init_kwargs", None) or {}
     normalize_model_init_dtype(model_init_kwargs)
-    revision = resolve_model_source(model_id, model_init_kwargs.get("revision"), tag="trainer_model").revision
-    # Pinned, the backend takes the family patches the policy loader applies, keyed on this model's own config,
-    # fetched after the shims since the fetch can already import a remote modeling file; unset, transformers
-    # picks it at the build.
-    if attn_implementation := model_init_kwargs.get("attn_implementation"):
-        apply_remote_code_compat_shims()
-        config = AutoConfig.from_pretrained(
-            model_id, revision=revision, trust_remote_code=model_init_kwargs.get("trust_remote_code", False)
-        )
-        model_init_kwargs = {
-            **model_init_kwargs,
-            "attn_implementation": apply_family_patches(config, attn_implementation),
-        }
+    source = resolve_model_source(model_id, model_init_kwargs.get("revision"), tag="trainer_model")
+    revision = source.revision
+    # The family patches key on this model's own config, fetched after the shims since the fetch can already
+    # import a remote modeling file. Unpinned, transformers picks the backend at the build and only the
+    # backend-independent patches apply (Zaya's load recording and checkpointing refusal).
+    apply_remote_code_compat_shims()
+    config = AutoConfig.from_pretrained(
+        model_id, revision=revision, trust_remote_code=model_init_kwargs.get("trust_remote_code", False)
+    )
+    if attn_implementation := apply_family_patches(config, model_init_kwargs.get("attn_implementation")):
+        model_init_kwargs = {**model_init_kwargs, "attn_implementation": attn_implementation}
 
     # Run-scoped after the load, never through from_pretrained: a kwarg write lands in the exported
     # config.json and defaults the KV cache off for every downstream consumer.
@@ -150,7 +149,7 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     cast_parameters_to_run_dtype(
         model, run_dtype, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params
     )
-    finalize_loaded_model(model)
+    finalize_loaded_model(model, weights_dir=source.local_dir)
     if run_scoped_cache_off:
         set_config_field_run_scoped(model.config, "use_cache", False)
     warm_attention_kernels(model, dtype=run_dtype)

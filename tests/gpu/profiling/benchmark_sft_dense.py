@@ -53,7 +53,6 @@ import traceback
 
 import torch
 from accelerate import PartialState
-from liger_kernel.ops import rms_norm as liger_rms_norm
 from peft import LoraConfig
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from trl import SFTConfig
@@ -264,9 +263,6 @@ def main() -> int:
 
         param_count = sum(p.numel() for p in model.parameters())
         log(f"  Model loaded: {param_count / 1e9:.2f}B parameters")
-        if use_liger:
-            launch_context = liger_rms_norm.device_context
-            log(f"  Liger launch context: {launch_context.__module__}.{launch_context.__qualname__}")
         if peft_config:
             log(f"  LoRA: r={lora_r}, targets={'all_linear' if lora_all_linear else 'attn_only'}, QLoRA={qlora}")
         log(f"  GPU memory after load: {gpu_mem_gb():.1f}GB")

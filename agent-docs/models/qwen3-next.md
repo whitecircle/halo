@@ -20,7 +20,7 @@ The hub checkpoints store the experts one tensor per expert (`mlp.experts.{i}.{g
 
 ## Attention and packing
 
-Attention resolves as on [Qwen3.5](qwen3_5.md#full-attention-qwen3_5moeattention), read off the 256-wide heads: FA4's dedicated head_dim-256 kernel on Blackwell with contiguous q/k/v, SDPA under `full_determinism`, and FA2 for SFT rows that hold several documents ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The shipped recipe pins that FA2 for its packed rows, on Hopper too.
+Attention resolves as on [Qwen3.5](qwen3_5.md#full-attention-qwen3_5moeattention), read off the 256-wide heads: FA4's dedicated head_dim-256 kernel on Blackwell with contiguous q/k/v, the padded scripts included, SDPA under `full_determinism`, and FA2 for SFT rows that hold several documents ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)). The shipped recipe pins that FA2 for its packed rows, on Hopper too.
 
 Packed rows isolate as on Qwen3.5: the collators emit `seq_idx` and `cu_seq_lens_q` for the GatedDeltaNet layers, and packing is refused without the `fla` / `causal-conv1d` kernels that read them ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 

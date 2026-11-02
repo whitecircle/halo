@@ -59,12 +59,12 @@ _ROW_WD_FACTOR = tl.constexpr(5)
 # at 8 probes and the TABLE_SIZE variants a run compiles.
 _MAX_TENSORS_PER_LAUNCH = 256
 # The compute capabilities (B200, B300) the multi-tensor launch is measured on. Elsewhere each launch steps one tensor
-# at TABLE_SIZE 1, which compiles to the per-parameter kernel's per-element code.
+# at TABLE_SIZE 1, which compiles to a lone tensor's per-element code.
 _MULTI_TENSOR_LAUNCH_CAPABILITIES = frozenset({(10, 0), (10, 3)})
 # Blocks of one tensor a program steps. Its lookup and table reads run once for all of them, so a block costs about
 # what a lone launch's program does; more would leave a launch of small tensors too few programs to fill the GPU.
 _BLOCKS_PER_PROGRAM = 16
-# Registers per thread at full occupancy (64K registers over 2,048 threads), the per-parameter kernel's count:
+# Registers per thread at full occupancy (64K registers over 2,048 threads), a lone tensor's launch's count:
 # uncapped, the per-tensor scalars a program holds across its blocks take 48, and an SM fits 5 programs, not 8.
 _ADAM_MAX_REGISTERS = 32
 # Triton's launcher specializes an integer argument as divisible when it is a multiple of this, and a pointer
@@ -382,8 +382,7 @@ class AdamWBF16(torch.optim.Optimizer):
     """AdamW with stochastically rounded bf16 weights and moments.
 
     bf16 params take the fused Triton step (eager with ``use_triton=False`` or off CUDA), many per launch on sm_100/103
-    and one per launch elsewhere; fp32 params
-    (``fp32_router`` / ``fp32_experts``) take plain in-place AdamW.
+    and one per launch elsewhere; fp32 params (``fp32_router`` / ``fp32_experts``) take plain in-place AdamW.
     """
 
     def __init__(

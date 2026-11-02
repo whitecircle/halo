@@ -310,7 +310,9 @@ def test_the_path_string_loader_warms_its_kernels_last_at_the_run_dtype(
     in a collective."""
     order = []
     monkeypatch.setattr(
-        whole_model, "finalize_loaded_model", lambda model: order.append("finalize") or finalize_loaded_model(model)
+        whole_model,
+        "finalize_loaded_model",
+        lambda model, **kwargs: order.append("finalize") or finalize_loaded_model(model, **kwargs),
     )
     monkeypatch.setattr(
         whole_model, "warm_attention_kernels", lambda model, *, dtype: order.append(("warmup", model, dtype))

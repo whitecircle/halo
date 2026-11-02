@@ -116,7 +116,7 @@ def load_ep_model_lazy(
     # Derived, never asserted: a checkpoint whose expert keys match no pattern is planned REPLICATE, and
     # claiming "already sharded" there would give every rank global experts 0..E_local-1.
     model = apply_ep_layers(base.model, ep_config, weights_already_sharded=weights_already_sharded)
-    finalize_loaded_model(model)
+    finalize_loaded_model(model, weights_dir=model_name_or_path)
     logger.info(f"[Rank {rank}] EP lazy loading complete")
     return model
 

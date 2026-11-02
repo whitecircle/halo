@@ -4,7 +4,8 @@
 ``apply_family_patches`` keys the family patches on the resolved backend (``sdpa`` for Gemma 4, whose
 wide heads need the SDPA pin) and returns the implementation to build with (its variant, ``sdpa_flex_sliding``).
 The policy loader and the frozen reference/teacher loader both build and finalize the model with that return
-value, and a trainer handed its model as a path string with a pinned backend builds with it. A frozen model built
+value, and a trainer handed its model as a path string with a pinned backend builds with it (unpinned, the seam still
+applies the patches no backend keys and the build picks its own). A frozen model built
 on plain ``sdpa`` would score every logprob of the objective's other half through a different attention than the
 policy it anchors, and a loader holding its own copy of the backend-to-variant step can drift into exactly that.
 
@@ -54,11 +55,12 @@ def test_the_seam_pins_the_backend_and_returns_the_build_implementation(opt_out,
 
 
 def _recording_seam(seen):
-    """An ``apply_family_patches`` stand-in that records the backend it was handed and returns a variant of it."""
+    """An ``apply_family_patches`` stand-in that records the backend it was handed and returns a variant of it, or
+    None for none, as the seam does."""
 
     def seam(model_config, attn_implementation):
         seen["patched"] = attn_implementation
-        return f"{attn_implementation}_variant"
+        return None if attn_implementation is None else f"{attn_implementation}_variant"
 
     return seam
 
@@ -128,18 +130,15 @@ def test_each_loader_builds_with_what_the_seam_returns(load):
     assert seen == {"patched": "sdpa", "build": "sdpa_variant", "finalize": "sdpa_variant"}
 
 
-def test_the_trainer_path_load_builds_with_what_the_seam_returns():
-    """A trainer handed its model as a path string (SMPO, offline GRPO, a teacher-distillation student) hands the
-    seam the backend its ``model_init_kwargs`` pin, read off the config at the agreed commit, and builds with the
-    return value; the caller's kwargs keep the backend it pinned."""
-    seen = {}
-    config = _wide_gemma4_config()
+def _load_trainer_path(model_init_kwargs: dict, seen: dict) -> None:
+    """``resolve_trainer_model`` on a path string up to its build, the source agreed at :data:`AGREED_COMMIT`."""
 
     def build(*args, **kwargs):
-        seen["build"] = kwargs["attn_implementation"]
+        seen["build"] = kwargs.get("attn_implementation")
         raise _Built
 
-    args = SimpleNamespace(model_init_kwargs={"attn_implementation": "sdpa"}, gradient_checkpointing=False)
+    args = SimpleNamespace(model_init_kwargs=model_init_kwargs, gradient_checkpointing=False)
+    config = _wide_gemma4_config()
     with (
         patch.object(
             whole_model, "resolve_model_source", lambda path, revision, **k: ModelSource(path, AGREED_COMMIT, path)
@@ -155,8 +154,26 @@ def test_the_trainer_path_load_builds_with_what_the_seam_returns():
         pytest.raises(_Built),
     ):
         whole_model.resolve_trainer_model("org/policy", args, parallelism_config=None)
+
+
+def test_the_trainer_path_load_builds_with_what_the_seam_returns():
+    """A trainer handed its model as a path string (SMPO, offline GRPO, a teacher-distillation student) hands the
+    seam the backend its ``model_init_kwargs`` pin, read off the config at the agreed commit, and builds with the
+    return value; the caller's kwargs keep the backend it pinned."""
+    seen = {}
+    model_init_kwargs = {"attn_implementation": "sdpa"}
+    _load_trainer_path(model_init_kwargs, seen)
     assert seen == {"config_revision": AGREED_COMMIT, "patched": "sdpa", "build": "sdpa_variant"}
-    assert args.model_init_kwargs["attn_implementation"] == "sdpa"
+    assert model_init_kwargs["attn_implementation"] == "sdpa"
+
+
+def test_an_unpinned_trainer_path_load_still_takes_the_family_patches():
+    """Without a pinned backend transformers picks one at the build, and the seam still runs on this model's config
+    at the agreed commit for the patches no backend keys (Zaya's load recording and checkpointing refusal); the build
+    gets no implementation of its own."""
+    seen = {}
+    _load_trainer_path({}, seen)
+    assert seen == {"config_revision": AGREED_COMMIT, "patched": None, "build": None}
 
 
 def test_no_loader_resolves_the_variant_itself():

@@ -1,15 +1,15 @@
 #!/usr/bin/env python
-"""load_expert_lora_adapters miss detection: full AND partial adapter-key misses must fail loud.
+"""load_expert_lora_adapters matches every saved key and shape to the live expert adapters before it loads any.
 
-A total-consumed check catches only the case where NO saved key matches any EP layer. A PARTIAL
-miss — one layer's adapters unmatched (wrapper-prefixed save path, renamed layer) while other
-layers match — slips through it: the missed layer gets an empty state dict and its adapters resume
-from zero-init, which the real ``load_expert_lora_state_dict`` surfaces only as an opaque
-``KeyError`` that never names the mismatch. Any layer with expert LoRA matching zero keys must
-raise, naming the layers, before anything loads.
+A total-consumed check catches only the case where NO saved key matches any EP layer. A PARTIAL miss — one layer's
+adapters unmatched (wrapper-prefixed save path, renamed layer) while other layers match — slips through it: the
+missed layer's adapters resume from zero-init. A file holding no expert tensors for a run that trains them is the
+same miss, layer for layer. Each must raise, naming the keys, before any layer loads.
 
 Run: pytest tests/cpu/peft/test_ep_lora_apply_miss.py
 """
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -17,19 +17,21 @@ import torch.nn as nn
 
 from halo.checkpoint.adapters import is_expert_lora_key
 from halo.distributed.expert_parallel.moe_layer.expert_lora import load_expert_lora_adapters
-from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase
+from tests.common.ep_stubs import StubEPLayerBase
 
 
-class _StubEPLoraLayer(EPMoELayerBase):
-    """Minimal EP layer with expert LoRA; records what the apply walk hands it."""
+class _StubEPLoraLayer(StubEPLayerBase):
+    """An EP layer holding expert LoRA on ``gate_up_proj`` for all of its two experts; records what the apply walk
+    hands it."""
 
     def __init__(self):
-        nn.Module.__init__(self)  # skip EPMoELayerBase.__init__ (needs live EP groups)
+        super().__init__()
+        self.expert_start, self.expert_end = 0, 2
+        self.ep_config = SimpleNamespace(ep_size=1)
+        self.gate_up_proj_lora_A = nn.Parameter(torch.zeros(2, 4, 2))
+        self.gate_up_proj_lora_B = nn.Parameter(torch.zeros(2, 2, 8))
         self._expert_lora_attrs = frozenset({"gate_up_proj"})
         self.loaded_state = None
-
-    def forward(self, hidden_states, **kwargs):  # pragma: no cover - never called
-        return hidden_states
 
     def load_expert_lora_state_dict(self, layer_state):
         self.loaded_state = dict(layer_state)
@@ -74,7 +76,7 @@ def test_expert_keys_with_no_ep_layer_to_receive_them_raise():
     for layer in model.model.layers:
         layer.mlp._expert_lora_attrs = frozenset()  # a run that builds no expert adapters
 
-    with pytest.raises(RuntimeError, match="no EP layer with expert LoRA"):
+    with pytest.raises(RuntimeError, match="no live tensor takes"):
         load_expert_lora_adapters(model, _adapter_keys(0))
 
 
@@ -90,7 +92,7 @@ def test_full_miss_raises():
     """Keys under a foreign path (e.g. an unstripped wrapper prefix) match no layer → raise."""
     model = _model_with_ep_layers()
     foreign = {f"wrapper.{k}": v for k, v in _adapter_keys(0).items()}
-    with pytest.raises(RuntimeError, match="matched none of the"):
+    with pytest.raises(RuntimeError, match=r"missing from the file .*wrapper\."):
         load_expert_lora_adapters(model, foreign)
 
 
@@ -104,9 +106,32 @@ def test_partial_miss_raises_naming_missed_layer():
         assert layer.mlp.loaded_state is None, "a miss must not leave the model partially updated"
 
 
-def test_empty_adapter_state_is_a_noop():
+def test_no_expert_tensors_for_a_run_that_trains_expert_lora_raise():
+    """A file without the expert half (an attention-only save resumed by a mixed run) would resume every expert
+    adapter from zero-init."""
     model = _model_with_ep_layers()
+    with pytest.raises(RuntimeError, match=r"model\.layers\.0\.mlp\.experts\.gate_up_proj\.lora_A"):
+        load_expert_lora_adapters(model, {})
+    for layer in model.model.layers:
+        assert layer.mlp.loaded_state is None
+
+
+def test_no_expert_tensors_for_a_run_without_expert_lora_is_a_noop():
+    model = _model_with_ep_layers()
+    for layer in model.model.layers:
+        layer.mlp._expert_lora_attrs = frozenset()
     load_expert_lora_adapters(model, {})
+    for layer in model.model.layers:
+        assert layer.mlp.loaded_state is None
+
+
+def test_a_reshaped_adapter_raises_before_any_layer_loads():
+    model = _model_with_ep_layers()
+    state = {**_adapter_keys(0), **_adapter_keys(1)}
+    key = "model.layers.1.mlp.experts.gate_up_proj.lora_A"
+    state[key] = torch.randn(2, 4, 3)
+    with pytest.raises(RuntimeError, match="reshaped"):
+        load_expert_lora_adapters(model, state)
     for layer in model.model.layers:
         assert layer.mlp.loaded_state is None
 

@@ -16,6 +16,7 @@ import torch
 import torch.nn as nn
 
 from halo.checkpoint.config_export import save_model_config
+from halo.checkpoint.external_tables import write_external_tables
 from halo.checkpoint.writing import (
     StreamingShardWriter,
     is_tie_reconcile_key,
@@ -122,7 +123,8 @@ def stream_gathered_checkpoint(
     max_shard_size: str,
     normalize: Callable[[dict[str, torch.Tensor]], dict[str, torch.Tensor]],
 ) -> tuple[int, int]:
-    """COLLECTIVE: write a gathered save straight to safetensors parts, then its config and index.
+    """COLLECTIVE: write a gathered save straight to safetensors parts, then its config, the model's external
+    tables (:func:`~halo.checkpoint.external_tables.write_external_tables`) and the index.
 
     ``chunks`` is a retain-gated gather driven to exhaustion on every rank; ``normalize`` brings each
     chunk to its on-disk names and dtypes, which is why the chunks are conversion-closed. Host RAM stays
@@ -165,6 +167,7 @@ def stream_gathered_checkpoint(
                 # Must precede the config write, which persists the flag this may clear.
                 reconcile_tie_word_embeddings(model, tied)
                 finalize.run(partial(save_model_config, model, output_dir))
+            finalize.run(partial(write_external_tables, model, writer))
             # The index is the last thing written: the parts are only a checkpoint once it names them.
             total_bytes = finalize.run(writer.close_as_hf_checkpoint) or 0
         # Over the store: the peers wait out the writer's last part, unbounded on slow storage.

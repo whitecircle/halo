@@ -14,7 +14,8 @@ Per row: logits, the attention parameters' gradients (worst one) and every gradi
 forward on the unwrapped FA4 kernel shows the family meets the head_dim-256 stride defect at all (its error at
 least 10x FA2's); transformers copies q/k/v on the ``position_ids``-only and unpad paths. Fails if the loader stops
 installing the contiguity fix, if the fix misses a tensor this family hands the kernel, or if FA4 trails FA2 on
-any row.
+any row. GLM-4.7-Flash's row holds the kernel path alone: the resolver keeps its latent attention on FA2, since
+trained end to end on FA4 its gradients leave FA2's by the second step.
 
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_fa4_hd256_family_parity.py --family qwen3_5_moe_text
 """

@@ -6,7 +6,7 @@ from __future__ import annotations
 import logging
 
 import torch
-from transformers import AutoConfig, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
+from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
 
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
@@ -23,6 +23,7 @@ from halo.model_loading.model_preparation import (
 from halo.model_loading.parallel.cp import load_cp_model, load_ep_cp_model
 from halo.model_loading.parallel.ep import load_ep_model
 from halo.model_loading.parallel.load_rules import (
+    reject_random_init_tables,
     reject_unsupported_load,
     reject_unsupported_model,
     reject_unsupported_run,
@@ -48,7 +49,7 @@ from halo.models.attention.selection import (
     supports_fa4_backward,
     validate_attn_implementation,
 )
-from halo.models.config_access import apply_config_overrides, drop_toolkit_stamps
+from halo.models.config_access import apply_config_overrides, drop_toolkit_stamps, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.load_coordination import joined_node_load
@@ -331,6 +332,13 @@ def _resolve_run_config(
     return source, model_config, model_class, wraps_experts
 
 
+def _built_model_config(model_config, model_class):
+    """The config the built model carries, which Liger resolves its applier on and stamps: on a composite config
+    ``AutoModelForCausalLM`` builds the text-only sibling (``resolve_auto_model_class`` refuses a family whose
+    CausalLM entry is the wrapper itself) on the text sub-config, whose own head the fused loss patches."""
+    return text_config(model_config) if model_class is AutoModelForCausalLM else model_config
+
+
 def load_distributed_model(
     model_name_or_path: str,
     parallelism_config: ParallelismConfig,
@@ -391,6 +399,8 @@ def load_distributed_model(
         reset_sinks=reset_sinks,
         init_from_scratch=init_from_scratch,
     )
+    # After the family patches, which stamp the config of a model that builds an external table.
+    reject_random_init_tables(model_config, init_from_scratch=init_from_scratch)
     reject_unsupported_structure(
         parallelism_config,
         source,
@@ -403,7 +413,7 @@ def load_distributed_model(
 
     if use_liger_kernel:
         apply_liger_kernel(
-            model_config,
+            _built_model_config(model_config, model_class),
             liger_kernel_config=liger_kernel_config,
             needs_ep_layers=parallelism_config.needs_ep_layers,
             tp_size=parallelism_config.tp_size,

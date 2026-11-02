@@ -33,7 +33,11 @@ from halo.configs.distillation import SelfDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import TREE_PACKING_FIELDS
-from halo.data.collators.collator_rules import reject_fa4_varlen_training, rows_reach_varlen_kernel
+from halo.data.collators.collator_rules import (
+    evaluation_batch_size,
+    reject_fa4_varlen_training,
+    rows_reach_varlen_kernel,
+)
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     SelfDistillVLMDataCollator,
@@ -378,6 +382,7 @@ def main():
         "packing": False,
         "padding_free": False,
         "per_device_train_batch_size": sft_config.per_device_train_batch_size,
+        "per_device_eval_batch_size": evaluation_batch_size(sft_config),
     }
     varlen_rows = rows_reach_varlen_kernel(**rows)
     attn_default = default_training_rows_attn_implementation(

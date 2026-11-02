@@ -74,7 +74,8 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
   as wide as a routed one, and the setting runs it on a side stream while the tokens travel to their
   experts, instead of after they return.
 - **Attention.** The recipe leaves `attn_implementation` unset, so Halo picks FA4 on Blackwell and FA3
-  on Hopper. MLA's query/key and value widths are both 128 here, so no kernel veto applies.
+  on Hopper. MLA's query/key and value widths are both 128 here, so FA4's general kernel runs it; the
+  head_dim-256 kernel limits do not apply.
 
 ## Limits
 

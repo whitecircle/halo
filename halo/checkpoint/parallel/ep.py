@@ -28,6 +28,7 @@ from halo.distributed.context_parallel.ulysses_attention import UlyssesAttention
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
+from halo.models.external_tables import named_external_tables
 from halo.models.moe.family_specs import find_moe_family_spec, moe_model_types
 from halo.models.param_roles import persistent_buffers
 from halo.models.peft_adapters import LoraFolds, lora_fold_targets, lora_folded_data
@@ -295,6 +296,14 @@ def reject_unmergeable_ep_sharded_save(
             "never matches — they pass through dead while the merged experts are the FROZEN base. "
             "Use save_sharded_ep=False (gathered), which folds the adapters via "
             "merge_expert_lora_on_save or writes them alongside the base."
+        )
+    tables = [name for name, _ in named_external_tables(model)]
+    if tables:
+        raise ValueError(
+            f"Sharded EP save (save_sharded_ep=True) is not supported for a model holding external tables "
+            f"({', '.join(tables[:2])}): merge_ep_shards.py merges the per-rank shards key by key with no model "
+            f"to read a table from, so the merged checkpoint would lack it. Use save_sharded_ep=False "
+            f"(gathered), which writes the tables."
         )
     _reject_unmergeable_hub_keys(model)
     # Attribute access, not getattr with a default: on anything but a finalized EPConfig the guards

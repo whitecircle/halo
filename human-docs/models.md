@@ -5,7 +5,7 @@ no extra work: point `model_name_or_path` at it and launch.
 
 The families below also have expert, context, tensor or pipeline-parallel
 support ([which, per family](supported-matrix.md#model-families)), a tuned
-recipe and GPU-validated coverage, except where a row says otherwise. Sixteen
+recipe and GPU-validated coverage, except where a row says otherwise. Seventeen
 of them are MoE.
 
 | Family | Hub example | Kind | What to know |
@@ -26,6 +26,8 @@ of them are MoE.
 | [GLM-5 Next](../agent-docs/models/glm5-next.md) ↗ | `zai-org/GLM-5.3-Flash` | MoE | convert fp8 to bf16 first; SDPA only |
 | [Step-3.7 Flash](../agent-docs/models/step3p7.md) ↗ | `stepfun-ai/Step-3.7-Flash` | MoE | composite VLM; SDPA only |
 | [Qwen3-Next](../agent-docs/models/qwen3-next.md) ↗ | `Qwen/Qwen3-Next-80B-A3B-Instruct` | MoE | hybrid linear attention; tiny-model GPU tests only |
+| [Qwen3.8-Flash-Next](../agent-docs/models/qwen4_exp.md) ↗ | `Qwen/Qwen3.8-Flash-Next` | MoE | experimental: SFT only, GPU-tested on tiny models only (EP+ETP untested); the n-gram table stays in host memory |
+| [Qwen3.8 dense](../agent-docs/models/qwen3_5.md#qwen38-27b) ↗ | `Qwen/Qwen3.8-27B` | dense | the Qwen3.5 dense path; the hub chat template refuses `reasoning_effort: high`; no recipe, no GPU run yet |
 | [Qwen3 dense](../agent-docs/models/qwen3.md) ↗ | `Qwen/Qwen3-4B-Instruct-2507` | dense | the reference dense family |
 | Any other HF causal LM | Llama, Mistral, Phi, … | dense | FSDP2 by default; TP needs a `tp_plan` |
 
@@ -53,7 +55,7 @@ checkpoint:
   with packing available.
 
 To load a multimodal checkpoint as text-only, set `text_only_model: true`. GLM-5
-Next and Step-3.7 Flash have no text-only variant and refuse it.
+Next, Step-3.7 Flash and Gemma 4 have no text-only variant and refuse it.
 
 Image data works for SFT, DPO, KTO, SMPO and both distillation trainers. Reward
 modeling takes images only on checkpoints with a multimodal sequence-classification

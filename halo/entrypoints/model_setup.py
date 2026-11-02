@@ -35,7 +35,7 @@ from halo.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, co
 from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
 from halo.models.attention.selection import (
     declares_attention_backends,
-    fa4_varlen_backward_refusal,
+    fa4_varlen_refusal,
     flash_attention_2_in_place_of_fa4,
     preferred_flash_impl,
     uses_fa4_dedicated_head_dim,
@@ -69,16 +69,15 @@ def default_padded_attn_implementation(
 ) -> str | None:
     """Attention implementation for a script that forwards right-padded batches, when the YAML pins none.
 
-    On Blackwell ``None``, the loader's own pick: FA4 where it applies, which outruns SDPA on these batches.
-    SDPA there when a checkpoint this request loads rules that pick out, and on every other GPU: a
-    remote-code class the resolver cannot read (Bailing's refuses every flash label at build), and a
-    head_dim-256 attention (:func:`uses_fa4_dedicated_head_dim`), whose dedicated FA4 kernel these scripts' padded
-    batches have not been measured on. The policy's own attention rules it out too where FA4's varlen backward refuses it
-    (:func:`fa4_varlen_backward_refusal`: Gemma 2's softcap, which then refuses SDPA and lands on FA2), since a
-    padded batch unpads to that call; the forward-only companions run it. ``checkpoint_config`` is the policy's
-    config; omitted, it is fetched (COLLECTIVE). ``companion_configs`` are those of the further models loaded on
-    the same request (a distillation teacher). ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks live)
-    drops the default, since only a sink-carrying impl is accepted there; pass the run's own ``reset_sinks``.
+    On Blackwell ``None``, the loader's own pick: FA4 where it applies, which outruns SDPA on these batches, and the
+    resolver's FA2 where FA4 does not train the attention (head_dim-256 Gemma 2/3, multi-head latent attention).
+    ``sdpa`` on every other GPU, and on Blackwell where a checkpoint this request loads rules that pick out: a
+    remote-code class the resolver cannot read (Bailing's refuses every flash label at build), or an attention
+    FA4's varlen kernels refuse (:func:`fa4_varlen_refusal`: Gemma 2's softcap, which then refuses SDPA and lands
+    on FA2), since a padded batch unpads to them, a forward-only companion's too. ``checkpoint_config`` is the
+    policy's config; omitted, it is fetched (COLLECTIVE). ``companion_configs`` are those of the further models
+    loaded on the same request (a distillation teacher). ``sinks_reset=False`` (on-policy gpt-oss, pretrained sinks
+    live) drops the default, since only a sink-carrying impl is accepted there; pass the run's own ``reset_sinks``.
     ``context_parallel`` drops it too: Ulysses calls FlashAttention itself, so the loader's hardware-aware
     pick names it.
     """
@@ -91,9 +90,7 @@ def default_padded_attn_implementation(
     if checkpoint_config is None:
         checkpoint_config = fetch_checkpoint_config(model_config, tag="padded_attn_default")
     loaded = (checkpoint_config, *companion_configs)
-    if fa4_varlen_backward_refusal(checkpoint_config) is None and all(
-        declares_attention_backends(config) and not uses_fa4_dedicated_head_dim(config) for config in loaded
-    ):
+    if all(declares_attention_backends(config) and fa4_varlen_refusal(config) is None for config in loaded):
         return None
     return "sdpa"
 
@@ -106,15 +103,17 @@ def default_training_rows_attn_implementation(
     per_device_train_batch_size: int,
     dtype: torch.dtype,
     checkpoint_config=None,
+    per_device_eval_batch_size: int = 0,
 ) -> str | None:
-    """Attention implementation for a script that knows the shape of its training rows (SFT, self-distillation,
-    embedding), when the YAML pins none: ``flash_attention_2`` where the load would resolve FA4 (the GPU's own pick,
-    at a half-precision ``dtype``) on rows that reach its varlen call (:func:`rows_reach_varlen_kernel`) and one of
-    two kernel limits applies, else ``None``, the loader's pick.
+    """Attention implementation for a script that knows the shape of its rows (SFT, self-distillation, embedding),
+    when the YAML pins none: ``flash_attention_2`` where the load would resolve FA4 (the GPU's own pick, at a
+    half-precision ``dtype``) on rows that reach its varlen call (:func:`rows_reach_varlen_kernel`, evaluation batches
+    of ``per_device_eval_batch_size`` rows included) and one of two kernel limits applies, else ``None``, the
+    loader's pick.
 
-    - FA4's varlen backward refuses the checkpoint's attention (:func:`fa4_varlen_backward_refusal`: Gemma 2's
-      softcap); raises where no FA2 build imports. One unpadded row per batch runs FA4's dense kernel, which takes
-      the softcap.
+    - FA4's varlen kernels refuse the checkpoint's attention (:func:`fa4_varlen_refusal`: Gemma 2's softcap);
+      raises where no FA2 build imports. One unpadded row per batch, training and evaluation, runs FA4's dense
+      kernel, which takes the softcap.
     - The rows hold several documents (``packing``, ``padding_free``) on a decoder with GatedDeltaNet layers
       (:func:`has_gated_delta_net_layers`: the Qwen3.5/3.6 recipes pack on FA2, Qwen3-Next shares their attention)
       whose heads run FA4's dedicated head_dim-256 kernel (:func:`uses_fa4_dedicated_head_dim`): that kernel is no
@@ -128,17 +127,20 @@ def default_training_rows_attn_implementation(
     if model_config.attn_implementation:
         return model_config.attn_implementation
     varlen_rows = rows_reach_varlen_kernel(
-        packing=packing, padding_free=padding_free, per_device_train_batch_size=per_device_train_batch_size
+        packing=packing,
+        padding_free=padding_free,
+        per_device_train_batch_size=per_device_train_batch_size,
+        per_device_eval_batch_size=per_device_eval_batch_size,
     )
     if not varlen_rows or dtype == torch.float32 or preferred_flash_impl() != "flash_attention_4":
         return None
     if checkpoint_config is None:
         checkpoint_config = fetch_checkpoint_config(model_config, tag="training_rows_attn_default")
-    refused = fa4_varlen_backward_refusal(checkpoint_config)
+    refused = fa4_varlen_refusal(checkpoint_config)
     if refused is not None:
         return flash_attention_2_in_place_of_fa4(
-            f"FlashAttention-4's varlen backward takes no {refused}, and this run trains on rows that reach it "
-            f"(packed, padding-free or padded)"
+            f"FlashAttention-4's varlen kernels take no {refused}, and this run forwards rows that reach them "
+            f"(packed, padding-free or padded, in training or evaluation)"
         )
     if (
         (packing or padding_free)

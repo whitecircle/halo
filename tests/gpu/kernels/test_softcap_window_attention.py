@@ -7,12 +7,13 @@ head_dim 256 with sliding layers whose window the rows exceed. Each row shape re
 unpacked row through SFT's default at one row per batch, a row of three packed documents through SFT's default for
 packed rows, a right-padded batch of two through the padded scripts' default. FA4's head_dim-256 kernel asserts on a
 softcap and on a window, and its varlen backward on a softcap, so only Gemma 2 27B's unpacked row may stay on FA4;
-every other row expects FA2, except Gemma 3's padded batch, which the padded scripts keep on SDPA at head_dim 256. The
-bf16 model then trains each row on its backend against the same weights in fp32 on eager.
+every other row expects FA2. The bf16 model then trains each row on its backend against the same weights in fp32 on
+eager.
 
 Per row, the logits and the median gradient must stay within 1.5x of bf16 eager's error, all finite. Premise checks
-keep the gates honest: at head_dim 256 FA4 refuses the forward, at 128 FA4's backward refuses the packed and the
-padded rows (both routes are still needed), and on Gemma 2 SDPA's logits error is at least 10x eager's (the softcap
+keep the gates honest: at head_dim 256 FA4 refuses the forward, at 128 FA4 refuses the packed and the padded rows
+(both routes are still needed): the varlen entry point's softcap refusal stops their forward, where the kernel's
+backward would assert and, on B300, its forward would not finish, and on Gemma 2 SDPA's logits error is at least 10x eager's (the softcap
 it drops matters at this geometry). Fails if a row resolves to FA4 where FA4 cannot train it, to SDPA under a
 softcap, or if its backend trains it wrong.
 
@@ -49,6 +50,8 @@ SCORE_SCALE = 8.0
 EAGER_ERROR_RATIO = 1.5
 # SDPA without the softcap is a different function, not a rounding difference.
 SOFTCAP_DROP_RATIO = 10.0
+# What FA4's varlen entry point raises on a softcapped call once the family patches installed its refusal.
+VARLEN_SOFTCAP_REFUSAL = "reached FlashAttention-4's varlen kernels"
 FA2, FA4, SDPA = "flash_attention_2", "flash_attention_4", "sdpa"
 
 _GEOMETRY = {
@@ -73,7 +76,7 @@ FAMILIES = {
         {**_GEMMA2_SOFTCAP, "head_dim": 128, "query_pre_attn_scalar": 128},
         {"unpacked": FA4, "packed": FA2, "padded": FA2},
     ),
-    "gemma3_text": (Gemma3TextConfig, Gemma3ForCausalLM, {}, {"unpacked": FA2, "packed": FA2, "padded": SDPA}),
+    "gemma3_text": (Gemma3TextConfig, Gemma3ForCausalLM, {}, {"unpacked": FA2, "packed": FA2, "padded": FA2}),
 }
 
 
@@ -129,8 +132,8 @@ def _errors(model, row, attn_implementation, reference) -> dict[str, float]:
 
 
 def _fa4_refuses(model, row, *, backward: bool) -> bool:
-    """Whether FA4 raises on this row's forward (or, with ``backward``, its backward): the kernel limit a route off
-    FA4 exists for."""
+    """Whether FA4 raises on this row's forward (or, with ``backward``, its backward), its kernel's assert or the
+    varlen entry point's softcap refusal the family patches install: the kernel limit a route off FA4 exists for."""
     model.config._attn_implementation = apply_family_patches(model.config, FA4)
     model.zero_grad(set_to_none=True)
     try:
@@ -140,6 +143,11 @@ def _fa4_refuses(model, row, *, backward: bool) -> bool:
                 logits.float().sum().backward()
     except AssertionError as error:
         log(f"  FA4 refused the {'backward' if backward else 'forward'}: {error}")
+        return True
+    except RuntimeError as error:
+        if VARLEN_SOFTCAP_REFUSAL not in str(error):
+            raise
+        log(f"  FA4's varlen entry point refused the forward: {error}")
         return True
     return False
 
@@ -188,7 +196,7 @@ def run(ctx):
         checks["fa4_refuses_this_model"] = _fa4_refuses(model, rows["unpacked"], backward=False)
     else:
         for row_name in ("packed", "padded"):
-            checks[f"fa4_backward_refuses_the_{row_name}_row"] = _fa4_refuses(model, rows[row_name], backward=True)
+            checks[f"fa4_refuses_the_{row_name}_row"] = _fa4_refuses(model, rows[row_name], backward=True)
     return {"checks": checks, "metrics": metrics}
 
 

@@ -22,6 +22,7 @@ writes its own copy.
 | **TP** (HF-native or selective) | `save_tp_checkpoint` — reconstruct DTensors, then all-gather the hand-sliced GptOss `sinks` (which the parameter walk skips: it would emit this rank's slice under the same key) | Save rank | `DTensor.full_tensor()` |
 | **CP** | `save_cp_checkpoint` — remap Ulysses wrapper keys to HF paths | Save rank | `full_tensor()` |
 | **FSDP2** (plain torchrun DP) | `save_fsdp2_checkpoint` — stream the gathered chunks | Save rank | `full_tensor()` |
+| **Single-GPU / DDP holding an [external table](#external-tables)** | `save_unsharded_checkpoint` — stream the whole model, tables included | Save rank | None |
 | **Single-GPU / accelerate** (no EP layers) | no saver (the ladder returns `None`) → HF Trainer default | Main process | None |
 
 Selection reads what the model **is**, not the configured sizes: a model carrying EP layers takes the EP
@@ -42,8 +43,8 @@ conversion-closed chunk (a decoder layer) at a time, EP its non-expert tensors a
 it is gathered. The writer holds at most one chunk, the shard it is filling and one shard per background
 write thread (`HALO_CHECKPOINT_WRITE_THREADS`, default `0`), so host memory stays well under 1× model
 ([measured peaks](../parallelism/expert-parallelism.md#checkpointing)). By default each part is written in
-line; a positive count writes the finished parts on that many threads while the next chunk is gathered and
-converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
+line; opting in with a positive count writes the finished parts on that many threads while the next chunk is
+gathered and converted, and the bytes on disk are the same at any thread count. A failed part write is raised on every
 rank, through the stream's deferred guard or the finalize's, and no write outlives the save that started it;
 one failing while the save is already raising another error is logged beside it.
 
@@ -51,10 +52,10 @@ The tokenizer is written once per save, before the weights (`save_tokenizer`), s
 its index names the weight files is already loadable with its tokenizer. A failed tokenizer write raises
 on every rank.
 
-The streamed parts are renamed to HF's own `model-{i}-of-{n}` once the count is known, so
-`from_pretrained` reads the result exactly as a `save_pretrained` checkpoint. Part *boundaries* can
-differ from HF's splitter's — the streaming writer flushes a block before an oversized tensor — so the
-file count and key→file mapping can differ while both load the same.
+The streamed parts are renamed to HF's own `model-{i}-of-{n}` once the count is known and every part is
+on disk, so `from_pretrained` reads the result exactly as a `save_pretrained` checkpoint. Part
+*boundaries* can differ from HF's splitter's — the streaming writer flushes a block before an oversized
+tensor — so the file count and key→file mapping can differ while both load the same.
 
 ## What lands on disk — four layouts
 
@@ -149,6 +150,31 @@ leaves: a staged write's stage, the withheld `.trainer_state.json.uncommitted`, 
 A failed write raises on every rank; no gathered save falls back to `pytorch_model.bin`. Only the
 config write is gated on the model carrying one; a model without a config still gets normalized weights
 in safetensors.
+
+### External tables
+
+A frozen table a module holds outside its state (`ExternalTable`, `halo/models/external_tables.py`:
+Qwen3.8-Flash-Next's [n-gram table](../models/qwen4_exp.md#n-gram-table)) is no parameter or buffer, so the
+gathered writer writes it itself, after the streamed weights and before the index
+(`halo/checkpoint/external_tables.py`); under background part writes it is written while the last parts are still
+in flight, and the index waits for every part. Its parts go into table-only files `model-tableNN-*.safetensors`
+under `<module path>.<part key>`, the keys transformers concatenates on load. A save holding a table always gets
+an index, and its streamed part is never named `model.safetensors`, which `from_pretrained` reads over an index.
+
+The first save of a process writes the table from the views it was attached as; each later save hard-links the
+last save's table files (`link_or_copy_file`: a copy across filesystems), and a table attached from a
+checkpoint's table-only files links them on its first save. A model the gathered writer would not otherwise save
+(one process or DDP without EP layers) takes `save_unsharded_checkpoint` rather than the base Trainer's
+`save_pretrained`, whose state dict holds no table; the family patch refuses a direct `save_pretrained`
+(`reject_state_dict_save`). Under accelerate-managed FSDP the base Trainer owns every save, so the trainer refuses a
+model holding a table at construction unless it trains adapters (`reject_unsaveable_external_tables`). The sharded
+EP save refuses a model holding a table too.
+
+The table attaches from the directory the loader read the weights from: the agreed source's snapshot for a Hub id,
+which the policy loaders and the trainer-path load name to `finalize_loaded_model`, since the model's config records
+the Hub id but no revision. A model loaded outside them from a Hub id is refused; one built with random weights
+(`init_from_scratch`) is refused before the build (`reject_random_init_tables`), since only the checkpoint supplies
+the frozen table.
 
 ### Exported `config.json`
 
@@ -492,7 +518,7 @@ optimizer and LR scheduler. WandB does **not** continue the same run on its own 
 | Mode | Path | Weight loading | Optimizer | Notes |
 |------|------|----------------|-----------|-------|
 | **FSDP2** (standard DP) | A at `use_grouped_gemm: false`, else B | Path A: `load_full_state_dict()` on rank 0 → `ModuleLayoutView` → `set_model_state_dict(full_state_dict=True, broadcast_from_rank0=True)`. Path B: loaded at construction, the re-read skipped | Per-rank FSDP2 shards | Exact resume, same world size |
-| **Single process / DDP** | A at `use_grouped_gemm: false`, else B | Path A: each rank streams the weights into its own copy through `ModuleLayoutView`. Accelerate-managed FSDP and a sentence-transformers pipeline keep the base Trainer's loader | The base Trainer's `optimizer.pt` | Exact resume |
+| **Single process / DDP** | A at `use_grouped_gemm: false`, else B | Path A: each rank streams the weights into its own copy through `ModuleLayoutView`; an adapter-only checkpoint restores through `restore_adapters` at the adapters' live dtype. Accelerate-managed FSDP and a sentence-transformers pipeline keep the base Trainer's loader | The base Trainer's `optimizer.pt` | Exact resume |
 | **TP** | B | Loaded at construction. Where it does read (a best-model reload, a model built elsewhere), each rank streams the checkpoint (`StreamingCheckpointReader`, no rank-0 buffer) and `distribute_tensor`s each tensor into the live placements (`src_data_rank=None`), GptOss `sinks` sliced by `tp_rank`; TP+DP raises for a model not constructed from the checkpoint | Per-rank shards | Exact resume, same world size |
 | **CP** | B | Loaded at construction via `load_distributed_model()` | Per-rank shards (matching fingerprint) | Checkpoint has HF keys, model has CP wrapper keys |
 | **EP / ETP / EP+CP / EP+TP** | B | Loaded at construction; the checkpoint holds the hub-spelled full expert tensors, not the rank-local slices the EP model registers | Per-rank shards (matching fingerprint) | A model built from anything but the checkpoint makes the loader refuse the resume |
@@ -511,10 +537,16 @@ base-Trainer fallback together; a rank-local read failure after a positive verdi
 
 Because the Path-B base is rebuilt fresh, `load_resume_weights` restores adapters separately
 (`restore_adapters`, `halo/checkpoint/parallel/adapters.py`): native EP expert adapters sliced per rank, PEFT
-attention adapters via `set_peft_model_state_dict`, from the checkpoint root or `resume_adapter/`. It warns
-on partial matches and raises if *every* saved key is unmatched, if no EP layer can receive the expert
-adapters, or if the LoRA scaling differs from the saved `adapter_config.json`'s
-([PEFT](../optimization/peft.md#checkpoint-saving)).
+attention adapters copied into the live tensor behind each saved key at its live dtype, from the checkpoint root
+or `resume_adapter/`. A single-process or DDP PEFT run's adapter-only checkpoint restores the same way rather than
+through the base Trainer's `load_adapter`, which recasts bf16 adapters to fp32 before the optimizer is built over
+them. Before any copy every rank matches the file to what a save of the live model writes, key for key at the
+saved shape: the PEFT selection over the attention adapters, `modules_to_save` and their persistent buffers, and
+each EP layer's gathered expert layout (every expert along dim 0). A missing, unexpected or reshaped tensor (a
+changed `lora_r` or `lora_target_modules`, a file without the expert half a run trains, a short copy on one node),
+a LoRA scaling other than the saved `adapter_config.json`'s, or saved attention tensors on a model without PEFT
+raises on every rank, naming the keys: the attention and the expert verdicts are each joined across ranks before
+either population copies a tensor ([PEFT](../optimization/peft.md#checkpoint-saving)).
 
 Router balancing biases: under `bias_update` they live in the family's own checkpoint slot, ride
 `model.safetensors` at their trained fp32 (`balancing_param_keys` exempts them from the bf16 cast) and serve

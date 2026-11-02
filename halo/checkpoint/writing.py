@@ -185,11 +185,13 @@ def _write_part(part: dict[str, torch.Tensor], path: str) -> None:
 
 def checkpoint_write_threads() -> int:
     """How many finished parts an entered :class:`StreamingShardWriter` writes in the background at once
-    (``HALO_CHECKPOINT_WRITE_THREADS``; a negative value warns and reads as 0); 0 writes each part in line."""
+    (``HALO_CHECKPOINT_WRITE_THREADS``; a negative value raises); 0 writes each part in line."""
     threads = env_int("HALO_CHECKPOINT_WRITE_THREADS", DEFAULT_CHECKPOINT_WRITE_THREADS)
     if threads < 0:
-        logger.warning(f"Ignoring HALO_CHECKPOINT_WRITE_THREADS={threads} (expected >= 0); writing each part in line.")
-        return 0
+        raise ValueError(
+            f"HALO_CHECKPOINT_WRITE_THREADS={threads}: expected a thread count >= 0 (0 writes each checkpoint part "
+            f"in line)."
+        )
     return threads
 
 
@@ -219,13 +221,18 @@ class StreamingShardWriter:
         self._weight_map: dict[str, str] = {}
         self._part_names: list[str] = []
         self._total_bytes = 0
+        # Files already on disk under their final names, which the index claims as they are.
+        self._written_map: dict[str, str] = {}
+        self._written_bytes = 0
         self._write_threads = 0
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._writes: deque[concurrent.futures.Future] = deque()
         self._write_error: BaseException | None = None
 
     def __enter__(self) -> StreamingShardWriter:
-        self._write_threads = checkpoint_write_threads() if self.enabled else 0
+        # Read on every rank, the disabled ones included, so a refused count raises before the save's first gather.
+        threads = checkpoint_write_threads()
+        self._write_threads = threads if self.enabled else 0
         if self._write_threads:
             self._executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=self._write_threads, thread_name_prefix="halo-shard-writer"
@@ -265,7 +272,7 @@ class StreamingShardWriter:
         once, since the first may already sit in a flushed part."""
         if not self.enabled:
             return
-        if key in self._weight_map or key in self._pending:
+        if key in self._weight_map or key in self._pending or key in self._written_map:
             raise RuntimeError(
                 f"{key!r} was staged twice for the checkpoint in {self.output_dir}: a streamed part "
                 f"already claims it, so the second tensor cannot replace the first. Two chunks of "
@@ -279,6 +286,20 @@ class StreamingShardWriter:
         self._pending[key] = tensor.contiguous()
         self._pending_bytes += nbytes
 
+    def add_written_files(self, weight_map: Mapping[str, str], nbytes: int) -> None:
+        """Index ``weight_map``'s files, already in the output directory under their final names (an external
+        table's parts), as they are: never renamed, and never swept as leftovers."""
+        if not self.enabled:
+            return
+        claimed = set(weight_map) & (self._weight_map.keys() | self._pending.keys() | self._written_map.keys())
+        if claimed:
+            raise RuntimeError(
+                f"{sorted(claimed)[:3]} are written twice to the checkpoint in {self.output_dir}: a file already on "
+                f"disk and a staged tensor (or another file) claim the same key."
+            )
+        self._written_map.update(weight_map)
+        self._written_bytes += nbytes
+
     def close(self) -> tuple[dict[str, str], int]:
         """Flush the remainder and return ``(weight_map fragment, bytes written)`` for a multi-writer
         save to merge; call it before the index exchange."""
@@ -286,12 +307,12 @@ class StreamingShardWriter:
             return {}, 0
         self._flush()
         self._settle_writes(0)
-        return self._weight_map, self._total_bytes
+        return {**self._weight_map, **self._written_map}, self._total_bytes + self._written_bytes
 
     def close_as_hf_checkpoint(self) -> int:
-        """Flush, rename the parts to HF's names once all are on disk, then index a sharded result or sweep the
-        leftovers beside a single ``model.safetensors``; return the bytes written. Valid only when this writer
-        owns every ``model*.safetensors`` in the directory: it deletes the rest."""
+        """Flush, rename the parts to HF's names once all are on disk, then index a sharded result (or one beside
+        written files) or sweep the leftovers beside a single ``model.safetensors``; return the bytes written.
+        Valid only when this writer owns every ``model*.safetensors`` in the directory: it deletes the rest."""
         if not self.enabled:
             return 0
         self._flush()
@@ -302,17 +323,20 @@ class StreamingShardWriter:
                 f"designated save rank but no tensors were staged, so there is nothing to name and "
                 f"the existing files there would be deleted for nothing."
             )
+        indexed = self._part > 1 or bool(self._written_map)
         renamed = {
-            part_name: hf_shard_filename(i, self._part) for i, part_name in enumerate(self._part_names, start=1)
+            part_name: hf_shard_filename(i, self._part, indexed=indexed)
+            for i, part_name in enumerate(self._part_names, start=1)
         }
         for part_name, final in renamed.items():
             os.replace(os.path.join(self.output_dir, part_name), os.path.join(self.output_dir, final))
-        if self._part > 1:
+        total_bytes = self._total_bytes + self._written_bytes
+        if indexed:
             weight_map = {key: renamed[part_name] for key, part_name in self._weight_map.items()}
-            write_merged_index(self.output_dir, weight_map, {"total_size": self._total_bytes})
+            write_merged_index(self.output_dir, {**weight_map, **self._written_map}, {"total_size": total_bytes})
         else:
             remove_stale_checkpoint_files(self.output_dir, set(renamed.values()))
-        return self._total_bytes
+        return total_bytes
 
     def _flush(self) -> None:
         if not self._pending:

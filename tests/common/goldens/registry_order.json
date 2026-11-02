@@ -7,6 +7,7 @@
   "EPSharedExpertsMoELayerBase",
   "EPQwen3_5MoELayer",
   "EPQwen3NextMoELayer",
+  "EPQwen4ExpMoELayer",
   "EPQwen3MoELayer",
   "EPLfm2MoELayer",
   "EPDeepseekV4MoELayer",
@@ -26,6 +27,7 @@
   "Gemma4TextExperts": "EPGemma4MoELayer",
   "Qwen3_5MoeSparseMoeBlock": "EPQwen3_5MoELayer",
   "Qwen3NextSparseMoeBlock": "EPQwen3NextMoELayer",
+  "Qwen4ExpTextSparseMoeBlock": "EPQwen4ExpMoELayer",
   "Qwen3MoeSparseMoeBlock": "EPQwen3MoELayer",
   "Lfm2MoeSparseMoeBlock": "EPLfm2MoELayer",
   "DeepseekV4SparseMoeBlock": "EPDeepseekV4MoELayer",
@@ -48,6 +50,8 @@
   "qwen3_5_moe": "EPQwen3_5MoELayer",
   "qwen3_5_moe_text": "EPQwen3_5MoELayer",
   "qwen3_next": "EPQwen3NextMoELayer",
+  "qwen4_exp": "EPQwen4ExpMoELayer",
+  "qwen4_exp_text": "EPQwen4ExpMoELayer",
   "qwen3_moe": "EPQwen3MoELayer",
   "lfm2_moe": "EPLfm2MoELayer",
   "lfm2_vl": "EPLfm2MoELayer",
@@ -90,6 +94,8 @@
   "qwen3_5_moe_text",
   "qwen3_moe",
   "qwen3_next",
+  "qwen4_exp",
+  "qwen4_exp_text",
   "step3p5",
   "step3p7",
   "zaya"
@@ -465,6 +471,27 @@
    "upstream_off": [
     "swiglu"
    ]
+  },
+  {
+   "model_types": [
+    "qwen4_exp_text"
+   ],
+   "modeling_module": "transformers.models.qwen4_exp.modeling_qwen4_exp",
+   "rms_norm": [],
+   "rms_norm_casting_mode": "llama",
+   "rms_norm_offset": 0.0,
+   "rms_norm_kernel": "liger",
+   "gated_rms_norm": [],
+   "glu_mlp": [],
+   "causal_lm": [
+    "Qwen4ExpForCausalLM"
+   ],
+   "router_aux_loss_in_head": true,
+   "rope": false,
+   "flce_default": false,
+   "remote_classes": [],
+   "delegates_to_upstream": false,
+   "upstream_off": []
   },
   {
    "model_types": [

@@ -296,17 +296,17 @@ def test_laguna_global_head_count_is_the_full_layers():
     [
         pytest.param(
             _step3p7,
-            {AttentionCall(4, 2, 64, None, 0.125, None), AttentionCall(2, 2, 64, 64, 0.125, None)},
+            {AttentionCall(4, 2, 64, 64, None, 0.125, None), AttentionCall(2, 2, 64, 64, 64, 0.125, None)},
             id="step3p7",
         ),
         pytest.param(
             _laguna,
-            {AttentionCall(4, 2, 64, None, 0.125, None), AttentionCall(8, 2, 64, 64, 0.125, None)},
+            {AttentionCall(4, 2, 64, 64, None, 0.125, None), AttentionCall(8, 2, 64, 64, 64, 0.125, None)},
             id="laguna",
         ),
         pytest.param(
             lambda: InklingForCausalLM(InklingTextConfig(**TINY_INKLING_CONFIG)),
-            {AttentionCall(4, 2, 64, None, 1 / 64, None), AttentionCall(64, 16, 128, 32, 1 / 128, None)},
+            {AttentionCall(4, 2, 64, 64, None, 1 / 64, None), AttentionCall(64, 16, 128, 128, 32, 1 / 128, None)},
             id="inkling",
         ),
     ],
@@ -315,12 +315,14 @@ def test_each_layer_reports_its_own_head_count(build, expected):
     assert attention_calls(build()) == expected
 
 
-def test_mla_reports_its_query_key_width():
+def test_mla_reports_its_query_key_and_value_widths():
     """MLA keeps no ``head_dim`` on the module (GLM-4.7-Flash's config aliases it to the rope slice); flash runs
-    at the query/key width, with the value padded up to it."""
-    config = Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG)
+    at the query/key width, with the value padded up to it, and SDPA at the value's own width."""
+    config = Glm4MoeLiteConfig(**{**TINY_GLM4_MOE_LITE_CONFIG, "v_head_dim": 16})
     assert config.head_dim != config.qk_head_dim  # premise: the config's head_dim is not the kernel's width
-    assert {call.head_dim for call in attention_calls(Glm4MoeLiteForCausalLM(config))} == {config.qk_head_dim}
+    assert config.v_head_dim != config.qk_head_dim  # premise: the value is narrower
+    calls = attention_calls(Glm4MoeLiteForCausalLM(config))
+    assert {(call.head_dim, call.v_head_dim) for call in calls} == {(config.qk_head_dim, config.v_head_dim)}
 
 
 def test_a_config_level_window_is_the_call_window():
@@ -340,12 +342,12 @@ def test_the_flex_warmup_reads_per_layer_heads():
     """The flex warm-up compiles each layer's own call: on Step-3.7 and Laguna the sliding layers' head counts,
     which differ from the full layers'."""
     assert flex_attention_calls(_step3p7()) == {
-        AttentionCall(4, 2, 64, None, 0.125, None),
-        AttentionCall(2, 2, 64, 64, 0.125, None),
+        AttentionCall(4, 2, 64, 64, None, 0.125, None),
+        AttentionCall(2, 2, 64, 64, 64, 0.125, None),
     }
     assert flex_attention_calls(_laguna()) == {
-        AttentionCall(4, 2, 64, None, 0.125, None),
-        AttentionCall(8, 2, 64, 64, 0.125, None),
+        AttentionCall(4, 2, 64, 64, None, 0.125, None),
+        AttentionCall(8, 2, 64, 64, 64, 0.125, None),
     }
 
 

@@ -1,12 +1,17 @@
 """Numerical comparisons the correctness tests bound: tensor error metrics, NaN-carrying extremes, equality
-across float dtypes, Muon's orthogonality on a controlled spectrum, and the autograd graph a loss builds."""
+across float dtypes, Muon's orthogonality on a controlled spectrum, the autograd graph a loss builds, and the
+deterministic weight perturbation a measured noise floor starts from."""
 
 import math
 from collections.abc import Callable, Iterable
 
 import torch
+from torch.distributed.tensor import DTensor
 
 from tests.common.tolerances import TOL
+
+# Spreads ``sin(value * phase)`` over its whole range across weights of similar magnitude.
+_PERTURBATION_PHASE = 12345.678
 
 
 def cos_sim(a: torch.Tensor, b: torch.Tensor, *, label: str) -> float:
@@ -173,3 +178,25 @@ def autograd_nodes(tensor: torch.Tensor) -> list[torch.autograd.graph.Node]:
         nodes.append(node)
         pending.extend(parent for parent, _ in node.next_functions)
     return nodes
+
+
+def perturb_trainable(model: torch.nn.Module, relative: float) -> int:
+    """Scale every trainable element of ``model`` in place by ``1 + relative * sin(value * phase)``, computed in fp32
+    and stored back once at the parameter's dtype, and return how many stored elements changed.
+
+    The factor is a function of each element's own value, so ranks holding copies of one tensor (DP replicas of an
+    EP bank, a weight replicated across a TP or ETP split) perturb it alike without a collective; a DTensor changes
+    its local shard. A ``relative`` under half a ULP of the dtype rounds every element back (``5e-4`` in bf16), so
+    the count is the caller's proof that the perturbation took.
+    """
+    changed = 0
+    with torch.no_grad():
+        for param in model.parameters():
+            if not param.requires_grad:
+                continue
+            local = param.to_local() if isinstance(param, DTensor) else param
+            wide = local.float()
+            perturbed = (wide * (1 + relative * torch.sin(wide * _PERTURBATION_PHASE))).to(local.dtype)
+            changed += int((perturbed != local).sum())
+            local.copy_(perturbed)
+    return changed

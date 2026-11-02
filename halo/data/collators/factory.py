@@ -33,6 +33,7 @@ def select_data_collator(
     per_device_train_batch_size: int = 1,
     keeps_packed_rows: bool = False,
     allow_cross_document_linear_attention: bool = False,
+    per_device_eval_batch_size: int = 0,
 ):
     """The data collator matching the training configuration, ``None`` for TRL's own; raises on an option
     combination no collator can serve. ``model_config`` supplies the eos set that ends assistant turns,
@@ -49,6 +50,7 @@ def select_data_collator(
         per_device_train_batch_size=per_device_train_batch_size,
         keeps_packed_rows=keeps_packed_rows,
         allow_cross_document_linear_attention=allow_cross_document_linear_attention,
+        per_device_eval_batch_size=per_device_eval_batch_size,
     )
     markers = segment_markers_for(model_config)
     completion_kwargs = {

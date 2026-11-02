@@ -19,7 +19,11 @@ from halo.config_validation import reject_non_default_args, reject_unsupported_a
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.collators.collator_rules import reject_fa4_varlen_training, rows_reach_varlen_kernel
+from halo.data.collators.collator_rules import (
+    evaluation_batch_size,
+    reject_fa4_varlen_training,
+    rows_reach_varlen_kernel,
+)
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets
 from halo.entrypoints.model_setup import default_training_rows_attn_implementation, load_model_and_tokenizer
@@ -128,6 +132,7 @@ def _assemble_preloaded_pipeline(
         "packing": False,
         "padding_free": False,
         "per_device_train_batch_size": embedding_config.per_device_train_batch_size,
+        "per_device_eval_batch_size": evaluation_batch_size(embedding_config),
     }
     varlen_rows = rows_reach_varlen_kernel(**rows)
     backbone, tokenizer = load_model_and_tokenizer(
@@ -186,13 +191,13 @@ def _load_sentence_transformer(
     revision = resolve_model_source(
         context.model_source, model_config.model_revision, tag="embedding_model", whole_repo=True
     ).revision
-    # Pinned, the backend takes the family patches the parallel loader applies, keyed on the backbone's
-    # own config; unset, transformers picks it at the build.
-    if model_config.attn_implementation:
-        backbone_config = AutoConfig.from_pretrained(
-            context.model_source, revision=revision, trust_remote_code=model_config.trust_remote_code
-        )
-        model_kwargs["attn_implementation"] = apply_family_patches(backbone_config, model_config.attn_implementation)
+    # The family patches the parallel loader applies, keyed on the backbone's own config; unpinned, transformers picks
+    # the backend at the build and only the backend-independent patches apply (Zaya's checkpointing refusal).
+    backbone_config = AutoConfig.from_pretrained(
+        context.model_source, revision=revision, trust_remote_code=model_config.trust_remote_code
+    )
+    if attn_implementation := apply_family_patches(backbone_config, model_config.attn_implementation):
+        model_kwargs["attn_implementation"] = attn_implementation
     with (
         joined_node_load(
             f"Embedding model load from {context.model_source}", parallelism_config.max_concurrent_loading

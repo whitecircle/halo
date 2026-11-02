@@ -154,6 +154,7 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
 | DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors cut KV windows at row indices and judge their causality by position, so every document after the first attends the row's first windows — `packing` and `padding_free` are **refused** |
 | Qwen3.5 / 3.6, Qwen3-Next | isolated | GatedDeltaNet reads `seq_idx` (conv) + `cu_seq_lens_q` (delta rule): the collators and SMPO's padding-free forward emit both for the family, so its boundaries reach the kernels — but only the `fla` / `causal-conv1d` fast paths consume them (both installed in the images). The torch fallbacks take neither, so a multi-document row would cross in the conv *and* the scan — the factory refuses `packing` / `padding_free`, and SMPO its `padding_free`, unless transformers' own fast-path predicates hold |
+| Qwen3.8-Flash-Next | isolated — its sparse (QSA) layers run Halo's tiled kernel per `seq_idx` document, and a packed row without `seq_idx` is refused ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#attention-and-rows)) | GatedDeltaNet as Qwen3.5; the per-layer embedding's n-gram history and dilated conv restart at every `seq_idx` document start |
 | Bailing / Ling | Ling 2.0, Ring: isolated on flash only (`patch_v4_flash_attention_template`); eager/SDPA **leak** — the remote file builds its mask from `attention_mask` alone ([Bailing/Ling](../models/bailing.md#attention-and-packing)). Ling 3.0: flash refused, MLA on SDPA leaks the same way, so Ling 3.0 cannot pack | Ling 3.0 KDA and Ring's Lightning-Attention-2 linear layers — **cross**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
 | GLM-5 Next | both layer types receive the 2D padding mask `create_recurrent_attention_mask` builds, so no packed-boundary parameter reaches the DSA attention either — flat packing **crosses**, so it is refused; [tree packing](../optimization/tree-packing.md) isolates it (the DSA forward reads the plan's path links) | KDA linear attention — **crosses** under flat packing, the same unreachable-boundary class as Bailing/Ling; isolated under tree packing (conv and scan segmented by the plan) |
 | LFM-2 | isolated | ShortConv is isolated exactly: the collators and SMPO's padding-free forward emit `seq_idx` for this family and both conv paths honor it |
@@ -236,9 +237,9 @@ they score packed rows under the same masks the student does.
     DeepSeek-V4 (eager-only: head_dim 512 exceeds FA's 256 cap) refuses both. Gemma 4 lands on the
     warning; its shipped config packs at batch 1. See [Padding-Free Collator](../optimization/padding-free-collator.md).
 
-- **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose backward takes no softcap. Packed,
-  padding-free and padded rows (more than one per batch: transformers unpads any batch holding a padding token)
-  all reach it (`rows_reach_varlen_kernel`). Left unset, `attn_implementation` takes FA2 there; a pinned
+- **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose kernels take no softcap (the
+  backward asserts, and on B300 the forward does not finish). Packed, padding-free and padded rows (more than one
+  per batch: transformers unpads any batch holding a padding token) all reach it (`rows_reach_varlen_kernel`). Left unset, `attn_implementation` takes FA2 there; a pinned
   `flash_attention_4` the load keeps (Gemma 2 27B; the resolver moves a head_dim-256 pin to FA2) is refused before
   the load and again on the resolved backend by `select_data_collator` (`reject_fa4_varlen_training`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 

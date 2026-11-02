@@ -9,8 +9,8 @@ be removed; for resume the saved adapter keys must match the rebuilt layer exact
     the base-only matmul) and restores each layer's PRIOR per-layer enabled flag, with re-entrancy.
   * :func:`install_ep_aware_disable_adapter` — wraps ``PeftModel.disable_adapter`` so it ALSO flips the
     EP layers' ``_expert_adapters_enabled``; idempotent; both flags restored on exit.
-  * :meth:`EPMoELayerBase.load_expert_lora_state_dict` — RAISES on a key-set mismatch (the GptOss
-    gate_up_proj-vs-gate_proj rename, or an empty state handed to a layer carrying adapters) and
+  * :func:`load_expert_lora_adapters` — RAISES on a key-set mismatch (the GptOss gate_up_proj-vs-gate_proj
+    rename, or an empty state handed to a layer carrying adapters) before the layer copies anything, and
     accepts an empty state only on a layer without expert adapters.
 
 Builds a tiny ``EPMoELayerBase`` SUBCLASS that bypasses the EP/DeepEP ``__init__`` and sets only the
@@ -23,6 +23,7 @@ Run: ``python tests/cpu/peft/test_ep_lora_kl_disable.py`` (or ``pytest -m cpu``)
 from __future__ import annotations
 
 import contextlib
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -31,6 +32,7 @@ from torch import nn
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     disable_expert_adapters,
     install_ep_aware_disable_adapter,
+    load_expert_lora_adapters,
 )
 from tests.common.ep_stubs import StubEPLayerBase
 
@@ -55,6 +57,7 @@ class _StubEPLayer(StubEPLayerBase):
         self.expert_lora_dropout = nn.Identity()
         self._expert_adapters_enabled = True
         self.expert_start, self.expert_end = 0, _E
+        self.ep_config = SimpleNamespace(ep_size=1)
         self.expert_tp_size = 1
         self.expert_tp_rank = 0
 
@@ -191,21 +194,30 @@ def test_ep_aware_is_idempotent():
 
 
 # --------------------------------------------------------------------------- #
-# load_expert_lora_state_dict — fail-loud key guard
+# load_expert_lora_adapters — fail-loud key guard
 # --------------------------------------------------------------------------- #
+
+
+def _holding(layer: nn.Module) -> nn.Module:
+    """A model holding ``layer`` at ``layer``, so its saved keys are ``layer.experts.<attr>.lora_{A,B}``."""
+    root = nn.Module()
+    root.layer = layer
+    return root
 
 
 def test_load_raises_on_key_set_mismatch():
     """A layer adapting {gate_proj, down_proj} fed a state keyed for the GptOss-renamed gate_up_proj
-    must RAISE — the alternative is silently rebuilding zero-init adapters."""
+    must RAISE — the alternative is silently rebuilding zero-init adapters — and copy nothing."""
     layer = _StubEPLayer(attrs=("gate_proj", "down_proj"))
+    before = {name: param.detach().clone() for name, param in layer.named_parameters()}
     # Saved state from a checkpoint with the fused gate_up_proj naming.
     bad_state = {
-        "experts.gate_up_proj.lora_A": torch.randn(_E, _K, _R),
-        "experts.gate_up_proj.lora_B": torch.randn(_E, _R, _N),
+        "layer.experts.gate_up_proj.lora_A": torch.randn(_E, _K, _R),
+        "layer.experts.gate_up_proj.lora_B": torch.randn(_E, _R, _N),
     }
-    with pytest.raises(RuntimeError, match="Expert-LoRA resume mismatch"):
-        layer.load_expert_lora_state_dict(bad_state)
+    with pytest.raises(RuntimeError, match="do not match the ones this model builds"):
+        load_expert_lora_adapters(_holding(layer), bad_state)
+    assert all(torch.equal(param, before[name]) for name, param in layer.named_parameters())
 
 
 def test_load_roundtrips_matching_keys():
@@ -213,24 +225,26 @@ def test_load_roundtrips_matching_keys():
     layer = _StubEPLayer(attrs=("gate_proj",))
     new_a = torch.randn(_E, _K, _R)
     new_b = torch.randn(_E, _R, _N)
-    layer.load_expert_lora_state_dict({"experts.gate_proj.lora_A": new_a, "experts.gate_proj.lora_B": new_b})
+    load_expert_lora_adapters(
+        _holding(layer), {"layer.experts.gate_proj.lora_A": new_a, "layer.experts.gate_proj.lora_B": new_b}
+    )
     assert torch.allclose(layer.gate_proj_lora_A.data, new_a)
     assert torch.allclose(layer.gate_proj_lora_B.data, new_b)
 
 
 def test_load_empty_state_raises_the_descriptive_mismatch():
     """A layer that rebuilt adapters but received no saved keys is the same resume mismatch as a
-    wrongly-keyed state, and must raise the actionable message — not the bare ``KeyError`` the copy
-    loop would otherwise produce, which names neither the layer nor the remedy."""
+    wrongly-keyed state, and must raise the actionable message naming the missing keys — not the bare
+    ``KeyError`` the copy loop would otherwise produce, which names neither the layer nor the remedy."""
     layer = _StubEPLayer(attrs=("gate_proj",))
-    with pytest.raises(RuntimeError, match="Expert-LoRA resume mismatch"):
-        layer.load_expert_lora_state_dict({})
+    with pytest.raises(RuntimeError, match=r"missing from the file \['layer\.experts\.gate_proj\.lora_A'"):
+        load_expert_lora_adapters(_holding(layer), {})
 
 
 def test_load_empty_state_on_a_layer_without_adapters_is_a_no_op():
     """The guard keys on the key SETS, so a layer with no expert-LoRA attrs accepts an empty state."""
     layer = _StubEPLayer(attrs=())
-    layer.load_expert_lora_state_dict({})
+    load_expert_lora_adapters(_holding(layer), {})
 
 
 if __name__ == "__main__":

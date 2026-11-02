@@ -14,6 +14,7 @@ from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
 from halo.data.collators.collator_rules import (
+    evaluation_batch_size,
     reject_dense_attention_rows,
     reject_fa4_varlen_training,
     reject_mrope_padding_free,
@@ -63,7 +64,7 @@ from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.parallel.whole_model import warm_tree_attention_kernels
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
-from halo.models.attention.selection import fa4_varlen_backward_refusal
+from halo.models.attention.selection import fa4_varlen_refusal
 from halo.models.attention.tree import (
     install_tree_attention,
     reject_unsupported_tree_attention,
@@ -179,12 +180,13 @@ def _packs_rows(sft_config, metadata) -> bool:
     return metadata.packed if metadata is not None else sft_config.packing
 
 
-def _trains_on_varlen_rows(sft_config, metadata) -> bool:
-    """Whether the training rows reach FlashAttention's varlen call (:func:`rows_reach_varlen_kernel`)."""
+def _reaches_varlen_rows(sft_config, metadata) -> bool:
+    """Whether the training or evaluation rows reach FlashAttention's varlen call (:func:`rows_reach_varlen_kernel`)."""
     return rows_reach_varlen_kernel(
         packing=_packs_rows(sft_config, metadata),
         padding_free=sft_config.padding_free,
         per_device_train_batch_size=sft_config.per_device_train_batch_size,
+        per_device_eval_batch_size=evaluation_batch_size(sft_config),
     )
 
 
@@ -196,6 +198,7 @@ def _policy_attn_default(sft_config, model_config, checkpoint_config, metadata) 
         packing=_packs_rows(sft_config, metadata),
         padding_free=sft_config.padding_free,
         per_device_train_batch_size=sft_config.per_device_train_batch_size,
+        per_device_eval_batch_size=evaluation_batch_size(sft_config),
         dtype=resolve_training_dtype(sft_config),
         checkpoint_config=checkpoint_config,
     )
@@ -261,6 +264,7 @@ def _prepare_text_data(
         train_on_last_assistant_only=args.train_on_last_assistant_only,
         model_config=hf_config,
         per_device_train_batch_size=sft_config.per_device_train_batch_size,
+        per_device_eval_batch_size=evaluation_batch_size(sft_config),
         keeps_packed_rows=parallelism_config.pp_size > 1,
         allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
     )
@@ -369,8 +373,8 @@ def main():
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
     metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
     attn_default = _policy_attn_default(sft_config, model_config, checkpoint_config, metadata)
-    varlen_rows = _trains_on_varlen_rows(sft_config, metadata)
-    if attn_default == "flash_attention_4" and varlen_rows and fa4_varlen_backward_refusal(checkpoint_config):
+    varlen_rows = _reaches_varlen_rows(sft_config, metadata)
+    if attn_default == "flash_attention_4" and varlen_rows and fa4_varlen_refusal(checkpoint_config):
         # A pinned FA4 the load keeps is refused before the load, not by the collator factory after it (an unset
         # request never reaches FA4 on these rows). Resolved only where it can refuse: the load repeats its warnings.
         reject_fa4_varlen_training(

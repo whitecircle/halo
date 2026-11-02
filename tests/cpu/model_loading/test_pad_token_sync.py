@@ -26,14 +26,15 @@ import logging
 
 import pytest
 import torch
-from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification
+from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassification, Qwen4ExpForCausalLM
+from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 from transformers.trainer_utils import align_special_tokens
 
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer, sync_special_token_id
 from halo.trainers.parallelism.pipeline_rules import require_pooling_pad_id
-from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN4_EXP_CONFIG
 
 MAX_LENGTH = 128
 # Arbitrary but distinct in-vocab ids for the stub tokenizer's special tokens.
@@ -195,6 +196,44 @@ def test_the_second_setup_call_records_the_ids_on_its_own_model():
     assert policy.config.get_text_config().eos_token_id == SPECIAL_TOKEN_IDS["<other_pad>"]
     assert policy.config.get_text_config().bos_token_id == SPECIAL_TOKEN_IDS["<pad>"]
     assert policy.generation_config.eos_token_id == SPECIAL_TOKEN_IDS["<other_pad>"]
+
+
+def test_an_eos_change_a_built_module_cannot_follow_is_refused():
+    """Qwen3.8-Flash-Next's n-gram embedding copies ``eos_token_id`` at build and restarts its history after it,
+    while every export records the run's id: a served copy would restart at another token than the trained model.
+    An eos the copy already holds, and a model holding no copy, record it as before."""
+    flash_next = Qwen4ExpForCausalLM(Qwen4ExpTextConfig(**TINY_QWEN4_EXP_CONFIG))
+    copied = TINY_QWEN4_EXP_CONFIG["eos_token_id"]
+    with pytest.raises(ValueError, match="Qwen4ExpTextNGramEmbedding"):
+        configure_run_tokenizer(
+            CommonScriptArguments(eos_token="<eos>"),
+            flash_next,
+            _Tokenizer(),
+            MAX_LENGTH,
+            embeddings_sharded=is_input_embedding_tp_sharded,
+        )
+    assert flash_next.config.eos_token_id == copied
+
+    tokenizer = _Tokenizer()
+    tokenizer.vocab["<endoftext>"] = copied
+    configure_run_tokenizer(
+        CommonScriptArguments(eos_token="<endoftext>"),
+        flash_next,
+        tokenizer,
+        MAX_LENGTH,
+        embeddings_sharded=is_input_embedding_tp_sharded,
+    )
+    assert flash_next.config.eos_token_id == copied
+
+    qwen3 = Qwen3ForCausalLM(Qwen3Config(**TINY_QWEN3_CONFIG))
+    configure_run_tokenizer(
+        CommonScriptArguments(eos_token="<eos>"),
+        qwen3,
+        _Tokenizer(),
+        MAX_LENGTH,
+        embeddings_sharded=is_input_embedding_tp_sharded,
+    )
+    assert qwen3.config.eos_token_id == SPECIAL_TOKEN_IDS["<eos>"]
 
 
 def test_setup_records_the_eos_fallback_too():

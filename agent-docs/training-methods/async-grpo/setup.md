@@ -97,11 +97,12 @@ round's generation.
 
 ## Multiple servers and prefetch
 
-Prefetch rolls the next rounds out while the current one trains, so each round trains `prefetch_depth` steps stale
-(one at the default) and the [importance sampling correction](objective.md#importance-sampling-correction) covers
-the lag. `enable_prefetch` unset turns it on with two or more servers and off with a **single** one
-(`rollout_server_url`, default `http://localhost:8000`, or a one-entry `rollout_server_configs`), whose step stays
-serial and on-policy. `true` prefetches on a single server too; `false` never prefetches.
+Prefetch rolls the next rounds out while the current one trains, so each round trains `prefetch_depth` rounds stale
+(one optimizer step each at the default `steps_per_generation`) and the
+[importance sampling correction](objective.md#importance-sampling-correction) covers the lag. `enable_prefetch` unset
+turns it on with two or more servers and off with a **single** one (`rollout_server_url`, default
+`http://localhost:8000`, or a one-entry `rollout_server_configs`), whose step stays serial and on-policy. `true`
+prefetches on a single server too; `false` never prefetches.
 
 ```yaml
 rollout_server_configs:

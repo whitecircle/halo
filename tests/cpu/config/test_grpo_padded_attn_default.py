@@ -6,8 +6,8 @@ scripts packs). A YAML that pins no ``attn_implementation`` reaches the loader w
 default, the same request ``teacher_distill.py`` / ``classification.py`` / the reward scripts make:
 nothing on Blackwell, where the loader's FA4 outruns SDPA on these batches, except for a remote-code
 checkpoint whose class the resolver cannot read (Bailing's refuses every flash label at build) and a
-head_dim-256 one, whose dedicated FA4 kernel these batches have not been measured on; ``sdpa`` on every
-other GPU.
+softcapped one, whose padded batches would reach FA4's varlen kernels (the softcap then lands the run on
+FA2); ``sdpa`` on every other GPU.
 
 It is a *request*, not a pin: with live sinks (``reset_sinks: false`` — the on-policy gpt-oss flow)
 the backend resolver refuses a sink-dropping impl, so forcing SDPA there would reject the run
@@ -28,7 +28,7 @@ from unittest import mock
 
 import pytest
 from datasets import DatasetDict
-from transformers import GemmaConfig, PretrainedConfig, Qwen3Config
+from transformers import Gemma2Config, GemmaConfig, PretrainedConfig, Qwen3Config
 
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints import model_setup
@@ -132,18 +132,23 @@ def test_unpinned_config_requests_the_padded_workload_backend(script, tmp_path):
 _PADDED_DEFAULT_SCRIPTS = [*_GRPO_SCRIPTS, "preference/smpo.py"]
 
 
+# Gemma 2 27B's attention: 128-wide heads, which FA4's general kernel runs, and a logit softcap.
+_SOFTCAPPED = Gemma2Config(hidden_size=4608, num_attention_heads=32, num_key_value_heads=16, head_dim=128)
+
+
 @pytest.mark.parametrize("script", _PADDED_DEFAULT_SCRIPTS)
 @pytest.mark.parametrize(
     ("checkpoint_config", "expected"),
-    [(Qwen3Config(), None), (_RemoteCodeConfig(), "sdpa"), (GemmaConfig(), "sdpa")],
-    ids=["native", "remote", "head_dim-256"],
+    [(Qwen3Config(), None), (GemmaConfig(), None), (_RemoteCodeConfig(), "sdpa"), (_SOFTCAPPED, "sdpa")],
+    ids=["native", "head_dim-256", "remote", "softcapped"],
 )
 def test_blackwell_leaves_the_kernel_to_the_loader_unless_the_checkpoint_rules_it_out(
     script, checkpoint_config, expected, tmp_path
 ):
-    """On Blackwell an unpinned padded run takes the loader's FA4. A remote-code checkpoint keeps SDPA, since
-    the resolver cannot read its flags and Bailing's refuses a flash label only at the model build; so does a
-    head_dim-256 one (Gemma 1 has neither a softcap nor a window, so nothing else would demote its FA4)."""
+    """On Blackwell an unpinned padded run takes the loader's pick, a head_dim-256 checkpoint's included (Gemma 1
+    has neither a softcap nor a window, so FA4's dedicated kernel trains it). A remote-code checkpoint keeps SDPA,
+    since the resolver cannot read its flags and Bailing's refuses a flash label only at the model build; so does
+    a softcapped one, whose padded batches would reach FA4's varlen kernels."""
     assert _requested_attn(script, "", tmp_path, checkpoint_config=checkpoint_config) == expected
 
 
@@ -236,13 +241,16 @@ def test_the_blackwell_seam_fetches_no_config_it_does_not_read(pinned, sinks_res
         (Qwen3Config(), Qwen3Config(), None),
         (Qwen3Config(), _RemoteCodeConfig(), "sdpa"),
         (_RemoteCodeConfig(), Qwen3Config(), "sdpa"),
-        (Qwen3Config(), GemmaConfig(), "sdpa"),
+        (Qwen3Config(), GemmaConfig(), None),
+        (Qwen3Config(), _SOFTCAPPED, "sdpa"),
+        (_SOFTCAPPED, Qwen3Config(), "sdpa"),
     ],
-    ids=["native-native", "native-remote", "remote-native", "native-hd256"],
+    ids=["native-native", "native-remote", "remote-native", "native-hd256", "native-softcapped", "softcapped-native"],
 )
 def test_the_blackwell_seam_decides_on_every_config_it_loads(policy_config, companion_config, expected):
     """A companion model loaded on the same request (a distillation teacher) can rule out the loader's pick
-    for both loads, and so can the policy's fetched config."""
+    for both loads, and so can the policy's fetched config: a forward-only teacher's softcap counts, since FA4's
+    varlen forward with one does not finish on B300."""
     model_config = types.SimpleNamespace(attn_implementation=None)
     with _blackwell(policy_config) as fetch:
         assert (

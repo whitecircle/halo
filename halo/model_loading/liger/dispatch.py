@@ -17,7 +17,6 @@ from halo.kernels.jit_cache import pin_liger_impls
 from halo.model_loading.liger.applier import LigerApplier, build_liger_appliers
 from halo.model_loading.liger.cross_entropy import patch_loss_utils_cross_entropy
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
-from halo.model_loading.liger.launch_context import pin_liger_device_context
 from halo.models.config_access import set_config_field_run_scoped, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.family_specs import wraps_experts
@@ -205,11 +204,10 @@ def sanitize_liger_config(
     Both Liger applications (model load, and the trainer's before HF Trainer re-applies) call this, since a
     rule present at one site only is undone by whichever runs second. The parallelism rules yield to an
     explicit ``swiglu``/``geglu`` request, which they make inert rather than wrong; the routed-experts
-    rule does not. It also pins the Liger implementations (:func:`pin_liger_impls`) and the same-device launch
-    context (:func:`pin_liger_device_context`), since a model passed to the trainer reaches only the second site.
+    rule does not. It also pins the Liger implementations (:func:`pin_liger_impls`), since a model passed to
+    the trainer reaches only the second site.
     """
     pin_liger_impls()
-    pin_liger_device_context()
     forced_off = liger_parallelism_overrides(
         has_ep_wrapped_experts=liger_ep_disables_fused_glu(needs_ep_layers, model_config),
         tp_size=tp_size,

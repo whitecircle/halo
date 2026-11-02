@@ -43,7 +43,7 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
 
 - **Performance optimizations are integrated.** Halo includes DeepEP V2, FlashAttention 4, Liger, Grouped GEMM, padding-free packing, and AdamWBF16, with implementations and fallbacks for Blackwell, Hopper, and older GPUs.
 
-- **RL is asynchronous, with a clean Transformers ↔ vLLM/SGLang split.** Multi-turn environment rollouts run as Ray actors against vLLM or SGLang servers; with two or more servers, a prefetch queue overlaps the next round's generation with training. The trainer pushes updated weights to the servers over native NCCL. There is no Megatron backend and no veRL dependency — the training side stays plain Transformers, with the same parallelism and checkpointing stack. See [Async GRPO with Environments](human-docs/training-methods/async-grpo-environments.md).
+- **RL is asynchronous, with a clean Transformers ↔ vLLM/SGLang split.** Multi-turn environment rollouts run as Ray actors against vLLM or SGLang servers; with two or more servers, or one that opts in, a prefetch queue overlaps the next round's generation with training. The trainer pushes updated weights to the servers over native NCCL. There is no Megatron backend and no veRL dependency — the training side stays plain Transformers, with the same parallelism and checkpointing stack. See [Async GRPO with Environments](human-docs/training-methods/async-grpo-environments.md).
 
 </br>
 

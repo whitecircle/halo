@@ -14,9 +14,9 @@ import torch.nn as nn
 from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from halo.hardware import current_device
-from halo.kernels.fla_autotune import restrict_fla_blackwell_autotune
-from halo.kernels.fla_fixed_nb import fix_fla_norm_nb
+from halo.kernels.fla_launch import apply_fla_launch_options
 from halo.log import warn_once
+from halo.model_loading.external_tables import attach_external_tables
 from halo.models.attention.layout import resolve_head_dim
 from halo.models.config_access import text_config
 from halo.models.module_tree import embedding_module
@@ -287,18 +287,19 @@ def _retie_shared_weights(model: nn.Module) -> None:
     model.tie_weights()
 
 
-def finalize_loaded_model(model: nn.Module) -> None:
+def finalize_loaded_model(model: nn.Module, weights_dir: str | None = None) -> None:
     """Post-load repair every load path must run once weights sit on their final device.
 
     transformers 5 re-materializes every non-persistent buffer as ``torch.empty_like``, and a
     remote-code family overriding ``_init_weights`` without ``super()`` never repairs it: a zero
     inv_freq degenerates RoPE to NoPE at a plausible loss. A buffer no fix covers stays on meta and is
-    rejected at the trainer's device placement. The kernel restrictions and launch options the loaded modules
-    need before their first launch are applied here too
-    (:func:`~halo.kernels.fla_autotune.restrict_fla_blackwell_autotune`,
-    :func:`~halo.kernels.fla_fixed_nb.fix_fla_norm_nb`).
+    rejected at the trainer's device placement. The FLA launch options the loaded modules need before their first
+    launch are set here too (:func:`~halo.kernels.fla_launch.apply_fla_launch_options`), and the external tables a
+    host-table build holds outside its state are attached
+    (:func:`~halo.model_loading.external_tables.attach_external_tables`) from ``weights_dir``, the local directory a
+    loader read the weights from, when it names one.
     """
     _walk_and_fix(model, (_ROTARY_FIXERS, _NON_PERSISTENT_FIXERS))
     _retie_shared_weights(model)
-    restrict_fla_blackwell_autotune()
-    fix_fla_norm_nb()
+    apply_fla_launch_options()
+    attach_external_tables(model, weights_dir)

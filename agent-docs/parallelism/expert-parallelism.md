@@ -33,6 +33,7 @@ the gather and in `merge_ep_shards.py` alike. Callers reach the layers through `
 | Qwen3 MoE | `Qwen3MoeSparseMoeBlock` | `EPQwen3MoELayer` | [qwen3.md](../models/qwen3.md#qwen3-moe) |
 | Qwen3.5 / Qwen3.6 MoE | `Qwen3_5MoeSparseMoeBlock` | `EPQwen3_5MoELayer` | [qwen3_5.md](../models/qwen3_5.md) |
 | Qwen3-Next | `Qwen3NextSparseMoeBlock` | `EPQwen3NextMoELayer` (subclasses `EPQwen3_5MoELayer`) | [qwen3-next.md](../models/qwen3-next.md) |
+| Qwen3.8-Flash-Next | `Qwen4ExpTextSparseMoeBlock` | `EPQwen4ExpMoELayer` (subclasses `EPQwen3NextMoELayer`) | [qwen4_exp.md](../models/qwen4_exp.md) |
 | GLM-4 MoE Lite | `Glm4MoeLiteMoE` | `EPGlm4MoELayer` | [glm4.md](../models/glm4.md) |
 | Laguna | `LagunaSparseMoeBlock` | `EPLagunaMoELayer` (subclasses `EPGlm4MoELayer`) | [laguna.md](../models/laguna.md) |
 | Inkling | `InklingMoE` | `EPInklingMoELayer` | [inkling.md](../models/inkling.md) |
@@ -81,6 +82,7 @@ EP surface. The table is pinned against the specs and classes by
 | Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `FAMILY.supports_lazy_loading` |
 | GLM-5 Next | RL weight sync — both pinned engines' expert loaders are per-expert only, and no sync into either is validated | `FAMILY.weight_sync_refusal` |
 | Qwen3-Next | RL weight sync — both pinned engines load the per-expert keys the gather emits, but no sync into either is validated | `FAMILY.weight_sync_refusal` |
+| Qwen3.8-Flash-Next | RL weight sync — no sync into either pinned engine is validated, and the host-resident n-gram table is outside the model the sync streams | `FAMILY.weight_sync_refusal` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for
@@ -314,7 +316,7 @@ across EP groups need no reduce: the clip runs the deferred sweep first, which l
 
 Under `full_determinism: true` the EP path (dispatch, expert compute, combine) repeats bit for bit,
 expert weight gradients included, as long as each EP group sits inside one NVLink domain. The rest of
-the model needs its own deterministic kernels: the gated-DeltaNet families (Qwen3.5/3.6 MoE, Qwen3-Next) need
+the model needs its own deterministic kernels: the gated-DeltaNet families (Qwen3.5/3.6 MoE, Qwen3-Next, Qwen3.8-Flash-Next) need
 `CAUSAL_CONV1D_DETERMINISTIC=1`, which `full_determinism` does not set.
 
 DeepEP's default dispatch claims each receive slot with an atomic, so the order an expert's tokens
@@ -583,7 +585,7 @@ on top of it: [Supported combinations](README.md#supported-combinations).
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`, non-reentrant under PP ([rule](../optimization/flash-attention.md#usage)). `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_install_ep_gradient_checkpointing` |
 | `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP); PP+EP always loads stage by stage from safetensors. Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the EP layers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `halo/model_loading/liger/dispatch.py` |
-| `moe_balancing` | `aux_loss` is inert on families whose EP layer severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Qwen3-Next, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
+| `moe_balancing` | `aux_loss` is inert on families whose EP layer severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Qwen3-Next, Qwen3.8-Flash-Next, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |
 | `ddp_find_unused_parameters` | must be `True`; the trainer sets it for every run with an EP group | `DistributedTrainerMixin._apply_training_args_overrides` |
 | `packing`, `padding_free`, `torch_compile`, `lowp_precision`, `dataset_num_proc` | not gated under EP | — |

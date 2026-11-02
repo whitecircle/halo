@@ -555,6 +555,8 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             # CPUs) would leave these 63 rows ungrouped on a many-core host.
             dataset_num_proc=4,
             per_device_train_batch_size=1,
+            per_device_eval_batch_size=1,
+            eval_strategy="no",
         )
         train, test, _, collator = _prepare_text_data(
             splits,

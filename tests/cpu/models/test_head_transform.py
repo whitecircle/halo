@@ -54,6 +54,8 @@ from tests.common.models import (
     TINY_MINICPM3_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
+    TINY_QWEN4_EXP_VISION_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_STEP3P7_CONFIG,
@@ -67,8 +69,13 @@ apply_remote_code_compat_shims()
 # The dense half of the roster; the MoE half is every model_type the EP layer registry claims.
 _DENSE_ROSTER = ("qwen3", "qwen3_5_text", "qwen3_vl")
 
-# Families whose transformers defaults do not build a model; their tiny config stands in.
-_DEFAULT_CONFIG_OVERRIDES = {"lfm2_moe": TINY_LFM2_MOE_CONFIG}
+# Families whose transformers defaults do not build a model, keyed by the config class's ``model_type``; their tiny
+# config stands in. Qwen3.8-Flash-Next's defaults declare QSA layers without an indexer budget.
+_DEFAULT_CONFIG_OVERRIDES = {
+    "lfm2_moe": TINY_LFM2_MOE_CONFIG,
+    "qwen4_exp_text": TINY_QWEN4_EXP_CONFIG,
+    "qwen4_exp": {"text_config": TINY_QWEN4_EXP_CONFIG, "vision_config": TINY_QWEN4_EXP_VISION_CONFIG},
+}
 
 # Values the shipped checkpoints carry and the defaults leave at identity, so the sweep verifies the
 # transform the run applies: Gemma 4 caps at 30, Inkling cuts its padded vocabulary.
@@ -193,7 +200,7 @@ def _grads(model) -> dict[str, torch.Tensor]:
 def test_every_roster_head_path_verifies_against_its_forward(model_type, class_name):
     """A roster family the verification cannot reproduce would be refused on both hidden-state paths."""
     model_class = getattr(transformers, class_name)
-    config = model_class.config_class(**_DEFAULT_CONFIG_OVERRIDES.get(model_type, {}))
+    config = model_class.config_class(**_DEFAULT_CONFIG_OVERRIDES.get(model_class.config_class.model_type, {}))
     verify_head_transform(model_class, config)
 
 

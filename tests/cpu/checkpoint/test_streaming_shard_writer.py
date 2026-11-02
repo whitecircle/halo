@@ -360,5 +360,19 @@ def test_the_index_writer_refuses_a_metadata_block_that_is_not_a_mapping(tmp_pat
     assert not os.listdir(tmp_path), "a refused index must not have swept the directory first"
 
 
+def test_written_files_claim_each_key_once(tmp_path):
+    """A file already on disk (an external table's part) and a staged tensor, or a second file, may not claim one
+    key: the index would name only one of them."""
+    writer = StreamingShardWriter(str(tmp_path), "4MB", enabled=True, filename_prefix=PREFIX)
+    writer.add("staged", _tensor(1))
+    writer.add_written_files({"table.0": "model-table00-00001-of-00001.safetensors"}, 0)
+    with pytest.raises(RuntimeError, match="written twice"):
+        writer.add_written_files({"staged": "other.safetensors"}, 0)
+    with pytest.raises(RuntimeError, match="written twice"):
+        writer.add_written_files({"table.0": "other.safetensors"}, 0)
+    with pytest.raises(RuntimeError, match="staged twice"):
+        writer.add("table.0", _tensor(1))
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

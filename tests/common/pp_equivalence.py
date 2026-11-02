@@ -38,7 +38,7 @@ from halo.distributed.pipeline_parallel.groups import build_pipeline_group
 from halo.distributed.pipeline_parallel.runner import PipelineRunner
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
 from halo.distributed.pipeline_parallel.stage_losses import TokenLoss
-from halo.kernels.fla_autotune import triton_autotuner
+from halo.kernels.fla_launch import triton_autotuner
 from halo.models.moe.expert_layout import to_hub_expert_tensors
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.sft import DistributedSFTTrainer

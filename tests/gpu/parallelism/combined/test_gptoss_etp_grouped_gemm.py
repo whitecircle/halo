@@ -7,17 +7,27 @@ class, the config unchanged), the configuration a loop-path ETP checkpoint carri
 
 1. Loop, 20 steps: the reference trajectory, every EP layer on the loop.
 2. Loop, 10 steps and a checkpoint, with this rank's optimizer state and trainable weights snapshotted.
-3. Grouped GEMM, 20 steps from the same init: every EP layer on grouped GEMM, each step's loss and gradient
-   norm on the loop's trajectory.
-4. Grouped GEMM resuming step 2's checkpoint: optimizer state and weights restored exactly, no fingerprint
+3. The floor: the loop, 20 steps from the same init with every trainable weight perturbed by about one bf16 ULP.
+4. Grouped GEMM, 20 steps from the same init: every EP layer on grouped GEMM. Its step-1 loss and gradient norm
+   match the loop's (a forward or backward error shows there, before any drift), and over all 20 steps it strays
+   from the loop's trajectory no further than the floor does, scaled by a margin.
+5. The control: grouped GEMM with every rank's expert bank rotated by one expert, one step. Its step-1 loss must
+   miss the loop's by over twice the step-1 bound, or that bound could not see a wrong expert.
+6. Grouped GEMM resuming step 2's checkpoint: optimizer state and weights restored exactly, no fingerprint
    warm restart, steps 11-20 on the loop's trajectory.
 
+From step 7 the loop's gradient norm surges (to about 12 at step 13): there any difference of start or reduction
+order grows, and the perturbed loop strays from its own reference as far as grouped GEMM does. A fixed trajectory
+bound would fail on that growth with no defect present, hence the measured floor.
+
 DeepEP dispatch is pinned deterministic, so the arms differ in the expert compute alone. A tiny random-init
-GptOss (8 experts: two per dispatch rank, each FFN sharded two ways) keeps four runs cheap.
+GptOss (8 experts: two per dispatch rank, each FFN sharded two ways) keeps the runs cheap.
 
     torchrun --nproc_per_node=8 tests/gpu/parallelism/combined/test_gptoss_etp_grouped_gemm.py
 """
 
+import contextlib
+import functools
 from unittest.mock import patch
 
 import torch
@@ -35,10 +45,11 @@ from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import pin_deterministic_ep_dispatch, world_all
+from tests.common.ep_reference import roll_expert_banks
 from tests.common.harness import gpu_test_main
 from tests.common.memory import cleanup_memory
 from tests.common.models import GPT_OSS_20B
-from tests.common.numerics import max_or_nan
+from tests.common.numerics import max_or_nan, perturb_trainable
 from tests.common.optimizer_state import local_optimizer_state, optimizer_state_matches
 from tests.common.rank_log import log, logged_messages
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
@@ -54,9 +65,18 @@ BATCH_SIZE = 2
 LEARNING_RATE = 3e-4
 MAX_SEQ_LENGTH = 256
 NUM_SAMPLES = 256
-# The step-1 forward differs by reduction order and the loop's bf16 index_add_ rounding only; later steps also
-# carry the optimizer's response to those differences.
-FIRST_STEP_LOSS_TOL = TOL.parallel_vs_baseline_loss_abs
+# The step-1 forward differs by reduction order and the loop's bf16 index_add_ rounding only (1.1e-3 measured); a
+# rotated expert bank moves it by about 3.6e-2 (an fp32 CPU forward of this model and batch), past the control bound
+# of twice this.
+FIRST_STEP_LOSS_TOL = 1e-2
+FIRST_STEP_GRAD_NORM_RATIO_MAX = TOL.grad_norm_ratio_max
+# The floor arm's perturbation, about one bf16 ULP: it moves about half the weights by one ULP, where 2e-3 moves 0.15%
+# and 5e-4 none.
+FLOOR_PERTURBATION = 4e-3
+# Grouped GEMM may stray from the loop's trajectory this many times as far as the floor arm does.
+FLOOR_LOSS_DELTA_FACTOR = 2.0
+FLOOR_GRAD_NORM_RATIO_FACTOR = 1.25
+# The resumed arm starts from the loop's own step-10 state, so it stays inside a fixed bound.
 TRAJECTORY_LOSS_TOL = TOL.parallel_vs_baseline_train_loss_abs
 
 
@@ -146,13 +166,38 @@ class _ResumeCapture(TrainerCallback):
         return control
 
 
+def _ratio(a: float, b: float) -> float:
+    return max(a / b, b / a) if a > 0 and b > 0 else float("inf")
+
+
+def _deltas(reference: list[float], candidate: list[float]) -> list[float]:
+    return [abs(a - b) for a, b in zip(reference, candidate, strict=True)]
+
+
 def _trajectory_checks(reference: list[float], candidate: list[float], label: str, metrics: dict) -> dict[str, bool]:
-    deltas = [abs(a - b) for a, b in zip(reference, candidate, strict=True)]
+    deltas = _deltas(reference, candidate)
     metrics[f"{label}_loss_max_delta"] = max_or_nan(deltas)
     log(f"  {label}: reference {[f'{x:.4f}' for x in reference]}")
     worst = metrics[f"{label}_loss_max_delta"]
     log(f"  {label}: candidate {[f'{x:.4f}' for x in candidate]}  max |delta| {worst:.5f}")
     return {f"{label}_losses_track_the_loop": bool(deltas) and max(deltas) <= TRAJECTORY_LOSS_TOL}
+
+
+def _train_arm(ctx, tiny_dir, tokenizer, dataset, train_out, steps: int, *, grouped: bool, label: str, edit=None):
+    """COLLECTIVE. One run from the tiny checkpoint: its layer checks, per-step losses and gradient norms, and what
+    ``edit`` (applied to the built model before training) returned."""
+    with contextlib.nullcontext() if grouped else _per_expert_loop():
+        trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, steps, None))
+        ctx.on_teardown(trainer.cleanup_ep)
+        checks = _layer_checks(trainer.model, grouped=grouped, label=label)
+        edited = edit(trainer.model) if edit else None
+        trainer.train()
+    losses, norms = step_losses(trainer), _grad_norms(trainer)
+    checks[f"{label}_ran_every_step"] = len(losses) == len(norms) == steps
+    del trainer
+    cleanup_memory()
+    ctx.barrier()
+    return checks, losses, norms, edited
 
 
 @gpu_test_main(exact_world_size=WORLD_SIZE, prefix="gptoss_etp_grouped_gemm")
@@ -174,22 +219,15 @@ def run(ctx):
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     dataset = create_sft_dataset(NUM_SAMPLES, tokenizer, seed=SEED)
+    arm = functools.partial(_train_arm, ctx, tiny_dir, tokenizer, dataset, train_out)
 
     log(f"\n--- 1. per-expert loop, {TOTAL_STEPS} steps ---")
-    with _per_expert_loop():
-        trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, TOTAL_STEPS, None))
-        ctx.on_teardown(trainer.cleanup_ep)
-        checks |= _layer_checks(trainer.model, grouped=False, label="loop")
-        trainer.train()
-    loop_losses, loop_norms = step_losses(trainer), _grad_norms(trainer)
-    checks["loop_ran_every_step"] = len(loop_losses) == len(loop_norms) == TOTAL_STEPS
+    arm_checks, loop_losses, loop_norms, _ = arm(TOTAL_STEPS, grouped=False, label="loop")
+    checks |= arm_checks
     # Anti-vacuity: the trajectories carry signal well past the bound they are compared under.
     loop_drop = loop_losses[0] - min(loop_losses) if loop_losses else 0.0
     metrics["loop_loss_drop"] = loop_drop
     checks["loop_loss_moved_past_the_bound"] = loop_drop > TOL.control_min_loss_shift(TRAJECTORY_LOSS_TOL)
-    del trainer
-    cleanup_memory()
-    ctx.barrier()
 
     log(f"\n--- 2. per-expert loop, {SAVE_AT_STEP} steps and a checkpoint ---")
     with _per_expert_loop():
@@ -202,26 +240,55 @@ def run(ctx):
     cleanup_memory()
     ctx.barrier()
 
-    log(f"\n--- 3. grouped GEMM, {TOTAL_STEPS} steps ---")
-    trainer = _make_trainer(tiny_dir, tokenizer, dataset, _sft_config(train_out, TOTAL_STEPS, None))
-    ctx.on_teardown(trainer.cleanup_ep)
-    checks |= _layer_checks(trainer.model, grouped=True, label="grouped")
-    trainer.train()
-    grouped_losses, grouped_norms = step_losses(trainer), _grad_norms(trainer)
-    checks["grouped_ran_every_step"] = len(grouped_losses) == len(grouped_norms) == TOTAL_STEPS
-    if checks["grouped_ran_every_step"] and checks["loop_ran_every_step"]:
-        metrics["first_step_loss_delta"] = abs(grouped_losses[0] - loop_losses[0])
-        checks["first_step_loss_matches_the_loop"] = metrics["first_step_loss_delta"] <= FIRST_STEP_LOSS_TOL
-        checks |= _trajectory_checks(loop_losses, grouped_losses, "grouped", metrics)
-        ratios = [max(g / l, l / g) for g, l in zip(grouped_norms, loop_norms, strict=True) if g > 0 and l > 0]
-        metrics["grad_norm_max_ratio"] = max_or_nan(ratios)
-        log(f"  grad norms: loop {[f'{x:.3f}' for x in loop_norms]}, grouped {[f'{x:.3f}' for x in grouped_norms]}")
-        checks["grad_norms_track_the_loop"] = len(ratios) == TOTAL_STEPS and max(ratios) <= TOL.grad_norm_ratio_max
-    del trainer
-    cleanup_memory()
-    ctx.barrier()
+    log(f"\n--- 3. the floor: per-expert loop from weights perturbed by {FLOOR_PERTURBATION}, {TOTAL_STEPS} steps ---")
+    arm_checks, floor_losses, floor_norms, changed = arm(
+        TOTAL_STEPS, grouped=False, label="floor", edit=lambda model: perturb_trainable(model, FLOOR_PERTURBATION)
+    )
+    checks |= arm_checks
+    checks["floor_perturbation_changed_weights"] = world_all(changed > 0, ctx.device)
 
-    log(f"\n--- 4. grouped GEMM resuming the loop's checkpoint-{SAVE_AT_STEP} ---")
+    log(f"\n--- 4. grouped GEMM, {TOTAL_STEPS} steps ---")
+    arm_checks, grouped_losses, grouped_norms, _ = arm(TOTAL_STEPS, grouped=True, label="grouped")
+    checks |= arm_checks
+
+    log("\n--- 5. control: grouped GEMM with every expert bank rotated by one expert, 1 step ---")
+    arm_checks, control_losses, _, rotated = arm(1, grouped=True, label="control", edit=roll_expert_banks)
+    checks |= arm_checks
+    checks["control_rotated_every_bank"] = world_all(rotated > 0, ctx.device)
+
+    full = all(checks[f"{label}_ran_every_step"] for label in ("loop", "floor", "grouped", "control"))
+    if full:
+        metrics["first_step_loss_delta"] = abs(grouped_losses[0] - loop_losses[0])
+        metrics["first_step_grad_norm_ratio"] = _ratio(grouped_norms[0], loop_norms[0])
+        checks["first_step_loss_matches_the_loop"] = metrics["first_step_loss_delta"] <= FIRST_STEP_LOSS_TOL
+        checks["first_step_grad_norm_matches_the_loop"] = (
+            metrics["first_step_grad_norm_ratio"] <= FIRST_STEP_GRAD_NORM_RATIO_MAX
+        )
+        metrics["control_first_step_loss_delta"] = abs(control_losses[0] - loop_losses[0])
+        checks["control_misses_the_first_step_loss"] = metrics["control_first_step_loss_delta"] > (
+            TOL.control_min_loss_shift(FIRST_STEP_LOSS_TOL)
+        )
+
+        metrics["floor_loss_max_delta"] = max_or_nan(_deltas(loop_losses, floor_losses))
+        metrics["grouped_loss_max_delta"] = max_or_nan(_deltas(loop_losses, grouped_losses))
+        metrics["floor_grad_norm_max_ratio"] = max_or_nan(map(_ratio, floor_norms, loop_norms))
+        metrics["grouped_grad_norm_max_ratio"] = max_or_nan(map(_ratio, grouped_norms, loop_norms))
+        log(f"  loop    losses {[f'{x:.4f}' for x in loop_losses]}")
+        log(f"  floor   losses {[f'{x:.4f}' for x in floor_losses]}")
+        log(f"  grouped losses {[f'{x:.4f}' for x in grouped_losses]}")
+        log(f"  grad norms: loop {[f'{x:.3f}' for x in loop_norms]}")
+        log(f"  grad norms: floor {[f'{x:.3f}' for x in floor_norms]}")
+        log(f"  grad norms: grouped {[f'{x:.3f}' for x in grouped_norms]}")
+        checks["floor_moved_the_trajectory"] = metrics["floor_loss_max_delta"] > 0
+        checks["grouped_losses_inside_the_floor"] = (
+            metrics["grouped_loss_max_delta"] <= FLOOR_LOSS_DELTA_FACTOR * metrics["floor_loss_max_delta"]
+        )
+        checks["grouped_grad_norms_inside_the_floor"] = (
+            metrics["grouped_grad_norm_max_ratio"]
+            <= FLOOR_GRAD_NORM_RATIO_FACTOR * metrics["floor_grad_norm_max_ratio"]
+        )
+
+    log(f"\n--- 6. grouped GEMM resuming the loop's checkpoint-{SAVE_AT_STEP} ---")
     with logged_messages(optimizer_store_mod.logger) as store_log:
         trainer = _make_trainer(
             ckpt_dir,

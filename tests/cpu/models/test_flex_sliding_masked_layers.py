@@ -157,21 +157,40 @@ def test_step3p7_calls_carry_each_layers_own_head_count():
     with pytest.raises(RuntimeError):  # premise: AmbiguousGlobalPerLayerAttributeError
         _ = attention.config.num_attention_heads
     assert flex_attention_calls(model) == {
-        AttentionCall(4, 2, 64, None, 0.125, None),
-        AttentionCall(2, 2, 64, 64, 0.125, None),
+        AttentionCall(4, 2, 64, 64, None, 0.125, None),
+        AttentionCall(2, 2, 64, 64, 64, 0.125, None),
     }
+
+
+def _narrow_value_mla() -> Glm4MoeLiteForCausalLM:
+    """A tiny GLM-4.7-Flash whose value head is narrower than its query/key head, as DeepSeek-V3's is."""
+    torch.manual_seed(0)
+    model = Glm4MoeLiteForCausalLM(Glm4MoeLiteConfig(**{**TINY_GLM4_MOE_LITE_CONFIG, "v_head_dim": 16}))
+    attention = next(m for m in model.modules() if isinstance(m, Glm4MoeLiteAttention))
+    assert attention.v_head_dim != attention.qk_head_dim  # premise
+    return model
 
 
 def test_the_call_check_and_the_warmup_read_one_call_on_an_mla_module():
     """FlexAttention's call check and its warm-up read the same per-module call: an MLA module, which keeps no
-    ``head_dim``, reports its query/key width instead of raising."""
-    model = Glm4MoeLiteForCausalLM(Glm4MoeLiteConfig(**TINY_GLM4_MOE_LITE_CONFIG))
+    ``head_dim``, reports its query/key width instead of raising, and its own value width, which SDPA and
+    FlexAttention take unpadded."""
+    model = _narrow_value_mla()
     attention = next(m for m in model.modules() if isinstance(m, Glm4MoeLiteAttention))
     assert not hasattr(attention, "head_dim")  # premise
     call = sdpa_flex_sliding._flex_call(attention)
     assert call == attention_call(attention)
-    assert call.head_dim == attention.qk_head_dim
+    assert (call.head_dim, call.v_head_dim) == (attention.qk_head_dim, attention.v_head_dim)
     assert flex_attention_calls(model) == {call}
+
+
+def test_an_mla_forward_makes_the_call_its_modules_declare():
+    """The value an MLA module hands the attention interface is as wide as its ``v_head_dim``, the width the
+    FlexAttention warm-up compiles: a call check keyed on the query/key width would refuse every such call."""
+    model = _narrow_value_mla()
+    seen, refused = _runtime_calls(model, [150, 30, 90])
+    assert _signatures(model) == seen
+    assert not refused
 
 
 def _packed(lengths: list[int], vocab: int) -> dict:
@@ -189,20 +208,23 @@ def _padded(lengths: list[int], vocab: int) -> dict:
     return {"input_ids": ids, "attention_mask": attention_mask, "labels": ids.masked_fill(attention_mask == 0, -100)}
 
 
-def _runtime_calls(model, lengths: list[int]) -> tuple[set[tuple[int, int, int, float | None]], list]:
-    """``(heads, kv_heads, head_dim, scaling)`` of every causal call no wider than FLASH_MAX_HEAD_DIM a packed
-    forward hands the attention interface (what the compiled kernel would see), and the calls among them that
-    differ from the call their own module declares, which FlexAttention would refuse."""
+def _full_mask(query: torch.Tensor, key: torch.Tensor) -> torch.Tensor:
+    """A boolean mask over exactly the call's queries and keys, the shape FlexAttention's call check admits."""
+    return torch.ones(query.shape[0], 1, query.shape[-2], key.shape[-2], dtype=torch.bool)
+
+
+def _runtime_calls(model, lengths: list[int]) -> tuple[set[tuple[int, int, int, int, float | None]], list]:
+    """``(heads, kv_heads, head_dim, v_head_dim, scaling)`` of every causal call no wider than FLASH_MAX_HEAD_DIM a
+    packed forward hands the attention interface (what the compiled kernel would see), and the calls among them
+    that differ from the call their own module declares, which FlexAttention would refuse."""
     seen, refused = set(), []
     sdpa = ALL_ATTENTION_FUNCTIONS["sdpa"]
 
     def spy(module, query, key, value, attention_mask, **kwargs):
         if getattr(module, "is_causal", False) and query.shape[-1] <= sdpa_flex_sliding.FLASH_MAX_HEAD_DIM:
-            scaling = kwargs.get("scaling")
-            seen.add((query.shape[1], key.shape[1], query.shape[-1], scaling))
-            call = sdpa_flex_sliding._flex_call(module)
-            made = (query.shape[1], key.shape[1], query.shape[-1], value.shape[-1], scaling)
-            if made != (call.heads, call.kv_heads, call.head_dim, call.head_dim, call.scaling):
+            made = (query.shape[1], key.shape[1], query.shape[-1], value.shape[-1], kwargs.get("scaling"))
+            seen.add(made)
+            if not sdpa_flex_sliding._flex_serves(module, query, key, value, _full_mask(query, key), None, made[-1]):
                 refused.append((type(module).__name__, made))
         return sdpa(module, query, key, value, attention_mask, **kwargs)
 
@@ -211,8 +233,11 @@ def _runtime_calls(model, lengths: list[int]) -> tuple[set[tuple[int, int, int, 
     return seen, refused
 
 
-def _signatures(model) -> set[tuple[int, int, int, float | None]]:
-    return {(call.heads, call.kv_heads, call.head_dim, call.scaling) for call in flex_attention_calls(model)}
+def _signatures(model) -> set[tuple[int, int, int, int, float | None]]:
+    return {
+        (call.heads, call.kv_heads, call.head_dim, call.v_head_dim, call.scaling)
+        for call in flex_attention_calls(model)
+    }
 
 
 @pytest.mark.parametrize("family", FORWARD_FAMILIES)
@@ -299,7 +324,7 @@ def test_flex_takes_only_the_call_the_warmup_compiles(caplog):
     k = torch.zeros(2, 2, 300, 64)
     mask = torch.ones(2, 1, 300, 300, dtype=torch.bool)
     module = _attention()
-    assert flex_attention_calls(module) == {AttentionCall(4, 2, 64, None, 0.125, None)}  # premise: the warm-up's
+    assert flex_attention_calls(module) == {AttentionCall(4, 2, 64, 64, None, 0.125, None)}  # premise: the warm-up's
     assert _flex_serves(q, k, mask, None, module=module)
     with caplog.at_level("WARNING", logger=sdpa_flex_sliding.logger.name):
         for _ in range(2):

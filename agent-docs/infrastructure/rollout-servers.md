@@ -216,7 +216,7 @@ The trainer refuses at construction a model the selected engine cannot take a sy
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
   Inkling (no engine run has validated its sync), GLM-5 Next (both engines' per-expert loaders refuse
-  the gathered fused pair), Qwen3-Next and Cohere2 MoE carry on both engines.
+  the gathered fused pair), Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE carry on both engines.
 - **A MoE without a live EP layer** (`use_grouped_gemm: false` at `ep_size: 1`), for every family: the
   experts ship in the layout the EP layer's gather emits, and the stock module tree's fused tensors
   under module names are dropped by the engine's loader with no error. `use_grouped_gemm: true` (the
@@ -258,7 +258,7 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 
 Every family not in the table syncs on both engines, expert distribution included: dense families,
 GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE. Inkling, GLM-5 Next,
-Qwen3-Next and Cohere2 MoE are refused on both by their family spec. Per-family server flags:
+Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE are refused on both by their family spec. Per-family server flags:
 [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank

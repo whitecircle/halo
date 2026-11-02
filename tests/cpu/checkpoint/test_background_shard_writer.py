@@ -5,11 +5,13 @@ Entered as a context manager, ``StreamingShardWriter`` hands each finished part 
 ``HALO_CHECKPOINT_WRITE_THREADS`` background threads and fills the next part meanwhile. Pinned here:
 every file a gathered save writes (dense and every EP-gathered MoE family) is byte-identical to the
 in-line writer's; the parts in flight stay within the thread count, which is what bounds the writer's
-host RAM; ``close()`` returns only once every part it names is on disk; a failed background write
-raises its own exception only once no other write is running, and on every rank of a gathered save,
-through the stream's guard or the finalize's; the block's exit waits out every write whatever the
-caller raised, logging a failed one the caller never collected; outside a block (the pipeline-stage
-writer) parts are written in line.
+host RAM; ``close()`` returns only once every part it names is on disk, and names the files already
+there (an external table's) beside them; a model's external table is written in line while its parts
+are still in flight, and the finalize waits those out before naming both in the index; a failed
+background write raises its own exception only once no other write is running, and on every rank of a
+gathered save, through the stream's guard or the finalize's; the block's exit waits out every write
+whatever the caller raised, logging a failed one the caller never collected; outside a block (the
+pipeline-stage writer) parts are written in line.
 
     python tests/cpu/checkpoint/test_background_shard_writer.py
 """
@@ -23,26 +25,38 @@ import threading
 import time
 import weakref
 from functools import partial
+from pathlib import Path
 
 import pytest
 import torch
-from transformers import Qwen3Config, Qwen3ForCausalLM
+from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
+import halo.checkpoint.parallel.writing as gathered_writing
 import halo.checkpoint.writing as writing
+from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
+from halo.checkpoint.parallel.save import save_fsdp2_checkpoint
 from halo.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
 from halo.checkpoint.writing import StreamingShardWriter, checkpoint_write_threads, normalize_gathered_state_dict
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
-from tests.common.checkpoint_io import file_digests, save_context
+from tests.common.checkpoint_io import file_digests, loading_problems, save_context
 from tests.common.gloo import run_gloo_ranks
-from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.models import TINY_QWEN3_CONFIG, TINY_QWEN4_EXP_CONFIG
 from tests.common.parallelism import single_process_ep_config
+from tests.common.qwen4_exp import (
+    NGRAM_TABLE_PATH,
+    build_tiny_qwen4_exp_checkpoint,
+    load_host_table_model,
+    transformers_forwards,
+)
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 
 THREADS_ENV = "HALO_CHECKPOINT_WRITE_THREADS"
 WRITER_THREAD_PREFIX = "halo-shard-writer"
 # Small enough that every tiny model below splits into several parts.
 SHARD_SIZE = "16KB"
+# The tiny Flash-Next model's streamed weights in a handful of parts, so slowing each write keeps the test short.
+TABLE_MODEL_SHARD_SIZE = "256KB"
 WORLD_SIZE = 2
 _REAL_SAVE = writing.save_safetensors_file
 
@@ -142,7 +156,8 @@ class _SlowWrites:
     """A part write that takes ``seconds``, counting the writes running at once and failing the parts named.
 
     Before that, a write is held until ``together`` writes are running and until ``release`` is set, each
-    for at most ``hold_seconds``: a held write is still running however slowly the caller proceeds.
+    for at most ``hold_seconds``: a held write is still running however slowly the caller proceeds. With
+    ``held_parts``, only those parts wait on ``release``.
     """
 
     def __init__(
@@ -154,12 +169,14 @@ class _SlowWrites:
         together: int = 1,
         release: threading.Event | None = None,
         hold_seconds: float = 1.0,
+        held_parts: tuple[int, ...] | None = None,
     ):
         self.seconds = seconds
         self.fail_parts = fail_parts
         self.together = together
         self.release = release
         self.hold_seconds = hold_seconds
+        self.held_parts = held_parts
         self.lock = threading.Condition()
         self.running = 0
         self.peak_running = 0
@@ -177,7 +194,7 @@ class _SlowWrites:
             self.lock.notify_all()
             self.lock.wait_for(lambda: self.running >= self.together, timeout=self.hold_seconds)
         try:
-            if self.release is not None:
+            if self.release is not None and (self.held_parts is None or part in self.held_parts):
                 self.release.wait(timeout=self.hold_seconds)
             time.sleep(self.seconds)
             if part in self.fail_parts:
@@ -266,6 +283,28 @@ def test_close_returns_only_once_every_part_it_names_is_on_disk(tmp_path, monkey
 
 
 @pytest.mark.parametrize("threads", [1, 2])
+def test_close_names_written_files_beside_its_parts(tmp_path, monkeypatch, threads):
+    """A multi-writer save's fragment holds the files already on disk (an external table's) beside every part,
+    the last one joined first, and counts both in its bytes."""
+    monkeypatch.setenv(THREADS_ENV, str(threads))
+    release = threading.Event()
+    _SlowWrites(monkeypatch, seconds=0.0, release=release, hold_seconds=0.3)
+    table_file, table_bytes = "model-table00-00001-of-00001.safetensors", 4096
+    (tmp_path / table_file).touch()
+    with StreamingShardWriter(str(tmp_path), "2MB", enabled=True) as writer:
+        for key, tensor in _tensors(5):
+            writer.add(key, tensor)
+        writer.add_written_files({"table.0": table_file}, table_bytes)
+        weight_map, total_bytes = writer.close()
+        missing = sorted(name for name in set(weight_map.values()) if not (tmp_path / name).is_file())
+        release.set()
+    assert weight_map["table.0"] == table_file
+    assert len(set(weight_map.values()) - {table_file}) == 3, "premise: three parts, the last flushed by close()"
+    assert not missing, f"close() returned {missing} before they were written"
+    assert total_bytes == 5 * 1_000_000 + table_bytes
+
+
+@pytest.mark.parametrize("threads", [1, 2])
 def test_a_failed_last_part_raises_from_close_itself(tmp_path, monkeypatch, threads):
     """The part ``close()`` flushes fails with no later ``add`` to report it: ``close()`` raises it."""
     monkeypatch.setenv(THREADS_ENV, str(threads))
@@ -277,6 +316,60 @@ def test_a_failed_last_part_raises_from_close_itself(tmp_path, monkeypatch, thre
         with pytest.raises(OSError, match="writing part 3"):
             writer.close()
         assert sorted(writes.finished) == [1, 2, 3]
+
+
+@pytest.mark.parametrize("threads", [1, 2])
+def test_an_external_table_is_indexed_beside_parts_still_in_flight(tmp_path, monkeypatch, threads):
+    """A gathered save of a model holding an external table (Qwen3.8-Flash-Next's host n-gram table) writes the
+    table's files in line while streamed parts are still being written; the finalize waits those out before it
+    renames them, and its index names both. The files equal the in-line writer's, and the save reloads whole."""
+    source, background, inline = (str(tmp_path / name) for name in ("source", "background", "inline"))
+    build_tiny_qwen4_exp_checkpoint(source)
+    os.makedirs(background)
+    os.makedirs(inline)
+    model = load_host_table_model(source, dtype=torch.bfloat16)
+    ids = torch.randint(0, TINY_QWEN4_EXP_CONFIG["vocab_size"], (2, 29), generator=torch.Generator().manual_seed(0))
+    with torch.no_grad(), transformers_forwards():
+        expected = model.eval()(input_ids=ids, use_cache=False).logits
+    table_keys = {
+        f"{NGRAM_TABLE_PATH}.shard_{index}.weight" for index in range(TINY_QWEN4_EXP_CONFIG["split_ngram_parts"])
+    }
+    monkeypatch.setenv(THREADS_ENV, "0")
+    save_fsdp2_checkpoint(save_context(model, max_shard_size=TABLE_MODEL_SHARD_SIZE), inline)
+    inline_map = json.loads(Path(inline, SAFETENSORS_INDEX_FILE).read_text())["weight_map"]
+    streamed_parts = len(set(inline_map.values()) - {inline_map[key] for key in table_keys})
+    assert streamed_parts > 2, "premise: several parts"
+
+    write_tables = gathered_writing.write_external_tables
+    in_flight_at_tables: list[int] = []
+    release = threading.Event()
+    with monkeypatch.context() as patch:
+        patch.setenv(THREADS_ENV, str(threads))
+        # The finalize flushes the last part, so the one before it is the last in flight beside the tables: held
+        # until they are written, however long the save takes to reach them.
+        writes = _SlowWrites(patch, seconds=0.0, release=release, hold_seconds=60.0, held_parts=(streamed_parts - 1,))
+
+        def write_tables_mid_stream(table_model, writer):
+            with writes.lock:
+                # A submitted part counts once its thread runs it; the hold keeps it running from then on.
+                writes.lock.wait_for(lambda: writes.running >= 1, timeout=30)
+                in_flight_at_tables.append(writes.running)
+            try:
+                write_tables(table_model, writer)
+            finally:
+                release.set()
+
+        patch.setattr(gathered_writing, "write_external_tables", write_tables_mid_stream)
+        save_fsdp2_checkpoint(save_context(model, max_shard_size=TABLE_MODEL_SHARD_SIZE), background)
+
+    weight_map = json.loads(Path(background, SAFETENSORS_INDEX_FILE).read_text())["weight_map"]
+    assert table_keys <= set(weight_map), "the index lost the table's files"
+    assert in_flight_at_tables and in_flight_at_tables[0] >= 1, "premise: no part was in flight beside the table"
+    assert file_digests(background) == file_digests(inline), "background writes changed the bytes on disk"
+    reloaded, info = AutoModelForCausalLM.from_pretrained(background, dtype=torch.bfloat16, output_loading_info=True)
+    assert loading_problems(info) == {}
+    with torch.no_grad(), transformers_forwards():
+        assert torch.equal(reloaded.eval()(input_ids=ids, use_cache=False).logits, expected)
 
 
 def test_the_block_exit_waits_out_every_write_and_logs_a_failed_one(tmp_path, monkeypatch, caplog):
@@ -332,7 +425,7 @@ def test_outside_a_block_and_at_zero_threads_every_part_is_written_in_line(tmp_p
 
 
 @pytest.mark.parametrize(
-    ("raw", "threads", "warns"), [(None, 0, False), ("2", 2, False), ("0", 0, False), ("-3", 0, True), ("x", 0, True)]
+    ("raw", "threads", "warns"), [(None, 0, False), ("2", 2, False), ("0", 0, False), ("x", 0, True)]
 )
 def test_the_thread_count_knob(monkeypatch, caplog, raw, threads, warns):
     if raw is None:
@@ -342,6 +435,18 @@ def test_the_thread_count_knob(monkeypatch, caplog, raw, threads, warns):
     with caplog.at_level(logging.WARNING):
         assert checkpoint_write_threads() == threads
     assert any(THREADS_ENV in r.getMessage() for r in caplog.records) == warns
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["save_rank", "peer_rank"])
+def test_a_negative_thread_count_raises_on_entry_on_every_rank(tmp_path, monkeypatch, enabled):
+    """The save rank and every peer refuse it entering the block, before a gathered save's first collective."""
+    monkeypatch.setenv(THREADS_ENV, "-3")
+    entered = False
+    with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITE_THREADS=-3"):
+        with StreamingShardWriter(str(tmp_path), SHARD_SIZE, enabled=enabled):
+            entered = True
+    assert not entered
+    assert not any(tmp_path.iterdir())
 
 
 def _raise_on_writer_thread(fail_part: int, tensors, path, **kwargs):

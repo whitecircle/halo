@@ -135,6 +135,28 @@ def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -
         setattr(generation_config, field, token_id)
 
 
+def reject_stale_eos_copies(model: PreTrainedModel | None, eos_token_id) -> None:
+    """Refuse recording ``eos_token_id`` on a model holding a module that copied its config's eos id at build: the
+    copy keeps the checkpoint's id through training while every export records the new one, so a served copy
+    computes differently from the trained model (Qwen3.8-Flash-Next's n-gram history restarts after its copy)."""
+    if model is None:
+        return
+    stale = sorted(
+        {
+            type(module).__name__
+            for module in model.modules()
+            if getattr(module, "eos_token_id", eos_token_id) != eos_token_id
+        }
+    )
+    if stale:
+        raise ValueError(
+            f"eos_token sets eos_token_id={eos_token_id}, but {stale} copied the checkpoint's eos id from the config "
+            f"when the model was built and computes with that copy, which the run cannot change, while every export "
+            f"records the new id: the served model would differ from the trained one. Leave eos_token unset (or "
+            f"set it to the checkpoint's own eos token) and end turns through the chat template."
+        )
+
+
 def configure_run_tokenizer(
     args: CommonScriptArguments,
     model: PreTrainedModel | None,
@@ -182,6 +204,7 @@ def configure_run_tokenizer(
     if args.eos_token is not None:
         if tokenizer.eos_token != args.eos_token:
             tokenizer.eos_token = args.eos_token
+        reject_stale_eos_copies(model, tokenizer.eos_token_id)
         sync_special_token_id(model, "eos_token_id", tokenizer.eos_token_id)
     if args.bos_token is not None:
         if tokenizer.bos_token != args.bos_token:

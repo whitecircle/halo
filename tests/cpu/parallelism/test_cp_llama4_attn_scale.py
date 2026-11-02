@@ -39,6 +39,7 @@ ORIGINAL_MAX_PE = 8
 
 
 class _FakeConfig:
+    hidden_size = HIDDEN
     num_attention_heads = NUM_Q_HEADS
     num_key_value_heads = NUM_KV_HEADS
     rope_interleave = False

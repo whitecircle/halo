@@ -18,29 +18,29 @@ from unittest.mock import patch
 
 import pytest
 import torch
-from transformers import Glm4MoeLiteConfig, PretrainedConfig, Qwen3Config
+from transformers import Glm4MoeLiteConfig, PretrainedConfig, Qwen3_5MoeTextConfig, Qwen3Config
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteAttention
+from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeAttention
 
 from halo import hardware
 from halo.distributed.context_parallel import ulysses_attention as cp_base_layer
-from halo.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention
+from halo.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention, Qwen3_5MoeUlyssesAttention
 from halo.model_loading.parallel import loader as model_loading
 from halo.models.attention import selection as attention_mod
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
-# Every spelling of the families whose attention runs FA4's dedicated head_dim-256 kernel. Qwen3.6 ships under
-# the 3.5 types (Qwen/Qwen3.6-35B-A3B declares ``qwen3_5_moe``), so there is no separate 3.6 spelling to cover.
+# Every spelling of the families FA4 trains on its dedicated head_dim-256 kernel. Qwen3.6 ships under the 3.5
+# types (Qwen/Qwen3.6-35B-A3B declares ``qwen3_5_moe``), so there is no separate 3.6 spelling to cover.
 FA4_HEAD_DIM_256_MODEL_TYPES = (
     "qwen3_5",
     "qwen3_5_moe",
     "qwen3_5_moe_text",
     "qwen3_5_text",
     "qwen3_next",
-    "glm4_moe_lite",
 )
 
 
@@ -236,8 +236,18 @@ def _resolve_on_blackwell(config, requested, dtype=torch.bfloat16, **pc_fields) 
         )
 
 
-# GLM-4.7-Flash's MLA at its release widths: 192 + 64 query/key, 256 value, so FA4 runs its head_dim-256 kernel.
+# GLM-4.7-Flash's MLA at its release widths: 192 + 64 query/key, 256 value, so FA4 would run its head_dim-256 kernel.
 _GLM4_FLASH_MLA = {**TINY_GLM4_MOE_LITE_CONFIG, "qk_nope_head_dim": 192, "qk_rope_head_dim": 64, "v_head_dim": 256}
+# Qwen3.5/3.6-MoE's attention at its release widths (16 query and 2 KV heads of 256), one layer of it.
+_QWEN3_5_MOE_ATTENTION = {"hidden_size": 256, "num_hidden_layers": 1, "layer_types": ["full_attention"]}
+
+
+def _glm4_flash() -> Glm4MoeLiteConfig:
+    return Glm4MoeLiteConfig(**_GLM4_FLASH_MLA)
+
+
+def _qwen3_5_moe() -> Qwen3_5MoeTextConfig:
+    return Qwen3_5MoeTextConfig(**_QWEN3_5_MOE_ATTENTION)
 
 
 @pytest.mark.parametrize("requested", [None, "flash_attention_4"])
@@ -245,31 +255,53 @@ def test_cp_labels_the_flash_kernel_ulysses_runs_where_fa4_cannot_train(requeste
     """A deterministic run refuses FA4's head_dim-256 kernel, Ulysses then runs FA2 on Blackwell, so under CP the
     label is FA2; the SDPA the resolver picks without CP is a label Ulysses refuses after the whole load."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
-    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), requested, cp_size=2) == "flash_attention_2"
-    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), requested) == "sdpa"
+    assert _resolve_on_blackwell(_qwen3_5_moe(), requested, cp_size=2) == "flash_attention_2"
+    assert _resolve_on_blackwell(_qwen3_5_moe(), requested) == "sdpa"
 
 
 @pytest.mark.parametrize("cp_size", [1, 2])
 @pytest.mark.parametrize("requested", [None, "flash_attention_4"])
 def test_a_head_dim_256_family_keeps_fa4_outside_a_deterministic_run(requested, cp_size, monkeypatch):
     monkeypatch.delenv("FLASH_ATTENTION_DETERMINISTIC", raising=False)
-    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), requested, cp_size=cp_size) == (
-        "flash_attention_4"
-    )
+    assert _resolve_on_blackwell(_qwen3_5_moe(), requested, cp_size=cp_size) == "flash_attention_4"
 
 
-@pytest.mark.parametrize(("deterministic", "allow_fa4"), [("1", False), ("0", True)])
-def test_the_ulysses_wrapper_refuses_fa4_where_the_loader_does(deterministic, allow_fa4, monkeypatch):
-    """The wrapper picks its own kernel, so it must read the same verdict as the loader's CP label."""
+@pytest.mark.parametrize("deterministic", ["0", "1"])
+@pytest.mark.parametrize("cp_size", [1, 2])
+@pytest.mark.parametrize("requested", [None, "flash_attention_4"])
+def test_glm_4_7_flash_runs_fa2_with_or_without_cp(requested, cp_size, deterministic, monkeypatch):
+    """FA4's dedicated kernel does not train multi-head latent attention, so GLM-4.7-Flash's label is FA2 in every
+    run, under CP (the kernel Ulysses then runs) or not, never the SDPA a deterministic run falls back to."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
-    attention = Glm4MoeLiteAttention(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), layer_idx=0)
-    assert Glm4MoeLiteUlyssesAttention(attention, cp_group=None, cp_size=2)._allow_fa4 is allow_fa4
+    with patch.object(attention_mod, "is_flash_attn_2_available", lambda: True):
+        assert _resolve_on_blackwell(_glm4_flash(), requested, cp_size=cp_size) == "flash_attention_2"
+
+
+@pytest.mark.parametrize(
+    ("build", "deterministic", "allow_fa4"),
+    [
+        ("qwen3_5_moe", "1", False),
+        ("qwen3_5_moe", "0", True),
+        ("glm4_flash", "1", False),
+        ("glm4_flash", "0", False),
+    ],
+)
+def test_the_ulysses_wrapper_refuses_fa4_where_the_loader_does(build, deterministic, allow_fa4, monkeypatch):
+    """The wrapper picks its own kernel, so it must read the same verdict as the loader's CP label: a deterministic
+    run refuses FA4's head_dim-256 kernel, and GLM-4.7-Flash's latent attention never takes it."""
+    monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
+    if build == "glm4_flash":
+        wrapper = Glm4MoeLiteUlyssesAttention(Glm4MoeLiteAttention(_glm4_flash(), layer_idx=0), None, 2)
+    else:
+        wrapper = Qwen3_5MoeUlyssesAttention(Qwen3_5MoeAttention(_qwen3_5_moe(), layer_idx=0), None, 2)
+    assert wrapper._allow_fa4 is allow_fa4
 
 
 def test_cp_keeps_the_half_precision_refusal_where_fa4_cannot_train(monkeypatch):
     """Only the FA4 refusal takes the CP kernel's label: an fp32 run has no flash kernel at all, under CP or not."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", "1")
-    assert _resolve_on_blackwell(Glm4MoeLiteConfig(**_GLM4_FLASH_MLA), None, torch.float32, cp_size=2) == "sdpa"
+    assert _resolve_on_blackwell(_qwen3_5_moe(), None, torch.float32, cp_size=2) == "sdpa"
+    assert _resolve_on_blackwell(_glm4_flash(), None, torch.float32, cp_size=2) == "sdpa"
 
 
 def test_detect_attn_impl_on_cpu_host_is_silent_fa2():

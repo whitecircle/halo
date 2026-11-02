@@ -29,6 +29,7 @@ from halo.model_loading.parallel.tp import uses_attention_only_tp
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.models.config_access import text_config
 from halo.models.context_window import context_window_from_config
+from halo.models.external_tables import EXTERNAL_TABLES_STAMP
 from halo.models.moe.config_fields import (
     has_routed_experts,
     resolve_expert_count,
@@ -237,6 +238,19 @@ def reject_unsupported_load(
                 "lowp_precision requires bf16/fp32 master weights, but dtype=float16. "
                 "Set bf16 (the toolkit default) — low precision affects only the GEMM operands."
             )
+
+
+def reject_random_init_tables(model_config, *, init_from_scratch: bool) -> None:
+    """Refuse a random-weight build (``init_from_scratch``) of a model whose config builds an external table (the
+    family patches stamp :data:`~halo.models.external_tables.EXTERNAL_TABLES_STAMP` on it): the table is frozen and
+    only a checkpoint supplies it, while the build keeps the checkpoint's ``_name_or_path``, so its attach would pair
+    the pretrained table with random weights."""
+    if init_from_scratch and getattr(model_config, EXTERNAL_TABLES_STAMP, False):
+        raise ValueError(
+            f"init_from_scratch builds {getattr(model_config, 'model_type', 'this model')} with random weights, but "
+            f"its external tables are frozen and come only from the checkpoint its config names, so the run would "
+            f"train random weights against a pretrained table. Train from the checkpoint: drop init_from_scratch."
+        )
 
 
 def reject_unsupported_structure(

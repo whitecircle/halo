@@ -87,7 +87,7 @@ The mode holds an **export contract**: `bias_update` is accepted only where the 
 | GLM-4, Laguna, GLM-5 Next, Inkling, DeepSeek-V4, Step-3.7 | `gate.e_score_correction_bias` (Laguna's hub spelling: `experts.e_score_correction_bias`) |
 | Bailing / Ling | The hub gate's persistent `expert_bias`, adopted whole — no side-buffer fallback |
 | LFM-2 | The block's `expert_bias`, materialized with `use_expert_bias` flipped on for the export |
-| Qwen3, Qwen3.5/3.6, Qwen3-Next, Mistral4, Cohere2 MoE | None — `bias_update_transient` only |
+| Qwen3, Qwen3.5/3.6, Qwen3-Next, Qwen3.8-Flash-Next, Mistral4, Cohere2 MoE | None — `bias_update_transient` only |
 | Gemma 4 | None, and no balancing route at all ([below](#gemma-4-has-no-balancing-path)) |
 
 The contract is checked on the **enabled tree**, not the class declaration: a renamed upstream slot, or one already FSDP-sharded as a DTensor, falls back to the side-buffer and `bias_update` then raises. Bailing has no fallback at all (`_supports_transient_balancing_bias = False`). A family on a weight-sync client's `DROPPED_BALANCING_BIAS_MODEL_TYPES` (Laguna on vLLM) warns, naming that client's `ENGINE_RELEASE`, that the engine's loader skips the exported key, so a copy served there never routes on the trained bias.
@@ -157,7 +157,7 @@ It **commits** only where the bias would land in exported state. GLM-4 MoE Lite,
 
 **Mistral4 and Cohere2 MoE** have no slot and resolve to `none`, warning that `bias_update_transient` is the deliberate opt-in.
 
-`aux_loss` follows for the families whose `forward` declares the parameter: GPT-OSS, Qwen3, Qwen3.5/3.6 (multimodal and text-only), Qwen3-Next, Laguna, GLM-5 Next. Where it does not and no EP layer accepts a bias either, the model has **no balancing route at all**, `auto` resolves to `none` with the reason, and an explicit `aux_loss` raises.
+`aux_loss` follows for the families whose `forward` declares the parameter: GPT-OSS, Qwen3, Qwen3.5/3.6 (multimodal and text-only), Qwen3-Next, Qwen3.8-Flash-Next, Laguna, GLM-5 Next. Where it does not and no EP layer accepts a bias either, the model has **no balancing route at all**, `auto` resolves to `none` with the reason, and an explicit `aux_loss` raises.
 
 That is also what `use_grouped_gemm: false` at `ep_size = 1` does to GLM-4 MoE Lite, LFM-2 and Step-3.7: with no EP layers to carry the bias, the run trains unbalanced.
 

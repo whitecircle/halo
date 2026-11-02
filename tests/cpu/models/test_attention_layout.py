@@ -22,6 +22,8 @@ from halo.models.attention.layout import (
     attention_layout,
     attention_layout_from_config,
 )
+from tests.common.models import QWEN3_8_FLASH_NEXT
+from tests.common.tokenizers import load_cached_config
 
 # gpt-oss-120b: 18 full + 18 sliding(128) layers, 64 heads of 64.
 DEPTH = 36
@@ -206,6 +208,30 @@ def test_sparse_layers_cost_top_k_keys_plus_a_pooled_indexer():
     seq_len = 65536
     expected = DEPTH * (SCORE_PASSES * WIDTH * 2048 + INDEX_PASSES * 32 * 128 * seq_len / 16)
     assert layout.flops_per_token(seq_len) == pytest.approx(expected, rel=1e-12)
+
+
+def test_block_indexed_layers_cost_the_budget_plus_the_tail_block():
+    """A block indexer (Qwen3.8-Flash-Next's QSA) keeps ``indexer_budget`` tokens of whole blocks plus the up to
+    ``indexer_compress_ratio - 1`` tokens of the incomplete tail, and scores one pooled key per block."""
+    config = _Config(
+        ["indexed_attention"] * DEPTH,
+        indexer_budget=2048,
+        indexer_compress_ratio=4,
+        indexer_n_heads=4,
+        indexer_head_dim=128,
+    )
+    layout = attention_layout_from_config(config)
+    seq_len = 65536
+    expected = DEPTH * (SCORE_PASSES * WIDTH * 2051 + INDEX_PASSES * 4 * 128 * seq_len / 4)
+    assert layout.flops_per_token(seq_len) == pytest.approx(expected, rel=1e-12)
+
+
+def test_the_flash_next_release_costs_twelve_qsa_layers():
+    config = load_cached_config(QWEN3_8_FLASH_NEXT)
+    layers = attention_layout_from_config(config).layers
+    sparse = [layer for layer in layers if layer.kind == "sparse"]
+    assert len(layers) == 48 and len(sparse) == 12 and {layer.kind for layer in layers} == {"sparse", "none"}
+    assert {(layer.keys, layer.index_width, layer.index_pool) for layer in sparse} == {(2051, 512.0, 4)}
 
 
 def test_compressed_layers_cost_the_compressed_stream_plus_the_local_band():

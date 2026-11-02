@@ -20,7 +20,7 @@ from transformers.models.qwen4_exp import Qwen4ExpConfig, Qwen4ExpTextConfig
 
 from halo.data.collators.collator_rules import reject_unsupported_collator_options
 from halo.models import segment_markers
-from halo.models.config_access import model_type_matches
+from halo.models.config_access import config_model_types, model_type_matches
 from halo.models.segment_markers import (
     SegmentMarkers,
     reject_unmarked_linear_attention_rows,
@@ -71,14 +71,18 @@ def _outcome(verdict, config):
 
 @pytest.mark.parametrize("family", sorted(ROSTER))
 def test_every_roster_family_keeps_its_verdict(family):
+    """The name list's verdict, or for a family it never held (``MOVED``) the GatedDeltaNet markers."""
     config = _roster_config(family)
-    assert segment_markers_for(config) == _named_verdict(config)
+    if set(config_model_types(config)) & MOVED:
+        assert segment_markers_for(config) == SegmentMarkers(seq_idx=True, cu_seq_lens=True)
+    else:
+        assert segment_markers_for(config) == _named_verdict(config)
 
 
 def test_the_roster_spans_both_verdicts():
     """A sweep where nothing is detected, or everything is, would pass the per-family pin vacuously."""
     detected = {family for family in ROSTER if segment_markers_for(_roster_config(family)).cu_seq_lens}
-    assert detected == {"qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next"}
+    assert detected == {"qwen3_5", "qwen3_5_moe", "qwen3_5_moe_text", "qwen3_next", "qwen4_exp", "qwen4_exp_text"}
 
 
 def test_every_qwen3_next_fixture_builds_qwen3_next():

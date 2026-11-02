@@ -24,7 +24,8 @@ one import line in the family roster.
 
 - EP layers subclass a shared base. A family whose expert-weight layout matches
   an existing one subclasses that instead: Laguna reuses GLM-4's in 26 lines,
-  and Qwen3-Next reuses Qwen3.5-MoE's in 32.
+  Qwen3-Next reuses Qwen3.5-MoE's in 32, and Qwen3.8-Flash-Next reuses
+  Qwen3-Next's in 17.
 - Every other EP layer file is 115 lines or fewer.
 - GPT-OSS is the outlier at 205, because of its interleaved, biased gate/up
   weights and its own clamped SwiGLU compute.

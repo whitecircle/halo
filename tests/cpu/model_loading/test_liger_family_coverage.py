@@ -61,13 +61,15 @@ _LLAMA_RMS_NORM_BODY = (
 
 # Multimodal wrappers carry no decoder classes of their own; dispatch resolves them through
 # `text_config.model_type`, and the wrapper's text tower may be either sibling (LFM-2 VL and
-# Cohere2-Vision both default to the DENSE one, `mistral3` wraps `mistral` or `mistral4`), so pinning
-# the wrapper to a spec would be wrong.
+# Cohere2-Vision both default to the DENSE one, `mistral3` wraps `mistral` or `mistral4`), or the wrapper
+# runs its own head where the tower's spec fuses the loss (Qwen3.8-Flash-Next), so pinning the wrapper to a
+# spec would be wrong.
 RESOLVED_THROUGH_TEXT_CONFIG = {
     "gemma4": "gemma4_text",
     "lfm2_vl": "lfm2",
     "cohere2_vision": "cohere2",
     "mistral3": "mistral4",
+    "qwen4_exp": "qwen4_exp_text",
 }
 
 # Norm classes that compute Liger's function on CPU yet must stay undeclared, with the reason: the
@@ -192,7 +194,8 @@ def test_no_liger_expressible_norm_is_left_undeclared(spec):
             continue
         try:
             norm = cls(16, 1e-5).to(torch.bfloat16)
-        except TypeError:
+        # A grouped norm takes its group size second (``Qwen4ExpTextRMSNorm``) and refuses the probe's eps.
+        except (TypeError, ValueError):
             continue
         weight = getattr(norm, "weight", None)
         if weight is None or "gate" in inspect.signature(norm.forward).parameters:
@@ -491,7 +494,7 @@ def test_the_fused_head_reproduces_the_family_head_bit_for_bit():
     branch shares: the ``logits_to_keep`` slice, the ``logit_scale`` fold, and the ``loss_function``
     call. Any drift there — a dropped scale, a wrong ``vocab_size``, a mis-shifted label — shows up
     as a non-zero delta on a tiny random model. Cohere2 MoE carries the scale (0.0625); GLM-4.7-Flash
-    is the plain shape.
+    is the plain shape; Qwen3.8-Flash-Next adds the router aux loss in its head.
 
     Subprocess: installing the forward rebinds the upstream classes for the rest of the process, and
     a later test in the session building one of these families would take the fused branch on CPU.
@@ -502,10 +505,14 @@ from transformers import AutoModelForCausalLM
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from tests.common.liger_appliers import liger_applier
-from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG
+from tests.common.models import TINY_COHERE2_MOE_CONFIG, TINY_GLM4_MOE_LITE_CONFIG, TINY_QWEN4_EXP_CONFIG
 
 failures = []
-for model_type, tiny in (("cohere2_moe", TINY_COHERE2_MOE_CONFIG), ("glm4_moe_lite", TINY_GLM4_MOE_LITE_CONFIG)):
+for model_type, tiny in (
+    ("cohere2_moe", TINY_COHERE2_MOE_CONFIG),
+    ("glm4_moe_lite", TINY_GLM4_MOE_LITE_CONFIG),
+    ("qwen4_exp_text", TINY_QWEN4_EXP_CONFIG),
+):
     config = CONFIG_MAPPING[model_type](**{**tiny, "attn_implementation": "eager"})
     torch.manual_seed(0)
     reference = AutoModelForCausalLM.from_config(config).float()
@@ -614,6 +621,7 @@ def test_the_fused_head_forwards_the_router_flag_where_the_head_adds_no_aux_loss
     assert {spec.model_types[0] for spec in LIGER_FAMILY_SPECS if spec.router_aux_loss_in_head} == {
         "deepseek_v4",
         "laguna",
+        "qwen4_exp_text",
     }
 
     # A caller's explicit False over a config True is the family head's own behaviour: no refusal,

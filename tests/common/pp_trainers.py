@@ -1,5 +1,6 @@
 """Shared pieces of the PP suites that drive a real trainer: construction refusals, training args, rows,
-runner spies, the EP bias-balanced SFT build and the reload and resume pins every PP save owes."""
+runner spies, gradient checkpointing as ``train`` enables it, the EP bias-balanced SFT build and the reload and
+resume pins every PP save owes."""
 
 import math
 import os
@@ -8,7 +9,13 @@ import torch
 import torch.distributed as dist
 from datasets import Dataset
 from torch.distributed.tensor import DTensor
-from transformers import AutoTokenizer, Qwen3Config, Qwen3ForSequenceClassification, default_data_collator
+from transformers import (
+    AutoTokenizer,
+    Qwen3Config,
+    Qwen3ForSequenceClassification,
+    TrainerCallback,
+    default_data_collator,
+)
 
 from halo.callbacks.balancing import configure_moe_balancing
 from halo.callbacks.factory import build_run_callbacks
@@ -18,7 +25,7 @@ from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.checkpoint_io import save_schedule
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
 from tests.common.optimizer_state import local_optimizer_state
-from tests.common.pp_equivalence import causal_lm_loss, dp_slice_batch
+from tests.common.pp_equivalence import causal_lm_loss, count_checkpoint_calls, dp_slice_batch
 from tests.common.rank_log import log
 from tests.common.tolerances import TOL
 
@@ -127,6 +134,38 @@ def build_pp_trainer(trainer_cls, *, also_record=None, **trainer_kwargs):
 
         setattr(runner, method, spying)
     return trainer, steps, evals
+
+
+def enable_gradient_checkpointing_as_train_does(trainer) -> None:
+    """Enable checkpointing on ``trainer.model`` as ``Trainer.train`` does before its first step, for a suite that
+    drives ``training_step`` without ``train``: ``every_n_layers`` and ``offload`` come out of the checkpoint
+    kwargs. A no-op where the args ask for none, as once an EP trainer installed its own at construction."""
+    if not trainer.args.gradient_checkpointing:
+        return
+    kwargs = dict(trainer.args.gradient_checkpointing_kwargs or {})
+    every_n_layers = kwargs.pop("every_n_layers", 1)
+    offload = kwargs.pop("offload", False)
+    trainer.model.gradient_checkpointing_enable(
+        gradient_checkpointing_kwargs=kwargs or None, every_n_layers=every_n_layers, offload=offload
+    )
+
+
+class CheckpointCallsInTrain(TrainerCallback):
+    """Counts the stage layers' checkpoint calls during ``trainer.train()``, wrapped at ``on_train_begin``, the first
+    hook after ``train`` enabled checkpointing; :attr:`calls` stays 0 where it enabled none."""
+
+    def __init__(self, trainer):
+        self._trainer = trainer
+        self._calls = [0]
+        trainer.add_callback(self)
+
+    @property
+    def calls(self) -> int:
+        return self._calls[0]
+
+    def on_train_begin(self, args, state, control, **kwargs):
+        if self._trainer.model.is_gradient_checkpointing:
+            self._calls = count_checkpoint_calls(self._trainer.model)
 
 
 def losses_identical_across_ranks(losses: list[float]) -> bool:

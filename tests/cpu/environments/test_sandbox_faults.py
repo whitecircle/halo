@@ -505,6 +505,7 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
     """Graded by a user that is not root, which the program shares: every test is judged, its
     working directory is removed at the end, and nothing it locked reads as a grading outage."""
     command = [sys.executable, "-c", _GRADE_AND_REPORT]
+    env = {**os.environ, "HOME": "/tmp"}
     if os.geteuid() == 0:
         if shutil.which("setpriv") is None:
             pytest.skip("running as root without setpriv to drop to an unprivileged uid")
@@ -517,9 +518,10 @@ def test_a_program_that_locks_its_workdir_gets_a_verdict_not_an_infra_error():
             "--clear-groups",
             *command,
         ]
-    proc = subprocess.run(
-        command, capture_output=True, text=True, cwd=REPO_ROOT, check=False, env={**os.environ, "HOME": "/tmp"}
-    )
+        # Importing torch latches its compile cache dir, under the suite's temp dir, into the environment; that dir
+        # may be private to root, so the dropped uid derives its own.
+        env.pop("TORCHINDUCTOR_CACHE_DIR", None)
+    proc = subprocess.run(command, capture_output=True, text=True, cwd=REPO_ROOT, check=False, env=env)
     assert proc.returncode == 0, proc.stderr
     report = json.loads(proc.stdout.splitlines()[-1])
     assert report["uid"] != 0

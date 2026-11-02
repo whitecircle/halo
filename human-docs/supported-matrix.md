@@ -36,25 +36,28 @@ SDPA or eager where no flash kernel serves the family.
 
 - **Padded-batch scripts** (preference, reward, classification, teacher
   distillation, GRPO) keep the hardware pick on Blackwell when the YAML sets none,
-  except for a remote-code, head_dim-256 or softcapped checkpoint, and default to SDPA on
-  other GPUs. Every GPU keeps the hardware pick for SMPO and offline GRPO under
+  except for a remote-code or softcapped checkpoint, and default to SDPA on other
+  GPUs (FA3 on Hopper for a softcapped model). Every GPU keeps the hardware pick for SMPO and offline GRPO under
   CP, and for a GPT-OSS run with live sinks (`reset_sinks: false`).
 - **Gemma 2 / Gemma 3 (head_dim 256)**: FA2 on Blackwell, since FA4's head_dim-256
-  kernel takes no softcap or sliding window; Gemma 3 takes SDPA in the padded
-  scripts. A model with attention softcapping (Gemma 2) never runs SDPA, which
-  would drop the softcap.
-- **Gemma 2 27B (head_dim 128)**: FA4 on Blackwell at one unpadded row per batch;
-  FA2 on packed, padding-free or padded rows, since FA4's varlen backward takes no
-  softcap.
+  kernel takes no softcap or sliding window. A model with attention softcapping
+  (Gemma 2) never runs SDPA, which would drop the softcap.
+- **Gemma 2 27B (head_dim 128)**: FA4 on Blackwell at one unpadded row per batch,
+  training and evaluation; FA2 on packed, padding-free or padded rows, since FA4's
+  varlen kernels take no softcap.
 - **Gemma 4**: no flash path (FA2 caps head_dim at 256, FA4 overflows tensor
   memory at its 512-wide global layers).
-- **Qwen3.5/3.6, Qwen3-Next, GLM-4 MoE Lite**: FA4 on Blackwell, FA3 on Hopper.
-  Under `full_determinism`, SDPA on Blackwell. Packed SFT on Qwen3.5/3.6 and
-  Qwen3-Next takes FA2 on Blackwell in either case.
+- **Qwen3.5/3.6, Qwen3-Next**: FA4 on Blackwell, FA3 on Hopper. Under
+  `full_determinism`, SDPA on Blackwell. Packed SFT takes FA2 on Blackwell in
+  either case.
+- **GLM-4 MoE Lite (GLM-4.7-Flash)**: FA2 on Blackwell in every run, since FA4's
+  head_dim-256 kernel trains its latent attention away from FA2; FA3 on Hopper.
 - **GLM-5 Next, Step-3.7 Flash, Inkling**: fall back to SDPA on their own. On
   GLM-5 Next that SDPA runs a packed row as one causal sequence, so it refuses
   flat `packing`; tree packing keeps its documents apart, and otherwise it trains
   on padded batches.
+- **Qwen3.8-Flash-Next**: SDPA; its sparse layers run Halo's tiled kernel, whose
+  memory grows linearly with the row.
 - **DeepSeek-V4**: eager only.
 - **Laguna, Ling 3.0**: no automatic fallback. Set `attn_implementation: sdpa`
   (Laguna's shipped configs do); on Ling 3.0 any flash label, the auto-selected
@@ -105,7 +108,7 @@ naming the family and the reason.
 | Dense families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 | Yes | Yes |
 | Laguna, Step-3.7 Flash | Yes | No (SGLang's loaders assert full coverage per call) |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No |
-| Inkling, GLM-5 Next, Qwen3-Next, Cohere2 MoE | No | No (no online RL at all) |
+| Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE | No | No (no online RL at all) |
 
 `rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only. SGLang must
 be served from this repo's image. Setup, ports, weight sync and
@@ -141,9 +144,10 @@ advanced parallelism. What each family is for:
 | Qwen3 (dense) | — | — | Yes | Yes | Yes | reference dense family; PP refuses the tied 0.6B, 1.7B and 4B checkpoints |
 | Qwen3 MoE | Yes | Yes | Yes | Yes | No | broadest coverage |
 | Qwen3-VL (text) | — | — | Yes | No | No | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
-| Qwen3.5 / Qwen3.6 (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
+| Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower |
 | Qwen3-Next | Yes | Yes | No | No | No | EP and ETP pass tiny-model GPU tests only |
+| Qwen3.8-Flash-Next | Yes | Yes | No | No | No | experimental: EP and pure ETP pass tiny-model GPU tests only, EP+ETP is untested; text rows, packed or padded; the n-gram table stays in host memory |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | No | |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | No | ETP passes tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |

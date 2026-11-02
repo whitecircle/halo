@@ -64,10 +64,10 @@ Online GRPO, online SDPG and async GRPO with environments generate with a
 separate vLLM server ([Rollout servers](rollout-servers.md)). Every other method
 trains without vLLM or Ray.
 
-Async GRPO also runs Ray rollout actors. With two or more servers it overlaps
-rollouts with training through a prefetch queue. It can generate with SGLang
-instead (`rollout_backend: sglang`), with the limits listed in the
-[Supported matrix](supported-matrix.md#rollout-engines).
+Async GRPO also runs Ray rollout actors. With two or more servers, or one that
+opts in, it overlaps rollouts with training through a prefetch queue. It can
+generate with SGLang instead (`rollout_backend: sglang`), with the limits
+listed in the [Supported matrix](supported-matrix.md#rollout-engines).
 
 Every hyperparameter, per method, is in the
 [training methods reference](../agent-docs/training-methods/README.md) ↗.

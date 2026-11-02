@@ -10,13 +10,14 @@ import math
 import torch
 import torch.nn as nn
 
-from halo.checkpoint.adapters import expert_lora_checkpoint_keys
+from halo.checkpoint.adapters import adapter_layout_mismatch, expert_lora_checkpoint_keys
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.kernels.grouped_mm import GROUPED_MM_STRIDE_ALIGNMENT_BYTES
 from halo.models.moe.expert_lora_spec import EXPERT_LORA_SUFFIXES
-from halo.runtime.collectives import all_gather_cat, broadcast_from_rank0
+from halo.runtime.collectives import all_gather_cat
+from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.dtensor import copy_full_tensor, materialize_dtensor
-from halo.runtime.ranks import get_global_rank, is_global_main_process
+from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -106,21 +107,23 @@ class EPExpertLoraMixin:
                     state[key] = adapter.contiguous().cpu()
         return state
 
+    def expert_lora_checkpoint_shapes(self) -> dict[str, tuple[int, ...]]:
+        """The key and shape :meth:`gather_expert_lora_state_dict` saves each adapter under: the live adapter's
+        (global, for an FSDP2 DTensor) shape, its expert dim concatenated across the dispatch-EP group."""
+        shapes = {}
+        for attr in sorted(self._expert_lora_attrs):
+            for suffix, key in zip(EXPERT_LORA_SUFFIXES, expert_lora_checkpoint_keys(attr), strict=True):
+                experts, *rest = getattr(self, f"{attr}{suffix}").shape
+                shapes[key] = (experts * self.ep_config.ep_size, *rest)
+        return shapes
+
     def load_expert_lora_state_dict(self, layer_state: dict) -> None:
-        """Load :meth:`gather_expert_lora_state_dict`'s output into the live adapters, slicing this rank's experts.
+        """Load :meth:`gather_expert_lora_state_dict`'s output into the live adapters, slicing this rank's experts;
+        :func:`load_expert_lora_adapters` has matched its keys and shapes on every rank.
 
         COLLECTIVE where the adapters are FSDP2 DTensors (ep1 with ``fsdp_shard_ep1_experts``): each copy re-shards
-        onto the param's mesh. Raises on a key-set mismatch, the trace of a changed expert configuration
-        (GptOss renames its attrs by grouped GEMM, ETP and arch) that would otherwise resume from zero-init.
+        onto the param's mesh.
         """
-        expected_keys = {key for attr in self._expert_lora_attrs for key in expert_lora_checkpoint_keys(attr)}
-        if set(layer_state) != expected_keys:
-            raise RuntimeError(
-                f"Expert-LoRA resume mismatch in {type(self).__name__}: saved adapter keys "
-                f"{sorted(layer_state)} do not match this layer's rebuilt adapters {sorted(expected_keys)}. "
-                "Likely a use_grouped_gemm / expert_tensor_parallel_size / GPU-arch change between "
-                "checkpoint and resume — resume with the same expert configuration."
-            )
         # sorted(): the DTensor copy is a collective, and frozenset order varies per process.
         for attr in sorted(self._expert_lora_attrs):
             for suffix, key in zip(EXPERT_LORA_SUFFIXES, expert_lora_checkpoint_keys(attr), strict=True):
@@ -152,50 +155,40 @@ def gather_expert_lora_adapters(model: nn.Module, *, retain: bool = True) -> dic
     return adapters
 
 
+def expert_lora_checkpoint_shapes(model: nn.Module) -> dict[str, tuple[int, ...]]:
+    """Every native expert adapter of ``model`` under the key and shape :func:`gather_expert_lora_adapters` saves it."""
+    return {
+        f"{layer_name}.{key}": shape
+        for layer_name, layer in expert_lora_layers(model)
+        for key, shape in layer.expert_lora_checkpoint_shapes().items()
+    }
+
+
 def load_expert_lora_adapters(model: nn.Module, adapter_state: dict[str, torch.Tensor]) -> None:
     """COLLECTIVE. Load :func:`gather_expert_lora_adapters`' output back into ``model``.
 
-    The "no adapters" decision is rank 0's, so a rank whose adapter file is missing on a non-shared filesystem
-    does not skip the DTensor re-shards its peers enter. Every layer is matched before anything loads, and an
-    adapter-carrying layer no saved key matches raises: its adapters would resume from zero-init.
+    Every rank first matches ``adapter_state`` to the adapters ``model`` trains, key for key at the saved shapes
+    (:func:`expert_lora_checkpoint_shapes`), and the verdicts are joined, so a missing, unexpected or reshaped tensor
+    raises on every rank before any copy: a file without the expert adapters a run trains, or one a peer on a
+    non-shared filesystem reads short, would resume them from zero-init, and a saved delta no layer takes would be
+    discarded.
     """
-    if not broadcast_from_rank0(bool(adapter_state)):
-        return
-    if not adapter_state:
-        raise RuntimeError(
-            f"load_expert_lora_adapters: rank {get_global_rank()} received no expert-adapter state while "
-            f"global rank 0 did — a torn/partial adapter checkpoint on a non-shared filesystem. This "
-            f"rank's adapters would silently resume from zero-init. Resume from a complete checkpoint."
-        )
-    pending: list[tuple[EPExpertLoraMixin, dict[str, torch.Tensor]]] = []
-    missed: list[str] = []
+    mismatch = adapter_layout_mismatch(adapter_state, expert_lora_checkpoint_shapes(model))
+    reject_across_ranks(
+        mismatch
+        and (
+            f"The expert-LoRA adapters saved do not match the ones this model builds: {mismatch}. Resume with the "
+            f"run's expert configuration (EP / grouped GEMM on, the same expert projections in lora_target_modules, "
+            f"the same lora_r, use_grouped_gemm, expert_tensor_parallel_size and GPU architecture) and a complete "
+            f"checkpoint."
+        ),
+        "Expert-LoRA adapter resume",
+    )
     for layer_name, layer in expert_lora_layers(model):
-        prefix = f"{layer_name}.experts."
-        layer_state = {
-            key[len(f"{layer_name}.") :]: tensor for key, tensor in adapter_state.items() if key.startswith(prefix)
-        }
-        if layer_state:
-            pending.append((layer, layer_state))
-        else:
-            missed.append(layer_name)
-    if missed:
-        raise RuntimeError(
-            f"load_expert_lora_adapters: {len(missed)} EP layer(s) with expert LoRA matched none of the "
-            f"{len(adapter_state)} saved expert-adapter keys: {missed[:5]}"
-            f"{' …' if len(missed) > 5 else ''} (first saved key: {next(iter(adapter_state))!r}). "
-            f"Their adapters would silently resume from zero-init."
+        prefix = f"{layer_name}."
+        layer.load_expert_lora_state_dict(
+            {key.removeprefix(prefix): tensor for key, tensor in adapter_state.items() if key.startswith(prefix)}
         )
-    if not pending:
-        # No layer builds expert adapters at all: EP off, use_grouped_gemm off, or the expert projections dropped
-        # from lora_target_modules since the save.
-        raise RuntimeError(
-            f"load_expert_lora_adapters: the checkpoint carries {len(adapter_state)} expert-adapter tensors "
-            f"(first: {next(iter(adapter_state))!r}) but this model has no EP layer with expert LoRA to "
-            f"receive them, so every saved expert delta would be discarded. Resume with the run's expert "
-            f"configuration — EP/grouped-GEMM on and the same expert projections in lora_target_modules."
-        )
-    for layer, layer_state in pending:
-        layer.load_expert_lora_state_dict(layer_state)
 
 
 @contextlib.contextmanager

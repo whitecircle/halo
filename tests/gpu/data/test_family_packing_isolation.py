@@ -1,8 +1,9 @@
 #!/usr/bin/env python
 """Packed rows on the real kernels for the families whose flash path or isolation is a toolkit patch:
-Ling 2.0 and Ring (remote code on transformers v4's flash template, ``patch_v4_flash_attention_template``)
-and Zaya (attention ``position_ids`` re-injection plus the document-aware CCA,
-``patch_zaya_packed_document_isolation``).
+Ling 2.0 and Ring (remote code on transformers v4's flash template, ``patch_v4_flash_attention_template``),
+Zaya (attention ``position_ids`` re-injection plus the document-aware CCA,
+``patch_zaya_packed_document_isolation``) and Qwen3.8-Flash-Next (tiled QSA and the document-aware PLE,
+``patch_qwen4_exp_document_forwards``, over the GatedDeltaNet segment kernels).
 
 A tiny random-init checkpoint loads through ``load_distributed_model`` at the requested label (unset =
 the arch's auto-selected flash kernel), so the label resolution, the remote-class funnel and the family
@@ -14,12 +15,13 @@ The isolation checks run where every mixer isolates (Ring's Lightning Attention-
 design). Doc A is perturbed and precedes the measured doc B (causality alone already shields an earlier
 document). Isolated, doc B reads as doc B alone; the control withholds the isolation (one continuous
 position ramp and a dense mask) and must move doc B by far more than the isolated drift, or the zero
-would be vacuous. On a dense label doc B is scored against doc B alone on an fp32 load
-(``FP32_ISOLATED_REL_MAX``).
+would be vacuous. Packed rows carry the segment markers the packing collator emits for the family. On a dense
+label doc B is scored against doc B alone on an fp32 load (``FP32_ISOLATED_REL_MAX``).
 
     torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family bailing_moe
     torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family bailing_moe_linear
     torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family zaya --attn sdpa
+    torchrun --nproc_per_node=1 tests/gpu/data/test_family_packing_isolation.py --family qwen4_exp_text --attn sdpa
 """
 
 import argparse
@@ -31,6 +33,7 @@ from halo.data.collators.packing import DataCollatorWithPacking
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.attention.selection import is_flash_attn_implementation
+from halo.models.segment_markers import segment_markers_for
 from tests.common.harness import gpu_test_main
 from tests.common.rank_log import log
 from tests.common.tiny_models import (
@@ -54,6 +57,8 @@ FAMILIES = {
     "bailing_moe_linear": _FamilyRow(TINY_BAILING_RING_FAMILY, isolates=False),
     # Zaya's tiny head_dim 16 is below what the FA3/FA4 kernels take.
     "zaya": _FamilyRow(TINY_MOE_FAMILIES["zaya"], {"head_dim": 64}),
+    # Its class declares no flash kernel: SDPA under the tiled QSA.
+    "qwen4_exp_text": _FamilyRow(TINY_MOE_FAMILIES["qwen4_exp_text"]),
 }
 SEED = 0
 DOC_A, DOC_B = 48, 40
@@ -88,10 +93,15 @@ def _load(ckpt: str, attn_implementation: str | None, dtype: torch.dtype = torch
     return model.eval()
 
 
+def _row_inputs(batch, device, keys) -> dict:
+    """The packed batch's ``keys`` on ``device``: tensors moved, the varlen maxima left as ints."""
+    return {key: value.to(device) if torch.is_tensor(value) else value for key, value in batch.items() if key in keys}
+
+
 def _doc_b_logits(model, batch, device, *, isolated: bool) -> torch.Tensor:
     input_ids = batch["input_ids"].to(device)
     if isolated:
-        kwargs = {"position_ids": batch["position_ids"].to(device)}
+        kwargs = _row_inputs(batch, device, set(batch) - {"input_ids", "labels"})
     else:
         kwargs = {
             "position_ids": torch.arange(input_ids.shape[1], device=device)[None],
@@ -114,10 +124,11 @@ def _fp32_doc_b_versus_alone(ckpt: str, label: str, batch, doc_b, device) -> tup
 
 
 def _packed_step_is_finite(model, batch, device) -> bool:
-    """One packed training step: a finite loss and finite gradients (an expert no token routed to has none)."""
+    """One packed training step as SFT runs it, without the KV cache: a finite loss and finite gradients (an expert
+    no token routed to has none)."""
     model.train()
     model.zero_grad(set_to_none=True)
-    loss = model(**{key: batch[key].to(device) for key in ("input_ids", "labels", "position_ids")}).loss
+    loss = model(**_row_inputs(batch, device, set(batch)), use_cache=False).loss
     loss.backward()
     grads = [param.grad for param in model.parameters() if param.grad is not None]
     model.eval()
@@ -150,7 +161,10 @@ def run(ctx) -> dict:
     doc_a, doc_a_variant, doc_b = (
         torch.randint(2, len(tokenizer), (n,), generator=g).tolist() for n in (DOC_A, DOC_A, DOC_B)
     )
-    collator = DataCollatorWithPacking(tokenizer=tokenizer)
+    markers = segment_markers_for(model.config)
+    collator = DataCollatorWithPacking(
+        tokenizer=tokenizer, return_seq_idx=markers.seq_idx, return_flash_attn_kwargs=markers.cu_seq_lens
+    )
     batches = [
         collator.torch_call([{"input_ids": a + doc_b, "labels": a + doc_b, "seq_lengths": [DOC_A, DOC_B]}])
         for a in (doc_a, doc_a_variant)
