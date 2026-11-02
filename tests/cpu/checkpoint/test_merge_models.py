@@ -42,7 +42,7 @@ from halo.checkpoint.format import (
 )
 from halo.checkpoint.reading import iter_checkpoint_shard_entries
 from halo.checkpoint.tools import model_merge as mm
-from halo.checkpoint.writing import checkpoint_write_threads
+from halo.checkpoint.writing import resolve_checkpoint_write_threads
 from tests.common.checkpoint_io import mark_resume_adapter
 from tests.common.models import TINY_QWEN3_CONFIG
 
@@ -729,7 +729,9 @@ def test_the_ram_preflight_sizes_inputs_as_stored_plus_the_method_working_set(tm
     numel = large.numel()
     stored = 3 * numel * 2 + numel * 4
     working = mm.MERGE_METHODS["ties"].fp32_copies(3) * 4 * numel
-    shard = (1 + checkpoint_write_threads()) * mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
+    shard = (1 + resolve_checkpoint_write_threads()) * mm.StreamingShardWriter(
+        str(tmp_path), "1MB", enabled=False
+    ).max_bytes
     assert captured["ram"] == stored + working + shard
 
 
@@ -757,7 +759,9 @@ def test_the_ram_preflight_counts_the_costliest_key_when_sizes_tie(tmp_path, mon
     numel = tensor.numel()
     stored = 2 * numel * 2 + numel * 4
     working = mm.MERGE_METHODS["task_arithmetic"].fp32_copies(2) * 4 * numel
-    shard = (1 + checkpoint_write_threads()) * mm.StreamingShardWriter(str(tmp_path), "1MB", enabled=False).max_bytes
+    shard = (1 + resolve_checkpoint_write_threads()) * mm.StreamingShardWriter(
+        str(tmp_path), "1MB", enabled=False
+    ).max_bytes
     assert captured["ram"] == stored + working + shard
 
 

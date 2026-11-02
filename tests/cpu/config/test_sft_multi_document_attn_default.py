@@ -27,6 +27,7 @@ from halo.configs.script_arguments import ModelArguments
 from halo.data.collators.collator_rules import reject_unsupported_collator_options
 from halo.entrypoints import model_setup
 from halo.entrypoints.model_setup import default_training_rows_attn_implementation
+from halo.models import segment_markers
 from halo.models.attention import selection
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
@@ -43,6 +44,8 @@ _MROPE_GDN_MODEL_TYPES = ("qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe
 _OTHER_MODEL_TYPES = ("glm4_moe_lite", "qwen3", "qwen3_moe", "gpt_oss", "llama")
 
 _DETERMINISTIC_ENV = "FLASH_ATTENTION_DETERMINISTIC"
+# The segment-aware kernel checks as the images answer them on a GPU host.
+_SEGMENT_AWARE_KERNELS_PRESENT = (("causal_conv1d", lambda: True), ("fla>=0.2.2", lambda: True))
 
 # Compute capability per arch, or None for a GPU-less host.
 _ARCHS = {"b200": (10, 0), "b300": (10, 3), "h100": (9, 0), "cpu": None}
@@ -162,8 +165,8 @@ def test_mrope_is_read_off_the_decoder_not_the_checkpoint_modality(model_type, m
 @pytest.mark.parametrize("model_type", _MROPE_GDN_MODEL_TYPES)
 def test_padding_free_on_a_qwen35_decoder_stays_on_sdpa(model_type):
     """Negative control: the Qwen3.5 decoder's M-RoPE varlen path faults FA2 under ``padding_free``, on a text-only
-    checkpoint as on a multimodal one, so the default must stay off and the run keep today's loud refusal (SDPA
-    cannot serve ``padding_free``)."""
+    checkpoint as on a multimodal one, so the default must stay off and the run keep its loud refusal, which names
+    the M-RoPE rotary no backend serves rather than the SDPA it resolved to."""
     config = CONFIG_MAPPING[model_type]()
     assert _default(model_type, "b300", padding_free=True) is None
     with mock.patch.object(selection, "_detect_attention_impl", return_value="flash_attention_4"):
@@ -171,7 +174,7 @@ def test_padding_free_on_a_qwen35_decoder_stays_on_sdpa(model_type):
             config, None, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )
     assert resolved == "sdpa"
-    with pytest.raises(ValueError, match="padding_free requires a varlen attention kernel"):
+    with pytest.raises(ValueError, match="rotates by M-RoPE"):
         reject_unsupported_collator_options(
             types.SimpleNamespace(),
             padding_free=True,
@@ -413,9 +416,10 @@ def _run_sft_main(tmp_path, model_type: str, yaml_body: str, *, preprocessed_pac
             "probe_checkpoint",
             return_value=(checkpoint_config, is_vlm_model("stub/model", checkpoint_config)),
         ),
-        mock.patch.object(module, "reject_compressed_kv_rows"),
+        mock.patch.object(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _SEGMENT_AWARE_KERNELS_PRESENT),
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(module, "resolve_training_dtype", return_value=torch.bfloat16),
+        mock.patch.object(model_setup, "resolve_training_dtype", return_value=torch.bfloat16),
         mock.patch.object(module, "reject_unsupported_tree_attention", side_effect=check_tree_attention),
         mock.patch.object(
             module, "load_script_datasets", return_value=((dataset, preprocessed_packed is not None), False)

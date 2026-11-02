@@ -1,9 +1,8 @@
-"""Tree attention: every token of a tree-packed row sees exactly its own root-to-leaf path. Each sequence mixer of
-an admitted family reads its part of the collator's plan (:mod:`halo.models.attention.tree_plan`): softmax
-attention at the flash interface, in the gather or split form; a GatedDeltaNet or KDA layer at its causal
-convolution and its delta-rule scan; a key-selecting softmax layer (GLM-5 Next's DeepSeek sparse attention) in its
-own forward, never at the flash interface (:mod:`halo.models.attention.tree_sparse`). Only backends whose kernels
-are pinned against every example run alone are admitted."""
+"""Tree attention: every token of a tree-packed row sees exactly its own root-to-leaf path. Each admitted family's
+sequence mixers read their part of the collator's plan (:mod:`halo.models.attention.tree_plan`): softmax attention
+at the flash interface, GatedDeltaNet and KDA at their conv and delta-rule scan, GLM-5 Next's sparse attention in
+its own forward (:mod:`halo.models.attention.tree_sparse`). Only backends pinned against every example run alone
+are admitted."""
 
 import copy
 import functools

@@ -10,27 +10,26 @@ from typing import TYPE_CHECKING
 
 import torch
 from accelerate.utils import is_peft_model
-from transformers import AutoConfig, AutoModelForImageTextToText, PreTrainedModel
+from transformers import AutoModelForImageTextToText, PreTrainedModel
 
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.log import warn_once
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import (
     apply_family_patches,
     apply_run_model_policies,
     auto_load_model,
+    resolve_build_config,
 )
 from halo.model_loading.parallel.model_source import resolve_model_source
 from halo.model_loading.parallel.peft_setup import wraps_in_peft_model
 from halo.model_loading.parallel.whole_model import warm_attention_kernels
-from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
-from halo.models.config_access import drop_toolkit_stamps
 from halo.runtime.load_coordination import joined_node_load
 
 if TYPE_CHECKING:
@@ -119,24 +118,22 @@ def load_frozen_auxiliary_model(
 
     Each logprob here is one half of the objective, so a mismatch against the policy biases the loss
     rather than raising: the load resolves its attention backend, family patches, sinks policy and dtype
-    exactly as the policy loader does, against this model's own config at its own ``revision``, and keeps
-    the coverage gate on the task head. ``is_vlm`` pins ``AutoModelForImageTextToText``; a
-    ``download_tag`` makes the load COLLECTIVE-EQUIVALENT, agreeing the source across ranks first, while
-    ``None`` is a single-process load.
+    exactly as the policy loader does, against this model's own config at its own ``revision``, builds on that
+    patched config, and keeps the coverage gate on the task head. ``is_vlm`` pins
+    ``AutoModelForImageTextToText``; a ``download_tag`` makes the load COLLECTIVE-EQUIVALENT, agreeing the source
+    across ranks first, while ``None`` is a single-process load.
     """
-    # Before the config fetch, which can already import a remote modeling file: a teacher preloaded
-    # ahead of the policy would otherwise be the process's first remote-code load and miss the shims.
-    apply_remote_code_compat_shims()
     # This path's first hub contact for the repo: on a cold cache every rank of every node would
     # otherwise hit the hub at once, and per-node caches could each hold a different commit.
-    if download_tag:
-        revision = resolve_model_source(model_name_or_path, revision, tag=download_tag).revision
-    config = AutoConfig.from_pretrained(model_name_or_path, trust_remote_code=trust_remote_code, revision=revision)
-    drop_toolkit_stamps(config)
+    source = resolve_model_source(model_name_or_path, revision, tag=download_tag) if download_tag else None
+    if source is not None:
+        revision = source.revision
+    config = resolve_build_config(model_name_or_path, revision=revision, trust_remote_code=trust_remote_code)
     sinks_policy = SinksPolicy.from_flags(reset_sinks=reset_sinks)
     backend = resolve_attn_implementation(config, attn_implementation, dtype, sinks_policy=sinks_policy)
     resolved_attn = apply_family_patches(config, backend)
     load_kwargs = {
+        "config": config,
         "revision": revision,
         "dtype": dtype,
         "trust_remote_code": trust_remote_code,
@@ -159,7 +156,7 @@ def load_frozen_auxiliary_model(
     cast_parameters_to_run_dtype(model, dtype)
 
     # Repairs non-persistent buffers; an uninitialized inv_freq biases every logprob this model scores.
-    finalize_loaded_model(model)
+    finalize_loaded_model(model, weights_dir=None if source is None else source.local_dir)
     apply_run_model_policies(
         model,
         config,

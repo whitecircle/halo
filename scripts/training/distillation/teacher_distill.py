@@ -12,11 +12,7 @@ from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, PreTrained
 from halo.configs.distillation import TeacherDistillationConfig, TeacherDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.data.collators.collator_rules import (
-    evaluation_batch_size,
-    reject_fa4_varlen_training,
-    rows_reach_varlen_kernel,
-)
+from halo.data.collators.collator_rules import evaluation_batch_size, rows_reach_varlen_kernel
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
 from halo.entrypoints.data_setup import (
@@ -33,6 +29,7 @@ from halo.entrypoints.model_setup import (
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
+    reject_fa4_varlen_request,
 )
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -45,6 +42,7 @@ from halo.entrypoints.script import (
 from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process
@@ -132,18 +130,21 @@ def main():
     attn_default = default_padded_attn_implementation(
         model_config, sinks_reset=args.reset_sinks, companion_configs=(teacher_config,)
     )
-    policy = load_policy_model(context, training_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
-    student_model = policy.model
-    # Before the teacher loads: more than one padded row per batch reaches the varlen call.
-    reject_fa4_varlen_training(
-        student_model.config,
+    # More than one padded row per batch reaches the varlen call.
+    reject_fa4_varlen_request(
+        model_config,
+        attn_default,
         varlen_rows=rows_reach_varlen_kernel(
             packing=False,
             padding_free=False,
             per_device_train_batch_size=training_config.per_device_train_batch_size,
             per_device_eval_batch_size=evaluation_batch_size(training_config),
         ),
+        dtype=resolve_training_dtype(training_config),
+        sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
     )
+    policy = load_policy_model(context, training_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
+    student_model = policy.model
     tokenizer = apply_max_length(training_config, args, student_model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)

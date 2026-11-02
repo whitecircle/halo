@@ -183,10 +183,14 @@ def _write_part(part: dict[str, torch.Tensor], path: str) -> None:
         part.clear()
 
 
-def checkpoint_write_threads() -> int:
-    """How many finished parts an entered :class:`StreamingShardWriter` writes in the background at once
-    (``HALO_CHECKPOINT_WRITE_THREADS``; a negative value raises); 0 writes each part in line."""
-    threads = env_int("HALO_CHECKPOINT_WRITE_THREADS", DEFAULT_CHECKPOINT_WRITE_THREADS)
+def resolve_checkpoint_write_threads() -> int:
+    """``HALO_CHECKPOINT_WRITE_THREADS`` as set, before its ``>= 0`` check: the count a job's ranks agree on."""
+    return env_int("HALO_CHECKPOINT_WRITE_THREADS", DEFAULT_CHECKPOINT_WRITE_THREADS)
+
+
+def validate_checkpoint_write_threads(threads: int) -> int:
+    """``threads``, how many finished parts an entered :class:`StreamingShardWriter` writes in the background at
+    once (0 writes each part in line); a negative count raises ``ValueError``."""
     if threads < 0:
         raise ValueError(
             f"HALO_CHECKPOINT_WRITE_THREADS={threads}: expected a thread count >= 0 (0 writes each checkpoint part "
@@ -200,8 +204,8 @@ class StreamingShardWriter:
     one would overflow ``max_shard_size``. ``enabled=False`` makes every method a no-op for non-writer
     ranks, which still enter each collective gather.
 
-    Entered as a context manager, the writer hands each finished part to one of
-    :func:`checkpoint_write_threads` background threads and fills the next meanwhile (``save_file``
+    Entered as a context manager, the writer hands each finished part to one of the
+    ``HALO_CHECKPOINT_WRITE_THREADS`` background threads and fills the next meanwhile (``save_file``
     releases the GIL), so it holds up to that many parts more (:attr:`max_resident_bytes`). A failed
     write raises its own exception from the next flush or close, once no other write is running; the
     block's exit waits out every write, so none outlives the caller's failure, and logs each failed one
@@ -224,15 +228,16 @@ class StreamingShardWriter:
         # Files already on disk under their final names, which the index claims as they are.
         self._written_map: dict[str, str] = {}
         self._written_bytes = 0
+        # Read on every rank, the disabled ones and a pipeline stage's never-entered writer included, so a refused
+        # count raises before a save's first gather.
+        self._configured_threads = validate_checkpoint_write_threads(resolve_checkpoint_write_threads())
         self._write_threads = 0
         self._executor: concurrent.futures.ThreadPoolExecutor | None = None
         self._writes: deque[concurrent.futures.Future] = deque()
         self._write_error: BaseException | None = None
 
     def __enter__(self) -> StreamingShardWriter:
-        # Read on every rank, the disabled ones included, so a refused count raises before the save's first gather.
-        threads = checkpoint_write_threads()
-        self._write_threads = threads if self.enabled else 0
+        self._write_threads = self._configured_threads if self.enabled else 0
         if self._write_threads:
             self._executor = concurrent.futures.ThreadPoolExecutor(
                 max_workers=self._write_threads, thread_name_prefix="halo-shard-writer"

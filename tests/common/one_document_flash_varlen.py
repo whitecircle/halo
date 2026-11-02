@@ -51,7 +51,7 @@ def one_document_batch(config, attn_implementation: str) -> dict:
     factory leaves it to TRL)."""
     use_flash(config, attn_implementation)
     collator = select_data_collator(
-        padding_tokenizer(), train_on_completions_only=False, model_config=config, one_document_varlen=True
+        padding_tokenizer(), train_on_completions_only=False, model_config=config, emit_varlen_one_document=True
     ) or TRLDataCollatorForLanguageModeling(pad_token_id=PAD_ID)
     return collator([dict(ONE_DOCUMENT_ROW)])
 

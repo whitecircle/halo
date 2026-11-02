@@ -32,7 +32,7 @@ from transformers import modeling_flash_attention_utils as flash_utils
 from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN
 from halo.kernels.jit_cache import ensure_fa4_kernel_cache_env
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.models.attention.backend_setup import patch_transformers_flash_varlen_int_seqlen
 from halo.models.attention.tree import (
     TREE_ATTN_IMPLEMENTATIONS,

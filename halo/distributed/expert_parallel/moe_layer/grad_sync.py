@@ -1,10 +1,7 @@
-"""Gradient sync for EP MoE layers: post-accumulate hooks on the FSDP-ignored router and replicated params,
-inert during gradient accumulation and in a single process.
-
-The expert grads take no hook: their divide, and the cross-replica sum multiple EP groups add, run once per
-optimizer step in the trainer's post-backward sweep (``EPConfig.defer_expert_grad_sync``), which every rank
-enters.
-"""
+"""Gradient sync for EP MoE layers: post-accumulate hooks on the FSDP-ignored router and replicated params, inert
+during gradient accumulation and in a single process. The expert grads take no hook: their divide, and the
+cross-replica sum multiple EP groups add, run once per optimizer step in the trainer's post-backward sweep
+(``EPConfig.runs_post_backward_sweep``), which every rank enters."""
 
 from __future__ import annotations
 

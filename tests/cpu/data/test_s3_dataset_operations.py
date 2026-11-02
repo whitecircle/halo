@@ -628,7 +628,7 @@ def test_the_s3_cli_requires_a_bucket_only_for_a_bare_key_without_a_default(monk
         with pytest.raises(ValueError, match="pass --bucket"):
             client_for(["list"])
         assert client_for(["list", "--bucket", "my-bucket"]).bucket == "my-bucket"
-        assert client_for(["list", "s3://uri-bucket/runs"]).bucket == "uri-bucket"
+        assert client_for(["list", "s3://example-bucket/runs"]).bucket == "example-bucket"
 
 
 def test_s3_cache_dir_derives_from_scratch_root():

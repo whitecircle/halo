@@ -34,7 +34,7 @@ from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.fsdp import IdentityParamSet, apply_fsdp2_per_layer, mixed_precision_policy
 from halo.distributed.mesh import build_dp_mesh
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.lazy_plan import WeightPlanner

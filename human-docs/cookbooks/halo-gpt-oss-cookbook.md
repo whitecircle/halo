@@ -119,7 +119,9 @@ harmony file, `SGLANG_REASONING_PARSER=gpt-oss` and `SGLANG_ENABLE_R3=1`.
 - Live sinks (`reset_sinks: false`) need a kernel that takes a sink argument. FA2 and SDPA are refused,
   and so is CP. On Blackwell that kernel is FA4, which the GRPO recipes pin. The Hopper image's FA3 takes
   no sink, so on H100 or H200 use `--attn_implementation=flex_attention` or `eager`. Both refuse
-  `packing`, so an SFT run there also needs `--packing=false`.
+  `packing`, so an SFT run there also needs `--packing=false`. Neither is fused: each holds the full
+  attention score matrix (flex under EP runs uncompiled, in fp32), so memory bounds the row length
+  ([Known issues](../../agent-docs/optimization/flash-attention.md#known-issues) ↗).
 - `packing: true` needs a flash attention backend. It is refused on eager, SDPA and flex attention.
 - The DPO, SMPO, reward, classification and offline GRPO recipes pin FA4, so they run on Blackwell only;
   FA4 is also what those scripts pick there unpinned. Unpinned on other GPUs, they take SDPA; on Hopper,

@@ -5,6 +5,7 @@ per-step :class:`WeightVersionCache` the DeepGEMM backend shares.
 
 from __future__ import annotations
 
+import functools
 import logging
 import weakref
 from collections.abc import Callable
@@ -21,7 +22,6 @@ logger = logging.getLogger(__name__)
 E4M3_MAX = 448.0  # largest finite value of float8_e4m3fn
 E2M1_MAX = 6.0  # largest magnitude of e2m1
 _E2M1_LEVELS = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)  # e2m1 magnitudes, codes 0..7
-# RNE bucket edges; a plain tuple (lru_cache'd tensors defeat compile) keeps _round_trip exact.
 _E2M1_BOUNDARIES = tuple((a + b) / 2 for a, b in zip(_E2M1_LEVELS[:-1], _E2M1_LEVELS[1:], strict=True))
 # Midpoints whose lower level has an odd mantissa code; hardware RNE resolves these ties up (0.75→1.0)
 # while bucketize resolves every tie down, and exact ties are routine at bf16 over power-of-two scales.
@@ -61,6 +61,20 @@ class BlockScaledTensor:
     packed: bool
     pow2_scale: bool
     global_scale: torch.Tensor | None = None
+
+
+@functools.cache
+def _device_constant(values: tuple[float, ...], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    return torch.tensor(values, device=device, dtype=dtype)
+
+
+def _constant_tensor(values: tuple[float, ...], device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    """``values`` as a tensor on ``device``. Eager calls reuse one copy per device and dtype, since the
+    activation path quantizes every call and a fresh table is a blocking host-to-device copy; a compiled
+    graph bakes the literal in instead of tracing the cache."""
+    if torch.compiler.is_compiling():
+        return torch.tensor(values, device=device, dtype=dtype)
+    return _device_constant(values, device, dtype)
 
 
 def _move_axis_last(t: torch.Tensor, axis: int) -> tuple[torch.Tensor, int]:
@@ -103,9 +117,8 @@ def _e2m1_codes(blocks: torch.Tensor, divisor: torch.Tensor) -> torch.Tensor:
     scaled = blocks / divisor.masked_fill(divisor == 0, 1.0)
     sign = (scaled < 0).to(torch.uint8)
     mag = scaled.abs().clamp(max=E2M1_MAX)
-    boundaries = torch.tensor(_E2M1_BOUNDARIES, device=blocks.device, dtype=mag.dtype)
-    codes = torch.bucketize(mag, boundaries).to(torch.uint8)
-    ties_up = torch.isin(mag, torch.tensor(_E2M1_TIES_UP, device=blocks.device, dtype=mag.dtype))
+    codes = torch.bucketize(mag, _constant_tensor(_E2M1_BOUNDARIES, blocks.device, mag.dtype)).to(torch.uint8)
+    ties_up = torch.isin(mag, _constant_tensor(_E2M1_TIES_UP, blocks.device, mag.dtype))
     return (codes + ties_up.to(torch.uint8)) | (sign << 3)
 
 
@@ -192,7 +205,7 @@ def dequantize(q: BlockScaledTensor) -> torch.Tensor:
     if q.packed:
         low = (work & 0x0F).to(torch.long)
         high = (work >> 4).to(torch.long)
-        levels = torch.tensor(_E2M1_LEVELS, device=q.data.device)
+        levels = _constant_tensor(_E2M1_LEVELS, q.data.device, torch.float32)
         mag = torch.stack([levels[low & 0x7], levels[high & 0x7]], dim=-1)
         sgn = torch.stack([1 - 2 * (low >> 3), 1 - 2 * (high >> 3)], dim=-1)
         elems = (mag * sgn).reshape(*work.shape[:-1], work.shape[-1] * 2)

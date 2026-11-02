@@ -189,7 +189,7 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
 - The stage FSDP wrap is EP-aware: EP layers are FSDP-ignored (`ep_size>1`) or sharded as
   stage-mesh DTensors (`ep_size==1` + `fsdp_shard_ep1_experts`); `fsdp_shard_ep1_experts: false` is
   rejected under PP.
-- EP gradient sync runs in one deferred post-backward sweep (`EPConfig.defer_grad_sync`), since
+- EP gradient sync runs in one deferred post-backward sweep (`EPConfig.sweep_reduces_across_replicas`), since
   per-backward hooks would fire on every microbatch and re-scale grads already synced. The sweep is
   off at `ep_size == 1` with the default `fsdp_shard_ep1_experts`, where FSDP2's own reduce-scatter
   syncs the experts. Router and replicated averages reduce over the stage's rank block, never the
@@ -319,7 +319,7 @@ rank.
 every batch to `max_length`. A stage's forward passes a model's conv / linear-attention layers no
 segment marker, so packing is refused where those layers need one (`segment_markers_for`: `seq_idx` for
 GatedDeltaNet and LFM-2 ShortConv, `cu_seq_lens` for the delta rule) or read no boundary at all
-(`has_unmarked_linear_attention`: KDA, Lightning Attention-2): their state would carry from each document
+(`find_unmarked_sequence_mixer`: KDA, Lightning Attention-2): their state would carry from each document
 of a packed row into the next. In the roster that refuses Qwen3.5 / 3.6 and GLM-5 Next; padded rows hold
 one document each and still run.
 `reject_pipeline_packed_rows` (`halo/models/segment_markers.py`) holds the rule; the collator factory

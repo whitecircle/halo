@@ -473,7 +473,7 @@ def test_unmarked_linear_attention_is_refused_on_flash(caplog, monkeypatch, name
     softmax-only models have no such layer: built without the opt-in, and quiet with it."""
     # GatedDeltaNet's segment-aware kernels need CUDA; taken as present, as on the images.
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
-    monkeypatch.setattr(segment_markers, "_CROSSING_ALLOWED_WARNED", set())
+    monkeypatch.setattr(segment_markers, "_crossing_allowed_warned", set())
     build, crosses, _ = _LINEAR_ATTENTION_CONFIGS[name]
     config = build()
     config._attn_implementation = "flash_attention_4"

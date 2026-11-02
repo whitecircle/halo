@@ -1,11 +1,7 @@
 """The ``sdpa_flex_sliding`` attention: masked causal layers on compiled FlexAttention, wide-head global layers on
-matmul attention or, on packed rows past its budget, on mem-efficient attention per document.
-
-Both skip the tiles a mask excludes (outside a sliding window, across packed documents, past a padded tail) that
-SDPA's dense mask computes, under a block mask or document boundaries derived from the mask transformers built.
-Every other call goes to the implementation registered as ``sdpa``; agent-docs/optimization/flash-attention.md
-has the routing and the compile contract.
-"""
+matmul attention or, on packed rows past its budget, on mem-efficient attention per document, each skipping the
+tiles the mask excludes; every other call goes to ``sdpa``. agent-docs/optimization/flash-attention.md has the
+routing and the compile contract."""
 
 from __future__ import annotations
 
@@ -18,6 +14,7 @@ from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from halo.env import env_flag
 from halo.hardware import is_blackwell_gpu
+from halo.kernels.fp32_matmul import bmm_fp32
 from halo.log import warn_once
 from halo.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
 from halo.models.attention.layout import AttentionCall, attention_call, attention_calls, has_sliding_window_layers
@@ -77,7 +74,7 @@ _compiled_flex = torch.compile(flex_attention, dynamic=True)
 # The deterministic-algorithms mode the warm-up compiled under, ``None`` in a process that ran none.
 _warmed_deterministic: bool | None = None
 
-_WARNED_UNWARMED_CALLS: set[tuple] = set()
+_warned_unwarmed_calls: set[tuple] = set()
 
 
 def _pad_to_tile(length: int) -> int:
@@ -243,14 +240,14 @@ def _block_sparse_attention(
 
 class _Fp32ScoreMatmul(torch.autograd.Function):
     """``query @ key_t`` over ``[N, M, D] @ [N, D, K]``, returned in at least fp32 at 16-bit GEMM speed
-    (upcast inputs would run an fp32 GEMM, ~18x slower at Gemma 4's shapes). ``bmm``'s ``out_dtype``
-    form has no derivative, hence the explicit backward.
+    (upcast inputs would run an fp32 GEMM, ~18x slower at Gemma 4's shapes). :func:`bmm_fp32` has no
+    derivative on that path, hence the explicit backward.
     """
 
     @staticmethod
     def forward(ctx, query: torch.Tensor, key_t: torch.Tensor) -> torch.Tensor:
         ctx.save_for_backward(query, key_t)
-        return torch.bmm(query, key_t, out_dtype=torch.promote_types(query.dtype, torch.float32))
+        return bmm_fp32(query, key_t)
 
     @staticmethod
     def backward(ctx, grad: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor | None]:
@@ -421,7 +418,7 @@ def _flex_serves(
         return True
     warn_once(
         logger,
-        _WARNED_UNWARMED_CALLS,
+        _warned_unwarmed_calls,
         (type(module).__name__, made),
         "%s: a %s call (query / KV heads, query / value widths, scaling) %s is not the call the FlexAttention "
         "warm-up compiles for its module, %s, so it runs SDPA; under tensor parallelism a call carries the "

@@ -143,7 +143,7 @@ class GradientSyncMixin:
         register_grad_sync_step_hook(
             self,
             "_deferred_ep_grad_sync_hook_registered",
-            lambda: self._ep_config is not None and self._ep_config.defer_expert_grad_sync,
+            lambda: self._ep_config is not None and self._ep_config.runs_post_backward_sweep,
             sweep_deferred_experts,
         )
         # The QLoRA sweep's per-step marker makes the clip's second call a no-op.
@@ -166,7 +166,7 @@ class GradientSyncMixin:
         reduce_grads_bucketed(grads, op=dist.ReduceOp.AVG, fp32=self.parallelism_config.fp32_grad_reduce)
 
     def _sync_deferred_expert_grads(self) -> None:
-        """COLLECTIVE: the post-backward EP grad sync, once per optimizer step (``EPConfig.defer_expert_grad_sync``).
+        """COLLECTIVE: the post-backward EP grad sync, once per optimizer step (``EPConfig.runs_post_backward_sweep``).
 
         Deferred because in-backward hooks would race the EP group's DeepEP combine (multi-group EP across
         nodes), re-fire per microbatch (PP), or re-fire per nested backward of a reentrant recompute, which
@@ -177,7 +177,7 @@ class GradientSyncMixin:
         callers run only with EP layers present, so a missing EP config raises.
         """
         ep_cfg = require_ep_config(self._ep_config)
-        if not ep_cfg.defer_expert_grad_sync:
+        if not ep_cfg.runs_post_backward_sweep:
             return
         # The expert leg (SUM/world_size) is not idempotent: a second pass halves every expert grad.
         if not claim_optimizer_step(self, "_deferred_sweep_last_step"):
@@ -191,7 +191,7 @@ class GradientSyncMixin:
         expert_divisor = ep_cfg.stage_world_size // ep_cfg.expert_tp_size
         fp32 = ep_cfg.fp32_grad_reduce
 
-        if not ep_cfg.defer_grad_sync:
+        if not ep_cfg.sweep_reduces_across_replicas:
             # One EP group, its router averaged by the in-backward hook: the combine already summed every rank's
             # tokens, so the experts take only the divide, with no collective (a rank no token reached holds no
             # grad). Per-tensor div_, whose CUDA kernel multiplies by the reciprocal, not _foreach_div_'s true

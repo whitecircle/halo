@@ -9,7 +9,8 @@ consecutive tokens and attends the tokens of each query's top-scoring pools. On 
   the previous layer's selection, and reading the sparse layers' row as one path instead of each
   token's own moves them;
 * the selection is the stock indexer's on every example's path, in one call or in chunks that cross
-  tree boundaries;
+  tree boundaries, and a plan's pools and chunk ranges cost one host read for every layer of the forward,
+  its recompute included, while the backward reads none;
 * the latent attention over the selected keys is the dense masked softmax, with exact gradients, and
   under autocast over fp32 parameters takes its two inputs in the autocast dtype;
 * under gradient checkpointing, reentrant or not, a tree row trains to the logits and gradients it
@@ -24,10 +25,13 @@ The CUDA kernels are pinned by ``tests/gpu/kernels/test_tree_sparse_attention.py
 Run: python tests/cpu/models/test_tree_sparse_attention.py  (or pytest)
 """
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from peft import LoraConfig, get_peft_model
 from peft.tuners.tuners_utils import BaseTunerLayer
+from torch.overrides import TorchFunctionMode
 
 from halo.configs.script_arguments import ModelArguments
 from halo.data.tree_layout import DEPTH_COLUMN, POSITION_COLUMN, build_trie, serialize_tree
@@ -45,6 +49,7 @@ from halo.models.attention.tree import (
 )
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
 from halo.models.attention.tree_sparse import _SparseLatentAttention, tree_key_selection
+from tests.common.packed_flash_varlen import HOST_READS
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.trees import checkpointing_gaps, example_rows, randomize_indexer_pools, tree_columns
 
@@ -295,6 +300,98 @@ def test_the_selection_is_the_stock_indexers_on_every_path(model, monkeypatch):
                 assert key_set(one_call[0, row]) == {int(rows[key]) for key in key_set(solo[at])}
             selecting += max(len(rows) // indexer.index_kpool - indexer.index_topk // indexer.index_kpool, 0)
         assert selecting, "no example is long enough to select among its pools"
+
+
+class _HostReads(TorchFunctionMode):
+    """Counts the calls that read a device tensor back to the host, each a sync on a GPU: the
+    :data:`HOST_READS` methods and a boolean-mask index, whose output size is data-dependent."""
+
+    def __init__(self):
+        super().__init__()
+        self.reads: list[str] = []
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        name = getattr(func, "__name__", None)
+        if name in HOST_READS:
+            self.reads.append(name)
+        elif name == "__getitem__" and any(
+            isinstance(index, torch.Tensor) and index.dtype == torch.bool
+            for index in (args[1] if isinstance(args[1], tuple) else (args[1],))
+        ):
+            self.reads.append("boolean mask index")
+        return func(*args, **(kwargs or {}))
+
+
+def _selection_problem(model):
+    """``(indexer, hidden, q_resid, links)`` of one DSA layer over a row of three random trees."""
+    generator = torch.Generator().manual_seed(5)
+    attention = next(
+        layer.self_attn
+        for layer in model.model.language_model.layers
+        if getattr(layer.self_attn, "indexer", None) is not None
+    )
+    row_trees = []
+    for _ in range(3):
+        paths = _random_paths(generator)
+        trained = [[True] * len(path) for path in paths]
+        row_trees.append(serialize_tree(build_trie(paths, [len(path) - 1 for path in paths], 1), paths, trained))
+    position = torch.tensor([p for tree in row_trees for p in tree[POSITION_COLUMN]])
+    depth = torch.tensor([d for tree in row_trees for d in tree[DEPTH_COLUMN]])
+    table = build_node_table(position, depth)
+    links = build_tree_attention_plan(table, sliding_window=None, full_form="gather", sparse_attention=True)["sparse"]
+    hidden = torch.randn(1, len(position), attention.hidden_size, generator=generator)
+    with torch.no_grad():
+        q_resid = attention.q_a_layernorm(attention.q_a_proj(hidden))
+    return attention.indexer, hidden, q_resid, links
+
+
+@pytest.mark.parametrize("chunk", [None, 3], ids=["one-call", "chunked"])
+def test_a_plans_selection_reads_the_host_once_for_every_layer(model, monkeypatch, chunk):
+    indexer, hidden, q_resid, links = _selection_problem(model)
+    pools = int((links["position"] % indexer.index_kpool == indexer.index_kpool - 1).sum())
+    if chunk is not None:
+        monkeypatch.setattr(tree_sparse, "INDEXER_SCORES_PER_CALL", indexer.n_heads * pools * chunk)
+    fresh = dict(links)
+    with _HostReads() as first:
+        selected = tree_key_selection(indexer, hidden, q_resid, links)
+    with _HostReads() as later:
+        for _ in range(3):  # the plan's other DSA layers, then the recompute of each
+            assert torch.equal(tree_key_selection(indexer, hidden, q_resid, links), selected)
+    assert sorted(first.reads) == ["nonzero", "tolist"], first.reads
+    assert later.reads == [], later.reads
+    assert torch.equal(tree_key_selection(indexer, hidden, q_resid, fresh), selected), "the kept plan drifted"
+
+
+def _recorded_forward(query, latent, keys, scale) -> SimpleNamespace:
+    """The context the forward leaves, for calling the backward directly: a function mode does not reach the
+    backward the autograd engine runs."""
+    ctx = SimpleNamespace()
+    ctx.save_for_backward = lambda *tensors: setattr(ctx, "saved_tensors", tensors)
+    with torch.no_grad():
+        _SparseLatentAttention.forward(ctx, query, latent, keys, scale)
+    return ctx
+
+
+def test_the_latent_attention_backward_reads_nothing_back_to_the_host(monkeypatch):
+    """Several query chunks, each with pad slots: the backward adds every slot, a pad's an exact zero, instead of
+    compacting the selected ones by a count read back per chunk."""
+    generator = torch.Generator().manual_seed(4)
+    tokens, heads, rank, width = 12, 2, 6, 5
+    query = torch.randn(tokens, heads, rank, generator=generator, requires_grad=True)
+    latent = torch.randn(tokens, rank, generator=generator, requires_grad=True)
+    keys = torch.randint(0, tokens, (tokens, width), generator=generator)
+    keys[torch.rand(tokens, width, generator=generator) < 0.4] = -1
+    keys[0] = -1
+    monkeypatch.setattr(tree_sparse, "ATTENTION_KEYS_PER_CALL", 4 * width)
+    out = _SparseLatentAttention.apply(query, latent, keys, 0.5)
+    upstream = torch.randn(out.shape, generator=generator)
+    expected = torch.autograd.grad(out, (query, latent), upstream)
+
+    ctx = _recorded_forward(query.detach(), latent.detach(), keys, 0.5)
+    with _HostReads() as reads:
+        d_query, d_latent, _, _ = _SparseLatentAttention.backward(ctx, upstream)
+    assert reads.reads == [], reads.reads
+    assert torch.equal(d_query, expected[0]) and torch.equal(d_latent, expected[1])
 
 
 def test_the_latent_attention_is_the_masked_softmax_with_exact_gradients():

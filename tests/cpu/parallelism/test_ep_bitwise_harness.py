@@ -238,7 +238,7 @@ def test_a_hook_under_a_deferred_sync_is_a_delta(monkeypatch, tmp_path):
 
     def undeferred(self, *args, **kwargs):
         init(self, *args, **kwargs)
-        self.defer_grad_sync = False
+        self.sweep_reduces_across_replicas = False
 
     monkeypatch.setattr(EPConfig, "__init__", undeferred)
 

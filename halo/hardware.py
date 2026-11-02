@@ -40,22 +40,14 @@ def is_hopper_gpu() -> bool:
 
 
 def supports_grouped_mm() -> bool:
-    """Whether ``F.grouped_mm`` can run here: SM90+ compute capability."""
+    """Whether ``F.grouped_mm`` can run here: SM90+ compute capability.
+
+    A failing capability read propagates: the answer picks the expert weight layout, and a rank answering
+    differently from its peers would hang the expert all-gather.
+    """
     if not torch.cuda.is_available():
         return False
-    try:
-        major, minor = torch.cuda.get_device_capability()
-    except RuntimeError as e:
-        # A broken CUDA context on this rank, not an old GPU. Logged because the answer picks a weight
-        # layout, and a rank answering differently from its peers hangs the expert all-gather.
-        logger.warning(
-            "grouped-GEMM capability probe failed on this rank (%s: %s); falling back to the per-expert "
-            "loop path. If peer ranks probe successfully they store expert weights under DIFFERENT "
-            "attribute names — set use_grouped_gemm=false uniformly instead of running like this.",
-            type(e).__name__,
-            e,
-        )
-        return False
+    major, minor = torch.cuda.get_device_capability()
     return (major * 10 + minor) >= 90
 
 

@@ -74,13 +74,14 @@ before the process starts. It does not make the racy single-domain multi-group s
 
 **These must agree across every rank of the job**: `HALO_EP_CAPACITY_DEDUP`,
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
-`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `DIST_NCCL_TIMEOUT_MINUTES`,
-`DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`,
+`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `HALO_CHECKPOINT_WRITE_THREADS`,
+`DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`,
 `FLASH_ATTENTION_DETERMINISTIC`. A divergence is a hang, not a slow run: the dedup changes how many
 collectives a rank runs, the grad-bucket size sets the chunk boundaries of the bucketed gradient
-reductions (EP, TP and QLoRA alike), the timeouts decide which rank gives up on a join first (the
-survivors then die on the next collective and blame it) and how long each rank looks for the filesystem
-probe's file, transformers' determinism switch picks a head_dim-256 model's attention backend (FA4 or its
+reductions (EP, TP and QLoRA alike), the write-thread count decides whether a rank refuses a save its
+peers have entered (a negative count raises on every rank once the ranks agree), the timeouts decide
+which rank gives up on a join first (the survivors then die on the next collective and blame it) and how
+long each rank looks for the filesystem probe's file, transformers' determinism switch picks a head_dim-256 model's attention backend (FA4 or its
 fallback, [Flash Attention](../optimization/flash-attention.md#model-specific-handling)), and the rest are
 wire parameters both ends of the all-to-all share.
 
@@ -146,13 +147,15 @@ single-domain group (an NVL72 `ep64` is single-domain;
 
 **Budget the retained generations.** The capacity latches to the largest count any rank of the group
 has presented, so the first oversized batch, or a larger `per_device_eval_batch_size` at the first
-eval, raises it for the rest of the run. A grow *retires* the previous arena rather than freeing it
-(in-flight pipeline microbatches may still name it), so until teardown the group holds the **sum** of
-every capacity it has had: ~4 GiB per generation at `ep64` with 8k tokens/rank, ~12 GiB after three
-growths. Avoid the growths instead: pack the corpus, or let the first forward present the run's maximum
-tokens per rank. The `DeepEP arena grew … retained so far` line (once per EP group) counts them. Packed
-batches above batch 1 flatten to a row of variable width, so a later step can still set a new
-high-water mark, at most a handful of generations bounded by `per_device_train_batch_size × max_length`.
+eval, raises it for the rest of the run. A grow *retires* the previous arena rather than freeing it (an
+in-flight microbatch's backward may still name it); the trainer frees the retired arenas once the
+optimizer step's last backward is done, on every rank of the group. Within the step that grew, the group
+holds the **sum** of the capacities it grew through (~4 GiB per generation at `ep64` with 8k
+tokens/rank), and from the next step only the live arena. Each growth still rebuilds the arena, so avoid
+the growths: pack the corpus, or let the first forward present the run's maximum tokens per rank. The
+`DeepEP arena grew …` line (once per EP group) marks each one. Packed batches above batch 1 flatten to a
+row of variable width, so a later step can still set a new high-water mark, bounded by
+`per_device_train_batch_size × max_length`.
 
 **Freeing a buffer is a collective**, so it never happens from a Python finalizer: a rank that enters
 the NVLink barrier alone on its garbage collector's schedule burns the whole
@@ -262,7 +265,10 @@ raw buffer: it claims a shared buffer through its backend, which picks the Gin o
 topology and sizes it lazily. `dispatch` / `combine` are autograd-aware: the dispatch backward is a
 combine, and the combine backward is a dispatch reusing the cached layout through the `handle`. Under
 gradient checkpointing the recompute replays the original pass's cached results, since a second
-dispatch would invalidate the handle the original backward holds.
+dispatch would invalidate the handle the original backward holds. The replay trades memory for no extra
+all-to-all: each MoE layer keeps its received tokens, their top-k ids and weights and its combined
+output from the forward until its backward, several times the GC activation term
+([sized per rank](../parallelism/large-scale-scenarios.md#per-rank-memory-model)).
 
 ```python
 # Inside an EP MoE layer (EPMoELayerBase._dispatch_compute_combine); owner= keys the checkpoint-replay cache.

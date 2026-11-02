@@ -163,7 +163,7 @@ def run(ctx) -> dict:
     )
     markers = segment_markers_for(model.config)
     collator = DataCollatorWithPacking(
-        tokenizer=tokenizer, return_seq_idx=markers.seq_idx, return_flash_attn_kwargs=markers.cu_seq_lens
+        tokenizer=tokenizer, return_seq_idx=markers.seq_idx, emit_varlen_always=markers.cu_seq_lens
     )
     batches = [
         collator.torch_call([{"input_ids": a + doc_b, "labels": a + doc_b, "seq_lengths": [DOC_A, DOC_B]}])

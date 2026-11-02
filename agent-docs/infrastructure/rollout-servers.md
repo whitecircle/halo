@@ -256,9 +256,9 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Laguna | ✓ | ✗ | SGLang's `load_weights` asserts every routed-expert tensor of every sparse layer per call; vLLM's loader drops the exported balancing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
-Every family not in the table syncs on both engines, expert distribution included: dense families,
-GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE. Inkling, GLM-5 Next,
-Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE are refused on both by their family spec. Per-family server flags:
+Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE are refused on both engines by their
+family spec. Every other family not in the table syncs on both, expert distribution included: dense families,
+GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE. Per-family server flags:
 [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank

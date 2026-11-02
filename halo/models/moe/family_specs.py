@@ -63,6 +63,9 @@ class MoEFamilySpec:
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
     # one causal sequence.
     dense_packing_leaks: bool = False
+    # The sequence mixer its forward reaches with no segment marker, so it carries every document of a
+    # multi-document row into the next on every backend, named for the refusal; ``None`` where none does.
+    unmarked_sequence_mixer: str | None = None
 
     def to_hub_key(self, key: str) -> str:
         """``key`` with the first ``export_key_renames`` pair it contains applied once."""
@@ -160,6 +163,8 @@ INKLING = MoEFamilySpec(
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("inkling_mm_model",),
+    # InklingShortConvolution reads seq_idx, but its call sites forward no kwargs.
+    unmarked_sequence_mixer="depthwise causal short convolutions (on the projected K/V and around each sublayer)",
     weight_sync_refusal=(
         "no end-to-end weight sync into this family's served model has been validated on either pinned rollout engine"
     ),

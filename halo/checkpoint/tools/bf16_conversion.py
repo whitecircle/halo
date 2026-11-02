@@ -26,7 +26,7 @@ from halo.checkpoint.tools.offline_export import (
     reject_in_place_conversion,
     save_full_checkpoint,
 )
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.tokenizer_setup import load_processing_class
 
 logger = logging.getLogger(__name__)

@@ -22,12 +22,12 @@ from halo.models.external_tables import EXTERNAL_TABLES_STAMP, reject_state_dict
 from halo.models.qwen4_exp.documents import (
     document_ngram_ids,
     document_ple_forward,
-    document_starts,
     ngram_rows,
     reject_unmarked_documents,
 )
 from halo.models.qwen4_exp.ngram_table import HostNGramTable
 from halo.models.qwen4_exp.sparse_attention import qsa_attention_forward
+from halo.models.segment_markers import document_starts
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)

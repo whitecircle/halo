@@ -147,9 +147,9 @@ def test_trl_holds_the_toolkit_reference_in_the_run_dtype_with_its_buffers_repai
     finalized = []
     repair = frozen_models.finalize_loaded_model
 
-    def recording_repair(model):
+    def recording_repair(model, weights_dir=None):
         finalized.append(model)
-        return repair(model)
+        return repair(model, weights_dir=weights_dir)
 
     monkeypatch.setattr(frozen_models, "finalize_loaded_model", recording_repair)
     reference = _load_reference(base_dir)

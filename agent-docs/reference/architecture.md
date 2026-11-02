@@ -170,7 +170,7 @@ weight plans and the shared stream tail (`materialization.py`), meta-shell insta
 lives in `halo/model_loading/lazy_safetensors/`, with no parallelism knowledge.
 
 The FSDP2, HSDP, and TP axes ride a torch `DeviceMesh` (`halo/distributed/mesh.py`); EP and CP use
-hand-built `dist.new_group` groups whose all-to-all patterns do not map to a mesh. The trainer reads
+hand-built groups (`build_groups`) whose all-to-all patterns do not map to a mesh. The trainer reads
 the mesh groups (DP, TP) through the mesh accessors (`dp_group`, `tp_group`) and the expert
 groups (dispatch, expert-TP, expert-replica) off `EPConfig`. The bucketed
 gradient all-reduce and the grad-presence agreement every post-backward sweep shares — deferred EP
@@ -184,7 +184,7 @@ Which axis combinations may run is an allowlist, not a denylist — see
 
 ```text
 YAML config
-   │  HaloArgumentParser: toolkit defaults (use_liger_kernel, bf16, logging_nan_inf_filter)
+   │  HaloArgumentParser: toolkit defaults (use_liger_kernel, bf16, logging_nan_inf_filter, non_blocking)
    ▼
 ParallelismConfig  ── validate mode, build process groups
    │

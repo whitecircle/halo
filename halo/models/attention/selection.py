@@ -165,8 +165,8 @@ def uses_fa4_dedicated_head_dim(model_config) -> bool:
 def fa4_dedicated_kernel_refusal(model_config) -> str | None:
     """Why FA4's dedicated head_dim-256 kernel does not train this model's attention, or ``None`` where FA4 runs it on
     another kernel or the dedicated one trains it: the kernel asserts on Gemma 2's softcap and Gemma 3's sliding
-    windows, and multi-head latent attention (:func:`has_latent_attention`, GLM-4.7-Flash) trained on it to step-2
-    gradients about 4x FA2's on 4.0.0b16, though the kernel replayed FA2 exactly on that run's own tensors."""
+    windows, and multi-head latent attention (:func:`has_latent_attention`, GLM-4.7-Flash) stays on FA2 as a
+    precaution."""
     if not uses_fa4_dedicated_head_dim(model_config):
         return None
     if has_attention_logit_softcap(model_config):
@@ -174,14 +174,13 @@ def fa4_dedicated_kernel_refusal(model_config) -> str | None:
     if has_sliding_window_layers(model_config):
         return "it takes no sliding-window attention"
     if has_latent_attention(model_config):
-        return "multi-head latent attention trained on it away from FA2 by the second step"
+        return "multi-head latent attention at this width stays on FA2 as a precaution"
     return None
 
 
 def fa4_varlen_refusal(model_config) -> str | None:
     """What this model's attention needs that FA4's varlen kernels are not validated with, or ``None``: Gemma 2's
-    softcap, with which their forward did not finish on B300 (4.0.0b16), so only the dense call runs it. Packed,
-    padding-free and padded batches all reach the varlen kernels."""
+    softcap, so only the dense call runs it. Packed, padding-free and padded batches all reach the varlen kernels."""
     return "attention logit softcapping" if has_attention_logit_softcap(model_config) else None
 
 
@@ -214,7 +213,7 @@ def supports_fa4_backward(model_config) -> bool:
     return not (flash_attention_deterministic() and uses_fa4_dedicated_head_dim(model_config))
 
 
-def fa4_demoted_by_determinism(model_config) -> bool:
+def is_fa4_demoted_by_determinism(model_config) -> bool:
     """Whether the run's deterministic backward alone takes FA4 off this model: its dedicated head_dim-256 kernel
     trains the attention (:func:`fa4_dedicated_kernel_refusal`, which moves the model to FA2 instead), but not with
     the deterministic backward the run asks for (:func:`supports_fa4_backward`)."""
@@ -298,8 +297,8 @@ def validate_attn_implementation(
             f"only with a build exposing it), or set reset_sinks: true for off-policy fine-tuning."
         )
 
-    # Fallback chain: sinks and softcap models prefer flash over flex, whose compile path is unusable under EP. On
-    # Hopper FA3 comes first: the image's FA2 throws in the split-K kernels its dense forward picks for small batches.
+    # Fallback chain: sinks and softcap models prefer flash over flex, whose compile path is unusable under EP; on
+    # Hopper the arch's own FA3 comes first.
     candidates = [attn_impl]
     if has_sinks or softcapped:
         if live_sinks:
@@ -385,7 +384,7 @@ def resolve_attn_implementation(
             f"FlashAttention-4 trains head_dim-{FA4_DEDICATED_HEAD_DIM} attention on a dedicated backward kernel: "
             f"{refused}"
         )
-    elif runs_fa4 and fa4_demoted_by_determinism(model_config):
+    elif runs_fa4 and is_fa4_demoted_by_determinism(model_config):
         if is_global_main_process():
             logger.warning(
                 "FlashAttention-4's head_dim-256 kernel is not validated with a deterministic backward, which this "

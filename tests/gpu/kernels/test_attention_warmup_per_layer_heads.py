@@ -9,9 +9,8 @@ on single-document and packed rows past and within the sliding window:
 
 * FA4 (Blackwell): no new key lands in FA4's forward or backward JIT caches. Gemma 2 at the 27B's geometry
   (128-wide heads, ratio 2) rides along on its single-document rows: its logit softcap is part of the kernel key,
-  value included, and a softcap stays off FA4's varlen kernels (not validated there; on B300 their forward with one
-  did not finish), so a varlen call carrying a softcap, the warm-up's included, is refused before it launches and
-  fails the check;
+  value included, and a softcap stays off FA4's varlen kernels (not validated there), so a varlen call carrying a
+  softcap, the warm-up's included, is refused before it launches and fails the check;
 * ``sdpa_flex_sliding``: Dynamo raises on any recompile, and each row runs FlexAttention on the layers it masks:
   every layer of a packed row, the full ones under its document mask, and the sliding ones of a single document.
   Mistral, whose modules keep no window and pass the config's, rides along.

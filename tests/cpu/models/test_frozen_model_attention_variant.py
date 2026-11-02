@@ -105,8 +105,7 @@ def _load_policy(config, seam, seen) -> None:
 
 def _load_frozen(config, seam, seen) -> None:
     with (
-        patch.object(frozen_models, "apply_remote_code_compat_shims"),
-        patch.object(frozen_models, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(frozen_models, "resolve_build_config", lambda *a, **k: config),
         patch.object(frozen_models, "resolve_attn_implementation", lambda *a, **k: "sdpa"),
         patch.object(frozen_models, "apply_family_patches", seam),
         patch.object(frozen_models, "auto_load_model", lambda *a, **k: seen.update(build=k["attn_implementation"])),
@@ -143,11 +142,10 @@ def _load_trainer_path(model_init_kwargs: dict, seen: dict) -> None:
         patch.object(
             whole_model, "resolve_model_source", lambda path, revision, **k: ModelSource(path, AGREED_COMMIT, path)
         ),
-        patch.object(whole_model, "apply_remote_code_compat_shims"),
         patch.object(
             whole_model,
-            "AutoConfig",
-            SimpleNamespace(from_pretrained=lambda *a, **k: seen.update(config_revision=k.get("revision")) or config),
+            "resolve_build_config",
+            lambda *a, **k: seen.update(config_revision=k.get("revision")) or config,
         ),
         patch.object(whole_model, "apply_family_patches", _recording_seam(seen)),
         patch.object(whole_model, "auto_load_model", build),

@@ -14,9 +14,10 @@ group, with only rank 1 failing, pin:
    resumes, and rank 0 warns with the failing rank and error.
 3. **No optimizer state saved** (``save_only_model``) is not a failure: the resume proceeds with a
    fresh optimizer and a warning, without the opt-in.
-4. **An interrupted save is.** Shards whose meta never landed, and the base save's rank-0
-   ``optimizer.pt`` with no shards beside it, are the two halves a kill mid-save leaves: every rank
-   refuses them, naming the opt-in, rather than warm-restarting over them as if they were complete.
+4. **Unrestorable state is.** Shards whose meta never landed (a kill mid-save), and a replicated
+   ``optimizer.pt`` with no shards beside it (a non-sharded run's state, or an earlier release's
+   sharded save stopped before its shards): every rank refuses them, naming the opt-in, rather than
+   warm-restarting over them as if they were complete.
 
 A single process takes both outcomes too, and the trainer hands the opt-in to the store it builds.
 
@@ -242,8 +243,8 @@ def test_shards_whose_meta_never_landed_are_refused_on_every_rank(tmp_path):
 
 
 def test_the_base_optimizer_without_its_shards_is_refused_on_every_rank(tmp_path):
-    """Killed after the base save's ``trainer_state.json`` but before the per-rank shards: what is
-    left is rank 0's replicated view, which the mixin deletes only once its shards are on disk."""
+    """A replicated ``optimizer.pt`` and no per-rank shards: state that provably exists in a layout this
+    run's shards cannot take."""
     _assert_every_rank_refused_the_torn_save(_run(tmp_path, "base_optimizer_only"), BASE_OPTIMIZER_FILE)
 
 

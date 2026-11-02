@@ -116,12 +116,12 @@ class EPConfig:
         # no tokens for a layer never enters the collective its replicas wait in. ``is_deferred_dp``
         # is a subset of ``needs_expert_grad_sync``, so it adds no term. PP defers too: per-backward
         # hooks would fire on every microbatch and re-scale already-synced grads (not idempotent).
-        self.defer_grad_sync = (
+        self.sweep_reduces_across_replicas = (
             self.needs_expert_grad_sync or self.num_rank_blocks > 1
         ) and not self.experts_fsdp_managed
         # One EP group per rank block keeps the router's in-backward average, which a reentrant recompute may
         # fire once per nested backward harmlessly; the expert divide may not, so the sweep runs it once per step.
-        self.defer_expert_grad_sync = self.defer_grad_sync or (
+        self.runs_post_backward_sweep = self.sweep_reduces_across_replicas or (
             not self.experts_fsdp_managed and has_process_group() and self.stage_world_size > 1
         )
 
@@ -141,8 +141,8 @@ class EPConfig:
     def uses_backward_grad_hooks(self) -> bool:
         """Whether the EP layer syncs its router and replicated grads with in-backward hooks: neither FSDP2 nor
         the deferred post-backward sweep does it. The expert grads are the sweep's either way
-        (``defer_expert_grad_sync``)."""
-        return not self.experts_fsdp_managed and not self.defer_grad_sync
+        (``runs_post_backward_sweep``)."""
+        return not self.experts_fsdp_managed and not self.sweep_reduces_across_replicas
 
     @property
     def keeps_fp32_experts(self) -> bool:
@@ -225,7 +225,7 @@ class EPConfig:
         )
         self._build_ep_groups(global_rank, layout, block)
 
-        # Narrower than ``defer_grad_sync``: this flag marks the multi-domain multi-group case where
+        # Narrower than ``sweep_reduces_across_replicas``: this flag marks the multi-domain multi-group case where
         # non-expert DP additionally shards over the EP group. Attention TP cannot reach it;
         # parallelism_rules._reject_tp rejects that shape.
         self.is_deferred_dp = (

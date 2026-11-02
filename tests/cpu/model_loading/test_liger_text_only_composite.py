@@ -198,18 +198,18 @@ def test_every_text_only_composite_load_applies_liger_to_the_config_its_model_ca
 
 
 def test_only_a_family_claimed_through_its_text_tower_alone_changes_its_applier():
-    """Where the composite spelling resolves the text spelling's applier without the wrapper-head flag (Qwen3.5,
-    Qwen3.5-MoE), a text-only load applies what it applied before; the families whose composite spelling resolved
-    through the text fallback (Flash-Next) now take the text tower's applier with its head."""
+    """The text tower's applier differs from the composite spelling's only for a family Liger claims through its
+    text tower alone (Flash-Next), whose composite spelling reaches an applier only through the wrapper's text
+    fallback; for Qwen3.5 and Qwen3.5-MoE the composite spelling resolves the text tower's applier itself."""
     changed = {}
     for model_type in TEXT_ONLY_COMPOSITE_TYPES:
         composite = _composite_config(model_type)
-        before, after = _applier_resolution(composite), _applier_resolution(text_config(composite))
-        if before != after:
-            changed[model_type] = (before, after)
-    assert "qwen4_exp" in changed, "the case the fix exists for"
+        composite_spelling, text_tower = _applier_resolution(composite), _applier_resolution(text_config(composite))
+        if composite_spelling != text_tower:
+            changed[model_type] = (composite_spelling, text_tower)
+    assert "qwen4_exp" in changed, "qwen4_exp resolves its applier through its text tower"
     assert not {"qwen3_5", "qwen3_5_moe"} & set(changed), changed
-    assert all(before[1] and not after[1] for before, after in changed.values()), changed
+    assert all(composite_spelling[1] and not text_tower[1] for composite_spelling, text_tower in changed.values())
 
 
 def test_a_load_that_pins_another_class_keeps_the_config_it_read():

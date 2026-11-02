@@ -41,7 +41,7 @@ from halo.distributed.tensor_parallel import hf_plan, local_linears, parallelize
 from halo.distributed.tensor_parallel.plain_params import per_head_norm_param_names
 from halo.kernels.lowp.linear import LowPrecisionLinear
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpSpec
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel import lowp_compute
 from halo.model_loading.parallel import tp as tp_loading
 from halo.models.module_tree import backbone_with_layers, decoder_layers

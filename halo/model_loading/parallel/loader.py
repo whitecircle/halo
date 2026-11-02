@@ -12,8 +12,8 @@ from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.rank_uniform_env import agree_rank_uniform_env
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.dtype import configure_float32_matmul_precision
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
 from halo.model_loading.model_preparation import (
     apply_family_patches,

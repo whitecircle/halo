@@ -20,8 +20,8 @@ from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import PrefixChange
 from transformers.models.qwen4_exp.configuration_qwen4_exp import Qwen4ExpTextConfig
 
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_keys import is_expert_bank_merge
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.models.external_tables import ExternalTable, named_external_tables
 from halo.models.qwen4_exp.forwards import patch_qwen4_exp_document_forwards

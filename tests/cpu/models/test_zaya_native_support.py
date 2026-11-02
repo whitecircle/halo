@@ -22,6 +22,7 @@ from halo.model_loading import model_preparation
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.zaya import (
+    _same_document_masks,
     is_zaya_cca_document_isolated,
     patch_zaya_gradient_checkpointing_refusal,
     patch_zaya_packed_document_isolation,
@@ -203,6 +204,33 @@ def test_cca_isolates_packed_documents_only_with_the_patch(upstream_zaya, lens, 
     # Not 0.0: doc A changes each expert's batch, which reorders the reductions (~1e-16).
     assert drift < 1e-12, f"doc B moved {drift:.2e} when doc A changed"
     assert versus_alone < 1e-12, f"packed doc B differs from doc B alone by {versus_alone:.2e}"
+
+
+@pytest.mark.parametrize(
+    "rows",
+    [
+        [[0, 1, 2, 0, 1, 0, 1, 2, 3]],
+        [[0, 0, 1, 0, 1, 2, 0, 0, 1], [0, 1, 2, 3, 4, 5, 6, 7, 8]],
+        [[3, 4, 0, 1, 2, 0, 1, 2, 3]],
+    ],
+)
+def test_cca_same_document_masks_match_a_per_token_reference(rows):
+    """Per shift, token ``t`` keeps token ``t - s`` exactly when no position restart lies in ``(t - s, t]``:
+    packed rows, one-token documents, a batch and a row that opens mid-document."""
+    position_ids = torch.tensor(rows)
+    max_shift = 4
+    masks = _same_document_masks(position_ids, position_ids.shape[1], max_shift, position_ids.device)
+    for shift, mask in enumerate(masks, start=1):
+        expected = [
+            [t >= shift and all(row[u] != 0 for u in range(t - shift + 1, t + 1)) for t in range(len(row))]
+            for row in rows
+        ]
+        assert mask.tolist() == expected, shift
+    one_row = _same_document_masks(None, 5, 2, position_ids.device)
+    assert [mask.tolist() for mask in one_row] == [
+        [[False, True, True, True, True]],
+        [[False, False, True, True, True]],
+    ]
 
 
 @pytest.mark.parametrize("kernels", [(2, 2), (3, 2), (2, 4)])

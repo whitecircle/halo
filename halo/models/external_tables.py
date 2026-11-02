@@ -1,10 +1,7 @@
-"""Frozen tables a module reads but does not hold as state, attached as zero-copy views of checkpoint tensors.
-
-An :class:`ExternalTable` is no parameter, buffer or state-dict entry, so no cast, wrap, optimizer or state-dict
-save reaches it: ``finalize_loaded_model`` attaches it, the gathered checkpoint writers write it themselves, and a
-state-dict-only save of a model holding one is refused, as the policy loader refuses a random-weight build of one
-(``reject_random_init_tables``).
-"""
+"""Frozen tables a module reads but does not hold as state, attached as zero-copy views of checkpoint tensors. An
+:class:`ExternalTable` is no parameter, buffer or state-dict entry, so no cast, wrap, optimizer or state-dict save
+reaches it: ``finalize_loaded_model`` attaches it, the gathered checkpoint writers write it themselves, and a
+state-dict-only save or a random-weight build of a model holding one is refused (``reject_random_init_tables``)."""
 
 from __future__ import annotations
 

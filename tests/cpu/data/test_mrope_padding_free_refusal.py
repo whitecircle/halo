@@ -56,8 +56,9 @@ def test_padding_free_on_an_mrope_decoder_is_refused_on_every_flash_backend(mode
 @pytest.mark.parametrize("attn_impl", _DENSE_ATTN_IMPLEMENTATIONS)
 @pytest.mark.parametrize("model_type", _MROPE_MODEL_TYPES)
 def test_padding_free_on_an_mrope_decoder_stays_refused_on_a_dense_backend(model_type, attn_impl):
-    """The dense backends' own refusal comes first there; either way the run stops before a step."""
-    with pytest.raises(ValueError, match="padding_free requires a varlen attention kernel"):
+    """The refusal names the M-RoPE rotary ahead of the dense backend's own, whose remedy, a flash backend, would
+    fault on the same row."""
+    with pytest.raises(ValueError, match="rotates by M-RoPE"):
         _select(_config(model_type, attn_impl), padding_free=True)
 
 

@@ -45,8 +45,8 @@ def test_router_hook_noop_without_process_group():
 def test_expert_sweep_not_armed_without_process_group():
     """No peers, nothing to divide by: the post-backward sweep stays off, its collectives with no group."""
     ep_config = single_process_ep_config(E, experts_fsdp_managed=False)
-    assert not ep_config.defer_expert_grad_sync
-    assert not ep_config.defer_grad_sync
+    assert not ep_config.runs_post_backward_sweep
+    assert not ep_config.sweep_reduces_across_replicas
 
 
 class _Lfm2Gate(nn.Module):

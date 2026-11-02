@@ -38,7 +38,7 @@ The family's fp32 pin covers the **short convolutions** (`_keep_in_fp32_modules_
 
 ## Why CP and TP are out
 
-- **Packing** — the attention layers isolate packed documents, but the four depthwise convolutions per layer cross boundaries: the modeling reads `seq_idx` yet its conv call sites never forward kwargs, so no collator emission can reach them ([Document isolation](../data/collators.md#document-isolation-under-packing)).
+- **Packing** — the attention layers isolate packed documents, but the four depthwise convolutions per layer cross boundaries: the modeling reads `seq_idx` yet its conv call sites never forward kwargs, so no collator emission can reach them. `packing` and `padding_free` are refused unless `allow_cross_document_linear_attention: true` accepts that mixing ([Document isolation](../data/collators.md#document-isolation-under-packing)).
 - **CP** — `InklingShortConvolution` runs over the sequence axis (a CP shard severs its receptive field at every chunk boundary, the LFM-2/Zaya blocker), and the additive relative-logits bias cannot pass through `flash_attn_func`, which the Ulysses path is built on (`_supports_flash_attn = False` upstream).
 
     Validation rejects the conv class with a precise error.
@@ -76,8 +76,8 @@ Liger covers Inkling's RMSNorm and cross-entropy (the config runs it). Its MLP a
 
 That division and cut are the family's declared head transform (`halo/models/head_transform.py`), so offline GRPO's `use_chunked_grpo_logprobs` sweep applies them too.
 
-Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
+Inkling loads as a `ConditionalGeneration` class, but the data path follows the run: text-only SFT rows take the text pipeline, so `packing` is available here under `allow_cross_document_linear_attention: true` ([SFT — VLMs](../training-methods/sft.md#vision-language-models)). The binding limit at EP=16 is the cross-node dispatch cap above — `per_device_train_batch_size × max_length ≤ 8192` tokens/rank, however the rows are formed.
 
-The shipped config sets `packing: false`: packed rows would attend the full 8192 tokens/rank/step, against the ~2.3k real tokens the measurement above ran at with a 246 of 288 GB peak, and the depthwise convs cross packed documents either way.
+The shipped config sets `packing: false`: packed rows would attend the full 8192 tokens/rank/step, against the ~2.3k real tokens the measurement above ran at with a 246 of 288 GB peak, and the depthwise convs would cross packed documents (refused without the opt-in).
 
 CPU coverage: `tests/cpu/models/test_inkling_support.py` (registration and router parity, joint normalization included). GPU gates: `tests/gpu/parallelism/ep/test_ep_family_vs_reference.py --family inkling_text` (with and without `--expert-tp-size 2`), `tests/gpu/parallelism/ep/test_ep_vlm_inkling.py`, `tests/gpu/trainers/lora/test_lora_merged_save_resume.py` (`--family inkling_text`).

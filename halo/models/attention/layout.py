@@ -472,13 +472,16 @@ def attention_layout_from_config(config) -> AttentionLayout:
     )
 
 
+def has_linear_attention_layers(config) -> bool:
+    """Whether the decoder (read through a VLM wrapper) declares ``linear_attention`` layer types."""
+    return config is not None and _LINEAR_ATTENTION_LAYER_TYPE in (get_config_field(config, "layer_types") or ())
+
+
 def has_gated_delta_net_layers(config) -> bool:
     """Whether the decoder (read through a VLM wrapper) runs GatedDeltaNet layers, under any ``model_type``:
-    ``layer_types`` lists ``linear_attention`` and the config declares the head split those mixers are built from."""
-    if config is None:
-        return False
-    layer_types = get_config_field(config, "layer_types") or ()
-    return _LINEAR_ATTENTION_LAYER_TYPE in layer_types and all(
+    it declares linear-attention layers (:func:`has_linear_attention_layers`) and the head split those mixers
+    are built from."""
+    return has_linear_attention_layers(config) and all(
         get_config_field(config, field) is not None for field in _GATED_DELTA_NET_HEAD_FIELDS
     )
 

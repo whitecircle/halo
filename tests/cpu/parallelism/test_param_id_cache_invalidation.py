@@ -36,7 +36,10 @@ class _StubEPLayer(StubEPLayerBase):
     def __init__(self):
         super().__init__()
         self.ep_config = SimpleNamespace(
-            fsdp_shard_ep1_experts=False, ep_group_size=2, experts_fsdp_managed=False, defer_grad_sync=False
+            fsdp_shard_ep1_experts=False,
+            ep_group_size=2,
+            experts_fsdp_managed=False,
+            sweep_reduces_across_replicas=False,
         )
         self.gate = nn.Linear(H, E, bias=False)  # the base's default _ROUTER_ATTR
         self.gate_proj = nn.Parameter(torch.randn(E, H, M))

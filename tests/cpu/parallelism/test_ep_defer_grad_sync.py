@@ -1,13 +1,13 @@
 #!/usr/bin/env python
 """EPConfig deferred-grad-sync + DP-scope-group contracts (pipeline-parallel rank blocks).
 
-``defer_grad_sync`` decides whether the router and replicated EP params ride per-backward hooks or the
+``sweep_reduces_across_replicas`` decides whether the router and replicated EP params ride per-backward hooks or the
 trainer's post-backward sweep. It must be a strict superset of ``is_deferred_dp``: any rank-blocked job
 (``num_rank_blocks > 1``, i.e. pipeline parallelism) also defers, because PP forces
 ``gradient_accumulation_steps`` to 1 so post-accumulate hooks would fire after EVERY microbatch
 backward and re-scale already-synced gradients. The one exception is ep1 experts sharded by FSDP
 (``fsdp_shard_ep1_experts`` + ``ep_group_size == 1``), whose reduce-scatter is accumulation-safe.
-``defer_expert_grad_sync`` widens it to every FSDP-ignored expert topology with peers: the expert divide
+``runs_post_backward_sweep`` widens it to every FSDP-ignored expert topology with peers: the expert divide
 runs in the sweep even where the router keeps its hook.
 
 ``dp_scope_group`` is the collective domain for router/replicated-param DP averages under PP (one
@@ -55,7 +55,7 @@ def _make_ep(rank: int, *, world_size: int, stage_world_size: int, fsdp_shard_ep
         return config, calls
 
 
-# defer_grad_sync truth table
+# sweep_reduces_across_replicas truth table
 
 
 def test_defer_false_without_pp_single_node():
@@ -64,18 +64,18 @@ def test_defer_false_without_pp_single_node():
     cfg, _ = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_rank_blocks == 1
     assert not cfg.is_deferred_dp
-    assert not cfg.defer_grad_sync
+    assert not cfg.sweep_reduces_across_replicas
     assert cfg.uses_backward_grad_hooks
-    assert cfg.defer_expert_grad_sync
+    assert cfg.runs_post_backward_sweep
     assert cfg.dp_scope_group is None
 
 
 def test_defer_true_for_multinode_deferred_dp_without_pp():
-    """pp1 multi-node multi-group EP (is_deferred_dp) implies defer_grad_sync — superset check."""
+    """pp1 multi-node multi-group EP (is_deferred_dp) implies sweep_reduces_across_replicas — superset check."""
     cfg, _ = _make_ep(0, world_size=16, stage_world_size=16, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_rank_blocks == 1
     assert cfg.is_deferred_dp
-    assert cfg.defer_grad_sync
+    assert cfg.sweep_reduces_across_replicas
     assert cfg.dp_scope_group is None  # single rank block → default (world) group
 
 
@@ -85,7 +85,7 @@ def test_defer_true_under_pp_even_without_deferred_dp():
     cfg, _ = _make_ep(0, world_size=16, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_rank_blocks == 2
     assert not cfg.is_deferred_dp
-    assert cfg.defer_grad_sync
+    assert cfg.sweep_reduces_across_replicas
 
 
 def test_defer_false_under_pp_for_fsdp_sharded_ep1_experts():
@@ -102,7 +102,7 @@ def test_defer_false_under_pp_for_fsdp_sharded_ep1_experts():
     )
     assert cfg.num_rank_blocks == 2
     assert cfg.ep_group_size == 1
-    assert not cfg.defer_grad_sync
+    assert not cfg.sweep_reduces_across_replicas
 
 
 def test_defer_true_under_pp_for_unsharded_ep1_experts():
@@ -116,7 +116,7 @@ def test_defer_true_under_pp_for_unsharded_ep1_experts():
         node_local=True,
         fsdp_shard_ep1_experts=False,
     )
-    assert cfg.defer_grad_sync
+    assert cfg.sweep_reduces_across_replicas
 
 
 def test_defer_true_under_pp_for_pure_etp():
@@ -133,7 +133,7 @@ def test_defer_true_under_pp_for_pure_etp():
         fsdp_shard_ep1_experts=True,
     )
     assert cfg.ep_group_size == 2
-    assert cfg.defer_grad_sync
+    assert cfg.sweep_reduces_across_replicas
 
 
 def _parallelism_config(world, stage, ep_size, etp, ep_scope, fsdp_shard_ep1_experts) -> ParallelismConfig:
@@ -175,12 +175,19 @@ def test_every_topology_with_expert_replicas_defers_their_sync(world, stage, ep_
     are DTensors outside the expert bucket, normed over their FSDP shard group instead."""
     cfg = built_ep_config(_parallelism_config(world, stage, ep_size, etp, ep_scope, managed))
     if cfg.num_ep_groups > 1:
-        assert cfg.defer_grad_sync or cfg.experts_fsdp_managed, (world, stage, ep_size, etp, ep_scope, managed)
+        assert cfg.sweep_reduces_across_replicas or cfg.experts_fsdp_managed, (
+            world,
+            stage,
+            ep_size,
+            etp,
+            ep_scope,
+            managed,
+        )
     if cfg.experts_fsdp_managed:
         assert cfg.ep_group_size == 1
     # The expert divide, which a reentrant recompute would repeat on a hook, defers wherever FSDP2 leaves
     # the experts out.
-    assert cfg.defer_expert_grad_sync == (not cfg.experts_fsdp_managed), (world, stage, ep_size, etp, ep_scope)
+    assert cfg.runs_post_backward_sweep == (not cfg.experts_fsdp_managed), (world, stage, ep_size, etp, ep_scope)
 
 
 @pytest.mark.parametrize("managed", [True, False])
@@ -189,8 +196,8 @@ def test_single_process_mode_defaults(managed):
     experts left out of FSDP2 too, since the sweep's collectives have no group to run on."""
     cfg = EPConfig(ep_size=1, stage_world_size=1, nvlink_domain_size=1, experts_fsdp_managed=managed)
     assert cfg.num_rank_blocks == 1
-    assert not cfg.defer_grad_sync
-    assert not cfg.defer_expert_grad_sync
+    assert not cfg.sweep_reduces_across_replicas
+    assert not cfg.runs_post_backward_sweep
     assert cfg.dp_scope_group is None
 
 
@@ -277,8 +284,8 @@ def _deferred_sweep_host(**ep_attrs):
     """Minimal host running the REAL deferred sweep over one FSDP-sharded non-expert param."""
     ep = SimpleNamespace(
         **{
-            "defer_grad_sync": True,
-            "defer_expert_grad_sync": True,
+            "sweep_reduces_across_replicas": True,
+            "runs_post_backward_sweep": True,
             "expert_replica_group": None,
             "is_deferred_dp": True,
             "ep_group_size": 4,
@@ -392,8 +399,8 @@ def test_each_run_sweeps_its_own_first_step():
     model.expert = expert
     host = SimpleNamespace(
         _ep_config=SimpleNamespace(
-            defer_grad_sync=False,
-            defer_expert_grad_sync=True,
+            sweep_reduces_across_replicas=False,
+            runs_post_backward_sweep=True,
             expert_replica_group=None,
             stage_world_size=4,
             expert_tp_size=1,
@@ -424,7 +431,7 @@ def test_restore_time_zero_lr_step_does_not_run_the_sweep():
     param = nn.Parameter(torch.zeros(2))
     fake = SimpleNamespace(
         optimizer=torch.optim.SGD([param], lr=0.0),
-        _ep_config=SimpleNamespace(defer_grad_sync=True, defer_expert_grad_sync=True),
+        _ep_config=SimpleNamespace(sweep_reduces_across_replicas=True, runs_post_backward_sweep=True),
         state=SimpleNamespace(global_step=4),
         _deferred_sweep_last_step=None,
         _sync_deferred_expert_grads=lambda: calls.append(1),

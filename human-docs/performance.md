@@ -55,8 +55,10 @@ Set these per run:
 On by default: grouped GEMM for MoE experts, Flash Attention 4 on Blackwell,
 Liger, `AdamWBF16` (6 bytes per parameter instead of 12), the atomic-free
 expert permute and its sync-free routing sort, the fused MoE path
-(`HALO_FUSED_GLU=0` turns off its GLU kernels), and `sdpa_flex_sliding` for
-Gemma 4 and Step-3.7 (`HALO_FLEX_SLIDING=0`). Each lever's page carries its
+(`HALO_FUSED_GLU=0` turns off its GLU kernels), TP linears on their local
+shards, two decoder layers per FSDP2 shard group under ZeRO-2, one Ulysses
+all-to-all for Q, K and V under CP, and `sdpa_flex_sliding` for Gemma 4 and
+Step-3.7 (`HALO_FLEX_SLIDING=0`). Each lever's page carries its
 measurements: [Optimization](../agent-docs/optimization/README.md) ↗.
 
 ## Levers that do not help here

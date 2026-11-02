@@ -20,5 +20,5 @@ def build_sft_collator(tokenizer, sft_config, model_config, parallelism_config):
         per_device_train_batch_size=sft_config.per_device_train_batch_size,
         per_device_eval_batch_size=evaluation_batch_size(sft_config),
         keeps_packed_rows=parallelism_config.pp_size > 1,
-        one_document_varlen=True,
+        emit_varlen_one_document=True,
     )

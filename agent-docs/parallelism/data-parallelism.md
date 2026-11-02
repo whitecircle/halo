@@ -368,8 +368,9 @@ those contributions never reach the sharded gradients the clip and the optimizer
 gathered past the optimizer step (the next forward reads pre-step weights), and its sharded gradient
 survives HF's `model.zero_grad()` into the next step. A ZeRO-2 [unit](#shard-groups) of two layers sits
 in the callback's state list once per layer, so its later visit finds the group idle and reduces the
-leftovers itself; the one-layer groups left are every decoder-layer group under ZeRO-3, a ZeRO-2 unit at
-the end of an odd layer count, and the nested dtype groups.
+leftovers itself; the one-layer groups left are every decoder-layer group under ZeRO-3, a ZeRO-2 unit cut
+short to one layer (at the end of an odd layer count, or where the next layer's trainable dtype differs), and
+the nested dtype groups.
 
 After every microstep's backward, `training_step` runs `complete_fsdp2_post_backward`
 (`halo/distributed/fsdp.py`) over every shard group: FSDP2's own `post_backward` on each group left

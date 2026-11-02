@@ -1,10 +1,7 @@
-"""Per-document segment markers for the conv / linear-attention mixers of a multi-document row.
-
-Attention isolates a row's documents from ``position_ids``, which restart at 0 at every document; some families'
-conv and linear-attention mixers read the boundaries from forward kwargs instead and carry state across documents
-without them. Held here: who reads which markers, the refusals for rows no marker can isolate, the markers, and the
-varlen set flash attention would otherwise derive from a packed row, or test a one-document row for, in every
-layer."""
+"""Per-document segment markers for the conv / linear-attention mixers of a multi-document row, which read its
+boundaries from forward kwargs rather than ``position_ids``: who reads which markers, the refusals for rows no
+marker isolates, the markers, and the varlen set flash attention would otherwise derive from a packed row, or test
+a one-document row for, in every layer."""
 
 import logging
 from collections.abc import Mapping
@@ -20,8 +17,9 @@ from halo.models.attention.layout import (
     compressed_layer_types,
     declares_linear_layer_groups,
     has_gated_delta_net_layers,
+    has_linear_attention_layers,
 )
-from halo.models.config_access import get_config_field, model_type_matches
+from halo.models.config_access import model_type_matches
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 
@@ -29,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 # (model_type, mode) pairs whose allowed cross-document linear attention was reported: a script refuses
 # before the model load and the collator again after it.
-_CROSSING_ALLOWED_WARNED: set[tuple[str | None, str]] = set()
+_crossing_allowed_warned: set[tuple[str | None, str]] = set()
 
 # transformers' own predicates selecting its segment-aware GatedDeltaNet kernels (a bare ``find_spec``
 # would drop the ``fla>=0.2.2`` floor and the CUDA-capable-torch conjunct); the torch fallbacks ignore
@@ -71,31 +69,36 @@ def segment_markers_for(model_config) -> SegmentMarkers:
     )
 
 
-def has_unmarked_linear_attention(model_config) -> bool:
-    """Whether the model declares linear-attention layers no segment marker reaches: hybrid layer groups
-    (:func:`~halo.models.attention.layout.declares_linear_layer_groups`) or ``linear_attention`` layer types,
-    outside the families whose kernels read ``cu_seq_lens``. Their recurrence carries state across a
-    multi-document row's documents on every backend."""
+def find_unmarked_sequence_mixer(model_config) -> str | None:
+    """The sequence mixers of the model no segment marker reaches, named for a refusal: the family's declared ones
+    (``MoEFamilySpec.unmarked_sequence_mixer``, read through a VLM wrapper: Inkling's short convolutions), or
+    linear-attention layers, by hybrid layer groups
+    (:func:`~halo.models.attention.layout.declares_linear_layer_groups`) or ``linear_attention`` layer types
+    (:func:`~halo.models.attention.layout.has_linear_attention_layers`), outside the families whose kernels read
+    ``cu_seq_lens``; ``None`` where every mixer is reached. Such mixers carry each document of a multi-document row
+    into the next on every backend."""
     if model_config is None:
-        return False
-    declares = declares_linear_layer_groups(model_config) or "linear_attention" in (
-        get_config_field(model_config, "layer_types") or ()
-    )
-    return declares and not segment_markers_for(model_config).cu_seq_lens
+        return None
+    spec = find_moe_family_spec_for_config(model_config)
+    if spec is not None and spec.unmarked_sequence_mixer is not None:
+        return spec.unmarked_sequence_mixer
+    declares = declares_linear_layer_groups(model_config) or has_linear_attention_layers(model_config)
+    return "linear-attention layers" if declares and not segment_markers_for(model_config).cu_seq_lens else None
 
 
 def reject_unmarked_linear_attention_rows(
     model_config, mode: str, *, allow_cross_document_linear_attention: bool
 ) -> None:
-    """Refuse a multi-document row (``mode``) on a model whose linear-attention layers no segment marker
-    reaches (:func:`has_unmarked_linear_attention`), on every attention backend, unless the run sets
-    ``allow_cross_document_linear_attention``; an allowed run is warned once."""
-    if not has_unmarked_linear_attention(model_config):
+    """Refuse a multi-document row (``mode``) on a model whose linear-attention layers, or a family's other
+    sequence mixers, no segment marker reaches (:func:`find_unmarked_sequence_mixer`), on every attention
+    backend, unless the run sets ``allow_cross_document_linear_attention``; an allowed run is warned once."""
+    mixer = find_unmarked_sequence_mixer(model_config)
+    if mixer is None:
         return
     model_type = getattr(model_config, "model_type", None)
     crossing = (
-        "its linear-attention layers receive no document boundary, so their recurrent state carries from "
-        "each document of a row into the next on every attention backend"
+        f"its {mixer} receive no document boundary, so their state carries from each document of a row into "
+        f"the next on every attention backend"
     )
     table = "agent-docs/data/collators.md (Document isolation under packing) lists the layers each family's rows cross"
     if not allow_cross_document_linear_attention:
@@ -107,7 +110,7 @@ def reject_unmarked_linear_attention_rows(
     if is_global_main_process():
         warn_once(
             logger,
-            _CROSSING_ALLOWED_WARNED,
+            _crossing_allowed_warned,
             (model_type, mode),
             "%s=True on model_type=%r under allow_cross_document_linear_attention: %s; %s.",
             mode,
@@ -120,7 +123,7 @@ def reject_unmarked_linear_attention_rows(
 def reject_pipeline_packed_rows(model_config) -> None:
     """Refuse packed rows under pipeline parallelism on a model whose conv / linear-attention mixers keep a row's
     documents apart only through segment markers (:func:`segment_markers_for`) or receive no boundary at all
-    (:func:`has_unmarked_linear_attention`): a stage's forward passes those mixers no segment marker."""
+    (:func:`find_unmarked_sequence_mixer`): a stage's forward passes those mixers no segment marker."""
     markers = segment_markers_for(model_config)
     read = [marker.name for marker in fields(markers) if getattr(markers, marker.name)]
     if read:
@@ -128,8 +131,8 @@ def reject_pipeline_packed_rows(model_config) -> None:
             f"its conv / linear-attention layers keep documents apart only through the {' and '.join(read)} segment "
             f"markers, which never reach them through a pipeline stage's forward"
         )
-    elif has_unmarked_linear_attention(model_config):
-        mixers = "its linear-attention layers read no document boundary on any path"
+    elif (unmarked := find_unmarked_sequence_mixer(model_config)) is not None:
+        mixers = f"its {unmarked} read no document boundary on any path"
     else:
         return
     raise ValueError(
@@ -184,6 +187,29 @@ def require_linear_attention_kernels(model_type: str | None, mode: str) -> None:
 def document_ids(position_ids: torch.Tensor) -> torch.Tensor:
     """Per-token document index of each row, counting the ``position_ids`` restarts at 0."""
     return (position_ids == 0).cumsum(dim=-1) - 1
+
+
+def document_boundaries(seq_idx: torch.Tensor | None, batch: int, length: int, device: torch.device) -> torch.Tensor:
+    """``[batch, length]`` bool, True at the first token of every document: each row's first token and every
+    change of ``seq_idx`` (:func:`document_ids`) along it. ``None`` is one document per row."""
+    boundaries = torch.zeros(batch, length, dtype=torch.bool, device=device)
+    boundaries[:, :1] = True
+    if seq_idx is None:
+        return boundaries
+    if seq_idx.shape != (batch, length) or seq_idx.dtype.is_floating_point or seq_idx.dtype == torch.bool:
+        raise ValueError(
+            f"seq_idx must be an integer [batch, sequence] = {(batch, length)} tensor of document indices, got "
+            f"{seq_idx.dtype} {tuple(seq_idx.shape)}"
+        )
+    boundaries[:, 1:] = seq_idx[:, 1:] != seq_idx[:, :-1]
+    return boundaries
+
+
+def document_starts(seq_idx: torch.Tensor | None, batch: int, length: int, device: torch.device) -> torch.Tensor:
+    """``[batch, length]`` long: the index of the first token of each token's document."""
+    positions = torch.arange(length, device=device)
+    starts = torch.where(document_boundaries(seq_idx, batch, length, device), positions, 0)
+    return starts.cummax(dim=1).values
 
 
 def flattened_document_positions(attention_mask: torch.Tensor) -> torch.Tensor:

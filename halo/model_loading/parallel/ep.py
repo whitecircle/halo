@@ -14,8 +14,8 @@ from halo.checkpoint.reading import has_whole_model_weight_file
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.dtype import resolve_load_dtype
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.parallel.expert_fuser import ExpertFuser

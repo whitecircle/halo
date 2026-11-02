@@ -33,11 +33,6 @@ from halo.configs.distillation import SelfDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import TREE_PACKING_FIELDS
-from halo.data.collators.collator_rules import (
-    evaluation_batch_size,
-    reject_fa4_varlen_training,
-    rows_reach_varlen_kernel,
-)
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     SelfDistillVLMDataCollator,
@@ -62,10 +57,10 @@ from halo.entrypoints.data_setup import (
 from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
-    default_training_rows_attn_implementation,
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
+    plan_training_rows,
 )
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -75,9 +70,9 @@ from halo.entrypoints.script import (
     run_trainer,
     with_distributed_teardown,
 )
-from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_reference_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.runtime.collectives import barrier
 from halo.runtime.filesystem import hub_metadata_main_first
 from halo.runtime.ranks import is_global_main_process
@@ -378,19 +373,13 @@ def main():
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
     # One padded row per conversation in each branch: more than one per batch reaches the varlen kernel.
-    rows = {
-        "packing": False,
-        "padding_free": False,
-        "per_device_train_batch_size": sft_config.per_device_train_batch_size,
-        "per_device_eval_batch_size": evaluation_batch_size(sft_config),
-    }
-    varlen_rows = rows_reach_varlen_kernel(**rows)
-    attn_default = default_training_rows_attn_implementation(
-        model_config, **rows, dtype=resolve_training_dtype(sft_config)
-    )
+    attn_default = plan_training_rows(
+        model_config,
+        sft_config,
+        sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
+    ).attn_default
     policy = load_policy_model(context, sft_config, model_config, args, vlm_run=is_vlm, attn_default=attn_default)
     model = policy.model
-    reject_fa4_varlen_training(model.config, varlen_rows=varlen_rows)
     tokenizer = apply_max_length(sft_config, args, model, policy.tokenizer)
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)

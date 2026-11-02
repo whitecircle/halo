@@ -58,7 +58,8 @@ Mention these only to confirm, not as new advice:
 - **Pure EP on 8 GPUs →** **ep2 (throughput) or ep8 (memory)**; ep4 there is rejected at config time
   ([why](../../agent-docs/parallelism/expert-parallelism.md#single-domain-multi-group-ep-races-and-hangs)).
   For finer expert sharding use **EP+ETP** (`ep4+etp2`); EP+TP does not help.
-- **Dense, long context →** FA4's win over FA2 is largest here; confirm it is selected.
+- **Dense, long context →** FA4's win over FA2 is largest here; confirm it is selected, unless the resolver
+  chose FA2 on purpose ([Model-specific handling](../../agent-docs/optimization/flash-attention.md#model-specific-handling)).
 - **Variable-length data (avg << max_len) →** **packing** is the big win, padding-free the smaller one
   (when cross-sequence boundaries are undesirable); uniform long rows tie
   ([Padding-free collator](../../agent-docs/optimization/padding-free-collator.md#when-to-use-each)). Rows sharing a long prefix:

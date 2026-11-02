@@ -67,6 +67,15 @@ def deep_ep_available() -> bool:
     return True
 
 
+def _destroy(buffers: list) -> None:
+    """Destroy each DeepEP buffer of ``buffers`` in order (collective over each buffer's group)."""
+    for buffer in buffers:
+        try:
+            buffer.destroy()
+        except Exception as e:
+            logger.warning(f"Failed to destroy DeepEP buffer: {e}")
+
+
 class _Arena:
     """One DeepEP buffer shared by every MoE layer dispatching one shape on one EP group: dispatch copies its
     results out and the handle carries the routing layout, so a later layer leaves a pending backward intact."""
@@ -110,14 +119,15 @@ class _Arena:
         """COLLECTIVE over the group. Whether no rank of the group still claims this arena."""
         return rank_consensus(self._users <= 0, group=self.group).all_ok
 
+    def free_retired(self) -> int:
+        """Destroy the buffers earlier grows retired, keeping the live one (collective over the group); returns how
+        many. Only a growing arena retires any."""
+        return 0
+
     def _free(self) -> None:
         """Destroy every buffer this arena holds (collective; host-aligned callers only)."""
         _Arena._registry.pop(self.key, None)
-        for buffer in self._owned_buffers():
-            try:
-                buffer.destroy()
-            except Exception as e:
-                logger.warning(f"Failed to destroy DeepEP buffer: {e}")
+        _destroy(self._owned_buffers())
         self.buffer = None
 
     def _owned_buffers(self) -> list:
@@ -136,8 +146,8 @@ class _ElasticArena(_Arena):
         # DeepEP's deterministic mode places each received token by prefix sums, not an atomic claim.
         self.deterministic = deterministic
         self.capacity = 0
-        # A grow retires the old buffer rather than freeing it: an in-flight microbatch's backward may
-        # still name it, and no rank-uniform point exists where none can. Teardown frees them.
+        # A grow retires the old buffer rather than freeing it: an in-flight microbatch's backward may still name
+        # it until the optimizer step's backwards are done, where the trainer frees it (free_retired_ep_buffers).
         self._retired: list = []
 
     @classmethod
@@ -155,7 +165,7 @@ class _ElasticArena(_Arena):
                 logger.info(
                     f"DeepEP arena grew {self.capacity} -> {needed} tokens/rank; the previous arena is "
                     f"retired rather than freed (handles from in-flight microbatches may still name it) "
-                    f"and is released at teardown — {len(self._retired)} retained so far."
+                    f"and is released once this optimizer step's backwards are done."
                 )
         self.buffer = deep_ep().ElasticBuffer(
             self.group,
@@ -170,6 +180,11 @@ class _ElasticArena(_Arena):
         )
         self.capacity = needed
         return True
+
+    def free_retired(self) -> int:
+        retired, self._retired = self._retired, []
+        _destroy(retired)
+        return len(retired)
 
     def _free(self) -> None:
         super()._free()
@@ -536,6 +551,14 @@ def free_unclaimed_ep_buffers() -> int:
     for arena in unclaimed:
         arena._free()
     return len(unclaimed)
+
+
+def free_retired_ep_buffers() -> int:
+    """COLLECTIVE over each arena's EP group: destroy the buffers every arena's grows retired, arena by arena in
+    build order, keeping each live buffer; returns how many it freed. Call it once a step's backwards are done,
+    when no handle names a retired buffer, on every rank: a grow reaches the group's all-reduced capacity, so every
+    rank of a group retired the same buffers."""
+    return sum(arena.free_retired() for arena in list(_Arena._registry.values()))
 
 
 def free_all_ep_buffers() -> None:

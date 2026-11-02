@@ -38,8 +38,8 @@ from halo.configs.script_arguments import ModelArguments
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from halo.distributed.pipeline_parallel.stage import PP_STAGE_PARTITION_ATTR, StageLayout
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.dtype import cast_parameters_to_run_dtype
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.lazy_safetensors.materialization import SafetensorsWeightLoader, WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.parallel.ep import load_ep_model_lazy

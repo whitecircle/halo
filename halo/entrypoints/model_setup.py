@@ -22,25 +22,30 @@ from transformers.utils import is_flash_attn_2_available
 
 from halo.checkpoint.format import PROCESSOR_FILES
 from halo.configs.script_arguments import ModelArguments
-from halo.data.collators.collator_rules import rows_reach_varlen_kernel
+from halo.data.collators.collator_rules import (
+    evaluation_batch_size,
+    reject_fa4_varlen_training,
+    rows_reach_varlen_kernel,
+)
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.entrypoints.script import ScriptContext
 from halo.model_loading.dtype import resolve_quantization_config, resolve_training_dtype
 from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
-from halo.model_loading.parallel.loader import load_distributed_model
+from halo.model_loading.parallel.loader import load_distributed_model, resolve_policy_attn_implementation
 from halo.model_loading.parallel.model_source import fetch_checkpoint_config, probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
+from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
 from halo.models.attention.selection import (
     FA4_DEDICATED_HEAD_DIM,
     declares_attention_backends,
     declares_flash_attention,
-    fa4_demoted_by_determinism,
     fa4_varlen_refusal,
     flash_attention_2_in_place_of_fa4,
     flash_attention_deterministic,
+    is_fa4_demoted_by_determinism,
     preferred_flash_impl,
     uses_fa4_dedicated_head_dim,
 )
@@ -61,6 +66,14 @@ class PolicyLoad(NamedTuple):
     processing_class: Any
     tokenizer: PreTrainedTokenizer
     is_vlm: bool
+
+
+class TrainingRows(NamedTuple):
+    """What :func:`plan_training_rows` decides: the attention request the policy loads with when the YAML pins
+    none, and whether the training or evaluation rows reach FlashAttention's varlen call."""
+
+    attn_default: str | None
+    varlen_rows: bool
 
 
 def default_padded_attn_implementation(
@@ -85,6 +98,9 @@ def default_padded_attn_implementation(
     pass the run's own ``reset_sinks``.
     ``context_parallel`` drops it too: Ulysses calls FlashAttention itself, so the loader's hardware-aware
     pick names it.
+
+    Where the policy's own attention is the one FA4's varlen kernels are not validated with and an FA2 build
+    imports, the request names ``flash_attention_2`` in place of that ``sdpa``.
     """
     if model_config.attn_implementation:
         return model_config.attn_implementation
@@ -95,9 +111,17 @@ def default_padded_attn_implementation(
     if checkpoint_config is None:
         checkpoint_config = fetch_checkpoint_config(model_config, tag="padded_attn_default")
     loaded = (checkpoint_config, *companion_configs)
-    if all(declares_attention_backends(config) and fa4_varlen_refusal(config) is None for config in loaded):
+    if not all(declares_attention_backends(config) for config in loaded):
+        return "sdpa"
+    if all(fa4_varlen_refusal(config) is None for config in loaded):
         return None
-    return "sdpa"
+    refused = fa4_varlen_refusal(checkpoint_config)
+    if refused is None or not is_flash_attn_2_available():
+        return "sdpa"
+    return flash_attention_2_in_place_of_fa4(
+        f"FlashAttention-4's varlen kernels are not validated with {refused}, and this run's padded batches unpad "
+        f"to them"
+    )
 
 
 def default_training_rows_attn_implementation(
@@ -124,9 +148,9 @@ def default_training_rows_attn_implementation(
       whose heads FA4 trains on its dedicated head_dim-256 backward (:func:`uses_fa4_dedicated_head_dim`), FA4
       unpinned: FA4 measured no faster than FA2 on packed rows.
     - The rows hold several documents and the run asks for the deterministic backward that kernel is not validated
-      with (:func:`fa4_demoted_by_determinism`, ``full_determinism``), FA4 pinned or not: the loader would demote FA4
-      to SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per query head. Padded rows of
-      one document keep that SDPA.
+      with (:func:`is_fa4_demoted_by_determinism`, ``full_determinism``), FA4 pinned or not: the loader would demote
+      FA4 to SDPA, which runs a packed row as one dense ``[L, L]`` mask with K/V repeated per query head. Padded rows
+      of one document keep that SDPA.
 
     Neither multi-document rule applies to ``padding_free`` on an M-RoPE decoder (:func:`has_mrope_rotary`: Qwen3.5/3.6,
     text-only checkpoints included), whose varlen path faults FA2 there, nor without an FA2 build, where the loader's
@@ -166,13 +190,79 @@ def default_training_rows_attn_implementation(
         and has_gated_delta_net_layers(checkpoint_config)
     ):
         return "flash_attention_2"
-    if declares_flash_attention(checkpoint_config) and fa4_demoted_by_determinism(checkpoint_config):
+    if declares_flash_attention(checkpoint_config) and is_fa4_demoted_by_determinism(checkpoint_config):
         return flash_attention_2_in_place_of_fa4(
             f"FlashAttention-4's head_dim-{FA4_DEDICATED_HEAD_DIM} kernel is not validated with a deterministic "
             "backward, which this run asks for (FLASH_ATTENTION_DETERMINISTIC=1, full_determinism), and its rows hold "
             "several documents, which SDPA would run as one dense mask"
         )
     return pinned
+
+
+def reject_fa4_varlen_request(
+    model_config: ModelArguments,
+    attn_request: str | None,
+    *,
+    varlen_rows: bool,
+    dtype: torch.dtype,
+    sinks_policy: SinksPolicy,
+    checkpoint_config=None,
+    init_from_scratch: bool = False,
+) -> None:
+    """Refuse, before any weight loads, a ``flash_attention_4`` request the policy load keeps
+    (:func:`resolve_policy_attn_implementation` under ``dtype`` and ``sinks_policy``) on rows that reach its varlen
+    kernels (``varlen_rows``) when they refuse the checkpoint's attention (:func:`reject_fa4_varlen_training`). Only a
+    pinned request can be FA4 there: both attention defaults name another backend for such a checkpoint.
+    ``checkpoint_config`` omitted is fetched (COLLECTIVE) where the request could be refused."""
+    if attn_request != "flash_attention_4" or not varlen_rows:
+        return
+    if checkpoint_config is None:
+        checkpoint_config = fetch_checkpoint_config(model_config, tag="fa4_varlen_request")
+    if fa4_varlen_refusal(checkpoint_config) is None:
+        return
+    resolved = resolve_policy_attn_implementation(
+        checkpoint_config, attn_request, dtype, sinks_policy=sinks_policy, init_from_scratch=init_from_scratch
+    )
+    reject_fa4_varlen_training(checkpoint_config, varlen_rows=varlen_rows, attn_impl=resolved)
+
+
+def plan_training_rows(
+    model_config: ModelArguments,
+    training_args,
+    *,
+    sinks_policy: SinksPolicy,
+    packing: bool = False,
+    padding_free: bool = False,
+    checkpoint_config=None,
+    init_from_scratch: bool = False,
+) -> TrainingRows:
+    """For a script that shapes its own rows (``packing``, ``padding_free``, ``training_args``' batch sizes): the
+    request :func:`default_training_rows_attn_implementation` makes for them and whether they reach FlashAttention's
+    varlen call, evaluation batches included, refusing a pinned FA4 there before any weight loads
+    (:func:`reject_fa4_varlen_request`). COLLECTIVE where ``checkpoint_config`` is omitted and a check needs it."""
+    rows = {
+        "packing": packing,
+        "padding_free": padding_free,
+        "per_device_train_batch_size": training_args.per_device_train_batch_size,
+        "per_device_eval_batch_size": evaluation_batch_size(training_args),
+    }
+    dtype = resolve_training_dtype(training_args)
+    plan = TrainingRows(
+        attn_default=default_training_rows_attn_implementation(
+            model_config, **rows, dtype=dtype, checkpoint_config=checkpoint_config
+        ),
+        varlen_rows=rows_reach_varlen_kernel(**rows),
+    )
+    reject_fa4_varlen_request(
+        model_config,
+        plan.attn_default,
+        varlen_rows=plan.varlen_rows,
+        dtype=dtype,
+        sinks_policy=sinks_policy,
+        checkpoint_config=checkpoint_config,
+        init_from_scratch=init_from_scratch,
+    )
+    return plan
 
 
 def reject_multimodal_model_without_seq_cls_head(model_config: ModelArguments) -> None:

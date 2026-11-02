@@ -62,9 +62,12 @@ class _RemoteCodeConfig(PretrainedConfig):
 
 @contextlib.contextmanager
 def _blackwell(checkpoint_config):
-    """A Blackwell host whose policy checkpoint has ``checkpoint_config``; yields the config fetch."""
+    """A Blackwell host with an FA2 build whose policy checkpoint has ``checkpoint_config``; yields the config
+    fetch."""
     with (
         mock.patch.object(selection, "is_blackwell_gpu", lambda: True),
+        mock.patch.object(selection, "is_flash_attn_2_available", lambda: True),
+        mock.patch.object(model_setup, "is_flash_attn_2_available", lambda: True),
         mock.patch.object(model_setup, "fetch_checkpoint_config", return_value=checkpoint_config) as fetch,
     ):
         yield fetch
@@ -139,7 +142,12 @@ _SOFTCAPPED = Gemma2Config(hidden_size=4608, num_attention_heads=32, num_key_val
 @pytest.mark.parametrize("script", _PADDED_DEFAULT_SCRIPTS)
 @pytest.mark.parametrize(
     ("checkpoint_config", "expected"),
-    [(Qwen3Config(), None), (GemmaConfig(), None), (_RemoteCodeConfig(), "sdpa"), (_SOFTCAPPED, "sdpa")],
+    [
+        (Qwen3Config(), None),
+        (GemmaConfig(), None),
+        (_RemoteCodeConfig(), "sdpa"),
+        (_SOFTCAPPED, "flash_attention_2"),
+    ],
     ids=["native", "head_dim-256", "remote", "softcapped"],
 )
 def test_blackwell_leaves_the_kernel_to_the_loader_unless_the_checkpoint_rules_it_out(
@@ -147,8 +155,8 @@ def test_blackwell_leaves_the_kernel_to_the_loader_unless_the_checkpoint_rules_i
 ):
     """On Blackwell an unpinned padded run takes the loader's pick, a head_dim-256 checkpoint's included (Gemma 1
     has neither a softcap nor a window, so FA4's dedicated kernel trains it). A remote-code checkpoint keeps SDPA,
-    since the resolver cannot read its flags and Bailing's refuses a flash label only at the model build; so does
-    a softcapped one, whose padded batches would reach FA4's varlen kernels."""
+    since the resolver cannot read its flags and Bailing's refuses a flash label only at the model build; a
+    softcapped one, whose padded batches would reach FA4's varlen kernels, requests FA2, which trains its softcap."""
     assert _requested_attn(script, "", tmp_path, checkpoint_config=checkpoint_config) == expected
 
 
@@ -243,7 +251,7 @@ def test_the_blackwell_seam_fetches_no_config_it_does_not_read(pinned, sinks_res
         (_RemoteCodeConfig(), Qwen3Config(), "sdpa"),
         (Qwen3Config(), GemmaConfig(), None),
         (Qwen3Config(), _SOFTCAPPED, "sdpa"),
-        (_SOFTCAPPED, Qwen3Config(), "sdpa"),
+        (_SOFTCAPPED, Qwen3Config(), "flash_attention_2"),
     ],
     ids=["native-native", "native-remote", "remote-native", "native-hd256", "native-softcapped", "softcapped-native"],
 )

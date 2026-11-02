@@ -23,7 +23,7 @@ HUB_TAGS = ("halo",)
 # The adapter types stock PEFT loads; the toolkit's native expert-LoRA types are outside it.
 _STOCK_PEFT_TYPES = frozenset(peft_type.value for peft_type in PeftType)
 # Export cards already warned about, so the config finalizer that follows a copy does not repeat it.
-_WARNED_EXPORT_CARDS: set[str] = set()
+_warned_export_cards: set[str] = set()
 
 
 def _malformed_card_message(card: Path, reason: Exception) -> str:
@@ -117,7 +117,7 @@ def tag_exported_model_card(output_dir: str, *, source_dir: str | None = None) -
         card = source_card if source_card is not None and source_card.is_file() else error.card
         warn_once(
             logger,
-            _WARNED_EXPORT_CARDS,
+            _warned_export_cards,
             os.path.realpath(error.card),
             f"{_malformed_card_message(card, error.reason)} The export keeps it verbatim, without the Halo "
             f"Hub tag; repair or remove {card}, then re-run to tag it.",

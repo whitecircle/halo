@@ -171,16 +171,19 @@ class _StopAtTeacherLoad(Exception):
     """Raised by the stubbed teacher load: main() runs only as far as the two requests under test."""
 
 
-def _main_requests(tmp_path, *, student_config, teacher_config, blackwell=True, yaml_body="", student=None):
+def _main_requests(
+    tmp_path, *, student_config, teacher_config, blackwell=True, yaml_body="", student=None, requests=None
+):
     """The (student, teacher) attention requests the shipped ``main()`` hands its two loads, on a host that is
-    Blackwell when ``blackwell`` is set, for checkpoints with these configs; ``student`` is the loaded model."""
+    Blackwell when ``blackwell`` is set, for checkpoints with these configs; ``student`` is the loaded model, and
+    ``requests`` collects each request as its load is reached."""
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: org/student\nteacher_model: org/teacher\noutput_dir: {tmp_path / 'out'}\n"
         f"bf16: false\nuse_cpu: true\n{yaml_body}"
     )
     runtime = types.SimpleNamespace(parallelism_config=ParallelismConfig(), local_rank=0)
-    requests: dict = {}
+    requests = {} if requests is None else requests
     tokenizer = MagicMock(spec=PreTrainedTokenizerBase)
 
     def fake_policy_load(context, training_config, model_config, args, *, vlm_run, attn_default):
@@ -268,30 +271,28 @@ def test_the_shared_request_keeps_the_padded_default_rules(blackwell, yaml_body,
     assert requests == (expected, expected)
 
 
-def _softcapped_student_on_fa4():
-    """A Gemma 2 27B-geometry student the load kept on FA4."""
-    config = _softcapped()
-    config._attn_implementation = "flash_attention_4"
-    return types.SimpleNamespace(config=config)
-
-
 @pytest.mark.parametrize(("batch_size", "refused"), [(2, True), (1, False)], ids=["padded-bs2", "unpadded-bs1"])
-def test_a_softcapped_student_on_fa4_is_refused_on_padded_rows_before_the_teacher_loads(batch_size, refused, tmp_path):
-    """More than one row per batch pads, and a padded batch reaches FA4's varlen kernels, which a softcap stays off;
-    one unpadded row per batch runs FA4's dense kernel and reaches the teacher load."""
+def test_a_softcapped_student_on_fa4_is_refused_on_padded_rows_before_any_weight_loads(batch_size, refused, tmp_path):
+    """More than one row per batch pads, and a padded batch reaches FA4's varlen kernels, which a softcap stays off: a
+    pinned FA4 the student load would keep is refused before the student loads; one unpadded row per batch runs
+    FA4's dense kernel and reaches both loads."""
     run = functools.partial(
         _main_requests,
         tmp_path,
-        student_config=_NATIVE,
+        student_config=_SOFTCAPPED,
         teacher_config=_NATIVE,
         yaml_body=f"attn_implementation: flash_attention_4\nper_device_train_batch_size: {batch_size}\n",
-        student=_softcapped_student_on_fa4(),
+        student=types.SimpleNamespace(config=_SOFTCAPPED),
     )
-    if refused:
-        with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
-            run()
-    else:
-        assert run() == ("flash_attention_4", "flash_attention_4")
+    reached: dict = {}
+    # A half-precision run, which a GPU-less TrainingArguments cannot construct: fp32 keeps FA4 off the student.
+    with patch.object(distill_script, "resolve_training_dtype", return_value=torch.bfloat16):
+        if refused:
+            with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
+                run(requests=reached)
+            assert reached == {}, "the student load was reached"
+        else:
+            assert run(requests=reached) == ("flash_attention_4", "flash_attention_4")
 
 
 @pytest.mark.parametrize("reset_sinks", [True, False])

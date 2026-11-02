@@ -22,11 +22,12 @@ import torch
 from transformers.models.deepseek_v4 import DeepseekV4Config, DeepseekV4ForCausalLM
 
 from halo.configs.preference import SMPOConfig
+from halo.data.collators.collator_rules import reject_dense_attention_rows
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models import segment_markers
+from halo.models.attention.selection import effective_attn_implementation
 from halo.models.segment_markers import GDN_SEGMENT_AWARE_BACKENDS, SegmentMarkers, segment_markers_for
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from halo.trainers.preference.preference_rules import reject_padding_free_without_varlen
 from halo.trainers.preference.smpo import SMPOTrainer
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.segment_isolation import (
@@ -235,19 +236,24 @@ def _composite_config(text_attn: str | None, top_attn: str | None = None) -> Sim
     return SimpleNamespace(_attn_implementation=top_attn, get_text_config=lambda: text)
 
 
+def _reject_dense_padding_free(config) -> None:
+    """The dense-kernel rule SMPO's padding-free row meets, on the backend its decoder runs."""
+    reject_dense_attention_rows(config, effective_attn_implementation(config), padding_free=True, packing=False)
+
+
 @pytest.mark.parametrize("backend", ["flash_attention_2", "flash_attention_3", "flash_attention_4"])
 def test_padding_free_admits_a_composite_whose_decoder_runs_varlen(backend):
     """A multimodal checkpoint records the backend on its text sub-config only; a top-level read
     sees None and would refuse a run whose decoder does consume cu_seqlens."""
-    reject_padding_free_without_varlen(_composite_config(backend))
+    _reject_dense_padding_free(_composite_config(backend))
 
 
 @pytest.mark.parametrize(
     "config", [_composite_config("sdpa"), _composite_config(None), _composite_config(None, "sdpa")]
 )
 def test_padding_free_refuses_a_decoder_without_a_varlen_kernel(config):
-    with pytest.raises(ValueError, match="no varlen kernel"):
-        reject_padding_free_without_varlen(config)
+    with pytest.raises(ValueError, match="padding_free requires a varlen attention kernel"):
+        _reject_dense_padding_free(config)
 
 
 if __name__ == "__main__":

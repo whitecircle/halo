@@ -25,7 +25,7 @@ from transformers.models.gemma4.modeling_gemma4 import (
 from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
 
 from halo.model_loading import buffer_repair
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 
 
 def _model_with_rotary(theta: float) -> tuple[nn.Module, Qwen3RotaryEmbedding, torch.Tensor]:

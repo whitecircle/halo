@@ -396,7 +396,7 @@ Gradient accumulation runs several micro-batches per optimizer step, so it buys 
 
 Each mode buys memory headroom by spending a specific collective.
 
-- **FSDP (data parallel)** shards weights, grads, and optimizer state, paying that first identity once per FSDP unit (a decoder layer). Both halves overlap well (prefetch the next layer), so FSDP reaches the highest efficiency when the model fits. [Data Parallelism](../parallelism/data-parallelism.md).
+- **FSDP (data parallel)** shards weights, grads, and optimizer state, paying that first identity once per FSDP unit (two decoder layers under ZeRO-2, one under ZeRO-3). Both halves overlap well (prefetch the next unit), so FSDP reaches the highest efficiency when the model fits. [Data Parallelism](../parallelism/data-parallelism.md).
 - **EP (expert parallel)** shards experts and adds a token all-to-all before and after each MoE layer (DeepEP). It is orthogonal to DP and tolerates cross-node links. [Expert Parallelism](../parallelism/expert-parallelism.md).
 
     Load balance limits it: real routing is lumpy, so the busiest expert and the all-to-all gate the step and skew utilization. The toolkit tracks per-expert load and rebalances the router (aux loss or DeepSeek-V3 bias update).

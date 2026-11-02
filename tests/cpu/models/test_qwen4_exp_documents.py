@@ -18,10 +18,10 @@ from halo.models.qwen4_exp.documents import (
     document_ngram_ids,
     document_ple_forward,
     document_short_conv,
-    document_starts,
     reject_unmarked_documents,
     shift_within_documents,
 )
+from halo.models.segment_markers import document_starts
 from tests.common.qwen4_exp import EOS_TOKEN_ID, packed_positions, packed_seq_idx, tiny_qwen4_exp_text_config
 
 SEED = 1234

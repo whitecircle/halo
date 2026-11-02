@@ -30,16 +30,16 @@ def _run(argv: list[str], method: str, **return_value) -> tuple[list[str], dict]
 @pytest.mark.parametrize(
     ("argv", "method", "key_kwarg", "key"),
     [
-        (["download", "s3://data-bucket/runs/a/", "local"], "download_folder", "key", "runs/a"),
-        (["push", "local", "s3://data-bucket/runs/a"], "push_folder", "key", "runs/a"),
-        (["list", "s3://data-bucket/"], "list_objects", "prefix", ""),
-        (["list", "s3://data-bucket/runs/"], "list_objects", "prefix", "runs"),
+        (["download", "s3://test-bucket/runs/a/", "local"], "download_folder", "key", "runs/a"),
+        (["push", "local", "s3://test-bucket/runs/a"], "push_folder", "key", "runs/a"),
+        (["list", "s3://test-bucket/"], "list_objects", "prefix", ""),
+        (["list", "s3://test-bucket/runs/"], "list_objects", "prefix", "runs"),
     ],
     ids=["download", "push", "list-bucket-root", "list-prefix"],
 )
 def test_a_uri_key_runs_against_the_bucket_it_names(argv, method, key_kwarg, key):
-    buckets, kwargs = _run(argv, method, return_value=[] if method == "list_objects" else "s3://data-bucket/runs/a")
-    assert buckets == ["data-bucket"]
+    buckets, kwargs = _run(argv, method, return_value=[] if method == "list_objects" else "s3://test-bucket/runs/a")
+    assert buckets == ["test-bucket"]
     assert kwargs[key_kwarg] == key and kwargs["subfolder"] is None
 
 
@@ -53,12 +53,12 @@ def test_a_bare_key_still_reads_bucket():
 )
 def test_a_uri_key_refuses_a_second_location(extra):
     with pytest.raises(SystemExit, match="names its bucket and key itself"):
-        _run(["download", "s3://data-bucket/runs/a", "local", *extra], "download_folder", return_value="x")
+        _run(["download", "s3://test-bucket/runs/a", "local", *extra], "download_folder", return_value="x")
 
 
 def test_a_uri_without_a_key_is_refused_where_a_key_is_needed():
     with pytest.raises(SystemExit, match="is not an s3://<bucket>/<key> URI"):
-        _run(["delete", "s3://data-bucket/", "--yes"], "delete", return_value=True)
+        _run(["delete", "s3://test-bucket/", "--yes"], "delete", return_value=True)
 
 
 if __name__ == "__main__":

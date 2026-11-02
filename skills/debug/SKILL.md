@@ -71,7 +71,8 @@ the others never reach.
 2. **Which model + attention impl?** When a head_dim-256 family (qwen3.5/3.6/Qwen3-Next) diverges on FA4, run
    `tests/gpu/kernels/test_fa4_hd256_strided_inputs.py` and `test_fa4_hd256_family_parity.py --family <family>` on
    the installed FA4: they hold its head_dim-256 path to FA2's error on the strided q/k/v these families hand it.
-   GLM-4 MoE Lite resolves to FA2 instead: its latent attention trains off FA2 on that kernel.
+   GLM-4 MoE Lite resolves to FA2 instead, kept there as a precaution
+   ([Flash Attention → Model-specific handling](../../agent-docs/optimization/flash-attention.md#model-specific-handling)).
 3. bf16 path: AdamWBF16 stochastic rounding (SR on weight write + `exp_avg_sq`) is what
    makes tiny LRs converge; a NaN right after an optimizer step suggests SR/precision —
    check `fp32_grad_reduce` / `fp32_non_ep_params`.

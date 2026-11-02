@@ -23,8 +23,11 @@ from transformers import PreTrainedModel
 from transformers import modeling_flash_attention_utils as flash_utils
 
 from halo.data.collators.factory import select_data_collator
+from halo.models.attention import remote_flash_attention
 from halo.models.attention.remote_flash_attention import patch_v4_flash_attention_template
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
+from halo.models.attention.tensor_memo import TensorMemo
+from halo.models.segment_markers import packed_row_varlen_kwargs
 from tests.common.models import BAILING_MOE_RING_MINI
 from tests.common.packed_flash_varlen import MULTI_DOCUMENT_ROWS, VARLEN_KEYS, padding_tokenizer
 from tests.common.tiny_models import TINY_BAILING_LING3_MLA_FAMILY, TINY_MOE_FAMILIES, word_level_tokenizer
@@ -44,6 +47,7 @@ class _ReferenceVarlen:
 
     def __init__(self):
         self.calls = 0
+        self.bounds: list[list[int]] = []
 
     def __call__(
         self,
@@ -59,6 +63,7 @@ class _ReferenceVarlen:
     ):
         self.calls += 1
         bounds = cu_seqlens_q.tolist()
+        self.bounds.append(bounds)
         outputs = [
             F.scaled_dot_product_attention(
                 *(x[start:end].transpose(0, 1)[None] for x in (q, k, v)),
@@ -214,33 +219,75 @@ def test_a_padded_batch_matches_the_files_sdpa(reference_varlen, label):
     assert difference < 1e-5, f"{label} differs from the file's sdpa by {difference:.2e} on a padded batch"
 
 
-def test_ling_drops_the_collators_varlen_set_and_derives_it_in_every_layer(reference_varlen, monkeypatch):
-    """The packing collator hands a flash run's multi-document row the varlen set, but Ling 2.0's remote forward
-    passes its layers no extra kwargs: every attention layer derives the set from the stashed position_ids, as it
-    does without the set, to the same logits. The packed varlen sweep skips the family for this
-    (``SET_DROPPING_FAMILIES``); a forward that starts reading the set fails here and belongs in the sweep."""
-    model = _tiny_ling("flash_attention_4")
+def _ling_step(model, inputs: dict) -> dict[str, torch.Tensor]:
+    """The loss, logits and every gradient of one training step on ``inputs``."""
+    model.zero_grad(set_to_none=True)
+    outputs = model(**inputs, use_cache=False)
+    outputs.loss.backward()
+    return {"loss": outputs.loss.detach(), "logits": outputs.logits.detach()} | {
+        name: param.grad.clone() for name, param in model.named_parameters() if param.grad is not None
+    }
+
+
+@pytest.mark.parametrize("gc", GC_MODES)
+def test_ling_derives_a_packed_rows_varlen_set_once_per_step(reference_varlen, monkeypatch, gc):
+    """Ling 2.0's remote forward passes its layers no extra kwargs, so the packing collator's varlen set never
+    reaches attention (the packed varlen sweep skips the family for this, ``SET_DROPPING_FAMILIES``). The flash seam
+    derives it from the stashed position_ids once for a whole training step, every layer and either checkpoint
+    recompute included, and no layer runs transformers' own derivation, the packed-row test and the nonzero each
+    layer would otherwise read back; the step trains what that per-layer derivation trains."""
+    model = _tiny_ling("flash_attention_4").train()
+    use_reentrant = GC_MODES[gc]
+    if use_reentrant is not None:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": use_reentrant})
     collator = select_data_collator(
         padding_tokenizer(), train_on_completions_only=False, packing=True, model_config=model.config
     )
-    handed = dict(collator.torch_call([dict(row) for row in MULTI_DOCUMENT_ROWS]))
-    handed.pop("labels")
-    assert all(key in handed for key in VARLEN_KEYS), sorted(handed)
-    derivations = {"count": 0}
-    derive = flash_utils._prepare_from_posids
+    batch = dict(collator.torch_call([dict(row) for row in MULTI_DOCUMENT_ROWS]))
+    assert all(key in batch for key in VARLEN_KEYS), sorted(batch)
+    transformers_derivations = {"_is_packed_sequence": 0, "_prepare_from_posids": 0}
+    for name in transformers_derivations:
+        original = getattr(flash_utils, name)
 
-    def counted(*args, **kwargs):
-        derivations["count"] += 1
-        return derive(*args, **kwargs)
+        def counted(*args, _original=original, _name=name, **kwargs):
+            transformers_derivations[_name] += 1
+            return _original(*args, **kwargs)
 
-    monkeypatch.setattr(flash_utils, "_prepare_from_posids", counted)
-    with torch.no_grad():
-        with_set = model(**handed, use_cache=False).logits
-        with_set_derivations = derivations["count"]
-        without = model(**{key: handed[key] for key in handed.keys() - set(VARLEN_KEYS)}, use_cache=False).logits
-    without_derivations = derivations["count"] - with_set_derivations
-    assert with_set_derivations == without_derivations == len(model.model.layers)
-    assert torch.equal(with_set, without)
+        monkeypatch.setattr(flash_utils, name, counted)
+    seam_derivations = []
+
+    def derive(position_ids):
+        seam_derivations.append(position_ids)
+        return packed_row_varlen_kwargs(position_ids)
+
+    monkeypatch.setattr(remote_flash_attention, "_packed_row_varlen", TensorMemo(derive))
+    once = _ling_step(model, batch)
+    assert len(seam_derivations) == 1, f"the seam derived the set {len(seam_derivations)} times in one step ({gc})"
+    assert transformers_derivations == {"_is_packed_sequence": 0, "_prepare_from_posids": 0}, transformers_derivations
+
+    monkeypatch.setattr(remote_flash_attention, "_packed_row_varlen", TensorMemo(lambda _position_ids: {}))
+    per_layer = _ling_step(model, batch)
+    # Anti-vacuity: without the handed set, every layer's forward, and a reentrant recompute, derives it again.
+    passes = 1 if use_reentrant is None else 2
+    assert transformers_derivations["_prepare_from_posids"] == passes * len(model.model.layers), (
+        transformers_derivations
+    )
+    assert once.keys() == per_layer.keys() and all(torch.equal(once[key], per_layer[key]) for key in once)
+
+
+def test_rows_with_other_documents_read_their_own_varlen_set(reference_varlen):
+    """Two packed rows of one length and different documents, one after the other through the same model: every
+    varlen call of the second reads the second row's boundaries, not the set derived for the first."""
+    model = _tiny_ling("flash_attention_4")
+    doc_a, _, doc_b = _documents()
+    rows = [(DOC_A, DOC_B), (DOC_B, DOC_A)]
+    for first, second in rows:
+        reference_varlen.bounds.clear()
+        position_ids = torch.cat([torch.arange(first), torch.arange(second)])[None]
+        with torch.no_grad():
+            model(input_ids=torch.cat([doc_a, doc_b])[None], position_ids=position_ids, use_cache=False)
+        expected = [0, first, first + second]
+        assert reference_varlen.bounds == [expected] * len(model.model.layers), reference_varlen.bounds
 
 
 def test_sdpa_leaks_and_packing_is_refused_there(reference_varlen):

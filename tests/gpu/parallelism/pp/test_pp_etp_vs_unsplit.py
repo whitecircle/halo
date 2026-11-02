@@ -96,7 +96,7 @@ def run(ctx):
     ep_modules = named_ep_layers(stage)
     ep_cfg = trainer._ep_config
     checks["stage_keeps_half_the_ep_layers"] = len(ep_modules) == TOTAL_LAYERS // PP_SIZE
-    checks["defer_grad_sync_active"] = bool(ep_cfg.defer_grad_sync)
+    checks["sweep_reduces_across_replicas"] = bool(ep_cfg.sweep_reduces_across_replicas)
     checks["no_in_backward_ep_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
     # The ETP axis must actually be live: partners each hold 1/etp of every expert's FFN. Without
     # this an etp_size that silently collapsed to 1 would pass every equivalence gate below.

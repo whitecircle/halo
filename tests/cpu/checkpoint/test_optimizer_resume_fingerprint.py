@@ -586,9 +586,8 @@ def test_a_peer_without_the_fingerprint_raises_on_every_rank(tmp_path, monkeypat
 def test_a_rank_that_cannot_produce_optimizer_state_fails_the_save(tmp_path, monkeypatch):
     """An unproducible optimizer state must RAISE, not skip the write.
 
-    The caller deletes the base Trainer's optimizer.pt and rotates the previous checkpoint away as
-    soon as this returns, so a skip trades the last checkpoint that HAS optimizer state for one that
-    has none — at exit code 0. Reachable in production: an optimizer whose ``state_dict`` refuses the
+    The caller rotates the previous checkpoint away as soon as this returns, so a skip trades the last
+    checkpoint that HAS optimizer state for one that has none — at exit code 0. Reachable in production: an optimizer whose ``state_dict`` refuses the
     live sharding (FlashAdamW on unevenly-sharded DTensors) takes this path on EVERY save.
     """
     model = _TinyModel()

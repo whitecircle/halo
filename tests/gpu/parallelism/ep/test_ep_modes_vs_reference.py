@@ -207,7 +207,7 @@ def _deferred_sweep_checks(model, metrics: dict) -> dict[str, bool]:
     identical batch every replica holds, it must leave each expert gradient as it was; the router comparisons that
     follow read the router after it."""
     layers = ep_layers(model)
-    if not layers or not layers[0].ep_config.defer_grad_sync:
+    if not layers or not layers[0].ep_config.sweep_reduces_across_replicas:
         return {}
     before = {
         f"{i}.{name}": param.grad.detach().clone()

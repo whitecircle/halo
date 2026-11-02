@@ -42,7 +42,7 @@ The scalar optimizer is [AdamWBF16](bf16-optimizer.md), not `torch.optim.AdamW`:
 
 Memory per param: ~4 B for 2D (bf16 weight + bf16 momentum), ~6 B for 1D (bf16 weight + bf16 AdamW states), plus transient Newton-Schulz buffers.
 
-Same-shape params are stacked for the NS kernel in chunks of 32 (`_GNS_CHUNK_SIZE`), which bounds the stacked NS input, not the whole transient: a bf16 update buffer for every param plus the per-shape concat of all NS outputs still materialize, tens of GB extra on a 100B+ MoE. Budget headroom for the step, and expect the same transient once on resume (the restore primes state with a zero-LR step).
+Same-shape params are stacked for the NS kernel in chunks of 32 (`_GNS_CHUNK_SIZE`), and each chunk's scaled output is copied straight back into its params' update buffers, so the step's transient is a bf16 update buffer for every param plus one stacked chunk and its Newton-Schulz output. Budget headroom for the update buffers (one bf16 copy of the matrix params), and expect the same transient once on resume (the restore primes state with a zero-LR step).
 
 **Muon-routed weights must be bf16.** Construction raises when any 2D+ param it would orthogonalize is not
 bf16, naming the offender, so the fp32 master-weight knobs (`fp32_non_ep_params`, `fp32_router`,

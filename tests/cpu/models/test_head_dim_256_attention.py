@@ -3,7 +3,7 @@
 
 The failures these gates close are late or silent. FA4's dedicated head_dim-256 kernel asserts in its first
 backward on a softcap (Gemma 2) and on a window (Gemma 3), so FA4 on such a model never trains, and multi-head
-latent attention (GLM-4.7-Flash) trained on it away from FA2 by the second step. transformers' SDPA drops
+latent attention (GLM-4.7-Flash) stays off it on FA2 as a precaution. transformers' SDPA drops
 ``attn_logit_softcapping`` without a word, so a Gemma 2 run on it trains a different model at a plausible loss.
 The padded scripts take the loader's own pick on Blackwell, head_dim-256 checkpoints included.
 
@@ -88,9 +88,9 @@ def _resolved(family: str, arch: str, collator: str) -> str:
 # (family, arch) -> (packed, padded). On Blackwell both shapes take the loader's pick: Gemma 2/3 and GLM-4.7-Flash
 # (MLA) leave FA4 for FA2 by head width, Gemma 1, PaliGemma and GPT-J (hd256, no softcap, no window) and the hd128
 # families keep it, and Gemma 4's 512-wide heads fit no flash kernel; the head_dim-256 GatedDeltaNet families take
-# FA2 on packed rows only. A softcapped policy's padded batch requests SDPA, which the softcap turns into FA2 (FA3
-# on Hopper, whose image stubs out the split-K kernels FA2's dense forward picks), as a remote-code checkpoint's
-# does; elsewhere every padded script requests SDPA, which GPT-J's class (no SDPA path) turns into eager. A remote-code config's packed row keeps the loader's pick, which its build may refuse.
+# FA2 on packed rows only. A softcapped policy's padded batch requests FA2 on Blackwell, which trains its softcap,
+# and SDPA on Hopper, which the softcap turns into FA3; a remote-code checkpoint's requests SDPA, as every padded
+# script does on Hopper, where GPT-J's class (no SDPA path) turns it into eager. A remote-code config's packed row keeps the loader's pick, which its build may refuse.
 _EXPECTED = {
     ("gemma2", "blackwell"): (FA2, FA2),
     ("gemma2", "hopper"): (FA3, FA3),
@@ -148,9 +148,8 @@ def test_a_softcapped_model_never_resolves_to_sdpa(family, request_, arch, dtype
 
 
 def test_a_softcapped_sdpa_request_falls_back_to_flash_then_flex():
-    """The order is FA3 on Hopper, FA2, flex, eager: both flash kernels carry the softcap at head_dim 256, and FA2's
-    dense forward throws on Hopper, whose image stubs out the split-K kernels it picks for small batches; flex's
-    compile path is unusable under EP, so it comes last before eager."""
+    """The order is FA3 on Hopper, FA2, flex, eager: both flash kernels carry the softcap at head_dim 256, the arch's
+    own FA3 first; flex's compile path is unusable under EP, so it comes last before eager."""
     config = _config("gemma2")
     with _on("hopper"):
         assert _resolve(config, SDPA) == FA3
@@ -256,15 +255,17 @@ _LATENT_256 = {
 @pytest.mark.parametrize("request_", [None, FA4], ids=["unset", "pinned_fa4"])
 @pytest.mark.parametrize("family", sorted(_LATENT_256))
 def test_multi_head_latent_attention_at_head_dim_256_trains_on_fa2(family, request_, deterministic, monkeypatch):
-    """GLM-4.7-Flash trained on FA4's dedicated kernel to step-2 gradients about 4x FA2's, so a 256-wide latent
-    attention lands on FA2 whatever the family, pinned or not, in a deterministic run too (not on the SDPA its
-    fallback names), and CP's kernel refuses FA4 on the same verdict."""
+    """A 256-wide latent attention stays on FA2 as a precaution whatever the family, pinned or not, in a
+    deterministic run too (not on the SDPA its fallback names), and CP's kernel refuses FA4 on the same verdict."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
     config = _config(family, **_LATENT_256[family])
     assert attention_mod.uses_fa4_dedicated_head_dim(config)  # premise
     with _on("blackwell"), patch.object(attention_mod.logger, "warning") as warn:
         assert _resolve(config, request_) == FA2
     assert any("multi-head latent attention" in call.args[0] for call in warn.call_args_list)
+    assert attention_mod.fa4_dedicated_kernel_refusal(config) == (
+        "multi-head latent attention at this width stays on FA2 as a precaution"
+    )
     assert not attention_mod.supports_fa4_backward(config)
 
 

@@ -5,14 +5,18 @@
 Validates storage shapes/dtypes, quantize->dequantize round-trip error within each
 format's tolerance, axis handling, divisibility guards, NVFP4's outlier handling, the
 straight-through ``fake_quant`` estimator, the per-step
-``cached_fake_quant`` weight cache, and which failures switch the compiled round trip to eager.
+``cached_fake_quant`` weight cache, the fp4 constant tables the eager path builds once per device,
+and which failures switch the compiled round trip to eager.
 
 Run: ``pytest tests/cpu/kernels/test_quantization.py``.
 """
 
+import warnings
+
 import pytest
 import torch
 from torch._dynamo.exc import TorchDynamoException
+from torch.overrides import TorchFunctionMode
 
 from halo.kernels.lowp import quantization
 from halo.kernels.lowp.quantization import (
@@ -209,6 +213,42 @@ def test_cached_fake_quant_is_straight_through():
     w = torch.nn.Parameter(torch.randn(8, 64) * 0.3)
     (cached_fake_quant(w, "mxfp8", axis=-1) * 3.0).sum().backward()
     assert w.grad is not None and torch.allclose(w.grad, torch.full_like(w.grad, 3.0))
+
+
+# fp4 constant tables: built once per device and dtype on the eager path
+
+
+class _TensorsFromHostData(TorchFunctionMode):
+    """Counts ``torch.tensor`` calls, each a blocking host-to-device copy when the target is a GPU."""
+
+    def __init__(self):
+        super().__init__()
+        self.calls = 0
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        if func is torch.tensor:
+            self.calls += 1
+        return func(*args, **(kwargs or {}))
+
+
+@pytest.mark.parametrize("fmt", ["mxfp4", "nvfp4"])
+def test_fp4_eager_path_builds_its_tables_once(fmt):
+    x = torch.randn(8, 64)
+    fake_quant(x, fmt)
+    with _TensorsFromHostData() as probe:
+        for _ in range(3):
+            fake_quant(x, fmt)
+    assert probe.calls == 0
+
+
+def test_compiled_mxfp4_round_trip_matches_eager_without_tracing_the_cache():
+    torch._dynamo.reset()
+    x = torch.randn(64, 128) * 3
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        compiled = torch.compile(quantization._block_round_trip, dynamic=True)(x, "mxfp4", -1)
+    assert torch.equal(compiled, quantization._block_round_trip(x, "mxfp4", -1))
+    assert not [w for w in caught if "lru_cache" in str(w.message)]
 
 
 # Compiled round trip: only a compile failure disables compile

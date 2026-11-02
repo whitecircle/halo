@@ -51,7 +51,6 @@ from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.reading import checkpoint_shard_files, is_ep_sharded_checkpoint
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.checkpoint.writing import save_dtype_caster
-from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -72,6 +71,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_QWEN3_CONFIG,
 )
+from tests.common.parallelism import single_process_ep_config
 from tests.common.pp_fakes import hand_built_stage, registered_pp_backbones
 from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, TINY_MOE_VLM_FAMILIES, tiny_family_model
 
@@ -129,13 +129,6 @@ PP_FAMILY_OVERRIDES = {
 PP_FAMILY_SPLITS = {"laguna": [4, 4], "gpt_oss": [4, 4]}
 # The fixture families unregistered for PP: the save and its reads are family-agnostic.
 UNREGISTERED_PP_BACKBONES = ("LagunaModel", "Mistral4Model", "InklingTextModel", "Qwen3MoeModel")
-SINGLE_RANK_EP_CONFIG = {
-    "ep_size": 1,
-    "stage_world_size": 1,
-    "nvlink_domain_size": 1,
-    "use_grouped_gemm": False,
-    "experts_fsdp_managed": True,
-}
 
 
 def _tiny_qwen3() -> Qwen3ForCausalLM:
@@ -743,7 +736,7 @@ def _pp_family_model(name: str, *, ep_wrapped: bool = True):
     torch.manual_seed(SEED)
     model = tiny_family_model(PP_FAMILIES[name], overrides=PP_FAMILY_OVERRIDES.get(name))
     if ep_wrapped:
-        apply_ep_layers(model, EPConfig(**SINGLE_RANK_EP_CONFIG))
+        apply_ep_layers(model, single_process_ep_config())
     return model
 
 
@@ -834,7 +827,7 @@ def test_a_pp_save_resumes_through_both_reads(tmp_path, name):
                 PP_SIZE,
                 config=AutoConfig.from_pretrained(pp_dir),
                 pp_split=PP_FAMILY_SPLITS.get(name),
-                ep_config=EPConfig(**SINGLE_RANK_EP_CONFIG),
+                ep_config=single_process_ep_config(),
                 model_class=family.load_class,
                 trust_remote_code=False,
             )

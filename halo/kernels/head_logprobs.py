@@ -1,12 +1,11 @@
-"""Log-probs (and entropy) of target tokens straight from hidden states, never materializing the logits.
-
-A dual-chunked (sequence × vocab) matmul with online softmax and a recompute backward; the head's logit
-scale, softcap and temperature apply inside every tile. Everything a tile does after its GEMM is one function
-per direction (:func:`_forward_tile`, :func:`_backward_tile`), which runs on CUDA as one compiled graph. The
-logits-plane form is :mod:`halo.kernels.logprobs`.
-"""
+"""Log-probs (and entropy) of target tokens straight from hidden states, never materializing the logits: a
+dual-chunked (sequence × vocab) matmul with online softmax and a recompute backward, the head's logit scale, softcap
+and temperature applied inside every tile, whose post-GEMM work is one compiled function per direction
+(:func:`_forward_tile`, :func:`_backward_tile`). The logits-plane form is :mod:`halo.kernels.logprobs`."""
 
 import torch
+
+from halo.kernels.fp32_matmul import gemm_dtype, mm_fp32
 
 # The working set is a few [seq, vocab] fp32 tiles (4096 × 16384 × 4 B = 256 MiB each); the loop runs
 # (T / seq) × (V / vocab) iterations, so tiles sized well below this leave the sweep launch-bound on
@@ -22,31 +21,6 @@ _COMPILED_DEVICE_TYPES = frozenset({"cuda"})
 # (TP and ETP replicas) and reruns compile the same kernels. Each graph is a few small kernels, so one compile
 # thread builds them in-process instead of starting a pool of up to 32 compile workers per rank.
 _TILE_COMPILE_OPTIONS = {"deterministic": True, "compile_threads": 1}
-
-
-def _gemm_dtype(t: torch.Tensor) -> torch.dtype:
-    """The dtype both operands of a GEMM against ``t`` take: ``t``'s half dtype on CUDA, where the tensor
-    cores accumulate in fp32, and fp32 otherwise."""
-    return t.dtype if t.is_cuda and t.dtype in (torch.bfloat16, torch.float16) else torch.float32
-
-
-def _matmul_fp32(a: torch.Tensor, b: torch.Tensor, out: torch.Tensor | None = None) -> torch.Tensor:
-    """``a @ b`` as fp32, or ``out += a @ b`` into an fp32 ``out``.
-
-    On CUDA with a bf16 or fp16 ``b``, both operands are in ``b``'s dtype (an fp32 ``a`` is cast to it
-    first) and the tensor-core GEMM accumulates in fp32 and returns fp32, so neither the product nor the
-    running sum ``out`` is rounded to half precision. Any other ``b`` (CPU, fp32) takes an fp32 matmul. Half
-    operands are not upcast on CUDA: under the pinned ``highest`` fp32 matmul precision that product would
-    run on the CUDA cores.
-    """
-    dtype = _gemm_dtype(b)
-    if dtype != torch.float32:
-        a = a.to(dtype)
-        if out is None:
-            return torch.mm(a, b, out_dtype=torch.float32)
-        return torch.addmm(out, a, b, out_dtype=torch.float32, out=out)
-    product = a.float() @ b.float()
-    return product if out is None else out.add_(product)
 
 
 def _head_logits(raw, bias, vocab_start, logit_scale, softcap) -> tuple[torch.Tensor, torch.Tensor | None]:
@@ -140,8 +114,9 @@ def _tile_bias(bias: torch.Tensor | None) -> torch.Tensor | None:
 
 
 def _autocast_off(device: torch.device):
-    """Autocast off around a sweep, which picks every GEMM dtype itself (:func:`_matmul_fp32`): a caller's bf16
-    autocast would round an fp32 GEMM's logits to bf16, and give the compiled tiles a graph per autocast state."""
+    """Autocast off around a sweep, which picks every GEMM dtype itself
+    (:func:`~halo.kernels.fp32_matmul.mm_fp32`): a caller's bf16 autocast would round an fp32 GEMM's logits to
+    bf16, and give the compiled tiles a graph per autocast state."""
     return torch.autocast(device.type, enabled=False)
 
 
@@ -159,7 +134,7 @@ def _online_softmax_tile(
 
     for vocab_start in range(0, weight.shape[0], VOCAB_TILE):
         weight_chunk = weight[vocab_start : vocab_start + VOCAB_TILE].to(hidden_chunk.dtype)
-        raw = _matmul_fp32(hidden_chunk, weight_chunk.t())
+        raw = mm_fp32(hidden_chunk, weight_chunk.t())
         forward_tile, _ = _tile_functions(raw)
         max_old, sum_exp, sum_exp_z, target_logit = forward_tile(
             raw,
@@ -210,20 +185,30 @@ def _logprobs_forward(
     return logprobs, log_z, entropy
 
 
-def _logprobs_backward(hidden, weight, targets, bias, log_z, grad_logprobs, temperature, logit_scale, softcap):
-    """Each logits tile is recomputed from the saved ``log_z`` instead of a stored ``[T, V]`` plane, and its
-    gradient (:func:`_backward_tile`) feeds both gradient GEMMs in the activations' GEMM dtype, accumulated in
-    fp32 (:func:`_matmul_fp32`)."""
+def _logprobs_backward(
+    hidden, weight, targets, bias, log_z, grad_logprobs, temperature, logit_scale, softcap, needs_grad
+):
+    """``(grad_hidden, grad_weight, grad_bias)`` in fp32, ``None`` where ``needs_grad`` (the
+    ``(hidden, weight, bias)`` flags) is false, so a frozen head builds no ``[V, H]`` buffer and runs no
+    weight-gradient GEMM.
+
+    Each logits tile is recomputed from the saved ``log_z`` instead of a stored ``[T, V]`` plane, and its
+    gradient (:func:`_backward_tile`) feeds the gradient GEMMs in the activations' GEMM dtype, accumulated in
+    fp32 (:func:`~halo.kernels.fp32_matmul.mm_fp32`)."""
     inv_t = 1.0 / temperature
     bias = _tile_bias(bias)
     n_rows, _ = hidden.shape
     vocab_size = weight.shape[0]
-    has_bias = bias is not None
-    grad_dtype = _gemm_dtype(hidden)
+    grad_dtype = gemm_dtype(hidden)
+    needs_hidden, needs_weight, needs_bias = needs_grad
 
-    grad_hidden = torch.zeros(hidden.shape, device=hidden.device, dtype=torch.float32)
-    grad_weight = torch.zeros(weight.shape, device=weight.device, dtype=torch.float32)
-    grad_bias = torch.zeros((vocab_size,), device=weight.device, dtype=torch.float32) if has_bias else None
+    grad_hidden = torch.zeros(hidden.shape, device=hidden.device, dtype=torch.float32) if needs_hidden else None
+    grad_weight = torch.zeros(weight.shape, device=weight.device, dtype=torch.float32) if needs_weight else None
+    grad_bias = (
+        torch.zeros((vocab_size,), device=weight.device, dtype=torch.float32)
+        if bias is not None and needs_bias
+        else None
+    )
     grad_logprobs = grad_logprobs.to(torch.float32)
 
     for seq_start in range(0, n_rows, SEQ_TILE):
@@ -235,7 +220,7 @@ def _logprobs_backward(hidden, weight, targets, bias, log_z, grad_logprobs, temp
         for vocab_start in range(0, vocab_size, VOCAB_TILE):
             vocab_end = min(vocab_start + VOCAB_TILE, vocab_size)
             weight_chunk = weight[vocab_start:vocab_end].to(hidden_chunk.dtype)
-            raw = _matmul_fp32(hidden_chunk, weight_chunk.t())
+            raw = mm_fp32(hidden_chunk, weight_chunk.t())
             _, backward_tile = _tile_functions(raw)
             grad_logits, grad_bias_tile = backward_tile(
                 raw,
@@ -249,9 +234,11 @@ def _logprobs_backward(hidden, weight, targets, bias, log_z, grad_logprobs, temp
                 softcap,
                 grad_dtype,
             )
-            _matmul_fp32(grad_logits, weight_chunk, out=grad_hidden[seq_start:seq_end])
-            _matmul_fp32(grad_logits.t(), hidden_chunk, out=grad_weight[vocab_start:vocab_end])
-            if has_bias:
+            if grad_hidden is not None:
+                mm_fp32(grad_logits, weight_chunk, out=grad_hidden[seq_start:seq_end])
+            if grad_weight is not None:
+                mm_fp32(grad_logits.t(), hidden_chunk, out=grad_weight[vocab_start:vocab_end])
+            if grad_bias is not None:
                 grad_bias[vocab_start:vocab_end].add_(grad_bias_tile)
 
     return grad_hidden, grad_weight, grad_bias
@@ -281,12 +268,30 @@ class _HeadLogprobFunction(torch.autograd.Function):
     def backward(ctx, grad_logprobs, _grad_entropy):
         hidden, weight, targets, bias, log_z = ctx.saved_tensors
         bias = bias if ctx.has_bias else None
+        needs_hidden, needs_weight, _, needs_bias = ctx.needs_input_grad[:4]
         with _autocast_off(hidden.device):
             grad_hidden, grad_weight, grad_bias = _logprobs_backward(
-                hidden, weight, targets, bias, log_z, grad_logprobs, ctx.temperature, ctx.logit_scale, ctx.softcap
+                hidden,
+                weight,
+                targets,
+                bias,
+                log_z,
+                grad_logprobs,
+                ctx.temperature,
+                ctx.logit_scale,
+                ctx.softcap,
+                (needs_hidden, needs_weight, needs_bias),
             )
-        grad_bias = None if bias is None else grad_bias.to(bias.dtype)
-        return grad_hidden.to(hidden.dtype), grad_weight.to(weight.dtype), None, grad_bias, None, None, None, None
+        return (
+            None if grad_hidden is None else grad_hidden.to(hidden.dtype),
+            None if grad_weight is None else grad_weight.to(weight.dtype),
+            None,
+            None if grad_bias is None else grad_bias.to(bias.dtype),
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 def chunked_head_logprobs(

@@ -1,16 +1,7 @@
-"""Tiled Qwen sparse attention (QSA) for uncached ``qwen4_exp`` training rows, with memory linear in the row length.
-
-transformers' ``Qwen4ExpTextQSAIndexer`` scores every query in a Python loop and its attention reads a dense
-``[batch, 1, length, length]`` mask. Here the indexer pools each document's key blocks once and scores them per
-query tile, and the attention runs per tile over the keys from its document's first key to the tile's end, saving
-only Q/K/V and the selected block ids; the backward recomputes each tile. Documents come from ``seq_idx``
-(:mod:`halo.models.qwen4_exp.documents`) and padding from a 2-D mask, so every query sees the keys transformers'
-dense mask gives it, and selects the same blocks: a row whose k-th and next block tie is re-scored exactly as
-transformers scores it, whose ``topk`` tie order depends on the row's width.
-
-Under a checkpoint's :class:`~halo.models.gradient_checkpointing.RecomputeScope` the first pass keeps its selection
-and the recompute attends exactly those keys.
-"""
+"""Tiled Qwen sparse attention (QSA) for uncached ``qwen4_exp`` training rows, memory linear in the row length:
+the indexer scores each document's pooled key blocks per query tile, attention runs per tile, and the backward
+recomputes each tile, selecting the blocks transformers' dense indexer selects (agent-docs/models/qwen4_exp.md).
+Under a checkpoint's recompute scope the recompute attends the first pass's selection."""
 
 import math
 from dataclasses import dataclass
@@ -22,7 +13,7 @@ from torch import nn
 from torch.autograd.function import once_differentiable
 
 from halo.models.gradient_checkpointing import active_recompute_scope
-from halo.models.qwen4_exp.documents import document_boundaries
+from halo.models.segment_markers import document_boundaries
 
 QUERY_TILE = 128
 # The RecomputeScope slot one indexer call keeps its selection in.

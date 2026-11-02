@@ -8,19 +8,18 @@ from collections.abc import Callable
 from functools import partial
 
 import torch
-from transformers import AutoConfig, PreTrainedModel
+from transformers import PretrainedConfig, PreTrainedModel
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import current_device
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, normalize_model_init_dtype
-from halo.model_loading.model_preparation import apply_family_patches, auto_load_model
+from halo.model_loading.finalization import finalize_loaded_model
+from halo.model_loading.model_preparation import apply_family_patches, auto_load_model, resolve_build_config
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from halo.model_loading.parallel.model_source import ModelSource, resolve_model_source
-from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import warm_fa4_kernels
 from halo.models.attention.sdpa_flex_sliding import warm_flex_sliding_kernels
 from halo.models.attention.tree import warm_tree_kernels
@@ -29,6 +28,9 @@ from halo.models.config_access import set_config_field_run_scoped
 from halo.runtime.consensus import DeferredRankFailure, barrier_on_exit
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_global_world_size
+
+# ``from_pretrained`` arguments that also name a config field: the load reads them itself, never off the config.
+_LOAD_ARGUMENTS_NAMING_CONFIG_FIELDS = frozenset({"dtype", "torch_dtype", "quantization_config"})
 
 
 def cast_loaded_parameters(model: torch.nn.Module, dtype, *, keep_fp32: bool, ep_wrapped: bool) -> None:
@@ -102,12 +104,27 @@ def load_whole_model(
     return model
 
 
+def _apply_config_field_kwargs(config: PretrainedConfig, model_init_kwargs: dict) -> dict:
+    """Set on ``config`` each ``model_init_kwargs`` entry naming one of its fields, as ``from_pretrained`` does to a
+    config it reads itself, and return the rest, the load's own arguments: a build handed ``config`` passes every
+    keyword it does not read to the model's ``__init__``."""
+    fields = {
+        key: value
+        for key, value in model_init_kwargs.items()
+        if hasattr(config, key) and key not in _LOAD_ARGUMENTS_NAMING_CONFIG_FIELDS
+    }
+    for key, value in fields.items():
+        setattr(config, key, value)
+    return {key: value for key, value in model_init_kwargs.items() if key not in fields}
+
+
 def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig | None, model_class=None):
     """COLLECTIVE for a path string: the model a trainer constructor was handed, loaded from the agreed
     source, cast and its attention kernels warmed when it is a path.
 
-    Every load takes the family patches the policy loader applies; a pinned ``attn_implementation`` also takes
-    the backend-keyed ones and builds with what they return. The cast keeps stored fp32 values where
+    Every load takes the family patches the policy loader applies, on the config the build receives with the
+    ``model_init_kwargs`` entries that name its fields; a pinned ``attn_implementation`` also takes the
+    backend-keyed ones and builds with what they return. The cast keeps stored fp32 values where
     ``parallelism_config`` (None without one) sets ``fp32_non_ep_params``. ``model_class`` None takes the
     widest Auto class. An instantiated model must come without ``model_init_kwargs``.
     """
@@ -122,15 +139,13 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     normalize_model_init_dtype(model_init_kwargs)
     source = resolve_model_source(model_id, model_init_kwargs.get("revision"), tag="trainer_model")
     revision = source.revision
-    # The family patches key on this model's own config, fetched after the shims since the fetch can already
-    # import a remote modeling file. Unpinned, transformers picks the backend at the build and only the
-    # backend-independent patches apply (Zaya's load recording and checkpointing refusal).
-    apply_remote_code_compat_shims()
-    config = AutoConfig.from_pretrained(
+    config = resolve_build_config(
         model_id, revision=revision, trust_remote_code=model_init_kwargs.get("trust_remote_code", False)
     )
-    if attn_implementation := apply_family_patches(config, model_init_kwargs.get("attn_implementation")):
-        model_init_kwargs = {**model_init_kwargs, "attn_implementation": attn_implementation}
+    load_kwargs = _apply_config_field_kwargs(config, model_init_kwargs)
+    # Unpinned, transformers picks the backend at the build and only the backend-independent patches apply.
+    if attn_implementation := apply_family_patches(config, load_kwargs.get("attn_implementation")):
+        load_kwargs["attn_implementation"] = attn_implementation
 
     # Run-scoped after the load, never through from_pretrained: a kwarg write lands in the exported
     # config.json and defaults the KV cache off for every downstream consumer.
@@ -141,10 +156,12 @@ def resolve_trainer_model(model, args, *, parallelism_config: ParallelismConfig 
     # Unthrottled: each rank keeps its copy in host memory until the trainer places it, so admitting the
     # ranks in batches would bound nothing.
     with joined_node_load(f"Model load from {model_id}", max_concurrent=0):
-        model = auto_load_model(model_id, model_class=model_class, **{**model_init_kwargs, "revision": revision})
+        model = auto_load_model(
+            model_id, model_class=model_class, config=config, **{**load_kwargs, "revision": revision}
+        )
     # An unset or "auto" dtype loads at the checkpoint's own dtype (recorded on the config); the cast
     # unifies the fp32 pins to it.
-    requested = model_init_kwargs.get("dtype")
+    requested = load_kwargs.get("dtype")
     run_dtype = requested if isinstance(requested, torch.dtype) else model.config.dtype
     cast_parameters_to_run_dtype(
         model, run_dtype, keep_fp32=parallelism_config is not None and parallelism_config.fp32_non_ep_params

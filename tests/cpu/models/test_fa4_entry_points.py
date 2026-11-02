@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The wrappers on FA4's ``flash_attn.cute`` entry points and the family patches every FA4 load takes.
 
-The trainable-sink rescale and the varlen softcap refusal share one install seam (``wrap_fa4_entry_points``) and sit
+The trainable-sink rescale and the varlen softcap refusal share one install seam (``install_fa4_entry_point_wrapper``) and sit
 in front of FA4 calls process-wide, and transformers decides which optional kwargs (sliding window, softcap, the
 gpt-oss sink) it forwards at all from the varlen entry point's signature: a wrapper that hid the signature would drop
 them on every FA4 model, silently. So the signature through both wrappers, the install seam and the rescale's lse

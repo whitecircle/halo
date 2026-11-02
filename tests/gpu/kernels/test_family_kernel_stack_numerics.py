@@ -62,7 +62,7 @@ from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.kernels import fla_launch
 from halo.kernels.fla_launch import FIXED_NB_FLAG, FIXED_NB_KERNELS, triton_autotuner
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.liger.dispatch import apply_liger_kernel
 from halo.models.config_access import text_config
 from halo.models.moe.config_fields import require_expert_count

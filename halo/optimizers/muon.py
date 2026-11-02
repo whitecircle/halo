@@ -12,11 +12,7 @@ import torch
 import triton
 import triton.language as tl
 from gram_newton_schulz import Muon as UpstreamMuon
-from gram_newton_schulz.muon.muon_utils.muon_matrix_split_utils import (
-    get_newton_schulz_inputs_from_gradients,
-    reconstruct_update_from_newton_schulz_outputs,
-    scale_newton_schulz_outputs_with_adjusted_lr,
-)
+from gram_newton_schulz.muon.muon_utils.muon_matrix_split_utils import get_newton_schulz_inputs_from_gradients
 from gram_newton_schulz.muon.muon_utils.muon_opt_utils import adjust_lr_rms_norm
 
 from halo.config_validation import differs_from_default
@@ -215,38 +211,29 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
             self.scalar_optimizer.settle_step(skipped)
 
     def _muon_step(self, param_groups: list[dict]) -> None:
-        """The matrix step: fused momentum, Newton-Schulz per shape group, fused weight decay and update."""
+        """The matrix step: fused momentum, Newton-Schulz per shape group written back into each update,
+        fused weight decay and update."""
         skip = self._take_step_skip(param_groups)
         for group in param_groups:
+            if group.get("param_split_fn") is not None or group.get("param_recombine_fn") is not None:
+                raise ValueError(
+                    "The fused Muon step orthogonalizes whole matrices in place: a param group's "
+                    "param_split_fn / param_recombine_fn is not supported."
+                )
             group_params, sr_seeds = _collect_params_with_sr_seeds(self.state, group["params"], group["param_names"])
             if not group_params:
                 continue
-            adjust_lr_fn = _resolve_adjust_lr_fn(group.get("adjust_lr", "rms_norm"))
-            ns_inputs_by_shape, shape_indices, split_metadata = get_newton_schulz_inputs_from_gradients(
-                self._nesterov_updates(group_params, group["momentum"], group["nesterov"], skip),
-                group.get("param_split_fn", None),
+            updates = self._nesterov_updates(group_params, group["momentum"], group["nesterov"], skip)
+            self._orthogonalize_in_place(
+                updates, group["lr"], _resolve_adjust_lr_fn(group.get("adjust_lr", "rms_norm"))
             )
-            orthogonalized_by_shape = self._orthogonalize_by_shape(ns_inputs_by_shape)
-            del ns_inputs_by_shape
-            orthogonalized_by_shape = scale_newton_schulz_outputs_with_adjusted_lr(
-                orthogonalized_by_shape,
-                group["lr"],
-                adjust_lr_fn,
-            )
-            orthogonalized = reconstruct_update_from_newton_schulz_outputs(
-                orthogonalized_by_shape,
-                shape_indices,
-                split_metadata,
-                group.get("param_recombine_fn", None),
-            )
-            del orthogonalized_by_shape
             decay_factor = 1.0 - group["lr"] * group["weight_decay"]
-            for p, u, seed in zip(group_params, orthogonalized, sr_seeds, strict=True):
+            for p, u, seed in zip(group_params, updates, sr_seeds, strict=True):
                 p_local = to_local(p.detach())
                 n = p_local.numel()
                 _weight_decay_update_kernel[(triton.cdiv(n, SR_BLOCK_SIZE),)](
                     p_local.view(-1),
-                    u.contiguous().view(-1),
+                    u.view(-1),
                     decay_factor,
                     n,
                     seed,
@@ -280,21 +267,19 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
             updates.append(u.view(m_local.shape))
         return updates
 
-    def _orthogonalize_by_shape(self, ns_inputs_by_shape: dict[tuple, list]) -> dict[tuple, torch.Tensor]:
-        """Newton-Schulz over each shape group's stacked inputs. Stacking same-shape params reaches tens of GB on
-        large MoE models, so it runs in ``_GNS_CHUNK_SIZE`` chunks whose inputs are freed as they are consumed."""
-        orthogonalized_by_shape: dict[tuple, torch.Tensor] = {}
-        for shape, ns_inputs_for_shape in ns_inputs_by_shape.items():
-            results_for_shape: list[torch.Tensor] = []
-            for start in range(0, len(ns_inputs_for_shape), _GNS_CHUNK_SIZE):
-                stop = start + _GNS_CHUNK_SIZE
-                batched = torch.stack(ns_inputs_for_shape[start:stop])
-                ns_inputs_for_shape[start:stop] = [None] * len(batched)
-                results_for_shape.append(self.newton_schulz(batched).clone())
-                del batched
-            orthogonalized_by_shape[shape] = torch.cat(results_for_shape, dim=0)
-            del results_for_shape
-        return orthogonalized_by_shape
+    def _orthogonalize_in_place(self, updates: list[torch.Tensor], lr: float, adjust_lr_fn) -> None:
+        """Replace each update with its Newton-Schulz orthogonalization scaled by the shape's adjusted ``lr``.
+
+        Same-shape matrices run stacked in ``_GNS_CHUNK_SIZE`` chunks, grouped and split as upstream groups
+        them, and each chunk's result is copied straight back into its matrices' views: stacking a whole
+        large MoE's expert updates reaches tens of GB, so the step holds one chunk beyond the updates.
+        """
+        views_by_shape, _, _ = get_newton_schulz_inputs_from_gradients(updates, None)
+        for shape, views in views_by_shape.items():
+            scale = lr if adjust_lr_fn is None else adjust_lr_fn(lr, shape)
+            for start in range(0, len(views), _GNS_CHUNK_SIZE):
+                chunk = views[start : start + _GNS_CHUNK_SIZE]
+                torch._foreach_copy_(chunk, self.newton_schulz(torch.stack(chunk)).mul_(scale).unbind(0))
 
     def state_dict(self) -> dict:
         """The state dict with the scalar optimizer's state merged in under the combined param index.

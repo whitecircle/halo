@@ -1,12 +1,6 @@
-"""Document boundaries of a ``qwen4_exp`` training row, and the per-layer embedding (PLE) computed within them.
-
-A multi-document row marks its documents with ``seq_idx``, the per-token document index of
-:func:`halo.models.segment_markers.document_ids`. Stock PLE crosses them twice: its n-gram history resets only
-after ``eos_token_id``, and its dilated depthwise conv never resets. Here the history resets at every document
-start as well as after eos, and the conv runs as one masked shifted multiply-add per tap whose taps stop at the
-document start, so a one-document row computes what the stock layer computes and each packed document computes
-what it would alone. Uncached rows only: a cached call keeps the stock forward.
-"""
+"""Document boundaries of a ``qwen4_exp`` training row (``seq_idx``), and the per-layer embedding (PLE) computed
+within them: the n-gram history restarts at every document start as well as after eos, and the dilated conv's taps
+stop at the document start, so each packed document computes what it would alone. Uncached rows only."""
 
 import math
 
@@ -16,29 +10,7 @@ import transformers.models.qwen4_exp.modeling_qwen4_exp as qwen4_exp_modeling
 from torch import nn
 
 from halo.models.qwen4_exp.ngram_table import HostNGramTable
-
-
-def document_boundaries(seq_idx: torch.Tensor | None, batch: int, length: int, device: torch.device) -> torch.Tensor:
-    """``[batch, length]`` bool, True at the first token of every document: each row's first token and every
-    change of ``seq_idx`` along it. ``None`` is one document per row."""
-    boundaries = torch.zeros(batch, length, dtype=torch.bool, device=device)
-    boundaries[:, :1] = True
-    if seq_idx is None:
-        return boundaries
-    if seq_idx.shape != (batch, length) or seq_idx.dtype.is_floating_point or seq_idx.dtype == torch.bool:
-        raise ValueError(
-            f"seq_idx must be an integer [batch, sequence] = {(batch, length)} tensor of document indices, got "
-            f"{seq_idx.dtype} {tuple(seq_idx.shape)}"
-        )
-    boundaries[:, 1:] = seq_idx[:, 1:] != seq_idx[:, :-1]
-    return boundaries
-
-
-def document_starts(seq_idx: torch.Tensor | None, batch: int, length: int, device: torch.device) -> torch.Tensor:
-    """``[batch, length]`` long: the index of the first token of each token's document."""
-    positions = torch.arange(length, device=device)
-    starts = torch.where(document_boundaries(seq_idx, batch, length, device), positions, 0)
-    return starts.cummax(dim=1).values
+from halo.models.segment_markers import document_boundaries, document_starts
 
 
 def reject_unmarked_documents(position_ids: torch.Tensor | None, seq_idx: torch.Tensor | None) -> None:

@@ -12,12 +12,15 @@ interpreter per family (:func:`main`, :func:`report`) and reports through one ``
 import halo.kernels.hub_kernel_dispatch  # noqa: F401  # isort: skip
 
 import functools
+import os
+import sys
 from collections.abc import Callable, Mapping
 from unittest.mock import MagicMock
 
 import torch
 from torch.overrides import TorchFunctionMode
 from torch.utils.checkpoint import CheckpointError
+from transformers import masking_utils
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
@@ -46,6 +49,8 @@ SWEEP_ATTN_IMPLEMENTATION = "flash_attention_4"
 # The tensor reads that hand a value to the host: on a device each one waits for the device's queued work.
 HOST_READS = frozenset({"__bool__", "__float__", "__index__", "__int__", "cpu", "item", "nonzero", "numpy", "tolist"})
 
+_TORCH_DIR = os.path.dirname(torch.__file__)
+
 # Rows as TRL's pack_dataset emits them, two packed rows of several documents each.
 MULTI_DOCUMENT_ROWS = (
     {"input_ids": [5, 6, 7, 8, 9, 10, 11], "seq_lengths": [3, 4]},
@@ -66,14 +71,14 @@ PACKING_FAMILIES = {
     }.items()
     if name != "deepseek_v4"
 }
-# The flash label a family's packed rows train under where it is not the sweep's: FA4's varlen backward takes no
-# attention softcap (Gemma 2), and its dedicated head_dim-256 kernel no sliding window (Gemma 3 at that width).
+# The flash label a family's packed rows train under where it is not the sweep's: a softcap stays off FA4's varlen
+# kernels (Gemma 2), and its dedicated head_dim-256 kernel takes no sliding window (Gemma 3 at that width).
 PACKED_ATTN_IMPLEMENTATIONS = {"dense:gemma2": "flash_attention_2", "dense:gemma3_text": "flash_attention_2"}
 # Gradient checkpointing per recompute-check mode: off, or the checkpoint at that ``use_reentrant``.
 GC_MODES = {"off": None, "non_reentrant": False, "reentrant": True}
-# Families whose model forward passes its attention layers no extra kwargs, so every layer derives the set the
-# collator hands it, as without it (Ling 2.0's remote forward; tests/cpu/models/test_remote_flash_packed_isolation.py
-# pins that).
+# Families whose model forward passes its attention layers no extra kwargs, so the set the collator hands it never
+# reaches attention, which derives its own from position_ids once per step (Ling 2.0's remote forward;
+# tests/cpu/models/test_remote_flash_packed_isolation.py pins that).
 SET_DROPPING_FAMILIES = frozenset({"bailing_moe"})
 
 
@@ -207,6 +212,29 @@ class AttentionHostReads(TorchFunctionMode):
         ALL_ATTENTION_FUNCTIONS.register(attn_implementation, recorded)
 
 
+def _first_caller_outside_torch() -> str:
+    """The file of the innermost frame on the stack outside torch and this module."""
+    frame = sys._getframe(1)
+    while frame is not None and (
+        frame.f_code.co_filename.startswith(_TORCH_DIR) or frame.f_code.co_filename == __file__
+    ):
+        frame = frame.f_back
+    return "" if frame is None else frame.f_code.co_filename
+
+
+class MaskHostReads(TorchFunctionMode):
+    """While active, counts the :data:`HOST_READS` calls transformers' mask construction (``masking_utils``) makes."""
+
+    def __init__(self):
+        super().__init__()
+        self.count = 0
+
+    def __torch_function__(self, func, types, args=(), kwargs=None):
+        if getattr(func, "__name__", None) in HOST_READS and _first_caller_outside_torch() == masking_utils.__file__:
+            self.count += 1
+        return func(*args, **(kwargs or {}))
+
+
 def count_derivations() -> dict[str, int]:
     """Call counts of the per-layer derivation a handed-over varlen set replaces (and of the padding-mask path,
     which precedes it), counted from here on."""
@@ -302,7 +330,7 @@ def family_findings(name: str) -> list[str]:
     """What breaks when ``name``'s packed batch hands flash its varlen set, then a ``reach:`` entry counting
     the attention calls that read it; a lone ``skip:`` entry for a family the change does not reach."""
     if name in SET_DROPPING_FAMILIES:
-        return [f"{SKIP_PREFIX} its model forward drops the varlen set, so every attention layer derives it"]
+        return [f"{SKIP_PREFIX} its model forward drops the varlen set, so its attention derives its own"]
     torch.manual_seed(SEED)
     model = tiny_family_model(PACKING_FAMILIES[name]).eval()
     config = model.config
@@ -425,6 +453,61 @@ def recompute_findings(name: str, gc_mode: str) -> list[str]:
     if _same(shifted_plain, with_set):
         findings.append("a shifted boundary trained the same step, so the recompute check cannot see a re-derivation")
     return findings
+
+
+def mask_probe_findings(name: str) -> list[str]:
+    """What breaks when ``name``'s packed flash training step builds its masks without transformers' packed-sequence
+    probe, which the family patches skip on a flash label: a host read left in mask construction, or a loss, logit or
+    gradient that differs from the same step with the probe; an SDPA forward of the same rows that no longer runs the
+    probe its packed mask needs. A ``reach:`` entry counts the reads the probe makes; a lone ``skip:`` entry marks a
+    family whose masks never run it."""
+    torch.manual_seed(SEED)
+    model = tiny_family_model(PACKING_FAMILIES[name]).train()
+    if not getattr(model, "_supports_flash_attn", False):
+        return [f"{SKIP_PREFIX} its model class declares no flash support, so its runs never resolve to flash"]
+    if segment_markers_for(model.config).cu_seq_lens:
+        return [f"{SKIP_PREFIX} its packed rows need the segment-aware GatedDeltaNet kernels, which no CPU runs"]
+    attn_implementation, batch = _packed_flash_batch(name, model.config)
+    patched = masking_utils._preprocess_mask_arguments
+    if not getattr(patched, "_halo_packed_probe_skip", False):
+        return ["the family patches left transformers' packed-sequence probe in place on a flash run"]
+
+    def step():
+        model.zero_grad(set_to_none=True)
+        install_reference_flash(attn_implementation=attn_implementation)
+        reads = MaskHostReads()
+        with reads:
+            outputs = model(**batch, use_cache=False)
+        outputs.loss.backward()
+        trained = {"loss": outputs.loss.detach(), "logits": outputs.logits.detach()} | {
+            param_name: param.grad.clone() for param_name, param in model.named_parameters() if param.grad is not None
+        }
+        return trained, reads.count
+
+    skipped, skipped_reads = step()
+    masking_utils._preprocess_mask_arguments = patched.__wrapped__
+    try:
+        probed, probed_reads = step()
+    finally:
+        masking_utils._preprocess_mask_arguments = patched
+    if not probed_reads:
+        return [f"{SKIP_PREFIX} its masks never run transformers' packed-sequence probe"]
+
+    findings = []
+    if skipped_reads:
+        findings.append(
+            f"mask construction still read the device {skipped_reads} times ({probed_reads} with the probe)"
+        )
+    if not _same(skipped, probed):
+        findings.append("skipping the probe changed the loss, the logits or a gradient")
+    if getattr(model, "_supports_sdpa", False):
+        set_attn_implementation(model.config, "sdpa")
+        reads = MaskHostReads()
+        with reads, torch.no_grad():
+            model(**{key: value for key, value in batch.items() if key not in VARLEN_KEYS}, use_cache=False)
+        if not reads.count:
+            findings.append("an SDPA forward of the same rows skipped the probe its packed mask needs")
+    return [*findings, f"{REACH_PREFIX}{probed_reads}"]
 
 
 def report(findings: list[str]) -> None:

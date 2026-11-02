@@ -13,7 +13,7 @@ from tests.common.goldens.shape_grid import GridGolden, LayoutShape
 from tests.common.parallelism import stubbed_process_groups
 
 # The EPConfig attributes that decide where expert gradients are synced; each is job-wide.
-EP_GRAD_SYNC_FLAGS = ("num_ep_groups", "needs_expert_grad_sync", "is_deferred_dp", "defer_grad_sync")
+EP_GRAD_SYNC_FLAGS = ("num_ep_groups", "needs_expert_grad_sync", "is_deferred_dp", "sweep_reduces_across_replicas")
 
 # Every axis combination, both EP scopes, the column-block degenerates (one member per domain, one
 # global group), EP+ETP on and across domains, pipelines, a 1-GPU domain and odd widths.

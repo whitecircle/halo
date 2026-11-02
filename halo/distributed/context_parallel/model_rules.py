@@ -9,8 +9,9 @@ import torch.nn as nn
 
 from halo.distributed.context_parallel.config import CPConfigError
 from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP
+from halo.models.attention.layout import has_linear_attention_layers
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, effective_attn_implementation
-from halo.models.config_access import text_config
+from halo.models.config_access import get_config_field, text_config
 
 logger = logging.getLogger(__name__)
 
@@ -90,14 +91,13 @@ def reject_unsupported_ulysses_model(model: nn.Module, cp_size: int) -> None:
             raise CPConfigError(f"Ulysses CP cannot run on a model that instantiates {class_name!r}: {detail}")
 
     # The config-only signal, for modules not instantiated yet (meta-init).
-    layer_types = getattr(effective_config, "layer_types", None)
-    if isinstance(layer_types, (list, tuple)):
+    if has_linear_attention_layers(config):
+        layer_types = get_config_field(config, "layer_types")
         num_linear = sum(layer_type == "linear_attention" for layer_type in layer_types)
-        if num_linear:
-            raise CPConfigError(
-                f"Ulysses CP cannot run on {model_type!r} because {num_linear} of {len(layer_types)} "
-                f"layers are ``linear_attention``: {_LINEAR_ATTENTION_DETAIL}"
-            )
+        raise CPConfigError(
+            f"Ulysses CP cannot run on {model_type!r} because {num_linear} of {len(layer_types)} "
+            f"layers are ``linear_attention``: {_LINEAR_ATTENTION_DETAIL}"
+        )
 
     attention_module = next((m for m in model.modules() if m.__class__.__name__ in ULYSSES_ATTENTION_MAP), None)
     if attention_module is None:

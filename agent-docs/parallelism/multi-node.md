@@ -72,7 +72,7 @@ on such a group is refused before the load ([Determinism](expert-parallelism.md#
 ### Deferred cross-replica sync
 
 **Every multi-EP-group topology defers**, single-node ones included, and so does every PP run.
-`EPConfig.defer_grad_sync` is `num_ep_groups > 1` or `pp_size > 1`, minus the FSDP-managed-expert
+`EPConfig.sweep_reduces_across_replicas` is `num_ep_groups > 1` or `pp_size > 1`, minus the FSDP-managed-expert
 case: `fsdp_shard_ep1_experts` at `ep_group_size == 1`, where FSDP2's reduce-scatter over the DTensor
 experts is already the sole sync and deferring on top would double-sync it.
 
@@ -90,7 +90,7 @@ The sweep agrees each bucket's membership over that bucket's reduce group instea
 of the group touched is zero-filled where absent, and one no rank touched keeps no gradient, so the
 optimizer applies no weight decay to it. The TP and QLoRA sweeps agree theirs the same way. A
 single-group EP run keeps its router hooks, and the same sweep runs only its expert leg there
-(`EPConfig.defer_expert_grad_sync`): a divide by `world_size / expert_tp_size` with no collective.
+(`EPConfig.runs_post_backward_sweep`): a divide by `world_size / expert_tp_size` with no collective.
 
 `EPConfig.is_deferred_dp` is narrower and **multi-domain only** — `num_ep_groups > 1`,
 `ep_group_size > 1`, more than one NVLink domain, no expert-TP. (Attention TP needs no term of its

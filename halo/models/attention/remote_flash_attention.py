@@ -15,6 +15,8 @@ from transformers import modeling_flash_attention_utils as flash_utils
 
 from halo.models.attention.packed_position_ids import get_stashed_position_ids, install_position_ids_stash
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS, is_flash_attn_implementation
+from halo.models.attention.tensor_memo import TensorMemo
+from halo.models.segment_markers import packed_row_varlen_kwargs
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -32,6 +34,10 @@ _TEMPLATE_FLASH_PARAMS = (
 )
 _PATCHED_ATTR = "_halo_varlen_flash"
 
+# The template's model forward passes its layers no varlen set, so the packed row's is derived here, once for every
+# layer of a forward and for their checkpoint recompute.
+_packed_row_varlen = TensorMemo(packed_row_varlen_kwargs)
+
 
 def _template_flash_class(module) -> type | None:
     """The flash class of ``module``'s v4 Llama-template ``ATTENTION_CLASSES`` table, or ``None``."""
@@ -47,7 +53,12 @@ def _varlen_flash_attention_forward(
     self, query_states, key_states, value_states, attention_mask, query_length, dropout=0.0, softmax_scale=None
 ):
     """The template's flash call through transformers' dispatch: the forward's ``position_ids`` turn a
-    packed row's documents into varlen sequences, and the configured label picks the kernel."""
+    packed row's documents into varlen sequences, handed over as the set :data:`_packed_row_varlen` derives,
+    and the configured label picks the kernel."""
+    position_ids = get_stashed_position_ids(self)
+    varlen = {}
+    if attention_mask is None and position_ids is not None and query_states.shape[0] == position_ids.shape[0] == 1:
+        varlen = _packed_row_varlen(position_ids)
     return flash_utils._flash_attention_forward(
         query_states,
         key_states,
@@ -56,9 +67,10 @@ def _varlen_flash_attention_forward(
         query_length,
         is_causal=self.is_causal,
         dropout=dropout,
-        position_ids=get_stashed_position_ids(self),
+        position_ids=position_ids,
         softmax_scale=softmax_scale,
         attn_implementation=self.config._attn_implementation,
+        **varlen,
     )
 
 

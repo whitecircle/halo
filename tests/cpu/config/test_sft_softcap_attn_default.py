@@ -2,11 +2,11 @@
 """The SFT, self-distillation and embedding scripts request FA2 for a softcapped model whose training or evaluation rows
 reach FA4's varlen call, and refuse a pinned FA4 there.
 
-A softcap stays off FA4's varlen kernels (not validated there; on B300 their forward with one did not finish), and
-packed, padding-free and padded rows (more than one per batch) all reach them, so Gemma 2 27B (head_dim 128, which FA4's
-general kernel otherwise runs) trains on FA4 only one unpadded row per batch. Driven through ``main()`` (the embedding EP/TP pipeline through its builder) on a Blackwell host up to the policy
-load: the request must be decided on the rows the collator will build (a pre-processed corpus as it was baked), before
-any weight loads, and reach every model the run loads on it.
+A softcap stays off FA4's varlen kernels (not validated there), and packed, padding-free and padded rows (more than one
+per batch) all reach them, so Gemma 2 27B (head_dim 128, which FA4's general kernel otherwise runs) trains on FA4 only
+one unpadded row per batch. Driven through ``main()`` (the embedding EP/TP pipeline through its builder) on a Blackwell
+host up to the policy load: the request must be decided on the rows the collator will build (a pre-processed corpus
+as it was baked), before any weight loads, and reach every model the run loads on it.
 
 Run: pytest tests/cpu/config/test_sft_softcap_attn_default.py
 """
@@ -61,13 +61,15 @@ def _runtime():
 @contextlib.contextmanager
 def _blackwell(module, dtype: torch.dtype):
     """A Blackwell host with FA4 and FA2 builds, and ``module`` training in ``dtype`` (bf16, which a GPU-less
-    ``TrainingArguments`` cannot construct, or fp32)."""
-    with (
-        mock.patch.object(selection, "is_blackwell_gpu", lambda: True),
-        mock.patch.object(selection, "_detect_attention_impl", lambda: FA4),
-        mock.patch.object(selection, "is_flash_attn_2_available", lambda: True),
-        mock.patch.object(module, "resolve_training_dtype", lambda _config: dtype),
-    ):
+    ``TrainingArguments`` cannot construct, or fp32), wherever the run's dtype is read: the shared row planning and,
+    where it reads the dtype itself too, the script."""
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(mock.patch.object(selection, "is_blackwell_gpu", lambda: True))
+        stack.enter_context(mock.patch.object(selection, "_detect_attention_impl", lambda: FA4))
+        stack.enter_context(mock.patch.object(selection, "is_flash_attn_2_available", lambda: True))
+        for reader in (model_setup, module):
+            if hasattr(reader, "resolve_training_dtype"):
+                stack.enter_context(mock.patch.object(reader, "resolve_training_dtype", lambda _config: dtype))
         yield
 
 
@@ -143,7 +145,7 @@ def test_the_sft_policy_load_takes_fa2_on_rows_reaching_the_varlen_call(tmp_path
 )
 def test_padded_evaluation_batches_take_the_sft_policy_off_fa4(tmp_path, yaml_body, expected):
     """One unpadded training row keeps FA4 only when the run's evaluation batches stay unpadded too: an evaluation
-    batch of eight unpads to the varlen call, which on B300 would hang at the first evaluation."""
+    batch of eight unpads to the varlen call, which a softcap stays off."""
     loads = _sft_request(tmp_path, f"per_device_train_batch_size: 1\n{yaml_body}", _gemma2(128))
     assert [load["attn_default"] for load in loads] == [expected]
 
@@ -196,9 +198,11 @@ def test_a_pinned_fa4_is_resolved_before_the_load_only_where_it_can_be_refused(
 ):
     """The load resolves the backend again and logs every fallback warning a second time, so the pre-load refusal
     resolves only a softcapped model on varlen rows."""
-    with mock.patch.object(
-        loader, "resolve_policy_attn_implementation", wraps=loader.resolve_policy_attn_implementation
-    ) as resolve:
+    resolve = mock.Mock(wraps=loader.resolve_policy_attn_implementation)
+    with (
+        mock.patch.object(loader, "resolve_policy_attn_implementation", resolve),
+        mock.patch.object(model_setup, "resolve_policy_attn_implementation", resolve),
+    ):
         loads = _sft_request(tmp_path, yaml_body, checkpoint_config)
     assert [load["attn_default"] for load in loads] == [FA4]
     assert resolve.call_count == resolves
@@ -316,7 +320,7 @@ def _embedding_backbone_loads(
                 per_device_train_batch_size=batch_size, per_device_eval_batch_size=8, eval_strategy=eval_strategy
             ),
             types.SimpleNamespace(attn_implementation=pinned, model_name_or_path=_MODEL_ID),
-            None,
+            types.SimpleNamespace(reset_sinks=True, train_sinks=False),
         )
     return loads
 
@@ -344,11 +348,42 @@ def test_an_embedding_backbone_loaded_on_fa4_with_padded_rows_is_refused():
 )
 def test_a_pinned_fa4_the_backbone_load_keeps_off_varlen_rows_is_not_refused(batch_size, head_dim, loaded_backend):
     """Anti-vacuity: one unpadded row per batch trains on FA4's dense kernel, and at head_dim 256 the loader moves the
-    pin to FA2 itself; the rule reads the loaded backbone's backend, not the request."""
+    pin to FA2 itself; the rule reads the backend the load resolves, not the request."""
     loads = _embedding_backbone_loads(
         batch_size=batch_size, pinned=FA4, loaded_backend=loaded_backend, head_dim=head_dim
     )
     assert [load.get("attn_default") for load in loads] == [FA4]
+
+
+# --- every script that plans its rows refuses before the load -----------------------------------------------------
+
+
+def _teacher_distill_refusal(tmp_path, yaml_body: str) -> None:
+    """``teacher_distill.py:main()`` with a Gemma 2 27B student and teacher, its student load raising if reached."""
+    module = load_script_module("scripts/training/distillation/teacher_distill.py", "halo_test_teacher_softcap_attn")
+    with (
+        _blackwell_main(module, tmp_path, f"teacher_model: stub/teacher\n{yaml_body}"),
+        mock.patch.object(model_setup, "fetch_checkpoint_config", return_value=_gemma2(128)),
+        mock.patch.object(module, "load_script_datasets", return_value=(_dataset(), False)),
+        mock.patch.object(module, "resolve_vlm_run", return_value=False),
+        mock.patch.object(module, "_load_teacher_metadata", return_value=(None, _gemma2(128))),
+        mock.patch.object(module, "load_policy_model", side_effect=AssertionError("reached the student load")),
+    ):
+        module.main()
+
+
+@pytest.mark.parametrize("script", ["self_distill", "embedding", "teacher_distill"])
+def test_a_pinned_fa4_on_padded_rows_is_refused_before_the_load_in_every_script(tmp_path, script):
+    """The request is refused on the backend the load would keep, before any weight loads: a load stubbed to hand
+    back an FA2 model shows that no check on the loaded model is what refuses it."""
+    yaml_body = f"attn_implementation: {FA4}\nper_device_train_batch_size: 2\n"
+    with pytest.raises(ValueError, match="which are not validated with attention logit softcapping"):
+        if script == "self_distill":
+            _self_distill_request(tmp_path, yaml_body, loaded_backend=FA2)
+        elif script == "embedding":
+            _embedding_backbone_loads(batch_size=2, pinned=FA4, loaded_backend=FA2)
+        else:
+            _teacher_distill_refusal(tmp_path, yaml_body)
 
 
 # --- fp32 -------------------------------------------------------------------------------------------------------

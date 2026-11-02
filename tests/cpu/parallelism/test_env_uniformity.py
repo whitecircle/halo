@@ -14,7 +14,9 @@ Two things break if it runs only on the DeepEP path:
 These tests pin the pure divergence verdict, the latch that keeps the loader's backstop free, that every
 distributed load runs that backstop first, and the fact that the bucket knob is part of the compared set. On
 a real gloo group they pin that ranks disagreeing on transformers' ``FLASH_ATTENTION_DETERMINISTIC``, which picks
-a head_dim-256 model's attention backend, are refused, by transformers' own reading of it.
+a head_dim-256 model's attention backend, are refused, by transformers' own reading of it; and that a checkpoint
+write-thread count that differs across ranks or is negative raises at the join on every rank, so no rank reaches a
+save's first gather.
 
     python tests/cpu/parallelism/test_env_uniformity.py
 """
@@ -27,7 +29,9 @@ from unittest.mock import patch
 
 import pytest
 import torch
+import torch.distributed as dist
 
+from halo.checkpoint.writing import StreamingShardWriter
 from halo.distributed import rank_uniform_env
 from halo.distributed.expert_parallel.deepep import settings as settings_mod
 from halo.model_loading.parallel import loader as model_loading
@@ -39,6 +43,10 @@ from tests.common.parallelism import make_parallelism_config
 _MOD = "halo.runtime.consensus"
 
 PG_TIMEOUT = datetime.timedelta(seconds=90)
+# Short: a rank that reaches the stand-in gather alone waits there this long before the case fails.
+WRITE_THREADS_PG_TIMEOUT = datetime.timedelta(seconds=20)
+# Per case, each rank's HALO_CHECKPOINT_WRITE_THREADS.
+_WRITE_THREAD_COUNTS = {"one_rank_negative": ("-1", "0"), "both_negative": ("-2", "-2"), "differing": ("2", "0")}
 # Per case, each rank's spelling of transformers' determinism switch (None: unset).
 _DETERMINISM_SPELLINGS = {
     "one_rank_deterministic": (None, "1"),
@@ -224,6 +232,36 @@ def test_ranks_disagreeing_on_flash_attention_determinism_are_refused(tmp_path):
         assert divergence in (outcomes["one_rank_deterministic"] or ""), f"rank {rank}: {outcomes}"
         assert outcomes["zero_and_unset"] is None, f"rank {rank}: {outcomes}"
         assert outcomes["both_deterministic"] is None, f"rank {rank}: {outcomes}"
+
+
+def _write_threads_worker(rank: int, tmp_dir: str, case: str) -> None:
+    """The run's startup join, then a save's writer and its first gather, recording how far this rank got."""
+    os.environ["HALO_CHECKPOINT_WRITE_THREADS"] = _WRITE_THREAD_COUNTS[case][rank]
+    rank_uniform_env._env_uniformity_verified = False
+    outcome = {"refused": None, "refused_at": None, "reached_gather": False}
+    phase = "startup"
+    try:
+        rank_uniform_env.agree_rank_uniform_env()
+        phase = "save"
+        with StreamingShardWriter(os.path.join(tmp_dir, f"save{rank}"), "1MB", enabled=rank == 0):
+            outcome["reached_gather"] = True
+            dist.barrier()
+    except ValueError as error:
+        outcome["refused"], outcome["refused_at"] = str(error), phase
+    with open(os.path.join(tmp_dir, f"rank{rank}.json"), "w") as handle:
+        json.dump(outcome, handle)
+
+
+@pytest.mark.parametrize("case", sorted(_WRITE_THREAD_COUNTS))
+def test_a_write_thread_count_refused_anywhere_is_refused_at_startup_on_every_rank(tmp_path, case):
+    """A negative count on one rank would raise there at the save while its peers wait in the save's first
+    gather; agreed at startup, every rank refuses a differing or negative count before any save."""
+    run_gloo_ranks(_write_threads_worker, 2, str(tmp_path), case, pg_timeout=WRITE_THREADS_PG_TIMEOUT)
+    expected = "-2: expected a thread count >= 0" if case == "both_negative" else "'HALO_CHECKPOINT_WRITE_THREADS': ["
+    for rank in range(2):
+        outcome = json.loads((tmp_path / f"rank{rank}.json").read_text())
+        assert not outcome["reached_gather"], f"rank {rank} reached the save: {outcome}"
+        assert outcome["refused_at"] == "startup" and expected in outcome["refused"], f"rank {rank}: {outcome}"
 
 
 if __name__ == "__main__":

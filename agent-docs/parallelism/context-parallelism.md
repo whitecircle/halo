@@ -75,8 +75,8 @@ reference and resume contract is in
 
 ### Fused head loss
 
-Without it, each rank scores its chunk from the model's logits in fp32: the bf16 logits, their fp32 copy and the
-saved log-softmax, about 12 B per local token per vocabulary entry across forward and backward. When the run
+Without it, each rank scores its chunk from the model's bf16 logits plane, cast to fp32 one checkpointed chunk at a
+time ([Loss computation](#loss-computation)), so the plane and its gradient stay in bf16. When the run
 resolves Liger's `fused_linear_cross_entropy` on for the family (requested in `liger_kernel_config`, or the family
 default: GLM-4.7-Flash), a training forward instead keeps one position's logits (`logits_to_keep=1`), takes the
 backbone's final hidden states, and scores them through Liger's fused linear cross-entropy under the family's
@@ -112,7 +112,7 @@ auto-switched to FA4/FA2 by `load_distributed_model` when CP is active. A wrappe
 [bailing.md](../models/bailing.md#cp-wrapper)).
 
 That check reads the *declared* implementation. The kernel CP calls is arch-matched, with FA4 refused where
-the run cannot train the model on it (`supports_fa4_backward`: GLM-4 MoE Lite's latent attention in every run,
+`supports_fa4_backward` refuses it (GLM-4 MoE Lite's latent attention in every run, as a precaution,
 head_dim-256 attention in a deterministic one,
 [Flash Attention → Supported backends](../optimization/flash-attention.md#supported-backends)), and
 under CP the loader labels such a model with that kernel (FA2 on Blackwell) where a deterministic run

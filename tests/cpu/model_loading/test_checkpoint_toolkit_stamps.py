@@ -110,8 +110,9 @@ def test_the_policy_config_drops_every_checkpoint_stamp(stamped):
 
 
 def test_a_frozen_model_drops_every_checkpoint_stamp(stamped):
-    """Both configs the frozen load holds: the one its attention backend resolves against, and the model's own,
-    which the load reads from the checkpoint itself."""
+    """The config the frozen load resolves its attention backend against carries no checkpoint stamp, and the model
+    built on it carries only the run's own: the sinks verdict this load resolved (live, against the checkpoint's
+    reset)."""
     family, path = stamped
     resolved_against = []
     resolve = frozen_models.resolve_attn_implementation
@@ -126,11 +127,14 @@ def test_a_frozen_model_drops_every_checkpoint_stamp(stamped):
             dtype=torch.float32,
             trust_remote_code=False,
             attn_implementation="eager",
+            reset_sinks=False,
             is_vlm=family == "qwen3_vl",
             download_tag=None,
         )
     assert resolved_against == [[]]
-    assert _stamps(model.config) == []
+    levels = config_sources(model.config)
+    assert _stamps(model.config) == sorted(f"{type(level).__name__}.{RESOLVED_SINKS_RESET_ATTR}" for level in levels)
+    assert all(vars(level)[RESOLVED_SINKS_RESET_ATTR] is False for level in levels)
 
 
 def test_a_trainer_model_path_drops_every_checkpoint_stamp(stamped):

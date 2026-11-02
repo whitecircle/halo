@@ -49,7 +49,7 @@ ETP only shards the expert FFN weights (gate/up/down), leaving attention untouch
 
 ## Buffer fixes
 
-`finalize_loaded_model()` (`halo/model_loading/buffer_repair.py`), run by every load path, restores two buffers that meta-device init drops: a `_NON_PERSISTENT_FIXERS` fixer restores `embed_scale` (the `sqrt(hidden_dim)` scaled-word-embedding factor) from the `scalar_embed_scale` the embedding keeps beside it; the `_ROTARY_FIXERS` chain recomputes the per-layer-type RoPE `inv_freq` buffers (`full_attention_inv_freq` + `sliding_attention_inv_freq`) in FP32.
+`finalize_loaded_model()` (`halo/model_loading/finalization.py`), run by every load path, restores two buffers that meta-device init drops: a `_NON_PERSISTENT_FIXERS` fixer (`halo/model_loading/buffer_repair.py`) restores `embed_scale` (the `sqrt(hidden_dim)` scaled-word-embedding factor) from the `scalar_embed_scale` the embedding keeps beside it; the `_ROTARY_FIXERS` chain recomputes the per-layer-type RoPE `inv_freq` buffers (`full_attention_inv_freq` + `sliding_attention_inv_freq`) in FP32.
 
 ## Export
 

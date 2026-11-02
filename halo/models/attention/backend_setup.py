@@ -1,18 +1,19 @@
-"""Process-wide attention backend fixes (flash varlen seqlens, FA4's varlen softcap refusal, wide-head SDPA, flex
-compile) and the FA4 warm-up."""
+"""Process-wide attention backend fixes (flash varlen seqlens and unpad memo, FA4's varlen softcap refusal,
+wide-head SDPA, flex compile) and the FA4 warm-up."""
 
 from __future__ import annotations
 
 import functools
+import inspect
 import logging
 
 import torch
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, masking_utils
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.integrations import sdpa_attention as _sdpa_mod
 from transformers.integrations.flex_attention import WrappedFlexAttention, flex_attention
 
-from halo.models.attention.fa4_entry_points import wrap_fa4_entry_points
+from halo.models.attention.fa4_entry_points import install_fa4_entry_point_wrapper
 from halo.models.attention.gpt_oss_sinks import uses_gpt_oss_sinks
 from halo.models.attention.layout import attention_calls
 from halo.models.attention.selection import (
@@ -32,6 +33,8 @@ _WARMUP_WINDOW_MARGIN = 8
 
 # Marker on the wrapped ``flash_attn.cute`` entry points.
 _FA4_VARLEN_SOFTCAP_ATTR = "_halo_fa4_varlen_softcap_refusal"
+# The attribute a padding mask keeps its derived unpad set in, as ``(version, set)``.
+_UNPAD_MEMO_ATTR = "_halo_unpad_data"
 
 
 def patch_transformers_flash_varlen_int_seqlen() -> None:
@@ -64,6 +67,44 @@ def patch_transformers_flash_varlen_int_seqlen() -> None:
     flash_utils._process_flash_attention_kwargs = wrapped
 
 
+def patch_transformers_flash_unpad_memo() -> None:
+    """Make transformers' flash path derive a padding mask's unpad set (token indices, ``cu_seqlens``, max length)
+    once per mask instead of once per attention layer (idempotent).
+
+    The layers of a forward that read one mask kind, and their checkpoint recompute, receive the same mask tensor,
+    and each derivation is a ``nonzero`` and a host read. The set is kept on that tensor, keyed on its version
+    counter, so an in-place write re-derives; an inference tensor, which keeps no counter, derives on every call. It
+    is not a single-entry :class:`~halo.models.attention.tensor_memo.TensorMemo`: transformers converts the mask once
+    per mask kind, so a model that alternates sliding and full layers would derive again in every layer.
+
+    Raises:
+        RuntimeError: transformers' ``_upad_input`` no longer reads the module-level ``_get_unpad_data``, so the
+            replacement would never be called.
+    """
+    fn = flash_utils._get_unpad_data
+    if getattr(fn, "_halo_unpad_memo", False):
+        return
+    if "_get_unpad_data" not in flash_utils._upad_input.__code__.co_names:
+        raise RuntimeError(
+            "transformers' _upad_input no longer derives its unpad set through the module-level _get_unpad_data, "
+            "so patch_transformers_flash_unpad_memo cannot reach it; move the memo to the function _upad_input calls."
+        )
+
+    @torch.compiler.disable
+    @functools.wraps(fn)
+    def memoized(attention_mask):
+        if attention_mask.is_inference():
+            return fn(attention_mask)
+        memo = getattr(attention_mask, _UNPAD_MEMO_ATTR, None)
+        if memo is None or memo[0] != attention_mask._version:
+            memo = (attention_mask._version, fn(attention_mask))
+            setattr(attention_mask, _UNPAD_MEMO_ATTR, memo)
+        return memo[1]
+
+    memoized._halo_unpad_memo = True
+    flash_utils._get_unpad_data = memoized
+
+
 def fa4_varlen_softcap_refusal(fn, varlen: bool):
     """``fn`` (an FA4 entry point), its varlen one raising on a softcapped call (:func:`fa4_varlen_refusal`). The
     dense entry point, which trains it, is returned as is."""
@@ -75,9 +116,9 @@ def fa4_varlen_softcap_refusal(fn, varlen: bool):
         if kwargs.get("softcap"):
             raise RuntimeError(
                 "A softcapped attention call reached FlashAttention-4's varlen kernels, which are not validated with "
-                "attention logit softcapping (on B300 their forward with it did not finish). A packed, "
-                "padding-free or padded batch, training or evaluation, reaches them. Leave attn_implementation "
-                "unset or set flash_attention_2; FA4 trains a softcapped model only on one unpadded row per batch."
+                "attention logit softcapping. A packed, padding-free or padded batch, training or evaluation, reaches "
+                "them. Leave attn_implementation unset or set flash_attention_2; FA4 trains a softcapped model only "
+                "on one unpadded row per batch."
             )
         return fn(*args, **kwargs)
 
@@ -87,7 +128,7 @@ def fa4_varlen_softcap_refusal(fn, varlen: bool):
 def install_fa4_varlen_softcap_refusal() -> bool:
     """Make FA4's varlen entry point refuse a softcapped call (:func:`fa4_varlen_softcap_refusal`) before it
     launches (idempotent). False when ``flash_attn.cute`` is not importable."""
-    return wrap_fa4_entry_points(
+    return install_fa4_entry_point_wrapper(
         _FA4_VARLEN_SOFTCAP_ATTR, fa4_varlen_softcap_refusal, "the softcap refusal on the varlen kernel"
     )
 
@@ -122,6 +163,46 @@ def patch_sdpa_for_wide_heads() -> None:
             f"Forced mem-efficient SDPA + manual KV repeat for heads wider than {FLASH_MAX_HEAD_DIM} "
             "(unlocks seq>20k by avoiding the math kernel's score matrix)"
         )
+
+
+def patch_transformers_packed_sequence_probe() -> None:
+    """Make transformers' mask construction skip its packed-sequence probe of ``position_ids`` for a model whose mask
+    interface is ``flash_attention_mask`` (idempotent).
+
+    The probe (``find_packed_sequence_indices``) reads a device flag back on every causal or sliding-window mask built
+    from ``position_ids`` without a padding mask, at the start of each forward, and ``flash_attention_mask`` discards
+    the packed mask it feeds: the flash path finds the documents in ``position_ids`` itself. The interface is read off
+    the registry the mask builders dispatch through, per call, so an SDPA, eager or flex model keeps the probe.
+
+    Raises:
+        RuntimeError: ``_preprocess_mask_arguments`` takes other parameters than the replacement, which would then
+            misroute them.
+    """
+    fn = masking_utils._preprocess_mask_arguments
+    if getattr(fn, "_halo_packed_probe_skip", False):
+        return
+
+    @functools.wraps(fn)
+    def preprocess(
+        config, inputs_embeds, attention_mask, past_key_values, position_ids, layer_idx, encoder_hidden_states=None
+    ):
+        interfaces = masking_utils.ALL_MASK_ATTENTION_FUNCTIONS
+        impl = config._attn_implementation
+        # An implementation outside the global table exits before the probe, and indexing it would raise.
+        if impl in interfaces._global_mapping and interfaces[impl] is masking_utils.flash_attention_mask:
+            position_ids = None
+        return fn(
+            config, inputs_embeds, attention_mask, past_key_values, position_ids, layer_idx, encoder_hidden_states
+        )
+
+    expected, found = inspect.signature(preprocess).parameters, inspect.signature(fn).parameters
+    if list(found) != list(expected) or found["encoder_hidden_states"].default is not None:
+        raise RuntimeError(
+            f"transformers' _preprocess_mask_arguments takes ({', '.join(found)}), not the "
+            f"({', '.join(expected)}) patch_transformers_packed_sequence_probe forwards; update its replacement."
+        )
+    preprocess._halo_packed_probe_skip = True
+    masking_utils._preprocess_mask_arguments = preprocess
 
 
 def patch_flex_attention_compile(reason: str):

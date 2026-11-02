@@ -306,7 +306,7 @@ each rank clips by its own coefficient) and backstopped by a step-pre-hook for a
 
 | Mode | DP effect | Gradient sync | Model loader |
 |------|-----------|---------------|--------------|
-| EP | none (orthogonal) | non-expert via FSDP2 (`ignored_params`); router via in-backward hooks, expert via the DeepEP combine within the EP group and one post-backward divide (`defer_expert_grad_sync`), except at `ep_group_size == 1` where FSDP2 shards the experts too. **Any multi-EP-group topology** (`defer_grad_sync`, single-domain included) drops the router hooks too and averages everything in one post-backward sweep (`_sync_deferred_expert_grads`); **across nodes** (`is_deferred_dp`) the non-expert FSDP shards over the EP group as well | `load_ep_model()` / `load_distributed_model()` |
+| EP | none (orthogonal) | non-expert via FSDP2 (`ignored_params`); router via in-backward hooks, expert via the DeepEP combine within the EP group and one post-backward divide (`runs_post_backward_sweep`), except at `ep_group_size == 1` where FSDP2 shards the experts too. **Any multi-EP-group topology** (`sweep_reduces_across_replicas`, single-domain included) drops the router hooks too and averages everything in one post-backward sweep (`_sync_deferred_expert_grads`); **across nodes** (`is_deferred_dp`) the non-expert FSDP shards over the EP group as well | `load_ep_model()` / `load_distributed_model()` |
 | CP | `world / cp_size` | FSDP2 across all ranks (each holds a partial gradient from its chunk) | `load_cp_model()` |
 | TP | `world / tp_size` | FSDP2 `fully_shard` on the DP dimension (DTensor weights) | dense: `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))`; MoE: `load_tp_moe_model` (attention-only TP — the auto plan mis-shards expert biases) |
 | EP+CP | `world / cp_size` | EP sync for routers and experts (as EP) + FSDP2 for non-experts | `load_ep_cp_model()` |
@@ -368,7 +368,7 @@ takes the model, args and decay parameters and returns an optimizer without touc
 |---|---|
 | `bf16_optimizer` | `AdamWBF16` (stochastic rounding) |
 | `args.optim` present in the `NAMED_OPTIMIZER_BUILDERS` registry (`halo/optimizers/registry.py`; Muon, FlashAdamW) | That builder |
-| `fp32_non_ep_params` (or `optim: sgd` on a model with EP layers) | Param groups split by `(weight_decay, dtype, is_dtensor)` with `foreach`/`fused` disabled (PyTorch's foreach/fused optimizers cannot mix DTensor and plain-tensor params) |
+| `fp32_non_ep_params` (or `optim: sgd` on a model with EP layers) | Param groups split by `(weight_decay, dtype, is_dtensor)`, each fused under `optim: adamw_torch_fused` and single-tensor otherwise, `foreach` off (one foreach/fused update cannot mix DTensor and plain-tensor params, and torch refuses foreach beside fused) |
 | else | The base Trainer optimizer |
 
 `build_optimizer` (`halo/trainers/optimizer_selection.py`) returns `None` for that last row, and the
@@ -638,9 +638,9 @@ whose saves write a sub-module's names overrides the two hooks (the embedding tr
 and sentence-transformers' own reload).
 
 Around it the mixin orchestrates the non-weight parts of a checkpoint: `_save_checkpoint` (which
-defers `save_total_limit` rotation until the new checkpoint is complete, and lets the shard store
-replace the base's `optimizer.pt`), and the LR-scheduler and `router_balancing_biases.pt` sidecars of
-`halo/checkpoint/parallel/sidecars.py`.
+defers `save_total_limit` rotation until the new checkpoint is complete, and keeps the base's
+`optimizer.pt` out of a save whose shard store writes per-rank shards), and the LR-scheduler and
+`router_balancing_biases.pt` sidecars of `halo/checkpoint/parallel/sidecars.py`.
 `_persist_trainer_sidecars` is a trainer's own hook, called on every rank before rotation, and
 `_restore_trainer_sidecars` its read-back, called on every rank of a resume (never a best-model
 load). The shared reference mixin overrides the write for DPO/KTO and offline GRPO's `reference_logps.pt`.

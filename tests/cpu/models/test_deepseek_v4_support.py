@@ -20,7 +20,7 @@ from halo.data.collators.factory import select_data_collator
 from halo.distributed.expert_parallel.families.deepseek_v4 import EPDeepseekV4MoELayer
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.kernels.fused_glu import GluCombine, clamped_silu_mul_eager, resolve_clamped_glu_mul
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
 from halo.models.moe.balancing import resolve_balancing_mode
@@ -104,13 +104,10 @@ def test_every_requested_attention_resolves_to_eager(requested):
 
 
 def test_collator_factory_refuses_multi_document_rows():
-    """DeepSeek-V4 trains one document per row: ``padding_free`` and ``packing`` are both refused.
-
-    ``padding_free`` falls to the varlen gate, derived from the RESOLVED ``_attn_implementation``
-    (eager here). ``packing`` falls to the compressed-KV refusal: the CSA/HCA compressors cut their
-    KV windows at row indices while positions restart per document, so every packed document after
-    the first attends the row-start windows — pinned behaviorally in
-    ``test_deepseek_v4_packed_isolation.py``.
+    """DeepSeek-V4 trains one document per row: ``padding_free`` and ``packing`` are both refused by the
+    compressed-KV rule, ahead of the backend checks: the CSA/HCA compressors cut their KV windows at row
+    indices while positions restart per document, so every document after the first attends the row-start
+    windows — pinned behaviorally in ``test_deepseek_v4_packed_isolation.py``.
     """
     config = _tiny_config()
     config._attn_implementation = "eager"
@@ -119,7 +116,7 @@ def test_collator_factory_refuses_multi_document_rows():
         pad_token = "<pad>"
         eos_token_id = 1
 
-    with pytest.raises(ValueError, match="varlen"):
+    with pytest.raises(ValueError, match=COMPRESSED_KV_REFUSAL):
         select_data_collator(train_on_completions_only=False, tokenizer=_Tok(), padding_free=True, model_config=config)
     with pytest.raises(ValueError, match=COMPRESSED_KV_REFUSAL):
         select_data_collator(train_on_completions_only=False, tokenizer=_Tok(), packing=True, model_config=config)

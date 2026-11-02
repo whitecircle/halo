@@ -108,9 +108,10 @@ absent parts, until `merge_pp_stages.py` merges the node directories
 | `resume_adapter/`, `resume_adapter.json` | Yes | Yes | `merge_expert_lora_on_save` and embedding LoRA only: the unmerged adapter the merged checkpoint resumes from, and the marker that says so ([Merge-on-save checkpoints](#merge-on-save-checkpoints)) |
 | `training_provenance.json` | Yes | Yes | GptOss adapter saves only: whether the attention sinks were live or neutralized ([PEFT saving](#peft-lora-saving)) |
 
-`optimizer.pt` is dropped under every torchrun sharded mode, which holds per-rank shards instead. Plain
-`accelerate launch` DDP is not intercepted by the mixin, so the base HF Trainer writes and keeps
-`optimizer.pt`.
+`optimizer.pt` is never written under a torchrun sharded mode (FSDP2, pure TP), which holds per-rank shards
+instead: the base Trainer's copy would be the save rank's own state a second time. The mixin writes
+`scheduler.pt` there itself. Plain `accelerate launch` DDP is not intercepted by the mixin, so the base HF
+Trainer writes and keeps `optimizer.pt`.
 
 Every gathered save writes parameters **plus persistent buffers** (Gemma4 `layer_scalar`, vision
 `std_scale`/`std_bias` — a dropped residual scalar corrupts the layer on reload) and reconstructs the
@@ -171,7 +172,8 @@ model holding a table at construction unless it trains adapters (`reject_unsavea
 EP save refuses a model holding a table too.
 
 The table attaches from the directory the loader read the weights from: the agreed source's snapshot for a Hub id,
-which the policy loaders and the trainer-path load name to `finalize_loaded_model`, since the model's config records
+which the policy loaders, the trainer-path load and a frozen reference or teacher load that agreed its source name to
+`finalize_loaded_model`, since the model's config records
 the Hub id but no revision. A model loaded outside them from a Hub id is refused; one built with random weights
 (`init_from_scratch`) is refused before the build (`reject_random_init_tables`), since only the checkpoint supplies
 the frozen table.
@@ -619,7 +621,9 @@ per-node one every rank writes its own copy and the save warns once. `expert_rep
 fingerprint records how many shards collapsed into one (`1` for every dense run and every default `ep1` run).
 Both reads of a resume (this rank's shard and, for a follower, the writer's) run under the node's
 `max_concurrent_loading` throttle, which every rank enters
-([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)).
+([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)). So does the save: each rank's
+host copy of its state lives from the offload to the end of its shard write inside the throttle, so a node
+holds at most that many copies at once, and the low-RAM warning estimates that many.
 
 Every restore verdict is rank-uniform — all ranks restore, warm-restart or raise together:
 
@@ -629,9 +633,10 @@ Every restore verdict is rank-uniform — all ranks restore, warm-restart or rai
 - **Shards absent on every rank** → warm restart, unless the directory still proves state was written
   (other ranks' shards, or a fingerprint-matched meta — a non-shared filesystem whose restart permuted the
   rank→node placement), which raises. **Shards on a subset** under a matching fingerprint raise (torn).
-- **An interrupted save** raises: shards whose `optimizer_meta.pt` is missing or unreadable (the meta is
-  written after every rank's shard), or the base Trainer's `optimizer.pt` with no shards beside it
-  (`OptimizerShardStore.save` deletes it only once the shards are on disk).
+- **Unrestorable saved state** raises: shards whose `optimizer_meta.pt` is missing or unreadable (an
+  interrupted save: the meta is written after every rank's shard), or a replicated `optimizer.pt` with no
+  shards beside it (a non-sharded run's state, or an earlier release's sharded save stopped before its
+  shards; a sharded save writes none).
 - **A meta with no fingerprint at all** is refused outright in every mode, with no warm-restart fallback:
   nothing records the sharding that produced those layouts.
 - **FQN drift** — a trainable param the shard neither holds state for nor lists in its `param_groups` —
@@ -649,8 +654,9 @@ plus `optimizer_meta.pt` is the explicit warm-restart opt-in. Resuming a sharded
 Checkpoint **rotation** (`save_total_limit`) runs only after every toolkit sidecar is on disk, and never
 after a failed save: the base Trainer would otherwise delete the oldest checkpoint before this save's
 optimizer shards exist. Under `save_only_model: false` a checkpoint that cannot carry its optimizer state
-**is** a failed save: `OptimizerShardStore.save` raises on every rank when any rank could not produce its
-state (a world all-reduce), so the base's `optimizer.pt` stays and rotation does not fire. Known trigger: an
+**is** a failed save: `OptimizerShardStore.save` raises on every rank when any rank could not produce or write
+its state (joined over the store after the throttled writes), so the checkpoint is never committed and rotation
+does not fire; the shards its peers wrote stay behind without the `optimizer_meta.pt` that would vouch for them. Known trigger: an
 optimizer whose `state_dict` refuses the live sharding (FlashAdamW on unevenly-sharded DTensors).
 `save_only_model: true` is the explicit opt-in for weights-only checkpoints.
 

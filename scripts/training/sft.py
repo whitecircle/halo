@@ -15,10 +15,9 @@ from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
 from halo.data.collators.collator_rules import (
     evaluation_batch_size,
-    reject_dense_attention_rows,
-    reject_fa4_varlen_training,
-    reject_mrope_padding_free,
-    rows_reach_varlen_kernel,
+    has_dense_kernel_row_refusal,
+    reject_multi_document_rows,
+    resolve_multi_document_mode,
 )
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
@@ -45,10 +44,10 @@ from halo.entrypoints.data_setup import (
 from halo.entrypoints.model_setup import (
     apply_max_length,
     apply_text_path_padding_side,
-    default_training_rows_attn_implementation,
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
+    plan_training_rows,
 )
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -64,16 +63,10 @@ from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.model_loading.parallel.whole_model import warm_tree_attention_kernels
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
-from halo.models.attention.selection import fa4_varlen_refusal
 from halo.models.attention.tree import (
     install_tree_attention,
     reject_unsupported_tree_attention,
     resolve_tree_plan_options,
-)
-from halo.models.segment_markers import (
-    has_dense_packing_leak,
-    reject_compressed_kv_rows,
-    reject_unmarked_linear_attention_rows,
 )
 from halo.runtime.collectives import barrier
 from halo.runtime.consensus import agree_probe_across_ranks
@@ -180,49 +173,6 @@ def _packs_rows(sft_config, metadata) -> bool:
     return metadata.packed if metadata is not None else sft_config.packing
 
 
-def _reaches_varlen_rows(sft_config, metadata) -> bool:
-    """Whether the training or evaluation rows reach FlashAttention's varlen call (:func:`rows_reach_varlen_kernel`)."""
-    return rows_reach_varlen_kernel(
-        packing=_packs_rows(sft_config, metadata),
-        padding_free=sft_config.padding_free,
-        per_device_train_batch_size=sft_config.per_device_train_batch_size,
-        per_device_eval_batch_size=evaluation_batch_size(sft_config),
-    )
-
-
-def _policy_attn_default(sft_config, model_config, checkpoint_config, metadata) -> str | None:
-    """The attention default the policy loads with: :func:`default_training_rows_attn_implementation` for the rows
-    the collator builds."""
-    return default_training_rows_attn_implementation(
-        model_config,
-        packing=_packs_rows(sft_config, metadata),
-        padding_free=sft_config.padding_free,
-        per_device_train_batch_size=sft_config.per_device_train_batch_size,
-        per_device_eval_batch_size=evaluation_batch_size(sft_config),
-        dtype=resolve_training_dtype(sft_config),
-        checkpoint_config=checkpoint_config,
-    )
-
-
-def _resolved_policy_attn(args, sft_config, dist_args, checkpoint_config, request: str | None) -> str:
-    """The backend the policy load resolves ``request`` to for this config, dtype and GPU, read before any weight
-    loads."""
-    return resolve_policy_attn_implementation(
-        checkpoint_config,
-        request,
-        resolve_training_dtype(sft_config),
-        sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
-        init_from_scratch=dist_args.init_from_scratch,
-    )
-
-
-def _planned_policy_attn(args, sft_config, model_config, dist_args, checkpoint_config) -> str:
-    """The backend the policy load resolves for rows as the packing flags shape them, read before the dataset and
-    the weights load: the request :func:`_policy_attn_default` makes for them, through :func:`_resolved_policy_attn`."""
-    request = _policy_attn_default(sft_config, model_config, checkpoint_config, None)
-    return _resolved_policy_attn(args, sft_config, dist_args, checkpoint_config, request)
-
-
 def _prepare_text_data(
     ds,
     metadata: PreprocessedDatasetMetadata | None,
@@ -269,7 +219,7 @@ def _prepare_text_data(
         per_device_eval_batch_size=evaluation_batch_size(sft_config),
         keeps_packed_rows=parallelism_config.pp_size > 1,
         allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
-        one_document_varlen=True,
+        emit_varlen_one_document=True,
     )
     return train_dataset, eval_dataset, generate_dataset, collator
 
@@ -317,27 +267,40 @@ def main():
         revision=model_config.model_revision,
         trust_remote_code=model_config.trust_remote_code,
     )
-    # The collator factory refuses the same rows, but only after the model load and the packing pass.
-    if sft_config.packing or sft_config.padding_free:
-        mode = "packing" if sft_config.packing else "padding_free"
-        reject_compressed_kv_rows(checkpoint_config, mode)
-        reject_mrope_padding_free(checkpoint_config, padding_free=sft_config.padding_free)
+    sinks_policy = SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks)
+    rows_plan = {
+        "sinks_policy": sinks_policy,
+        "padding_free": sft_config.padding_free,
+        "checkpoint_config": checkpoint_config,
+        "init_from_scratch": dist_args.init_from_scratch,
+    }
+    attn_default = plan_training_rows(model_config, sft_config, packing=sft_config.packing, **rows_plan).attn_default
+    mode = resolve_multi_document_mode(packing=sft_config.packing, padding_free=sft_config.padding_free)
+    # The backend the policy load resolves for rows as the packing flags shape them, read before the dataset and the
+    # weights load; a config the probe could not read leaves the row checks to the collator factory after the load.
+    planned_attn = None
+    if mode is not None and checkpoint_config is not None:
+        # Resolved only where a rule reads it, since the load resolves the backend again and repeats its warnings.
+        if args.tree_packing or has_dense_kernel_row_refusal(
+            checkpoint_config, padding_free=sft_config.padding_free, packing=sft_config.packing
+        ):
+            planned_attn = resolve_policy_attn_implementation(
+                checkpoint_config,
+                attn_default,
+                resolve_training_dtype(sft_config),
+                sinks_policy=sinks_policy,
+                init_from_scratch=dist_args.init_from_scratch,
+            )
         if not args.tree_packing:
-            # Resolved only where a dense kernel refuses the rows, since the load resolves the backend again and
-            # repeats its warnings; a config the probe could not read leaves the check to the factory after the load.
-            if checkpoint_config is not None and (
-                sft_config.padding_free or has_dense_packing_leak(checkpoint_config)
-            ):
-                reject_dense_attention_rows(
-                    checkpoint_config,
-                    _planned_policy_attn(args, sft_config, model_config, dist_args, checkpoint_config),
-                    padding_free=sft_config.padding_free,
-                    packing=sft_config.packing,
-                )
-            reject_unmarked_linear_attention_rows(
+            # The collator factory refuses the same rows, but only after the model load and the packing pass; the
+            # FA4 varlen rule ran in plan_training_rows, on the backend the load keeps.
+            reject_multi_document_rows(
                 checkpoint_config,
                 mode,
+                attn_impl=planned_attn,
                 allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+                keeps_packed_rows=dist_args.pipeline_parallel_size > 1,
+                varlen_rows=False,
             )
     context = init_training_script(
         args,
@@ -353,7 +316,7 @@ def main():
         # Tree rows are packed text rows, never pre-processed, so the planned backend is the one the load makes.
         reject_unsupported_tree_attention(
             checkpoint_config,
-            _planned_policy_attn(args, sft_config, model_config, dist_args, checkpoint_config),
+            planned_attn,
             args.tree_full_attention,
             lora_target_modules=model_config.lora_target_modules if model_config.use_peft else None,
             quantization_config=resolve_quantization_config(model_config, sft_config),
@@ -375,16 +338,10 @@ def main():
     if is_vlm:
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
     metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
-    attn_default = _policy_attn_default(sft_config, model_config, checkpoint_config, metadata)
-    varlen_rows = _reaches_varlen_rows(sft_config, metadata)
-    if attn_default == "flash_attention_4" and varlen_rows and fa4_varlen_refusal(checkpoint_config):
-        # A pinned FA4 the load keeps is refused before the load, not by the collator factory after it (an unset
-        # request never reaches FA4 on these rows). Resolved only where it can refuse: the load repeats its warnings.
-        reject_fa4_varlen_training(
-            checkpoint_config,
-            varlen_rows=varlen_rows,
-            attn_impl=_resolved_policy_attn(args, sft_config, dist_args, checkpoint_config, attn_default),
-        )
+    if metadata is not None:
+        attn_default = plan_training_rows(
+            model_config, sft_config, packing=_packs_rows(sft_config, metadata), **rows_plan
+        ).attn_default
 
     policy = load_policy_model(
         context,

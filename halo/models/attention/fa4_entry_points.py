@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 _ENTRY_POINTS = (("flash_attn_varlen_func", "_flash_varlen_fn", True), ("flash_attn_func", "_flash_fn", False))
 
 
-def wrap_fa4_entry_points(marker: str, wrap: Callable[[Callable, bool], Callable], description: str) -> bool:
+def install_fa4_entry_point_wrapper(marker: str, wrap: Callable[[Callable, bool], Callable], description: str) -> bool:
     """Replace both entry points with ``wrap(entry_point, varlen)``, and the references transformers already
     cached to them, once per ``marker`` (idempotent). False when ``flash_attn.cute`` is not importable.
 

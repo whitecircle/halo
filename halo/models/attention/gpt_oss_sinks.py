@@ -16,7 +16,7 @@ import torch
 from transformers import AutoConfig, AutoModelForCausalLM, PreTrainedModel
 from transformers.models.gpt_oss.modeling_gpt_oss import GptOssPreTrainedModel
 
-from halo.models.attention.fa4_entry_points import wrap_fa4_entry_points
+from halo.models.attention.fa4_entry_points import install_fa4_entry_point_wrapper
 from halo.models.config_access import text_config
 from halo.models.model_classes import mapped_model_class
 from halo.models.module_tree import backbone_with_layers
@@ -231,7 +231,7 @@ def install_fa4_trainable_sink_rescale() -> bool:
     kernel's ``dlse`` path. The kernel's own sink backward is not validated here. Idempotent; False when
     ``flash_attn.cute`` is not importable.
     """
-    return wrap_fa4_entry_points(
+    return install_fa4_entry_point_wrapper(
         _FA4_RESCALE_ATTR,
         _with_sink_grad,
         "the trainable-sink rescale (sink-less kernel + sigmoid(lse - sink) gate)",

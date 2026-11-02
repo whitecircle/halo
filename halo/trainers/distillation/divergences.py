@@ -10,9 +10,9 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
-from torch.nn.functional import cosine_similarity, kl_div, log_softmax, mse_loss
+from torch.nn.functional import cosine_similarity, cross_entropy, kl_div, log_softmax, mse_loss
 
-from halo.kernels.logprobs import LABEL_IGNORE_INDEX, map_token_chunks, selective_logprobs
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, at_least_fp32, map_token_chunks
 from halo.model_loading.parallel.frozen_models import place_and_freeze
 
 # Floor for a -inf logit (vocab padding, a top-k-truncated teacher). Its probability stays an exact 0
@@ -27,11 +27,15 @@ def logits_forward_inputs(inputs: Mapping[str, Any]) -> dict[str, Any]:
     return {**{k: v for k, v in inputs.items() if k not in ("labels", "skip_logits")}, "use_cache": False}
 
 
+def _token_cross_entropy(logits: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+    """Hard-label cross-entropy of ``[rows, V]`` logits (:func:`at_least_fp32`), ``[rows]``, ignored labels 0."""
+    return cross_entropy(at_least_fp32(logits), labels, ignore_index=LABEL_IGNORE_INDEX, reduction="none")
+
+
 def shifted_token_cross_entropy(shift_logits: torch.Tensor, shift_labels: torch.Tensor) -> torch.Tensor:
     """Per-token fp32 hard-label cross-entropy over already-shifted logits and labels ``[B, S]``, ignored
-    positions 0, left un-reduced for each caller's own denominator; chunked (:func:`selective_logprobs`)."""
-    supervised = shift_labels != LABEL_IGNORE_INDEX
-    return -selective_logprobs(shift_logits, shift_labels.masked_fill(~supervised, 0), supervised)
+    positions 0, left un-reduced for each caller's own denominator; chunked (:func:`map_token_chunks`)."""
+    return map_token_chunks(_token_cross_entropy, shift_logits, shift_labels)
 
 
 def temperature_rescaled(loss: torch.Tensor, temperature: float) -> torch.Tensor:
@@ -182,6 +186,18 @@ def call_divergence(
     return loss_fn(student_logits, teacher_logits, **optional)
 
 
+def _vocab_summed_divergence(
+    loss_fn: Callable,
+    student: torch.Tensor,
+    teacher: torch.Tensor,
+    temperature: float,
+    hard_labels: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """``loss_fn`` (:func:`call_divergence`) summed over the vocabulary where it scores per (token, vocab)."""
+    loss = call_divergence(loss_fn, student, teacher, temperature, hard_labels)
+    return loss.sum(-1) if loss.dim() == student.dim() else loss
+
+
 def token_divergence(
     loss_fn: Callable,
     student_logits: torch.Tensor,
@@ -195,11 +211,29 @@ def token_divergence(
     fp32 plane of the divergence."""
 
     def per_token(student: torch.Tensor, teacher: torch.Tensor, *labels: torch.Tensor) -> torch.Tensor:
-        loss = call_divergence(loss_fn, student, teacher, temperature, *labels)
-        return loss.sum(-1) if loss.dim() == student.dim() else loss
+        return _vocab_summed_divergence(loss_fn, student, teacher, temperature, *labels)
 
     labels = (hard_labels,) if hard_labels is not None and uses_hard_labels(loss_fn) else ()
     return map_token_chunks(per_token, student_logits, teacher_logits, *labels)
+
+
+def token_divergence_and_cross_entropy(
+    loss_fn: Callable,
+    student_logits: torch.Tensor,
+    teacher_logits: torch.Tensor,
+    temperature: float,
+    hard_labels: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """:func:`token_divergence` and :func:`shifted_token_cross_entropy` of the same planes, each ``[B, S]``, from one
+    chunked pass: each chunk's backward builds the student gradient of both terms, where a pass per term builds a
+    whole-plane gradient each and holds the first while it builds the second."""
+
+    def per_token(student: torch.Tensor, teacher: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:
+        divergence = _vocab_summed_divergence(loss_fn, student, teacher, temperature, labels)
+        return torch.stack([divergence, _token_cross_entropy(student, labels)], dim=-1)
+
+    both = map_token_chunks(per_token, student_logits, teacher_logits, hard_labels)
+    return both[..., 0], both[..., 1]
 
 
 def _hard_labels_gate(student: torch.Tensor, teacher: torch.Tensor, labels: torch.Tensor) -> torch.Tensor:

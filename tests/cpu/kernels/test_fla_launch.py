@@ -31,7 +31,7 @@ from triton.runtime.jit import JITFunction
 
 from halo.kernels import fla_launch
 from halo.kernels.fla_launch import FIXED_NB_FLAG, apply_fla_launch_options, triton_autotuner
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 
 _STATE_KERNEL = "chunk_gated_delta_rule_fwd_kernel_h_blockdim64"
 # Rows past two 65,536 boundaries: FLA launches these with NB=3.

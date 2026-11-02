@@ -37,7 +37,7 @@ def stub_frozen_loader():
         return STUB_RESOLVED_ATTN
 
     with (
-        patch.object(frozen_loader, "AutoConfig") as auto_config,
+        patch.object(frozen_loader, "resolve_build_config") as build_config,
         patch.object(frozen_loader, "resolve_attn_implementation", fake_resolve),
         patch.object(frozen_loader, "auto_load_model") as auto_load,
         patch.object(frozen_loader, "from_pretrained_verified") as vlm_load,
@@ -48,7 +48,7 @@ def stub_frozen_loader():
         patch.object(sink_patches, "_reset_gpt_oss_sinks") as reset_sinks,
         patch.object(sink_patches, "_set_gpt_oss_sinks_trainable") as freeze_sinks,
     ):
-        auto_config.from_pretrained.return_value = STUB_CONFIG
+        build_config.return_value = STUB_CONFIG
         # The source agreement hands back the source every rank then reads at its revision; unchanged here.
         fetch_scope.side_effect = lambda model_name_or_path, revision, *, tag: ModelSource(
             model_name_or_path, revision, model_name_or_path
@@ -58,7 +58,7 @@ def stub_frozen_loader():
         freeze_sinks.return_value = 1
         yield types.SimpleNamespace(
             resolver_calls=resolver_calls,
-            auto_config=auto_config,
+            build_config=build_config,
             auto_load=auto_load,
             vlm_load=vlm_load,
             fetch_scope=fetch_scope,
@@ -81,7 +81,7 @@ def captured_load(caps, *, is_vlm: bool = False):
         load=loader_mock.call_args.kwargs,
         load_positional=loader_mock.call_args.args,
         resolver=caps.resolver_calls[0],
-        config=caps.auto_config.from_pretrained.call_args.kwargs,
+        config=caps.build_config.call_args.kwargs,
         fetch_scope=caps.fetch_scope,
         reset_sinks=caps.reset_sinks,
         freeze_sinks=caps.freeze_sinks,

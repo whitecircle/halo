@@ -6,7 +6,6 @@ from __future__ import annotations
 import glob
 import logging
 import os
-import traceback
 from functools import partial
 
 import torch
@@ -41,15 +40,14 @@ from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.runtime.consensus import (
     DeferredRankFailure,
     RankConsensus,
-    barrier_on_exit,
     gather_rank_reasons,
     gathered_failure_summary,
     rank0_verdict,
     rank_consensus,
 )
 from halo.runtime.filesystem import is_fs_save_rank, is_output_shared_filesystem
-from halo.runtime.load_coordination import joined_node_load
-from halo.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
+from halo.runtime.load_coordination import joined_node_load, resolve_load_concurrency
+from halo.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
 
@@ -81,22 +79,32 @@ def _reimpose_group_settings(param_groups: list[dict], settings: list[dict]) -> 
     )
 
 
-def _warn_if_low_host_ram(optimizer, doing: str) -> None:
-    """Warn, never raise, when host RAM is below an upper bound on this rank's optimizer-state host copy
-    (two moments per param, a DTensor at its local shard): running out is an opaque OOM kill mid-checkpoint."""
+def _concurrent_node_ranks(max_concurrent: int | None) -> int:
+    """How many of this node's ranks :func:`~halo.runtime.load_coordination.joined_node_load` admits at once."""
+    local_world_size = get_local_world_size()
+    admitted = resolve_load_concurrency(max_concurrent, local_world_size)
+    return local_world_size if admitted == 0 else min(admitted, local_world_size)
+
+
+def _warn_if_low_host_ram(optimizer, doing: str, max_concurrent: int | None) -> None:
+    """Warn, never raise, when host RAM is below an upper bound on the optimizer-state host copies this node holds
+    at once: this rank's (two moments per param, a DTensor at its local shard) times the ranks the node's load
+    throttle admits together (``max_concurrent``). Running out is an opaque OOM kill mid-checkpoint."""
     available = available_host_ram_bytes()
     if optimizer is None or available is None:
         return
-    estimated = sum(
+    per_rank = sum(
         2 * (p.data.to_local().numel() if isinstance(p.data, DTensor) else p.data.numel()) * p.data.element_size()
         for group in optimizer.param_groups
         for p in group["params"]
     )
-    if available < estimated:
+    ranks = _concurrent_node_ranks(max_concurrent)
+    if available < ranks * per_rank:
         logger.warning(
             f"[rank {get_global_rank()}] Host MemAvailable ({available / 1e9:.1f} GB) is below the "
-            f"~{estimated / 1e9:.1f} GB upper-bound estimate of this rank's optimizer state for "
-            f"{doing}; the host copy may OOM-kill the run (peer ranks on this node add their own)."
+            f"~{ranks * per_rank / 1e9:.1f} GB upper-bound estimate of the optimizer state {ranks} rank(s) of this "
+            f"node hold at once for {doing} (~{per_rank / 1e9:.1f} GB each); the host copies may OOM-kill the "
+            f"run. Lower max_concurrent_loading to admit fewer ranks at a time."
         )
 
 
@@ -154,45 +162,24 @@ class OptimizerShardStore:
         return self.ctx.fsdp_wrapped or self.ctx.parallelism_config.is_tp_mode
 
     def save(self, output_dir: str) -> None:
-        """COLLECTIVE. Write this rank's optimizer view to its shard, ``optimizer_meta.pt`` once every shard is on
-        disk, then remove the base save's rank-0 ``optimizer.pt``. Any rank's failure raises on every rank:
-        the caller rotates the previous checkpoint away only after a save that returned."""
+        """COLLECTIVE. Write this rank's optimizer view to its shard, a node's ranks a batch at a time as the
+        restore reads them (``max_concurrent_loading``), and ``optimizer_meta.pt`` once every shard is on disk. Any
+        rank's failure raises on every rank: the caller rotates the previous checkpoint away only after a save
+        that returned."""
         ctx = self.ctx
+        max_concurrent = getattr(ctx.parallelism_config, "max_concurrent_loading", None)
         # A rank leaving early while its peers block on the closing barrier() hangs the job.
         try:
-            rank = get_global_rank()
-            osd = None
-            if ctx.optimizer is not None:
-                _warn_if_low_host_ram(ctx.optimizer, "the cpu_offload of the shard save")
-                options = StateDictOptions(full_state_dict=False, cpu_offload=True)
-                try:
-                    reshard_fsdp2_modules(ctx.model)
-                    osd = get_optimizer_state_dict(self.model, ctx.optimizer, options=options)
-                except Exception as e:
-                    logger.warning(
-                        f"[rank {rank}] Failed to get sharded optimizer state dict: "
-                        f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
-                    )
-            # All-or-nothing, an absent optimizer included: a rank writing while a peer failed leaves a
-            # set the resume gate must call torn.
-            if not rank_consensus(osd is not None).all_ok:
-                raise RuntimeError(
-                    f"Optimizer shard save to {output_dir} failed: at least one rank could not produce its "
-                    "optimizer state (that rank's log carries the exception). This checkpoint would carry no "
-                    "optimizer state while rotation removed the previous complete one. Known trigger: an optimizer "
-                    "whose state_dict refuses the live sharding (FlashAdamW on unevenly-sharded DTensors). Set "
-                    "save_only_model: true to write weights-only checkpoints deliberately."
-                )
-
-            self._drop_replicated_state(osd)
-
-            # Deferred: a raise on one shard write would take that rank to the closing barrier() while its
-            # peers vouch for an incomplete set with the meta.
-            guard = DeferredRankFailure(f"optimizer shard write to {output_dir}")
-            guard.run(partial(torch.save, osd, os.path.join(output_dir, optimizer_shard_filename(rank))))
+            _warn_if_low_host_ram(ctx.optimizer, "the cpu_offload of the shard save", max_concurrent)
+            # Deferred: a raise on one rank would take it to the closing barrier() while its peers vouch for an
+            # incomplete set with the meta. The node's ranks enter the throttle in turn, so nothing in it may
+            # be a collective.
+            guard = DeferredRankFailure(f"optimizer shard save to {output_dir}")
+            with joined_node_load(f"Writing the per-rank optimizer shards to {output_dir}", max_concurrent):
+                guard.run(partial(self._write_shard, output_dir))
 
             # What makes "meta present ⇒ complete shard set" true, which lets resume call a missing shard torn.
-            # Over the store: every rank writes at once, so the slowest shard waits on shared storage.
+            # Over the store: the throttled batches and the slowest shard on shared storage outlast any collective.
             guard.store_reject("checkpoint/optimizer_shards")
 
             pp_partition = (
@@ -211,14 +198,31 @@ class OptimizerShardStore:
             guard.reject()
         finally:
             barrier()
-        # The base's optimizer.pt/.bin is rank 0's view alone; deleted only now, with its replacement on
-        # disk, so there is never a window with neither.
-        with barrier_on_exit(f"Removing the base optimizer state from {output_dir}"):
-            if is_fs_save_rank():
-                for name in OPTIMIZER_STATE_FILES:
-                    stale = os.path.join(output_dir, name)
-                    if os.path.exists(stale):
-                        os.remove(stale)
+
+    def _write_shard(self, output_dir: str) -> None:
+        """This rank's optimizer view, offloaded to host memory, written to its shard without the replicated expert
+        state it does not write (:meth:`_drop_replicated_state`); the host copy is freed on return. Rank-local.
+
+        Raises:
+            RuntimeError: this rank holds no optimizer, or its state cannot be produced under the live sharding.
+        """
+        ctx = self.ctx
+        if ctx.optimizer is None:
+            raise RuntimeError("This rank holds no optimizer to save.")
+        try:
+            reshard_fsdp2_modules(ctx.model)
+            osd = get_optimizer_state_dict(
+                self.model, ctx.optimizer, options=StateDictOptions(full_state_dict=False, cpu_offload=True)
+            )
+        except Exception as e:
+            raise RuntimeError(
+                f"This rank could not produce its sharded optimizer state ({type(e).__name__}: {e}), so the "
+                "checkpoint would carry none while rotation removed the previous complete one. Known trigger: an "
+                "optimizer whose state_dict refuses the live sharding (FlashAdamW on unevenly-sharded DTensors). Set "
+                "save_only_model: true to write weights-only checkpoints deliberately."
+            ) from e
+        self._drop_replicated_state(osd)
+        torch.save(osd, os.path.join(output_dir, optimizer_shard_filename(get_global_rank())))
 
     def _drop_replicated_state(self, osd) -> None:
         """Strip the replicated expert moments (``state`` only) from every shard but their writer's; skipped,
@@ -446,15 +450,15 @@ class OptimizerShardStore:
                 "moments. Restore the original rank→node placement, or delete every optimizer_shard_*.pt and "
                 "optimizer_meta.pt to explicitly accept an optimizer warm restart."
             )
-        # The base's rank-0 optimizer.pt outlives only a save whose shards never landed (or a non-sharded run).
+        # A sharded save writes no base optimizer file: this one is another layout's state.
         replicated = any(os.path.isfile(os.path.join(checkpoint, name)) for name in OPTIMIZER_STATE_FILES)
         if rank_consensus(replicated).any_ok:
             return self._refuse_unless_opted_in(
                 checkpoint,
                 f"Optimizer resume from {checkpoint}: it holds a replicated "
                 f"{' / '.join(OPTIMIZER_STATE_FILES)} but no per-rank optimizer shards",
-                "That file is either the base save's rank-0 view from a save interrupted before its "
-                "per-rank shards were written, or a non-sharded run's state; neither restores into this "
+                "That file is a non-sharded run's state, or the rank-0 view an earlier Halo release's sharded "
+                "save wrote before its per-rank shards and was interrupted there; neither restores into this "
                 "run's shards. Resume from an earlier complete checkpoint",
                 pp_strict=False,
             )
@@ -469,10 +473,9 @@ class OptimizerShardStore:
         """COLLECTIVE. This rank's optimizer state (its own shard plus the replica writer's) and why it could
         not be read, under the node's load throttle (:func:`~halo.runtime.load_coordination.joined_node_load`):
         both reads land in host RAM, and every follower of a replica group opens the writer's file."""
-        with joined_node_load(
-            f"Reading the per-rank optimizer shards from {checkpoint}",
-            getattr(self.ctx.parallelism_config, "max_concurrent_loading", None),
-        ):
+        max_concurrent = getattr(self.ctx.parallelism_config, "max_concurrent_loading", None)
+        _warn_if_low_host_ram(self.ctx.optimizer, f"restoring {os.path.basename(shard_path)}", max_concurrent)
+        with joined_node_load(f"Reading the per-rank optimizer shards from {checkpoint}", max_concurrent):
             osd, failure = self._read_shard(shard_path)
             if failure is None:
                 failure = self._merge_replicated_state(checkpoint, osd)
@@ -483,7 +486,6 @@ class OptimizerShardStore:
     def _read_shard(self, shard_path: str) -> tuple[object | None, str | None]:
         """An optimizer shard, or why it could not be read (a crash mid-save leaves a truncated one).
         Rank-local; the caller joins it."""
-        _warn_if_low_host_ram(self.ctx.optimizer, f"restoring {os.path.basename(shard_path)}")
         try:
             return torch.load(shard_path, map_location="cpu", weights_only=False), None
         except Exception as e:

@@ -96,11 +96,14 @@ Two ways to group ranks, used where each fits:
     `(tp,)` / `(dp, tp)` tensor mesh. The trainer reads the resulting groups through its accessors
     (`tp_group`, `tp_local_rank`, `dp_group`).
 
-- **Hand-built process groups** (`dist.new_group`) for EP, CP and PP, whose communication DTensor
-  cannot express: EP routing is *data-dependent* (the router picks each token's experts at runtime),
-  EP and CP run *custom all-to-all kernels* (DeepEP dispatch/combine, Ulysses sequence↔head swap)
+- **Hand-built process groups** (`build_groups` in `halo/runtime/collectives.py`) for EP, CP and PP, whose
+  communication DTensor cannot express: EP routing is *data-dependent* (the router picks each token's experts
+  at runtime), EP and CP run *custom all-to-all kernels* (DeepEP dispatch/combine, Ulysses sequence↔head swap)
   rather than a layout-inferred redistribution, and PP sends point-to-point along a pipeline chain
-  (`halo/distributed/pipeline_parallel/groups.py`).
+  (`halo/distributed/pipeline_parallel/groups.py`). On an NCCL default group bound to its device (the
+  `init_distributed` launch) every group of one kind comes from one `split_group`, a single communicator split;
+  a `dist.new_group` per group would split the world communicator once per group, each split blocking every
+  rank (136 world-wide splits for `ep8` on 1,024 ranks, 520 on 4,096).
 
     DeepEP also needs contiguous rank blocks for its intra-node kernel, which a mesh's row-major
     order cannot produce. `EPConfig` (`halo/distributed/expert_parallel/config.py`) builds the EP,

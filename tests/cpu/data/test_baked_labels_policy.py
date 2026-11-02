@@ -47,7 +47,7 @@ def test_flattening_mask_finds_spans_in_input_ids_when_labels_masked():
     collator = DataCollatorWithFlatteningAndCompletionMask(
         tokenizer=make_tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
-        return_flash_attn_kwargs=True,
+        emit_varlen_always=True,
     )
     features = [
         {
@@ -68,7 +68,7 @@ def test_flattening_mask_unchanged_when_labels_are_input_copy():
     collator = DataCollatorWithFlatteningAndCompletionMask(
         tokenizer=make_tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
-        return_flash_attn_kwargs=True,
+        emit_varlen_always=True,
     )
     ids = [20, RESP_1, RESP_2, 30, EOS, 21]
     batch = collator([{"input_ids": ids}])

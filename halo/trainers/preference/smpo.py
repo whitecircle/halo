@@ -35,7 +35,7 @@ from transformers.trainer_utils import EvalLoopOutput
 
 from halo.callbacks.variable_scheduler import VariableSchedulerCallback
 from halo.configs.preference import SMPOConfig
-from halo.data.collators.collator_rules import reject_mrope_padding_free
+from halo.data.collators.collator_rules import reject_multi_document_rows
 from halo.data.collators.smpo import DataCollatorForSMPO, DataCollatorForVLMSMPO, concatenate_pairs
 from halo.data.pipeline.coordinated_map import coordinated_map, resolve_map_num_proc
 from halo.data.pipeline.preferences import VLM_SMPO_FEATURES, tokenize_preference_row, tokenize_vlm_preference_row
@@ -46,12 +46,11 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX, next_token_logprobs, token
 from halo.model_loading.parallel.peft_setup import peft_bf16_autocast, prepare_policy_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
+from halo.models.attention.selection import effective_attn_implementation, is_flash_attn_implementation
 from halo.models.segment_markers import (
+    SegmentMarkers,
     document_ids,
     flattened_document_positions,
-    reject_compressed_kv_rows,
-    reject_unmarked_linear_attention_rows,
-    require_segment_aware_kernels,
     segment_marker_kwargs,
     segment_markers_for,
 )
@@ -60,7 +59,6 @@ from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from halo.trainers.evaluation import split_rows_head, split_rows_mean
 from halo.trainers.parallelism.pipeline_loss_adapter import PipelineLossAdapter
 from halo.trainers.preference.preference_rules import (
-    reject_padding_free_without_varlen,
     reject_smpo_options,
     reject_smpo_pp_options,
     reject_smpo_vlm_options,
@@ -410,18 +408,23 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         )
 
         if args.padding_free:
-            reject_compressed_kv_rows(model.config, "padding_free")
-            reject_padding_free_without_varlen(model.config)
-            reject_mrope_padding_free(model.config, padding_free=True)
-            require_segment_aware_kernels(model.config, "padding_free")
-            reject_unmarked_linear_attention_rows(
+            reject_multi_document_rows(
                 model.config,
                 "padding_free",
+                attn_impl=effective_attn_implementation(model.config),
                 allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+                keeps_packed_rows=False,
+                varlen_rows=True,
             )
         # position_ids alone keep the padding-free row's documents apart in attention; these are the
-        # segment markers this family's conv / linear-attention mixers read on top.
-        self._segment_markers = segment_markers_for(model.config)
+        # segment markers this family's conv / linear-attention mixers read on top. A flash backend takes the
+        # varlen set too, which every attention layer would otherwise derive from position_ids, each a host read.
+        markers = segment_markers_for(model.config)
+        self._segment_markers = SegmentMarkers(
+            seq_idx=markers.seq_idx,
+            cu_seq_lens=markers.cu_seq_lens
+            or is_flash_attn_implementation(effective_attn_implementation(model.config)),
+        )
         return model
 
     def _prepare_dataset(

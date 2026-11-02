@@ -920,8 +920,7 @@ def _sft_main_rows(tmp_path, yaml_body: str, *, preprocessed_packed: bool | None
     no_op = {
         name: mock.DEFAULT
         for name in (
-            "reject_compressed_kv_rows",
-            "reject_unmarked_linear_attention_rows",
+            "reject_multi_document_rows",
             "reject_unsupported_vlm_sft_options",
             "install_resolved_tokenizer",
             "apply_text_path_padding_side",
@@ -933,7 +932,7 @@ def _sft_main_rows(tmp_path, yaml_body: str, *, preprocessed_packed: bool | None
     with (
         mock.patch.multiple(module, **no_op),
         mock.patch.object(module, "probe_checkpoint", return_value=(Qwen3Config(), vlm)),
-        mock.patch.object(module, "has_dense_packing_leak", return_value=False),
+        mock.patch.object(module, "has_dense_kernel_row_refusal", return_value=False),
         mock.patch.object(module, "init_training_script", return_value=runtime),
         mock.patch.object(
             module, "load_script_datasets", return_value=((dataset, preprocessed_packed is not None), False)
@@ -942,7 +941,7 @@ def _sft_main_rows(tmp_path, yaml_body: str, *, preprocessed_packed: bool | None
         mock.patch.object(
             module, "load_preprocessed_metadata", return_value=SimpleNamespace(packed=preprocessed_packed, is_vlm=vlm)
         ),
-        mock.patch.object(module, "_policy_attn_default", return_value=None),
+        mock.patch.object(module, "plan_training_rows", return_value=SimpleNamespace(attn_default=None)),
         mock.patch.object(module, "load_policy_model", return_value=policy),
         mock.patch.object(module, "apply_max_length", return_value=policy.tokenizer),
         mock.patch.object(module, "configure_adapter_training", return_value=None),

@@ -95,7 +95,7 @@ def _flattened_collator_labels(input_ids: list[int]) -> list[int]:
         tokenizer=_Tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
         eos_token_ids=frozenset({EOS}),
-        return_flash_attn_kwargs=True,
+        emit_varlen_always=True,
     )
     return collator([{"input_ids": list(input_ids)}])["labels"][0].tolist()
 

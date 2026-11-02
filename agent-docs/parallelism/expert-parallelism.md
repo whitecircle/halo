@@ -286,7 +286,7 @@ Hybrid sync, with one EP group:
   per segment, and a divide repeated per firing would leave the earlier segments divided K times.
   The sweep divides every accumulated expert gradient, so a bank that idles in the sync microbatch
   after accumulating earlier still gets it; a bank with no accumulated grad keeps `grad=None` and the
-  optimizer skips it (`EPConfig.defer_expert_grad_sync`, off only without peers or under
+  optimizer skips it (`EPConfig.runs_post_backward_sweep`, off only without peers or under
   `fsdp_shard_ep1_experts`).
 
 **More than one EP group registers no hooks at all.** The cross-replica `all_reduce(SUM)` those
@@ -294,7 +294,7 @@ topologies need cannot ride a post-accumulate hook: it fires only where a grad a
 rank whose dispatch delivered no tokens for a layer would leave its replicas hanging in a collective
 it never enters.
 
-`EPConfig.defer_grad_sync` routes every such shape, single-node included, to the
+`EPConfig.sweep_reduces_across_replicas` routes every such shape, single-node included, to the
 [post-backward sweep](multi-node.md#deferred-cross-replica-sync). `ep_group_size == 1` under
 `fsdp_shard_ep1_experts` is the exception, since FSDP2 already owns those experts.
 
@@ -365,7 +365,9 @@ backward still calls `buffer.combine()` / `buffer.dispatch()` for the gradient c
 That cache lives on a `RecomputeScope` (`halo/models/gradient_checkpointing.py`) created
 per checkpoint invocation and entered by both passes, not on the layer: concurrent frames stay
 separate, and a `no_grad` reference or teacher pass
-cannot reach a scope it did not create. The recompute signal is the scope's pass counter, not grad
+cannot reach a scope it did not create. The recompute releases the cache as it exits: the reentrant checkpoint
+keeps every scope until the loss is dropped, so a layer's receive buffers would otherwise stay alive through
+every later layer's backward. The recompute signal is the scope's pass counter, not grad
 mode, so replay works in both checkpoint modes — but the two modes are still **not**
 interchangeable.
 

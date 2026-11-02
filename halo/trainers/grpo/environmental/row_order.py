@@ -1,12 +1,7 @@
-"""The length-ordered deal of a generation round's rows into its micro-batches.
-
-Under ZeRO-3 or an EP dispatch every rank forwards its rows in lock-step with its peers, one backbone call per
-row on the dense path, so each row costs the longest row its peers forward at the same time. TRL shuffles each
-rank's rows with a per-rank seed, pairing a row with unrelated peer rows; the deal ranks every rank's rows
-longest first and spreads them over the micro-batches alike, so the ``i``-th longest rows of all ranks run
-together. Only the order changes: the dense path forwards each row on its own, and the gate below admits only
-objectives that do not read which rows share a micro-batch.
-"""
+"""The length-ordered deal of a generation round's rows into its micro-batches. Under ZeRO-3 or an EP dispatch the
+ranks forward their rows in lock-step, so each row costs the longest row its peers run beside it; the deal ranks
+every rank's rows longest first and spreads them over the micro-batches alike, so the ``i``-th longest rows of all
+ranks run together. Only the order changes, and only objectives that read no micro-batch composition are admitted."""
 
 import contextlib
 import logging

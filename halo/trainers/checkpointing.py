@@ -34,7 +34,6 @@ from halo.model_loading.tokenizer_setup import pristine_model_max_length
 from halo.models.attention.gpt_oss_sinks import gpt_oss_sinks_restored
 from halo.models.config_access import config_export_ready, restore_config_fields
 from halo.models.unwrapping import base_transformers_model
-from halo.runtime.collectives import barrier
 from halo.runtime.consensus import DeferredRankFailure
 from halo.runtime.filesystem import fs_aware_makedirs, is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
@@ -187,15 +186,22 @@ class CheckpointingMixin:
             )
         guard.reject()
         self._save_merged_checkpoint_resume_adapter(output_dir)
-        # save_only_model drops scheduler.pt on every mode, re-warming the LR from step 0 on resume.
-        if self.args.save_only_model:
+        store = None if self.args.save_only_model else self._optimizer_store()
+        # The base save writes no scheduler.pt under save_only_model, nor beside per-rank optimizer shards
+        # (_save_optimizer_and_scheduler); without one the LR re-warms from step 0 on resume.
+        if store is None or store.writes_shards:
             save_lr_scheduler(self.lr_scheduler, output_dir)
         self._persist_trainer_sidecars(output_dir)
-        if not self.args.save_only_model and (store := self._optimizer_store()).writes_shards:
-            # Sync before modifying checkpoint files (base Trainer's post-save I/O is async across ranks).
-            barrier()
+        if store is not None and store.writes_shards:
             store.save(output_dir)
         self._publish_checkpoint(output_dir, trial)
+
+    def _save_optimizer_and_scheduler(self, output_dir: str) -> None:
+        """The base save's ``optimizer.pt`` and ``scheduler.pt``, except where the optimizer state is per-rank shards
+        (:attr:`OptimizerShardStore.writes_shards`): there ``optimizer.pt`` would be rank 0's own state written a
+        second time, and :meth:`_save_checkpoint` writes the shards and ``scheduler.pt`` instead."""
+        if not self._optimizer_store().writes_shards:
+            super()._save_optimizer_and_scheduler(output_dir)
 
     def _save_merged_checkpoint_resume_adapter(self, checkpoint_dir: str) -> None:
         """COLLECTIVE. Write a ``merge_expert_lora_on_save`` checkpoint's unmerged adapters, which it resumes from

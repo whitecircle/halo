@@ -12,7 +12,7 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
     FA4's end-to-end gain is small on MoE/EP and grows with sequence length on dense; see [Flash Attention](flash-attention.md).
 
-    Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks).
+    Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks). Its fused linear cross-entropy also reads the batch's non-ignored target count to the host in every forward, a host sync inside each fused-loss micro-batch (upstream; on Halo's paths the count feeds only token accuracy).
 
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes). Both are rank 0's.
@@ -214,7 +214,7 @@ Achieved TFLOPS rises with sequence length (longer sequences amortize the Ulysse
 
 ### EP+TP
 
-TP shards attention (Q/K/V/O) via DTensor; EP distributes experts. **EP+TP requires `ep_size` to be a multiple of `tp_size`**: each EP group must span whole TP groups (the validator rejects `ep_size % tp_size != 0`).
+TP shards attention (Q/K/V/O), each linear computing on its local shard between explicit collectives ([Local-shard linears](../parallelism/tensor-parallelism.md#local-shard-linears)); EP distributes experts. **EP+TP requires `ep_size` to be a multiple of `tp_size`**: each EP group must span whole TP groups (the validator rejects `ep_size % tp_size != 0`).
 
 On one 8-GPU node, full-EP (`ep8`) combines with `tp2`, `tp4`, or `tp8` (all valid); `ep2tp8`/`ep4tp8` are rejected (ep < tp). The table below is `ep8tp8` (one TP group of 8): DP=1, so all eight GPUs share each batch and the cluster runs 8× the tok/s/GPU.
 

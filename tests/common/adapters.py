@@ -43,7 +43,7 @@ from halo.checkpoint.writing import cast_to_save_dtype
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.model_loading.parallel.peft_setup import configure_adapter_training, split_expert_lora_targets
 from halo.models.unwrapping import plain_adapter_key, strip_peft_adapter_segment

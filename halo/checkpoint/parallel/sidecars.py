@@ -20,8 +20,9 @@ logger = logging.getLogger(__name__)
 
 
 def save_lr_scheduler(lr_scheduler, checkpoint_dir: str) -> None:
-    """COLLECTIVE. Write ``scheduler.pt`` from the FS-aware save rank(s), for a ``save_only_model`` save the base
-    Trainer drops it from: the LR schedule must continue from the resumed step. No-op without a scheduler."""
+    """COLLECTIVE. Write ``scheduler.pt`` from the FS-aware save rank(s), for a save the base Trainer writes none in
+    (``save_only_model``, per-rank optimizer shards): the LR schedule must continue from the resumed step. No-op
+    without a scheduler."""
     if lr_scheduler is None:
         return
     with barrier_on_exit(f"Writing {SCHEDULER_STATE_FILE} to {checkpoint_dir}"):
@@ -29,7 +30,7 @@ def save_lr_scheduler(lr_scheduler, checkpoint_dir: str) -> None:
             os.makedirs(checkpoint_dir, exist_ok=True)
             torch.save(lr_scheduler.state_dict(), os.path.join(checkpoint_dir, SCHEDULER_STATE_FILE))
             if is_global_main_process():
-                logger.info(f"✓ Persisted LR scheduler to {checkpoint_dir} (EP/CP resume under save_only_model)")
+                logger.info(f"✓ Persisted LR scheduler to {checkpoint_dir}")
 
 
 def restore_lr_scheduler(lr_scheduler, optimizer, checkpoint: str) -> bool:

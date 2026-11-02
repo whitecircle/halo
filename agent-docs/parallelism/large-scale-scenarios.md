@@ -34,7 +34,8 @@ their backward mirrors — arithmetic from the layer count and the autograd grap
 Four per layer, not two, because `DeepEPDispatchFunction.backward` *is* a combine and
 `DeepEPCombineFunction.backward` *is* a dispatch (`halo/distributed/expert_parallel/deepep/dispatcher.py`).
 Gradient checkpointing does not multiply the count — recompute replays cached results rather than
-re-issuing the collective.
+re-issuing the collective, and that cache is a memory term of its own
+([GC replay cache](#per-rank-memory-model)).
 
 The cost is worse than the count suggests: cross-domain dispatch is **latency**-bound, so its fixed
 per-collective cost does not amortize as the message grows
@@ -119,6 +120,7 @@ post-backward sweep ([Multi-Node](multi-node.md#deferred-cross-replica-sync)).
 | Replicated router + shared expert | `8·P_r`, plus `8·P_router` under `fp32_router` | **7 GB, always** (8 GB with `fp32_router`) |
 | FSDP non-expert, ZeRO-2 (default) | `2·P_f + 8·P_f/F` | 19 GB resident + 5 / 2 / 1 GB at `F` = 16 / 32 / 64 |
 | Activations, GC on | `(2·L·H + 6·k·I_moe)·b·S` | **4.5 GB** at `b1 s8192`, **18.1 GB** at `b1 s32768` |
+| GC replay cache (EP) | `L_moe·b·S·(r·(2·H_pad + 12·k) + 2·H_pad)` | **35 / 40 / 42 GB** at `b1 s8192`, `ep` = 16 / 32 / 64; 4× at `s32768` |
 | Load-time peak (separate) | `2·(P_ne + P_e/ep_size)` | see the `Load` column |
 
 `8 B/param` = 2 weights + 2 grads + 4 optimizer state; `AdamWBF16` (`halo/optimizers/adamw_bf16.py`)
@@ -132,6 +134,17 @@ The activation term is one bf16 layer input per layer (`2·L·H·b·S`) plus the
 expert intermediates (`6·k·I_moe·b·S` — gate_up, SiLU product, down input at top-`k` = 10). The
 45 linear layers additionally hold an fp32 recurrent state of
 `64 × 128 × 128 × 4 B ≈ 4 MB` per sequence per layer (≈190 MB at `b=1`).
+
+The GC replay cache is what lets the recompute skip the all-to-all
+([DeepEP → How the toolkit drives it](../infrastructure/deepep.md#how-the-toolkit-drives-it)): each
+MoE layer keeps its first pass's received tokens (`[R, H_pad]` bf16), their top-`k` expert ids (int64)
+and weights (fp32), and its combined output (`[b·S, H_pad]` bf16), and every layer's cache is alive
+when the backward starts. DeepEP sends a token once per destination rank, so `R = r·b·S` with `r` the
+distinct ranks a token's top-`k` experts land on: `ep·(1 − C(E − E/ep, k) / C(E, k))` under uniform
+routing, 7.7 / 8.8 / 9.4 at `ep` = 16 / 32 / 64. `H_pad` is the hidden rounded up to 256 on the
+elastic backend and the hidden itself on legacy (both 4096 here). Under EP+ETP `r` counts the
+`ep_size`-wide dispatch group; under PP each in-flight microbatch holds its own. At this model it is
+8–9× the activation term, and it decides the 2-node cells.
 
 **ZeRO-3 would remove the 19 GB resident term but is rejected** under EP and under TP+DP
 (`_reject_fsdp_settings`) — every layout on this page is EP, so
@@ -175,8 +188,8 @@ load peak.
 
 ## Scenario matrix
 
-`X = ep_size × expert_tp_size`. `Steady` = experts + replicated + FSDP non-expert + activations at
-`b1`. `Load` = the separate per-rank peak while weights stream in. All EP cells need
+`X = ep_size × expert_tp_size`. `Steady` = experts + replicated + FSDP non-expert + activations +
+GC replay cache at `b1`. `Load` = the separate per-rank peak while weights stream in. All EP cells need
 `512 % ep_size == 0`, rejected by `reject_unsupported_model` off `config.json`
 at the top of the model load — after the checkpoint download, before the process groups, the meta
 shell or any weight read.
@@ -189,25 +202,25 @@ NVLink.
 |---|---|---:|---:|---:|---:|---:|---:|---:|---|
 | **1** (8) | `ep8` node | 8 | 8 | 386 | 35 | **>420** | — | 117 | ✗ experts alone are 1.5× HBM |
 | 1 | `ep4`+`etp2` · `ep2`+`etp4` | 8 | 4 · 2 | 386 | 35 | **>420** | — | 214 · 407 | ✗ same expert share — `X` cannot exceed the 8 GPUs |
-| **2** (16) | **`ep16` global** | 16 | 16 | 193 | 31 | **228** | 242 | 69 | ⚠ fits, zero headroom |
-| 2 | `ep16` global + `tp8` | 16 | 2 | 193 | 55 | **253** | 266 | 69 | ✗ TP collapses `F` to 2 |
-| 2 | `ep2` + `etp8` global | 16 | 2 | 193 | 31 | 228 | 242 | **407** | ✗ load peak |
+| **2** (16) | **`ep16` global** | 16 | 16 | 193 | 31 | **263** | 383 | 69 | ✗ the replay cache takes full fine-tuning past the ceiling; frozen layers or `s4096` (244, ⚠) fit |
+| 2 | `ep16` global + `tp8` | 16 | 2 | 193 | 55 | **288** | 407 | 69 | ✗ TP collapses `F` to 2 |
+| 2 | `ep2` + `etp8` global | 16 | 2 | 193 | 31 | 240 | 291 | **407** | ✗ load peak |
 | 2 | `ep8` node · `ep4` node · `ep2` node | ≤8 | 16 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
-| 2 | `pp2` × `ep8` node | 8 per stage | 8 | 206 | 27 | 238 | 253 | 66 | ⚠ stage 0 holds 32 of the 60 layers ([PP cells](#pipeline-parallel-cells)) |
+| 2 | `pp2` × `ep8` node | 8 per stage | 8 | 206 | 27 | 268 | 373 | 66 | ✗ stage 0 holds 32 of the 60 layers and two microbatches' replay caches ([PP cells](#pipeline-parallel-cells)) |
 | **3** (24) | `ep3/6/12/24` global | 3–24 | 24 | — | — | — | — | — | ✗ `512 % ep_size ≠ 0` at load ([The 3-node case](#the-3-node-case)) |
 | 3 | `ep2/4/8` node | ≤8 | 24 | 386 | 35–63 | **>420** | — | 117–407 | ✗ experts alone exceed HBM |
-| 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 29 | 162 | 176 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
+| 3 | `ep3` + `etp8` global | 24 | 3 | 129 | 29 | 178 | 240 | **278** | ✗ `512 % 3 ≠ 0`, and the `ep_size`-governed load peak would not fit either |
 | 3 | `ep2/4/8/16` global | — | — | — | — | — | — | — | ✗ rejected at config (`_reject_ep_group`) |
-| 3 | `pp3` × `ep8` node | 8 per stage | 8 | 155 | 22 | 182 | 198 | 51 | ✓ the one legal 3-node layout, at the [PP costs](#pipeline-parallel-cells) |
-| **4** (32) | **`ep32` global** | 32 | 32 | 97 | 28 | **129** | 143 | 45 | ✓ |
-| 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 129 | 143 | **214** | ⚠ load peak, experimental axis |
-| 4 | `ep32` global + `tp8` | 32 | 4 | 97 | 39 | 140 | 154 | 45 | ✓ but strictly worse than `ep32` |
-| 4 | `ep16` global × 2 replicas | 16 | 32 | 193 | 31 | 228 | 242 | 69 | ⚠ half the sharding; both groups still span all 4 domains (4 contiguous ranks per domain — column-block layout), so dispatch stays on RDMA. The win is the narrower 16-rank dispatch group, not domain locality |
-| 4 | `pp4` × `ep8` node | 8 per stage | 8 | 103 | 16 | 124 | 138 | 36 | ✓ EP on NVLink and no 8192 tokens/rank cap, at the [PP costs](#pipeline-parallel-cells) |
-| **8** (64) | **`ep64` global** | 64 | 64 | 48 | 27 | **80** | 93 | 33 | ✓ memory to spare; tokens/rank still capped at 8192 |
-| 8 | `ep8` + `etp8` global | 64 | 8 | 48 | 27 | 80 | 93 | 117 | ✓ EFA-latency pick, experimental axis |
-| 8 | `ep32` global × 2 replicas | 32 | 64 | 97 | 28 | 129 | 143 | 45 | ✓ narrower EP group |
-| 8 | `ep16` global × 4 replicas | 16 | 64 | 193 | 31 | 228 | 242 | 69 | ⚠ |
+| 3 | `pp3` × `ep8` node | 8 per stage | 8 | 155 | 22 | 216 | 334 | 51 | ✓ at 8k, the one legal 3-node layout, at the [PP costs](#pipeline-parallel-cells); ✗ at 32k |
+| **4** (32) | **`ep32` global** | 32 | 32 | 97 | 28 | **169** | 303 | 45 | ✓ |
+| 4 | `ep4` + `etp8` global | 32 | 4 | 97 | 28 | 149 | 221 | **214** | ⚠ load peak, experimental axis |
+| 4 | `ep32` global + `tp8` | 32 | 4 | 97 | 39 | 180 | 314 | 45 | ✓ but strictly worse than `ep32` |
+| 4 | `ep16` global × 2 replicas | 16 | 32 | 193 | 31 | 263 | 383 | 69 | ✗ as `ep16` at 2 nodes; both groups still span all 4 domains (4 contiguous ranks per domain — column-block layout), so dispatch stays on RDMA. The win is the narrower 16-rank dispatch group, not domain locality |
+| 4 | `pp4` × `ep8` node | 8 per stage | 8 | 103 | 16 | 154 | 258 | 36 | ✓ EP on NVLink and no 8192 tokens/rank cap, at the [PP costs](#pipeline-parallel-cells); ⚠ at 32k |
+| **8** (64) | **`ep64` global** | 64 | 64 | 48 | 27 | **122** | 263 | 33 | ✓ memory to spare; tokens/rank still capped at 8192 |
+| 8 | `ep8` + `etp8` global | 64 | 8 | 48 | 27 | 108 | 206 | 117 | ✓ EFA-latency pick, experimental axis |
+| 8 | `ep32` global × 2 replicas | 32 | 64 | 97 | 28 | 169 | 303 | 45 | ✓ narrower EP group |
+| 8 | `ep16` global × 4 replicas | 16 | 64 | 193 | 31 | 263 | 383 | 69 | ✗ as `ep16` at 2 nodes |
 | any | plain FSDP2 · pure TP · pure ETP · pure CP | — | — | — | — | — | — | **794** | ✗ no shard-aware load |
 | any | any EP + CP | — | — | — | — | — | — | — | ✗ `reject_unsupported_ulysses_model` |
 
@@ -215,7 +228,8 @@ NVLink.
 which on 8 GPUs is at most 8, so every legal single-node shape puts the same 386 GB of expert state
 on each GPU against a ~260 GB practical ceiling.
 
-Two nodes with `ep16 --ep_scope=global` is the floor; four is the first comfortable size. Freezing
+Two nodes with `ep16 --ep_scope=global` is the floor, where full fine-tuning fits only with frozen
+layers or at `s4096`; four is the first comfortable size. Freezing
 the experts is the single-node escape: LoRA on EP experts, or `unfreeze_layers_patterns`, drops them
 from 8 to 2 bytes/param. That is arithmetic, not a validated cell.
 
@@ -286,7 +300,8 @@ changes in three ways:
   `8·P_e·L_stage/60/ep_size`;
 - the FSDP term adds the unsharded stage gradient the schedule holds across the microbatch loop:
   `4·P_f,stage + 8·P_f,stage/F`, with `F` the stage's 8 ranks;
-- under 1F1B the first stage keeps up to `pp_size` microbatches' layer inputs in flight.
+- under 1F1B the first stage keeps up to `pp_size` microbatches' layer inputs and GC replay caches in
+  flight.
 
 What PP buys here: the 8192 tokens/rank cross-node dispatch ceiling does not apply (node-local `ep8`
 still needs `ep_buffer_backend: legacy` past ~64k tokens per rank), and 3 nodes become usable. What it
@@ -310,10 +325,10 @@ at the [costs above](#pipeline-parallel-cells).
 
 | Nodes | Cell | Crosses on | Steady `b1 s8192` | Why |
 |---|---|---|---:|---|
-| 2 | `ep16 --ep_scope=global` + `unfreeze_layers_patterns` | RDMA all-to-all | 228 GB full FT / ≈120 GB partial | the only layout that loads and fits; no headroom for 32k or `b>1` |
-| 3 | `pp3` × `ep8` node, `moe_balancing: none` | boundary activations only | 182 GB | the one layout that fits on a validated path ([The 3-node case](#the-3-node-case)); trains unbalanced |
-| 4 | **`ep32 --ep_scope=global`** | RDMA all-to-all | 129 GB | first comfortable point on memory — but the binding limit is the 8192 tokens/rank cross-node dispatch ceiling, not the 120 GB spare |
-| 8 | **`ep64 --ep_scope=global`** | RDMA all-to-all | 80 GB | memory headroom to spare, same 8192 tokens/rank ceiling on `b × max_length`; `ep8 + etp8` if the fabric is EFA |
+| 2 | `ep16 --ep_scope=global` + `unfreeze_layers_patterns` | RDMA all-to-all | ≈155 GB partial (263 GB full FT, ✗) | the only layout that loads; full fine-tuning fits only at `s4096`, no headroom for 32k or `b>1` |
+| 3 | `pp3` × `ep8` node, `moe_balancing: none` | boundary activations only | 216 GB | the one layout that fits on a validated path ([The 3-node case](#the-3-node-case)); trains unbalanced |
+| 4 | **`ep32 --ep_scope=global`** | RDMA all-to-all | 169 GB | first comfortable point on memory — but the binding limit is the 8192 tokens/rank cross-node dispatch ceiling, not the 90 GB spare |
+| 8 | **`ep64 --ep_scope=global`** | RDMA all-to-all | 122 GB | memory headroom to spare, same 8192 tokens/rank ceiling on `b × max_length`; `ep8 + etp8` if the fabric is EFA |
 
 **On NVL72, declare a 64-GPU domain, not 72.** `_reject_ep_group` requires
 `nvlink_domain_size % ep_group_size == 0`, and `72 % 64 = 8`.
@@ -396,7 +411,7 @@ Values that differ from it or are load-bearing at 397B:
 | Knob | Value | Why |
 |---|---|---|
 | `expert_parallel_size` / `ep_scope` | per the table above / `global` | node-scope EP caps `X` at 8 and cannot hold `P_e` |
-| `attn_implementation` | `flash_attention_2` | **pin it explicitly**: the validated varlen kernel for this family on every GPU. Unset, Blackwell picks FA4 ([Qwen3.5](../models/qwen3_5.md)) and Hopper FA3. An explicit FA2 is kept as-is |
+| `attn_implementation` | `flash_attention_2` | unset, these packed rows load FA2 on Blackwell too (unpacked rows take FA4, [Qwen3.5 → Configs](../models/qwen3_5.md#configs)) and Hopper picks FA3; the pin keeps Hopper on FA2 as well. An explicit FA2 is kept as-is |
 | `packing` / `padding_free` | `true` / `false` | fixed-length only — the M-RoPE varlen path crashes FA2 |
 | `fsdp_reshard_after_forward` | `false` | ZeRO-3 is rejected under EP |
 | `gradient_checkpointing` | `true` | the activation column assumes it |

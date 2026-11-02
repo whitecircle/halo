@@ -90,7 +90,7 @@ def _collator(config, *, completion_only: bool = False, packing: bool = False, *
         assistant_message_template=RESPONSE_TEMPLATE if completion_only else None,
         packing=packing,
         model_config=config,
-        **{"one_document_varlen": True, **kwargs},
+        **{"emit_varlen_one_document": True, **kwargs},
     )
 
 
@@ -141,7 +141,7 @@ def test_the_set_is_the_only_change_to_the_batch(completion_only, packing):
     )
     # Without the opt-in the full-sequence route is TRL's own collator, which TRL builds from the pad id.
     bare = _collator(
-        _config("flash_attention_2"), completion_only=completion_only, packing=packing, one_document_varlen=False
+        _config("flash_attention_2"), completion_only=completion_only, packing=packing, emit_varlen_one_document=False
     ) or TRLDataCollatorForLanguageModeling(pad_token_id=PAD_ID)
     assert all(key in handed for key in VARLEN_KEYS)
     assert _equal_batches(without_set(handed), bare([dict(row) for row in rows]))
@@ -228,7 +228,7 @@ def test_a_non_flash_run_keeps_trls_collator_and_gets_no_set(attn_implementation
 
 @pytest.mark.parametrize(
     "kwargs",
-    [{"one_document_varlen": False}, {"keeps_packed_rows": True}],
+    [{"emit_varlen_one_document": False}, {"keeps_packed_rows": True}],
     ids=("caller_did_not_opt_in", "pipeline_parallel"),
 )
 def test_a_run_outside_the_opt_in_keeps_its_collators(kwargs):
@@ -254,8 +254,8 @@ def test_context_parallel_builds_its_own_collator():
 
 
 def test_fa4_keeps_the_dense_kernel_where_its_varlen_kernels_refuse_the_attention():
-    """Gemma 2's softcap: FA4's varlen backward takes none, so its one-document rows stay dense on FA4, while the
-    FA2 and FA3 varlen kernels take it."""
+    """Gemma 2's softcap stays off FA4's varlen kernels, so its one-document rows stay dense on FA4, while the FA2
+    and FA3 varlen kernels take it."""
     softcapped = {"config_cls": Gemma2Config, "attn_logit_softcapping": 50.0}
     assert _collator(_config("flash_attention_4", **softcapped)) is None
     for attn_implementation in ("flash_attention_2", "flash_attention_3"):

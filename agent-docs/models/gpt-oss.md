@@ -40,7 +40,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 - **Neutralized** (`reset_sinks: true`, the SFT default): `None` under FA2 (its kernel takes no sink argument), `dtype.min` and frozen everywhere else (~0 softmax mass, zero gradient). Every checkpoint writer re-emits the FA2-removed sinks as `dtype.min`.
 - **Live, frozen** (`reset_sinks: false`): the pretrained sinks stay in every softmax, `requires_grad=False`. This is the RL setting — the trainer scores with the sinks the rollout engine serves — and the only live policy an adapter run or weight-sync trainer accepts.
 
-    Live sinks admit only sink-carrying implementations (FA4, `flex_attention`, `eager`; FA3 with an `s_aux` build): a sink-dropping implementation shifts every logprob ~−3 nats against the served policy (gpt-oss-20b). They are refused under Context Parallelism, whose kernels never see the column.
+    Live sinks admit only sink-carrying implementations (FA4, `flex_attention`, `eager`; FA3 with an `s_aux` build): a sink-dropping implementation shifts every logprob ~−3 nats against the served policy (gpt-oss-20b). They are refused under Context Parallelism, whose kernels never see the column. On Hopper no fused kernel carries them: `flex_attention` under EP runs uncompiled ([Known issues](../optimization/flash-attention.md#known-issues)) and `eager` everywhere, both holding the full score matrix, so memory bounds the row length.
 
 - **Trainable** (`reset_sinks: false` + `train_sinks: true`): live with gradients on; full fine-tuning under FA4 or `eager` only.
 
@@ -64,7 +64,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 - **Blackwell** auto-selects FA4 under every sink policy. GPT-OSS is unaffected by the Qwen3.5/3.6 FA4→SDPA fallback.
 - **SFT alternatives.** With sinks reset, `flash_attention_2` (`sinks = None`) and `sdpa` (the `dtype.min` column contributes `exp(dtype.min)=0`) also run end to end, both JIT-free. RL cannot use them ([why](#attention-sinks)). Which kernel carries a sink, and how the resolver reads it: [Flash Attention](../optimization/flash-attention.md#model-specific-handling).
 - **Sink-free trainer, live engine.** `reject_unsyncable_model` refuses on-policy RL when the FA2 reset removed the sinks Parameter (`reset_sinks: true` + FA2): the sync sends named parameters only, so the engine would keep serving the pretrained sinks against a sink-free trainer — permanently off-policy with no error at sync time.
-- **Hopper FA2** needs the split-K kernel patch shipped in the image (`docker/training/flash_attn_split_stubs_hopper.cpp`).
+- **Hopper FA2** runs the image's build, whose split-K kernels are stubbed and never picked by a forward Halo runs ([Docker → Building](../infrastructure/docker.md#building)).
 - **Variable-length RL** (async GRPO) runs FA4 through a per-row dense forward ([Flash Attention](../optimization/flash-attention.md#model-specific-handling)).
 
 ## Configs

@@ -83,7 +83,7 @@ class _StubEPLayer(StubEPLayerBase):
             fsdp_shard_ep1_experts=managed,
             ep_group_size=1 if managed else 2,
             experts_fsdp_managed=managed,
-            defer_grad_sync=False,
+            sweep_reduces_across_replicas=False,
             uses_backward_grad_hooks=not managed,
         )
         self.gate = nn.Linear(H, E, bias=False)  # the base's default _ROUTER_ATTR
@@ -101,7 +101,7 @@ class _StubTrainer:
     def __init__(self, layers, *, deferred: bool = False):
         self.model = nn.ModuleList(layers)
         self._layers = layers
-        self._ep_config = SimpleNamespace(defer_grad_sync=deferred)
+        self._ep_config = SimpleNamespace(sweep_reduces_across_replicas=deferred)
 
     def check(self):
         """The guard over what an EP run leaves out of FSDP2: every EP layer's parameters."""

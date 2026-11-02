@@ -1,10 +1,7 @@
-"""World-level metrics folded from rank-local sums.
-
-TRL's ``log`` averages each process's own ``_metrics`` list and only the main process reports, so a value
-computed over one rank's rows is logged as if it were the batch's. Each rank records its sums instead, and a
-flush folds them where they lie and derives every metric from the world totals in fixed-width all-reduces read
-back once; only a key the ranks have not agreed on yet, or a percentile's raw values, travels in an object gather.
-"""
+"""World-level metrics folded from rank-local sums. TRL's ``log`` averages each process's own ``_metrics`` list
+and only the main process reports, so a value over one rank's rows would be logged as the batch's; each rank
+records its sums instead, and a flush derives every metric from the world totals in fixed-width all-reduces read
+back once, an object gather carrying only a key the ranks have not agreed on yet or a percentile's raw values."""
 
 import math
 from collections import defaultdict

@@ -98,6 +98,7 @@ docker run -d --rm --name <job> \
 | EFA userspace: rdma-core, AWS libfabric and one pinned `aws-ofi-nccl` build (`docker/efa/install_efa_userspace.sh`), shared with the rollout images | Yes | Yes |
 | NVSHMEM (`nvidia-nvshmem-cu13`, transitive via torch) | Yes | Yes |
 | `nvidia-cutlass-dsl` 4.6.2 (CUDA 13 runtime flavor only) + `quack-kernels` 0.6.4 | Yes | Yes |
+| `flash-linear-attention` 0.4.2 + `causal-conv1d` 1.6.2.post1, built at `uv.lock`'s pins (FLA's Blackwell state-kernel restriction: [Qwen3.5](../models/qwen3_5.md#linear-attention-qwen3_5moegateddeltanet)) | Yes | Yes |
 | FlashAdamW (`flashoptim==0.1.4`) | Yes | Yes |
 | DeepGEMM (commit `559d79f`, native fp8/fp4 grouped MoE GEMM behind `HALO_DEEPGEMM_NATIVE=1`; JIT-compiles at runtime) | No | Yes |
 | Gigatoken tokenizer backend (`gigatoken` 0.9.x, `tokenizer_backend: gigatoken`) | Yes | Yes |
@@ -149,10 +150,11 @@ release read off `Dockerfile.vllm` / `Dockerfile.sglang` (`ARG VLLM_VERSION`, `A
   `GDRCOPY_COMMIT`. Blackwell's FA2 comes from `BASE_IMAGE` (default
   `nvcr.io/nvidia/pytorch:26.03-py3`).
 - **Hopper FA2 split-K stub.** CUDA 13.2 ptxas hangs on the 24 sm_90 split-K kernels, so the build
-  swaps them for throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`). Split-K is
-  unreachable from the varlen forward and the backward, but the non-varlen forward can pick it by
-  occupancy at small shapes, so a non-varlen caller prefers FA3 on sm_90, as
-  `halo/distributed/context_parallel/ulysses_attention.py` does.
+  swaps them for throw-stubs (`docker/training/flash_attn_split_stubs_hopper.cpp`) and pins the dense
+  and varlen forwards to one split (`num_splits` 0 → 1 in `flash_api.cpp`, asserted in the build): their
+  occupancy heuristic would otherwise pick split-K for a small unpadded batch and for decode under GQA.
+  The backward never uses split-K; only `flash_attn_with_kvcache`, which nothing in Halo calls, still
+  can reach a stub.
 - **No `flash_attn.cute` on Hopper.** FA2's source build also installs an old copy of FA4's CuTe DSL
   sources, which does not import against the pinned cutlass-dsl; the Hopper build removes it, so every
   FA4 probe reads FA4 as not installed there.

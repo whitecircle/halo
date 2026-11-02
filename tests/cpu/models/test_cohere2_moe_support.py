@@ -29,7 +29,7 @@ from halo.distributed.context_parallel.families import ULYSSES_ATTENTION_MAP, Co
 from halo.distributed.expert_parallel.families.cohere2_moe import EPCohere2MoELayer
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.models.moe.balancing import (
     accepts_native_balancing_bias,
     is_transient_balancing_router,

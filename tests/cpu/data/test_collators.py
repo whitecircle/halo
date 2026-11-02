@@ -484,7 +484,7 @@ def test_flattening_position_ids():
 def test_flattening_cu_seq_lens():
     """Flattening: cu_seq_lens should track cumulative lengths."""
     tok = make_tokenizer()
-    collator = DataCollatorWithFlattening(tokenizer=tok, return_flash_attn_kwargs=True)
+    collator = DataCollatorWithFlattening(tokenizer=tok, emit_varlen_always=True)
 
     ex1 = {"input_ids": [USER_A, ASST_A], "labels": [USER_A, ASST_A]}
     ex2 = {"input_ids": [USER_B, ASST_B, EOS], "labels": [USER_B, ASST_B, EOS]}

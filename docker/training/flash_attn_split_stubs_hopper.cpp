@@ -14,14 +14,13 @@
 // runtime. The .so links cleanly (no undefined symbols); the varlen forward and
 // the whole backward are unaffected.
 //
-// SCOPE OF THE THROW — wider than KV-cache inference. flash_api.cpp's *non-varlen*
-// mha_fwd calls set_params_splitkv() unconditionally with num_splits=0, so the
-// occupancy heuristic picks split-K (and reaches these stubs) whenever dropout is 0
-// and batch*heads*ceil(seq_q/64) < 0.8*2*SMs — i.e. small batch/head/seq shapes, not
-// just decode. mha_varlen_fwd gates the same call behind seqlenq_ngroups_swapped, so
-// packed/padding-free training never reaches it. Callers that use the non-varlen
-// entry point must therefore prefer FA3 on sm_90; halo/distributed/context_parallel/
-// ulysses_attention.py does exactly that.
+// SCOPE OF THE THROW. flash_api.cpp's mha_fwd, and mha_varlen_fwd for a one-token
+// query under GQA (seqlenq_ngroups_swapped), pass num_splits=0 to set_params_splitkv(),
+// whose occupancy heuristic picks split-K whenever dropout is 0 and
+// batch*heads*ceil(seq_q/64) < 0.8*2*SMs: small unpadded batches and decode, training
+// included. The Dockerfile rewrites both calls to num_splits=1 and asserts it, so
+// neither forward reaches these stubs. Only flash_attn_with_kvcache, whose caller
+// picks num_splits, still can; nothing in Halo calls it.
 //
 // If/when CUDA 13.3+ fixes the ptxas regression, drop this file and restore
 // the original split .cu kernels.

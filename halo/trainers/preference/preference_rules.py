@@ -4,11 +4,6 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.models.attention.selection import (
-    VARLEN_ATTN_IMPLEMENTATIONS,
-    effective_attn_implementation,
-    is_flash_attn_implementation,
-)
 from halo.trainers.parallelism.pipeline_rules import reject_pp_peft
 
 # Why each DPO loss type that couples the whole batch cannot be split into pipeline microbatches.
@@ -20,24 +15,6 @@ _PP_BATCH_COUPLED_DPO_LOSSES = {
     "sft": "its cross-entropy is a mean over the whole batch's chosen completion tokens — a "
     "batch-global token denominator that changes with the microbatch split",
 }
-
-
-def reject_padding_free_without_varlen(model_config) -> None:
-    """Refuse a padding-free run unless the decoder runs a varlen kernel.
-
-    Read off the decoder's own config level: a VLM wrapper records the backend on its text
-    sub-config, so a top-level read reports ``None`` and would refuse a model running flash attention.
-    """
-    attn_impl = effective_attn_implementation(model_config)
-    if not is_flash_attn_implementation(attn_impl):
-        raise ValueError(
-            f"padding_free is not supported with attn_implementation='{attn_impl}': it has no "
-            f"varlen kernel. Padding-free flattens the batch into one [1, total_tokens] "
-            f"sequence carrying no attention mask, so every example would attend across the "
-            f"whole batch and the preference logps would be computed on contaminated "
-            f"contexts — silently. Use one of {list(VARLEN_ATTN_IMPLEMENTATIONS)}, or set "
-            f"padding_free: false."
-        )
 
 
 def reject_smpo_options(args, parallelism_config: ParallelismConfig | None) -> None:

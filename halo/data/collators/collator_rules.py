@@ -65,61 +65,63 @@ def reject_fa4_varlen_training(model_config, *, varlen_rows: bool, attn_impl: st
         return
     raise ValueError(
         f"attn_implementation='flash_attention_4' cannot train this model on packed, padding-free or padded rows: "
-        f"they reach FA4's varlen kernels, which are not validated with {refused} (on B300 their forward with it "
-        f"did not finish). "
+        f"they reach FA4's varlen kernels, which are not validated with {refused}. "
         f"Leave attn_implementation unset (these rows then take flash_attention_2) or set flash_attention_2, or "
         f"train unpacked at per_device_train_batch_size: 1 (and per_device_eval_batch_size: 1 where the run "
         f"evaluates), whose rows run FA4's dense kernel."
     )
 
 
+def has_dense_kernel_row_refusal(model_config, *, padding_free: bool, packing: bool) -> bool:
+    """Whether a dense attention kernel refuses these multi-document rows of ``model_config``: a padding-free row,
+    whose ``cu_seq_lens`` only a varlen kernel reads, or a packed row on a family whose dense forward attends across
+    its documents."""
+    return model_config is not None and (padding_free or (packing and has_dense_packing_leak(model_config)))
+
+
 def reject_dense_attention_rows(model_config, attn_impl: str | None, *, padding_free: bool, packing: bool) -> None:
-    """Refuse the multi-document rows a model whose decoder runs the dense kernel ``attn_impl`` cannot serve: a
-    padding-free row, whose ``cu_seq_lens`` only a varlen kernel reads, and a packed row on a family whose dense
-    forward attends across its documents. ``attn_impl`` is the loaded model's backend, or the one a script
+    """Refuse the multi-document rows a model whose decoder runs the dense kernel ``attn_impl`` cannot serve
+    (:func:`has_dense_kernel_row_refusal`). ``attn_impl`` is the loaded model's backend, or the one a script
     resolves for its checkpoint before the load."""
-    if model_config is None or is_flash_attn_implementation(attn_impl):
+    if is_flash_attn_implementation(attn_impl) or not has_dense_kernel_row_refusal(
+        model_config, padding_free=padding_free, packing=packing
+    ):
         return
     if padding_free:
         raise ValueError(
             f"padding_free requires a varlen attention kernel, but this model resolved to "
             f"attn_implementation={attn_impl!r}. Only {list(VARLEN_ATTN_IMPLEMENTATIONS)} consume "
-            f"cu_seqlens, so the cu_seq_lens this collator exists to emit go unread — it buys "
+            f"cu_seqlens, so the cu_seq_lens a flattened row exists to carry go unread — it buys "
             f"nothing here, while still paying a dense mask over the flattened batch's TOTAL "
-            f"token count. Use packing: true instead (same isolation, and it raises tokens per "
-            f"row on any kernel), or a model that resolves to flash attention."
+            f"token count. Use a model that resolves to flash attention, or set padding_free: false; "
+            f"under SFT, packing: true keeps the same isolation and raises tokens per row on any kernel."
         )
-    if packing and has_dense_packing_leak(model_config):
-        raise ValueError(
-            f"packing=True on attn_implementation={attn_impl!r} is refused for "
-            f"model_type={getattr(model_config, 'model_type', None)!r}: this family's forward does not pass "
-            f"position_ids into its mask construction, so the packed row runs as ONE dense "
-            f"causal sequence and documents attend across each other — silently. Use a varlen "
-            f"attention implementation ({list(VARLEN_ATTN_IMPLEMENTATIONS)}) where the family has "
-            f"one, or disable packing."
-        )
+    raise ValueError(
+        f"packing=True on attn_implementation={attn_impl!r} is refused for "
+        f"model_type={getattr(model_config, 'model_type', None)!r}: this family's forward does not pass "
+        f"position_ids into its mask construction, so the packed row runs as ONE dense "
+        f"causal sequence and documents attend across each other — silently. Use a varlen "
+        f"attention implementation ({list(VARLEN_ATTN_IMPLEMENTATIONS)}) where the family has "
+        f"one, or disable packing."
+    )
 
 
-def _reject_dense_attention_rows(model_config, *, padding_free: bool, packing: bool) -> None:
-    """Refuse (or warn about) a multi-document row on a model whose decoder (read through a VLM wrapper's
-    text sub-config) resolved to a dense kernel."""
-    attn_impl = effective_attn_implementation(model_config)
-    if model_config is None or is_flash_attn_implementation(attn_impl):
+def _warn_dense_packed_rows(model_config, attn_impl: str | None, *, packing: bool) -> None:
+    """Warn that packed rows on the dense kernel ``attn_impl`` run as one sequence under a dense mask."""
+    if model_config is None or not packing or is_flash_attn_implementation(attn_impl) or not is_global_main_process():
         return
-    reject_dense_attention_rows(model_config, attn_impl, padding_free=padding_free, packing=packing)
-    if packing and is_global_main_process():
-        logger.warning(
-            "packing=True on attn_implementation=%r: this backend materializes a dense mask "
-            "from the packed position_ids rather than consuming cu_seqlens — and the packed "
-            "rows are flattened into one sequence, so that mask's side is the whole batch's "
-            "token count, up to per_device_train_batch_size * max_length. Keep "
-            "per_device_train_batch_size at 1 and scale the batch with "
-            "gradient_accumulation_steps (pipeline parallelism excepted: it keeps the rows and "
-            "splits them into microbatches). Expected on models that cannot run a varlen "
-            "kernel. Isolation is family-dependent: the families whose mixers carry state across "
-            "document boundaries on every backend are listed in agent-docs/data/collators.md.",
-            attn_impl,
-        )
+    logger.warning(
+        "packing=True on attn_implementation=%r: this backend materializes a dense mask "
+        "from the packed position_ids rather than consuming cu_seqlens — and the packed "
+        "rows are flattened into one sequence, so that mask's side is the whole batch's "
+        "token count, up to per_device_train_batch_size * max_length. Keep "
+        "per_device_train_batch_size at 1 and scale the batch with "
+        "gradient_accumulation_steps (pipeline parallelism excepted: it keeps the rows and "
+        "splits them into microbatches). Expected on models that cannot run a varlen "
+        "kernel. Isolation is family-dependent: the families whose mixers carry state across "
+        "document boundaries on every backend are listed in agent-docs/data/collators.md.",
+        attn_impl,
+    )
 
 
 def reject_mrope_padding_free(model_config, *, padding_free: bool) -> None:
@@ -151,6 +153,46 @@ def reject_padding_free_conflicts(*, padding_free: bool, packing: bool, use_cont
             "CP requires fixed-length sequences for collective synchronization. "
             "Please disable padding_free when using CP."
         )
+
+
+def resolve_multi_document_mode(*, packing: bool, padding_free: bool) -> str | None:
+    """The flag that asks for multi-document rows, ``"packing"`` or ``"padding_free"``, or ``None`` for one document
+    per row (:func:`reject_padding_free_conflicts` refuses both at once)."""
+    if packing:
+        return "packing"
+    return "padding_free" if padding_free else None
+
+
+def reject_multi_document_rows(
+    model_config,
+    mode: str | None,
+    *,
+    attn_impl: str | None,
+    allow_cross_document_linear_attention: bool,
+    keeps_packed_rows: bool,
+    varlen_rows: bool,
+) -> None:
+    """Refuse the rows ``model_config`` cannot keep apart, or no kernel it runs can serve: a multi-document row
+    (``mode``: ``"packing"`` or ``"padding_free"``, ``None`` for one document per row) on an M-RoPE decoder
+    (padding-free), on compressed-KV layers, on the dense kernel ``attn_impl`` (:func:`reject_dense_attention_rows`),
+    on GatedDeltaNet layers without their segment-aware kernels, or on linear attention no segment marker reaches
+    unless ``allow_cross_document_linear_attention``; a packed row a pipeline stage keeps (``keeps_packed_rows``);
+    and FA4 on rows that reach its varlen call (``varlen_rows``). ``attn_impl`` is the loaded model's backend, or the
+    one a script resolves for its checkpoint before the load."""
+    padding_free, packing = mode == "padding_free", mode == "packing"
+    reject_mrope_padding_free(model_config, padding_free=padding_free)
+    if mode is not None:
+        reject_compressed_kv_rows(model_config, mode)
+    reject_dense_attention_rows(model_config, attn_impl, padding_free=padding_free, packing=packing)
+    reject_fa4_varlen_training(model_config, varlen_rows=varlen_rows, attn_impl=attn_impl)
+    if mode is None:
+        return
+    require_segment_aware_kernels(model_config, mode)
+    reject_unmarked_linear_attention_rows(
+        model_config, mode, allow_cross_document_linear_attention=allow_cross_document_linear_attention
+    )
+    if packing and keeps_packed_rows:
+        reject_pipeline_packed_rows(model_config)
 
 
 def reject_unsupported_collator_options(
@@ -185,10 +227,13 @@ def reject_unsupported_collator_options(
             per_device_train_batch_size,
             per_device_train_batch_size,
         )
-    _reject_dense_attention_rows(model_config, padding_free=padding_free, packing=packing)
-    reject_mrope_padding_free(model_config, padding_free=padding_free)
-    reject_fa4_varlen_training(
+    attn_impl = effective_attn_implementation(model_config)
+    reject_multi_document_rows(
         model_config,
+        resolve_multi_document_mode(packing=packing, padding_free=padding_free),
+        attn_impl=attn_impl,
+        allow_cross_document_linear_attention=allow_cross_document_linear_attention,
+        keeps_packed_rows=keeps_packed_rows,
         varlen_rows=rows_reach_varlen_kernel(
             packing=packing,
             padding_free=padding_free,
@@ -196,20 +241,12 @@ def reject_unsupported_collator_options(
             per_device_eval_batch_size=per_device_eval_batch_size,
         ),
     )
+    _warn_dense_packed_rows(model_config, attn_impl, packing=packing)
     reject_unusable_response_marker(
         tokenizer, assistant_message_template, train_on_completions_only, "select_data_collator"
     )
     if train_on_last_assistant_only and not train_on_completions_only:
         raise ValueError("train_on_last_assistant_only=True requires train_on_completions_only=True")
-    if packing or padding_free:
-        mode = "packing" if packing else "padding_free"
-        reject_compressed_kv_rows(model_config, mode)
-        require_segment_aware_kernels(model_config, mode)
-        reject_unmarked_linear_attention_rows(
-            model_config, mode, allow_cross_document_linear_attention=allow_cross_document_linear_attention
-        )
-    if packing and keeps_packed_rows:
-        reject_pipeline_packed_rows(model_config)
     if use_context_parallel and packing:
         raise ValueError(
             "packing is not supported with Context Parallelism: the CP attention path has no "

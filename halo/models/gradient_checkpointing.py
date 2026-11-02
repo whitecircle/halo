@@ -31,9 +31,9 @@ class RecomputeScope:
     """One checkpoint invocation's replay cache, entered once per pass.
 
     ``slot(owner, name)`` hands out that owner's cache dict for the current call, in call order
-    within the pass: the first pass creates slots, later passes re-read them positionally. Keyed by
-    checkpoint frame rather than by layer or grad mode: a 1F1B pipeline schedule keeps several
-    microbatches in flight, and the non-reentrant checkpoint runs both passes with grad enabled.
+    within the pass: the first pass creates slots, the recompute re-reads them positionally and releases
+    them as it exits. Keyed by checkpoint frame rather than by layer or grad mode: a 1F1B pipeline schedule
+    keeps several microbatches in flight, and the non-reentrant checkpoint runs both passes with grad enabled.
     """
 
     __slots__ = ("_slots", "_cursors", "_pass", "grad_enabled")
@@ -76,6 +76,10 @@ class RecomputeScope:
 
     def __exit__(self, *exc_info) -> bool:
         _stack().pop()
+        # The recompute is the last pass that reads the slots: the reentrant checkpoint keeps this scope until the
+        # loss is dropped, and with it every layer's replay cache, DeepEP receive buffers included.
+        if self.is_recompute:
+            self._slots.clear()
         return False
 
 

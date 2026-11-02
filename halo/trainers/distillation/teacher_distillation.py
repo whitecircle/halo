@@ -5,7 +5,6 @@ require wrapping both models). Same-model variants live in ``self_distillation``
 
 import logging
 from collections.abc import Callable
-from contextlib import nullcontext
 
 import torch
 import torch.nn as nn
@@ -33,6 +32,7 @@ from halo.trainers.distillation.divergences import (
     require_divergence,
     shifted_token_cross_entropy,
     token_divergence,
+    token_divergence_and_cross_entropy,
     uses_hard_labels,
 )
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
@@ -179,9 +179,18 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         with torch.no_grad():
             teacher_logits = self.teacher_model(**model_inputs).logits[..., :-1, : self._vocab_width]
 
-        distillation_loss = token_divergence(
-            self.distillation_loss_fn, student_logits, teacher_logits, self.args.distill_temperature, hard_labels
-        )
+        # The CLM term is METRIC-ONLY at distill_alpha=1.0: a grad-carrying cross-entropy there would
+        # be built and backward-ed for a summand of exactly zero. Rank-uniform config, so no rank
+        # builds a different graph. In the loss it shares the divergence's chunked pass, so backward builds
+        # one gradient plane of the student logits, not one per term.
+        clm_in_loss = self.args.distill_alpha != 1.0
+        divergence_args = (self.distillation_loss_fn, student_logits, teacher_logits, self.args.distill_temperature)
+        if clm_in_loss:
+            distillation_loss, token_cross_entropy = token_divergence_and_cross_entropy(*divergence_args, hard_labels)
+        else:
+            distillation_loss = token_divergence(*divergence_args, hard_labels)
+            with torch.no_grad():
+                token_cross_entropy = shifted_token_cross_entropy(student_logits, hard_labels)
         metrics = {}
 
         if self.args.apply_hard_labels:
@@ -190,13 +199,7 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
             metrics["distillation_coef"] = global_token_mean(gate, supervised)
 
         distillation_loss = global_token_mean(distillation_loss, supervised)
-
-        # The CLM term is METRIC-ONLY at distill_alpha=1.0: a grad-carrying cross-entropy there would
-        # be built and backward-ed for a summand of exactly zero. Rank-uniform config, so no rank
-        # builds a different graph.
-        clm_in_loss = self.args.distill_alpha != 1.0
-        with nullcontext() if clm_in_loss else torch.no_grad():
-            sft_loss = global_token_mean(shifted_token_cross_entropy(student_logits, hard_labels), supervised)
+        sft_loss = global_token_mean(token_cross_entropy, supervised)
 
         loss = self.args.distill_alpha * distillation_loss
         if clm_in_loss:

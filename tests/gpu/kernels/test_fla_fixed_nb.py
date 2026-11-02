@@ -23,7 +23,7 @@ from fla.modules.l2norm import l2norm
 from triton import knobs
 
 from halo.kernels.fla_launch import FIXED_NB_FLAG, FIXED_NB_KERNELS, triton_autotuner
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.rank_log import log
 

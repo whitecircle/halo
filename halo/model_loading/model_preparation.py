@@ -8,6 +8,7 @@ from transformers import (
     AutoConfig,
     AutoModelForCausalLM,
     AutoModelForImageTextToText,
+    PretrainedConfig,
     PreTrainedModel,
 )
 from transformers.models.auto.modeling_auto import (
@@ -22,7 +23,9 @@ from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import (
     install_fa4_varlen_softcap_refusal,
     patch_sdpa_for_wide_heads,
+    patch_transformers_flash_unpad_memo,
     patch_transformers_flash_varlen_int_seqlen,
+    patch_transformers_packed_sequence_probe,
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
 from halo.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
@@ -32,7 +35,7 @@ from halo.models.attention.selection import (
     has_head_dim_beyond_flash,
     is_flash_attn_implementation,
 )
-from halo.models.config_access import model_type_matches
+from halo.models.config_access import drop_toolkit_stamps, model_type_matches
 from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
 from halo.models.zaya import apply_zaya_patches
 from halo.runtime.ranks import is_global_main_process
@@ -109,22 +112,42 @@ def resolve_auto_model_class(model_config, *, text_only: bool = False):
     return AutoModelForCausalLM
 
 
+def resolve_build_config(
+    model_name_or_path: str, *, revision: str | None, trust_remote_code: bool
+) -> PretrainedConfig:
+    """The config a build of ``model_name_or_path`` takes as ``config``, once the caller has applied
+    :func:`apply_family_patches` to it: read at ``revision`` after the remote-code shims, without the toolkit stamps a
+    checkpoint's ``config.json`` can carry.
+
+    A build that reads ``config.json`` itself loses the run-scoped stamps the patches set, so Qwen3.8-Flash-Next's
+    n-gram table builds as a trainable ``nn.Embedding`` instead of a host table.
+    """
+    # Before the config fetch, which can already import a remote modeling file.
+    apply_remote_code_compat_shims()
+    config = AutoConfig.from_pretrained(model_name_or_path, revision=revision, trust_remote_code=trust_remote_code)
+    drop_toolkit_stamps(config)
+    return config
+
+
 def auto_load_model(
     model_name_or_path: str, *, trust_remote_code: bool = False, model_class=None, text_only: bool = False, **kwargs
 ):
     """Load a model from a path, picking the widest Auto* class for its config unless one is pinned.
 
     The unsharded load core: the compat shims, the config fetch, the class resolution and the
-    coverage-verified ``from_pretrained``. ``model_class`` pins the class and skips the config fetch;
-    ``text_only`` is :func:`resolve_auto_model_class`'s.
+    coverage-verified ``from_pretrained``. ``model_class`` pins the class; otherwise a ``config`` in ``kwargs``
+    (the one the build takes) resolves it, or the checkpoint's is fetched. ``text_only`` is
+    :func:`resolve_auto_model_class`'s.
     """
     # Before the config fetch, which can already import a remote modeling file.
     apply_remote_code_compat_shims()
     if model_class is None:
-        # revision must reach the config fetch too, else a pinned checkpoint pairs with hub-main's config.
-        config = AutoConfig.from_pretrained(
-            model_name_or_path, trust_remote_code=trust_remote_code, revision=kwargs.get("revision")
-        )
+        config = kwargs.get("config")
+        if config is None:
+            # revision must reach the config fetch too, else a pinned checkpoint pairs with hub-main's config.
+            config = AutoConfig.from_pretrained(
+                model_name_or_path, trust_remote_code=trust_remote_code, revision=kwargs.get("revision")
+            )
         model_class = resolve_auto_model_class(config, text_only=text_only)
     return from_pretrained_verified(model_class, model_name_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
@@ -141,10 +164,18 @@ def apply_family_patches(model_config, attn_implementation: str | None) -> str |
     """
     if attn_implementation == "sdpa" and has_head_dim_beyond_flash(model_config):
         patch_sdpa_for_wide_heads()
+    # Else every forward's mask construction reads back whether position_ids hold packed documents, for a packed
+    # mask flash never reads.
+    if is_flash_attn_implementation(attn_implementation):
+        patch_transformers_packed_sequence_probe()
     # Else Mistral4's attention swallows position_ids before the flash interface, so the varlen
     # packed path never engages and packed documents attend across each other.
     if is_flash_attn_implementation(attn_implementation) and model_type_matches(model_config, "mistral4"):
         patch_mistral4_flash_packed_position_ids()
+    # Else every attention layer of a padded batch re-derives the unpad set, a nonzero and a host read each, and
+    # again in the checkpoint recompute.
+    if is_flash_attn_implementation(attn_implementation):
+        patch_transformers_flash_unpad_memo()
     # Load recording for the native balancing buffer, the GC refusal, and the packed-document plumbing
     # its model forward lacks (it never passes position_ids down to attention or the CCA convs).
     if model_type_matches(model_config, "zaya"):

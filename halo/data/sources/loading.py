@@ -304,8 +304,15 @@ def _load_single(
 
 
 def _reject_empty_splits(ds: DatasetDict, sharded: bool) -> None:
-    """Refuse an empty train or test split, logging each split's size and columns as it passes."""
-    if len(ds["train"]) == 0:
+    """COLLECTIVE when ``sharded``: refuse an empty train or test split, logging each split's size and columns
+    as it passes. Sharded, an empty train slice on any rank raises on every rank, while the test split raises
+    only when empty on all of them."""
+    train_empty = len(ds["train"]) == 0
+    if sharded:
+        # Ratio subsetting can floor one rank's slice to zero rows; its peers must raise with it, not block in
+        # the test verdict's all-reduce below.
+        train_empty = not rank_consensus(not train_empty).all_ok
+    if train_empty:
         raise ValueError("No training data after schema normalization. Please check your dataset.")
     if is_global_main_process():
         logger.info(f"Training data after schema normalization: {len(ds['train'])}")

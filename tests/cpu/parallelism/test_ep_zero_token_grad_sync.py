@@ -9,13 +9,13 @@ loop template short-circuit on ``tokens.shape[0] == 0``), so those weights end t
 the rank's replicas — which DID receive tokens — would block forever inside a collective it never
 entered.
 
-The guarantee is structural, not a guard: ``EPConfig.defer_grad_sync`` covers EVERY multi-EP-group
+The guarantee is structural, not a guard: ``EPConfig.sweep_reduces_across_replicas`` covers EVERY multi-EP-group
 topology (not just the cross-node ``is_deferred_dp`` one), routing the sum through the trainer's
 post-backward sweep, which walks ``named_parameters()`` and agrees grad presence over its reduce group
 (zero-filling a grad only a peer holds) so membership is rank-uniform. Grad-equivalence holds: a zero
 grad contributes nothing to the SUM. With one EP group the sweep only divides the experts, by
 ``world_size // expert_tp_size``, with no collective, so a rank holding no expert grad skips nothing its
-peers enter (``EPConfig.defer_expert_grad_sync``; a hook would divide once per nested backward of a
+peers enter (``EPConfig.runs_post_backward_sweep``; a hook would divide once per nested backward of a
 reentrant recompute).
 
 The end-to-end proof is a GPU test: an 8-GPU ``ep_size=2`` run (4 EP groups, one NVLink domain — the
@@ -66,7 +66,7 @@ def test_single_domain_multigroup_ep_defers():
     assert cfg.num_ep_groups == 4
     assert cfg.needs_expert_grad_sync
     assert not cfg.is_deferred_dp, "single-domain multi-group EP is NOT is_deferred_dp — the whole point"
-    assert cfg.defer_grad_sync
+    assert cfg.sweep_reduces_across_replicas
 
 
 def test_single_ep_group_keeps_the_router_hook_and_defers_the_expert_divide():
@@ -76,8 +76,8 @@ def test_single_ep_group_keeps_the_router_hook_and_defers_the_expert_divide():
     cfg = _make_ep(0, world_size=8, stage_world_size=8, ep_size=8, nvlink_domain_size=8, node_local=True)
     assert cfg.num_ep_groups == 1
     assert not cfg.needs_expert_grad_sync
-    assert not cfg.defer_grad_sync
-    assert cfg.defer_expert_grad_sync
+    assert not cfg.sweep_reduces_across_replicas
+    assert cfg.runs_post_backward_sweep
 
 
 def test_fsdp_managed_ep1_experts_never_defer():
@@ -96,7 +96,7 @@ def test_fsdp_managed_ep1_experts_never_defer():
     assert cfg.ep_group_size == 1
     assert cfg.needs_expert_grad_sync
     assert cfg.experts_fsdp_managed
-    assert not cfg.defer_grad_sync
+    assert not cfg.sweep_reduces_across_replicas
 
 
 def test_no_topology_leaves_a_reducing_hook_on_any_rank():
@@ -119,7 +119,7 @@ def test_no_topology_leaves_a_reducing_hook_on_any_rank():
                 rank, world_size=world, stage_world_size=world, nvlink_domain_size=world, node_local=True, **shape
             )
             assert not (cfg.uses_backward_grad_hooks and cfg.needs_expert_grad_sync), (shape, rank)
-            assert cfg.defer_expert_grad_sync == (not cfg.experts_fsdp_managed), (shape, rank)
+            assert cfg.runs_post_backward_sweep == (not cfg.experts_fsdp_managed), (shape, rank)
 
 
 # The single-group expert sweep is collective-free
@@ -133,8 +133,8 @@ def _single_group_sweep(expert_grad: torch.Tensor | None) -> nn.Parameter:
     model.expert = expert
     host = SimpleNamespace(
         _ep_config=SimpleNamespace(
-            defer_grad_sync=False,
-            defer_expert_grad_sync=True,
+            sweep_reduces_across_replicas=False,
+            runs_post_backward_sweep=True,
             expert_replica_group=None,
             stage_world_size=8,
             expert_tp_size=2,

@@ -3,6 +3,7 @@
 import os
 from datetime import timedelta
 
+from halo.checkpoint.writing import resolve_checkpoint_write_threads, validate_checkpoint_write_threads
 from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
 from halo.distributed.expert_parallel.deepep.settings import (
     DEEPEP_GPU_TIMEOUT_S,
@@ -38,6 +39,7 @@ def rank_uniform_settings() -> dict[str, object]:
         "HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK": GIN_MAX_TOKENS_PER_RANK,
         # In the unit the operator sets, so a divergence message names a value they can grep for.
         "HALO_GRAD_BUCKET_MB": GRAD_BUCKET_MB,
+        "HALO_CHECKPOINT_WRITE_THREADS": resolve_checkpoint_write_threads(),
         "DIST_NCCL_TIMEOUT_MINUTES": nccl_timeout() // timedelta(minutes=1),
         "DIST_STORE_TIMEOUT_HOURS": store_timeout() // timedelta(hours=1),
         "DIST_FS_PROBE_TIMEOUT_SECONDS": fs_probe_timeout() // timedelta(seconds=1),
@@ -47,7 +49,8 @@ def rank_uniform_settings() -> dict[str, object]:
 
 
 def agree_rank_uniform_env() -> None:
-    """COLLECTIVE over the world. Raise when ranks disagree on a setting in :func:`rank_uniform_settings`.
+    """COLLECTIVE over the world. Raise when ranks disagree on a setting in :func:`rank_uniform_settings`, and on
+    every rank when the agreed ``HALO_CHECKPOINT_WRITE_THREADS`` is negative.
 
     A divergence is a hang, not a slow run: a rank with ``HALO_EP_CAPACITY_DEDUP`` off runs the
     capacity all-reduce on every MoE layer while its peers run it once. Runs at most once per process,
@@ -62,9 +65,12 @@ def agree_rank_uniform_env() -> None:
         "Every rank of the job must agree on these — the check is world-wide, because "
         "HALO_EP_CAPACITY_DEDUP changes how many collectives a rank runs, HALO_GRAD_BUCKET_MB sets "
         "the chunk boundaries of the bucketed gradient reductions (EP, TP and QLoRA sweeps alike), "
+        "HALO_CHECKPOINT_WRITE_THREADS whether a rank refuses a save its peers have entered, "
         "DIST_NCCL_TIMEOUT_MINUTES / DIST_STORE_TIMEOUT_HOURS decide which rank gives up on a join "
         "first, DIST_FS_PROBE_TIMEOUT_SECONDS how long every rank looks for the filesystem probe's file, "
         "FLASH_ATTENTION_DETERMINISTIC which attention backend a head_dim-256 model loads (FA4 or its "
         "fallback), and the rest are wire parameters shared by both ends of the all-to-all.",
     )
+    # Agreed by now, so a refused count raises on every rank before a save's first gather.
+    validate_checkpoint_write_threads(resolve_checkpoint_write_threads())
     _env_uniformity_verified = has_process_group()

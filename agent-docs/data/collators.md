@@ -80,7 +80,7 @@ document).
 
 ### One-document batches
 
-Without the set, an unpacked batch-1 row costs every flash attention layer a packed-row check (`_is_packed_sequence`, a device sync), again in each checkpoint recompute, before transformers runs its dense kernel: two per layer and step under gradient checkpointing. Where `select_data_collator` gets `one_document_varlen=True` (the SFT script passes it), a batch that is one unpadded document (an unpacked batch-1 row, a one-document packed row, a `wrapped` row) carries the set too: `cu_seq_lens_q/k` `[0, S]` and host-int `max_length_q/k` `S`, what transformers derives from its positions (`single_row_varlen_kwargs` in `halo/models/segment_markers.py`). Attention then runs the varlen kernel over one segment and no layer checks the row. The set is all the collator adds: every other tensor of the batch is the one the route builds without it. With neither packing nor completion masking the factory returns `DataCollatorForLanguageModelingWithVarlen`, TRL's own SFT collator handing the set, built with the `pad_token_id` and `pad_to_multiple_of` TRL builds its default with; without the opt-in it returns `None` there and TRL builds its own.
+Without the set, an unpacked batch-1 row costs every flash attention layer a packed-row check (`_is_packed_sequence`, a device sync), again in each checkpoint recompute, before transformers runs its dense kernel: two per layer and step under gradient checkpointing. Where `select_data_collator` gets `emit_varlen_one_document=True` (the SFT script passes it), a batch that is one unpadded document (an unpacked batch-1 row, a one-document packed row, a `wrapped` row) carries the set too: `cu_seq_lens_q/k` `[0, S]` and host-int `max_length_q/k` `S`, what transformers derives from its positions (`single_row_varlen_kwargs` in `halo/models/segment_markers.py`). Attention then runs the varlen kernel over one segment and no layer checks the row. The set is all the collator adds: every other tensor of the batch is the one the route builds without it. With neither packing nor completion masking the factory returns `DataCollatorForLanguageModelingWithVarlen`, TRL's own SFT collator handing the set, built with the `pad_token_id` and `pad_to_multiple_of` TRL builds its default with; without the opt-in it returns `None` there and TRL builds its own.
 
 The set is handed on FA2, FA3 and FA4 only, and not to a model whose GatedDeltaNet layers read it too (Qwen3.5/3.6, Qwen3-Next: the delta rule would take its varlen path) or whose attention FA4's varlen kernels refuse (`fa4_varlen_refusal`: Gemma 2's softcap, whose one-document rows keep FA4's dense kernel); `supports_one_document_varlen_set` in `collator_rules.py` is the rule. Never under CP (Ulysses passes its own `cu_seqlens`) or PP (each stage builds the set of its packed microbatches), and not for teacher distillation, whose batch also reaches the teacher. A batch of several rows or a padded one keeps transformers' mask path, and a multi-document packed row the set of its documents. A remote-code forward declaring no `**kwargs` raises on the set at the first step, as it does on a packed row's.
 
@@ -108,7 +108,7 @@ Flags, keyword-only: `train_on_completions_only` (required: the run's own settin
 `packing=False`, `assistant_message_template=None`, `pad_to_multiple_of=None`, `use_context_parallel=False`,
 `train_on_last_assistant_only=False`, `model_config=None`, `per_device_train_batch_size=1`,
 `keeps_packed_rows=False`, `allow_cross_document_linear_attention=False`, `per_device_eval_batch_size=0`,
-`one_document_varlen=False` ([One-document batches](#one-document-batches)). With `packing` above batch 1 the collator merges the mini-batch's packed
+`emit_varlen_one_document=False` ([One-document batches](#one-document-batches)). With `packing` above batch 1 the collator merges the mini-batch's packed
 rows into one row (document isolation and throughput unchanged), and the factory warns: raise
 `max_length` instead when a longer pack is the intent. `keeps_packed_rows` suppresses that warning;
 only the PP seam sets it.
@@ -122,7 +122,7 @@ terminators live in `config.eos_token_id` (GLM-4). The SFT script passes it.
 |---------------|----------|
 | CP + packing | **rejected** — the Ulysses CP attention path has no per-document boundaries, so packed documents would attend across each other |
 | PP + padding_free | **rejected** — the flattened width varies per step while the pipeline's P2P buffers are frozen after the first |
-| padding_free on an M-RoPE decoder (Qwen3.5/3.6 text towers included, the Qwen-VL text models) | **rejected** on every backend (`reject_mrope_padding_free`), as is a padding-free collator handed straight to the SFT trainer (`reject_mrope_padding_free_collator`) — the flattened M-RoPE row faults the flash varlen kernels; `packing` serves the same rows |
+| padding_free on an M-RoPE decoder (Qwen3.5/3.6 text towers included, the Qwen-VL text models) | **rejected** on every backend (`reject_mrope_padding_free`), as is a padding-free collator handed straight to the SFT trainer (`reject_multi_document_collator` in `halo/trainers/trainer_rules.py`) — the flattened M-RoPE row faults the flash varlen kernels; `packing` serves the same rows |
 | PP + packing on a model whose conv / linear-attention layers read segment markers (GatedDeltaNet, LFM-2 ShortConv) or no boundary at all (KDA, Lightning Attention-2) | **rejected** — a stage's forward passes those layers no segment marker, so they cross the kept rows' documents ([PP packing](../parallelism/pipeline-parallelism.md#packing)) |
 | CP + completion masking | `DataCollatorForCompletionOnlyLM` (CP mode) |
 | CP | `DataCollatorForCausalLMWithPadding` (a label-preserving `DataCollatorForLanguageModeling` subclass in `padded.py`) |
@@ -159,7 +159,7 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | Family | Attention layers | Other layers |
 |---|---|---|
 | Qwen3 (dense + MoE), GLM-4 MoE Lite, Laguna, Gemma 4 | isolated on their supported backends | — |
-| Inkling | isolated | four depthwise causal convs per layer **cross by construction** — the modeling reads `seq_idx` but its call sites never forward kwargs, so no emission can reach them |
+| Inkling | isolated | four depthwise causal convs per layer **cross by construction** — the modeling reads `seq_idx` but its call sites never forward kwargs, so no emission can reach them; `packing` and `padding_free` are **refused** unless `allow_cross_document_linear_attention` |
 | Mistral4 | isolated — flash needs `patch_mistral4_flash_packed_position_ids` (upstream drops `position_ids` before the attention interface); dense clean to grouped-GEMM reduction noise | — |
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
 | DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors cut KV windows at row indices and judge their causality by position, so every document after the first attends the row's first windows — `packing` and `padding_free` are **refused** |
@@ -187,7 +187,7 @@ too, so a composite (VLM) wrapper is covered:
   at row indices, so a later document reads another document's compressed KV as its own context.
   Train with padded batches. The SFT script runs the same check before the model load,
   `prepare_dataset.py` before an offline `--pack_sequences` pass, and the SFT trainer for a
-  packing / padding-free collator handed to it directly (`reject_compressed_kv_collator`, keyed on
+  packing / padding-free collator handed to it directly (`reject_multi_document_collator`, keyed on
   the same two collator roots as the CP gate), as does SMPO for its `padding_free` forward.
 
 Which families get which segment markers, and the kernel refusal below, live in
@@ -209,17 +209,18 @@ hold, so the refusal cannot disagree with the kernels actually selected (the pro
 satisfy them).
 
 "Crosses by construction" applies where the mixer has no per-document boundary parameter at
-all (Inkling's convs). Pack such a family only where a small amount of cross-document mixing is
-acceptable, and prefer padded batches when it is not.
+all (Inkling's convs). Such a family's rows are refused as unmarked linear attention's are, below, and
+the same opt-in admits them where a small amount of cross-document mixing is acceptable.
 
 A linear-attention layer no segment marker reaches is refused unless the run opts in:
-`has_unmarked_linear_attention` (`halo/models/segment_markers.py`) reads hybrid layer groups
+`find_unmarked_sequence_mixer` (`halo/models/segment_markers.py`) reads hybrid layer groups
 (`layer_group_size` above 1: Ring's Lightning Attention-2, Ling 3.0's KDA) or `linear_attention` layer
-types (GLM-5 Next's KDA) outside the families that read `cu_seq_lens`. SFT's `packing` / `padding_free`
+types (GLM-5 Next's KDA) outside the families that read `cu_seq_lens`, and the sequence mixer a family spec
+names in `unmarked_sequence_mixer` (Inkling's short convolutions). SFT's `packing` / `padding_free`
 (before the model load and again at collator selection) and SMPO's `padding_free` raise on every backend
 through `reject_unmarked_linear_attention_rows`, flash included, where the softmax layers isolate and the
 loss shows nothing. So does the SFT trainer for a packing / padding-free collator handed to it directly
-(`reject_unmarked_linear_attention_collator`), under the opt-in the factory records on the collators it
+(`reject_multi_document_collator`), under the opt-in the factory records on the collators it
 builds; a tree collator is left to its plan. `allow_cross_document_linear_attention: true` (`SFTScriptArguments`, `SMPOConfig`)
 trains such rows anyway, with a warning: those layers' recurrent state then carries from each document of
 a row into the next. It admits no GLM-5 Next row: the family runs only dense backends, where its DSA
@@ -248,7 +249,7 @@ they score packed rows under the same masks the student does.
     warning; its shipped config packs at batch 1. See [Padding-Free Collator](../optimization/padding-free-collator.md).
 
 - **A softcapped model (Gemma 2) does not train on FA4's varlen call**, whose kernels are not validated with a
-  softcap (on B300 their forward with one did not finish). Packed, padding-free and padded rows (more than one
+  softcap. Packed, padding-free and padded rows (more than one
   per batch: transformers unpads any batch holding a padding token) all reach it (`rows_reach_varlen_kernel`). Left unset, `attn_implementation` takes FA2 there; a pinned
   `flash_attention_4` the load keeps (Gemma 2 27B; the resolver moves a head_dim-256 pin to FA2) is refused before
   the load and again on the resolved backend by `select_data_collator` (`reject_fa4_varlen_training`). See [Flash Attention](../optimization/flash-attention.md#model-specific-handling).

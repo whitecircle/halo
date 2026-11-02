@@ -398,7 +398,9 @@ stage of at most 32 ranks, at every NVLink domain dividing the stage, plus the s
 144 and 256 ranks on 8-GPU nodes and 72-GPU NVL72 racks; each grid golden (a `GridGolden`) holds a digest
 per shape plus the full record of a readable subset, so a failure reads as a diff. Notes per golden:
 
-- **`ep_group_order`.** `new_group` is a collective over the default group, so a rank making other calls
+- **`ep_group_order`.** Recorded on a gloo default group, where every group is a `new_group` call (an NCCL group
+  bound to its device splits each call's groups at once: `tests/cpu/parallelism/test_group_split.py`).
+  `new_group` is a collective over the default group, so a rank making other calls
   than rank 0 hangs a real job (the generator raises there), and two calls over the same members build
   two communicators, so a reordered call fails here even where `rank_layout`, which compares memberships,
   passes. `tests/cpu/parallelism/test_parallelism_config_gate_order.py` separately pins the order of

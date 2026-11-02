@@ -14,6 +14,8 @@ import torch.distributed as dist
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.runtime import collectives
+from halo.runtime.ranks import get_global_rank
 
 _MOD = "halo.distributed.parallelism_config"
 _RULES_MOD = "halo.distributed.parallelism_rules"
@@ -56,10 +58,17 @@ class StubGroup(tuple):
 
 
 @contextlib.contextmanager
-def stubbed_process_groups(world_size: int, rank: int, calls: list[StubGroup] | None = None) -> Iterator[None]:
+def stubbed_process_groups(
+    world_size: int, rank: int, calls: list[StubGroup] | None = None, *, splits: list[tuple] | None = None
+) -> Iterator[None]:
     """``torch.distributed`` as global rank ``rank`` of a live ``world_size``-rank job, where
     ``new_group`` returns a :class:`StubGroup`, which compares equal to its member tuple and is read back
-    by ``get_process_group_ranks``. Every group built is appended to ``calls`` when one is given."""
+    by ``get_process_group_ranks``. Every group built is appended to ``calls`` when one is given.
+
+    Groups come from ``new_group`` unless ``splits`` is given: then the default group counts as NCCL bound to a
+    device, ``split_group`` returns the :class:`StubGroup` of the split holding ``rank`` (``None`` outside every
+    split) and each call is appended to ``splits`` as ``(group_desc, split lists)``.
+    """
 
     def new_group(ranks=None, **kwargs):
         group = StubGroup(ranks, kwargs)
@@ -67,11 +76,18 @@ def stubbed_process_groups(world_size: int, rank: int, calls: list[StubGroup] | 
             calls.append(group)
         return group
 
+    def split_group(parent_pg=None, split_ranks=None, **kwargs):
+        splits.append((kwargs.get("group_desc"), [list(ranks) for ranks in split_ranks]))
+        return next((StubGroup(sorted(ranks), kwargs) for ranks in split_ranks if rank in ranks), None)
+
     with (
         patch.object(dist, "is_initialized", new=lambda: True),
         patch.object(dist, "get_rank", new=lambda group=None: rank),
         patch.object(dist, "get_world_size", new=lambda group=None: world_size),
+        # The split verdict alone: a real default group, which some callers hold, keeps answering its collectives.
+        patch.object(collectives, "_splits_default_group", new=lambda: splits is not None),
         patch.object(dist, "new_group", new=new_group),
+        patch.object(dist, "split_group", new=split_group),
         patch.object(dist, "get_process_group_ranks", new=list),
     ):
         yield
@@ -142,12 +158,14 @@ def single_process_ep_config(num_experts: int | None = None, **overrides) -> EPC
     comparison stays in-process. ``use_grouped_gemm=False`` keeps the eager expert loop (the
     grouped-GEMM kernel needs SM90+; a GPU caller overrides it). A layer built directly reads
     ``expert_start_idx``/``expert_end_idx`` at construction, so ``num_experts`` finalizes the expert
-    assignment here; :func:`apply_ep_layers` finalizes it off the model when it is left unset.
+    assignment here; :func:`apply_ep_layers` finalizes it off the model when it is left unset. Inside a
+    live multi-rank group each rank is its own one-rank block, so the groups it creates hold it.
     """
     config = EPConfig(
         **{
             "ep_size": 1,
             "stage_world_size": 1,
+            "stage_base_rank": get_global_rank(),
             "nvlink_domain_size": 1,
             "use_grouped_gemm": False,
             "experts_fsdp_managed": True,

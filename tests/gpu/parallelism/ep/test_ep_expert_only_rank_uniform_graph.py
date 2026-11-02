@@ -190,7 +190,9 @@ def run(ctx):
     # The comparison assumes the single-group regime: the sweep's /world expert divide makes the ep2 gradient
     # the gradient of the mean of both ranks' losses, which is what the reference differentiates.
     checks["single_group_sweep_regime"] = (
-        ep_config.defer_expert_grad_sync and not ep_config.defer_grad_sync and not ep_config.experts_fsdp_managed
+        ep_config.runs_post_backward_sweep
+        and not ep_config.sweep_reduces_across_replicas
+        and not ep_config.experts_fsdp_managed
     )
 
     generator = torch.Generator().manual_seed(SEED)

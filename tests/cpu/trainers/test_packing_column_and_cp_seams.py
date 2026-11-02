@@ -8,9 +8,9 @@
 2. The CP × packing rejection must see a collator passed POSITIONALLY (at TRL's own data_collator
    slot), not only via keyword — a packed collator slipping past the gate under CP attends across
    documents silently.
-3. The compressed-KV rejection must see a packing / padding-free collator handed straight to the
-   trainer, which skips the factory: a multi-document row on DeepSeek-V4's compressors reads another
-   document's compressed KV.
+3. The multi-document row rules must see a packing / padding-free collator handed straight to the trainer,
+   which skips the factory, read on the model the trainer built: a multi-document row on DeepSeek-V4's
+   compressors reads another document's compressed KV.
 4. The M-RoPE rejection must see a padding-free collator handed straight to the trainer: a flattened M-RoPE
    row (every Qwen3.5/3.6 decoder) faults the flash varlen kernels, while ``packing`` serves the same rows.
 5. The unmarked-linear-attention rejection must see a packing / padding-free collator handed straight to the
@@ -37,10 +37,19 @@ from halo.data.collators.packing import (
     DataCollatorWithPacking,
 )
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
+from halo.models import segment_markers
 from halo.trainers.dataloaders import DataParallelLoaderMixin
 from halo.trainers.sft import _CTOR_POSITIONS, DistributedSFTTrainer
 from tests.common.models import TINY_DSV4_CONFIG
 from tests.common.tiny_models import unknown_hybrid_config
+
+
+@pytest.fixture(autouse=True)
+def _segment_aware_kernels(monkeypatch):
+    """The segment-aware kernel checks as the images answer them on a GPU host, which a CPU host's torch fails."""
+    monkeypatch.setattr(
+        segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("causal_conv1d", lambda: True), ("fla>=0.2.2", lambda: True))
+    )
 
 
 class _Base:
@@ -89,23 +98,32 @@ def test_union_override_wins_over_trl_base():
     )
 
 
-def _construct_sft(*, cp: bool, model=None, collator=None) -> None:
+def _construct_sft(*, cp: bool, model=None, collator=None, built=None) -> None:
     """``DistributedSFTTrainer`` up to its gates, ``model`` and ``collator`` at TRL's own positional
-    slots, as a signature-following caller would pass them."""
+    slots, as a signature-following caller would pass them; the base builds ``built``, else ``model``."""
 
     def _init_cfg(self, kwargs, **_):
         self.parallelism_config = types.SimpleNamespace(is_cp_mode=cp)
         return kwargs
+
+    def _base_init(self, *_args, **_kwargs):
+        self.model = model if built is None else built
 
     ctor_args: list = [None] * (max(_CTOR_POSITIONS["data_collator"], _CTOR_POSITIONS["model"]) + 1)
     ctor_args[_CTOR_POSITIONS["data_collator"]] = collator
     ctor_args[_CTOR_POSITIONS["model"]] = model
     with (
         mock.patch.object(DistributedSFTTrainer, "_init_distributed_config", _init_cfg),
-        mock.patch.object(SFTTrainer, "__init__", return_value=None),
+        mock.patch.object(SFTTrainer, "__init__", _base_init),
         mock.patch.object(DistributedSFTTrainer, "_configure_distributed_modes", return_value=None),
     ):
         DistributedSFTTrainer(*ctor_args)
+
+
+def _on_flash(config):
+    """``config`` as a load on FA2 leaves it, so the rows' backend admits multi-document rows."""
+    config._attn_implementation = "flash_attention_2"
+    return config
 
 
 def test_positional_collator_reaches_cp_gate():
@@ -121,7 +139,9 @@ def test_positional_collator_reaches_cp_gate():
 def test_a_hand_built_multi_document_collator_reaches_the_compressed_kv_gate(root, mode, compressed):
     """Refused for a model with compressed-KV layers; a model without them constructs."""
     layer_types = TINY_DSV4_CONFIG["layer_types"] if compressed else ["sliding_attention"] * 3
-    model = types.SimpleNamespace(config=DeepseekV4Config(**{**TINY_DSV4_CONFIG, "layer_types": layer_types}))
+    model = types.SimpleNamespace(
+        config=_on_flash(DeepseekV4Config(**{**TINY_DSV4_CONFIG, "layer_types": layer_types}))
+    )
     refusal = f"{mode} is refused .* layers pool KV over windows"
     with pytest.raises(ValueError, match=refusal) if compressed else contextlib.nullcontext():
         _construct_sft(cp=False, model=model, collator=object.__new__(root))
@@ -141,7 +161,7 @@ def test_a_hand_built_multi_document_collator_reaches_the_compressed_kv_gate(roo
 def test_a_hand_built_padding_free_collator_reaches_the_mrope_gate(collator_class, flattens, model_type, mrope):
     """Refused for an M-RoPE decoder, read through a composite wrapper too; packing there, and a padding-free
     collator on a plain-RoPE decoder, construct."""
-    model = types.SimpleNamespace(config=CONFIG_MAPPING[model_type]())
+    model = types.SimpleNamespace(config=_on_flash(CONFIG_MAPPING[model_type]()))
     with pytest.raises(ValueError, match="M-RoPE") if flattens and mrope else contextlib.nullcontext():
         _construct_sft(cp=False, model=model, collator=object.__new__(collator_class))
 
@@ -157,7 +177,7 @@ def test_a_hand_built_multi_document_collator_reaches_the_linear_attention_gate(
     """Refused for GLM-5 Next's KDA layers; GatedDeltaNet reads its markers and softmax-only models have no such
     layer, so both construct."""
     crosses = _LINEAR_ATTENTION[model_type]
-    model = types.SimpleNamespace(config=CONFIG_MAPPING[model_type]())
+    model = types.SimpleNamespace(config=_on_flash(CONFIG_MAPPING[model_type]()))
     refusal = f"{mode}=True is refused for model_type='{model_type}': its linear-attention layers"
     with pytest.raises(ValueError, match=refusal) if crosses else contextlib.nullcontext():
         _construct_sft(cp=False, model=model, collator=object.__new__(root))

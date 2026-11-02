@@ -123,8 +123,8 @@ RUN pip install "torch~=2.11.0" --index-url https://download.pytorch.org/whl/cu1
 ARG CUTLASS_DSL_VERSION=4.6.2
 ARG QUACK_VERSION=0.6.4
 
-# Throw-on-call stubs for the FA2 split-K instantiations CUDA 13.2 ptxas hangs on for sm_90
-# (split-K serves KV-cache inference paths, not training). Hopper build only.
+# Throw-on-call stubs for the FA2 split-K instantiations CUDA 13.2 ptxas hangs on for sm_90; the build pins
+# mha_fwd and mha_varlen_fwd to one split so no forward reaches them. Hopper build only.
 COPY docker/training/flash_attn_split_stubs_hopper.cpp /tmp/flash_attn_split_stubs_hopper.cpp
 
 RUN if [ "$TARGET_GPU" = "blackwell" ]; then \
@@ -166,9 +166,12 @@ print(f'FA2 inherited from base: {flash_attn.__version__}')"; \
       && git -C /tmp/flash-attention checkout v2.8.3.post1 \
       && cd /tmp/flash-attention \
       && echo "Hopper: replacing 24 FA2 split-K kernel files with throw-stubs" \
-      && echo "  (CUDA 13.2 ptxas hangs indefinitely on these for sm_90;" \
-      && echo "   split-K is only used by KV-cache inference paths, not training)" \
+      && echo "  (CUDA 13.2 ptxas hangs indefinitely on these for sm_90)" \
       && cp /tmp/flash_attn_split_stubs_hopper.cpp csrc/flash_attn/src/flash_fwd_split_stubs.cpp \
+      # The dense and varlen forwards pick split-K by occupancy (num_splits 0): small batches, and decode under
+      # GQA. One split keeps both on the kernels this build compiles.
+      && sed -i 's|/\*num_splits\*/ 0|/*num_splits*/ 1|' csrc/flash_attn/flash_api.cpp \
+      && test "$(grep -c '/\*num_splits\*/ 1' csrc/flash_attn/flash_api.cpp)" = 2 \
       && sed -i '/csrc\/flash_attn\/src\/flash_fwd_split_/d' setup.py \
       && sed -i '/csrc\/flash_attn\/flash_api.cpp/a\                "csrc/flash_attn/src/flash_fwd_split_stubs.cpp",' setup.py \
       && echo "Patched setup.py: removed split .cu lines, added 1 stub .cpp" \

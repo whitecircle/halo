@@ -16,8 +16,10 @@ a nested shard group) and a tiny Qwen3-MoE under EP layers at ep1 with FSDP-shar
 under HSDP on 4 ranks. Each is trained 3 SGD steps beside an unsharded model without checkpointing that averages
 its gradients over the ranks, with HF's step order (backward per microbatch, clip, step, ``model.zero_grad()``).
 At K=1 the step must leave every gradient and weight bit for bit what the same step without the completion
-leaves. The non-finite step guard reads its verdict off the completed gradient: a K>1 step whose backward
-overflows on one rank is skipped everywhere, and nothing of it reaches a later step.
+leaves. Under a reduce dtype wider than the parameters' (fp64 over fp32), a deferred window's microsteps park
+their gradients in FSDP2's accumulator and the window still ends at the reference's gradient. The non-finite step
+guard reads its verdict off the completed gradient: a K>1 step whose backward overflows on one rank is skipped
+everywhere, and nothing of it reaches a later step.
 
     python tests/cpu/parallelism/test_fsdp2_reentrant_recompute.py
 """
@@ -36,6 +38,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from accelerate.utils import DistributedType
 from torch.distributed.device_mesh import init_device_mesh
+from torch.distributed.fsdp import MixedPrecisionPolicy
 from torch.distributed.fsdp._fully_shard import _fsdp_param_group
 from torch.distributed.tensor import DTensor
 from transformers import Trainer
@@ -84,6 +87,8 @@ WINDOWS = {
     "both": {"fsdp_reshard_after_backward": False, "fsdp_defer_grad_sync": True},
 }
 NO_WINDOW = {"fsdp_reshard_after_backward": True, "fsdp_defer_grad_sync": False}
+# Windows that defer the reduce, run with the dense model reducing in fp64 over fp32 parameters.
+MIXED_REDUCE_WINDOWS = ("defer", "both")
 # HSDP over 4 ranks: 2 replicas of 2 shards, each group's reduce a reduce-scatter then an all-reduce.
 HSDP_MESH = (2, 2)
 HSDP_K_VALUES = (1, 4)
@@ -207,16 +212,29 @@ def _build(family: str, ep_config: EPConfig) -> nn.Module:
     return model.train()
 
 
-def _sharded(family: str, ep_config: EPConfig, mesh, *, raf: bool, nested: bool, units: int) -> nn.Module:
+def _sharded(
+    family: str,
+    ep_config: EPConfig,
+    mesh,
+    *,
+    raf: bool,
+    nested: bool,
+    units: int,
+    reduce_dtype: torch.dtype | None = None,
+) -> nn.Module:
     """``family``'s model under scoped reentrant checkpointing and the toolkit's FSDP2 wrap in groups of ``units``
     decoder layers; ``nested`` holds each MLP in float64, which the wrap splits into a shard group inside its
-    layer's."""
+    layer's; ``reduce_dtype`` reduces the fp32 gradients in another dtype."""
     model = _build(family, ep_config)
     if nested:
         for layer in model.model.layers:
             layer.mlp.to(torch.float64)
     enable_scoped_gradient_checkpointing(model, gradient_checkpointing_kwargs={"use_reentrant": True})
     policy = mixed_precision_policy(torch.float32, fp32_reduce=True, cast_forward_inputs=True)
+    if reduce_dtype is not None:
+        policy = MixedPrecisionPolicy(
+            param_dtype=torch.float32, reduce_dtype=reduce_dtype, cast_forward_inputs=policy.cast_forward_inputs
+        )
     apply_fsdp2_per_layer(
         model, mesh, policy, reshard_after_forward=raf, ignored_params=IdentityParamSet(), layers_per_unit=units
     )
@@ -306,12 +324,13 @@ def _train(
     nested: bool = False,
     window: dict = NO_WINDOW,
     complete: bool = True,
+    reduce_dtype: torch.dtype | None = None,
 ) -> dict:
     """``STEPS`` optimizer steps of ``micro`` microbatches of ``k`` rows through the trainer's step; ``complete``
     off runs the same step without the post-backward completion (the K=1 twin). Every collective runs on
     every rank in the same order, before anything is compared."""
     reference = _build(family, ep_config)
-    model = _sharded(family, ep_config, mesh, raf=raf, nested=nested, units=units)
+    model = _sharded(family, ep_config, mesh, raf=raf, nested=nested, units=units, reduce_dtype=reduce_dtype)
     trainer = _Trainer(model, None if family == "dense" else ep_config, window)
     if not complete:
         trainer._finish_fsdp2_backward = lambda model: None
@@ -475,6 +494,18 @@ def _scenarios() -> dict[str, dict]:
                         "micro": GRAD_ACCUM,
                         "window": window,
                     }
+    for units in UNIT_SIZES[False]:
+        for name in MIXED_REDUCE_WINDOWS:
+            for k in WINDOW_K_VALUES:
+                cases[f"dense-units{units}-window_{name}-k{k}-reduce_fp64"] = {
+                    "family": "dense",
+                    "k": k,
+                    "raf": False,
+                    "units": units,
+                    "micro": GRAD_ACCUM,
+                    "window": WINDOWS[name],
+                    "reduce_dtype": torch.float64,
+                }
     return cases
 
 
@@ -660,6 +691,21 @@ def test_accumulation_windows_keep_their_semantics(runs, family, window, units):
                     assert microstep["any_reduce"] == 0, (k, microstep)
                 if microstep["sync"]:
                     assert microstep["layer_reduces"] == [1 if k == 1 else 2] * len(microstep["layer_reduces"]), k
+
+
+@pytest.mark.parametrize("units", UNIT_SIZES[False])
+@pytest.mark.parametrize("window", MIXED_REDUCE_WINDOWS)
+def test_a_wider_reduce_dtype_keeps_every_segment_across_the_window(runs, window, units):
+    """fp32 parameters reducing in fp64: each deferred microstep parks its gradient, K-1 recomputed segments
+    included, in FSDP2's accumulator, and the window's last backward reduces it all to the reference's gradient,
+    with the groups sharded after every step."""
+    for rank_runs in runs:
+        for k in WINDOW_K_VALUES:
+            run = _run(rank_runs, f"dense-units{units}-window_{window}-k{k}-reduce_fp64")
+            assert max(run["grad_rel"]) < PARITY_RTOL, (k, run["grad_rel"])
+            assert max(run["clipped_rel"]) < PARITY_RTOL, (k, run["clipped_rel"])
+            assert all(run["sharded_after_step"]) and run["logit_rel"] < PARITY_RTOL, k
+            assert all(m["any_reduce"] == 0 for m in run["micro"] if not m["sync"]), k
 
 
 @pytest.mark.parametrize("units", UNIT_SIZES[False])

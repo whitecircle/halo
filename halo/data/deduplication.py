@@ -18,8 +18,8 @@ from transformers import AutoModel, AutoTokenizer
 
 from halo.data.sources.loading import load_dataset_split
 from halo.hardware import available_cpu_count
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
+from halo.model_loading.finalization import finalize_loaded_model
 
 logger = logging.getLogger(__name__)
 

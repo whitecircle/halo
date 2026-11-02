@@ -26,7 +26,7 @@ from halo.distributed.pipeline_parallel.stage import (
     slice_backbone_to_stage,
 )
 from halo.log import KEY_PREVIEW_COUNT
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.parallel.expert_fuser import ExpertFuser, FusionTask

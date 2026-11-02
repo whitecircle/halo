@@ -247,8 +247,8 @@ def test_a_head_dim_256_family_keeps_fa4_outside_a_deterministic_run(requested, 
 @pytest.mark.parametrize("cp_size", [1, 2])
 @pytest.mark.parametrize("requested", [None, "flash_attention_4"])
 def test_glm_4_7_flash_runs_fa2_with_or_without_cp(requested, cp_size, deterministic, monkeypatch):
-    """FA4's dedicated kernel does not train multi-head latent attention, so GLM-4.7-Flash's label is FA2 in every
-    run, under CP (the kernel Ulysses then runs) or not, never the SDPA a deterministic run falls back to."""
+    """GLM-4.7-Flash's latent attention stays on FA2 as a precaution, so its label is FA2 in every run, under CP
+    (the kernel Ulysses then runs) or not, never the SDPA a deterministic run falls back to."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
     with patch.object(attention_mod, "is_flash_attn_2_available", lambda: True):
         assert _resolve_on_blackwell(_glm4_flash(), requested, cp_size=cp_size) == "flash_attention_2"
@@ -265,7 +265,7 @@ def test_glm_4_7_flash_runs_fa2_with_or_without_cp(requested, cp_size, determini
 )
 def test_the_ulysses_wrapper_refuses_fa4_where_the_loader_does(build, deterministic, allow_fa4, monkeypatch):
     """The wrapper picks its own kernel, so it must read the same verdict as the loader's CP label: a deterministic
-    run refuses FA4's head_dim-256 kernel, and GLM-4.7-Flash's latent attention never takes it."""
+    run refuses FA4's head_dim-256 kernel, and GLM-4.7-Flash's latent attention stays on FA2."""
     monkeypatch.setenv("FLASH_ATTENTION_DETERMINISTIC", deterministic)
     if build == "glm4_flash":
         wrapper = Glm4MoeLiteUlyssesAttention(Glm4MoeLiteAttention(_glm4_flash(), layer_idx=0), None, 2)

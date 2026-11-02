@@ -85,7 +85,7 @@ server on another node: [Multi-Node → RDMA fabrics](multi-node.md#rdma-fabrics
 `DIST_NCCL_TIMEOUT_MINUTES` is the one NCCL watchdog setting: the process group starts before the
 config is parsed, so a training config that sets `ddp_timeout` away from its default is refused. Set
 it alike on every node. `init_distributed` pins it as the default for every later
-`dist.new_group()`. EP/CP/PP subgroups pass it explicitly; the pin is what carries it onto the
+`dist.new_group()`. EP/CP/PP subgroups pass it explicitly (`new_group` or `split_group`); the pin is what carries it onto the
 DTensor meshes, since `init_device_mesh` takes no timeout — that is the DP/HSDP/TP axes. It does
 **not** bound the DeepEP dispatch/combine kernels, which carry the `ElasticBuffer` GPU-side barrier
 rather than the PyTorch watchdog.

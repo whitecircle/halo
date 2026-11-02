@@ -55,7 +55,7 @@ def _warn_if_dense_mlp_unmatched(model: nn.Module, precision: str) -> None:
         )
 
 
-def _require_block_aligned(
+def _verify_block_aligned(
     subject: str, contraction: int, precision: str, quant_format: QuantFormat, *, split_by: str | None, opt_out: str
 ) -> None:
     """Raise unless ``contraction`` splits into ``quant_format`` blocks: the fake-quant blocks both GEMM operands
@@ -75,9 +75,7 @@ def _require_block_aligned(
     )
 
 
-def _require_block_aligned_experts(
-    name: str, layer: EPMoELayerBase, precision: str, quant_format: QuantFormat
-) -> None:
+def _verify_block_aligned_experts(name: str, layer: EPMoELayerBase, precision: str, quant_format: QuantFormat) -> None:
     """Check every grouped-GEMM expert weight of ``layer``. Stored ``[E, K, N]``, its contraction is dim 1: the
     hidden size, or the intermediate, which expert TP shards. LoRA adapters (bf16 under lowp) and biases are
     exempt."""
@@ -86,7 +84,7 @@ def _require_block_aligned_experts(
         if weight_name in adapters or weight.ndim != 3:
             continue
         etp_sharded = layer.expert_tp_size > 1 and layer.EXPERT_TP_SHARD_DIMS.get(weight_name) == 1
-        _require_block_aligned(
+        _verify_block_aligned(
             f"{name} expert weight {weight_name} {tuple(weight.shape)}",
             weight.shape[1],
             precision,
@@ -96,11 +94,11 @@ def _require_block_aligned_experts(
         )
 
 
-def _require_block_aligned_dense(name: str, linear: nn.Linear, precision: str, quant_format: QuantFormat) -> None:
+def _verify_block_aligned_dense(name: str, linear: nn.Linear, precision: str, quant_format: QuantFormat) -> None:
     """Check one dense projection. Its contraction is the weight's last axis as this rank holds it: whole under
     colwise TP, sharded under rowwise, where the fake-quant blocks the local shard."""
     contraction = to_local(linear.weight).shape[-1]
-    _require_block_aligned(
+    _verify_block_aligned(
         f"{name} {tuple(linear.weight.shape)}",
         contraction,
         precision,
@@ -153,7 +151,7 @@ def _convert_dense_mlps(
             child = getattr(module, proj, None)
             if isinstance(child, nn.Linear) and not isinstance(child, LowPrecisionLinear):
                 path = f"{name}.{proj}" if name else proj
-                _require_block_aligned_dense(path, child, precision, quant_format)
+                _verify_block_aligned_dense(path, child, precision, quant_format)
                 _convert_dense_linear(child, path, quant_format, tp_plan, tp_mesh)
                 converted += 1
     return converted
@@ -181,7 +179,7 @@ def apply_lowp_compute(model: nn.Module, lowp: LowpSpec, *, expert_weight_cachea
             if isinstance(module, EPMoELayerBase) and decoder_layer_index(name, backbone_prefix) not in kept:
                 moe_count += 1
                 if module.set_lowp_compute(quant_format, weight_cacheable=expert_weight_cacheable):
-                    _require_block_aligned_experts(name, module, precision, quant_format)
+                    _verify_block_aligned_experts(name, module, precision, quant_format)
                 else:
                     loop_path_layers += 1
         if loop_path_layers:

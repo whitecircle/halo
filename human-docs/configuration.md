@@ -85,7 +85,7 @@ halo launch sft my-run.yaml -n 8 --learning_rate=1e-5 --max_length=32000
 
 ## Defaults Halo changes
 
-The parser applies three defaults that differ from upstream, each only when your
+The parser applies four defaults that differ from upstream, each only when your
 YAML and command line leave the field unset:
 
 - `bf16: true`. It also switches to the memory-saving `AdamWBF16` optimizer
@@ -94,6 +94,10 @@ YAML and command line leave the field unset:
 - `use_liger_kernel: true`.
 - `logging_nan_inf_filter: false`. The upstream filter logs the running average
   in place of a NaN, which hides the step where a run diverged.
+- `accelerator_config: {non_blocking: true}` while batches are pinned
+  (`dataloader_pin_memory` not `false`, `use_cpu` off), merged into an
+  `accelerator_config` you set without overriding its keys. A pinned batch then
+  copies to the GPU without waiting for the queued kernels.
 
 The trainers also never apply an optimizer step whose gradient norm is NaN or
 inf: the step is skipped with a warning and training goes on. More than

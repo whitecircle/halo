@@ -43,12 +43,12 @@ def test_the_embedding_backbone_loads_at_the_agreed_revision(monkeypatch, tmp_pa
         seen["load"] = (model_name_or_path, revision)
         raise _BackboneBuilt
 
-    def config(model_name_or_path, *, revision, **kwargs):
+    def config(model_name_or_path, *, revision, trust_remote_code):
         seen["config"] = (model_name_or_path, revision)
         return Qwen3Config(**TINY_QWEN3_CONFIG)
 
     monkeypatch.setattr(embedding_script, "resolve_model_source", resolve)
-    monkeypatch.setattr(embedding_script.AutoConfig, "from_pretrained", config)
+    monkeypatch.setattr(embedding_script, "resolve_build_config", config)
     monkeypatch.setattr(embedding_script, "SentenceTransformer", build)
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(has_ep_group=False, is_tp_mode=False, max_concurrent_loading=None),

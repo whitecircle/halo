@@ -24,7 +24,7 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch import nn
-from transformers import AutoModelForImageTextToText, GenerationConfig
+from transformers import AutoModelForImageTextToText, GenerationConfig, Qwen3Config
 
 import halo.model_loading.parallel.frozen_models as frozen_models
 import scripts.training.distillation.self_distill as self_distill_script
@@ -32,6 +32,7 @@ import scripts.training.distillation.teacher_distill as distill_script
 import scripts.training.grpo.offline as offline_grpo_script
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.model_loading import model_preparation
 from halo.model_loading.parallel.frozen_models import (
     load_frozen_auxiliary_model,
     load_reference_model_for_on_policy_grpo,
@@ -188,7 +189,7 @@ PREFERENCE_LOADS = REPO_ROOT / "halo/entrypoints/model_setup.py"
 def test_every_frozen_load_site_reaches_the_shared_loader(site):
     """Only ``load_frozen_auxiliary_model``'s namespace is stubbed here.
 
-    A call site that fetched through its own ``AutoConfig``/``auto_load_model`` would miss these stubs
+    A call site that fetched through its own config read or ``auto_load_model`` would miss these stubs
     entirely — it would reach the hub for a repo that does not exist, and record no fetch — so this is
     a routing check, not a smoke test.
     """
@@ -416,14 +417,17 @@ def test_the_frozen_load_keeps_the_task_head(is_vlm):
 def test_the_frozen_load_applies_the_remote_code_shims_before_the_config_fetch():
     """A teacher or reference preloaded ahead of the policy is the first remote-code load of the
     process, so it cannot inherit the shims the policy loader applies — and the config fetch is
-    already enough to import a remote modeling file, so the order matters as much as the call.
+    already enough to import a remote modeling file, so the order matters as much as the call. The
+    frozen load reads its config through ``resolve_build_config``, which owns that order.
     """
     order = []
     with (
-        stub_frozen_loader() as caps,
-        patch.object(frozen_models, "apply_remote_code_compat_shims", lambda: order.append("shims")),
+        stub_frozen_loader(),
+        patch.object(frozen_models, "resolve_build_config", model_preparation.resolve_build_config),
+        patch.object(model_preparation, "apply_remote_code_compat_shims", lambda: order.append("shims")),
+        patch.object(model_preparation, "AutoConfig") as auto_config,
     ):
-        caps.auto_config.from_pretrained.side_effect = lambda *args, **kwargs: order.append("config") or STUB_CONFIG
+        auto_config.from_pretrained.side_effect = lambda *args, **kwargs: order.append("config") or Qwen3Config()
         load_frozen_auxiliary_model(AUX_MODEL, dtype=torch.bfloat16, trust_remote_code=False, download_tag=None)
     assert order == ["shims", "config"]
 

@@ -35,7 +35,6 @@ from halo.checkpoint.reading import StreamingCheckpointReader, load_full_state_d
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR, built_from_checkpoint, weights_read_from
 from halo.checkpoint.writing import normalize_gathered_state_dict
 from halo.distributed.context_parallel.ulysses_model import UlyssesModel
-from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.expert_parallel.families.roster import MOE_LAYER_MAP
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.expert_parallel.parallelize import ep_claimed_blocks
@@ -51,6 +50,7 @@ from halo.model_loading.parallel.tp import load_ep_tp_model, load_tp_moe_model
 from halo.trainers.parallelism.mode_setup import ModeSetupMixin
 from tests.common.checkpoint_io import load_context
 from tests.common.gloo import run_gloo_ranks
+from tests.common.parallelism import single_process_ep_config
 from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.tiny_models import TINY_MOE_FAMILIES
 
@@ -169,14 +169,8 @@ def _cpu_cp_wrap(model, config):
 
 
 def _ep_config(*, fp32_router, fp32_experts, fp32_non_ep, managed_experts):
-    return EPConfig(
-        ep_size=1,
-        stage_world_size=1,
-        nvlink_domain_size=1,
-        fp32_router=fp32_router or fp32_non_ep,
-        fp32_experts=fp32_experts,
-        experts_fsdp_managed=managed_experts,
-        use_grouped_gemm=False,
+    return single_process_ep_config(
+        fp32_router=fp32_router or fp32_non_ep, fp32_experts=fp32_experts, experts_fsdp_managed=managed_experts
     )
 
 

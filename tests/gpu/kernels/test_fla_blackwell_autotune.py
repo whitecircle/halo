@@ -26,7 +26,7 @@ from fla.ops.gated_delta_rule import chunk_gated_delta_rule
 from fla.ops.gated_delta_rule.naive import naive_recurrent_gated_delta_rule
 
 from halo.kernels.fla_launch import triton_autotuner
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import cos_sim, max_abs_rel_err
 from tests.common.rank_log import log

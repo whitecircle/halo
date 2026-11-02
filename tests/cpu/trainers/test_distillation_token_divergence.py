@@ -6,29 +6,40 @@ backward keeps the two logits planes and no fp32 ``[tokens, V]`` plane of the di
 gate and the hard-label cross-entropy chunk the same way. Chunking is only legitimate if the numbers do
 not move, so every divergence is held to the whole-plane form (values and student gradients, across
 several chunks, on the shifted views the trainers pass), and the saved-for-backward set is checked for
-fp32 vocab-wide tensors: the whole-plane form keeps several, the chunked one none.
+fp32 vocab-wide tensors: the whole-plane form keeps several, the chunked one none. Teacher distillation's
+divergence and its hard-label cross-entropy share one chunked pass when both train, which scores and trains what
+two passes do while backward builds one student gradient plane instead of two.
 
 Run: pytest tests/cpu/trainers/test_distillation_token_divergence.py
 """
+
+import multiprocessing
 
 import pytest
 import torch
 
 import halo.kernels.logprobs as logprob_kernels
-from halo.kernels.logprobs import LABEL_IGNORE_INDEX
+from halo.kernels.logprobs import LABEL_IGNORE_INDEX, selective_logprobs
 from halo.trainers.distillation.divergences import (
     DIVERGENCES,
     call_divergence,
+    global_token_mean,
     gold_token_probs,
     hard_labels_coefficient,
     shifted_token_cross_entropy,
     token_divergence,
+    token_divergence_and_cross_entropy,
 )
+from tests.common.memory import host_peak_rss_gib, reset_host_peak_rss
 
 BATCH, SEQ, VOCAB = 2, 17, 37
 TEMPERATURE = 1.7
 # Token rows per chunk: SEQ - 1 = 16 shifted rows split into 4 chunks per sequence.
 CHUNK_ROWS = 4
+# The peak-memory comparison's planes: one bf16 [B, S, V] student plane is 128 MiB, so a whole gradient plane
+# stands far above the allocator's noise.
+PEAK_SHAPE = (2, 1024, 32768)
+DISTILL_ALPHA = 0.5
 
 
 @pytest.fixture(autouse=True)
@@ -153,6 +164,77 @@ def test_the_hard_label_cross_entropy_holds_no_fp32_plane():
     assert token_ce.dtype == torch.float32
     assert not planes, f"fp32 vocab-wide tensors held for backward: {planes}"
     assert (token_ce[labels == LABEL_IGNORE_INDEX] == 0).all()
+
+
+def test_the_cross_entropy_scores_and_trains_what_the_log_prob_form_does():
+    """The hard-label cross-entropy runs ``cross_entropy`` per chunk; the selective log-prob form it replaced is
+    the oracle, bit for bit, values and student gradient."""
+    base, _, labels = _inputs(torch.bfloat16, seed=5)
+    logits, oracle_in = base.clone().requires_grad_(True), base.clone().requires_grad_(True)
+    supervised = labels != LABEL_IGNORE_INDEX
+    got = shifted_token_cross_entropy(logits[:, :-1], labels)
+    want = -selective_logprobs(oracle_in[:, :-1], labels.masked_fill(~supervised, 0), supervised)
+    assert torch.equal(got, want)
+    weights = torch.rand(BATCH, SEQ - 1, generator=torch.Generator().manual_seed(6))
+    (got * weights).sum().backward()
+    (want * weights).sum().backward()
+    assert torch.equal(logits.grad, oracle_in.grad)
+
+
+@pytest.mark.parametrize("name", sorted(DIVERGENCES))
+def test_one_pass_scores_and_trains_what_two_passes_do(name):
+    """Bit for bit, on bf16 logits as the trainer scores them: both per-token terms and the student gradient of
+    their weighted sum."""
+    loss_fn = DIVERGENCES[name]
+    base, teacher, labels = _inputs(torch.bfloat16, seed=7)
+    joint_in, split_in = base.clone().requires_grad_(True), base.clone().requires_grad_(True)
+    divergence, cross_entropy = token_divergence_and_cross_entropy(
+        loss_fn, joint_in[:, :-1], teacher[:, :-1], TEMPERATURE, labels
+    )
+    want_divergence = token_divergence(loss_fn, split_in[:, :-1], teacher[:, :-1], TEMPERATURE, labels)
+    want_cross_entropy = shifted_token_cross_entropy(split_in[:, :-1], labels)
+    assert torch.equal(divergence, want_divergence)
+    assert torch.equal(cross_entropy, want_cross_entropy)
+    weights = torch.rand(2, BATCH, SEQ - 1, generator=torch.Generator().manual_seed(8))
+    ((divergence * weights[0]).sum() + (cross_entropy * weights[1]).sum()).backward()
+    ((want_divergence * weights[0]).sum() + (want_cross_entropy * weights[1]).sum()).backward()
+    assert torch.equal(joint_in.grad, split_in.grad)
+
+
+def _peak_gradient_planes(one_pass: bool) -> float:
+    """Peak resident memory of one teacher-distillation loss and its backward at ``DISTILL_ALPHA``, above the
+    logits it reads, in student planes: in a fresh process, so no earlier allocation is reused."""
+    batch, seq, vocab = PEAK_SHAPE
+    generator = torch.Generator().manual_seed(0)
+    student = torch.randn(batch, seq + 1, vocab, generator=generator).to(torch.bfloat16).requires_grad_(True)
+    teacher = torch.randn(batch, seq + 1, vocab, generator=generator).to(torch.bfloat16)
+    labels = torch.randint(0, vocab, (batch, seq), generator=generator)
+    supervised = labels != LABEL_IGNORE_INDEX
+    loss_fn = DIVERGENCES["forward_kl"]
+    reset_host_peak_rss()
+    baseline = host_peak_rss_gib()
+    if one_pass:
+        divergence, cross_entropy = token_divergence_and_cross_entropy(
+            loss_fn, student[:, :-1], teacher[:, :-1], 1.0, labels
+        )
+    else:
+        divergence = token_divergence(loss_fn, student[:, :-1], teacher[:, :-1], 1.0, labels)
+        cross_entropy = shifted_token_cross_entropy(student[:, :-1], labels)
+    loss = DISTILL_ALPHA * global_token_mean(divergence, supervised)
+    loss = loss + (1 - DISTILL_ALPHA) * global_token_mean(cross_entropy, supervised)
+    loss.backward()
+    plane_gib = batch * seq * vocab * student.element_size() / 1024**3
+    return (host_peak_rss_gib() - baseline) / plane_gib
+
+
+def test_one_pass_builds_one_student_gradient_plane_fewer():
+    """The two-pass form holds the divergence's whole student gradient while it builds the cross-entropy's and adds
+    them, about one plane more at its peak than one pass, whose chunks each build the gradient of both terms."""
+    with multiprocessing.get_context("spawn").Pool(1, maxtasksperchild=1) as pool:
+        one_pass = pool.apply(_peak_gradient_planes, (True,))
+    with multiprocessing.get_context("spawn").Pool(1, maxtasksperchild=1) as pool:
+        two_passes = pool.apply(_peak_gradient_planes, (False,))
+    assert two_passes - one_pass > 0.5, f"peak above the logits: one pass {one_pass:.2f}, two {two_passes:.2f} planes"
 
 
 if __name__ == "__main__":

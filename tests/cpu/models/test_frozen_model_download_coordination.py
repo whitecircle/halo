@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
+from halo.model_loading import model_preparation
 from halo.model_loading.parallel import frozen_models
 from halo.model_loading.parallel.model_source import ModelSource
 
@@ -42,8 +43,8 @@ def test_the_source_is_resolved_before_the_first_fetch_and_pins_every_read(monke
         return MagicMock()
 
     monkeypatch.setattr(frozen_models, "resolve_model_source", resolve)
-    monkeypatch.setattr(frozen_models, "apply_remote_code_compat_shims", lambda: events.append("shims"))
-    monkeypatch.setattr(frozen_models, "AutoConfig", MagicMock(from_pretrained=fetch_config))
+    monkeypatch.setattr(model_preparation, "apply_remote_code_compat_shims", lambda: events.append("shims"))
+    monkeypatch.setattr(model_preparation, "AutoConfig", MagicMock(from_pretrained=fetch_config))
     monkeypatch.setattr(frozen_models, "resolve_attn_implementation", lambda *a, **k: "sdpa")
     monkeypatch.setattr(frozen_models, "apply_family_patches", lambda config, attn: attn)
     monkeypatch.setattr(frozen_models, "auto_load_model", fetch_weights)
@@ -56,8 +57,8 @@ def test_the_source_is_resolved_before_the_first_fetch_and_pins_every_read(monke
             "org/teacher", dtype=torch.float32, download_tag="teacher_model", trust_remote_code=False
         )
 
-    assert events == ["shims", "resolve:teacher_model", "config", "weights"], (
-        f"the remote-code shims, then the coordinated resolution, must precede every fetch: {events}"
+    assert events == ["resolve:teacher_model", "shims", "config", "weights"], (
+        f"the coordinated resolution must precede every fetch, and the remote-code shims the config fetch: {events}"
     )
     assert reads == {"config": AGREED_COMMIT, "weights": AGREED_COMMIT}, (
         f"the config and weight fetches must read at the agreed revision: {reads}"

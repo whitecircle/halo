@@ -13,8 +13,8 @@ Per row: logits, the attention parameters' gradients (worst one) and every gradi
 1.5x of FA2's error, all finite. The unpacked and ``cu_seq_lens`` rows must hand FA4's entry points q/k/v strided,
 the layout flash-attn-4 4.0.0b16 read scrambled at head_dim 256 (transformers copies them on the ``position_ids``-only
 and unpad paths). Fails if FA4 trails FA2 on any row, or if those rows stop reaching FA4 strided and so stop testing
-that layout. GLM-4.7-Flash's row holds the kernel path alone: the resolver keeps its latent attention on FA2, since
-trained end to end on FA4 its gradients leave FA2's by the second step.
+that layout. GLM-4.7-Flash's row holds the kernel path alone: the resolver keeps its latent attention on FA2 as a
+precaution.
 
     torchrun --nproc_per_node=1 tests/gpu/kernels/test_fa4_hd256_family_parity.py --family qwen3_5_moe_text
 """

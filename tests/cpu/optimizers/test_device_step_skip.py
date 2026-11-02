@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 """CPU test: a device skip flag (``halo/optimizers/step_skip.py``) leaves every toolkit optimizer's step exact.
 
-Under a False flag a step writes what an unflagged step does, bit for bit; under a True flag it writes nothing, and
-settling it as skipped returns the state dict to what it was (:func:`tests.common.device_step_skip.
+Under a False flag a step writes what an unflagged step does, bit for bit; under a True flag it changes no parameter
+or moment, and settling it as skipped returns the state dict to what it was (:func:`tests.common.device_step_skip.
 device_skip_mismatches`). AdamWBF16's eager paths are held to the implementation before the flag
 (``PerParameterAdamWBF16``); its fused kernel and Muon's run under Triton's interpreter in a fresh process
 (``TRITON_INTERPRET`` is read when a kernel is defined), against their own unflagged steps. The CUDA legs are

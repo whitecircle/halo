@@ -1,7 +1,7 @@
 """The device skip flag's contract for an optimizer (``halo/optimizers/step_skip.py``), checked on any device.
 
-Under a False flag a step writes what an unflagged step does, bit for bit; under a True one it writes nothing, and
-settling it as skipped returns its state dict to what it was, lazily created state included. It runs on CUDA
+Under a False flag a step writes what an unflagged step does, bit for bit; under a True one it changes no parameter or
+moment, and settling it as skipped returns its state dict to what it was, lazily created state included. It runs on CUDA
 and, for the Triton paths, on CPU under ``TRITON_INTERPRET=1``.
 """
 
@@ -14,7 +14,9 @@ import torch.nn as nn
 from halo.optimizers.adamw_bf16 import AdamWBF16
 from halo.optimizers.muon import build_muon_optimizer
 
-# Optimizer steps of the run, and the ones whose gradients hold a NaN: the first (no state yet) and a later one.
+# Optimizer steps of the run, and the non-finite ones: the first (no state yet) and a later one. On those the first
+# parameter's gradient holds a NaN and the first fp32 one's an inf; the rest stay finite, as a rank's do when another
+# rank overflowed.
 STEPS = 5
 NONFINITE_STEPS = (1, 3)
 # AdamWBF16's parameters, (shape, dtype, weight decay): bf16 under, near and over one SR block of 1024 elements, and
@@ -34,7 +36,7 @@ def adamw_bf16_builder(
     device, *, optimizer_cls: type[AdamWBF16] = AdamWBF16, parameter_cls: type[nn.Parameter] = nn.Parameter
 ) -> Build:
     """A builder of :data:`ADAMW_BF16_PARAMS` on ``device`` under ``optimizer_cls``, two weight-decay groups, the
-    parameters made as ``parameter_cls``."""
+    undecayed one on its own betas, the parameters made as ``parameter_cls``."""
 
     def build():
         generator = torch.Generator().manual_seed(0)
@@ -47,8 +49,9 @@ def adamw_bf16_builder(
                 "params": [p for p, (_, _, wd) in zip(params, ADAMW_BF16_PARAMS, strict=True) if wd == decay],
                 "param_names": [f"p{i}" for i, (_, _, wd) in enumerate(ADAMW_BF16_PARAMS) if wd == decay],
                 "weight_decay": decay,
+                "betas": betas,
             }
-            for decay in (0.1, 0.0)
+            for decay, betas in ((0.1, (0.9, 0.999)), (0.0, (0.8, 0.99)))
         ]
         return params, optimizer_cls(groups, lr=1e-2)
 
@@ -104,8 +107,8 @@ def _param_differences(expected: Sequence[torch.Tensor], params: Sequence[torch.
 
 def device_skip_mismatches(build_reference: Build, build: Build) -> list[str]:
     """Run :data:`STEPS` steps of the optimizer ``build()`` returns under the device flag, :data:`NONFINITE_STEPS`
-    on NaN gradients and the rest on finite ones, beside ``build_reference()``'s unflagged steps on the finite ones;
-    name each departure from the contract. Both builders return equal parameters on one device and an optimizer
+    on non-finite gradients and the rest on finite ones, beside ``build_reference()``'s unflagged steps on the finite
+    ones; name each departure from the contract. Both builders return equal parameters on one device and an optimizer
     holding no state yet."""
     reference_params, reference = build_reference()
     params, optimizer = build()
@@ -117,6 +120,9 @@ def device_skip_mismatches(build_reference: Build, build: Build) -> list[str]:
         grads = [torch.randn(p.shape, generator=generator).to(device=device, dtype=p.dtype) for p in params]
         if nonfinite:
             grads[0].view(-1)[0] = float("nan")
+            fp32_grads = [grad for grad in grads if grad.dtype == torch.float32]
+            if fp32_grads:
+                fp32_grads[0].view(-1)[-1] = float("inf")
             weights = [p.detach().clone() for p in params]
             state = copy.deepcopy(optimizer.state_dict())
         else:

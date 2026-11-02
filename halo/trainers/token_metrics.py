@@ -1,11 +1,8 @@
 """Per-batch token accounting: the loss mask, loss-contributing tokens, HF's input-token count, each batch's
-attention-score work and HF's floating-point estimate.
-
-Nothing syncs the host per micro-batch: counts fold into host or on-device accumulators, the input and loss
-tokens and HF's FLOPs estimate sum over the world in one all-reduce per log (the input tokens also at a save and
-at each step a bound callback measures, the FLOPs at a save and at the end of training), and the attention work
-is read once per optimizer step, once a callback binds as its sink.
-"""
+attention-score work and HF's floating-point estimate. Nothing syncs the host per micro-batch: the input and loss
+tokens and the FLOPs estimate sum over the world in one all-reduce per log (the input tokens also at a save and at
+each step a bound callback measures, the FLOPs at a save and at train end), and the attention work is read once per
+optimizer step."""
 
 from __future__ import annotations
 

@@ -110,7 +110,7 @@ An empty group takes a fresh `torch.empty` instead of `.contiguous()`: at `M == 
 
 ### Detection and disabling
 
-At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `True` (default) and `supports_grouped_mm()` (`halo/hardware.py`) holds — CUDA is available and compute capability is ≥ 9.0. That predicate is the single authority; a test asking for grouped GEMM on pre-SM90 hardware still gets the loop path. Opt out with `use_grouped_gemm: false` in the YAML config.
+At model load the EP MoE layer enables grouped GEMM when `use_grouped_gemm` is `True` (default) and `supports_grouped_mm()` (`halo/hardware.py`) holds — CUDA is available and compute capability is ≥ 9.0. That predicate is the single authority; a test asking for grouped GEMM on pre-SM90 hardware still gets the loop path. A failing capability read raises rather than answering: the answer picks the expert weight layout, which every rank must share. Opt out with `use_grouped_gemm: false` in the YAML config.
 
 ## Supported models
 

@@ -3,22 +3,32 @@
 
 A second DeepEP dispatch during recompute reuses the same ``ElasticBuffer`` and invalidates the
 handle the original forward's backward node holds, so the replay cache is load-bearing for
-correctness, not just speed. These tests pin the three properties it rests on: the pass counter is
+correctness, not just speed. These tests pin the properties it rests on: the pass counter is
 the recompute signal (grad mode is NOT — non-reentrant checkpointing enables grad on both passes),
-concurrent frames (pipeline microbatches in flight) never see each other's slots, and a recompute
-that diverges from its forward fails loud.
+concurrent frames (pipeline microbatches in flight) never see each other's slots, a recompute
+that diverges from its forward fails loud, and the recompute releases its slots: the reentrant
+checkpoint keeps every scope until the loss is dropped, so a layer's cache held past its own backward
+stays alive through every other layer's.
 
 Run: ``pytest tests/cpu/parallelism/test_ep_checkpoint_scope.py``.
 """
 
+import functools
+import gc
+import weakref
+
 import pytest
 import torch
+from torch import nn
+from torch.utils.checkpoint import checkpoint
 
 from halo.models.gradient_checkpointing import (
     RecomputeScope,
     active_recompute_scope,
     scoped_checkpoint_func,
 )
+
+LAYERS, TOKENS, HIDDEN = 6, 16, 8
 
 
 class _Owner:
@@ -128,6 +138,69 @@ def test_scoped_checkpoint_func_is_idempotent():
 
     once = scoped_checkpoint_func(fake_checkpoint)
     assert scoped_checkpoint_func(once) is once
+
+
+def test_the_recompute_releases_its_slots():
+    owner, scope = _Owner(), RecomputeScope()
+    with scope:
+        scope.slot(owner, "dispatch")["v"] = 1
+    with scope:
+        assert scope.slot(owner, "dispatch")["v"] == 1
+    with scope, pytest.raises(RuntimeError, match="different path"):
+        scope.slot(owner, "dispatch")
+
+
+class _CachingLayer(nn.Module):
+    """Caches a fresh tensor in its scope slot on the first pass and replays it in the recompute, as the DeepEP
+    dispatch keeps its receive buffer; records which layers' caches are alive when its own backward runs."""
+
+    def __init__(self, index: int, caches: list, alive_at_backward: list):
+        super().__init__()
+        self.index = index
+        self.linear = nn.Linear(HIDDEN, HIDDEN)
+        self._caches = caches
+        self._alive_at_backward = alive_at_backward
+
+    def forward(self, x):
+        scope = active_recompute_scope()
+        slot = scope.slot(self, "dispatch")
+        if scope.is_recompute:
+            received = slot["received"] + 0 * x
+        else:
+            cached = (x * 2).detach().clone()
+            slot["received"] = cached
+            self._caches.append((self.index, weakref.ref(cached)))
+            received = cached + 0 * x
+        out = self.linear(received)
+        if scope.is_recompute:
+            out.register_hook(functools.partial(self._record, self.index))
+        return out
+
+    def _record(self, index, grad):
+        gc.collect()
+        self._alive_at_backward.append((index, _alive(self._caches)))
+        return grad
+
+
+def _alive(caches: list) -> list[int]:
+    return sorted(index for index, ref in caches if ref() is not None)
+
+
+def test_a_reentrant_layers_cache_dies_with_its_recompute():
+    """Under the reentrant checkpoint EP, CP and every MoE run, each layer's replay cache is released once its
+    recompute exits, before the backward reaches the layers below; none outlives ``loss.backward()``."""
+    caches, alive_at_backward = [], []
+    layers = [_CachingLayer(index, caches, alive_at_backward) for index in range(LAYERS)]
+    run = scoped_checkpoint_func(functools.partial(checkpoint, use_reentrant=True))
+    hidden = torch.randn(TOKENS, HIDDEN, requires_grad=True)
+    for layer in layers:
+        hidden = run(layer, hidden)
+    loss = hidden.sum()
+    assert _alive(caches) == list(range(LAYERS))
+    loss.backward()
+    gc.collect()
+    assert alive_at_backward == [(index, list(range(index))) for index in reversed(range(LAYERS))]
+    assert _alive(caches) == [], "a replay cache outlived the backward while the loss is still held"
 
 
 if __name__ == "__main__":

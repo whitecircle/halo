@@ -101,8 +101,7 @@ def test_a_refused_fa4_gets_fa2():
 
 @pytest.mark.skipif(not HAS_FA3, reason="flash_attn_interface (FA3) not installed in this image")
 def test_hopper_prefers_fa3_over_everything_else():
-    """Hopper must not take the FA2 path: the image stubs out the split-K kernels FA2's non-varlen
-    forward — the one CP calls — selects by occupancy heuristic."""
+    """Hopper runs its own FA3 for the non-varlen forward CP calls, the path FA2 serves worst."""
     func = _resolve(blackwell=False, hopper=True)
     assert _module_of(func).startswith("flash_attn_interface"), f"expected FA3 on Hopper, got {_module_of(func)!r}"
 

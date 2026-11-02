@@ -2,15 +2,15 @@
 """CPU tests for where a softcapped model (Gemma 2) trains on FlashAttention-4, per size, row shape and GPU.
 
 FA4 trains a softcap on its dense call only. Its head_dim-256 backward refuses one outright (Gemma 2 2B and 9B), and a
-softcap stays off its varlen kernels at any width (not validated there; on B300 their forward with one did not
-finish): a packed, padding-free or padded training batch unpads to that call, so
-Gemma 2 27B (head_dim 128) trains on FA4 only one unpadded row per batch at a time, evaluation batches included. Every
-other row shape takes FA2, chosen before the load; a pinned FA4 there is refused with the remedy; a host with no FA2
-build refuses rather than fall back to a kernel that drops the softcap. Whatever still reaches FA4's varlen entry
-point with a softcap (a pinned FA4 on a padded script) raises there instead of hanging.
+softcap stays off its varlen kernels at any width (not validated there): a packed, padding-free or padded training
+batch unpads to that call, so Gemma 2 27B (head_dim 128) trains on FA4 only one unpadded row per batch at a time,
+evaluation batches included. Every other row shape takes FA2, chosen before the load; a pinned FA4 there is refused
+with the remedy; a host with no FA2 build refuses rather than fall back to a kernel that drops the softcap. Whatever
+still reaches FA4's varlen entry point with a softcap (a pinned FA4 on a padded script) raises there, before the kernel
+launches.
 
 A stand-in ``flash_attn.cute`` checks the premise against the installed transformers: an unpadded row reaches the
-dense entry point, a padded batch and a packed row the varlen one, whose backward refuses a softcap as FA4's does.
+dense entry point, a padded batch and a packed row the varlen one.
 
 Run: ``python tests/cpu/models/test_softcap_varlen_attention.py`` (or ``pytest -m cpu``).
 """
@@ -110,8 +110,9 @@ def _padded_script_backend(config) -> str:
 
 
 # (size, arch) -> backend per SFT row shape, then the padded scripts'. 2B/9B leave FA4 on every row (its hd256 kernel
-# takes no softcap); 27B keeps it on one unpadded row per batch only; Hopper's FA3 trains the softcap on every row, and
-# the padded scripts' SDPA request lands on FA2 on Blackwell and on FA3 on Hopper, since SDPA drops the softcap.
+# takes no softcap); 27B keeps it on one unpadded row per batch only; Hopper's FA3 trains the softcap on every row.
+# The padded scripts request FA2 on Blackwell, and their SDPA request lands on FA3 on Hopper, since SDPA drops the
+# softcap.
 _EXPECTED = {
     ("2b", "blackwell"): {"unpacked-bs1": FA2, "unpacked-bs4": FA2, "packed": FA2, "padding-free": FA2, "padded": FA2},
     ("9b", "blackwell"): {"unpacked-bs1": FA2, "unpacked-bs4": FA2, "packed": FA2, "padding-free": FA2, "padded": FA2},
@@ -168,8 +169,22 @@ def test_a_softcapped_forward_only_companion_takes_the_padded_scripts_off_fa4():
             )
             == SDPA
         )
-        assert default_padded_attn_implementation(_UNSET, sinks_reset=True, checkpoint_config=_gemma2("27b")) == SDPA
         assert _resolve(_gemma2("27b"), SDPA) == FA2
+
+
+def test_a_softcapped_policy_requests_fa2_on_its_padded_batches():
+    """A softcapped policy's padded scripts request FA2 themselves, the softcap named as the reason, rather than an
+    SDPA the resolver then refuses for the softcap; without an FA2 build the request stays SDPA, whose refusal routes
+    on to a softcap-carrying backend as before."""
+    with _on("blackwell"), patch.object(selection.logger, "warning") as warn:
+        request = default_padded_attn_implementation(_UNSET, sinks_reset=True, checkpoint_config=_gemma2("27b"))
+        assert request == FA2
+        assert _resolve(_gemma2("27b"), request) == FA2
+    messages = [str(call.args[0]) for call in warn.call_args_list]
+    assert any("attention logit softcapping" in message for message in messages), messages
+    assert not any("sdpa" in message for message in messages), messages
+    with _on("blackwell", fa2=False):
+        assert default_padded_attn_implementation(_UNSET, sinks_reset=True, checkpoint_config=_gemma2("27b")) == SDPA
 
 
 def test_the_sft_default_reads_no_checkpoint_on_the_branches_that_decide_without_it():
@@ -227,7 +242,7 @@ def test_the_evaluation_batch_counts_only_where_the_run_evaluates(eval_strategy,
 
 def test_padded_evaluation_batches_take_a_softcapped_run_off_fa4():
     """One unpadded training row would keep 27B on FA4, but an evaluation batch of eight pads and unpads to the
-    varlen call, which on B300 would hang at the first evaluation."""
+    varlen call, which a softcap stays off."""
     with _on("blackwell"):
         trains_only = default_training_rows_attn_implementation(
             _UNSET, **_UNPADDED_ROW, dtype=torch.bfloat16, checkpoint_config=_gemma2("27b")
@@ -371,22 +386,9 @@ _FLASH_CACHE_GLOBALS = (
 )
 
 
-class _KernelOutput(torch.autograd.Function):
-    """The query passed through, whose backward refuses what FA4's refuses: a cu_seqlens call with a softcap."""
-
-    @staticmethod
-    def forward(ctx, q, varlen_softcap):
-        ctx.varlen_softcap = varlen_softcap
-        return q.clone()
-
-    @staticmethod
-    def backward(ctx, grad):
-        assert not ctx.varlen_softcap, "varlen + score_mod not supported in bwd yet"
-        return grad, None
-
-
 class _RecordingCute(types.ModuleType):
-    """``flash_attn.cute`` whose two entry points record whether each call was varlen and softcapped."""
+    """``flash_attn.cute`` whose two entry points record whether each call was varlen and softcapped, and pass the
+    query through."""
 
     def __init__(self):
         super().__init__("flash_attn.cute")
@@ -415,7 +417,7 @@ class _RecordingCute(types.ModuleType):
 
     def _run(self, q, *, varlen: bool, softcap):
         self.calls.append((varlen, bool(softcap)))
-        return _KernelOutput.apply(q, varlen and bool(softcap))
+        return q.clone()
 
 
 @pytest.fixture
@@ -442,9 +444,9 @@ _PREMISE_ROWS = {
 
 
 @pytest.mark.parametrize("rows", list(_PREMISE_ROWS))
-def test_a_padded_or_packed_batch_reaches_fa4s_varlen_backward(cute, rows):
-    """Premise of the route: training rows reach the varlen call packed or padded, and FA4's backward there refuses
-    the softcap; one unpadded row reaches the dense call, which trains."""
+def test_a_padded_or_packed_batch_reaches_fa4s_varlen_call(cute, rows):
+    """Premise of the route: a softcapped model's training rows reach FA4's varlen call packed or padded, softcap
+    included; one unpadded row reaches the dense call."""
     batch_rows, extra, reaches_varlen = _PREMISE_ROWS[rows]
     torch.manual_seed(0)
     model = Gemma2ForCausalLM(Gemma2Config(**TINY_GEMMA2_CONFIG, attn_logit_softcapping=50.0)).to(torch.bfloat16)
@@ -453,11 +455,8 @@ def test_a_padded_or_packed_batch_reaches_fa4s_varlen_backward(cute, rows):
     loss = model(input_ids=ids, labels=ids, use_cache=False, **extra).loss
     assert cute.calls and {varlen for varlen, _ in cute.calls} == {reaches_varlen}
     assert all(softcap for _, softcap in cute.calls)
-    if reaches_varlen:
-        with pytest.raises(AssertionError, match="varlen \\+ score_mod not supported in bwd yet"):
-            loss.backward()
-    else:
-        loss.backward()
+    assert ((True, True) in cute.calls) is reaches_varlen
+    loss.backward()
 
 
 # --- the varlen entry point's own refusal ----------------------------------------------------------------------
@@ -466,8 +465,8 @@ def test_a_padded_or_packed_batch_reaches_fa4s_varlen_backward(cute, rows):
 @pytest.mark.parametrize("rows", list(_PREMISE_ROWS))
 def test_fa4s_varlen_entry_point_refuses_a_softcapped_call_in_the_forward(cute, rows):
     """Installed, the refusal turns the varlen call a padded or packed batch reaches into an error in the forward,
-    before a B300 kernel could hang on it; one unpadded row reaches the dense call, which trains. The premise test
-    above is the negative control: without it the same forward runs and only the backward fails."""
+    before the kernel launches; one unpadded row reaches the dense call, which trains. The premise test above is the
+    negative control: without the refusal the same forward reaches the varlen kernel with the softcap."""
     assert install_fa4_varlen_softcap_refusal()
     batch_rows, extra, reaches_varlen = _PREMISE_ROWS[rows]
     torch.manual_seed(0)

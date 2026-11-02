@@ -2,7 +2,7 @@
 """Single EP group: the /world expert divide must survive a zero-token sync microbatch.
 
 With one EP group the trainer's post-backward sweep divides each ACCUMULATED expert gradient by the DP
-width once per optimizer step (``EPConfig.defer_expert_grad_sync``). A rank whose expert bank receives
+width once per optimizer step (``EPConfig.runs_post_backward_sweep``). A rank whose expert bank receives
 tokens in an early accumulation microbatch and ZERO dispatched tokens in the final one must still end at
 accumulated/world — not at the raw sum — and a bank that never received a token keeps ``grad is None``.
 Routing is forced by a fixed-selection router stub so which rank idles is exact; the sweep runs through
@@ -92,7 +92,9 @@ def run(ctx):
 
     # Anti-vacuity: this file certifies the single-group sweep regime, router on its hook, experts swept.
     checks["single_group_sweep_regime"] = (
-        ep_cfg.defer_expert_grad_sync and not ep_cfg.defer_grad_sync and not ep_cfg.experts_fsdp_managed
+        ep_cfg.runs_post_backward_sweep
+        and not ep_cfg.sweep_reduces_across_replicas
+        and not ep_cfg.experts_fsdp_managed
     )
 
     router = _FixedRouter(config.num_experts, top_k=1)

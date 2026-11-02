@@ -35,7 +35,6 @@ from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3ForSequenceClassifi
 
 from halo.checkpoint.tools import adapter_merge, bf16_conversion
 from halo.model_loading import model_preparation
-from halo.model_loading.parallel import whole_model
 from halo.model_loading.parallel.whole_model import resolve_trainer_model
 from tests.common.models import TINY_QWEN3_CONFIG
 from tests.common.repo import REPO_ROOT
@@ -262,7 +261,7 @@ def test_the_string_path_loader_applies_the_shims_before_it_materializes_weights
     ):
         resolve_trainer_model(causal_lm_checkpoint, args, parallelism_config=None, model_class=Qwen3ForCausalLM)
 
-    assert order == ["shims", "load"], order
+    assert order[0] == "shims" and order[-1] == "load" and order.count("load") == 1, order
 
 
 def test_a_pinned_backend_reads_its_config_after_the_shims(causal_lm_checkpoint):
@@ -277,7 +276,6 @@ def test_a_pinned_backend_reads_its_config_after_the_shims(causal_lm_checkpoint)
 
     args = SimpleNamespace(model_init_kwargs={"dtype": torch.float32, "attn_implementation": "eager"})
     with (
-        patch.object(whole_model, REMOTE_CODE_SHIMS, lambda: order.append("shims")),
         patch.object(model_preparation, REMOTE_CODE_SHIMS, lambda: order.append("shims")),
         patch.object(model_preparation.AutoConfig, "from_pretrained", recording_from_pretrained),
     ):
@@ -313,6 +311,12 @@ _LOADER_FUNCS = {
     and _calls_name(node, "from_pretrained_verified")
 }
 WEIGHT_MATERIALIZING_LOADERS = sorted(_LOADER_FUNCS)
+# The shims, and the shared loading helpers that apply them before their own config or weight read.
+_SHIM_APPLYING_CALLS = {REMOTE_CODE_SHIMS} | {
+    node.name
+    for node in ast.walk(ast.parse(LOADER_MODULES[0].read_text(encoding="utf-8")))
+    if isinstance(node, ast.FunctionDef) and _calls_name(node, REMOTE_CODE_SHIMS)
+}
 
 
 def test_the_sweep_found_the_string_path_loaders():
@@ -324,10 +328,12 @@ def test_the_sweep_found_the_string_path_loaders():
 @pytest.mark.parametrize("loader", WEIGHT_MATERIALIZING_LOADERS)
 def test_every_loader_that_materializes_weights_applies_the_shims(loader):
     """Derived from the module rather than listed, so a NEW loader that forgets the shims fails here
-    instead of in a Bailing/Ling run whose export crashes hours later."""
-    assert _calls_name(_LOADER_FUNCS[loader], REMOTE_CODE_SHIMS), (
-        f"{loader}() loads weights from a path but never calls {REMOTE_CODE_SHIMS}() — a remote-code "
-        f"modeling file imported through it reaches none of the v5 compat shims"
+    instead of in a Bailing/Ling run whose export crashes hours later. A loader applies them itself or
+    through a shared helper that applies them before its read (``resolve_build_config``)."""
+    assert any(_calls_name(_LOADER_FUNCS[loader], name) for name in _SHIM_APPLYING_CALLS - {loader}), (
+        f"{loader}() loads weights from a path but never calls {REMOTE_CODE_SHIMS}() or a helper that does "
+        f"({sorted(_SHIM_APPLYING_CALLS - {REMOTE_CODE_SHIMS})}) — a remote-code modeling file imported through it "
+        f"reaches none of the v5 compat shims"
     )
 
 

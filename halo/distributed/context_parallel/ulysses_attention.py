@@ -49,8 +49,6 @@ def _adapt_to_fa2_contract(func):
 def _flash_attn_func(allow_fa4: bool = True):
     """``flash_attn_func`` of :func:`preferred_flash_impl`, else FA2. This probe, not ``_attn_implementation``,
     picks a CP run's kernel; the arch's own build comes first because both images also ship FA2."""
-    # Hopper (sm_90) cannot take the FA2 path: the image stubs out the split-K kernels that FA2's
-    # non-varlen forward (the one CP calls) selects by occupancy heuristic, so it would raise.
     preferred = preferred_flash_impl(allow_fa4=allow_fa4)
     if preferred != "flash_attention_2":
         with contextlib.suppress(ImportError):

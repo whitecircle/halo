@@ -1,11 +1,7 @@
 """The gradient-checkpointing plan: which text decoder layers a run checkpoints, chosen from one fully checkpointed
-step.
-
-The policies are transformers' ``every_n_layers=k`` rule (every k-th decoder layer checkpointed) and off; they replay
-the same forward, so losses and gradients match full checkpointing bitwise where the kernels are deterministic. Pure
-over rank-uniform inputs; the measurement, the collectives and the record a run leaves in ``output_dir`` are
-:mod:`halo.callbacks.checkpointing_plan`'s.
-"""
+step. The policies are transformers' ``every_n_layers=k`` rule and off; they replay the same forward, so losses and
+gradients match full checkpointing bitwise where the kernels are deterministic. Pure over rank-uniform inputs; the
+measurement, the collectives and the run's record are :mod:`halo.callbacks.checkpointing_plan`'s."""
 
 from __future__ import annotations
 

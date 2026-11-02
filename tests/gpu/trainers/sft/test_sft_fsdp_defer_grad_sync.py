@@ -123,7 +123,7 @@ def _exercises_mode(mode: str, pc: ParallelismConfig, model) -> bool:
         # ep: the in-backward router hook and the swept expert divide; ep2: the full post-backward sweep.
         ep_config = pc.ep_config()
         sweep = mode == "ep2"
-        return ep_config.defer_grad_sync == sweep and ep_config.is_deferred_dp == sweep
+        return ep_config.sweep_reduces_across_replicas == sweep and ep_config.is_deferred_dp == sweep
     return pc.data_parallel_size > 1
 
 

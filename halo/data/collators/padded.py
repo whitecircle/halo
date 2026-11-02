@@ -17,7 +17,7 @@ from halo.models.segment_markers import single_row_varlen_kwargs
 class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     """Completion-only collator: every label outside the assistant completions is ignored.
     ``response_prompt_template`` marks the response start; pass token ids where the tokenizer encodes it
-    context-dependently. ``one_document_varlen`` hands a one-document batch its varlen set
+    context-dependently. ``emit_varlen_one_document`` hands a one-document batch its varlen set
     (:func:`~halo.models.segment_markers.single_row_varlen_kwargs`)."""
 
     def __init__(
@@ -26,7 +26,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         *args,
         train_on_last_assistant_only: bool = False,
         eos_token_ids: frozenset[int] | None = None,
-        one_document_varlen: bool = False,
+        emit_varlen_one_document: bool = False,
         **kwargs,
     ):
         super().__init__(*args, mlm=False, **kwargs)
@@ -35,7 +35,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
         self.train_on_last_assistant_only = train_on_last_assistant_only
         self.response_token_ids = tokenize_response_template(response_prompt_template, self.tokenizer)
         self.eos_token_ids = eos_token_ids if eos_token_ids is not None else resolve_eos_token_ids(self.tokenizer)
-        self.one_document_varlen = one_document_varlen
+        self.emit_varlen_one_document = emit_varlen_one_document
 
         warn_if_pad_equals_eos(self.tokenizer)
 
@@ -48,7 +48,7 @@ class DataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
             self.response_prompt_template,
             tokenizer=self.tokenizer,
         )
-        if self.one_document_varlen:
+        if self.emit_varlen_one_document:
             batch.update(single_row_varlen_kwargs(batch))
         return batch
 

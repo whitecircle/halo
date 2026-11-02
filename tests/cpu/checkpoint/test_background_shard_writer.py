@@ -11,7 +11,8 @@ are still in flight, and the finalize waits those out before naming both in the 
 background write raises its own exception only once no other write is running, and on every rank of a
 gathered save, through the stream's guard or the finalize's; the block's exit waits out every write
 whatever the caller raised, logging a failed one the caller never collected; outside a block (the
-pipeline-stage writer) parts are written in line.
+pipeline-stage writer) parts are written in line; a negative thread count raises when any writer is built, a
+pipeline stage's never-entered one included.
 
     python tests/cpu/checkpoint/test_background_shard_writer.py
 """
@@ -33,11 +34,15 @@ from transformers import AutoModelForCausalLM, Qwen3Config, Qwen3ForCausalLM
 
 import halo.checkpoint.parallel.writing as gathered_writing
 import halo.checkpoint.writing as writing
-from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
+from halo.checkpoint.format import PP_WRAPPER_PART_PREFIX, SAFETENSORS_INDEX_FILE
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from halo.checkpoint.parallel.save import save_fsdp2_checkpoint
 from halo.checkpoint.parallel.writing import chunked_saveable_tensors, stream_gathered_checkpoint
-from halo.checkpoint.writing import StreamingShardWriter, checkpoint_write_threads, normalize_gathered_state_dict
+from halo.checkpoint.writing import (
+    StreamingShardWriter,
+    normalize_gathered_state_dict,
+    resolve_checkpoint_write_threads,
+)
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from tests.common.checkpoint_io import file_digests, loading_problems, save_context
 from tests.common.gloo import run_gloo_ranks
@@ -433,13 +438,13 @@ def test_the_thread_count_knob(monkeypatch, caplog, raw, threads, warns):
     else:
         monkeypatch.setenv(THREADS_ENV, raw)
     with caplog.at_level(logging.WARNING):
-        assert checkpoint_write_threads() == threads
+        assert resolve_checkpoint_write_threads() == threads
     assert any(THREADS_ENV in r.getMessage() for r in caplog.records) == warns
 
 
 @pytest.mark.parametrize("enabled", [True, False], ids=["save_rank", "peer_rank"])
-def test_a_negative_thread_count_raises_on_entry_on_every_rank(tmp_path, monkeypatch, enabled):
-    """The save rank and every peer refuse it entering the block, before a gathered save's first collective."""
+def test_a_negative_thread_count_raises_on_every_rank_before_the_block(tmp_path, monkeypatch, enabled):
+    """The save rank and every peer refuse it building the writer, before a gathered save's first collective."""
     monkeypatch.setenv(THREADS_ENV, "-3")
     entered = False
     with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITE_THREADS=-3"):
@@ -447,6 +452,15 @@ def test_a_negative_thread_count_raises_on_entry_on_every_rank(tmp_path, monkeyp
             entered = True
     assert not entered
     assert not any(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["stage_writer_rank", "stage_peer_rank"])
+def test_a_negative_thread_count_refuses_the_pipeline_stage_writer(tmp_path, monkeypatch, enabled):
+    """A pipeline stage builds its writer and writes in line, never entering a block; the count is refused there
+    too, as a stage's writer is built on every stage rank ahead of the stage's gathers."""
+    monkeypatch.setenv(THREADS_ENV, "-1")
+    with pytest.raises(ValueError, match="HALO_CHECKPOINT_WRITE_THREADS=-1"):
+        StreamingShardWriter(str(tmp_path), SHARD_SIZE, enabled=enabled, filename_prefix=PP_WRAPPER_PART_PREFIX)
 
 
 def _raise_on_writer_thread(fail_part: int, tensors, path, **kwargs):

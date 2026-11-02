@@ -1,10 +1,7 @@
 """Chunked log-probs and cross-entropy sums over a logits plane, in at least fp32, and the next-token label math they
-score.
-
-Whole, the fp32 upcast of a logits plane and the ``log_softmax`` output saved for backward are two
-fp32 planes, ~26 GB at ``V=201088``, ``S=8192``, so every caller chunks under the one budget below. The
-hidden-state form, which never builds the plane, is :mod:`halo.kernels.head_logprobs`.
-"""
+score. Whole, the fp32 upcast of a logits plane and the ``log_softmax`` output saved for backward are two fp32
+planes, ~26 GB at ``V=201088``, ``S=8192``, so every caller chunks under the one budget below. The hidden-state form,
+which never builds the plane, is :mod:`halo.kernels.head_logprobs`."""
 
 from collections.abc import Callable, Iterator
 

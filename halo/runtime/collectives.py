@@ -48,18 +48,42 @@ def broadcast_from_rank0(value):
     return value
 
 
-def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.ProcessGroup:
-    """Create a process group for every rank list, in order, and return the ``mine``-th. COLLECTIVE.
+def _splits_default_group() -> bool:
+    """Whether new groups can come from one split of the default group's communicator: an NCCL default group
+    initialized on its bound device, the check ``DeviceMesh`` makes before ``split_group``."""
+    return (
+        dist.get_backend() == dist.Backend.NCCL
+        and getattr(dist.distributed_c10d._get_default_group(), "bound_device_id", None) is not None
+    )
 
-    Every rank passes the identical ``rank_lists``: one skipping or reordering a creation deadlocks the job.
+
+def build_groups(rank_lists: list[list[int]], *, mine: int, what: str) -> dist.ProcessGroup:
+    """Create a process group for every rank list and return the ``mine``-th, which must hold this rank.
+    COLLECTIVE.
+
+    Every rank passes the identical, disjoint ``rank_lists``. Over an NCCL default group bound to its device the
+    call is one communicator split (``split_group``): a ``new_group`` per list splits the world communicator once
+    per list, each split blocking every rank of the job at startup.
+
+    Raises:
+        ValueError: the rank lists overlap.
+        RuntimeError: this rank is not in the ``mine``-th list.
     """
-    my_group = None
-    for index, ranks in enumerate(rank_lists):
-        group = dist.new_group(ranks, timeout=nccl_timeout())
-        if index == mine:
-            my_group = group
-    if my_group is None:
-        raise RuntimeError(f"Rank {dist.get_rank()} was not assigned a {what} (index {mine}).")
+    members = [rank for ranks in rank_lists for rank in ranks]
+    if len(members) != len(set(members)):
+        raise ValueError(f"The {what} rank lists overlap, so no split of the world holds them: {rank_lists}")
+    rank = dist.get_rank()
+    if _splits_default_group():
+        my_group = dist.split_group(split_ranks=rank_lists, timeout=nccl_timeout(), group_desc=what)
+    else:
+        my_group = None
+        # One rank skipping or reordering a creation deadlocks the job.
+        for index, ranks in enumerate(rank_lists):
+            group = dist.new_group(ranks, timeout=nccl_timeout())
+            if index == mine:
+                my_group = group
+    if my_group is None or not 0 <= mine < len(rank_lists) or rank not in rank_lists[mine]:
+        raise RuntimeError(f"Rank {rank} was not assigned a {what} (index {mine} of {len(rank_lists)}).")
     return my_group
 
 

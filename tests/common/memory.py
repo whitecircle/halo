@@ -1,11 +1,14 @@
-"""Device and host memory for the test suites: release between phases, current and peak GPU use, and the
-process's peak resident set size."""
+"""Device and host memory for the test suites: release between phases, current and peak GPU use, the
+process's peak resident set size, and the peak bytes a CPU region's ops hold at once."""
 
 import gc
 import pathlib
 import re
+import weakref
 
 import torch
+from torch.utils._python_dispatch import TorchDispatchMode
+from torch.utils._pytree import tree_leaves
 
 # Written to /proc/self/clear_refs, restarts the process's peak resident set size (VmHWM) from its current size.
 _RESET_PEAK_RSS = "5"
@@ -48,3 +51,33 @@ def host_peak_rss_gib() -> float:
     if peak is None:
         raise RuntimeError("/proc/self/status carries no VmHWM line to read a peak resident set size from")
     return int(peak.group(1)) / 1024**2
+
+
+class LiveTensorBytes(TorchDispatchMode):
+    """The most bytes the tensors allocated inside the region hold at once (``peak``), and what they still hold
+    (``live``). An op's output counts when its storage is new (not an input's, not a view); it stops counting
+    when the tensor is freed, which a live view of it postpones. Tensors allocated before the region never count.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.live = 0
+        self.peak = 0
+
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        kwargs = kwargs or {}
+        output = func(*args, **kwargs)
+        inputs = {t.untyped_storage().data_ptr() for t in tree_leaves((args, kwargs)) if isinstance(t, torch.Tensor)}
+        for tensor in tree_leaves(output):
+            if not isinstance(tensor, torch.Tensor) or tensor._base is not None:
+                continue
+            storage = tensor.untyped_storage()
+            if storage.data_ptr() in inputs or storage.nbytes() == 0:
+                continue
+            self.live += storage.nbytes()
+            self.peak = max(self.peak, self.live)
+            weakref.finalize(tensor, self._release, storage.nbytes())
+        return output
+
+    def _release(self, nbytes: int) -> None:
+        self.live -= nbytes

@@ -38,13 +38,13 @@ def select_data_collator(
     keeps_packed_rows: bool = False,
     allow_cross_document_linear_attention: bool = False,
     per_device_eval_batch_size: int = 0,
-    one_document_varlen: bool = False,
+    emit_varlen_one_document: bool = False,
 ):
     """The data collator matching the training configuration, ``None`` for TRL's own; raises on an option
     combination no collator can serve. ``model_config`` supplies the eos set that ends assistant turns,
     which templates delimiting turns with role markers (GLM-4) need.
 
-    ``one_document_varlen`` hands a one-document batch its varlen set where the model takes it
+    ``emit_varlen_one_document`` hands a one-document batch its varlen set where the model takes it
     (:func:`~halo.data.collators.collator_rules.supports_one_document_varlen_set`), outside PP
     (``keeps_packed_rows``), whose stages build their own; the CP routes never take it, Ulysses handing the kernel
     its own ``cu_seqlens``. TRL's collator then comes from here, with the set. Only for a caller whose batches reach
@@ -71,13 +71,15 @@ def select_data_collator(
         "eos_token_ids": resolve_eos_token_ids(tokenizer, model_config),
     }
     last_only = ", last-only" if train_on_last_assistant_only else ""
-    one_document = one_document_varlen and not keeps_packed_rows and supports_one_document_varlen_set(model_config)
-    flat_markers = {"return_seq_idx": markers.seq_idx, "return_flash_attn_kwargs": True}
+    one_document = (
+        emit_varlen_one_document and not keeps_packed_rows and supports_one_document_varlen_set(model_config)
+    )
+    flat_markers = {"return_seq_idx": markers.seq_idx, "emit_varlen_always": True}
     packed_markers = {
         "return_seq_idx": markers.seq_idx,
-        "return_flash_attn_kwargs": markers.cu_seq_lens,
-        "flash_varlen_kwargs": is_flash_attn_implementation(effective_attn_implementation(model_config)),
-        "one_document_varlen": one_document,
+        "emit_varlen_always": markers.cu_seq_lens,
+        "emit_varlen_on_flash_restart": is_flash_attn_implementation(effective_attn_implementation(model_config)),
+        "emit_varlen_one_document": one_document,
     }
     if use_context_parallel and train_on_completions_only:
         # pad_to_multiple_of keeps seqs divisible by cp_size.
@@ -102,7 +104,7 @@ def select_data_collator(
         collator = DataCollatorWithPacking(tokenizer=tokenizer, **packed_markers)
     elif train_on_completions_only:
         prefix, name = "📝", f"DataCollatorForCompletionOnlyLM{last_only}"
-        collator = DataCollatorForCompletionOnlyLM(**completion_kwargs, one_document_varlen=one_document)
+        collator = DataCollatorForCompletionOnlyLM(**completion_kwargs, emit_varlen_one_document=one_document)
     elif one_document:
         prefix, name = "ℹ️", "DataCollatorForLanguageModelingWithVarlen (TRL's, with the one-document varlen set)"
         collator = DataCollatorForLanguageModelingWithVarlen(

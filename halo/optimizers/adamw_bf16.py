@@ -1,10 +1,7 @@
-"""AdamW with bf16 master weights and moments (6 B/param), stochastically rounded.
-
-Stochastic rounding keeps the bf16 writes unbiased, where nearest rounding would truncate a sub-ULP ``lr*step``
-update to zero and inflate the non-negative second moment. The fused step updates the bf16 parameters that share
-dtypes and a launch specialization in one launch on sm_100/103 and one parameter per launch on other GPUs, through raw
-pointers to the local shards, and bumps ``_version`` explicitly: the Triton stores are invisible to ATen, and the
-low-precision weight cache keys on the counter."""
+"""AdamW with bf16 master weights and moments (6 B/param), stochastically rounded so a sub-ULP ``lr*step`` update
+and the non-negative second moment stay unbiased. The fused step updates the local bf16 shards through raw
+pointers, several parameters per launch on sm_100/103 and one elsewhere, and bumps ``_version`` itself: the Triton
+stores are invisible to ATen, and the low-precision weight cache keys on the counter."""
 
 import functools
 import logging
@@ -233,6 +230,25 @@ def _step_hparams(group: dict, step: int) -> tuple[float, float, float, float, f
     return beta1, beta2, step_size, bc2_sqrt, group["eps"], 1.0 - lr * group["weight_decay"]
 
 
+def _flagged_fp32_operands(
+    skip: Tensor, dtype: torch.dtype, beta1: float, beta2: float, wd_factor: float, eps: float
+) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """The fp32 path's operands under the skip flag, 0-dim tensors on ``skip``'s device that let the flag ride the
+    update's own ops: the -0.0 (fp32) a skipped step selects its gradient to, then the moment decays, the weight decay
+    factor and ``eps`` in ``dtype``.
+
+    Unset, each factor holds the value its float would, so the step writes the same bits. Set, the factors are one and
+    ``eps`` is infinite: the moments, decayed by one and given a -0.0 gradient, keep their values, and the weight update
+    over an infinite denominator is a signed zero, which keeps every weight but a -0.0 one beside a negative (or -0.0)
+    ``exp_avg``, which turns +0.0.
+    """
+    factors = tuple(
+        torch.full((), value, dtype=dtype, device=skip.device).masked_fill_(skip, identity)
+        for value, identity in ((beta1, 1.0), (beta2, 1.0), (wd_factor, 1.0), (eps, math.inf))
+    )
+    return torch.full((), -0.0, dtype=torch.float32, device=skip.device), *factors
+
+
 def _divisibility(tensors: Sequence[Tensor]) -> tuple[bool, bool, bool, bool, bool]:
     """What Triton's launch specialization would mark divisible in a launch over ``tensors`` (p, grad, exp_avg,
     exp_avg_sq) alone: the element count, then each tensor's start (:data:`_DIVISIBILITY`)."""
@@ -398,7 +414,7 @@ class AdamWBF16(DeviceStepSkipMixin, torch.optim.Optimizer):
 
     bf16 params take the fused Triton step (eager with ``use_triton=False`` or off CUDA), many per launch on sm_100/103
     and one per launch elsewhere; fp32 params (``fp32_router`` / ``fp32_experts``) take plain AdamW. A device skip flag
-    (:meth:`skip_next_step_if`) makes a step write nothing.
+    (:meth:`skip_next_step_if`) makes a step leave every parameter and moment as it was.
     """
 
     def __init__(
@@ -453,6 +469,8 @@ class AdamWBF16(DeviceStepSkipMixin, torch.optim.Optimizer):
         pending: dict[tuple, list[_FusedUpdate]] = defaultdict(list)
         fused_params = []
         for group in self.param_groups:
+            # The flagged fp32 operands carry the group's hyperparameters, so they live per group (and dtype).
+            flagged_operands: dict[torch.dtype, tuple[Tensor, ...]] = {}
             for p, name in zip(group["params"], group["param_names"], strict=True):
                 # The step count advances for every param, including one with no grad, so replicas
                 # whose grad presence differs still agree on the step a param's seed is keyed by.
@@ -497,24 +515,26 @@ class AdamWBF16(DeviceStepSkipMixin, torch.optim.Optimizer):
                     continue
 
                 # Per param, not _foreach_*: FSDP2 DTensor params cannot mix with plain tensors. All four
-                # tensors share one sharding, so the pointwise update on local shards writes through. Each new
-                # value is written once complete: a skipped step keeps the moments, and the weight update that
-                # reads them goes unwritten too.
+                # tensors share one sharding, so the pointwise update on local shards writes through.
                 p_data = to_local(p).detach()
                 exp_avg = to_local(state["exp_avg"])
                 exp_avg_sq = to_local(state["exp_avg_sq"])
                 grad_fp32 = _scaled_grad(to_local(p.grad), grad_scale).float()
-                write_unless_skipped(exp_avg, exp_avg.mul(beta1).add_(grad_fp32, alpha=1.0 - beta1), skip)
-                write_unless_skipped(
-                    exp_avg_sq, exp_avg_sq.mul(beta2).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2), skip
-                )
-                denom = (exp_avg_sq.sqrt() / bc2_sqrt).add_(eps)
+                ea_decay, easq_decay, p_decay, denom_eps = beta1, beta2, wd_factor, eps
+                if skip is not None:
+                    if p_data.dtype not in flagged_operands:
+                        flagged_operands[p_data.dtype] = _flagged_fp32_operands(
+                            skip, p_data.dtype, beta1, beta2, wd_factor, eps
+                        )
+                    skipped_grad, ea_decay, easq_decay, p_decay, denom_eps = flagged_operands[p_data.dtype]
+                    # A select, not a factor: a non-finite gradient survives multiplication by zero.
+                    grad_fp32 = torch.where(skip, skipped_grad, grad_fp32)
+                exp_avg.mul_(ea_decay).add_(grad_fp32, alpha=1.0 - beta1)
+                exp_avg_sq.mul_(easq_decay).addcmul_(grad_fp32, grad_fp32, value=1.0 - beta2)
                 if group["weight_decay"] != 0.0:
-                    new_p = p_data.mul(wd_factor).addcdiv_(exp_avg, denom, value=-step_size)
-                else:
-                    new_p = torch.addcdiv(p_data, exp_avg, denom, value=-step_size)
-                del denom
-                write_unless_skipped(p_data, new_p, skip)
+                    p_data.mul_(p_decay)
+                denom = (exp_avg_sq.sqrt() / bc2_sqrt).add_(denom_eps)
+                p_data.addcdiv_(exp_avg, denom, value=-step_size)
 
         for launch in pending.values():
             if launch:

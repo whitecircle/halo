@@ -1,10 +1,8 @@
 """FSDP2 (``fully_shard``) data-parallel gradient sync for every torchrun mode, plus the sharding-state helpers.
-
-The DP entry point builds its mesh and the TP one takes the loader's ``(dp, tp)`` mesh; both run one wrap body, so a
-policy knob cannot drift between them. ``reshard_after_forward``: False = SHARD_GRAD_OP (faster), True = FULL_SHARD
-(lower peak memory). A multi-layer unit's forward hooks and :func:`complete_fsdp2_post_backward` drive FSDP2
-internals (``FSDPState``, ``FSDPParamGroup``), which ``tests/cpu/parallelism/test_fsdp2_post_backward_internals.py``
-and ``tests/cpu/parallelism/test_fsdp2_layer_units.py`` pin against the installed torch."""
+The DP entry point builds its mesh and the TP one takes the loader's ``(dp, tp)`` mesh; both run one wrap body, so
+a policy knob cannot drift between them. A multi-layer unit's forward hooks and
+:func:`complete_fsdp2_post_backward` drive FSDP2 internals of the installed torch (``FSDPState``,
+``FSDPParamGroup``)."""
 
 import contextlib
 import functools

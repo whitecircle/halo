@@ -239,8 +239,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
     gradient_checkpointing_plan: Literal["off", "auto"] = field(
         default="off",
         metadata={
-            "help": "auto: measure step 2 fully checkpointed, then checkpoint only every k-th text decoder layer (or "
-            "none) while the predicted peak fits 85% of device memory (75% under EP), one plan for every rank; a "
+            "help": "auto: measure one fully checkpointed step, then checkpoint only every k-th text decoder layer "
+            "(or none) while the predicted peak fits the device memory budget, one plan for every rank; a "
             "relaunch into the same output_dir after an unfinished run checkpoints at least one step more. Packed "
             "SFT rows only; refused under PP, torch_compile, auto_find_batch_size, RL rollouts, multimodal rows, "
             "activation offload, an explicit every_n_layers, model-level checkpointing or gradient_checkpointing "
@@ -408,14 +408,15 @@ class ModelInitKwargsArguments:
 @dataclass
 class CrossDocumentLinearAttentionArguments:
     """The opt-in of the configs whose multi-document rows (``packing``, ``padding_free``) are refused on
-    linear-attention layers no document boundary reaches
+    sequence mixers no document boundary reaches
     (:func:`~halo.models.segment_markers.reject_unmarked_linear_attention_rows`)."""
 
     allow_cross_document_linear_attention: bool = field(
         default=False,
         metadata={
-            "help": "Train multi-document rows (packing, padding_free) on a model whose linear-attention layers "
-            "receive no document boundary (Ring's Lightning Attention-2): their recurrent state then carries from "
-            "each document of a row into the next. Off, such a run is refused."
+            "help": "Train multi-document rows (packing, padding_free) on a model whose linear-attention layers or "
+            "other sequence mixers receive no document boundary (Ring's Lightning Attention-2, Inkling's short "
+            "convolutions): their state then carries from each document of a row into the next. Off, such a run "
+            "is refused."
         },
     )

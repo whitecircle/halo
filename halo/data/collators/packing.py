@@ -87,9 +87,9 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
     family to plumb position_ids or the varlen set through (the matrix is in ``agent-docs/data/collators.md``). Requires right
     padding, since leading pads would become an attended document.
 
-    ``return_flash_attn_kwargs`` emits the varlen set (``cu_seq_lens_q/k``, ``max_length_q/k``) on every
-    flattened row, for a mixer that reads it; ``flash_varlen_kwargs`` emits it where transformers would derive
-    the same set from position_ids itself, on a flash run's multi-document row; ``one_document_varlen`` on a batch
+    ``emit_varlen_always`` emits the varlen set (``cu_seq_lens_q/k``, ``max_length_q/k``) on every
+    flattened row, for a mixer that reads it; ``emit_varlen_on_flash_restart`` emits it where transformers would derive
+    the same set from position_ids itself, on a flash run's multi-document row; ``emit_varlen_one_document`` on a batch
     that is one document (:func:`~halo.models.segment_markers.single_row_varlen_kwargs`), which transformers
     would test for packing before its dense kernel. Handed over, the set spares every attention layer that
     derivation or test and its device syncs.
@@ -110,9 +110,9 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
         self,
         tokenizer: PreTrainedTokenizerBase,
         return_seq_idx: bool = False,
-        return_flash_attn_kwargs: bool = False,
-        flash_varlen_kwargs: bool = False,
-        one_document_varlen: bool = False,
+        emit_varlen_always: bool = False,
+        emit_varlen_on_flash_restart: bool = False,
+        emit_varlen_one_document: bool = False,
     ):
         if getattr(tokenizer, "padding_side", "right") != "right":
             raise ValueError(
@@ -124,9 +124,9 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             )
         super().__init__(tokenizer=tokenizer, mlm=False, return_tensors="pt")
         self.return_seq_idx = return_seq_idx
-        self.return_flash_attn_kwargs = return_flash_attn_kwargs
-        self.flash_varlen_kwargs = flash_varlen_kwargs
-        self.one_document_varlen = one_document_varlen
+        self.emit_varlen_always = emit_varlen_always
+        self.emit_varlen_on_flash_restart = emit_varlen_on_flash_restart
+        self.emit_varlen_one_document = emit_varlen_one_document
 
     def torch_call(self, examples: list[list[int] | Any | dict[str, Any]]) -> dict[str, Any]:
         # Copy mappings before popping seq_lengths/labels — the pops must not mutate the caller's rows.
@@ -166,12 +166,12 @@ class DataCollatorWithPacking(DataCollatorForLanguageModeling):
             if self.flatten_to_single_row:
                 batch = flatten_packed_batch(batch, self._real_row_lengths(batch, examples))
             # The varlen set is only defined on the flattened [1, total] row — PP keeps its rows.
-            varlen = self.return_flash_attn_kwargs or (
-                self.flash_varlen_kwargs and positions_restart(batch["position_ids"])
+            varlen = self.emit_varlen_always or (
+                self.emit_varlen_on_flash_restart and positions_restart(batch["position_ids"])
             )
             markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=varlen and self.flatten_to_single_row)
             batch.update(segment_marker_kwargs(batch["position_ids"], markers))
-        if self.one_document_varlen:
+        if self.emit_varlen_one_document:
             batch.update(single_row_varlen_kwargs(batch))
 
         return batch
@@ -204,16 +204,16 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
         train_on_last_assistant_only: bool = False,
         eos_token_ids: frozenset[int] | None = None,
         return_seq_idx: bool = False,
-        return_flash_attn_kwargs: bool = False,
-        flash_varlen_kwargs: bool = False,
-        one_document_varlen: bool = False,
+        emit_varlen_always: bool = False,
+        emit_varlen_on_flash_restart: bool = False,
+        emit_varlen_one_document: bool = False,
     ):
         super().__init__(
             tokenizer=tokenizer,
             return_seq_idx=return_seq_idx,
-            return_flash_attn_kwargs=return_flash_attn_kwargs,
-            flash_varlen_kwargs=flash_varlen_kwargs,
-            one_document_varlen=one_document_varlen,
+            emit_varlen_always=emit_varlen_always,
+            emit_varlen_on_flash_restart=emit_varlen_on_flash_restart,
+            emit_varlen_one_document=emit_varlen_one_document,
         )
 
         self.response_prompt_template = response_prompt_template
@@ -285,7 +285,7 @@ class DataCollatorWithFlattening(DefaultDataCollator):
     (:data:`~halo.models.attention.selection.VARLEN_ATTN_IMPLEMENTATIONS`)."""
 
     tokenizer: PreTrainedTokenizerBase = None
-    return_flash_attn_kwargs: bool = True
+    emit_varlen_always: bool = True
     return_seq_idx: bool = False
     # The run's opt-in, recorded by the collator factory so a trainer's own check admits what the factory did.
     allow_cross_document_linear_attention: bool = False
@@ -318,7 +318,7 @@ class DataCollatorWithFlattening(DefaultDataCollator):
             batch["position_ids"] += list(range(len(input_ids)))
 
         batch = {key: torch.tensor([value], dtype=torch.int64) for key, value in batch.items()}
-        markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=self.return_flash_attn_kwargs)
+        markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=self.emit_varlen_always)
         batch.update(segment_marker_kwargs(batch["position_ids"], markers))
         return batch
 

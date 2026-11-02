@@ -1,23 +1,7 @@
-"""Tree attention for GLM-5 Next's DeepSeek sparse attention: every query selects its keys on its own path.
-
-A DSA layer's indexer scores pools of ``index_kpool`` consecutive tokens and each query attends the
-tokens of its top-scoring pools plus the incomplete pool it sits in. Pools are runs of positions along
-a sequence, so in a tree row they run along each token's own path: a pool is its last token and that
-token's predecessors on the path, which makes a pool straddling a node boundary one pool per branch.
-A query's candidates are the pools whose last token precedes it on its path. Every term the stock
-indexer computes is then taken per path, and each example of a tree row selects what it selects alone.
-The layers carry no position encoding, so position enters only through the pool boundaries.
-
-The selection takes no gradient (the stock indexer runs under ``no_grad``), so it is scored a chunk of
-queries at a time; the stock form holds ``[tokens, heads, tokens / index_kpool]`` fp32 scores, which no
-card holds at long context. Ties at the selection cut break to the earlier pool on the path, the order
-the example alone presents them in.
-
-Attention then runs on the MLA latent the keys and values expand from: one ``kv_lora_rank`` vector per
-token, shared by every head. With the key projection folded into the query and the value projection
-applied after, a query attends only its selected latent rows instead of the stock dense ``[T, T]`` mask
-over expanded keys — the same scores and outputs, reassociated.
-"""
+"""Tree attention for GLM-5 Next's DeepSeek sparse attention: every query selects its keys along its own path,
+from indexer pools that run along each token's path, and attends only its selected MLA latent rows, with the key
+projection folded into the query. agent-docs/optimization/tree-packing.md has the pool, selection and attention
+rules."""
 
 import functools
 
@@ -26,6 +10,7 @@ import torch.nn.functional as F
 from peft.tuners.tuners_utils import BaseTunerLayer
 from peft.utils.constants import INCLUDE_LINEAR_LAYERS_SHORTHAND
 
+from halo.kernels.fp32_matmul import bmm_fp32
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY
 from halo.models.config_access import text_config
 
@@ -61,12 +46,46 @@ def _path_back(predecessor: torch.Tensor, tokens: torch.Tensor, steps: int) -> t
     return torch.stack(chain, dim=-1)
 
 
+def _pool_ends(links: dict, pool: int) -> dict[str, torch.Tensor]:
+    """The layer-independent pools of a tree row at pool width ``pool``, built once per plan (``links``, the plan's
+    ``sparse`` part, keeps them): ``ends``, one pool per last token in row order; ``members``, ``[pools, pool]``
+    in slot order; and ``end_bound``, each pool's subtree end. Finding the ends is a device sync."""
+    key = ("pool_ends", pool)
+    if key not in links:
+        ends = (links["position"] % pool == pool - 1).nonzero().squeeze(-1)
+        links[key] = {
+            "ends": ends,
+            "members": _path_back(links["predecessor"], ends, pool).flip(-1),
+            "end_bound": links["subtree_end"][ends],
+        }
+    return links[key]
+
+
+def _query_chunk_pools(links: dict, pool: int, tokens: int, chunk: int) -> list[tuple[int, int, int, int]]:
+    """Per chunk of ``chunk`` queries, ``(start, stop, low, high)`` as host ints: ``[low, high)`` are the pools of the
+    trees its queries sit in that end before the chunk does. Built once per plan, pool width and chunk size with one
+    ``searchsorted`` and one host read, which every layer and every recompute then shares."""
+    key = ("query_chunk_pools", pool, chunk)
+    if key not in links:
+        ends = _pool_ends(links, pool)["ends"]
+        starts = torch.arange(0, tokens, chunk, device=ends.device)
+        bounds = torch.stack([links["tree_start"][starts], (starts + chunk).clamp_max(tokens)])
+        lows, highs = torch.searchsorted(ends, bounds).tolist()
+        links[key] = [
+            (start, min(start + chunk, tokens), low, high)
+            for start, low, high in zip(range(0, tokens, chunk), lows, highs, strict=True)
+        ]
+    return links[key]
+
+
 @torch.no_grad()
 def tree_key_selection(indexer, hidden_states: torch.Tensor, q_resid: torch.Tensor, links: dict) -> torch.Tensor:
     """The stock indexer's ``[1, T, index_topk (+ index_kpool - 1)]`` int32 key rows (``-1`` pads), per path.
 
     ``links`` is the plan's ``sparse`` part: per token its path ``predecessor``, ``subtree_end``,
     path ``position`` and ``tree_start`` (:func:`~halo.models.attention.tree_plan.build_tree_attention_plan`).
+    The pools and the query chunks' pool ranges are read off it once per plan (:func:`_pool_ends`,
+    :func:`_query_chunk_pools`) and kept there.
     """
     hidden_states, q_resid = hidden_states[0], q_resid[0]
     tokens, pool = hidden_states.shape[0], indexer.index_kpool
@@ -76,22 +95,18 @@ def tree_key_selection(indexer, hidden_states: torch.Tensor, q_resid: torch.Tens
     weights = indexer.weights_proj(hidden_states.to(indexer.weights_proj.weight.dtype)).float() * indexer.n_heads**-0.5
     predecessor, position = links["predecessor"], links["position"]
 
-    ends = (position % pool == pool - 1).nonzero().squeeze(-1)  # one pool per last token, in row order
-    members = _path_back(predecessor, ends, pool).flip(-1)  # [pools, pool] in slot order
+    pools = _pool_ends(links, pool)
+    ends, members, end_bound = pools["ends"], pools["members"], pools["end_bound"]
     logits = gate[members].float() + indexer.index_kpool_compress_ape.float()
     pool_keys = (torch.nan_to_num(logits.softmax(dim=1)).to(key.dtype) * key[members]).sum(dim=1)
-    end_bound = links["subtree_end"][ends]
 
     select = min(indexer.index_topk // pool, ends.numel())
     tail = pool - 1 if indexer.index_kpool_always_select_tail else 0
     width = indexer.index_topk + tail
     chunk = max(1, INDEXER_SCORES_PER_CALL // (indexer.n_heads * max(ends.numel(), 1)))
     rows = []
-    for start in range(0, tokens, chunk):
-        stop = min(start + chunk, tokens)
+    for start, stop, low, high in _query_chunk_pools(links, pool, tokens, chunk):
         queries = torch.arange(start, stop, device=hidden_states.device)
-        # The pools of the trees this chunk's queries sit in that end before the chunk does.
-        low, high = (int(torch.searchsorted(ends, bound)) for bound in (links["tree_start"][start], stop))
         scores = torch.matmul(query[start:stop].float(), pool_keys[low:high].float().T)
         scores = scores.mul_(indexer.softmax_scale).relu_()
         scores = torch.matmul(weights[start:stop].unsqueeze(-2), scores).squeeze(-2)
@@ -111,13 +126,6 @@ def tree_key_selection(indexer, hidden_states: torch.Tensor, q_resid: torch.Tens
 
 def _wide(dtype: torch.dtype) -> torch.dtype:
     return torch.promote_types(dtype, torch.float32)
-
-
-def _bmm_fp32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    """``a @ b`` with an fp32 (or wider) result, on the tensor cores where the inputs are half precision."""
-    if a.is_cuda and a.dtype in (torch.float16, torch.bfloat16):
-        return torch.bmm(a, b, out_dtype=torch.float32)
-    return torch.bmm(a.to(_wide(a.dtype)), b.to(_wide(a.dtype)))
 
 
 def _query_chunks(keys: torch.Tensor):
@@ -143,12 +151,12 @@ class _SparseLatentAttention(torch.autograd.Function):
         lse = torch.empty(query.shape[:2], dtype=_wide(query.dtype), device=query.device)
         for chunk in _query_chunks(keys):
             gathered = latent[keys[chunk].clamp_min(0)]
-            scores = (_bmm_fp32(query[chunk], gathered.transpose(1, 2)) * scale).masked_fill(
+            scores = (bmm_fp32(query[chunk], gathered.transpose(1, 2)) * scale).masked_fill(
                 (keys[chunk] < 0)[:, None], float("-inf")
             )
             lse[chunk] = torch.logsumexp(scores, dim=-1).nan_to_num(neginf=0.0)
             probs = torch.exp(scores - lse[chunk][..., None])
-            out[chunk] = _bmm_fp32(probs.to(latent.dtype), gathered).to(out.dtype)
+            out[chunk] = bmm_fp32(probs.to(latent.dtype), gathered).to(out.dtype)
         ctx.save_for_backward(query, latent, keys, out, lse)
         ctx.scale = scale
         return out
@@ -161,19 +169,23 @@ class _SparseLatentAttention(torch.autograd.Function):
         for chunk in _query_chunks(keys):
             rows = keys[chunk]
             gathered = latent[rows.clamp_min(0)]
-            scores = (_bmm_fp32(query[chunk], gathered.transpose(1, 2)) * ctx.scale).masked_fill(
+            scores = (bmm_fp32(query[chunk], gathered.transpose(1, 2)) * ctx.scale).masked_fill(
                 (rows < 0)[:, None], float("-inf")
             )
             probs = torch.exp(scores - lse[chunk][..., None])
             upstream = grad[chunk]
             delta = (upstream.to(lse.dtype) * out[chunk].to(lse.dtype)).sum(-1, keepdim=True)
-            d_scores = (probs * (_bmm_fp32(upstream, gathered.transpose(1, 2)) - delta) * ctx.scale).to(query.dtype)
-            d_query[chunk] = _bmm_fp32(d_scores, gathered).to(query.dtype)
-            d_gathered = _bmm_fp32(d_scores.transpose(1, 2), query[chunk]) + _bmm_fp32(
+            d_scores = (probs * (bmm_fp32(upstream, gathered.transpose(1, 2)) - delta) * ctx.scale).to(query.dtype)
+            d_query[chunk] = bmm_fp32(d_scores, gathered).to(query.dtype)
+            d_gathered = bmm_fp32(d_scores.transpose(1, 2), query[chunk]) + bmm_fp32(
                 probs.to(upstream.dtype).transpose(1, 2), upstream
             )
+            # Every slot is added, so no host read of the selected count: a pad slot adds an exact zero to a row
+            # spread by its flat slot index, which keeps the pads' atomics off any one row.
             selected = rows >= 0
-            d_latent.index_add_(0, rows[selected], d_gathered[selected])
+            spread = torch.arange(rows.numel(), device=rows.device).view_as(rows) % latent.shape[0]
+            d_gathered.masked_fill_(~selected[..., None], 0.0)
+            d_latent.index_add_(0, torch.where(selected, rows, spread).flatten(), d_gathered.flatten(0, 1))
         return d_query, d_latent.to(latent.dtype), None, None
 
 

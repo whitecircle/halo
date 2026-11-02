@@ -8,7 +8,9 @@ These tests pin every member it reads and the defect it repairs: a ``fully_shard
 reentrant around its ``__call__`` and run three times before one backward is left gathered with an
 unreduced gradient once the root's final callback has run, and the completion turns that into the
 gradient of the same blocks run without checkpointing. A torch upgrade that renames a member fails the
-first test; one that fixes the defect upstream fails the second, the cue to retire the completion.
+first test; one that fixes the defect upstream fails the second, the cue to retire the completion. A gradient
+FSDP2 parked in its accumulator (a no-reduce microstep under a reduce dtype other than the parameters') counts as
+unreduced too: the guard refuses it and the completion reduces it.
 
 Run: python tests/cpu/parallelism/test_fsdp2_post_backward_internals.py
 """
@@ -22,7 +24,7 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed.device_mesh import init_device_mesh
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import MixedPrecisionPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPCommContext, FSDPParamGroup
 from torch.distributed.tensor import DTensor
@@ -167,6 +169,34 @@ def test_the_completion_refuses_a_backward_in_flight(single_rank_gloo):
     model.embed.register_forward_hook(complete_mid_backward)
     with pytest.raises(RuntimeError, match="mid-pass"):
         model(_rows()).backward()
+
+
+def test_an_accumulated_gradient_with_the_reduce_armed_is_reduced(single_rank_gloo):
+    """fp32 parameters reducing in fp64: a no-reduce microstep leaves every group's gradient in FSDP2's accumulator,
+    off the parameter. With the reduce re-armed and no backward to follow, the guard refuses that state, and the
+    completion reduces it to the reference's gradient."""
+    torch.manual_seed(0)
+    reference = _Model()
+    model = copy.deepcopy(reference)
+    policy = MixedPrecisionPolicy(param_dtype=torch.float32, reduce_dtype=torch.float64)
+    for block in model.blocks:
+        fully_shard(block, mesh=single_rank_gloo, reshard_after_forward=False, mp_policy=policy)
+    fully_shard(model, mesh=single_rank_gloo, reshard_after_forward=False, mp_policy=policy)
+    model.set_requires_gradient_sync(False)
+    reference(_rows()).backward()
+    model(_rows()).backward()
+    groups = fsdp.fsdp2_param_groups(model)
+    parked = [fsdp_param for group in groups for fsdp_param in group.fsdp_params]
+    assert all(p.unsharded_accumulated_grad is not None and p.unsharded_param.grad is None for p in parked)
+    assert not any(group.is_unsharded for group in groups), "premise: only the accumulator holds the gradient"
+
+    model.set_requires_gradient_sync(True)
+    with pytest.raises(RuntimeError, match=rf"{len(groups)} group\(s\) still hold an unreduced gradient"):
+        fsdp.reject_unfinished_fsdp2_backward(groups)
+    assert fsdp.complete_fsdp2_post_backward(groups) == len(groups)
+    fsdp.reject_unfinished_fsdp2_backward(groups)
+    for (name, param), ref in zip(model.named_parameters(), reference.parameters(), strict=True):
+        torch.testing.assert_close(param.grad.full_tensor(), ref.grad, msg=name)
 
 
 if __name__ == "__main__":

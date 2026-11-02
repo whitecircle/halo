@@ -204,7 +204,7 @@ def _assert_ep2_dp2_topology(trainer, config, checks):
     """
     ep_cfg = trainer._ep_config
     checks["two_ep_groups_per_stage"] = ep_cfg.num_ep_groups == 2
-    checks["deferred_dp_engaged"] = bool(ep_cfg.is_deferred_dp) and bool(ep_cfg.defer_grad_sync)
+    checks["deferred_dp_engaged"] = bool(ep_cfg.is_deferred_dp) and bool(ep_cfg.sweep_reduces_across_replicas)
     checks["dispatch_group_is_2_rank"] = dist.get_world_size(ep_cfg.process_group) == 2
     # This rank's replica peers: same ep_rank in the other domain of the same stage.
     expected_replicas = [
@@ -291,7 +291,7 @@ def run_moe_mode(ctx, mode: str):
     stage = trainer._top_level_model()
     ep_modules = named_ep_layers(stage)
     checks["stage_keeps_expected_ep_layers"] = len(ep_modules) == spec.kept_ep_layers
-    checks["defer_grad_sync_active"] = bool(trainer._ep_config.defer_grad_sync)
+    checks["sweep_reduces_across_replicas"] = bool(trainer._ep_config.sweep_reduces_across_replicas)
     checks["no_in_backward_ep_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
     _TOPOLOGY_ASSERTS[mode](trainer, config, checks)
 
@@ -358,7 +358,7 @@ def run_ep1_dp4(ctx):
     )
     checks["no_grad_sync_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
     checks["clip_is_pp_clip"] = trainer.accelerator.clip_grad_norm_ is pp_clip_grad_norm
-    checks["no_deferred_sync"] = not trainer._ep_config.defer_grad_sync
+    checks["no_deferred_sync"] = not trainer._ep_config.sweep_reduces_across_replicas
 
     dp_rank = config.get_data_parallel_rank()
     batch = ppeq.dp_slice_batch(rows, labels, dp_rank, 2)

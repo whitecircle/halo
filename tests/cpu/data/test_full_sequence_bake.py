@@ -94,7 +94,7 @@ def test_packed_rows_batch_alike_with_and_without_the_copy(tmp_path, monkeypatch
     rows = _bake(tmp_path, monkeypatch, tokenizer, packed=True)
     assert any(len(row["seq_lengths"]) > 1 for row in rows), "a packed row must hold several documents"
     for flatten in (True, False):
-        collator = DataCollatorWithPacking(tokenizer, return_flash_attn_kwargs=flatten)
+        collator = DataCollatorWithPacking(tokenizer, emit_varlen_always=flatten)
         collator.flatten_to_single_row = flatten
         _assert_same_batches(collator, rows)
 
@@ -105,7 +105,7 @@ def test_unpacked_rows_batch_alike_with_and_without_the_copy(tmp_path, monkeypat
     assert len({len(row["input_ids"]) for row in rows}) > 1, "rows of one length would pad nothing"
     for collator in (
         DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False, pad_to_multiple_of=2),
-        DataCollatorWithFlattening(tokenizer=tokenizer, return_flash_attn_kwargs=True),
+        DataCollatorWithFlattening(tokenizer=tokenizer, emit_varlen_always=True),
         TRLDataCollatorForLanguageModeling(pad_token_id=tokenizer.pad_token_id),
     ):
         _assert_same_batches(collator, rows)

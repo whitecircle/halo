@@ -26,7 +26,7 @@ from transformers.integrations import flash_attention
 from transformers.models.zaya import modeling_zaya
 
 from halo.distributed.fsdp import _should_cast_forward_inputs
-from halo.model_loading.buffer_repair import finalize_loaded_model
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.peft_setup import _peft_module_casting_to_bf16
 from halo.models.attention.layout import resolve_qk_v_head_dims
 from halo.models.attention.selection import supports_fa4_backward
@@ -39,8 +39,8 @@ def _config(model_type: str):
 
 # The families FA4 trains on its dedicated head_dim-256 kernel.
 _FA4_HEAD_DIM_256_MODEL_TYPES = ("qwen3_next", "qwen3_5", "qwen3_5_moe")
-# The head_dim-256 families that kernel does not train: GLM-4.7-Flash's latent attention, Gemma 3's windows and
-# Gemma 2's softcap.
+# The head_dim-256 families the resolver keeps off that kernel: GLM-4.7-Flash's latent attention (a precaution),
+# Gemma 3's windows and Gemma 2's softcap.
 _FA4_REFUSED_HEAD_DIM_256_MODEL_TYPES = ("glm4_moe_lite", "gemma3_text", "gemma2")
 
 

@@ -1,6 +1,6 @@
 """The optimizer step a device-side flag skips, so the host never waits for the verdict that decides it.
 
-Under the flag a step writes no parameter or moment; its host bookkeeping (step counts, lazily created state) still
+Under the flag a step changes no parameter or moment; its host bookkeeping (step counts, lazily created state) still
 moves, and :meth:`DeviceStepSkipMixin.settle_step` rolls it back once the host has read the flag.
 """
 
@@ -20,7 +20,8 @@ class DeviceStepSkipMixin:
     """A ``torch.optim.Optimizer`` whose next step a device flag can skip.
 
     The subclass's step calls :meth:`_take_step_skip` once, before it touches any state, and hands the flag it
-    returns to every write, a kernel's or :func:`write_unless_skipped`.
+    returns to every write: a kernel's, :func:`write_unless_skipped`, or operands that leave their values as they were
+    where it is set.
     """
 
     _armed_skip: Tensor | None = None
@@ -28,7 +29,8 @@ class DeviceStepSkipMixin:
     _state_before_step: list[tuple[Tensor, dict | None]] | None = None
 
     def skip_next_step_if(self, flag: Tensor) -> None:
-        """Make the next step write nothing where ``flag``, a 0-dim bool on the parameters' device, is set."""
+        """Make the next step change no parameter or moment where ``flag``, a 0-dim bool on the parameters' device, is
+        set."""
         self._armed_skip = flag
 
     def settle_step(self, skipped: bool) -> None:

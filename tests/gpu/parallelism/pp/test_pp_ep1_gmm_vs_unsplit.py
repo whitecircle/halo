@@ -59,7 +59,7 @@ def run(ctx):
     )
     checks["no_grad_sync_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
     checks["clip_is_pp_clip"] = trainer.accelerator.clip_grad_norm_ is pp_clip_grad_norm
-    checks["no_deferred_sync"] = not trainer._ep_config.defer_grad_sync
+    checks["no_deferred_sync"] = not trainer._ep_config.sweep_reduces_across_replicas
 
     dp_rank = config.get_data_parallel_rank()
     batch = ppeq.dp_slice_batch(rows, labels, dp_rank, PER_DEVICE_BATCH)

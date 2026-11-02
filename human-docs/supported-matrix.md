@@ -15,6 +15,8 @@ truth; where a recipe disagrees with this page, this page wins.
 | PEFT | 0.18.1 |
 | sentence-transformers | 6.1.0 |
 | Liger Kernel | 0.8.4 |
+| Flash Attention 4 | 4.0.0b37 (beta), Blackwell image only |
+| flash-linear-attention | 0.4.2; on Blackwell its delta-rule state kernel tunes over its `num_warps=2` configs only |
 | vLLM | 0.32.0 on Model Runner V2, its own container: rollouts for both online RL methods |
 | SGLang | 0.5.22, its own container: rollouts for async GRPO with environments |
 
@@ -36,8 +38,8 @@ SDPA or eager where no flash kernel serves the family.
 
 - **Padded-batch scripts** (preference, reward, classification, teacher
   distillation, GRPO) keep the hardware pick on Blackwell when the YAML sets none,
-  except for a remote-code or softcapped checkpoint, and default to SDPA on other
-  GPUs (FA3 on Hopper for a softcapped model). Every GPU keeps the hardware pick for SMPO and offline GRPO under
+  except SDPA for a remote-code checkpoint and FA2 for a softcapped one, and
+  default to SDPA on other GPUs (FA3 on Hopper for a softcapped model). Every GPU keeps the hardware pick for SMPO and offline GRPO under
   CP, and for a GPT-OSS run with live sinks (`reset_sinks: false`).
 - **Gemma 2 / Gemma 3 (head_dim 256)**: FA2 on Blackwell, since FA4's head_dim-256
   backward takes no softcap or sliding window. A model with attention softcapping
@@ -50,12 +52,15 @@ SDPA or eager where no flash kernel serves the family.
 - **Qwen3.5/3.6, Qwen3-Next**: FA4 on Blackwell, FA3 on Hopper. Under
   `full_determinism`, SDPA on Blackwell. Packed SFT takes FA2 on Blackwell in
   either case.
-- **GLM-4 MoE Lite (GLM-4.7-Flash)**: FA2 on Blackwell in every run, since FA4's
-  head_dim-256 kernel trained its latent attention away from FA2; FA3 on Hopper.
+- **GLM-4 MoE Lite (GLM-4.7-Flash)**: FA2 on Blackwell in every run, kept there as
+  a precaution ([why](../agent-docs/optimization/flash-attention.md#model-specific-handling) ↗);
+  FA3 on Hopper.
 - **GLM-5 Next, Step-3.7 Flash, Inkling**: fall back to SDPA on their own. On
   GLM-5 Next that SDPA runs a packed row as one causal sequence, so it refuses
   flat `packing`; tree packing keeps its documents apart, and otherwise it trains
-  on padded batches.
+  on padded batches. Inkling's short convolutions cross packed documents on every
+  kernel, so packing Inkling is refused unless
+  `allow_cross_document_linear_attention: true`.
 - **Qwen3.8-Flash-Next**: SDPA; its sparse layers run Halo's tiled kernel, whose
   memory grows linearly with the row.
 - **DeepSeek-V4**: eager only.

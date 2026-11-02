@@ -76,7 +76,7 @@ def run(ctx):
     stage = trainer._top_level_model()
     ep_modules = named_ep_layers(stage)
     checks["stage_keeps_4_ep_layers"] = len(ep_modules) == 4
-    checks["defer_grad_sync_active"] = bool(trainer._ep_config.defer_grad_sync)
+    checks["sweep_reduces_across_replicas"] = bool(trainer._ep_config.sweep_reduces_across_replicas)
     checks["no_in_backward_ep_hooks"] = all(not m._grad_sync_hooks for _, m in ep_modules)
 
     gc_calls = None

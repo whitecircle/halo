@@ -24,9 +24,9 @@ from halo.data.conversation import build_base_prompt, reject_image_content, reso
 from halo.entrypoints.resumable_generation import assistant_turn, follow_up_messages, reject_empty_results
 from halo.inference.openai_client import build_openai_client, chat_completion
 from halo.inference.response import ENGINE_CUT_FINISH_REASONS, get_finish_reason
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import DTYPE_BY_NAME
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import apply_family_patches
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 

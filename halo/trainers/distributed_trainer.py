@@ -9,7 +9,7 @@ import torch.nn as nn
 
 from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from halo.configs.script_arguments import DEFAULT_MAX_CONSECUTIVE_NONFINITE_STEPS
-from halo.distributed.expert_parallel.deepep.backends import free_unclaimed_ep_buffers
+from halo.distributed.expert_parallel.deepep.backends import free_retired_ep_buffers, free_unclaimed_ep_buffers
 from halo.distributed.expert_parallel.deepep.capacity import register_forward_generation_hook
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     install_ep_aware_disable_adapter,
@@ -599,12 +599,15 @@ class DistributedTrainerMixin(
 
     def training_step(self, model, inputs, num_items_in_batch=None):
         """Count the batch's loss tokens and attention-score work and arm FSDP2's per-window post-backward
-        toggles before the inherited step, and complete FSDP2's post-backward after it."""
+        toggles before the inherited step, and complete FSDP2's post-backward after it. COLLECTIVE once an optimizer
+        step's last backward is done: the DeepEP buffers its grows retired are freed there."""
         self._accumulate_unmasked_output_tokens(self._extract_output_token_count(inputs))
         self._accumulate_attention_flops(inputs)
         if self._pp_runner is not None:
             # The schedule drives forward and backward, so the inherited step must not also run them.
-            return self._pp_training_step(inputs)
+            loss = self._pp_training_step(inputs)
+            free_retired_ep_buffers()
+            return loss
         self._warn_once_on_thin_memory_margin()
         # HF sets sync_gradients before every training_step, so this is the window's last microbatch.
         self._set_window_end(self.accelerator.sync_gradients)
@@ -620,6 +623,8 @@ class DistributedTrainerMixin(
             )
             raise
         self._finish_fsdp2_backward(model)
+        if self.accelerator.sync_gradients:
+            free_retired_ep_buffers()
         return loss
 
     def _warn_once_on_thin_memory_margin(self):

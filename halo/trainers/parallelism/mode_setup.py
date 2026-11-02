@@ -84,7 +84,7 @@ def reject_unsynced_trainable_params(
     candidate_set = IdentityParamSet(candidates)
     # The deferred sweep averages every trainable non-DTensor parameter, and a parameter outside the
     # shard groups is never a DTensor.
-    deferred = ep_config is not None and ep_config.defer_grad_sync
+    deferred = ep_config is not None and ep_config.sweep_reduces_across_replicas
     covered: set[int] = set()
     for layer in ep_layers:
         if not layer.ep_config.experts_fsdp_managed:

@@ -17,7 +17,7 @@ from halo.kernels.histogram import accumulate_bincount
 from halo.models.attention.packed_position_ids import get_stashed_position_ids, install_packed_position_ids_injection
 from halo.models.gradient_checkpointing import counts_toward_expert_load
 from halo.models.param_roles import FP32_INTERLAYER_RESIDUAL_ATTR
-from halo.models.segment_markers import document_ids
+from halo.models.segment_markers import document_ids, document_starts
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -91,16 +91,10 @@ def patch_zaya_fp32_interlayer_residual() -> None:
 def _same_document_masks(position_ids: torch.Tensor | None, seq_len: int, max_shift: int, device) -> list:
     """Per shift ``s`` in ``1..max_shift``, the ``[rows, seq_len]`` mask of tokens ``t`` whose token ``t - s``
     lies in the same document (``position_ids`` restart at 0 per document; ``None`` is one per row)."""
-    if position_ids is None:
-        documents = torch.zeros(1, seq_len, dtype=torch.long, device=device)
-    else:
-        documents = document_ids(position_ids)
-    masks = []
-    for shift in range(1, max_shift + 1):
-        same = torch.zeros_like(documents, dtype=torch.bool)
-        same[:, shift:] = documents[:, shift:] == documents[:, :-shift]
-        masks.append(same)
-    return masks
+    seq_idx = None if position_ids is None else document_ids(position_ids)
+    rows = 1 if seq_idx is None else seq_idx.shape[0]
+    offsets = torch.arange(seq_len, device=device) - document_starts(seq_idx, rows, seq_len, device)
+    return [offsets >= shift for shift in range(1, max_shift + 1)]
 
 
 def _document_causal_cca_conv(projection, qk_states: torch.Tensor, same_document: list) -> torch.Tensor:

@@ -101,8 +101,8 @@ def _worker(rank: int, out: str) -> None:
     results = {}
     for topology, (group_attr, divisor) in TOPOLOGIES.items():
         ep_config = SimpleNamespace(
-            defer_grad_sync=True,
-            defer_expert_grad_sync=True,
+            sweep_reduces_across_replicas=True,
+            runs_post_backward_sweep=True,
             expert_replica_group=replica_group,
             is_deferred_dp=False,
             stage_world_size=WORLD,
@@ -133,8 +133,8 @@ def _worker(rank: int, out: str) -> None:
 def _ep_etp(rank: int, dispatch_group, expert_tp_group) -> dict:
     """EP+ETP in one EP group: no replicas, so the sweep only divides the experts; the router arrives synced."""
     ep_config = SimpleNamespace(
-        defer_grad_sync=False,
-        defer_expert_grad_sync=True,
+        sweep_reduces_across_replicas=False,
+        runs_post_backward_sweep=True,
         fp32_grad_reduce=False,
         expert_replica_group=None,
         stage_world_size=WORLD,

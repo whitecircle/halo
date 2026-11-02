@@ -14,8 +14,8 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.tensor_parallel.hf_plan import consistent_tied_tp_plan, finish_hf_tp_load
 from halo.distributed.tensor_parallel.parallelize_attention import apply_tp_to_attention_only
 from halo.hardware import current_device
-from halo.model_loading.buffer_repair import finalize_loaded_model
 from halo.model_loading.checkpoint_coverage import from_pretrained_verified
+from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.ep import load_ep_model
 from halo.model_loading.parallel.fp32_masters import restore_fp32_master_parameters
 from halo.model_loading.parallel.model_source import ModelSource

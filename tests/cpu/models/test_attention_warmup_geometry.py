@@ -13,8 +13,8 @@ A counting ``flash_attn.cute`` stands in for FA4 on CPU. It keeps a compile cach
 FA4's own key reads (dtype, head widths, query/KV head ratio, causal, window, varlen, sink, softcap, whether the
 forward keeps a log-sum-exp for a backward, and that backward's deterministic mode), and the model's training step
 reaches it through transformers' real flash path. A backward kernel counts only once a backward runs through it. It
-raises on a varlen call with a softcap: FA4's varlen backward takes none, and its varlen forward with one does not
-finish on B300 (Gemma 2's geometry), so FA4 runs a softcapped model's single-document rows only.
+raises on a varlen call with a softcap, which stays off FA4's varlen kernels (not validated there), so FA4 runs a
+softcapped model's single-document rows only.
 
 The FlexAttention warm-up is held to the same contract on the per-layer-head models and Mistral: Dynamo traces the
 kernel (on its eager backend, which a CPU runs) and raises on any graph the rows add after the warm-up, and each row
