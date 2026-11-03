@@ -371,7 +371,7 @@ def _build_and_start(moe_balancing: str, model):
 
 
 def test_weight_sync_downgrades_bias_update_to_none() -> None:
-    """The vLLM sync forwards parameters only and an adopted native slot is a buffer. A trained bias would steer the
+    """The sync carries no bias that moves and an adopted native slot is a buffer. A trained bias would steer the
     trainer's routing while the generator keeps the pretrained one, which trains off-policy with no failure."""
     layer = _NativeAdoptingEPLayer()
     model = _Model(_Cfg(num_experts=8, num_experts_per_tok=2), submodules=[layer])

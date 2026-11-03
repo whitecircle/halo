@@ -43,9 +43,10 @@ services:
       # any existing directory serves.
       - ${SGLANG_MODEL_DIR:?set SGLANG_MODEL_DIR to the host directory holding a local SGLANG_MODEL (any existing directory for a hub id)}:${SGLANG_MODEL_DIR}:ro
     # Two flags are required and silent when wrong: --tool-call-parser (tool-using environments need
-    # the calls parsed; `auto` reads the parser off the chat template) and --moe-runner-backend
-    # triton (auto-selection picks a fused runner for most MoE shapes: triton_kernel and flashinfer
-    # skip R3 capture, and flashinfer_trtllm repacks the expert weights an update writes).
+    # the calls parsed; `auto` reads the parser off the chat template and disables it on one it cannot
+    # detect) and --moe-runner-backend triton (auto-selection picks a fused runner for most MoE shapes:
+    # triton_kernel and flashinfer skip R3 capture, and flashinfer_trtllm repacks the expert weights an
+    # update writes).
     # --attention-backend is a per-family need, --trust-remote-code a per-checkpoint one, and SGLANG_EXTRA_ARGS is appended
     # last so a flag repeated there wins. Values per family: agent-docs/infrastructure/rollout-servers.md
     command: >

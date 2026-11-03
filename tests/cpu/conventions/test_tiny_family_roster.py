@@ -10,6 +10,7 @@ from transformers import AutoConfig
 
 from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
 from halo.models.moe.family_specs import find_moe_family_spec, find_moe_family_spec_for_config
+from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backends
 from tests.common import ep_determinism
 from tests.common.equivalence.cp_equivalence import FAMILIES as CP_FAMILIES
 from tests.common.lora_sync_exactness import parse_row, row_families, syncable_moe_families
@@ -20,9 +21,12 @@ from tests.common.tiny_models import (
     TINY_BAILING_RING_FAMILY,
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
     build_tiny_family_checkpoint,
     tiny_family_model,
 )
+from tests.common.weight_push_exact import CHECKPOINTS as PUSH_EXACT_CHECKPOINTS
+from tests.common.weight_push_exact import parse_row as parse_push_exact_row
 from tests.gpu.manifest import MANIFEST
 
 MERGED_RESUME_SUITE = "trainers/lora/test_lora_merged_save_resume.py"
@@ -32,6 +36,7 @@ PRECOMPUTE_RESUME_SUITE = "parallelism/ep/test_ep_preference_precompute_resume.p
 PRECOMPUTE_PER_FAMILY = (("dpo", "ep2"), ("dpo", "ep1"), ("kto", "ep2"), ("dpo", "etp2"), ("dpo", "ep2etp2"))
 PRECOMPUTE_PER_TP_FAMILY = (("dpo", "tp2"), ("dpo", "ep2tp2"))
 SYNC_EXACTNESS_SUITE = "trainers/lora/test_lora_weight_sync_exact.py"
+PUSH_EXACT_SUITE = "trainers/grpo/test_weight_push_exact.py"
 DETERMINISM_SUITE = "parallelism/ep/test_ep_deterministic_expert_grads.py"
 CP_SUITES = ("parallelism/cp/test_cp_family_vs_reference.py", "parallelism/cp/test_cp_fused_head_loss.py")
 REENTRANT_SUITE = "parallelism/test_fsdp2_reentrant_recompute.py"
@@ -205,6 +210,31 @@ def test_the_cp_rows_run_every_cp_roster_family_once(suite):
     assert sorted(families) == sorted(CP_FAMILIES), (
         f"CP rows {sorted(families)} != the CP roster {sorted(CP_FAMILIES)}"
     )
+
+
+def test_every_engine_runs_the_push_exactness_rows_of_every_family_it_takes():
+    """The live proof that an unchanged push leaves a server alone. A family the rows skip could corrupt it with every
+    tensor forwarded, since only the engine's reload knows what it counts."""
+    rows = [
+        (parse_push_exact_row(shlex.split(args)), spec.markers) for args, spec in MANIFEST[PUSH_EXACT_SUITE].launches()
+    ]
+    assert {row.family for row, _ in rows} == set(PUSH_EXACT_CHECKPOINTS)
+    registry = ep_layer_class_by_model_type()
+    for backend in rollout_backends():
+        refused = resolve_weight_sync_client(backend).UNSERVABLE_MODEL_TYPES
+        served = {row.family for row, _ in rows if row.backend == backend}
+        for family in syncable_moe_families():
+            assert (family in served) == (registry[family].FAMILY.model_types[0] not in refused), (family, backend)
+    for row, markers in rows:
+        assert f"{row.backend}_server" in markers, f"{row} would run with no {row.backend} server gate"
+
+
+def test_the_composite_gemma4_per_layer_table_follows_a_vocab_override():
+    """A tokenizer-sized vocab past the table's own width raises at the first embedded id."""
+    model = tiny_family_model(TINY_MOE_VLM_FAMILIES["gemma4"], overrides={"vocab_size": 2048})
+
+    assert model.config.text_config.vocab_size_per_layer_input == 2048
+    assert model.get_input_embeddings().num_embeddings == 2048
 
 
 if __name__ == "__main__":

@@ -3,8 +3,9 @@
 patches it, as accurately as on FA2, on four row shapes.
 
 Full-attention layers and every expert routed, so the comparison is continuous in the attention output. The unpacked
-and ``cu_seq_lens`` rows must reach FA4 strided, the layout flash-attn-4 4.0.0b16 read scrambled. GLM-4.7-Flash holds
-the kernel path alone: the resolver keeps its latent attention on FA2 as a precaution.
+and ``cu_seq_lens`` rows must reach FA4 strided, the layout flash-attn-4 4.0.0b16 read scrambled, on every family whose
+attention can hand it that. GLM-4.7-Flash holds the kernel path alone: the resolver keeps its latent attention on FA2 as
+a precaution.
 """
 
 import argparse
@@ -38,6 +39,9 @@ PADDED_LENGTHS = (SEQ, SEQ - 200)
 FA2_ERROR_RATIO = 1.5
 # Transformers' position_ids-only and unpad paths copy q/k/v; these rows hand them strided.
 STRIDED_ROWS = ("unpacked", "packed_cu_seq_lens")
+# Contiguous at every shape: they rotate the whole head element by element, which keeps q's memory order, where the
+# others' partial rotary rebuilds q and k with a ``torch.cat``; Cohere2's global layers skip the rotary too.
+CONTIGUOUS_QKV_FAMILIES = frozenset({"cohere2_moe", "lfm2_moe"})
 
 _GQA_256 = {"num_hidden_layers": 2, "num_attention_heads": 16, "num_key_value_heads": 2, "head_dim": 256}
 _FULL_ATTENTION = {"layer_types": ["full_attention", "full_attention"]}
@@ -183,7 +187,7 @@ def run(ctx):
             checks[f"{row_name}_{metric}_within_fa2_error"] = fa4[metric] <= FA2_ERROR_RATIO * fa2[metric]
             metrics[f"{row_name}_{metric}_fa4"] = fa4[metric]
             metrics[f"{row_name}_{metric}_fa2"] = fa2[metric]
-        if row_name in STRIDED_ROWS:
+        if row_name in STRIDED_ROWS and family_name not in CONTIGUOUS_QKV_FAMILIES:
             checks[f"{row_name}_hands_fa4_strided_inputs"] = any(strided)
         metrics[f"{row_name}_fa4_strided_calls"] = sum(strided)
     return {"checks": checks, "metrics": metrics}

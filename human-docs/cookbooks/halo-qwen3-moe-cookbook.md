@@ -109,7 +109,7 @@ CUDA_VISIBLE_DEVICES=2,3 halo launch grpo/environmental qwen3-moe-grpo.yaml -n 2
 
 Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs. On SGLang, add
 `--rollout_backend=sglang --rollout_server_url=http://localhost:30000` and start the server with
-`SGLANG_ENABLE_R3=1`.
+`SGLANG_ENABLE_R3=1 SGLANG_TOOL_PARSER=qwen25`.
 
 ## Settings that matter
 
@@ -118,7 +118,10 @@ Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs.
 - **Router balancing.** `aux_loss` uses the checkpoint's `router_aux_loss_coef` (0.001). The router has no
   bias slot, so `bias_update` raises. `bias_update_transient` balances training only, and exported
   checkpoints serve without the bias.
-- **Tool parser.** Qwen3 tool calls parse with vLLM's default `hermes` parser.
+- **Tool parser.** Qwen3 tool calls parse with vLLM's default `hermes` parser. On SGLang, set
+  `SGLANG_TOOL_PARSER=qwen25`: the default `auto` cannot read the 2507 chat template and turns the parser off
+  with one log line, so calls stay text and every episode scores 0
+  ([Tool parsers on SGLang](../../agent-docs/infrastructure/rollout-servers.md#tool-parsers-on-sglang) ↗).
 
 ## Limits
 

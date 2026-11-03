@@ -194,7 +194,7 @@ Either way Gemma 4 gets no balancing **and** no `moe/*` metrics, and `output_rou
 
 Inertness is a **trainer-class contract**: `ROUTER_AUX_LOSS_ADDED_BY` declares what adds the aux term: the model's `labels` forward (`DistributedSFTTrainer`), TRL's own loss (`DistributedDPOTrainer`, `DistributedKTOTrainer`), or nothing (every other trainer). An explicit `aux_loss` on a non-consuming trainer **raises**; an `auto` resolution landing there turns `output_router_logits` back off.
 
-Online and async GRPO go further: syncing weights to a live rollout engine downgrades **both bias modes to `none`**, since the sync ships parameters only — an adopted native slot is a buffer, a transient bias a plain attribute — and a bias the generator never sees drifts trainer routing off the trajectories it produced.
+Online and async GRPO go further: syncing weights to a live rollout engine downgrades **both bias modes to `none`**, since the sync ships parameters and carries no bias that moves — an adopted native slot is a buffer, a transient bias a plain attribute — and a bias the generator never sees drifts trainer routing off the trajectories it produced. Ling 2.0's `gate.expert_bias` does ride the push, at its checkpoint value ([Partly loaded layers](../infrastructure/rollout-servers.md#partly-loaded-layers)).
 
 With `aux_loss` inert under the same loss, those runs have **no router balancing on any family**.
 

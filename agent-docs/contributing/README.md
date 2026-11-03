@@ -95,7 +95,9 @@ compose line), and they replace the `qwen3` reasoning parser. A per-family pass
 (`HALO_TEST_ENV_GRPO_MODEL`) takes its family's row of that table. Under a wrong parser every call stays
 text and every episode scores 0, so each env-GRPO row on the draw task (all but the one-process
 `react_math` rows, which send no tool schema) fails `step_1_rewards_spread_within_a_group`.
-SGLang's default parser (`auto`) reads the right one off the chat template.
+SGLang's default parser (`auto`) reads it off the chat template where it can and disables it elsewhere: the
+Qwen3-30B pass needs `SGLANG_TOOL_PARSER=qwen25`
+([Tool parsers on SGLang](../infrastructure/rollout-servers.md#tool-parsers-on-sglang)).
 
 ```bash
 make train CONFIG=examples/sft/qwen3/qwen3-4b-ultrachat.yaml NPROC=8
@@ -276,6 +278,7 @@ the script:
 | `HALO_TEST_ENV_GRPO_MODEL` / `HALO_TEST_ENV_GRPO_MAX_STEPS` | Checkpoint (default `Qwen/Qwen3-30B-A3B-Instruct-2507`) and steps (default `2`; a `--prefetch-depth N` row runs `N + 2`: its `N` cold rounds, then two that pop a prefetched one) of the two-rank vLLM rows of the Environmental-GRPO e2e (`tests/common/env_grpo_e2e.py`) |
 | `HALO_TEST_ENV_GRPO_SGLANG_MODEL` / `HALO_TEST_ENV_GRPO_4GPU_MODEL` | Checkpoints of the SGLang rows and of the four-rank vLLM rows (EP+ETP, EP+TP, ep4) of `trainers/grpo/test_env_grpo_e2e.py`, both default `unsloth/gpt-oss-20b-BF16` |
 | `HALO_TEST_ENV_GRPO_ATTN_IMPL` / `HALO_TEST_ENV_GRPO_LORA_TARGETS` | Per-family overrides for that e2e: the policy's `attn_implementation` (unset: auto-selection; `sdpa` for a remote-code family without FA4) and a comma-separated `lora_target_modules` for the `--peft lora` rows (unset: the attention projections read off the index; needed where they do not end in `_proj`, such as Ling's `query_key_value,dense`) |
+| `HALO_TEST_PUSH_EXACT_FRESH` / `HALO_TEST_PUSH_EXACT_MODEL` | `trainers/grpo/test_weight_push_exact.py`: the first states the server has taken no other suite's push, without which the suite skips, since a server another push moved cannot be told from one this push moved; the second is a local path standing in for the row's checkpoint on both sides (the script header has the server launch) |
 | `HALO_TEST_VLLM_REINIT_MODEL` / `HALO_TEST_VLLM_REINIT_CYCLES` / `HALO_TEST_VLLM_SERVER_GPU` | Checkpoint (default `Qwen/Qwen3-0.6B`), connect/sync/disconnect cycles (default `12`, enough for a stranded communicator to overshoot the 1 GiB growth budget) and the server's `nvidia-smi` index (unset: every GPU the trainer does not own) for `trainers/grpo/test_weight_transfer_reinit.py --backend vllm`; the pool-reconnect suite reads the same checkpoint knob |
 | `HALO_TEST_SGLANG_REINIT_MODEL` / `HALO_TEST_SGLANG_REINIT_CYCLES` / `HALO_TEST_SGLANG_SERVER_GPU` | The same three for `--backend sglang`, against `SGLANG_SERVER_URL` |
 

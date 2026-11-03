@@ -37,6 +37,16 @@ class CompositeTextLayout:
         return self.composite_head + key[len(self.head) :] if key.startswith(self.head) else key
 
 
+@dataclass(frozen=True)
+class EngineLoadedBuffers:
+    """Hub tensors the trainer holds as buffers and an engine loads beside the parameters of one module, so a weight
+    push must carry them. ``config_flag`` is the field that creates them on the engine, whose loader refuses the name
+    without it."""
+
+    attrs: tuple[str, ...]
+    config_flag: str
+
+
 @dataclass(frozen=True, eq=False)
 class MoEFamilySpec:
     """Identity-compared, as each family has exactly one spec constant."""
@@ -67,6 +77,9 @@ class MoEFamilySpec:
     supports_gradient_checkpointing: bool = True
     # Why no online weight sync into the family's served model is validated.
     weight_sync_refusal: str | None = None
+    # vLLM's reload rebuilds a module that received part of its tensors from uninitialized storage
+    # (agent-docs/infrastructure/rollout-servers.md#partly-loaded-layers).
+    engine_loaded_buffers: EngineLoadedBuffers | None = None
     # Why the family runs eager attention only.
     eager_only_attention: str | None = None
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
@@ -96,6 +109,7 @@ BAILING = MoEFamilySpec(
     expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS),
     balancing_slot=NativeBalancingSlot(("gate.expert_bias",)),
     shared_expert_attrs=("shared_experts",),
+    engine_loaded_buffers=EngineLoadedBuffers(("gate.expert_bias",), config_flag="moe_router_enable_expert_bias"),
 )
 COHERE2_MOE = MoEFamilySpec(
     model_types=("cohere2_moe", "cohere2_vision"),

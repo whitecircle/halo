@@ -1,5 +1,5 @@
-"""The trainer side of the rollout-engine weight sync: every rank gathers the EP experts, then the dense shards, and
-the forwarding rank streams them under hub names, PEFT folded out of place."""
+"""The trainer side of the rollout-engine weight sync: every rank gathers the EP experts, the buffers a family declares
+and the dense shards, and the forwarding rank streams them under hub names, PEFT folded out of place."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ from halo.distributed.tensor_parallel.plain_params import hand_sliced_suffixes, 
 from halo.env import env_flag
 from halo.model_loading.dtype import has_packed_quantized_params
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, neutralized_gpt_oss_sinks, stamped_sinks_policy
-from halo.models.config_access import config_model_types
+from halo.models.config_access import config_model_types, get_config_field
 from halo.models.moe.balancing import (
     NATIVE_BALANCING_BIAS_ADOPTED_ATTR,
     is_transient_balancing_router,
@@ -106,9 +106,24 @@ def _reject_model_state(model: torch.nn.Module, ep_layers: dict[str, EPMoELayerB
         )
 
 
+def _engine_loaded_buffer_attrs(layer: EPMoELayerBase, config) -> tuple[str, ...]:
+    buffers = layer.FAMILY.engine_loaded_buffers
+    return buffers.attrs if buffers is not None and get_config_field(config, buffers.config_flag, False) else ()
+
+
+def _engine_loaded_buffer(layer: EPMoELayerBase, attr: str) -> torch.Tensor:
+    """Read through the owner: ``lora_modules_to_save`` may wrap it, and the wrapper answers with the copy that routes.
+    A parameter is refused, as the dense push already sends it."""
+    owner, _, leaf = attr.rpartition(".")
+    buffer = getattr(layer.get_submodule(owner), leaf)
+    if not isinstance(buffer, torch.Tensor) or isinstance(buffer, torch.nn.Parameter):
+        raise AttributeError(f"{attr!r} is {type(buffer).__name__}, not a buffer")
+    return buffer
+
+
 def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str, EPMoELayerBase]) -> None:
-    """Refuses an unservable family, one with a ``weight_sync_refusal``, and an EP family without the live EP layer
-    whose gather emits the layout the engine loads."""
+    """Refuses an unservable family, one with a ``weight_sync_refusal``, an EP family without the live EP layer whose
+    gather emits the layout the engine loads, and one missing a buffer the push must carry."""
     client_cls = resolve_weight_sync_client(backend)
     config = getattr(unwrap_framework_wrappers(model), "config", None)
     unservable = sorted(client_cls.UNSERVABLE_MODEL_TYPES.keys() & config_model_types(config))
@@ -146,10 +161,22 @@ def _reject_engine_fit(model: torch.nn.Module, backend: str, ep_layers: dict[str
             f"Set use_grouped_gemm: true (the torchrun default), which installs the EP layers at "
             f"expert_parallel_size 1 too."
         )
+    for where, layer in ep_layers.items():
+        for attr in _engine_loaded_buffer_attrs(layer, config):
+            try:
+                _engine_loaded_buffer(layer, attr)
+            except AttributeError as missing:
+                raise ValueError(
+                    f"{type(layer).__name__} (at {where!r}) declares the buffer {attr!r} the weight sync must carry, "
+                    f"but the layer holds none: the family moved or renamed it upstream, and {client_cls.ENGINE_RELEASE} "
+                    f"would keep a value the trainer does not route with. Update {layer.FAMILY.model_types[0]}'s "
+                    f"engine_loaded_buffers."
+                ) from missing
 
 
 def _reject_balancing_state(model: torch.nn.Module) -> None:
-    """Refuse enabled bias-update balancing state, which the parameter-only payload never pushes."""
+    """Refuse enabled bias-update balancing state: the payload is parameters, plus the buffers a family declares at
+    the value they loaded with, and no bias that moves between pushes."""
     # Enabled state, not the mode string, which the shipped scripts downgrade first; Zaya's native buffer is
     # neither adopted nor transient.
     balancing = sorted(
@@ -162,9 +189,9 @@ def _reject_balancing_state(model: torch.nn.Module) -> None:
     if balancing:
         raise ValueError(
             f"router bias-update balancing is enabled on {', '.join(balancing)} while weight sync to an "
-            f"external rollout engine is configured: the sync payload carries parameters only, so the "
-            f"balancing bias (an adopted buffer or a transient side-buffer) is never pushed and trainer "
-            f"routing drifts from the generator producing the trajectories. Run weight-sync RL with "
+            f"external rollout engine is configured: the sync payload carries no bias that moves (an adopted "
+            f"buffer or a transient side-buffer), so trainer routing drifts from the generator producing the "
+            f"trajectories. Run weight-sync RL with "
             f"moe_balancing: none — the shipped GRPO scripts downgrade it automatically."
         )
 
@@ -266,6 +293,16 @@ def _send_ep_expert_weights(
         del gathered
 
 
+def _send_engine_loaded_buffers(ep_layers: dict[str, EPMoELayerBase], forwarder: _HubForwarder | None, config) -> None:
+    """COLLECTIVE for a sharded buffer, so every rank walks them. Run before the dense push, whose flush ends the
+    forwarder's holding."""
+    for layer_name, layer in ep_layers.items():
+        for attr in _engine_loaded_buffer_attrs(layer, config):
+            data = materialize_dtensor(_engine_loaded_buffer(layer, attr))
+            if forwarder is not None:
+                forwarder.send(f"{layer_name}.{attr}", data)
+
+
 def _send_dense_weights(
     model: torch.nn.Module,
     ep_layers: dict[str, EPMoELayerBase],
@@ -312,6 +349,7 @@ def gather_and_send_weights(model: torch.nn.Module, sender: WeightSyncSender | N
     # Out of place, not PEFT's merge/unmerge, whose bf16 unmerge misses the frozen base by a rounding step.
     folds = lora_fold_targets(model)
     _send_ep_expert_weights(ep_layers, forwarder, guard)
+    _send_engine_loaded_buffers(ep_layers, forwarder, getattr(base_transformers_model(model), "config", None))
     _send_dense_weights(model, ep_layers, forwarder, folds)
     guard.reject()
 

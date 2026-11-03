@@ -167,6 +167,7 @@ def load_policy(
     *,
     attn_implementation: str | None = None,
     lora_target_modules: list[str] | None = None,
+    trust_remote_code: bool = True,
 ):
     """Load the policy and adapters through the production path; returns ``(model, peft_config)``. ``weights_source``
     is the base checkpoint, or the resume checkpoint where the EP/CP loader constructs from it."""
@@ -175,7 +176,7 @@ def load_policy(
             model_name_or_path=weights_source,
             parallelism_config=parallelism_config,
             dtype=torch.bfloat16,
-            trust_remote_code=True,
+            trust_remote_code=trust_remote_code,
             attn_implementation=attn_implementation,
             # The engine serves pretrained sinks; the fine-tuning reset would train a different model and sync
             # neutralized sinks.

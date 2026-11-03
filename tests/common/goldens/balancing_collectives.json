@@ -54,7 +54,7 @@
   ],
   "dense / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -67,7 +67,7 @@
   ],
   "dense / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -80,7 +80,7 @@
   ],
   "dense / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -93,7 +93,7 @@
   ],
   "dense / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback']",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -178,7 +178,7 @@
   ],
   "moe without EP layers / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -191,7 +191,7 @@
   ],
   "moe without EP layers / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -204,7 +204,7 @@
   ],
   "moe without EP layers / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -217,7 +217,7 @@
   ],
   "moe without EP layers / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -304,7 +304,7 @@
   ],
   "moe native slot / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -319,7 +319,7 @@
   ],
   "moe native slot / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -334,7 +334,7 @@
   ],
   "moe native slot / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -349,7 +349,7 @@
   ],
   "moe native slot / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -437,7 +437,7 @@
   ],
   "moe transient / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -453,7 +453,7 @@
   ],
   "moe transient / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -469,7 +469,7 @@
   ],
   "moe transient / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -485,7 +485,7 @@
   ],
   "moe transient / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': False, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.001 forced_off=False"
   ],
@@ -518,7 +518,7 @@
   ],
   "moe native router / auto / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
   ],
@@ -531,7 +531,7 @@
   ],
   "moe native router / auto / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
   ],
@@ -568,7 +568,7 @@
   ],
   "moe native router / bias_update / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
   ],
@@ -581,7 +581,7 @@
   ],
   "moe native router / bias_update / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
   ],
@@ -594,7 +594,7 @@
   ],
   "moe native router / bias_update_transient / policy_gradient_loss=False / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
   ],
@@ -607,7 +607,7 @@
   ],
   "moe native router / bias_update_transient / policy_gradient_loss=True / syncs_to_external_generator=True": [
     "all_gather_object object[2] world",
-    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the routing bias isn't forwarded by the rollout-engine weight sync (parameters only \u2014 an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
+    "log WARNING moe_balancing=bias_update_transient is incompatible with on-policy weight-sync RL: the rollout-engine weight sync carries no routing bias that moves (an adopted native slot is a buffer), so trainer\u2194generator routing diverges. Downgrading to moe_balancing=none \u2014 with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING AT ALL and router_balancing_rate is unreachable. Families that only balance via bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here.",
     "roster ['ParameterStatsCallback', '_GenerateStandIn', 'EfficiencyCallback', \"MoEMetricsCallback {'topk': 2, 'enable_router_logits': False, 'exclude_last_slot': True, 'log_every_n_steps': 5}\"]",
     "config output_router_logits=False router_aux_loss_coef=0.0 forced_off=False"
   ],

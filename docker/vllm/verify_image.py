@@ -34,6 +34,7 @@ from vllm.engine.arg_utils import EngineArgs
 from vllm.entrypoints.rl.online.api_router import pause_generation, router
 from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 from vllm.model_executor.model_loader.reload import layerwise
+from vllm.model_executor.model_loader.reload.meta import SKIP_LOAD_TENSORS, SKIP_TENSORS
 from vllm.model_executor.models.gemma4 import Gemma4Router
 from vllm.model_executor.models.gpt_oss import OAIAttention
 from vllm.v1.engine.async_llm import AsyncLLM
@@ -84,6 +85,11 @@ def check_layerwise_skip_coverage() -> None:
     assert covered(OAIAttention), "sinks owner OAIAttention not covered by SKIP_LAYER_NAMES"
     assert covered(Gemma4Router), "Gemma4Router (scale param + root_size buffer) not covered by SKIP_LAYER_NAMES"
     print("layerwise skip-list coverage: OK (RoutedExperts + OAIAttention + Gemma4Router)")
+    # GLM-4's and LFM-2's router biases stay out of the push on this name alone; Ling's gate spells it expert_bias,
+    # which the reload counts, so the family forwards it (MoEFamilySpec.engine_loaded_buffers).
+    bias = "e_score_correction_bias"
+    assert bias in SKIP_LOAD_TENSORS and bias in SKIP_TENSORS, f"the reload no longer skips {bias}"
+    print(f"layerwise tensor skip list: OK ({bias})")
 
 
 def check_weight_transfer_reinit_patch() -> None:

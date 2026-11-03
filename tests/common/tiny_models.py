@@ -467,12 +467,18 @@ TINY_MOE_VLM_FAMILIES: dict[str, TinyFamily] = {
         load_class=AutoModelForImageTextToText,
     ),
     "gemma4": TinyFamily(
-        _composite(
+        lambda overrides: _composite(
             Gemma4Config,
             Gemma4ForConditionalGeneration,
             TINY_GEMMA4_MOE_CONFIG,
             TINY_GEMMA4_VISION_CONFIG,
             audio_config=None,
+        )(
+            # Its per-layer input table embeds the same ids as the main one, as in _tiny_gemma4.
+            {
+                **overrides,
+                "vocab_size_per_layer_input": overrides.get("vocab_size", TINY_GEMMA4_MOE_CONFIG["vocab_size"]),
+            }
         ),
         load_class=AutoModelForImageTextToText,
         ulysses_cp=False,

@@ -182,6 +182,40 @@ _SYNC_EXACTNESS_SWEEP_FAMILIES = (
     "step3p7",
 )
 
+# Row family → its marker, on both engines but for the two SGLang refuses; each needs a fresh server on the family's
+# checkpoint (tests/common/weight_push_exact.py), so a tier pass on another checkpoint skips them.
+_PUSH_EXACT_MOE_FAMILY_MARKERS = {
+    "bailing_moe": "bailing",
+    "gemma4_text": "gemma4",
+    "glm4_moe_lite": "glm4",
+    "gpt_oss": "gptoss",
+    "laguna": "laguna",
+    "lfm2_moe": "lfm2",
+    "qwen3_5_moe_text": "qwen3",
+    "qwen3_6_moe_text": "qwen3",
+    "qwen3_moe": "qwen3",
+    "step3p7": "step3p7",
+}
+_PUSH_EXACT_VLLM_ONLY = ("laguna", "step3p7")
+_PUSH_EXACT_MOE_ROWS = tuple(
+    Row(
+        f"--family {family} --backend {backend} --ep-size {ep_size}",
+        markers=("gpu", "full", "2gpu", "ep", "moe", marker, f"{backend}_server"),
+    )
+    for family, marker in _PUSH_EXACT_MOE_FAMILY_MARKERS.items()
+    for backend in ("vllm", "sglang")
+    if backend == "vllm" or family not in _PUSH_EXACT_VLLM_ONLY
+    for ep_size in (1, 2)
+)
+_PUSH_EXACT_DENSE_ROWS = tuple(
+    Row(
+        f"--family qwen3 --backend {backend}{layout}",
+        markers=("gpu", "full", "2gpu", *axes, "qwen3", f"{backend}_server"),
+    )
+    for backend in ("vllm", "sglang")
+    for layout, axes in (("", ()), (" --tp-size 2", ("tp",)))
+)
+
 _ENV_GRPO_4GPU_ROWS = (
     "--ep-size 2 --etp-size 2",
     "--ep-size 2 --tp-size 2",
@@ -1109,6 +1143,22 @@ MANIFEST: dict[str, TestSpec] = {
     # SERVER_TIER model; the script docstring has the server launch.
     "trainers/grpo/test_step3p7_vllm_weight_sync_e2e.py": TestSpec(
         nproc=1, markers=("gpu", "full", "1gpu", "ep", "moe", "step3p7", "vllm_server"), timeout=1200
+    ),
+    "trainers/grpo/test_weight_push_exact.py": TestSpec(
+        nproc=2,
+        markers=(
+            "gpu",
+            "full",
+            "2gpu",
+            "ep",
+            "tp",
+            "moe",
+            *dict.fromkeys(_PUSH_EXACT_MOE_FAMILY_MARKERS.values()),
+            "vllm_server",
+            "sglang_server",
+        ),
+        args_matrix=(*_PUSH_EXACT_MOE_ROWS, *_PUSH_EXACT_DENSE_ROWS),
+        timeout=1800,
     ),
     # Every row asserts the served policy changed, so the server must run the row's checkpoint: on vLLM Qwen3-30B on
     # two ranks and gpt-oss on four (SERVER_TIER='moe and not gptoss' / 'moe and gptoss'), on SGLang gpt-oss.

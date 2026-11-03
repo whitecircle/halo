@@ -295,14 +295,14 @@ def configure_moe_balancing(
     syncs_to_external_generator: bool = False,
 ) -> BalancingMode:
     """COLLECTIVE. Resolve, agree and apply ``args.moe_balancing``. ``syncs_to_external_generator`` downgrades both
-    bias modes to ``none``: the sync ships parameters only, so a trained bias would split routing."""
+    bias modes to ``none``: the sync carries no bias that moves, so a trained bias would split routing."""
     routing = resolve_moe_routing(model)
     mode = agree_balancing_mode(resolve_balancing_mode(args.moe_balancing, model, routing.routes_between_experts))
     if syncs_to_external_generator and mode in BIAS_UPDATE_MODES:
         logger.warning(
-            f"moe_balancing={mode} is incompatible with on-policy weight-sync RL: the routing bias "
-            "isn't forwarded by the rollout-engine weight sync (parameters only — an adopted native slot "
-            "is a buffer), so trainer↔generator routing diverges. Downgrading to moe_balancing=none — "
+            f"moe_balancing={mode} is incompatible with on-policy weight-sync RL: the rollout-engine weight "
+            "sync carries no routing bias that moves (an adopted native slot is a buffer), so "
+            "trainer↔generator routing diverges. Downgrading to moe_balancing=none — "
             "with aux_loss also inert under a policy-gradient loss, THIS RUN HAS NO ROUTER BALANCING "
             "AT ALL and router_balancing_rate is unreachable. Families that only balance via "
             "bias_update (Zaya, DeepSeek-V4) train with unbalanced experts here."

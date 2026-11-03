@@ -80,7 +80,11 @@ SGLANG_MODEL=Qwen/Qwen3-30B-A3B SGLANG_MODEL_DIR=/path/to/checkpoints SGLANG_CUD
 The variables mirror vLLM's (`SGLANG_MODEL`, `SGLANG_PORT`, `SGLANG_CUDA_DEVICES`,
 `SGLANG_TP`, `SGLANG_GPU_MEM`), except that `SGLANG_TOOL_PARSER` reads the parser
 off the chat template by default, and `SGLANG_MODEL_DIR` is required: the host
-directory holding a local `SGLANG_MODEL`, any existing one for a hub id. The compose file also sets
+directory holding a local `SGLANG_MODEL`, any existing one for a hub id. On a template it cannot read
+(the Qwen3 2507 releases, Ling-mini-2.0) that default turns the parser off with one log line, tool calls
+stay text and every episode scores 0, so set the parser yourself: `SGLANG_TOOL_PARSER=qwen25` for Qwen3
+([Tool parsers on SGLang](../agent-docs/infrastructure/rollout-servers.md#tool-parsers-on-sglang) ↗).
+The compose file also sets
 `NCCL_CUMEM_ENABLE=1`; a container you start by hand needs it too
 ([Rollout Servers → SGLang](../agent-docs/infrastructure/rollout-servers.md#sglang) ↗).
 

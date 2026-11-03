@@ -208,6 +208,39 @@ that the gpt-oss parser plugins drive Model Runner V2's budget, that `EngineArgs
 per-family [config-schema parity](#config-schema-parity). A green build is what proves the server can
 be synced.
 
+### Partly loaded layers
+
+vLLM's layerwise reload counts every tensor a module holds, less the names on its skip list
+(`SKIP_LOAD_TENSORS`), and processes the module once the count is met. A module that received some of its
+tensors is processed at `/finish_weight_update` instead: the missing ones are materialized with
+`torch.empty_strided`, and that storage is copied over the live parameter. The update answers `200 OK`.
+A module that received nothing keeps its tensors, and a name on the skip list stays out of the count and
+off the meta device.
+
+So a hub tensor the trainer holds as a buffer and the engine holds as a parameter beside pushed ones has
+to ride the push. Ling 2.0's router bias is that case: vLLM spells it `GateLinear.expert_bias`, which the
+reload counts, so the family spec declares it (`engine_loaded_buffers`) and the gather forwards it whenever
+`moe_router_enable_expert_bias`, the flag both engines create the tensor on, is set. Left out, the served
+router bias reads back as whatever that storage holds, which keeps the model plausible and moves most prompt
+log-probs. Weight-sync RL runs `moe_balancing: none`, so the buffer holds its checkpoint's value and the push
+leaves it where the server loaded it.
+
+The other router biases stay out of the push and stay exact:
+
+| Family | Hub tensor | Why vLLM keeps it |
+|---|---|---|
+| GLM-4 MoE Lite | `gate.e_score_correction_bias` | the name is on the skip list (`docker/vllm/verify_image.py` asserts it) |
+| LFM-2 MoE | `expert_bias`, mapped onto `gate.e_score_correction_bias` | the same |
+| Step-3.7 | `moe.router_bias` | it sits alone on a module that receives nothing |
+| Gemma 4 | `layer_scalar` (not a bias) | the same |
+
+Laguna's bias and GPT-OSS's `router.bias` are trainer parameters, so they are pushed anyway. SGLang's loaders
+copy name by name with nothing to count, so a tensor left out keeps its value on every family, and Ling's bias
+lands on a parameter of the same name. `tests/cpu/grpo/test_weight_sync_engine_loaded_buffers.py` holds every
+syncable family's push to its gathered checkpoint, and `tests/gpu/trainers/grpo/test_weight_push_exact.py`
+proves on a live server, per family and engine, that an unchanged push leaves the served log-probs alone and
+that a push after a real optimizer step serves what the trainer computes, within their gap before the step.
+
 ### Construction gates
 
 The online and async GRPO trainers refuse at construction a model the selected engine cannot take a
@@ -229,8 +262,10 @@ sync for (`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`
   the sync forwards `named_parameters()` only, so the server keeps the pretrained sinks against a
   sink-free trainer, permanently off-policy. On-policy GptOss needs `reset_sinks: false` with FA4 or
   eager, as the shipped GRPO configs set; `train_sinks: true` (SFT-only) is refused too.
-- **Enabled bias-update balancing**, adopted or transient: the parameter-only payload never pushes the
-  bias. The shipped GRPO scripts downgrade `moe_balancing` to `none` themselves.
+- **Enabled bias-update balancing**, adopted or transient: the push carries no bias that moves between
+  syncs. The shipped GRPO scripts downgrade `moe_balancing` to `none` themselves.
+- **A declared buffer the EP layer no longer holds** ([Partly loaded layers](#partly-loaded-layers)): an
+  upstream rename would otherwise raise mid-push, after the engine took a chunk.
 
 Offline GRPO needs no server and passes none of these gates.
 
@@ -450,7 +485,7 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
 | `SGLANG_PORT` | `30000` | Bound on the host |
 | `SGLANG_TP` / `SGLANG_GPU_MEM` | `1` / `0.85` | `--tp-size` / `--mem-fraction-static` |
 | `SGLANG_CUDA_DEVICES` | `7` | Server GPUs, disjoint from the trainer's |
-| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`; `auto` reads the parser off the chat template (gpt-oss resolves to the harmony parser) |
+| `SGLANG_TOOL_PARSER` | `auto` | `--tool-call-parser`; `auto` reads the parser off the chat template and **disables it** on a template it cannot detect ([below](#tool-parsers-on-sglang)); `qwen25` for the Qwen3 2507 releases |
 | `SGLANG_MOE_RUNNER_BACKEND` | `triton` | Keep `triton` for MoE RL and R3 |
 | `SGLANG_ENABLE_R3` | *(unset)* | Any value adds `--enable-return-routed-experts` |
 | `SGLANG_REASONING_PARSER` | *(unset)* | `--reasoning-parser` (`gpt-oss` for harmony models) |
@@ -485,6 +520,18 @@ SGLANG_MODEL=Qwen/Qwen3-0.6B SGLANG_MODEL_DIR=/path/to/checkpoints docker compos
   collide on `rank_offset + tp_rank`). Attention DP (`--attn-dp-size N`) is accepted; the client reads
   the layout off `/server_info`.
 - **`isr_engine_reference`** re-scores through `/generate` with `logprob_start_len`.
+
+### Tool parsers on SGLang
+
+`--tool-call-parser auto` resolves where one of SGLang's template rules matches, as on the families of the
+shipped SGLang recipes: gpt-oss (`gpt-oss`), Qwen3.5 and Qwen3.6 (`qwen3_coder`), Gemma 4 (`gemma4`). On a
+template no rule matches it logs one warning (`could not detect tool-call parser from chat template. Disabling
+tool-call parser.`) and serves with no parser, the failure [above](#running-it): calls stay text and every
+episode of a native-tool environment scores 0, with no error anywhere. Qwen3-30B-A3B-Instruct-2507 and
+Ling-mini-2.0 land there, since their templates carry no `enable_thinking` toggle for the `qwen` rule to read.
+
+Serve the Qwen3 2507 releases with `SGLANG_TOOL_PARSER=qwen25` (0.5.22 logs it as the old spelling of `qwen`).
+Ling-mini-2.0 writes the same JSON inside `<tool_call>` tags, which that detector parses.
 
 ### NCCL transport (SGLang)
 

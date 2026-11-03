@@ -121,7 +121,9 @@ Only **Ling 2.0** (`bailing_moe`) is servable and syncable on both pinned engine
 
 **Ling 3.0** (`bailing_hybrid`) is registered on both pinned engines (`BailingMoeV3ForCausalLM`), but no online update into it has been validated end to end. **Ring**'s checkpoints declare `BailingMoeLinearV2ForCausalLM` where both engines register `BailingMoeV2_5ForCausalLM`, an architecture-string mismatch, so the server cannot load the base model. Both clients list the two spellings in their `UNSERVABLE_MODEL_TYPES`, so RL weight sync is refused at trainer construction on either backend ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).
 
-The SGLang server needs `SGLANG_TRUST_REMOTE_CODE=1` (the repo ships its modeling code), and its routed-experts capturer raises at the first capture for this family, so serve without `SGLANG_ENABLE_R3` and replay routing with `recompute` there.
+The SGLang server needs `SGLANG_TRUST_REMOTE_CODE=1` (the repo ships its modeling code), and its routed-experts capturer raises at the first capture for this family, so serve without `SGLANG_ENABLE_R3` and replay routing with `recompute` there. Set `SGLANG_TOOL_PARSER` too: `auto` disables the parser on this template ([Tool parsers on SGLang](../infrastructure/rollout-servers.md#tool-parsers-on-sglang)).
+
+The trainer holds the gate's `expert_bias` as a buffer and both engines hold it as a parameter, so the family spec declares it (`engine_loaded_buffers`) and every push forwards it. vLLM's reload would otherwise rewrite the served bias from fresh storage on the first update ([Partly loaded layers](../infrastructure/rollout-servers.md#partly-loaded-layers)).
 
 ## Configs
 

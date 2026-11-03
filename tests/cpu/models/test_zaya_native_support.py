@@ -41,6 +41,12 @@ def _upstream(forward):
     return getattr(forward, "__wrapped__", forward)
 
 
+@pytest.fixture(autouse=True)
+def gc_refusal_stays_in_this_module(monkeypatch):
+    """The refusal patch writes the class for the whole process; other suites build GC-capable tiny Zaya models."""
+    monkeypatch.setattr(zaya_modeling.ZayaPreTrainedModel, "supports_gradient_checkpointing", True)
+
+
 @pytest.fixture
 def upstream_zaya():
     """An earlier test may have applied the process-wide isolation patch; restores what was installed afterwards."""

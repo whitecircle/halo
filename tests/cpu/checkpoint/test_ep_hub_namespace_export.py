@@ -195,14 +195,21 @@ def _gather_on_cpu(layer: EPMoELayerBase):
 
 @pytest.mark.parametrize("name", list(FAMILIES))
 def test_weight_sync_forwards_what_the_gathered_save_writes(name, tmp_path):
-    """The sync and save invert one list, all but the persistent buffers a parameter payload never carries."""
+    """The sync and save invert one list, all but the persistent buffers the push leaves out: every one but those a
+    family declares (``engine_loaded_buffers``)."""
     loaded = _loaded(name, tmp_path)
     for layer in loaded.ep_layers.values():
         layer.gather_expert_state_dict = _gather_on_cpu(layer)
     sender = _RecordingSender()
     gather_and_send_weights(loaded.model, sender)
 
-    buffers = {buffer_name for buffer_name, _ in persistent_buffers(loaded.model)}
+    declared = {
+        f"{path}.{attr}"
+        for path, layer in loaded.ep_layers.items()
+        if layer.FAMILY.engine_loaded_buffers is not None
+        for attr in layer.FAMILY.engine_loaded_buffers.attrs
+    }
+    buffers = {buffer_name for buffer_name, _ in persistent_buffers(loaded.model)} - declared
     unsynced = {key for key in loaded.saved if _live_name(loaded.model, key) in buffers}
     assert set(sender.sent) == set(loaded.saved) - unsynced, (
         f"{name}: only sync={sorted(set(sender.sent) - set(loaded.saved))[:5]}, "

@@ -147,7 +147,7 @@ def restore_balancing_biases(model, checkpoint: str, *, is_pp_mode: bool) -> Non
         logger.warning(
             f"[rank {get_global_rank()}] {path} carries {len(saved)} trained router balancing bias(es) but no live "
             "router in the world accepts one, so they are DROPPED. This run's balancing mode resolved to none — "
-            "weight-sync RL downgrades both bias modes, since the sync ships parameters only. Families whose bias "
+            "weight-sync RL downgrades both bias modes, since the sync carries no bias that moves. Families whose bias "
             "exports into a native checkpoint slot keep routing as trained (frozen); side-buffer families "
             "re-balance from zero, and this run's own saves emit no sidecar to resume from.",
         )
