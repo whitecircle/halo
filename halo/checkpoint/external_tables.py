@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Callable
 
 from halo.checkpoint.atomic import link_or_copy_file, save_safetensors_file, staged_file
 from halo.checkpoint.format import SAFETENSORS_METADATA, SAFETENSORS_SHARD_PATTERN
@@ -14,14 +15,18 @@ from halo.models.external_tables import ExternalTable, TableFiles, named_externa
 logger = logging.getLogger(__name__)
 
 
-def _table_filename(table_index: int, file_index: int, total_files: int) -> str:
-    """File ``file_index`` (1-based) of table ``table_index``'s parts: inside the shard glob, so a later save
-    sweeps it once no index names it, and apart from every streamed part's name."""
-    return SAFETENSORS_SHARD_PATTERN.format(suffix=f"-table{table_index:02d}-{file_index:05d}-of-{total_files:05d}")
+# The gathered save's table-file prefix: the shard pattern's own stem.
+GATHERED_TABLE_FILE_PREFIX = SAFETENSORS_SHARD_PATTERN.format(suffix="").removesuffix(".safetensors")
+
+
+def _table_filename(prefix: str, table_index: int, file_index: int, total_files: int) -> str:
+    """File ``file_index`` (1-based) of table ``table_index``'s parts under ``prefix``: inside the shard glob, so a
+    later save sweeps it once no index names it, and apart from every streamed part's name."""
+    return f"{prefix}-table{table_index:02d}-{file_index:05d}-of-{total_files:05d}.safetensors"
 
 
 def _write_parts(
-    table: ExternalTable, keys: tuple[str, ...], table_index: int, writer: StreamingShardWriter
+    table: ExternalTable, keys: tuple[str, ...], table_index: int, writer: StreamingShardWriter, prefix: str
 ) -> dict[str, str]:
     """Write the parts into table-only files of at most the writer's shard size, by the streaming writer's rule;
     returns their weight map."""
@@ -35,18 +40,20 @@ def _write_parts(
         size += part.nbytes
     weight_map = {}
     for file_index, group in enumerate(groups, start=1):
-        filename = _table_filename(table_index, file_index, len(groups))
+        filename = _table_filename(prefix, table_index, file_index, len(groups))
         with staged_file(writer.output_dir, filename, durable=False) as staged:
             save_safetensors_file({keys[i]: table.parts[i] for i in group}, staged, metadata=SAFETENSORS_METADATA)
         weight_map.update(dict.fromkeys((keys[i] for i in group), filename))
     return weight_map
 
 
-def _link_parts(source: TableFiles, table_index: int, output_dir: str) -> dict[str, str]:
+def _link_parts(source: TableFiles, table_index: int, output_dir: str, prefix: str) -> dict[str, str]:
     """Hard-link (copy across filesystems) the table-only files ``source`` names into ``output_dir``; returns their
     weight map."""
     names = list(dict.fromkeys(source.files))
-    renamed = {name: _table_filename(table_index, index, len(names)) for index, name in enumerate(names, start=1)}
+    renamed = {
+        name: _table_filename(prefix, table_index, index, len(names)) for index, name in enumerate(names, start=1)
+    }
     for name, final in renamed.items():
         origin, destination = os.path.join(source.directory, name), os.path.join(output_dir, final)
         if not (os.path.exists(destination) and os.path.samefile(origin, destination)):
@@ -64,27 +71,40 @@ def _is_linkable(source: TableFiles | None, keys: tuple[str, ...]) -> bool:
     )
 
 
-def write_external_tables(model, writer: StreamingShardWriter) -> None:
+def write_external_tables(
+    model,
+    writer: StreamingShardWriter,
+    *,
+    checkpoint_name: Callable[[str], str] | None = None,
+    file_prefix: str = GATHERED_TABLE_FILE_PREFIX,
+) -> None:
     """Put every external table of ``model`` into ``writer``'s directory and index, the save rank's part of a
-    gathered save: linked from table-only files already holding the keys, else written from the attached parts.
+    gathered save or a pipeline stage writer's part of a PP save: linked from table-only files already holding the
+    keys, else written from the attached parts.
+
+    ``checkpoint_name`` maps a table's module path in ``model`` to its name in the checkpoint (a pipeline stage's
+    re-based layer index to the unsplit model's); ``file_prefix`` keeps one writer's table files apart from another's
+    in a directory several write into.
 
     Raises:
         RuntimeError: a table was never attached, so the checkpoint would lack it.
     """
     if not writer.enabled:
         return
+    name_of = checkpoint_name or str
     for table_index, (name, table) in enumerate(named_external_tables(model)):
         if not table.is_attached:
             raise RuntimeError(
                 f"{name} ({type(table).__name__}) holds no table, so this save cannot write it: the model was built "
                 f"for an external table but never passed through finalize_loaded_model, which attaches it."
             )
-        keys = tuple(f"{name}.{table.part_key(index)}" for index in range(table.part_count))
+        saved_name = name_of(name)
+        keys = tuple(f"{saved_name}.{table.part_key(index)}" for index in range(table.part_count))
         if _is_linkable(table.files, keys):
-            weight_map, how = _link_parts(table.files, table_index, writer.output_dir), "linked"
+            weight_map, how = _link_parts(table.files, table_index, writer.output_dir, file_prefix), "linked"
         else:
-            weight_map, how = _write_parts(table, keys, table_index, writer), "wrote"
+            weight_map, how = _write_parts(table, keys, table_index, writer, file_prefix), "wrote"
         nbytes = sum(part.nbytes for part in table.parts)
         writer.add_written_files(weight_map, nbytes)
         table.files = TableFiles(writer.output_dir, tuple(weight_map[key] for key in keys), keys, table_only=True)
-        logger.info(f"{how.capitalize()} external table {name}: {len(keys)} parts, {nbytes / 1e9:.2f}GB")
+        logger.info(f"{how.capitalize()} external table {saved_name}: {len(keys)} parts, {nbytes / 1e9:.2f}GB")

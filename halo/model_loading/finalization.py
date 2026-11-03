@@ -2,6 +2,8 @@
 a meta-device build needs, the shared-weight re-tie, FLA's launch options and the external tables a host-table
 build holds outside its state."""
 
+from collections.abc import Callable
+
 import torch.nn as nn
 
 from halo.kernels.fla_launch import apply_fla_launch_options
@@ -33,7 +35,9 @@ def _retie_shared_weights(model: nn.Module) -> None:
     model.tie_weights()
 
 
-def finalize_loaded_model(model: nn.Module, weights_dir: str | None = None) -> None:
+def finalize_loaded_model(
+    model: nn.Module, weights_dir: str | None = None, checkpoint_name: Callable[[str], str] | None = None
+) -> None:
     """Post-load repair every load path must run once weights sit on their final device.
 
     transformers 5 re-materializes every non-persistent buffer as ``torch.empty_like``, and a
@@ -43,9 +47,10 @@ def finalize_loaded_model(model: nn.Module, weights_dir: str | None = None) -> N
     launch are set here too (:func:`~halo.kernels.fla_launch.apply_fla_launch_options`), and the external tables a
     host-table build holds outside its state are attached
     (:func:`~halo.model_loading.external_tables.attach_external_tables`) from ``weights_dir``, the local directory a
-    loader read the weights from, when it names one.
+    loader read the weights from, when it names one, by ``checkpoint_name`` where the model's own names are not the
+    checkpoint's (a pipeline stage's re-based layers).
     """
     apply_buffer_repairs(model)
     _retie_shared_weights(model)
     apply_fla_launch_options()
-    attach_external_tables(model, weights_dir)
+    attach_external_tables(model, weights_dir, checkpoint_name)

@@ -39,9 +39,11 @@ from halo.models.moe.expert_layout import to_hub_expert_tensors
 from halo.runtime.dtensor import materialize_dtensor
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.distributed import world_spread
+from tests.common.ep_reference import KIND_SCORED_CHECK, per_layer_grad_floors, score_ep_grad_pairs
 from tests.common.models import QWEN3_0_6B, TINY_GPTOSS_CONFIG, TINY_QWEN3_CONFIG
 from tests.common.numerics import max_abs_rel_err, max_or_nan
 from tests.common.rank_log import log
+from tests.common.tolerances import TOL
 
 SEQ_LEN = 64
 # The token-id ceiling of build_ragged_batch's rows: a model under test needs at least this vocabulary.
@@ -326,16 +328,38 @@ def rel_err(test: torch.Tensor, ref: torch.Tensor) -> float:
     return float((test.float() - ref.float()).norm() / denom)
 
 
-def run_unsplit_reference(model, rows: torch.Tensor, labels: torch.Tensor, device, dp_size: int) -> UnsplitReference:
+def run_unsplit_reference(
+    model, rows: torch.Tensor, labels: torch.Tensor, device, dp_size: int, row_kwargs: list[dict] | None = None
+) -> UnsplitReference:
     """Full-global-batch forward+backward on an unsplit model; grads keyed by global param name.
 
     An EP-wrapped model additionally yields its experts through ``gather_expert_grads`` (no
     collective at ``ep_group_size == 1``) so a distributed run can be compared shard-for-shard in
     one canonical layout, and the expert parameter names so the name-keyed comparison can skip them.
+    ``row_kwargs`` runs each row as its own ``[1, L]`` forward with its kwargs (a packed row's positions and
+    segment markers) in place of the batch's all-ones mask, without a KV cache unless a row's kwargs ask for one, as
+    the SFT trainer and a pipeline stage run a training row: transformers reads restarting positions as documents
+    only where no cache is live.
     """
     model.train()
-    out = model(input_ids=rows.to(device), attention_mask=torch.ones_like(rows).to(device))
-    row_sums = token_ce_sums(out.logits, labels.to(device))
+    if row_kwargs is None:
+        logits = model(input_ids=rows.to(device), attention_mask=torch.ones_like(rows).to(device)).logits
+    else:
+        logits = torch.cat(
+            [
+                model(
+                    input_ids=rows[i : i + 1].to(device),
+                    **{
+                        "use_cache": False,
+                        **{
+                            key: value.to(device) if torch.is_tensor(value) else value for key, value in kwargs.items()
+                        },
+                    },
+                ).logits
+                for i, kwargs in enumerate(row_kwargs)
+            ]
+        )
+    row_sums = token_ce_sums(logits, labels.to(device))
     total_tokens = int((labels[:, 1:] != -100).sum())
     loss = row_sums.sum() / total_tokens  # S / G
     loss.backward()
@@ -360,7 +384,7 @@ def run_unsplit_reference(model, rows: torch.Tensor, labels: torch.Tensor, devic
     }
     expert_param_names = {f"{name}.{attr}" for name, m in ep_modules for attr, _ in m.expert_named_params()}
 
-    del out
+    del logits
     model.zero_grad(set_to_none=True)
     return UnsplitReference(
         grads, param_names, slice_losses, total_norm, total_tokens, expert_grads, router_grads, expert_param_names
@@ -505,6 +529,59 @@ def check_loss_vs_reference(
     expected = reference.slice_losses[dp_rank]
     loss_err = abs(float(loss) - expected) / abs(expected)
     return {"loss_matches_reference": loss_err < tol}, {"loss_rel_err": loss_err}
+
+
+def score_stage_grads_vs_reference(ctx, stage, reference: UnsplitReference, checks: dict, metrics: dict) -> None:
+    """COLLECTIVE (world all-gather). Score every gradient ``stage`` holds against ``reference`` by its unsplit name:
+    non-expert parameters directly (a DTensor gathers over its mesh, in parameter order on every rank), expert banks
+    in the family's hub layout through the export's gather. Scored by direction and norm ratio, a gradient under
+    ``TOL.grad_negligible_layer_fraction`` of its decoder layer's largest held to that floor as absolute error, and the
+    stages together must compare every gradient the reference holds."""
+    ep_modules = named_ep_layers(stage)
+    expert_ids = {id(param) for _, module in ep_modules for _, param in module.expert_named_params()}
+    pairs, compared = {}, set()
+    for local, param in stage.named_parameters():
+        if id(param) in expert_ids or not param.requires_grad:
+            continue
+        name = stage.global_parameter_name(local)
+        grad = None if param.grad is None else materialize_dtensor(param.grad).float()
+        if name in reference.grads:
+            pairs[name] = (grad, reference.grads[name].float())
+            compared.add(name)
+    for local, module in ep_modules:
+        name = stage.global_parameter_name(local)
+        for key, grad in gather_expert_grads(module, device=ctx.device).items():
+            pairs[f"{name}.{key}"] = (grad.float(), reference.expert_grads[name][key].float())
+            compared.add(f"{name}.{key}")
+
+    pair_checks, pair_metrics = {}, {}
+    floors = per_layer_grad_floors(pairs, TOL.grad_negligible_layer_fraction)
+    score_ep_grad_pairs(pairs, pair_checks, pair_metrics, cos_min=TOL.ep_grad_cosine_min, negligible_floors=floors)
+    checks[KIND_SCORED_CHECK] = pair_checks.pop(KIND_SCORED_CHECK)
+    checks["stage_grads_match_reference"] = all(pair_checks.values())
+    cosines = {name: pair_metrics[f"{name}_cos"] for name in pairs if f"{name}_cos" in pair_metrics}
+    worst_name = min(cosines, key=cosines.get, default="")
+    worst_cos = cosines.get(worst_name, 1.0)
+    worst_ratio = max((abs(pair_metrics[f"{name}_norm_ratio"] - 1.0) for name in cosines), default=0.0)
+    negligible = len(pairs) - len(cosines)
+    metrics.update(
+        worst_grad_cosine=worst_cos,
+        worst_grad_ratio_drift=worst_ratio,
+        params_compared=len(pairs),
+        params_negligible=negligible,
+    )
+    log(f"[rank {ctx.rank}] {len(pairs)} grads ({negligible} negligible), worst cos {worst_cos:.5f} at {worst_name}")
+
+    gathered: list = [None] * ctx.world_size
+    dist.all_gather_object(gathered, compared)
+    expected = (set(reference.grads) - reference.expert_param_names) | {
+        f"{name}.{key}" for name, grads in reference.expert_grads.items() for key in grads
+    }
+    covered = set().union(*gathered)
+    if covered != expected:
+        extra, missing = sorted(covered - expected)[:4], sorted(expected - covered)[:4]
+        log(f"[rank {ctx.rank}] grad name diff: extra={extra} missing={missing}")
+    checks["stages_cover_every_reference_grad"] = covered == expected
 
 
 def check_router_grads(

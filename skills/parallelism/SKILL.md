@@ -56,8 +56,8 @@ advising.
    TP reduces DP by `tp_size`.
 5. **Model too large for one node?** **PP** — the outermost axis, composing with **EP or pure
    ETP** only. Every stage is a whole number of NVLink domains of at least two ranks, so a run
-   needs at least two domains; only the families with a PP verdict in the compatibility matrix
-   split. A per-node (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) save exports through
+   needs at least two domains; only the families marked Yes in the compatibility matrix's PP
+   column split. A per-node (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) save exports through
    `scripts/after_training/merge_pp_stages.py`.
 6. Compute `dp_size` and sanity-check it's >= 1 and the global batch is what you intend.
 

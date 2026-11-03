@@ -310,7 +310,6 @@ costs, and why an EP layout stays the recommendation wherever one fits:
 - **No router balancing.** The split severs the aux-loss path and Qwen3.5 has no checkpoint slot for a
   bias, so the run takes `moe_balancing: none`: 512 experts at top-10 train unbalanced
   ([PP + EP](pipeline-parallelism.md#pp--ep-moe)).
-- **No packing.** PP refuses packing on the GatedDeltaNet families, so every row pads to `max_length`.
 - **The bubble.** `9 × (pp_size − 1)` microbatches hold it at 10%, and `per_device_train_batch_size`
   must be a multiple of the microbatch count ([Configuration](pipeline-parallelism.md#configuration)).
 - **The PP refusals.** `save_sharded_ep`, PEFT and expert LoRA, and layer-indexed
@@ -379,7 +378,7 @@ torchrun --nnodes=$NNODES --node_rank=$NODE_RANK --nproc_per_node=8 \
 | Nodes | Layout flags |
 |---|---|
 | 2 | `--expert_parallel_size=16 --ep_scope=global` |
-| 3 | `--pipeline_parallel_size=3 --expert_parallel_size=8 --ep_scope=node`, with the PP keys of [Pipeline-parallel cells](#pipeline-parallel-cells) (`moe_balancing: none`, `packing: false`, `max_length`, `pipeline_microbatches`) |
+| 3 | `--pipeline_parallel_size=3 --expert_parallel_size=8 --ep_scope=node`, with the PP keys of [Pipeline-parallel cells](#pipeline-parallel-cells) (`moe_balancing: none`, `max_length`, `pipeline_microbatches`) |
 | 4 | `--expert_parallel_size=32 --ep_scope=global` |
 | 8 | `--expert_parallel_size=64 --ep_scope=global` |
 | 8, EFA | `--expert_parallel_size=8 --expert_tensor_parallel_size=8 --ep_scope=global` |

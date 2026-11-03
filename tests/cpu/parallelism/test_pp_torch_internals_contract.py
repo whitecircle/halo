@@ -38,6 +38,9 @@ SCHEDULES = sorted(runner._SCHEDULES)
 
 
 class _TinyCausalLM(nn.Module):
+    # The one stage member the runner reads: a one-stage chain hands no token ids beside its activation.
+    token_ids_kwarg = None
+
     def __init__(self):
         super().__init__()
         self.embed = nn.Embedding(VOCAB, HIDDEN)

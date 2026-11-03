@@ -232,7 +232,8 @@
   "ZayaModel",
   "DeepseekV4Model",
   "Gemma4TextModel",
-  "Glm5NextTextModel"
+  "Glm5NextTextModel",
+  "Qwen4ExpTextModel"
  ],
  "head transform claims": {
   "MiniCPM3ForCausalLM": "MiniCPM3HeadTransform",

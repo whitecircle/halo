@@ -130,12 +130,21 @@ def test_an_unknown_model_type_with_gated_delta_net_layers_is_detected(monkeypat
         require_segment_aware_kernels(config, "packing")
 
 
-def test_an_unknown_model_type_with_gated_delta_net_layers_refuses_packing_under_pp(monkeypatch):
-    """Pipeline parallelism keeps packed rows, which carry no per-row ``cu_seq_lens``."""
+@pytest.mark.parametrize(
+    ("fields", "refused"), [(GDN_HEADS, False), ({}, True)], ids=["gated_delta_net_heads", "no_head_split"]
+)
+def test_an_unknown_model_type_packs_under_pp_where_its_markers_reach_its_layers(fields, refused, monkeypatch):
+    """Pipeline parallelism keeps packed rows, and each stage rebuilds the markers GatedDeltaNet layers read, under a
+    name no list holds; the same layers without the head split read no marker, so their packed rows are refused."""
     monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla>=0.2.2", lambda: True),))
-    config = UnknownHybridConfig(layer_types=["linear_attention", "full_attention"], **GDN_HEADS)
+    config = UnknownHybridConfig(layer_types=["linear_attention", "full_attention"], **fields)
     config._attn_implementation = "flash_attention_2"
-    with pytest.raises(ValueError, match="packing under pipeline parallelism.*halo_unknown_hybrid"):
+    expectation = (
+        pytest.raises(ValueError, match="packing under pipeline parallelism.*halo_unknown_hybrid")
+        if refused
+        else contextlib.nullcontext()
+    )
+    with expectation:
         reject_unsupported_collator_options(
             None,
             padding_free=False,
@@ -147,6 +156,7 @@ def test_an_unknown_model_type_with_gated_delta_net_layers_refuses_packing_under
             model_config=config,
             per_device_train_batch_size=1,
             keeps_packed_rows=True,
+            allow_cross_document_linear_attention=True,
         )
 
 

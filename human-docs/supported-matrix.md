@@ -155,9 +155,9 @@ advanced parallelism. What each family is for:
 | Qwen3 MoE | Yes | Yes | Yes | Yes | Yes | broadest coverage; PP passes tiny-model GPU tests only and needs `moe_balancing: none` |
 | Qwen3-VL (text) | — | — | Yes | No | No | CP on text-only batches (a batch with images raises mid-run); TP raises at load, so keep `tensor_parallel_size=1` |
 | Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
-| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower |
+| Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower and needs `moe_balancing: none` |
 | Qwen3-Next | Yes | Yes | No | No | No | EP and ETP pass tiny-model GPU tests only |
-| Qwen3.8-Flash-Next | Yes | Yes | No | No | No | experimental: EP, pure ETP and EP+ETP pass tiny-model GPU tests, and EP8 trains the release cut to four layers; full fine-tuning, LoRA and expert LoRA; plain FSDP2 (`ep_size: 1`) loads the whole model on every GPU, so tiny models only; text rows, packed or padded; the n-gram table stays in host memory; no RL weight sync |
+| Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental: EP, pure ETP and EP+ETP pass tiny-model GPU tests, and EP8 trains the release cut to four layers; full fine-tuning, LoRA and expert LoRA; plain FSDP2 (`ep_size: 1`) loads the whole model on every GPU, so tiny models only; PP takes the text tower, full fine-tuning with `moe_balancing: none` on tiny models only; text rows, packed or padded; the n-gram table stays in host memory; no RL weight sync |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | PP passes tiny-model GPU tests only |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | ETP and PP pass tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |
@@ -197,9 +197,11 @@ What each mode writes, and which resumes are exact:
 ## Validation
 
 The GPU tests run on single 8× B300 nodes. Hopper gets the image build, the
-CPU tests inside it and an FA3 import check, with no GPU test. Multi-node
-coverage is a two-node simulation on one host: nothing in this release ran on
-two machines. Checkpoints written by Halo 1.1.0 resume exactly and export.
+CPU tests inside it and an FA3 import check, with no GPU test. On two machines
+(B300 over EFA) this release ran cross-node expert parallelism and the two
+pipeline-parallel recipes, the Qwen3-8B one through a per-node save, resume and
+merge; the rest of the multi-node coverage is a two-node simulation on one host.
+Checkpoints written by Halo 1.1.0 resume exactly and export.
 The full scope: [Release validation](../agent-docs/infrastructure/ci.md#release-validation) ↗
 and [Verified topologies](../agent-docs/parallelism/multi-node.md#verified-topologies) ↗.
 

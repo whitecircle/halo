@@ -25,6 +25,7 @@ from transformers import (
 )
 from transformers.models.step3p7.configuration_step3p7 import Step3p7TextConfig
 
+from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.pipeline_parallel import model_rules
 from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP
 from halo.distributed.pipeline_parallel.model_rules import MTP_LAYER_COUNT_FIELDS, reject_unsupported_pp_model
@@ -36,9 +37,11 @@ from halo.distributed.pipeline_parallel.partition import (
 )
 from halo.distributed.pipeline_parallel.stage import StageLayout, build_pipeline_stage
 from halo.models.head_transform import IDENTITY_HEAD_TRANSFORM
+from halo.models.module_tree import backbone_with_layers
 from halo.models.moe.config_fields import ROUTER_TOPK_FIELDS
 from halo.models.param_roles import persistent_buffers
 from tests.common.models import TINY_GPTOSS_CONFIG, TINY_INKLING_PP_OVERRIDES, TINY_QWEN3_CONFIG, TINY_STEP3P7_CONFIG
+from tests.common.parallelism import single_process_ep_config
 from tests.common.pp_fakes import registered_pp_backbones
 from tests.common.tiny_models import (
     TINY_DENSE_FAMILIES,
@@ -459,6 +462,55 @@ def test_aux_loss_balanced_moe_is_rejected():
         build_pipeline_stage(_moe_model(), 0, 2)
 
 
+def _ep1_wrapped(family: str):
+    """``family``'s tiny model at a live ``router_aux_loss_coef``, carrying the ep1 EP layer classes."""
+    torch.manual_seed(0)
+    model = tiny_family_model(TINY_MOE_FAMILIES[family], overrides={"router_aux_loss_coef": 0.001})
+    return apply_ep_layers(model, single_process_ep_config())
+
+
+def test_an_ep1_qwen3_moe_aux_loss_refusal_names_only_moe_balancing_none():
+    """Qwen3-MoE's gate has no slot for a routing bias: bias_update raises at configure and bias_update_transient
+    is refused under PP, so the refusal of its default (``auto`` resolves to aux_loss) offers none alone."""
+    with pytest.raises(ValueError, match="resolves to 'aux_loss'") as refusal:
+        reject_unsupported_pp_model(_ep1_wrapped("qwen3_moe"))
+    assert "moe_balancing=none" in str(refusal.value)
+    assert "bias_update" not in str(refusal.value)
+
+
+def test_an_ep1_laguna_aux_loss_refusal_names_bias_update_first():
+    """Laguna's EP layers export the bias into its own checkpoint slot, so the refusal of its default leads with
+    bias_update."""
+    with pytest.raises(ValueError, match="resolves to 'aux_loss'") as refusal:
+        reject_unsupported_pp_model(_ep1_wrapped("laguna"))
+    message = str(refusal.value)
+    assert message.index("moe_balancing=bias_update") < message.index("moe_balancing=none")
+
+
+# Whether each PP-registered MoE family's EP layers export a routing bias into a checkpoint slot of the family's
+# own, written out rather than read off the predicate the refusal branches on.
+_PP_MOE_EXPORTS_BIAS = {
+    "deepseek_v4": True,
+    "glm4_moe_lite": True,
+    "glm5_next": True,
+    "gpt_oss": True,
+    "inkling_text": True,
+    "laguna": True,
+    "step3p7": True,
+    "qwen3_moe": False,
+    "qwen3_5_moe_text": False,
+    "qwen4_exp_text": False,
+}
+
+
+@pytest.mark.parametrize("family", sorted(_PP_MOE_EXPORTS_BIAS))
+def test_the_aux_loss_refusal_offers_bias_update_exactly_where_the_bias_exports(family):
+    with pytest.raises(ValueError, match="resolves to 'aux_loss'") as refusal:
+        reject_unsupported_pp_model(_ep1_wrapped(family), "aux_loss")
+    assert ("moe_balancing=bias_update" in str(refusal.value)) is _PP_MOE_EXPORTS_BIAS[family]
+    assert "moe_balancing=none" in str(refusal.value)
+
+
 def test_bias_update_balanced_moe_is_accepted():
     """Families balanced by the aux-loss-free bias update do not touch the severed path.
 
@@ -549,15 +601,25 @@ REGISTERED_BACKBONES = {
     "Step3p7TextModel",
     "DeepseekV4Model",
     "Glm5NextTextModel",
+    "Qwen4ExpTextModel",
 }
 _TINY_FAMILIES = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 # The tiny families whose backbone is neither registered nor refused with a spec of its own.
-_UNREGISTERED_FAMILIES = ("bailing_moe", "cohere2_moe", "lfm2_moe", "mistral4", "qwen3_next", "qwen4_exp_text")
+_UNREGISTERED_FAMILIES = ("bailing_moe", "cohere2_moe", "lfm2_moe", "mistral4", "qwen3_next")
 
 
 def test_the_registry_holds_exactly_the_validated_families():
     assert {name for name, spec in PP_SPEC_MAP.items() if spec.validated} == REGISTERED_BACKBONES
     assert all(PP_SPEC_MAP[name].refusal is None for name in REGISTERED_BACKBONES)
+
+
+def test_the_bias_export_table_covers_every_registered_moe_family():
+    registered = {
+        family
+        for family, tiny in TINY_MOE_FAMILIES.items()
+        if type(backbone_with_layers(tiny_family_model(tiny))).__name__ in REGISTERED_BACKBONES
+    }
+    assert set(_PP_MOE_EXPORTS_BIAS) == registered
 
 
 @pytest.mark.parametrize(
@@ -576,6 +638,7 @@ def test_the_registry_holds_exactly_the_validated_families():
         "laguna",
         "inkling_text",
         "inkling_mm_model",
+        "qwen4_exp_text",
     ],
 )
 def test_every_registered_family_passes_the_structure_gate(family):

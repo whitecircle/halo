@@ -41,8 +41,7 @@ packing: true
 # --- Training schedule ---
 per_device_train_batch_size: 8        # split into the 8 microbatches above: one 8192-token row each
 num_train_epochs: 1.0
-gradient_checkpointing_kwargs:
-  use_reentrant: false                # PP refuses reentrant checkpointing
+gradient_checkpointing: false         # on is TRL's default; off: +21.5% tok/s at ~70 GiB peak per GPU (B300)
 
 # --- Optimizer & LR schedule ---
 learning_rate: 5.0e-06

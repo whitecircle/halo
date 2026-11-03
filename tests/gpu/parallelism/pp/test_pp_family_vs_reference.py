@@ -25,19 +25,14 @@ import argparse
 import copy
 
 import torch
-import torch.distributed as dist
 
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.distributed.expert_parallel.parallelize import apply_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.runtime.dtensor import materialize_dtensor
 from tests.common import pp_equivalence as ppeq
-from tests.common.ep_reference import KIND_SCORED_CHECK, per_layer_grad_floors, score_ep_grad_pairs
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
-from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, TINY_PP_SPLIT_OVERRIDES, tiny_family_model
-from tests.common.tolerances import TOL
 
 SEED = 1234
 PP_SIZE = 2
@@ -132,54 +127,7 @@ def run(ctx):
     checks.update(c)
     metrics.update(m)
 
-    # Non-expert gradients by unsplit name (a DTensor gathers over its mesh, in parameter order on every rank).
-    expert_ids = {id(param) for _, module in ep_modules for _, param in module.expert_named_params()}
-    pairs, compared = {}, set()
-    for local, param in stage.named_parameters():
-        if id(param) in expert_ids or not param.requires_grad:
-            continue
-        name = stage.global_parameter_name(local)
-        grad = None if param.grad is None else materialize_dtensor(param.grad).float()
-        if name in reference.grads:
-            pairs[name] = (grad, reference.grads[name].float())
-            compared.add(name)
-    # Expert banks in the family's hub layout, gathered over the stage's expert groups.
-    for local, module in ep_modules:
-        name = stage.global_parameter_name(local)
-        for key, grad in ppeq.gather_expert_grads(module, device=ctx.device).items():
-            pairs[f"{name}.{key}"] = (grad.float(), reference.expert_grads[name][key].float())
-            compared.add(f"{name}.{key}")
-
-    pair_checks, pair_metrics = {}, {}
-    floors = per_layer_grad_floors(pairs, TOL.grad_negligible_layer_fraction)
-    score_ep_grad_pairs(pairs, pair_checks, pair_metrics, cos_min=TOL.ep_grad_cosine_min, negligible_floors=floors)
-    checks[KIND_SCORED_CHECK] = pair_checks.pop(KIND_SCORED_CHECK)
-    checks["stage_grads_match_reference"] = all(pair_checks.values())
-    cosines = {name: pair_metrics[f"{name}_cos"] for name in pairs if f"{name}_cos" in pair_metrics}
-    worst_name = min(cosines, key=cosines.get, default="")
-    worst_cos = cosines.get(worst_name, 1.0)
-    worst_ratio = max((abs(pair_metrics[f"{name}_norm_ratio"] - 1.0) for name in cosines), default=0.0)
-    negligible = len(pairs) - len(cosines)
-    metrics.update(
-        worst_grad_cosine=worst_cos,
-        worst_grad_ratio_drift=worst_ratio,
-        params_compared=len(pairs),
-        params_negligible=negligible,
-    )
-    log(f"[rank {ctx.rank}] {len(pairs)} grads ({negligible} negligible), worst cos {worst_cos:.5f} at {worst_name}")
-
-    # The stages together compare every gradient the reference holds, so the name map cannot empty the check.
-    gathered: list = [None] * ctx.world_size
-    dist.all_gather_object(gathered, compared)
-    expected = (set(reference.grads) - reference.expert_param_names) | {
-        f"{name}.{key}" for name, grads in reference.expert_grads.items() for key in grads
-    }
-    covered = set().union(*gathered)
-    if covered != expected:
-        log(
-            f"[rank {ctx.rank}] grad name diff: extra={sorted(covered - expected)[:4]} missing={sorted(expected - covered)[:4]}"
-        )
-    checks["stages_cover_every_reference_grad"] = covered == expected
+    ppeq.score_stage_grads_vs_reference(ctx, stage, reference, checks, metrics)
     return {"checks": checks, "metrics": metrics}
 
 

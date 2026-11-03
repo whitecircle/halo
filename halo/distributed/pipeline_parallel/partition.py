@@ -22,8 +22,8 @@ def validate_partition(model: nn.Module, partition: list[tuple[int, int]]) -> No
     """Raise if any stage boundary of ``partition`` would silently change the model.
 
     Run on every rank with the whole partition, so an invalid split fails every rank together rather
-    than leaving peers at the first collective. Several families (GptOss, Qwen3, Qwen3.5, LFM2,
-    Laguna) select each layer's mask as ``config.layer_types[i]`` by list position, which slicing
+    than leaving peers at the first collective. Several families (GptOss, Qwen3, Qwen3.5, Step-3.7,
+    Laguna, Inkling) select each layer's mask as ``config.layer_types[i]`` by list position, which slicing
     re-bases: a stage offset must be a whole number of pattern periods unless the family's spec is
     ``layer_types_rebase_safe``. The family's own ``reject_severed_boundaries`` runs after.
     """

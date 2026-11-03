@@ -95,10 +95,10 @@ _RULES = {
         {"allow_cross_document_linear_attention": True},
     ),
     "pipeline-packed-rows": (
-        TINY_DENSE_FAMILIES["qwen3_5"],
+        TINY_BAILING_RING_FAMILY,
         "packing",
         FA2,
-        {"keeps_packed_rows": True},
+        {"keeps_packed_rows": True, "allow_cross_document_linear_attention": True},
         "pipeline",
         {"keeps_packed_rows": False},
     ),

@@ -57,14 +57,15 @@ VOCAB_CEIL = 1000
 
 @functools.cache
 def seam_sweep_skip(name: str) -> str | None:
-    """Why packing family ``name`` gives the seam nothing to hand over, or ``None``: pipeline parallelism does not
-    register its backbone, its GatedDeltaNet mixers read the set themselves, or it never resolves to flash."""
+    """Why packing family ``name`` has no seam to sweep against the derivation, or ``None``: pipeline parallelism does
+    not register its backbone, its GatedDeltaNet mixers read the markers the seam hands them, or it never resolves to
+    flash."""
     model = tiny_family_model(PACKING_FAMILIES[name])
     spec = resolve_pp_spec(backbone_with_layers(model))
     if not spec.validated or spec.refusal is not None:
         return "pipeline parallelism does not register its backbone"
     if segment_markers_for(model.config).cu_seq_lens:
-        return "its GatedDeltaNet mixers read the set, so the seam hands it none"
+        return "its GatedDeltaNet mixers read the markers the seam hands them, so no arm runs without it"
     if not getattr(model, "_supports_flash_attn", False):
         return "its model class declares no flash support, so its runs never resolve to flash"
     return None
@@ -116,7 +117,7 @@ def sweep_layouts(model_config) -> dict[str, dict[str, torch.Tensor]]:
 @contextlib.contextmanager
 def seam_withheld() -> Iterator[None]:
     """The stage forward as it ran before the seam: no varlen set handed to the backbone."""
-    with mock.patch.object(stage_module, "packed_row_varlen_kwargs", lambda position_ids: {}):
+    with mock.patch.object(stage_module, "packed_row_segment_kwargs", lambda position_ids, markers: {}):
         yield
 
 

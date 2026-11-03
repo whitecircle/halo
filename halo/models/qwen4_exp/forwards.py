@@ -140,6 +140,11 @@ def patch_qwen4_exp_ngram_embedding() -> None:
         logger.info("Patched Qwen4ExpTextNGramEmbedding to hold its n-gram table in host memory")
 
 
+def document_forwards_installed() -> bool:
+    """Whether :func:`patch_qwen4_exp_document_forwards` replaced the model, decoder-layer and attention forwards."""
+    return getattr(qwen4_exp_modeling.Qwen4ExpTextModel.forward, _DOCUMENT_FORWARDS_ATTR, False)
+
+
 def _verify_upstream_mask_kinds(forward) -> None:
     source = inspect.getsource(inspect.unwrap(forward))
     missing = [kind for kind in _MASK_KINDS if f'"{kind}"' not in source]
@@ -157,6 +162,16 @@ def _text_position_ids(position_ids: torch.Tensor | None) -> torch.Tensor | None
     if position_ids is None or position_ids.ndim == 2:
         return position_ids
     return position_ids[0] if position_ids.shape[0] in (1, 4) else None
+
+
+def document_padding_mask(config, rows: torch.Tensor, attention_mask, position_ids, seq_idx) -> torch.Tensor | None:
+    """The 2-D padding mask (or none) every layer of an uncached row reads in place of upstream's mask mapping, once a
+    packed row (``position_ids`` restarting) is checked to carry the ``seq_idx`` marking its documents. ``rows`` is any
+    ``[batch, sequence, ...]`` tensor of the row: its ids, embeddings or hyper-connection stream."""
+    # Upstream reads position restarts as documents only without a padding mask.
+    positions = _text_position_ids(position_ids) if attention_mask is None or seq_idx is not None else None
+    reject_unmarked_documents(positions, seq_idx)
+    return create_recurrent_attention_mask(config, rows, attention_mask)
 
 
 def _is_document_call(attention_mask, past_key_values) -> bool:
@@ -280,12 +295,8 @@ def patch_qwen4_exp_document_forwards() -> None:
                 ple_input_ids=ple_input_ids,
                 **kwargs,
             )
-        seq_idx = kwargs.get("seq_idx")
-        # Upstream reads position restarts as documents only without a padding mask.
-        positions = _text_position_ids(position_ids) if attention_mask is None or seq_idx is not None else None
-        reject_unmarked_documents(positions, seq_idx)
         rows = input_ids if input_ids is not None else inputs_embeds
-        padding = create_recurrent_attention_mask(self.config, rows, attention_mask)
+        padding = document_padding_mask(self.config, rows, attention_mask, position_ids, kwargs.get("seq_idx"))
         return original_model(
             self,
             input_ids=input_ids,

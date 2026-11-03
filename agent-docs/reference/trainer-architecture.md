@@ -164,10 +164,12 @@ constructor-time gates rather than class attributes. Rejections land in three pl
 
 `PipelineTrainerMixin._split_pipeline_stage` rejects the generic blockers on every trainer
 (`halo/trainers/parallelism/pipeline_rules.py`):
-an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `peft_config`, TRL's
-`activation_offloading`, `torch_compile`, image-bearing data, and an eval batch size differing
-from train. Padding-free collation is rejected at the collator wrap (its flattened width varies
-every step); packing passes the gates, at one packed row per microbatch.
+an unset `max_length`, `save_sharded_ep`, reentrant gradient checkpointing, `peft_config` or a model
+already PEFT-wrapped (a `PeftModel`, or one carrying PEFT tuner layers), TRL's `activation_offloading`,
+`torch_compile`, image-bearing data, and an eval batch size differing from train. Padding-free
+collation is rejected at the collator wrap (its flattened width varies every step); packing passes
+at one packed row per microbatch, except on a model whose sequence mixers read no document boundary
+([PP packing](../parallelism/pipeline-parallelism.md#packing)).
 
 `pipeline_rules.py` also holds the shared vocabulary the preference and offline-GRPO
 wrappers add on top, through the `_reject_unsupported_pp_options` hook or their own gate — a live `ref_model`, missing precomputed reference columns, and

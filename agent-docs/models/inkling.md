@@ -6,7 +6,7 @@ Attention is hybrid sliding (5 sliding : 1 full, period 6) with **no RoPE** — 
 
 Transformers ships `transformers.models.inkling` natively (the image pins 5.20.2), so the family loads with no remote code. The composite config's `model_type` is `inkling_mm_model`, the text config's `inkling_text` (there is no bare `inkling` spelling).
 
-Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP and TP are out for architectural reasons, not a missing registration ([why](#why-cp-and-tp-are-out)). Pipeline parallelism splits the text tower on whole six-layer `layer_types` periods, with packing refused ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). LoRA is tiny-model verified only (`test_lora_merged_save_resume.py --family inkling_text`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume).
+Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). CP and TP are out for architectural reasons, not a missing registration ([why](#why-cp-and-tp-are-out)). Pipeline parallelism splits the text tower on whole six-layer `layer_types` periods, with packing refused whatever `allow_cross_document_linear_attention` says ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)). LoRA is tiny-model verified only (`test_lora_merged_save_resume.py --family inkling_text`: expert and mixed adapters at ep2 and ep1 through a merged save and an exact resume).
 
 ## EP layer
 

@@ -12,7 +12,7 @@ from halo.distributed.pipeline_parallel.families import PP_SPEC_MAP, resolve_pp_
 from halo.models.config_access import get_config_field, text_config, ties_word_embeddings
 from halo.models.head_transform import resolve_head_transform
 from halo.models.module_tree import backbone_with_layers, decoder_layers, embedding_module
-from halo.models.moe.balancing import resolve_balancing_mode
+from halo.models.moe.balancing import accepts_native_balancing_bias, resolve_balancing_mode
 from halo.models.moe.config_fields import has_routed_experts
 
 # Every family spelling of the multi-token-prediction tail-layer count (DeepSeek/Bailing,
@@ -73,12 +73,17 @@ def _reject_aux_loss_balancing(model: nn.Module, moe_balancing: str) -> None:
     coef = get_config_field(config, "router_aux_loss_coef", 0) or 0
     if coef <= 0:
         return
+    remedy = (
+        "Use moe_balancing=bias_update, which this model's EP layers export, moe_balancing=none to accept "
+        "unbalanced experts, or train this model without PP."
+        if accepts_native_balancing_bias(model)
+        else "No layer here can export a routing bias, so set moe_balancing=none to accept unbalanced experts, "
+        "or train this model without PP."
+    )
     raise ValueError(
         f"{type(model).__name__} balances its experts through the HuggingFace router aux loss "
         f"(moe_balancing={moe_balancing!r} resolves to 'aux_loss', router_aux_loss_coef={coef}), "
-        f"which pipeline parallelism drops: a stage never runs the *ForCausalLM.forward that adds it. "
-        f"Use moe_balancing=bias_update on a family whose EP layers support the aux-loss-free bias "
-        f"update, moe_balancing=none to accept unbalanced experts, or train this model without PP."
+        f"which pipeline parallelism drops: a stage never runs the *ForCausalLM.forward that adds it. {remedy}"
     )
 
 

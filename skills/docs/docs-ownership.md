@@ -51,7 +51,7 @@ changes.
 | `halo/models/moe/expert_layout.py` | `agent-docs/reference/checkpoints.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/models/adding-a-model.md` |
 | `halo/distributed/context_parallel/`, `halo/model_loading/parallel/cp.py` | `agent-docs/parallelism/context-parallelism.md` |
 | `halo/distributed/tensor_parallel/`, `halo/model_loading/parallel/tp.py` | `agent-docs/parallelism/tensor-parallelism.md` |
-| `halo/distributed/pipeline_parallel/` | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
+| `halo/distributed/pipeline_parallel/` | `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md`; the PP column and its footnotes in `agent-docs/models/README.md` and `human-docs/supported-matrix.md` |
 | `halo/model_loading/lazy_safetensors/`, `halo/model_loading/checkpoint_keys.py` | `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/parallelism/pipeline-parallelism.md`, `agent-docs/reference/checkpoints.md` |
 | `halo/model_loading/parallel/lazy_plan.py`, `halo/model_loading/parallel/expert_fuser.py`, `halo/model_loading/parallel/ep.py`, `halo/model_loading/parallel/lazy_load.py`, `halo/models/gradient_checkpointing.py` | `agent-docs/parallelism/expert-parallelism.md` |
 | `halo/model_loading/parallel/pp.py` | `agent-docs/parallelism/pipeline-parallelism.md` |
@@ -108,7 +108,7 @@ changes.
 
 | `halo/` area | Owning doc page(s) |
 |---|---|
-| `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/models/adding-a-model.md`, `agent-docs/models/README.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`; the attention facts also `agent-docs/optimization/flash-attention.md` |
+| `halo/distributed/expert_parallel/families/`, `halo/models/moe/family_specs.py` | the family's `agent-docs/models/` page, `agent-docs/models/adding-a-model.md`, `agent-docs/models/README.md`, `agent-docs/parallelism/expert-parallelism.md`, `agent-docs/optimization/grouped-gemm.md`; the attention facts also `agent-docs/optimization/flash-attention.md`; a `weight_sync_refusal` also `agent-docs/infrastructure/rollout-servers.md` and `human-docs/supported-matrix.md` |
 | `halo/distributed/expert_parallel/families/zaya.py`, `halo/models/zaya.py` | `agent-docs/models/zaya.md` |
 | `halo/distributed/expert_parallel/families/qwen3_next.py` | `agent-docs/models/qwen3-next.md` |
 | `halo/distributed/expert_parallel/families/qwen4_exp.py`, `halo/models/qwen4_exp/` | `agent-docs/models/qwen4_exp.md` |
@@ -277,7 +277,7 @@ what a user sets, runs or can combine there, update the page with its owner. A n
 | `human-docs/configuration.md` | `halo/configs/parser.py`, `halo/configs/`; `agent-docs/reference/configuration-reference.md` |
 | `human-docs/environment-variables.md` | `halo/env.py` and every toolkit knob; `agent-docs/reference/configuration-reference.md` (Environment variables) |
 | `human-docs/parallelism.md` | `halo/distributed/{parallelism_config,parallelism_rules}.py`, `halo/configs/parallelism_arguments.py`; `agent-docs/parallelism/` |
-| `human-docs/supported-matrix.md` | every support verdict: version pins, attention backends, trainer × mode, the rollout-engine roster (`halo/weight_sync/clients/`), families, parallelism modes, PEFT and quantization |
+| `human-docs/supported-matrix.md` | every support verdict: version pins, attention backends, trainer × mode, the rollout-engine roster (`halo/weight_sync/clients/`, `weight_sync_refusal` in `halo/models/moe/family_specs.py`), families, parallelism modes, PEFT and quantization |
 | `human-docs/clusters.md` | multi-node launch, `launcher-configs/**`; `agent-docs/parallelism/{multi-node,launch-recipes}.md`, `agent-docs/infrastructure/{skypilot,runpod,nomad}.md` |
 | `human-docs/checkpoints.md` | `halo/checkpoint/parallel/`, `halo/checkpoint/`, `scripts/after_training/**`; `agent-docs/reference/{checkpoints,model-merging}.md` |
 | `human-docs/data.md` | `halo/data/`; `agent-docs/data/` |

@@ -68,6 +68,10 @@ class StageKeyFilter:
         """``model_key`` in this stage's layer numbering, the inverse of ``global_parameter_name``'s shift."""
         return rebase_layer_index(model_key, self.layer_root, self.layer_root, -self.lo) or model_key
 
+    def model_key(self, stage_key: str) -> str:
+        """``stage_key`` back in the unsplit model's numbering, the inverse of :meth:`stage_key`."""
+        return rebase_layer_index(stage_key, self.layer_root, self.layer_root, self.lo) or stage_key
+
     def filter(self, plans: list[WeightPlan]) -> list[WeightPlan]:
         """This stage's plans, with their model keys re-based."""
         return [replace(plan, model_key=self.stage_key(plan.model_key)) for plan in plans if self.owns(plan.model_key)]
@@ -194,10 +198,10 @@ def _plan_stage(
     pp_size: int,
     pp_split: list[int] | None,
     fuser: ExpertFuser | None,
-) -> tuple[list[WeightPlan], list[str], list[FusionTask], list[tuple[int, int]]]:
-    """COLLECTIVE: this stage's plans in its own numbering, the cross-stage keys it drops, its fusion tasks
-    and the partition; slices the shell to the stage. Every stage-local verdict is joined across ranks on the
-    meta shell, before any rank pays for a weight."""
+) -> tuple[list[WeightPlan], list[str], list[FusionTask], list[tuple[int, int]], StageKeyFilter]:
+    """COLLECTIVE: this stage's plans in its own numbering, the cross-stage keys it drops, its fusion tasks,
+    the partition and the stage's key filter; slices the shell to the stage. Every stage-local verdict is joined
+    across ranks on the meta shell, before any rank pays for a weight."""
     model, missing_files = base.model, base.missing_shard_files
     if missing_files:
         logger.info(
@@ -237,7 +241,7 @@ def _plan_stage(
     slice_backbone_to_stage(model, lo, hi)
     setattr(model, PP_STAGE_PARTITION_ATTR, partition)
     reject_across_ranks(_unresolved_plans_reason(model, plans, pp_rank, lo, hi), _PP_LOAD_LABEL)
-    return plans, dropped_keys, fusion_tasks, partition
+    return plans, dropped_keys, fusion_tasks, partition, stage_filter
 
 
 def _load_stage_lazy(
@@ -283,7 +287,9 @@ def _load_stage_lazy(
         if ep_config is not None and base.expert_layout == ExpertKeyLayout.PER_EXPERT
         else None
     )
-    plans, dropped_keys, fusion_tasks, partition = _plan_stage(base, model_path, pp_rank, pp_size, pp_split, fuser)
+    plans, dropped_keys, fusion_tasks, partition, stage_filter = _plan_stage(
+        base, model_path, pp_rank, pp_size, pp_split, fuser
+    )
     lo, hi = partition[pp_rank]
 
     def report(plans: list[WeightPlan], fused_keys: set[str]) -> None:
@@ -322,7 +328,8 @@ def _load_stage_lazy(
         except Exception as e:  # a stage-local verdict, joined below
             reason = f"EP patching failed on pipeline stage {pp_rank}: {type(e).__name__}: {e}"
         reject_across_ranks(reason, _PP_LOAD_LABEL)
-    finalize_loaded_model(model)
+    # External tables are planned in the checkpoint's key space, so a table on a later stage reads its own layer's.
+    finalize_loaded_model(model, checkpoint_name=stage_filter.model_key)
     reject_across_ranks(_unmaterialized_reason(model, model_path, pp_rank, lo, hi), _PP_LOAD_LABEL)
     return model
 

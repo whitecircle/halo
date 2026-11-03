@@ -134,8 +134,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 ## Limits
 
 - No CP: the linear-attention layers can't split the sequence across ranks.
-- Pipeline parallelism takes the text tower only (`text_only_model: true`), without packing and with
-  `moe_balancing: none`
+- Pipeline parallelism takes the text tower only (`text_only_model: true`), with `moe_balancing: none`;
+  packed rows keep their documents apart, one packed row per microbatch
   ([Qwen3.5 / Qwen3.6 model notes](../../agent-docs/models/qwen3_5.md) ↗).
 - TP stops at 2 because the checkpoints have two KV heads. TP shards only the 10 full-attention layers,
   so per-GPU memory drops much less than `1/tp_size`.

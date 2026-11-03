@@ -109,8 +109,9 @@ The scope Halo 1.2.0 is validated on:
   SGLang 0.5.22), the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`) and
   the throughput band (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)).
 - **Hopper:** the image build, the CPU tier inside it and an FA3 import check; no GPU test runs on Hopper.
-- **Multi-node:** a two-node simulation on one host; no 1.2.0 row ran on two machines
-  ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
+- **Multi-node:** two B300 nodes over EFA for the two PP recipes (training; the Qwen3-8B one also a
+  per-node save, resume, merge and load) and cross-node `ep16`; the rest is a two-node simulation on one
+  host ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
 - **Upgrades:** checkpoints written by 1.1.0 resume with the optimizer restored exactly, and export and
   merge: FSDP2 full fine-tuning, LoRA adapters, EP gathered saves, EP sharded saves after
   `merge_ep_shards.py`, and async GRPO whose prefetched rounds hold plain prompts and answers.

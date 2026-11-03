@@ -38,8 +38,9 @@ parallelism flag.
 - **`0`: per-node local disk** (RunPod pods, ephemeral NVMe). Each node saves its
   own copy. Resume needs no copying as long as every node keeps its
   `--node_rank`, since optimizer shards stay on the node that wrote them. Resume
-  on per-node storage is validated on one host simulating two nodes, not on two
-  machines ([Validation](supported-matrix.md#validation)).
+  on per-node storage is validated on two machines for the Qwen3-8B
+  pipeline-parallel recipe, and on one host simulating two nodes for the rest
+  ([Validation](supported-matrix.md#validation)).
 
 A multi-node run checks the declarations against `output_dir` and the HF caches
 at startup and refuses one that contradicts the mount. One input declaration

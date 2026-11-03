@@ -7,6 +7,7 @@ import itertools
 import logging
 import os
 import threading
+from collections.abc import Callable
 
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.model_loading.checkpoint_keys import build_key_plan, resolve_model_conversions
@@ -55,24 +56,34 @@ def _prefetch_files(paths: list[str]) -> None:
             os.close(descriptor)
 
 
-def attach_external_tables(model, weights_dir: str | None = None) -> None:
+def attach_external_tables(
+    model, weights_dir: str | None = None, checkpoint_name: Callable[[str], str] | None = None
+) -> None:
     """Attach every unattached external table of ``model`` from its checkpoint (``weights_dir`` when the loader names
     it, :func:`_weights_directory`), prefetch the table files once per node, and record the build stamp on
     ``model.config`` as run-scoped so no export of it carries the stamp.
+
+    ``checkpoint_name`` maps a module path in ``model`` to its name in the checkpoint's key space (a pipeline stage's
+    re-based layer index to the unsplit model's), so a table is planned against the keys of its own layer.
 
     Raises:
         FileNotFoundError: the config names no checkpoint, or the checkpoint holds no keys for a table.
         ValueError: a table's keys, shapes or dtypes do not match the module built for it.
     """
+    name_of = checkpoint_name or str
     tables = {
-        f"{name}.{table.stock_key}": table for name, table in named_external_tables(model) if not table.is_attached
+        f"{name_of(name)}.{table.stock_key}": table
+        for name, table in named_external_tables(model)
+        if not table.is_attached
     }
     if not tables:
         return
     directory = _weights_directory(model, weights_dir)
     weight_map = resolve_checkpoint_weights(directory).weight_map
     live_names = itertools.chain(
-        (name for name, _ in model.named_parameters()), (name for name, _ in persistent_buffers(model)), tables
+        (name_of(name) for name, _ in model.named_parameters()),
+        (name_of(name) for name, _ in persistent_buffers(model)),
+        tables,
     )
     plan = build_key_plan(
         weight_map,

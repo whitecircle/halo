@@ -80,20 +80,19 @@ def test_factory_emits_segment_kwargs_for_gdn_families(monkeypatch):
     assert batch["cu_seq_lens_q"].tolist() == [*starts, positions.numel()]
 
 
-def test_pp_keeps_rows_is_refused(monkeypatch):
-    """PP keeps the packed rows, and a stage's forward passes neither seq_idx nor cu_seq_lens, so the
-    conv and the delta rule would cross documents while attention isolates: refused, not silently built."""
-    _backends(monkeypatch)  # else the wheel refusal fires first and this would pass for it
+def test_pp_keeps_rows_and_leaves_the_markers_to_its_stages(monkeypatch):
+    """PP keeps the packed rows, whose stages rebuild seq_idx and the varlen set per microbatch: the collator
+    builds the row's seq_idx and no varlen set, which exists only on a flattened row."""
+    _backends(monkeypatch)  # else the wheel refusal fires first
     config = Qwen3NextConfig(num_hidden_layers=1)
     config._attn_implementation = "flash_attention_2"
-    with pytest.raises(ValueError, match="packing under pipeline parallelism is refused .*seq_idx and cu_seq_lens"):
-        select_data_collator(
-            make_tokenizer(),
-            train_on_completions_only=False,
-            packing=True,
-            model_config=config,
-            keeps_packed_rows=True,
-        )
+    collator = select_data_collator(
+        make_tokenizer(), train_on_completions_only=False, packing=True, model_config=config, keeps_packed_rows=True
+    )
+    collator.flatten_to_single_row = False  # what the PP trainer sets on the collator it keeps
+    batch = collator.torch_call([{"input_ids": [5, 6, 7, 8, 9], "attention_mask": [1] * 5, "seq_lengths": [2, 3]}])
+    assert batch["seq_idx"].tolist() == [[0, 0, 1, 1, 1]]
+    assert "cu_seq_lens_q" not in batch
 
 
 def test_other_families_get_no_segment_kwargs():

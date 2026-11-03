@@ -2,7 +2,7 @@
 
 A separate class hierarchy from Qwen3 (`Qwen3_5MoeForCausalLM`, `Qwen3_5MoeSparseMoeBlock`, `Qwen3_5MoeAttention`). Three traits drive parallelism: a sigmoid-gated shared expert, a double-width `q_proj` fusing query with a sigmoid gate, and a hybrid `layer_types` scheme interleaving full attention with `Qwen3_5MoeGatedDeltaNet` linear-attention layers.
 
-Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, no packing (a stage's forward passes the GatedDeltaNet layers no segment marker), and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
+Per-axis support (MoE and dense rows): [Compatibility matrix](README.md#compatibility-matrix). CP is blocked by the linear-attention layers ([why](#why-cp-is-blocked-on-real-checkpoints)). Pipeline parallelism takes the text towers only: `text_only_model: true` for the multimodal checkpoints, boundaries on the period-4 `layer_types`, packed rows on the GatedDeltaNet segment markers each stage rebuilds, and `moe_balancing: none` (no exportable bias slot, and the split severs `aux_loss`) ([Pipeline Parallelism](../parallelism/pipeline-parallelism.md#model-support)).
 
 ## Architecture
 

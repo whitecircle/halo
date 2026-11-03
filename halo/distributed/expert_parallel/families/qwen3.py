@@ -19,7 +19,7 @@ class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("Qwen3MoeSparseMoeBlock",)
     FAMILY = QWEN3
 
-    # The only balancing under pipeline parallelism, which rejects aux_loss.
+    # The gate has no slot to export a bias, so this admits only the trainer-only bias_update_transient.
     SUPPORTS_BIAS_BALANCING = True
 
     # ``Qwen3MoeTopKRouter`` renormalizes with no floor.

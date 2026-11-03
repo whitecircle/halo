@@ -10,12 +10,13 @@ anywhere else.
 
 Held here: the set equals transformers' derivation on every row a pipeline batch holds (a row its documents fill, a
 chunked pad tail, a per-pad zero tail, a one-document row); building it reads the device row once; the stage hands
-it to the backbone only on a flash run's unmasked one-row microbatch with ``position_ids``, of a family whose own
-mixers do not read it; across the pipeline-registered tiny roster the stages read it in place of the derivation with
-identical kernel arguments and bit-identical outputs (:mod:`tests.common.pp_packed_flash_varlen`, one fresh
-interpreter per family); and the real schedule over gloo (pp2 x dp2, FSDP2 per stage) reproduces bit for bit the
-step loss, gradients, eval loss and forward-only output it gives without the set, under both schedules, activation
-checkpointing and the fused head loss, with no host read left inside attention.
+it to the backbone only on a flash run's unmasked one-row microbatch with ``position_ids``, and a GatedDeltaNet
+family's stage its mixers' own markers on such a microbatch on any backend; across the pipeline-registered tiny
+roster the stages read it in place of the derivation with identical kernel arguments and bit-identical outputs
+(:mod:`tests.common.pp_packed_flash_varlen`, one fresh interpreter per family); and the real schedule over gloo
+(pp2 x dp2, FSDP2 per stage) reproduces bit for bit the step loss, gradients, eval loss and forward-only output it
+gives without the set, under both schedules, activation checkpointing and the fused head loss, with no host read left
+inside attention.
 
     python tests/cpu/parallelism/test_pp_stage_flash_varlen.py
 """
@@ -30,7 +31,7 @@ from torch.distributed.device_mesh import init_device_mesh
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.pipeline_parallel.groups import build_pipeline_group
 from halo.distributed.pipeline_parallel.stage import build_pipeline_stage
-from halo.models.segment_markers import packed_row_varlen_kwargs
+from halo.models.segment_markers import packed_row_varlen_kwargs, segment_marker_kwargs, segment_markers_for
 from tests.common.gloo import run_gloo_ranks
 from tests.common.packed_flash_varlen import (
     FINDINGS_MARKER,
@@ -192,10 +193,26 @@ def test_a_one_document_microbatch_keeps_the_dense_kernel():
     assert reads == ["cpu"]
 
 
-def test_a_gated_deltanet_stage_keeps_its_own_markers():
-    """Its chunked delta rule reads ``cu_seq_lens_q`` too, so a handed set would change what its mixers compute."""
-    row, reads = _device_row(_rows("ramp_tail")[0])
-    assert not VARLEN_KEYS & _handed(_stage("qwen3_5"), row).keys()
+def test_a_gated_deltanet_stage_hands_its_mixers_their_markers():
+    """Its conv reads ``seq_idx`` and its chunked delta rule the varlen set, which the packing collator emits for a
+    flattened row: the stage rebuilds both from the same single host read, as the collator builds them."""
+    position_ids = _rows("ramp_tail")[0]
+    stage = _stage("qwen3_5")
+    row, reads = _device_row(position_ids)
+    handed = _handed(stage, row)
+    expected = segment_marker_kwargs(position_ids, segment_markers_for(stage.config))
+    assert expected.keys() == {"seq_idx", *VARLEN_KEYS}, sorted(expected)
+    for key, value in expected.items():
+        assert torch.equal(handed[key], value) if torch.is_tensor(value) else handed[key] == value, key
+    assert reads == ["cpu"], reads
+
+
+def test_a_masked_gated_deltanet_microbatch_is_left_to_its_mask():
+    """Padded rows hold one document each and carry their mask: nothing is handed, as before the seam."""
+    position_ids = _rows("ramp_tail")[0]
+    row, reads = _device_row(position_ids)
+    handed = _handed(_stage("qwen3_5"), row, attention_mask=torch.ones_like(position_ids))
+    assert not ({"seq_idx", *VARLEN_KEYS} & handed.keys())
     assert reads == []
 
 

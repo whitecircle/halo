@@ -123,6 +123,7 @@ def fake_runner(schedule: FakeSchedule | None = None) -> PipelineRunner:
     runner.schedule = schedule or FakeSchedule()
     runner.stage = runner.schedule._stage
     runner.stage_module = None
+    runner.token_ids_kwarg = None
     runner.is_first = True
     runner.is_last = True
     runner.loss = TokenLoss()

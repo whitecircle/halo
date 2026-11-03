@@ -74,9 +74,11 @@ number of NVLink domains, so only point-to-point activations cross nodes and a
 run needs at least two nodes. It composes with EP or pure ETP. Which methods
 and families it covers is in the [Supported matrix](supported-matrix.md); any
 other model is refused by name before a weight loads. Every batch pads to
-`max_length`, so use `packing` (except on Qwen3.5/3.6 and Inkling, whose packing
-PP refuses, and GLM-5 Next, which refuses packing everywhere). On per-node
-storage, merge the nodes' checkpoint directories with
+`max_length`, so use `packing` (except on Inkling, whose packing PP refuses,
+and GLM-5 Next and DeepSeek-V4, which refuse flat packing everywhere). Turn
+gradient checkpointing off where memory allows: a stage holds only a few
+microbatches' activations, and the shipped recipes run 18–22% faster without
+it. On per-node storage, merge the nodes' checkpoint directories with
 `halo run merge-pp-stages` before loading the result
 ([Clusters](clusters.md#pipeline-parallelism-across-nodes),
 [Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md) ↗).

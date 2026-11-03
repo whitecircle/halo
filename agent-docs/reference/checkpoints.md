@@ -162,6 +162,11 @@ in flight, and the index waits for every part. Its parts go into table-only file
 under `<module path>.<part key>`, the keys transformers concatenates on load. A save holding a table always gets
 an index, and its streamed part is never named `model.safetensors`, which `from_pretrained` reads over an index.
 
+A pipeline-parallel save writes each stage's tables from that stage's writer, under the unsplit model's keys
+(`checkpoint_name=global_parameter_name`) and in files under the stage's part prefix
+(`model-ppSSSSS-of-PPPPP-tableNN-*`), so no two stages' table files share a name; the stage-aware loader attaches a
+stage's table by the same unsplit keys, so a stage starting past layer 0 reads its own layer's table.
+
 The first save of a process writes the table from the views it was attached as; each later save hard-links the
 last save's table files (`link_or_copy_file`: a copy across filesystems), and a table attached from a
 checkpoint's table-only files links them on its first save. A model the gathered writer would not otherwise save

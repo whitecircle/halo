@@ -192,6 +192,9 @@ class PipelineRunner:
         self.rows_per_example = rows_per_example
         self.is_first = config.is_first_pp_stage
         self.is_last = config.is_last_pp_stage
+        # The backbone kwarg this stage re-reads the microbatch's token ids under, ``None`` where only its
+        # positional activation carries them.
+        self.token_ids_kwarg = stage_module.token_ids_kwarg
         if isinstance(loss, FusedHeadLoss) and self.is_last:
             stage_module.fused_loss_fn = fused_causal_lm_token_loss
 
@@ -366,11 +369,15 @@ class PipelineRunner:
     ) -> tuple[tuple, dict]:
         """One batch's ``(args, kwargs)`` for the schedule.
 
-        Only stage 0 consumes ``input_ids``; the others receive activations over P2P. The side inputs
-        reach every stage as kwargs, which torch microbatches like the positional args, and so do the
+        Only stage 0 consumes ``input_ids`` as its activation; the others receive activations over P2P, and
+        take the ids as a ``token_ids`` kwarg where their family's layers re-read them
+        (:attr:`~halo.distributed.pipeline_parallel.stage.PipelineStageModule.token_ids_kwarg`). The side
+        inputs reach every stage as kwargs, which torch microbatches like the positional args, and so do the
         labels a fused last stage scores inside its forward.
         """
         kwargs = {}
+        if self.token_ids_kwarg is not None:
+            kwargs["token_ids"] = input_ids
         if attention_mask is not None:
             kwargs["attention_mask"] = attention_mask
         if position_ids is not None:

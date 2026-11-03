@@ -5,7 +5,7 @@ a one-document row for, in every layer."""
 
 import logging
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -121,24 +121,19 @@ def reject_unmarked_linear_attention_rows(
 
 
 def reject_pipeline_packed_rows(model_config) -> None:
-    """Refuse packed rows under pipeline parallelism on a model whose conv / linear-attention mixers keep a row's
-    documents apart only through segment markers (:func:`segment_markers_for`) or receive no boundary at all
-    (:func:`find_unmarked_sequence_mixer`): a stage's forward passes those mixers no segment marker."""
-    markers = segment_markers_for(model_config)
-    read = [marker.name for marker in fields(markers) if getattr(markers, marker.name)]
-    if read:
-        mixers = (
-            f"its conv / linear-attention layers keep documents apart only through the {' and '.join(read)} segment "
-            f"markers, which never reach them through a pipeline stage's forward"
-        )
-    elif (unmarked := find_unmarked_sequence_mixer(model_config)) is not None:
-        mixers = f"its {unmarked} read no document boundary on any path"
-    else:
+    """Refuse packed rows under pipeline parallelism on a model whose sequence mixers read no document boundary
+    (:func:`find_unmarked_sequence_mixer`). The segment markers a family's mixers read
+    (:func:`segment_markers_for`) are rebuilt on every stage from its microbatch's ``position_ids``
+    (:func:`packed_row_segment_kwargs`), so their kernels must be the segment-aware ones that read them."""
+    require_segment_aware_kernels(model_config, "packing")
+    unmarked = find_unmarked_sequence_mixer(model_config)
+    if unmarked is None:
         return
     raise ValueError(
         f"packing under pipeline parallelism is refused for model_type={getattr(model_config, 'model_type', None)!r}: "
-        f"{mixers}, so their state carries from each document of a packed row into the next. Disable packing (padded "
-        f"rows hold one document each), or train without pipeline parallelism."
+        f"its {unmarked} read no document boundary on any path, so their state carries from each document of a packed "
+        f"row into the next. Disable packing (padded rows hold one document each), or train without pipeline "
+        f"parallelism."
     )
 
 
@@ -259,14 +254,21 @@ def single_row_varlen_kwargs(batch: Mapping[str, Any]) -> dict[str, torch.Tensor
     return segment_marker_kwargs(torch.arange(input_ids.shape[1]).unsqueeze(0), SegmentMarkers(cu_seq_lens=True))
 
 
-def packed_row_varlen_kwargs(position_ids: torch.Tensor) -> dict[str, torch.Tensor | int]:
-    """The varlen set flash attention would derive from one ``[1, L]`` row's ``position_ids`` in every layer,
-    built from a single host copy of the row: ``cu_seq_lens_q/k`` on the row's device and host-int
-    ``max_length_q/k``. Empty for a row whose positions do not restart, which transformers runs on its dense
-    kernel."""
+def packed_row_segment_kwargs(position_ids: torch.Tensor, markers: SegmentMarkers) -> dict[str, torch.Tensor | int]:
+    """The forward kwargs ``markers`` selects (:func:`segment_marker_kwargs`) for one ``[1, L]`` row, built from a
+    single host copy of its ``position_ids``: tensors on the row's device, ``max_length_q/k`` as host ints. Empty for
+    a row whose positions do not restart, which is one document."""
     host = position_ids.cpu()
     if not positions_restart(host):
         return {}
-    kwargs = segment_marker_kwargs(host, SegmentMarkers(cu_seq_lens=True))
-    cu_seq_lens = kwargs["cu_seq_lens_q"].to(position_ids.device, non_blocking=True)
-    return {**kwargs, "cu_seq_lens_q": cu_seq_lens, "cu_seq_lens_k": cu_seq_lens}
+    kwargs = segment_marker_kwargs(host, markers)
+    # One copy per tensor: the q and k entries of the varlen set are one tensor.
+    tensors = {id(value): value for value in kwargs.values() if isinstance(value, torch.Tensor)}
+    on_device = {key: tensor.to(position_ids.device, non_blocking=True) for key, tensor in tensors.items()}
+    return {key: on_device.get(id(value), value) for key, value in kwargs.items()}
+
+
+def packed_row_varlen_kwargs(position_ids: torch.Tensor) -> dict[str, torch.Tensor | int]:
+    """The varlen set flash attention would derive from one ``[1, L]`` row's ``position_ids`` in every layer
+    (:func:`packed_row_segment_kwargs`); empty for a row transformers runs on its dense kernel."""
+    return packed_row_segment_kwargs(position_ids, SegmentMarkers(cu_seq_lens=True))

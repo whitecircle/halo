@@ -16,7 +16,7 @@ The registries behind the matrix: the family specs (`MOE_FAMILY_SPECS`, `halo/mo
 | [Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense)](qwen3_5.md) | `qwen3_5_text` | — | — | No | Yes | Yes ⁴ | `examples/*/qwen3_5/*9b*` |
 | [Qwen3.5 / Qwen3.6 MoE](qwen3_5.md) | `qwen3_5_moe` | Yes | Yes | No | Yes ³ | Yes ⁴ | `examples/sft/qwen3_5/*-a*b-*` |
 | [Qwen3-Next](qwen3-next.md) | `qwen3_next` | Yes ¹¹ | Yes ¹¹ | No | No | No | `examples/sft/qwen3_next/*` |
-| [Qwen3.8-Flash-Next](qwen4_exp.md) | `qwen4_exp` | Yes ¹² | Yes ¹² | No | No | No | `examples/sft/qwen4_exp/*` |
+| [Qwen3.8-Flash-Next](qwen4_exp.md) | `qwen4_exp` | Yes ¹² | Yes ¹² | No | No | Yes ¹⁰ ¹³ ¹⁴ | `examples/sft/qwen4_exp/*` |
 | [GPT-OSS](gpt-oss.md) | `gpt_oss` | Yes | Yes | Yes | Yes | Yes | `examples/sft/gptoss/*` |
 | [GLM-4 MoE Lite](glm4.md) | `glm4_moe_lite` | Yes | Yes | Yes | Yes ⁵ | Yes ¹³ | `examples/sft/glm4/*` |
 | [Laguna S / XS 2.1](laguna.md) | `laguna` | Yes | Yes ⁶ | No | No | Yes ¹³ | `examples/sft/laguna/*` |
@@ -40,7 +40,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ³ `tensor_parallel_size` must divide the KV heads: at most 2 on 35B-A3B.
 
-⁴ Text towers (`text_only_model: true` for the multimodal checkpoints), no packing.
+⁴ Text towers (`text_only_model: true` for the multimodal checkpoints); packed rows run on the GatedDeltaNet segment markers each stage rebuilds. The MoE tower has no bias slot and the split severs `aux_loss`, so it trains with `moe_balancing: none`.
 
 ⁵ Only the MLA expansion projections shard.
 
@@ -59,6 +59,8 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 ¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains, exactly resumes and exports the release cut to four layers under EP8, and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
 
 ¹³ Tiny-model GPU tests only: no released checkpoint is trained under PP here. Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
+
+¹⁴ Full fine-tuning with `moe_balancing: none`: PP refuses adapters, the split severs `aux_loss`, and the router has no bias slot ([Qwen3.8-Flash-Next](qwen4_exp.md#pipeline-parallelism)).
 
 ## MoE knobs
 

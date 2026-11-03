@@ -68,7 +68,7 @@ Counted is the router's **own** selection, not `topk(router_logits)`: a DeepSeek
 It emits nothing in three cases:
 
 - Under either bias-update mode — `BalancingBiasCallback` emits the same keys from its load counter.
-- Under pipeline parallelism, where it is not wired: the stage forwards return bare tensors without `router_logits`, so `bias_update` is the route to load metrics there.
+- Under pipeline parallelism, where it is not wired: the stage forwards return bare tensors without `router_logits`, so `bias_update`, on a family whose EP layers export the bias, is the route to load metrics there.
 - Where `output_router_logits` is off, stamped forced-off by the balancing strategy or just unset. The flag costs a `[B*S, num_experts]` tensor per MoE layer per forward **and** adds the aux loss, so metrics never enable it; opt in via `model_init_kwargs`.
 
 Two live paths bypass the hooks even when wired: an EP layer routing without the HF router module (`SEVERS_AUX_LOSS` — Bailing/Ling, Inkling, DeepSeek-V4), and a GRPO trainer taking log-probs from the backbone alone. Both warn once after the first step; use `bias_update` there.

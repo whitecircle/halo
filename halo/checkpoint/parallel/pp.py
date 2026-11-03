@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 
 from halo.checkpoint.config_export import save_model_config
+from halo.checkpoint.external_tables import write_external_tables
 from halo.checkpoint.format import PP_WRAPPER_PART_PREFIX, pp_stage_part_prefix
 from halo.checkpoint.hub_layout import ModuleLayoutView, revert_conversions
 from halo.checkpoint.parallel.context import CheckpointContext, CheckpointLoadContext
@@ -84,7 +85,8 @@ def _write_hub_group(
 def _write_stage_tensors(
     ctx: CheckpointContext, output_dir: str, guard: DeferredRankFailure, *, is_writer: bool
 ) -> tuple[dict[str, str], int]:
-    """COLLECTIVE: stream this stage's tensors into its shard; ``(weight-map fragment, bytes written)``.
+    """COLLECTIVE: stream this stage's tensors, then its external tables, into its shard; ``(weight-map fragment,
+    bytes written)``.
 
     Every stage rank enters the DTensor and EP gathers; only the writer retains and writes. Closing
     writes the last part, which must precede the index exchange: that exchange is the sync
@@ -114,6 +116,17 @@ def _write_stage_tensors(
         hub = ((stage.global_parameter_name(key), cast(key, tensor)) for key, tensor in ep_weights.items())
         guard.run(partial(_write_hub_group, writer, stage, hub))
         del ep_weights
+    # The stage's external tables under their unsplit names, in files its own part prefix keeps apart from another
+    # stage's; the writer indexes them with its parts.
+    guard.run(
+        partial(
+            write_external_tables,
+            stage,
+            writer,
+            checkpoint_name=stage.global_parameter_name,
+            file_prefix=writer.filename_prefix,
+        )
+    )
     return guard.run(writer.close) or ({}, 0)
 
 

@@ -28,6 +28,7 @@ PP_EQUIVALENCE_SUITES = {
     "parallelism/pp/test_pp_ep1_gmm_vs_unsplit.py": ("gpt_oss", 1),
     "parallelism/pp/test_pp_ep_vs_unsplit.py": ("gpt_oss", 2),
     "parallelism/pp/test_pp_family_vs_reference.py": (None, 2),
+    "parallelism/pp/test_pp_qwen4_exp_vs_reference.py": ("qwen4_exp_text", 2),
 }
 ROSTER = {**TINY_DENSE_FAMILIES, **TINY_MOE_FAMILIES}
 VALIDATED = frozenset(name for spec in PP_FAMILY_SPECS if spec.validated for name in spec.hf_module_names)

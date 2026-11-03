@@ -1057,6 +1057,28 @@ MANIFEST: dict[str, TestSpec] = {
     "parallelism/pp/test_pp_inkling_text_only.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "pp", "ep", "moe", "inkling"), timeout=900
     ),
+    # Qwen3.8-Flash-Next through the real trainer against its unsplit ep1 twin, a PLE layer on each stage: pp2 x ep2,
+    # pp2 x etp2 (fp32), packed rows on the markers every stage rebuilds (pp2 x etp2, fp32; Qwen3.5-MoE's packed rows
+    # too), and activation checkpointing; then its checkpoint's tables, export and resume. Markers are the union
+    # across the matrix.
+    "parallelism/pp/test_pp_qwen4_exp_vs_reference.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "pp", "ep", "etp", "moe", "qwen3"),
+        timeout=1500,
+        args_matrix=(
+            "--mode ep2",
+            "--mode etp2",
+            "--mode packed",
+            "--mode gc",
+            "--family qwen3_5_moe_text --mode packed",
+        ),
+    ),
+    "parallelism/pp/test_pp_qwen4_exp_resume.py": TestSpec(
+        nproc=4,
+        markers=("gpu", "full", "4gpu", "pp", "ep", "etp", "moe", "qwen3"),
+        timeout=1500,
+        args_matrix=("--mode ep2", "--mode etp2"),
+    ),
     # Hyper-connection boundary families: the [B, S, hc_mult, D] stream crosses the real P2P
     # schedule (pp2 x dp2) and both must reproduce single-GPU gradients. Markers are the union across
     # the matrix.

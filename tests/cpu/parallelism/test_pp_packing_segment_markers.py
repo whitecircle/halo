@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """Packing under pipeline parallelism on models whose conv / linear-attention mixers need segment markers.
 
-A pipeline stage's forward passes none of the ``seq_idx`` / ``cu_seq_lens`` markers GatedDeltaNet and ShortConv
-layers read, and the linear-attention layers no marker reaches (KDA, Lightning Attention-2) have no boundary on
-any path. Their state carries from
-each document of a packed row into the next, and the loss shows nothing. The PP trainer's check of its final
-collator and the collator factory (PP keeps the packed rows) refuse such a row; padded rows hold one document
-each and stay allowed.
+Every pipeline stage rebuilds the ``seq_idx`` / ``cu_seq_lens`` markers GatedDeltaNet and ShortConv layers read from
+its microbatch's ``position_ids``, so their packed rows are admitted where the segment-aware kernels that read the
+markers are present. The mixers no marker reaches (KDA, Lightning Attention-2, Inkling's short convolutions) have no
+boundary on any path: their state carries from each document of a packed row into the next, and the loss shows
+nothing. The PP trainer's check of its final collator and the collator factory (PP keeps the packed rows) refuse such
+a row; padded rows hold one document each and stay allowed.
 
 Run: python tests/cpu/parallelism/test_pp_packing_segment_markers.py
 """
@@ -39,6 +39,7 @@ from tests.common.models import (
     TINY_MISTRAL4_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
+    TINY_QWEN4_EXP_CONFIG,
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_QWEN35_VISION_CONFIG,
@@ -66,8 +67,9 @@ _PP_ROSTER = {
     ),
     # Its compressed-KV layers are refused by reject_compressed_kv_rows, not by this rule.
     "DeepseekV4Model": (lambda: CONFIG_MAPPING["deepseek_v4"](**TINY_DSV4_CONFIG), False),
-    "Qwen3_5TextModel": (lambda: CONFIG_MAPPING["qwen3_5_text"](**TINY_QWEN35_CONFIG), True),
-    "Qwen3_5MoeTextModel": (lambda: CONFIG_MAPPING["qwen3_5_moe_text"](**TINY_QWEN35_MOE_CONFIG), True),
+    "Qwen3_5TextModel": (lambda: CONFIG_MAPPING["qwen3_5_text"](**TINY_QWEN35_CONFIG), False),
+    "Qwen3_5MoeTextModel": (lambda: CONFIG_MAPPING["qwen3_5_moe_text"](**TINY_QWEN35_MOE_CONFIG), False),
+    "Qwen4ExpTextModel": (lambda: CONFIG_MAPPING["qwen4_exp_text"](**TINY_QWEN4_EXP_CONFIG), False),
     "Glm5NextTextModel": (
         lambda: Glm5NextConfig(text_config=dict(TINY_GLM5_CONFIG), vision_config=dict(TINY_GLM5_VISION_CONFIG)),
         True,
@@ -81,9 +83,9 @@ _DETECTED = {
         lambda: Qwen3_5MoeConfig(
             text_config=dict(TINY_QWEN35_MOE_CONFIG), vision_config=dict(TINY_QWEN35_VISION_CONFIG)
         ),
-        True,
+        False,
     ),
-    "lfm2_moe_short_conv": (lambda: CONFIG_MAPPING["lfm2_moe"](**TINY_LFM2_MOE_CONFIG), True),
+    "lfm2_moe_short_conv": (lambda: CONFIG_MAPPING["lfm2_moe"](**TINY_LFM2_MOE_CONFIG), False),
     "ring_lightning_attention": (lambda: remote_config(BAILING_MOE_RING_MINI), True),
     "unknown_family_linear_attention": (unknown_hybrid_config, True),
     "mistral4_softmax_only": (lambda: CONFIG_MAPPING["mistral4"](**TINY_MISTRAL4_CONFIG), False),
@@ -100,8 +102,14 @@ def test_the_roster_is_every_registered_pp_backbone():
     assert set(_PP_ROSTER) == {name for name, spec in PP_SPEC_MAP.items() if spec.validated}
 
 
+@pytest.fixture
+def segment_aware_kernels(monkeypatch):
+    """GatedDeltaNet's segment-aware kernels need CUDA; taken as present, as on the images."""
+    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
+
+
 @pytest.mark.parametrize("name", sorted(_CASES))
-def test_a_packed_row_is_refused_where_a_mixer_needs_markers(name):
+def test_a_packed_row_is_refused_where_no_marker_reaches_a_mixer(segment_aware_kernels, name):
     build, refused = _CASES[name]
     config = build()
     with pytest.raises(ValueError, match=_REFUSAL) if refused else nullcontext():
@@ -119,11 +127,9 @@ def test_a_packed_row_is_refused_where_a_mixer_needs_markers(name):
         ("Qwen3Model", "flash_attention_4"),
     ],
 )
-def test_the_collator_factory_applies_the_same_rule_under_pp(monkeypatch, name, attn_implementation):
+def test_the_collator_factory_applies_the_same_rule_under_pp(segment_aware_kernels, name, attn_implementation):
     """PP keeps the packed rows, so the factory refuses the same rows; the run's opt-in admits crossing linear
-    attention off PP, not the markers a stage drops."""
-    # GatedDeltaNet's segment-aware kernels need CUDA; taken as present, as on the images.
-    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", ())
+    attention off PP, not a mixer no marker reaches."""
     build, refused = _CASES[name]
     config = build()
     config._attn_implementation = attn_implementation
@@ -159,17 +165,26 @@ def _pp_trainer(collator, config) -> SimpleNamespace:
     )
 
 
-@pytest.mark.parametrize("name", ["Qwen3_5TextModel", "Glm5NextTextModel"])
-def test_the_pp_seam_checks_the_collator_against_the_stage_config(name):
-    trainer = _pp_trainer(_packing_collator(), _PP_ROSTER[name][0]())
+def test_the_pp_seam_checks_the_collator_against_the_stage_config():
+    trainer = _pp_trainer(_packing_collator(), _PP_ROSTER["Glm5NextTextModel"][0]())
     with pytest.raises(ValueError, match=_REFUSAL):
         PipelineTrainerMixin._pp_wrap_collator(trainer)
 
 
-def test_the_pp_seam_wraps_a_packing_collator_on_a_softmax_model():
+def test_a_marker_reading_family_needs_the_kernels_that_read_them(monkeypatch):
+    """The markers a stage rebuilds reach GatedDeltaNet only through its segment-aware kernels; the torch fallbacks
+    drop them, so a packed row is refused where those kernels are absent."""
+    monkeypatch.setattr(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", (("fla>=0.2.2", lambda: False),))
+    trainer = _pp_trainer(_packing_collator(), _PP_ROSTER["Qwen3_5MoeTextModel"][0]())
+    with pytest.raises(ValueError, match="unavailable"):
+        PipelineTrainerMixin._pp_wrap_collator(trainer)
+
+
+@pytest.mark.parametrize("name", ["Qwen3Model", "Qwen3_5TextModel", "Qwen4ExpTextModel"])
+def test_the_pp_seam_wraps_a_packing_collator_where_every_mixer_is_reached(segment_aware_kernels, name):
     """Anti-vacuity for the refusal above: the same seam wraps the collator where nothing crosses."""
     collator = _packing_collator()
-    trainer = _pp_trainer(collator, _PP_ROSTER["Qwen3Model"][0]())
+    trainer = _pp_trainer(collator, _PP_ROSTER[name][0]())
     PipelineTrainerMixin._pp_wrap_collator(trainer)
     assert isinstance(trainer.data_collator, FixedShapeCollator) and trainer.data_collator.inner is collator
     assert collator.flatten_to_single_row is False

@@ -448,7 +448,7 @@ Deep pipelines want many microbatches; the roofline wants few and fat.
 
 **Memory.** A stage holds `1/p` of the parameters, and torch's schedule pins them unsharded across the backward and defers FSDP's reduce-scatter to the optimizer step. Per rank that is `2P/p` bytes of resident weights and `2P/p` of accumulating gradient, while optimizer state stays sharded at `4P/world_size` (§8); `fp32_grad_reduce` doubles the gradient term to `4P/p` ([BF16 Optimizer](../optimization/bf16-optimizer.md#master-weight-and-grad-reduce-options)). PP divides the one term FSDP2 leaves whole.
 
-Activations are the sharper win. A **1F1B** (one-forward-one-backward) stage holds at most `p` microbatches over `L/p` layers at `B/m` rows each — `1/m` of what the same rank stores without PP. (GPipe's all-forwards-first schedule holds `B·L/p`, which is why 1F1B is the default.) PP hands a dense stage the headroom GC exists to buy, so a dense PP run wants GC off, and nothing disables it automatically.
+Activations are the sharper win. A **1F1B** (one-forward-one-backward) stage holds at most `p` microbatches over `L/p` layers at `B/m` rows each — `1/m` of what the same rank stores without PP. (GPipe's all-forwards-first schedule holds `B·L/p`, which is why 1F1B is the default.) PP hands a stage the headroom GC exists to buy, so a PP run wants GC off where memory allows, dense or with EP ([measured](../parallelism/pipeline-parallelism.md#measured-throughput)), and nothing disables it automatically.
 
 **Composition.** The expert axes are the only other sharding PP admits: EP, whose dispatch stays inside a stage, or pure ETP (`ep_size=1`), never both.
 

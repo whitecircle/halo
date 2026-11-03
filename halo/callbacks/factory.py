@@ -69,7 +69,8 @@ def build_run_callbacks(
             logger.info(
                 "MoEMetricsCallback disabled under pipeline parallelism (pp_size="
                 f"{parallelism_config.pp_size}): stage forwards return bare tensors without "
-                "router_logits. Use moe_balancing=bias_update for moe/* load metrics under PP."
+                "router_logits. Under PP, moe/* load metrics come from moe_balancing=bias_update, on a family "
+                "whose EP layers export the bias."
             )
         else:
             callbacks.append(
