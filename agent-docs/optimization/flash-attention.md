@@ -238,6 +238,8 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | Gemma4 | → `sdpa_flex_sliding` on CUDA: FlexAttention on the sliding layers, matmul attention on the head_dim-512 global layers, past a score-memory budget mem-efficient attention per packed document ([Gemma 4](../models/gemma4.md)) |
 | Ling 2.0 · Ring | FA4 on Blackwell, FA3 on Hopper (`patch_remote_llama_flash_template`) |
 | Ling 3.0 | no fallback: the flash label fails the model build — set `attn_implementation: sdpa` |
+| Laguna | through remote code → SDPA with a warning, and a pinned flash label raises: its flash call never receives the sliding window (`remote_code_flash_loses_window`). In-library classes: FA4 on Blackwell, FA3 on Hopper |
+| LFM2-VL | → SDPA (its SigLIP2 tower declares no flash support, and `declares_flash_attention` reads each sub-model's class) |
 | DeepSeek-V4 | → eager |
 | GLM-5 Next · Inkling | → SDPA (upstream declares no flash support) |
 | Step-3.7 Flash | → SDPA (upstream declares no flash support), built as `sdpa_flex_sliding` on CUDA: FlexAttention on the sliding layers and on the full layers' packed or padded rows |

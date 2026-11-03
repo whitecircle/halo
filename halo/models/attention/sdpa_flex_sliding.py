@@ -23,7 +23,6 @@ from halo.models.attention.selection import (
     has_attention_logit_softcap,
     has_head_dim_beyond_flash,
 )
-from halo.models.model_classes import is_remote_code_class
 
 logger = logging.getLogger(__name__)
 
@@ -501,7 +500,6 @@ def resolve_flex_sliding_attn_implementation(model_config, attn_implementation: 
     model_class = declared_model_class(model_config)
     if (
         model_class is None
-        or is_remote_code_class(model_class)
         or not model_class.is_backend_compatible()
         or not (has_sliding_window_layers(model_config) or has_head_dim_beyond_flash(model_config))
     ):

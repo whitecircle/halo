@@ -11,7 +11,9 @@ import torch
 import torch.nn as nn
 from safetensors.torch import load_file, save_file
 from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForSequenceClassification, Qwen3ForCausalLM
+from transformers.utils import CONFIG_NAME
 
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE
 from halo.model_loading.checkpoint_coverage import (
     ALLOW_MISSING_CHECKPOINT_KEYS_ENV,
     from_pretrained_verified,
@@ -207,6 +209,34 @@ def test_a_tied_config_on_a_legacy_list_tie_is_refused(tmp_path):
         from_pretrained_verified(legacy, _write_checkpoint(tmp_path / "tied", tie_word_embeddings=True))
     model = from_pretrained_verified(legacy, _write_checkpoint(tmp_path / "untied"))
     assert model.lm_head.weight.data_ptr() != model.model.embed_tokens.weight.data_ptr()
+
+
+@pytest.mark.parametrize(
+    "load",
+    [lambda path: from_pretrained_verified(AutoModelForCausalLM, path), auto_load_model],
+    ids=["verified_load", "widest_auto_class_load"],
+)
+def test_an_adapter_directory_is_refused_with_what_loads_it(tmp_path, load):
+    """transformers' own adapter load raises ``ModuleNotFoundError`` for a PEFT module the pinned release lacks, and a
+    config fetch ahead of the load would name only the absent ``config.json``."""
+    (tmp_path / ADAPTER_CONFIG_FILE).write_text("{}")
+    with pytest.raises(ValueError, match="holds a PEFT adapter.*PeftModel.from_pretrained"):
+        load(str(tmp_path))
+
+
+def test_a_directory_with_a_model_config_is_not_read_as_an_adapter(tmp_path):
+    class _Reached(Exception):
+        pass
+
+    class _Stub:
+        @staticmethod
+        def from_pretrained(*args, **kwargs):
+            raise _Reached
+
+    (tmp_path / ADAPTER_CONFIG_FILE).write_text("{}")
+    (tmp_path / CONFIG_NAME).write_text("{}")
+    with pytest.raises(_Reached):
+        from_pretrained_verified(_Stub, str(tmp_path))
 
 
 def test_importing_the_gate_makes_module_cache_copies_whole():

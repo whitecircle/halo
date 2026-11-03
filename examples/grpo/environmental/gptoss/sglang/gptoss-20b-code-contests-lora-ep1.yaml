@@ -32,6 +32,8 @@ lora_target_modules:
 lora_modules_to_save:
 - embed_tokens
 - lm_head
+merge_expert_lora_on_save: true    # fold both halves into each save -> servable, as no tool folds this adapter later;
+                                   # every kept checkpoint holds a gathered full copy beside its resume adapters
 
 # --- Environment ---
 environment_type: codeforces

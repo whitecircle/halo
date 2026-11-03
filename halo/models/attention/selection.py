@@ -9,7 +9,7 @@ import logging
 import os
 
 import torch
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.utils import is_flash_attn_2_available
 
 from halo.hardware import is_blackwell_gpu, is_hopper_gpu
@@ -31,7 +31,7 @@ from halo.models.attention.layout import (
 )
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
 from halo.models.config_access import get_config_field, set_config_field_run_scoped, text_config
-from halo.models.model_classes import mapped_model_class
+from halo.models.model_classes import is_remote_code_class, mapped_model_class
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 
@@ -224,10 +224,20 @@ def declares_attention_backends(model_config) -> bool:
 
 
 def declares_flash_attention(model_config) -> bool:
-    """No flash kernel reads a prefix LM's mask, so its trained tokens would attend to those they are scored on."""
+    """No flash kernel reads a prefix LM's mask, so its trained tokens would attend to those they are scored on. A
+    composite hands every sub-model the same label, so each sub-model's class has to take it (LFM2-VL's SigLIP2 tower
+    does not)."""
     if has_prefix_lm_attention(model_config):
         return False
-    return getattr(declared_model_class(model_config), "_supports_flash_attn", True)
+    sub_configs = (getattr(model_config, name, None) for name in getattr(model_config, "sub_configs", ()))
+    classes = (declared_model_class(model_config), *(mapped_model_class(sub, AutoModel) for sub in sub_configs))
+    return all(getattr(cls, "_supports_flash_attn", True) for cls in classes)
+
+
+def remote_code_flash_loses_window(model_config) -> bool:
+    """A remote file decides for itself whether its flash call passes a layer's window, and the flash mask is ``None``,
+    so a flash kernel may run those layers as full attention. SDPA reads the window off its mask."""
+    return is_remote_code_class(type(model_config)) and has_sliding_window_layers(model_config)
 
 
 def select_supported_attn_implementation(
@@ -353,6 +363,7 @@ def resolve_attn_implementation(
     """Auto-detected when None, narrowed by the per-family kernel limits, then validated. ``fa4_fallback`` is taken in
     place of FA4 where :func:`supports_fa4_backward` refuses it. FA4's varlen limit and the kernel taken in place of a
     deterministic FA4 on multi-document rows depend on the rows, so the scripts' requests apply them."""
+    pinned = attn_implementation
     attn_implementation = attn_implementation or _detect_attention_impl()
 
     if dtype == torch.float32 and is_flash_attn_implementation(attn_implementation):
@@ -365,6 +376,21 @@ def resolve_attn_implementation(
                 f"falling back to attn_implementation='{fp32_fallback}' (FlashAttention is half-precision only)."
             )
         attn_implementation = fp32_fallback
+
+    if is_flash_attn_implementation(attn_implementation) and remote_code_flash_loses_window(model_config):
+        if pinned:
+            raise ValueError(
+                f"attn_implementation='{pinned}' on remote-code {type(model_config).__name__}: its sliding-window "
+                f"layers may run as full attention, since the remote file need not pass a flash kernel their window. "
+                f"Set attn_implementation: sdpa, or load the in-library class (trust_remote_code: false)."
+            )
+        if is_global_main_process():
+            logger.warning(
+                f"Remote-code {type(model_config).__name__} has sliding-window layers its file need not pass a flash "
+                f"kernel; taking attn_implementation='sdpa' in place of {attn_implementation}, which reads the window "
+                f"off its mask."
+            )
+        attn_implementation = "sdpa"
 
     # FA2 takes head_dim 256 with a softcap and a window, where SDPA would drop the softcap, so the dedicated kernel's
     # refusal runs ahead of the deterministic-backward fallback, which would hand such a model SDPA.

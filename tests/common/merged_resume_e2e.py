@@ -37,11 +37,17 @@ from tests.common.memory import finish_phase
 from tests.common.models import QWEN3_0_6B
 from tests.common.numerics import relative_l2
 from tests.common.rank_log import log
-from tests.common.tiny_models import TINY_MOE_FAMILIES, TinyFamily, shared_tiny_family_checkpoint
+from tests.common.tiny_models import (
+    TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
+    TinyFamily,
+    shared_tiny_family_checkpoint,
+)
 from tests.common.tolerances import TOL
 from tests.common.training_checks import resumed_loss_deltas, snapshot_trainable, step_losses
 from tests.common.weight_sync import local_parameters, moved_parameters
 
+ROSTER = {**TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
 ADAPTER_MODES = {"expert": "expert_lora", "mixed": "mixed"}
 # (ep_size, cp_size) on two ranks.
 LAYOUTS = ((2, 1), (1, 1), (2, 2))
@@ -69,11 +75,17 @@ class _MergedResumeParser(argparse.ArgumentParser):
 
 def merged_resume_parser() -> argparse.ArgumentParser:
     parser = _MergedResumeParser()
-    parser.add_argument("--family", choices=sorted(TINY_MOE_FAMILIES), required=True)
+    parser.add_argument("--family", choices=sorted(ROSTER), required=True)
     parser.add_argument("--adapters", choices=sorted(ADAPTER_MODES), default="mixed")
     parser.add_argument("--ep-size", type=int, choices=sorted({ep for ep, _ in LAYOUTS}), default=2)
     parser.add_argument("--cp-size", type=int, choices=sorted({cp for _, cp in LAYOUTS}), default=1)
     parser.add_argument("--fp32-masters", action="store_true")
+    parser.add_argument("--liger", action="store_true", help="the production kernels; a recipe's default")
+    parser.add_argument(
+        "--attention-targets",
+        type=lambda names: names.split(","),
+        help="comma-separated modules a mixed run adapts in place of the family's attention targets",
+    )
     return parser
 
 
@@ -115,7 +127,7 @@ class _RestorePoint(RestorePointSnapshot):
             self.before_save = local_parameters(unwrap(self.trainer.model))
 
 
-def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
+def _sft_config(output_dir: str, *, save: bool, liger: bool) -> SFTConfig:
     return SFTConfig(
         output_dir=output_dir,
         max_steps=TOTAL_STEPS,
@@ -133,7 +145,7 @@ def _sft_config(output_dir: str, *, save: bool) -> SFTConfig:
         max_length=MAX_SEQ_LENGTH,
         dataloader_drop_last=True,
         dataloader_num_workers=0,
-        use_liger_kernel=False,
+        use_liger_kernel=liger,
         seed=SEED,
     )
 
@@ -209,10 +221,18 @@ def _serving_checks(
 
 
 def run_merged_resume(
-    ctx, *, family: str, adapters: str, ep_size: int, cp_size: int, fp32_masters: bool = False
+    ctx,
+    *,
+    family: str,
+    adapters: str,
+    ep_size: int,
+    cp_size: int,
+    fp32_masters: bool = False,
+    liger: bool = False,
+    attention_targets: list[str] | None = None,
 ) -> dict:
     """The phases for one family, adapter shape and layout; returns the harness result."""
-    tiny = TINY_MOE_FAMILIES[family]
+    tiny = ROSTER[family]
     if ep_size > 1:
         pin_deterministic_ep_dispatch()
     log(
@@ -229,7 +249,7 @@ def run_merged_resume(
     # Read once, off the base: a merged checkpoint's index spells attention in the hub namespace, not PEFT's module
     # names.
     targets = (
-        mixed_targets(list(tiny.attention_targets or attention_target_modules(base_dir)))
+        mixed_targets(list(attention_targets or tiny.attention_targets or attention_target_modules(base_dir)))
         if adapters == "mixed"
         else None
     )
@@ -243,12 +263,12 @@ def run_merged_resume(
             parallelism_config,
             model_name=model_source,
             attn_implementation="eager" if cp_size == 1 else None,
-            use_liger_kernel=False,
+            use_liger_kernel=liger,
             lora_target_modules=targets,
         )
         trainer = DistributedSFTTrainer(
             model=model,
-            args=_sft_config(phase_dir, save=save),
+            args=_sft_config(phase_dir, save=save, liger=liger),
             train_dataset=create_sft_dataset(64, tokenizer, seed=SEED),
             processing_class=tokenizer,
             parallelism_config=parallelism_config,

@@ -20,6 +20,8 @@ def run(ctx):
         ep_size=ARGS.ep_size,
         cp_size=ARGS.cp_size,
         fp32_masters=ARGS.fp32_masters,
+        liger=ARGS.liger,
+        attention_targets=ARGS.attention_targets,
     )
 
 

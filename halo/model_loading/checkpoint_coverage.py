@@ -12,7 +12,9 @@ from contextlib import contextmanager
 
 import torch.nn as nn
 from transformers import PreTrainedModel
+from transformers.utils import CONFIG_NAME
 
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE
 from halo.env import env_flag
 from halo.model_loading.remote_code import reject_untieable_list_ties
 from halo.models.config_access import drop_toolkit_stamps
@@ -99,12 +101,26 @@ def full_weights_on_every_rank() -> Iterator[None]:
             os.environ[_FSDP_CPU_RAM_EFFICIENT_LOADING] = previous
 
 
+def reject_adapter_directory(model_name_or_path: str) -> None:
+    """transformers' own adapter load imports a module the pinned PEFT lacks, an error that names neither the adapter
+    nor what to do."""
+    if os.path.isfile(os.path.join(model_name_or_path, ADAPTER_CONFIG_FILE)) and not os.path.isfile(
+        os.path.join(model_name_or_path, CONFIG_NAME)
+    ):
+        raise ValueError(
+            f"{model_name_or_path} holds a PEFT adapter and no {CONFIG_NAME}, so there is no model to load from it. "
+            f"Load it onto its base with PeftModel.from_pretrained(base, path), or merge it first with "
+            f"scripts/after_training/merge_peft_adapters.py."
+        )
+
+
 def from_pretrained_verified(
     model_class, model_name_or_path: str, *, excuse_task_head: bool = True, **kwargs
 ) -> PreTrainedModel:
     """``from_pretrained`` with its missing-key report gated, inside :func:`full_weights_on_every_rank`. A passed
     ``config`` carries this run's stamps and is kept; one read from the checkpoint takes
     :func:`drop_toolkit_stamps`."""
+    reject_adapter_directory(model_name_or_path)
     with full_weights_on_every_rank():
         model, loading_info = model_class.from_pretrained(model_name_or_path, output_loading_info=True, **kwargs)
     if kwargs.get("config") is None:

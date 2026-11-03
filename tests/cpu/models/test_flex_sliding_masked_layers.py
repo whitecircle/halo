@@ -116,6 +116,7 @@ class _RemoteModel(MistralForCausalLM):
     config_class = _RemoteConfig
 
 
+_RemoteConfig.__module__ = "transformers_modules.org.repo.configuration_remote"
 _RemoteModel.__module__ = "transformers_modules.org.repo.modeling_remote"
 
 

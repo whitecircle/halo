@@ -57,6 +57,8 @@ class MoEFamilySpec:
     # The sequence mixer its forward reaches with no segment marker, so it carries every document of a
     # multi-document row into the next on every backend, named for the refusal.
     unmarked_sequence_mixer: str | None = None
+    # The buffer its routers index by token id, one frozen expert assignment per row, which gives a new token no row.
+    token_indexed_table: str | None = None
 
     def to_hub_key(self, key: str) -> str:
         for module_spelling, hub_spelling in self.export_key_renames:
@@ -92,6 +94,7 @@ DEEPSEEK_V4 = MoEFamilySpec(
     balancing_slot=_E_SCORE_CORRECTION_BIAS,
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("deepseek_v4",),
+    token_indexed_table="gate.tid2eid",
     eager_only_attention=(
         "its head_dim=512 exceeds every flash kernel, SDPA and flex cannot carry its sink column, and its "
         "compressor concatenates KV entries after the mask is built"

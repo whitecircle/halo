@@ -90,6 +90,7 @@ from transformers.models.mistral4 import Mistral4Config, Mistral4ForCausalLM
 from transformers.models.qwen4_exp.modeling_qwen4_exp import Qwen4ExpTextPLELayer
 from transformers.models.zaya.modeling_zaya import ZayaQKNorm
 
+from halo.checkpoint.config_export import restore_model_type
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.sdpa_flex_sliding import FLEX_MIN_HEAD_DIM
 from halo.models.param_roles import fp32_pinned_names
@@ -594,6 +595,8 @@ def build_tiny_family_checkpoint(
         if name in stored:
             param.data = stored[name]
     model.save_pretrained(target_dir, max_shard_size=TINY_SHARD_SIZE)
+    # As a real export does, or a vendor config leaving the class attribute unset reloads family-less.
+    restore_model_type(model.config, target_dir)
     if tokenizer is not None:
         tokenizer.save_pretrained(target_dir)
 

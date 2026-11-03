@@ -15,14 +15,18 @@ from transformers import Glm4MoeLiteConfig, PretrainedConfig, Qwen3_5MoeTextConf
 from transformers import modeling_flash_attention_utils as flash_utils
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.models.glm4_moe_lite.modeling_glm4_moe_lite import Glm4MoeLiteAttention
+from transformers.models.laguna.configuration_laguna import LagunaConfig
+from transformers.models.laguna.modeling_laguna import LagunaForCausalLM
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeAttention
 
 from halo import hardware
 from halo.distributed.context_parallel import ulysses_attention as cp_base_layer
 from halo.distributed.context_parallel.families import Glm4MoeLiteUlyssesAttention, Qwen3_5MoeUlyssesAttention
+from halo.entrypoints.model_setup import default_padded_attn_implementation
 from halo.model_loading.parallel import loader as model_loading
 from halo.models.attention import selection as attention_mod
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
 from tests.common.models import TINY_GLM4_MOE_LITE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
@@ -500,6 +504,108 @@ def test_a_config_without_a_causal_lm_class_is_judged_by_its_image_text_class(mo
     )
     with patch.object(attention_mod.logger, "warning"):
         assert attention_mod.select_supported_attn_implementation(ImageTextOnlyConfig(), "flash_attention_2") == "sdpa"
+
+
+class _RemoteLagunaConfig(LagunaConfig):
+    """Named as transformers' mapping reads a remote config: by class name alone, so it matches the in-library one."""
+
+
+_RemoteLagunaConfig.__name__ = "LagunaConfig"
+_RemoteLagunaConfig.__module__ = "transformers_modules.poolside.laguna.configuration_laguna"
+
+_SLIDING_LAYERS = {"sliding_window": 8, "layer_types": ["sliding_attention", "full_attention"], "num_hidden_layers": 2}
+
+
+def _resolve_laguna(config, requested):
+    is_avail, capability = _blackwell()
+    with is_avail, capability, patch.object(attention_mod.logger, "info"):
+        return attention_mod.resolve_attn_implementation(
+            config, requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+
+
+def test_a_remote_config_named_like_an_in_library_class_declares_no_class():
+    """The ``_supports_*`` flags and ``is_backend_compatible`` of a class the run never builds would answer for it."""
+    assert attention_mod.declared_model_class(LagunaConfig()) is LagunaForCausalLM
+    assert attention_mod.declared_model_class(_RemoteLagunaConfig()) is None
+    assert not attention_mod.declares_attention_backends(_RemoteLagunaConfig())
+
+
+def test_an_unset_flash_pick_on_remote_sliding_layers_takes_sdpa_and_says_so():
+    """Its flash call never receives the window, so 36 of Laguna-S's 48 layers would run as full attention."""
+    with patch.object(attention_mod.logger, "warning") as warn:
+        assert _resolve_laguna(_RemoteLagunaConfig(**_SLIDING_LAYERS), None) == "sdpa"
+    assert any("sliding-window layers" in call.args[0] for call in warn.call_args_list)
+
+
+@pytest.mark.parametrize("requested", ["flash_attention_2", "flash_attention_3", "flash_attention_4"])
+def test_a_pinned_flash_label_on_remote_sliding_layers_raises(requested):
+    with pytest.raises(ValueError, match=f"{requested}.*sliding-window.*attn_implementation: sdpa"):
+        _resolve_laguna(_RemoteLagunaConfig(**_SLIDING_LAYERS), requested)
+
+
+def test_the_padded_scripts_default_takes_sdpa_on_remote_laguna():
+    model_args = SimpleNamespace(attn_implementation=None)
+    is_avail, capability = _blackwell()
+    with is_avail, capability:
+        remote = default_padded_attn_implementation(
+            model_args, sinks_reset=True, checkpoint_config=_RemoteLagunaConfig(**_SLIDING_LAYERS)
+        )
+        in_library = default_padded_attn_implementation(
+            model_args, sinks_reset=True, checkpoint_config=LagunaConfig(**_SLIDING_LAYERS)
+        )
+    assert (remote, in_library) == ("sdpa", None)
+
+
+def test_a_pinned_sdpa_on_remote_laguna_builds_plain_sdpa():
+    """Flex-sliding registers an implementation a remote file's attention need not dispatch through."""
+    with patch.object(torch.cuda, "is_available", lambda: True):
+        assert resolve_flex_sliding_attn_implementation(_RemoteLagunaConfig(**_SLIDING_LAYERS), "sdpa") == "sdpa"
+        assert resolve_flex_sliding_attn_implementation(LagunaConfig(**_SLIDING_LAYERS), "sdpa") != "sdpa"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [LagunaConfig(**_SLIDING_LAYERS), _RemoteLagunaConfig()],
+    ids=["in_library_passes_the_window", "remote_without_sliding_layers"],
+)
+def test_flash_stays_where_no_window_can_be_lost(config):
+    with patch.object(attention_mod.logger, "warning"):
+        assert _resolve_laguna(config, None) == "flash_attention_4"
+
+
+def test_a_float32_flash_pin_on_remote_sliding_layers_keeps_the_half_precision_fallback():
+    """That fallback already lands on the kernel holding the window, so nothing is left to refuse."""
+    config = _RemoteLagunaConfig(**_SLIDING_LAYERS)
+    with patch.object(attention_mod.logger, "warning"):
+        resolved = attention_mod.resolve_attn_implementation(
+            config, "flash_attention_2", torch.float32, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+    assert resolved == "sdpa"
+
+
+@pytest.mark.parametrize("requested", [None, "flash_attention_2", "flash_attention_4"])
+def test_a_composite_whose_tower_refuses_flash_takes_sdpa_before_the_build(requested):
+    """LFM2-VL's wrapper declares nothing, while transformers hands its SigLIP2 tower the same label and raises."""
+    config = CONFIG_MAPPING["lfm2_vl"]()
+    assert not attention_mod.declares_flash_attention(config)
+    is_avail, capability = _blackwell()
+    with is_avail, capability, patch.object(attention_mod.logger, "info"), patch.object(attention_mod.logger, "warning"):
+        resolved = attention_mod.resolve_attn_implementation(
+            config, requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+    assert resolved == "sdpa"
+
+
+def test_a_composite_whose_every_sub_model_takes_flash_keeps_it():
+    config = CONFIG_MAPPING["qwen3_5_moe"]()
+    assert attention_mod.declares_flash_attention(config)
+    is_avail, capability = _blackwell()
+    with is_avail, capability, patch.object(attention_mod.logger, "info"):
+        resolved = attention_mod.resolve_attn_implementation(
+            config, None, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
+        )
+    assert resolved == "flash_attention_4"
 
 
 if __name__ == "__main__":

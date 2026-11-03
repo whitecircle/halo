@@ -921,24 +921,41 @@ def test_a_loopback_endpoint_takes_the_local_key_and_needs_none(no_api_keys, mon
     assert scorer_api_key(term) == "sk-local"
 
 
-@pytest.mark.parametrize("base_url", [DEFAULT_OPENROUTER_BASE_URL, _PRIVATE_URL])
-def test_any_other_endpoint_at_the_default_variable_reads_the_hosted_chain(no_api_keys, monkeypatch, base_url):
-    term = _term(base_url=base_url)
-    with pytest.raises(RuntimeError, match="set OPENROUTER_API_KEY or OPENAI_API_KEY$"):
-        scorer_api_key(term)
-
+@pytest.mark.parametrize(
+    ("base_url", "own", "other"),
+    [
+        (DEFAULT_OPENROUTER_BASE_URL, "OPENROUTER_API_KEY", "OPENAI_API_KEY"),
+        ("https://api.openai.com/v1", "OPENAI_API_KEY", "OPENROUTER_API_KEY"),
+    ],
+    ids=["openrouter", "openai"],
+)
+def test_a_hosted_vendor_takes_its_own_key_and_no_other(no_api_keys, monkeypatch, base_url, own, other):
+    monkeypatch.setenv(other, "sk-other-vendor")
     monkeypatch.setenv("VLLM_API_KEY", "sk-local")
-    with pytest.raises(RuntimeError, match="no API key"):
+    term = _term(base_url=base_url)
+    with pytest.raises(RuntimeError, match=f"no API key — set {own}$"):
         scorer_api_key(term)
 
+    monkeypatch.setenv(own, "sk-own")
+    assert scorer_api_key(term) == "sk-own"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [_PRIVATE_URL, "https://api.mistral.ai/v1", "https://openrouter.ai.gateway.example/v1"],
+    ids=["private", "another_vendor", "a_host_only_starting_like_a_vendors"],
+)
+def test_any_other_endpoint_at_the_default_variable_is_refused_with_both_keys_set(
+    no_api_keys, monkeypatch, base_url
+):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
-    assert scorer_api_key(term) == "sk-openai"
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-chain")
-    assert scorer_api_key(term) == "sk-or-chain"
+    with pytest.raises(RuntimeError, match="set api_key_env to the variable holding this endpoint's key$"):
+        scorer_api_key(_term(base_url=base_url))
 
 
 def test_client_is_built_against_the_term_endpoint(monkeypatch):
-    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-test")
+    monkeypatch.setenv("MY_JUDGE_KEY", "sk-mine")
     captured = {}
 
     def fake_build_openai_client(base_url, api_key_override):
@@ -946,8 +963,8 @@ def test_client_is_built_against_the_term_endpoint(monkeypatch):
         return _FakeClient([])
 
     monkeypatch.setattr(judge_module, "build_openai_client", fake_build_openai_client)
-    GenerativeJudge(_term(base_url="http://judge:8000/v1"))._connect()
-    assert captured == {"base_url": "http://judge:8000/v1", "api_key_override": "sk-or-test"}
+    GenerativeJudge(_term(api_key_env="MY_JUDGE_KEY", base_url="http://judge:8000/v1"))._connect()
+    assert captured == {"base_url": "http://judge:8000/v1", "api_key_override": "sk-mine"}
 
 
 def test_a_judge_on_an_unset_named_variable_builds_no_client_with_another_key(no_api_keys, monkeypatch):

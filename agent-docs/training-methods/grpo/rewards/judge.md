@@ -13,8 +13,8 @@ Shared term fields, `on_error` and the launch probe: [Reward Terms](README.md).
 |---|---|---|
 | `requirements`, `scale` | —, `10` | `{name, description, weight}` items (`weight > 0`, default 1), each scored `0..scale`; a veto judge refuses `scale` |
 | `checks` | — | `{name, description, veto, weight, unless}` items; `veto` default `false`; `weight >= 0`, default 1 (0 for a veto check); `unless` an episode fact the environment establishes, under which the check never fires. `environment` takes the checks the environment declares ([Environment checks](#environment-checks)) |
-| `model`, `base_url` | `openai/gpt-5.6-luna`, OpenRouter | Any OpenAI-compatible endpoint, a local vLLM included |
-| `api_key_env` | `OPENROUTER_API_KEY` | Key variable. Another name is that key alone: unset, the launch probe fails, with no fallback. At the default, a loopback `base_url` reads `VLLM_API_KEY`, then `OPENAI_API_KEY`, and needs neither; any other reads `OPENROUTER_API_KEY`, then `OPENAI_API_KEY` |
+| `model`, `base_url` | `openai/gpt-5.6-luna`, OpenRouter | Any OpenAI-compatible endpoint, a local vLLM included; one neither loopback nor a vendor's own host needs `api_key_env` |
+| `api_key_env` | `OPENROUTER_API_KEY` | Key variable. Another name is that key alone: unset, the launch probe fails, with no fallback. At the default, a loopback `base_url` reads `VLLM_API_KEY`, then `OPENAI_API_KEY`, and needs neither; OpenRouter's host reads only `OPENROUTER_API_KEY` and `api.openai.com` only `OPENAI_API_KEY`; any other host is refused, so name its key here |
 | `reasoning_effort` | `medium` | `none`, `minimal`, `low`, `medium`, `high`, `xhigh`; `null` sends no such field |
 | `temperature` | unset | Reasoning models refuse an explicit one |
 | `view` | `final` | `final`, `full` or `digest` ([Views](#views)) |

@@ -37,7 +37,10 @@ def remote_code_model_class(model: torch.nn.Module) -> type | None:
 
 
 def mapped_model_class(config, *auto_classes) -> type | None:
-    """None for a remote-code config or an auto class without a ``_model_mapping``."""
+    """None for a remote-code config or an auto class without a ``_model_mapping``. Remote code is ruled out by module,
+    as the mapping keys on the class name and would answer a remote ``LagunaConfig`` with the in-library class."""
+    if is_remote_code_class(type(config)):
+        return None
     for auto_class in auto_classes:
         mapping = getattr(auto_class, "_model_mapping", None)
         if mapping is None:

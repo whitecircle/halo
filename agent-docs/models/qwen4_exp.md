@@ -40,7 +40,7 @@ Under gradient checkpointing the recompute reuses the forward's QSA selection an
 
 ## LoRA
 
-PEFT adapts attention (`q_proj`, `k_proj`, `v_proj`, `o_proj`) and GatedDeltaNet (`in_proj_qkv`, `in_proj_z`, `in_proj_a`, `in_proj_b`, `out_proj`); routed experts take Halo's native expert LoRA under EP ([PEFT](../optimization/peft.md)). An adapter on `indexer.index_qk_proj` never gets a gradient: the indexer's top-k is a boolean selection, in transformers as here. List targets explicitly, as the LoRA recipe does.
+PEFT adapts attention (`q_proj`, `k_proj`, `v_proj`, `o_proj`) and GatedDeltaNet (`in_proj_qkv`, `in_proj_z`, `in_proj_a`, `in_proj_b`, `out_proj`); routed experts take Halo's native expert LoRA under EP ([PEFT](../optimization/peft.md)). An adapter on `indexer.index_qk_proj` never gets a gradient: the indexer's top-k is a boolean selection, in transformers as here. List targets explicitly, as the LoRA recipe does. The merged-save GPU rows adapt the attention projections and experts; the GatedDeltaNet projections ran through the EP8 recipe.
 
 ## Balancing
 

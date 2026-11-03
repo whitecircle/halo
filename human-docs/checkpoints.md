@@ -144,7 +144,8 @@ weights:
   embedding LoRA).
 
 For a LoRA run, upload the adapter directory, or merge it with
-`merge-peft-adapters` for a standalone model.
+`merge-peft-adapters` for a standalone model. Load an uploaded adapter with
+`PeftModel.from_pretrained`.
 
 The inherited `push_to_hub` / `hub_strategy` upload is not tested end to end. It
 pushes `log/run.log` and, for online or async GRPO, the `completions/` prompts

@@ -104,9 +104,10 @@ Qwen3) drops out of the injection with that warning, so the run trains the targe
 - **Rank (`lora_r`):** 8–32 for 1B–3B, 32–96 for 7B–14B, 64–384 for 27B+. With a tuned learning rate,
   performance is largely rank-independent; rank matters most when the LR is suboptimal.
 - **Alpha:** `alpha = rank` (conservative) or `2 * rank` (aggressive). For rank ≥ 64, prefer `use_rslora`.
-- **Target modules:** all-linear for best quality; attention-only when memory-constrained. On MoE models
-  `all-linear` does not reach the fused expert tensors — name the expert projections explicitly (see
-  [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
+- **Target modules:** all-linear on a dense model or on stock experts (`use_grouped_gemm: false`). On EP layers it
+  runs on GPT-OSS, Qwen3 MoE, Gemma 4, Inkling and LFM-2, without reaching the fused expert tensors. Every other EP
+  family refuses it, as it would put PEFT layers inside the EP layer. There, name attention and expert projections
+  explicitly (see [MoE models](#moe-models--expert-targets-and-full-trained-modules)).
 - **Learning rate:** LoRA needs 5–10× the full-FT rate.
 - **Dropout:** honored on SFT. The preference, reward and offline-GRPO trainers run TRL's
   `disable_dropout_in_model` after the adapter wrap (`disable_dropout` defaults to `True`), zeroing PEFT's
@@ -228,7 +229,7 @@ own ([Data Parallelism](../parallelism/data-parallelism.md#fsdp2-strategy-by-mod
 
 | Mode | LoRA | QLoRA | Target restriction | Notes |
 |---|---|---|---|---|
-| DDP / FSDP | Yes | Yes | None | Standard path; QLoRA on a MoE is unverified ([QLoRA](#quantized-training-qlora)) |
+| DDP / FSDP | Yes | Yes | None | Standard path; QLoRA on a MoE needs `use_grouped_gemm: false` ([QLoRA](#quantized-training-qlora)) |
 | HSDP | Yes | No | None | Pure DP or CP only, so expert adapters train at `ep_size: 1`; every replica starts from the first one's adapters ([HSDP](../parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel)). QLoRA rejected: `use_hsdp` is refused under QLoRA, which skips FSDP2 ([QLoRA](#quantized-training-qlora)) |
 | EP | Yes | No | Attention + experts | Attention via PEFT; expert FFNs via native grouped adapters. QLoRA rejected: EP loaders materialize plain de-quantized weights, losing `Params4bit` |
 | CP | Yes | Yes* | None | CP shards the sequence, not the weights — adapters stay replicated; standard `from_pretrained` preserves `Params4bit`. *QLoRA only on a **dense** model: an MoE takes the grouped-GEMM loader, which rejects a quantized base |
@@ -361,8 +362,8 @@ The embedding trainer injects LoRA into its backbone in place, on data paralleli
 
 QLoRA combines LoRA with 4-bit/8-bit base quantization under DDP/FSDP (a MoE base also needs
 `use_grouped_gemm: false`), and under CP on a dense model. CP keeps the standard `from_pretrained` loader,
-which preserves `Params4bit`. Every QLoRA GPU row trains dense Qwen3-0.6B, so QLoRA on a MoE is admitted but
-unverified. AdamWBF16 optimizes only the bf16 adapter params; the frozen quantized base is skipped.
+which preserves `Params4bit`. GPU rows train dense Qwen3-0.6B, and gpt-oss-20b with stock experts through a save and
+reload. AdamWBF16 optimizes only the bf16 adapter params; the frozen quantized base is skipped.
 
 `load_distributed_model` raises for EP, TP, and the grouped-GEMM MoE loader — pure ETP included, since
 the gate reads `ep_group_size = ep_size × expert_tp_size`. Those loaders materialize plain de-quantized
@@ -497,9 +498,8 @@ The script **refuses native EP expert-LoRA adapters** (`peft_type` of `EXPERT_LO
 namespace is refused.
 
 `merge_expert_lora_on_save: true` produces the merged servable checkpoint at training time instead, for
-expert-only **and** mixed runs alike. Without it a mixed adapter is resumable by this toolkit but foldable by
-no tool, since saving the adapters and merging afterwards hits exactly the refusal above. Each merged
-training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
+expert-only **and** mixed runs alike. Set it from the first save: a mixed adapter saved without it resumes here,
+and `merge_peft_adapters` refuses it. Each merged training checkpoint also keeps the unmerged adapter in `resume_adapter/`, which resume restores onto the
 base, so the run continues from its trained adapters rather than the fold
 ([Merge-on-save checkpoints](../reference/checkpoints.md#merge-on-save-checkpoints)).
 

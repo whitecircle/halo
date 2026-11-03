@@ -1,5 +1,6 @@
 #!/usr/bin/env python
-"""Every head_dim-256 family trains on FA4, as the loader patches it, as accurately as on FA2, on four row shapes.
+"""Every head_dim-256 family, and each family the loader leaves on FA4 at another width, trains on FA4, as the loader
+patches it, as accurately as on FA2, on four row shapes.
 
 Full-attention layers and every expert routed, so the comparison is continuous in the attention output. The unpacked
 and ``cu_seq_lens`` rows must reach FA4 strided, the layout flash-attn-4 4.0.0b16 read scrambled. GLM-4.7-Flash holds
@@ -54,6 +55,33 @@ FAMILIES = {
             "qk_rope_head_dim": 64,
             "v_head_dim": 256,
             "kv_lora_rank": 64,
+            "n_routed_experts": 8,
+            "num_experts_per_tok": 8,
+        },
+    ),
+    "cohere2_moe": (TINY_MOE_FAMILIES["cohere2_moe"], {**_FULL_ATTENTION, **_ALL_EIGHT_EXPERTS}),
+    "laguna": (
+        TINY_MOE_FAMILIES["laguna"],
+        {
+            "num_hidden_layers": 2,
+            "num_attention_heads_per_layer": [4, 4],
+            "mlp_layer_types": ["sparse", "sparse"],
+            **_FULL_ATTENTION,
+            **_ALL_EIGHT_EXPERTS,
+        },
+    ),
+    "lfm2_moe": (
+        TINY_MOE_FAMILIES["lfm2_moe"],
+        {"num_hidden_layers": 2, "num_dense_layers": 0, **_FULL_ATTENTION, **_ALL_EIGHT_EXPERTS},
+    ),
+    "mistral4": (
+        TINY_MOE_FAMILIES["mistral4"],
+        {
+            "num_hidden_layers": 2,
+            "qk_nope_head_dim": 32,
+            "qk_rope_head_dim": 32,
+            "qk_head_dim": 64,
+            "v_head_dim": 64,
             "n_routed_experts": 8,
             "num_experts_per_tok": 8,
         },

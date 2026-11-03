@@ -46,7 +46,9 @@ Blackwell, FA3 on Hopper and FA2 as the fallback, except:
 | GLM-5 Next, Step-3.7 Flash, Inkling | SDPA, chosen automatically |
 | Qwen3.8-Flash-Next | SDPA, with Halo's tiled kernel on the sparse layers |
 | DeepSeek-V4 | eager only |
-| Laguna, Ling 3.0 | set `attn_implementation: sdpa`; there is no automatic fallback |
+| Laguna with `trust_remote_code: true` | SDPA, and a flash pin is refused |
+| Ling 3.0 | set `attn_implementation: sdpa`; the flash label fails the build |
+| LFM2-VL | SDPA, chosen automatically |
 
 Padded-batch scripts use a different default on GPUs other than Blackwell
 ([Writing a config](configuration.md#the-keys-that-matter)). CP picks its own
@@ -162,8 +164,8 @@ mode: the [model pages](../agent-docs/models/README.md) ↗.
 
 | Feature | Status |
 | --- | --- |
-| LoRA | supported except under TP, EP+TP and PP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1` |
-| QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated; verified on dense models only; rejected by both online RL methods and by offline GRPO under CP |
+| LoRA | supported except under TP, EP+TP and PP; expert-projection adapters also refused when `expert_tensor_parallel_size > 1`. LoRA ran on release checkpoints for GPT-OSS 20B, Qwen3-30B, Qwen3-0.6B, Ring-mini-linear-2.0, Gemma 4 26B and, for a few steps, Qwen3.8-Flash-Next. The other families' LoRA ran on tiny models. |
+| QLoRA | DDP, FSDP and CP only, with the 4-bit base replicated; ran on dense Qwen3 and on gpt-oss-20b with stock experts; rejected by both online RL methods and by offline GRPO under CP |
 | Adapter merge | `halo run merge-peft-adapters` writes a standalone checkpoint; native EP expert LoRA merges at save time instead (`merge_expert_lora_on_save: true`) |
 | FP8 / FP4 MoE QAT and export | experimental: simulated backend for QAT, `quantize-to-lowp` for export |
 | Muon, FlashAdamW | supported optimizer options, except under PP |

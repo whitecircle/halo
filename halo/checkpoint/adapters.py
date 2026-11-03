@@ -264,9 +264,9 @@ def reject_expert_lora_adapter(adapter_dir: str) -> None:
         )
         folds = "the expert deltas inside each family's expert gather"
     raise ValueError(
-        f"{adapter_dir} {shape} — which a PEFT merge silently drops. Re-save the run with "
-        f"merge_expert_lora_on_save=True: the gathered EP save folds {folds}, producing a merged "
-        "servable HF checkpoint."
+        f"{adapter_dir} {shape} — which a PEFT merge silently drops, so this adapter only resumes in this toolkit. "
+        f"Set merge_expert_lora_on_save=True from the run's first save: the gathered EP save folds {folds}, "
+        "producing a merged servable HF checkpoint."
     )
 
 

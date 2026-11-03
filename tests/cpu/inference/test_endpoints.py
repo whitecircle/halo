@@ -8,12 +8,7 @@ import pathlib
 import pytest
 
 from halo.inference import endpoints
-from halo.inference.endpoints import (
-    LOCAL_SERVER_API_KEY,
-    is_loopback,
-    resolve_external_api_key,
-    resolve_local_api_key,
-)
+from halo.inference.endpoints import LOCAL_SERVER_API_KEY, is_loopback, resolve_local_api_key
 
 _KEY_VARS = ("VLLM_API_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY")
 
@@ -34,20 +29,11 @@ def test_local_key_prefers_the_server_convention_then_the_sdk_key_then_the_place
     assert resolve_local_api_key() == "server-key"
 
 
-def test_external_key_prefers_openrouter_then_the_sdk_key_then_nothing(no_keys):
-    assert resolve_external_api_key() is None
-    no_keys.setenv("OPENAI_API_KEY", "sdk-key")
-    assert resolve_external_api_key() == "sdk-key"
-    no_keys.setenv("OPENROUTER_API_KEY", "router-key")
-    assert resolve_external_api_key() == "router-key"
-
-
-def test_an_exported_empty_key_falls_through_both_chains(no_keys):
+def test_an_exported_empty_key_falls_through_the_local_chain(no_keys):
     """``.env.example`` ships the keys blank: an exported empty value is unset, not a key."""
     for name in _KEY_VARS:
         no_keys.setenv(name, "")
     assert resolve_local_api_key() == LOCAL_SERVER_API_KEY
-    assert resolve_external_api_key() is None
 
 
 @pytest.mark.parametrize("host", ["127.0.0.1", "127.0.1.1", "localhost", "::1", "0.0.0.0"])

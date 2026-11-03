@@ -7,14 +7,23 @@ import shlex
 
 import pytest
 
+from transformers import AutoConfig
+
 from halo.distributed.tensor_parallel.parallelize_attention import TP_SHARDABLE_ATTENTION_CLASSES
+from halo.models.moe.family_specs import find_moe_family_spec, find_moe_family_spec_for_config
 from tests.common import ep_determinism
 from tests.common.equivalence.cp_equivalence import FAMILIES as CP_FAMILIES
 from tests.common.lora_sync_exactness import parse_row, row_families, syncable_moe_families
 from tests.common.merged_resume_e2e import ADAPTER_MODES, LAYOUTS, merged_resume_parser
 from tests.common.preference_precompute_e2e import DENSE, precompute_resume_parser, world_size
 from tests.common.rosters import ep_layer_class_by_model_type
-from tests.common.tiny_models import TINY_DENSE_FAMILIES, TINY_MOE_FAMILIES, tiny_family_model
+from tests.common.tiny_models import (
+    TINY_BAILING_RING_FAMILY,
+    TINY_DENSE_FAMILIES,
+    TINY_MOE_FAMILIES,
+    build_tiny_family_checkpoint,
+    tiny_family_model,
+)
 from tests.gpu.manifest import MANIFEST
 
 MERGED_RESUME_SUITE = "trainers/lora/test_lora_merged_save_resume.py"
@@ -63,6 +72,28 @@ def test_every_ep_family_has_one_tiny_model():
     missing = sorted(cls.__name__ for cls in set(registry.values()) - set(covered))
     assert not missing, f"EP families with no tiny model in TINY_MOE_FAMILIES: {missing}"
     assert len(set(covered)) == len(covered), "two tiny models stand for one EP family"
+
+
+def test_the_merged_resume_body_reaches_recipes_liger_composites_and_chosen_targets():
+    args = merged_resume_parser().parse_args(
+        ["--family", "qwen3_5_moe", "--liger", "--attention-targets", "q_proj,in_proj_z"]
+    )
+    assert args.liger
+    assert args.attention_targets == ["q_proj", "in_proj_z"]
+    assert not merged_resume_parser().parse_args(["--family", "gpt_oss"]).liger
+
+
+_RELOADED_FAMILIES = {**TINY_MOE_FAMILIES, "bailing_moe_linear": TINY_BAILING_RING_FAMILY}
+
+
+@pytest.mark.parametrize("name", sorted(_RELOADED_FAMILIES))
+def test_a_tiny_checkpoint_reloads_under_its_family_spec(name, tmp_path):
+    """A vendor config leaves ``model_type`` off its class attribute, so a plain save reloads family-less and every row
+    built on it skips the spec-keyed paths a release takes."""
+    family = _RELOADED_FAMILIES[name]
+    build_tiny_family_checkpoint(family, str(tmp_path))
+    config = AutoConfig.from_pretrained(str(tmp_path), trust_remote_code=family.trust_remote_code)
+    assert find_moe_family_spec_for_config(config) is find_moe_family_spec(name)
 
 
 def test_the_merged_resume_rows_cover_every_family_adapter_shape_and_layout():

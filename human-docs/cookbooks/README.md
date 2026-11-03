@@ -63,6 +63,11 @@ output = model.generate(**inputs, max_new_tokens=256)
 print(tokenizer.decode(output[0][inputs["input_ids"].shape[-1]:], skip_special_tokens=True))
 ```
 
+A LoRA run saves an adapter, not a full checkpoint. Load it with
+`PeftModel.from_pretrained(base, path)` or merge it first;
+`AutoModelForCausalLM.from_pretrained` does not load an adapter directory under
+PEFT 0.18.1.
+
 ## Serve from the host
 
 Start rollout and serving containers on the host from the repo root, not inside the training container,

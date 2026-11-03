@@ -17,7 +17,7 @@ from transformers.models.auto.modeling_auto import (
 
 import halo.models.seq_cls_heads  # noqa: F401  registers the heads before any Auto* class resolves
 from halo.checkpoint.model_card import HUB_TAGS
-from halo.model_loading.checkpoint_coverage import from_pretrained_verified
+from halo.model_loading.checkpoint_coverage import from_pretrained_verified, reject_adapter_directory
 from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import (
     install_fa4_varlen_softcap_refusal,
@@ -125,6 +125,7 @@ def auto_load_model(
     if model_class is None:
         config = kwargs.get("config")
         if config is None:
+            reject_adapter_directory(model_name_or_path)
             # revision must reach the config fetch too, else a pinned checkpoint pairs with hub-main's config.
             config = AutoConfig.from_pretrained(
                 model_name_or_path, trust_remote_code=trust_remote_code, revision=kwargs.get("revision")

@@ -4,6 +4,8 @@ hold high special tokens (harmony EOS, <|return|>, <|call|>), and the served mod
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 from torch import nn
@@ -50,6 +52,8 @@ class _StubModelWithPaddedEmbedding(nn.Module):
     """The gpt-oss embedding shape: ``padded_rows`` > ``len(tokenizer)``. Its resize appends rows and keeps existing
     ones, as HF's does when growing."""
 
+    config = SimpleNamespace(model_type="stub")
+
     def __init__(self, padded_rows: int, hidden: int):
         super().__init__()
         self.embed = nn.Embedding(padded_rows, hidden)
@@ -61,7 +65,7 @@ class _StubModelWithPaddedEmbedding(nn.Module):
     def get_output_embeddings(self):
         return self.lm_head
 
-    def resize_token_embeddings(self, new_num_tokens: int):
+    def resize_token_embeddings(self, new_num_tokens: int, mean_resizing: bool = True):
         old = self.embed.weight.shape[0]
         if new_num_tokens == old:
             return

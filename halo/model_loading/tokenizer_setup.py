@@ -13,6 +13,7 @@ from transformers.utils import cached_file
 
 from halo.model_loading.tokenizer_backend import resolve_tokenizer_backend
 from halo.models.config_access import set_config_field
+from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.ranks import is_global_main_process
 
@@ -246,11 +247,27 @@ def configure_run_tokenizer(
     return resolve_tokenizer_backend(tokenizer, args.tokenizer_backend)
 
 
+def _reject_token_indexed_table_grow(base: PreTrainedModel, num_tokens: int) -> None:
+    """A forward on an added id would raise ``IndexError`` once it appears, and the export's table would no longer match
+    its config's ``vocab_size``, so it would not load. A checkpoint with no hash layer holds no such table."""
+    spec = find_moe_family_spec_for_config(base.config)
+    table = spec.token_indexed_table if spec is not None else None
+    if table is None or not any(name.endswith(f".{table}") for name, _ in base.named_buffers()):
+        return
+    raise ValueError(
+        f"Growing {spec.model_types[0]}'s vocabulary to {num_tokens} rows leaves {table} without a row for the added "
+        f"tokens: its routers index that table by token id, and a new token has no expert assignment. Keep added "
+        f"tokens within the checkpoint's {base.get_input_embeddings().weight.shape[0]} embedding rows."
+    )
+
+
 def grow_vocabulary(model: PreTrainedModel, num_tokens: int, *, mean_resizing: bool = True) -> None:
     """Resize the embeddings (and an untied head) up to ``num_tokens`` rows and mark the plain transformers model
     grown, which an adapter save reads back. ``mean_resizing=False`` is for a caller overwriting the rows."""
+    base = base_transformers_model(model)
+    _reject_token_indexed_table_grow(base, num_tokens)
     model.resize_token_embeddings(num_tokens, mean_resizing=mean_resizing)
-    setattr(base_transformers_model(model), _GROWN_VOCABULARY_ATTR, True)
+    setattr(base, _GROWN_VOCABULARY_ATTR, True)
 
 
 def vocabulary_grown(model) -> bool:

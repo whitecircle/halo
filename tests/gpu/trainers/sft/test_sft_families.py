@@ -205,7 +205,6 @@ SUITES = {
             sft_args={**SHORT_SMOKE_ARGS, "gradient_checkpointing": False},
             num_samples=(16, 4),
             dataset=create_single_turn_sft_dataset,
-            # Liger has no Gemma4-specific kernels.
             use_liger_kernel=False,
         ),
         None,

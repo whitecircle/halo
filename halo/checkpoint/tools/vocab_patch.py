@@ -17,6 +17,7 @@ from halo.model_loading.dtype import DTYPE_BY_NAME
 from halo.model_loading.model_preparation import auto_load_model
 from halo.model_loading.tokenizer_setup import (
     adopt_tokenizer_chat_template,
+    grow_vocabulary,
     load_chat_template,
     load_processing_class,
     resolve_tokenizer,
@@ -81,7 +82,7 @@ def add_tokens_to_model(
     # it, so a shrink recovers only padding and any target under len(tokenizer) cuts the specials.
     current_embedding_size = model.get_input_embeddings().weight.shape[0]
     if new_vocab_size > current_embedding_size:
-        model.resize_token_embeddings(new_vocab_size)
+        grow_vocabulary(model, new_vocab_size)
     else:
         logger.info(
             f"Keeping existing embedding size {current_embedding_size} (>= new vocab {new_vocab_size}); "
