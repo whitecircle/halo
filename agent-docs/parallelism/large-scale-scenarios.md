@@ -487,13 +487,18 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
     concurrent loader; set `max_concurrent_loading: 1` when `free -g` is tight. `fp32_experts` doubles
     the expert bank it stages ([EP → Model loading](expert-parallelism.md#model-loading)).
 
-- Host RAM at save and resume: a run that keeps optimizer state (`save_only_model: false`) copies
-  each rank's optimizer shard to host RAM at every save and resume (`cpu_offload`): ~28 GB/rank at
-  `ep64`, ~102 GB/rank at `ep16`, ~820 GB per 8-GPU node.
+- Host RAM at save and resume: a run that keeps optimizer state (`save_only_model: false`) passes
+  each rank's optimizer shard through host RAM: ~28 GB/rank at `ep64`, ~102 GB/rank at `ep16`. At `ep16`
+  an 8-GPU node holds ~410 GB during a save (the default `max_concurrent_loading` admits 4 ranks at a
+  time) and ~820 GB during a resume, where every rank keeps its copy until the collective apply.
 
     Every recommended cell runs **one** EP group, so each rank's expert state is unique; a job wide enough to
     run several EP groups (they are DP replicas) writes that half once per replica group instead
     ([Checkpoints](../reference/checkpoints.md#warm-restart-vs-exact-resume-torchrun)).
+
+    A `save_sharded_ep` save, with or without optimizer state, also holds each rank's whole expert slice in
+    host RAM at once, unthrottled: ~48 GB/rank and ~386 GB per 8-GPU node at `ep16`, halving at each
+    doubling of `ep_size`. Rank 0 holds ~20 GB more for the replicated half.
 
 - Hardware gates on every node: `scripts/profiling/nvlink_health.py` (non-zero exit = a degraded
   lane that silently caps or hangs the EP all-to-all), `nvidia-smi` (8 GPUs, near-zero used memory,
@@ -503,8 +508,11 @@ The `ep16` rows all sit on cross-node EP and inherit its `per_device_train_batch
 - Dataset shards: `num_shards >= data_parallel_size`, which is `stage_world_size / max(tp, cp, etp)`,
   not the GPU count.
 
-- Dry-run the layout on one node with the smaller Qwen3.5 MoE sibling (`Qwen/Qwen3.5-35B-A3B`) to exercise the
-  validators before the real weights load.
+- Dry-run with the smaller Qwen3.5 MoE sibling (`Qwen/Qwen3.5-35B-A3B`) before the real weights load. One
+  8-GPU host cannot form a recommended cell, since each needs its own node count. Two `torchrun` agents on
+  that host ([`--nnodes=2 --nproc_per_node=4`](pipeline-parallelism.md#measured-throughput)) train `pp2` ×
+  `ep4` and pass the config gates for `ep8 --ep_scope=global` and `ep2` + `etp4`. For the real cell's
+  config verdict, build a `ParallelismConfig` with its `world_size` and `gpus_per_node` on CPU.
 
 **After step 1**
 

@@ -74,7 +74,7 @@ The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence
 
 Throughput is **real (non-padding) tokens/s/GPU** — `attention_mask.sum()`, not padded element count — set via `include_num_input_tokens_seen="non_padding"` so all three modes share one real-token basis.
 
-**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (SM103), EP=2, Blackwell image. **Data:** max_length=4096, avg ≈ 1024 tokens (~75% padding waste). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup.
+**Model:** Qwen3-30B-A3B (128 experts, top_k=8), FA2. **Hardware:** 2× B300 (SM103), EP=2, Blackwell image, Halo 1.1.0 or earlier. **Data:** max_length=4096, avg ≈ 1024 tokens (~75% padding waste). **Setup:** batch_size=2/GPU, GC on, 8 steps / 3 warmup.
 
 | Mode | tokens/s/GPU (real) | Step time | vs Standard |
 |------|:-------------------:|:---------:|:-----------:|

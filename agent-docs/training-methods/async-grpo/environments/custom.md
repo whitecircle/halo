@@ -94,7 +94,7 @@ To log per-episode diagnostics, override `rollout_metrics(trajectory) -> dict[st
 {"prompt": str | list[dict], "answer": Any, "difficulty": "hard"}
 ```
 
-- `answer` and the columns named in the script's `context_fields` reach `reset()` / `step()` in `context`; other columns are dropped. A `context_field` (or a renamed `answer_field`) that names no column raises at startup.
+- `answer` and the columns named in the script's `context_fields` reach `reset()` / `step()` in `context`; other columns are dropped. A `context_fields` entry (or a renamed `answer_field`) that names no column raises at startup.
 - `requires_answer = True` makes the trainer refuse a dataset without `answer` (default `False`; per-run override in `environment_kwargs`).
 - A list-valued prompt reaches the environment as its **last `user` message** only, so put framing in the environment's system prompt (`system_prompt` on the protocol classes; `_init_trajectory(system_prompt=...)` on your own).
 

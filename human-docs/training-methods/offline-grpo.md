@@ -27,8 +27,12 @@ against a served model, scores them with a reward model, and writes this shape.
 halo launch grpo/offline examples/grpo/offline/qwen3_5/offline-grpo-qwen3.6-35b-a3b-gsm8k.yaml -n 8
 ```
 
-Nothing else has to run. `examples/grpo/offline/` also holds the GPT-OSS and Gemma 4 versions. Test a
-config first with `--max_steps=10 --save_strategy=no` on a slice of the data.
+Nothing else has to run, so the families online RL refuses for weight sync still train here (on
+Qwen3.8-Flash-Next this path is CPU-tested only). `examples/grpo/offline/` also holds the GPT-OSS and
+Gemma 4 versions. Test a config first with `--max_steps=10 --save_strategy=no` on a slice of the data.
+
+Context and pipeline parallelism take full fine-tuning only, and pipeline parallelism needs
+`max_prompt_length` and `max_completion_length` set.
 
 - `advantage_method` turns the group's rewards into advantages; the default `quantile_norm` ranks them,
   which handles discrete or outlier-heavy rewards.

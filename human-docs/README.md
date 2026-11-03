@@ -71,8 +71,8 @@ mechanism.
 ## Operate
 
 - [Checkpoints](checkpoints.md): save, resume, merge, quantize, serve, upload.
-- [Monitoring](monitoring.md): the log file, W&B or ClearML, and the metrics
-  worth turning on.
+- [Monitoring](monitoring.md): the log file, W&B or ClearML, and the opt-in
+  metrics.
 - [Troubleshooting](troubleshooting.md): OOM, rejected configs, hangs, and
   RL-specific failures.
 

@@ -223,7 +223,7 @@ These configs come from [TRL](https://huggingface.co/docs/trl) and are used dire
 | `bf16` | `bool \| None` | `True` | Toolkit default `True` (TRL leaves it `None`); yields to an explicitly-enabled `fp16`. Applied before the config is built, so `mixed_precision` follows it. |
 | `use_liger_kernel` | `bool` | `True` | Liger Triton kernels. Toolkit default `True` (TRL default `False`). |
 | `logging_nan_inf_filter` | `bool` | `False` | Toolkit default `False` (upstream `True`). Upstream's filter reads the loss scalar back to the host on **every** micro-batch — `gradient_accumulation_steps` stalls per optimizer step, and at large world size every rank then waits on the slowest — and replaces a NaN/Inf loss with the running average, hiding a diverged run from its own loss curve. |
-| `accelerator_config` | `dict \| str \| None` | `{non_blocking: true}` with pinned batches | Toolkit default for one key: `non_blocking: true` whenever `dataloader_pin_memory` is not `false` and `use_cpu` is off, merged into a dict the config gives and never over a key it sets (a JSON file path is left whole), so a pinned batch copies to the device behind the queued kernels instead of waiting for them. |
+| `accelerator_config` | `dict \| str \| None` | `{non_blocking: true}` with pinned batches | Toolkit default for one key: `non_blocking: true` whenever `dataloader_pin_memory` is not `false` and `use_cpu` is off, merged into a dict the config gives and never over a key it sets (a JSON file path is left whole), so a pinned batch copies to the device behind the queued kernels instead of waiting for them (Qwen3-8B CP2 +11.4%, FSDP2 flat; 8× B300, 1.2.0, two rounds). |
 
 ### DPOConfig — `DistributedDPOTrainer` ([TRL docs](https://huggingface.co/docs/trl/dpo_trainer#trl.DPOConfig))
 
@@ -345,7 +345,7 @@ Every other field below keeps its name, except `world_size` / `gpus_per_node` (a
 
 Besides these, `num_nodes`, `num_nvlink_domains`, `ep_group_size`, `data_parallel_size`, `stage_world_size`, `pp_rank`, and the stage-local rank coordinates are computed in `__post_init__`.
 
-Two more carry no `ParallelismArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`halo/configs/parallelism_arguments.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
+Two more carry no `ParallelismArguments` spelling and are derived from the training config by `parallelism_config_from_args` (`halo/configs/parallelism_arguments.py`): `ep_rows_per_device` (the rows one MoE forward carries per device — the trainer's rows-per-example × `per_device_train_batch_size`, divided under PP by the microbatch count) and `ep_declared_max_length`, which the config-time dispatch-ceiling gate multiplies out into a per-rank token budget before any weight is read.
 
 A trainer whose config declares no `max_length` field stamps neither and leaves the ceiling to the dispatcher's runtime backstop. `max_length: null` still stamps the rows; the gate then takes `max_prompt_length + max_completion_length` where the config bounds both (offline GRPO, or SMPO with both shares set), else the model's context window.
 

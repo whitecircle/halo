@@ -85,8 +85,8 @@ card(
     color=BLUE,
 )
 
-arrow(ax, N1_X + N1_W, trainer_y + 0.85, N2_X, engine_y + 1.64, "NCCL :51216", color=VIOLET)
-arrow(ax, N1_X + N1_W, actors_y + 0.85, N2_X, engine_y + 0.49, "HTTP :8000", color=TEAL)
+arrow(ax, N1_X + N1_W, engine_y + 1.74, N2_X, engine_y + 1.74, "NCCL :51216", color=VIOLET)
+arrow(ax, N1_X + N1_W, engine_y + 0.49, N2_X, engine_y + 0.49, "HTTP :8000", color=TEAL)
 arrow(
     ax,
     CARD_X + 0.5 * CARD_W,
@@ -116,7 +116,7 @@ STRIP = [
             "rollout_group_port 51216",
             "bound on the trainer host",
             "+1 per extra server",
-            "VLLM_GROUP_HOST, multi-homed",
+            "multi-homed: *_GROUP_HOST",
         ],
     ),
     (
@@ -131,7 +131,7 @@ STRIP = [
     (
         "EFA",
         [
-            "docker-compose.vllm.efa.yml",
+            "docker-compose.<engine>.efa.yml",
             "+ make EFA=1 on the trainer",
             "else the sync runs on sockets",
             "weight_sync_transport.py",

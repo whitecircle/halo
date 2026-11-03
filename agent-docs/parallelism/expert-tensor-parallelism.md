@@ -36,6 +36,9 @@ tokens, routing weights → SumGradAcrossGroup (identity fwd, all-reduce bwd)
        → SumAcrossGroup (all-reduce SUM fwd, identity bwd) → output
 ```
 
+Expert compute is one grouped GEMM over the local shards on every family. On gpt-oss-20b against its per-expert
+loop (8× B300, s4096, 1.2.0, three rounds, peaks equal): ep4 × etp2 **+68.6%**, pure etp8 3.17×.
+
 The expert-TP all-reduce sits at the layer boundary (token space), **outside** the DeepEP
 dispatch→combine span (`EPMoELayerBase._dispatch_compute_combine`). This is exact because the
 combine is linear in the expert outputs, so summing per-shard partials in token space equals summing

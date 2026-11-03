@@ -34,10 +34,12 @@ import pytest
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK, ep_dispatch_capacity
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.distributed.pipeline_parallel.runner import resolve_microbatch_count
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
-from tests.common.parallelism import make_parallelism_config
+from halo.trainers.sft import DistributedSFTTrainer
+from tests.common.parallelism import make_parallelism_config, simulated_world
 from tests.common.rosters import distributed_trainer_classes
 
 # Wide model: hidden 8192 (already wire-aligned) × top-8 puts the 32-bit index ceiling at a capacity
@@ -268,11 +270,12 @@ class _PairedTrainer(DistributedTrainerMixin):
 
 
 class _TrainingConfig:
-    """The two fields the builder reads for the declared per-rank token budget."""
+    """The fields the builder reads for the declared per-rank token budget."""
 
-    def __init__(self, per_device_train_batch_size: int, max_length: int | None):
+    def __init__(self, per_device_train_batch_size: int, max_length: int | None, gradient_accumulation_steps: int = 1):
         self.per_device_train_batch_size = per_device_train_batch_size
         self.max_length = max_length
+        self.gradient_accumulation_steps = gradient_accumulation_steps
 
 
 class _GenerationTrainingConfig:
@@ -327,6 +330,53 @@ def test_the_prologue_separates_a_null_max_length_from_an_absent_one():
 
     no_knob = _built(_PairedTrainer, _GenerationTrainingConfig(2))
     assert (no_knob.ep_rows_per_device, no_knob.ep_declared_max_length) == (0, 0)
+
+
+def _pp_built(batch_size: int, *, microbatches: int = 0, accumulation: int = 1, schedule: str = "1f1b"):
+    """pp2 × ep8 on two 8-GPU nodes at 16384 tokens/row, through the real builder."""
+    with simulated_world(16, 8):
+        return parallelism_config_from_args(
+            ParallelismArguments(
+                pipeline_parallel_size=2,
+                expert_parallel_size=8,
+                pipeline_microbatches=microbatches,
+                pipeline_schedule=schedule,
+                nvlink_domain_size=8,
+            ),
+            training_config=_TrainingConfig(batch_size, _WIDE_INDEX_CEILING // 2, accumulation),
+            trainer_cls=DistributedSFTTrainer,
+        )
+
+
+@pytest.mark.parametrize(
+    "microbatches, accumulation, schedule, rows",
+    [
+        (8, 1, "1f1b", 1),
+        (0, 8, "1f1b", 1),
+        (2, 1, "1f1b", 4),
+        (0, 1, "1f1b", 4),
+        (8, 1, "gpipe", 1),
+        (0, 1, "gpipe", 8),
+    ],
+)
+def test_pipeline_rows_are_one_microbatch_as_the_schedule_resolves_it(microbatches, accumulation, schedule, rows):
+    """The gate's row count and the schedule's split must come from one count, 1F1B's full-pipeline floor included."""
+    config = _pp_built(8, microbatches=microbatches, accumulation=accumulation, schedule=schedule)
+    assert config.ep_rows_per_device == rows
+    assert resolve_microbatch_count(config, accumulation, 8) == 8 // rows
+
+
+def test_a_pipeline_is_judged_on_one_microbatch_not_the_whole_batch():
+    """8 × 16384 tokens over-runs the wire index as one forward; split into 8 microbatches each one fits."""
+    _reject_unsupported_model(_pp_built(8, microbatches=8), _wide())
+
+
+def test_a_microbatch_over_the_ceiling_is_still_refused_and_names_the_pipeline_lever():
+    """4 rows × 16384 is twice the ceiling: the gate still binds, and more microbatches is what clears it."""
+    with pytest.raises(ValueError) as err:
+        _reject_unsupported_model(_pp_built(8, microbatches=2), _wide())
+    assert "raise pipeline_microbatches" in str(err.value).split(". ")[0]
+    assert "4 row(s)/forward" in str(err.value)
 
 
 # Rows one model call carries per dataset example. Not derivable — it is a fact about each trainer's

@@ -1,8 +1,8 @@
 """Output destination and save helper shared by the style modules here.
 
-Palettes and rcParams stay per-family (`_theory_style`, the `_pipeline_style` layer over it, the
-benchmark charts); what they share is the anchored `agent-docs/assets/<kind>` destination and the
-create-directory-then-save step. Importing this module also pins matplotlib to the Agg backend,
+Palette and rcParams live in `_theory_style`, with `_pipeline_style` and `_chart_style` layered over it;
+this module holds the anchored `agent-docs/assets/<kind>` destination and the create-directory-then-save
+step. Importing this module also pins matplotlib to the Agg backend,
 which every generator needs before it touches `pyplot`.
 """
 

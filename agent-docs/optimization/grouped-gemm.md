@@ -6,6 +6,12 @@ The MoE expert step sorts tokens by expert (contiguous per-expert blocks), build
 
 ## Performance
 
+Every figure on this page is from Halo 1.1.0 or earlier, except the two 1.2.0 rows that open this section.
+
+**Routing sort (1.2.0).** The counting sort against the torch construction, which runs about 31 small aten ops per MoE layer pass. On 8× B300 at the [1.2.0 comparison's shapes](throughput-benchmarks.md#120-against-110), three rounds, peaks equal, step-1 loss bitwise: gpt-oss-20b ep8 × cp2 **+10.6%**, Qwen3.5-35B-A3B ep8 +9.0%, gpt-oss-20b ep2 +6.8%, ep8 × tp2 +5.7%, ep8 +2.2%.
+
+**Receive counts (1.2.0).** Expert compute sized from DeepEP's host-side receive counts, with no device read-back, on the same shapes: gpt-oss-20b ep4 × etp2 +6.6%, Qwen3.5-35B-A3B ep8 +2.4%, every other row within 0.5%.
+
 **Isolated kernel** — 1× B300 (SM103, PyTorch 2.11), Blackwell image, Qwen3-30B-A3B dims (hidden 2048, moe_intermediate 768), 128 experts / 4K tokens, median over 50 iters: the forward runs **≈10.2×** the per-expert loop, 1.12 ms → 0.11 ms (achieved TFLOPS 11.51 → 117.42). `benchmark_grouped_mm.py` reports the raw `grouped_mm` backward as unavailable and estimates its fwd+bwd row from the forward ratio, so there is no measured fwd+bwd figure. The ratio scales with expert count (more launches saved). These are launch-dominated; end-to-end is far smaller.
 
 **End-to-end** the launch saving is worth most at small batch and narrows as per-expert GEMMs grow (the Qwen3-30B EP=2 row below).

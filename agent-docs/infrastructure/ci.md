@@ -47,8 +47,9 @@ a 1 MB file-size cap (optional: `pipx install pre-commit`, then `pre-commit inst
 ## Self-hosted tier
 
 `cpu-tests.yml` asserts the image is present and runs `make test-cpu` (the image without `--gpus`, so it
-does not contend with GPU jobs on the runner) in one pytest process, about 1.5 hours under a 120-minute
-cap, uploading its JUnit XML.
+does not contend with GPU jobs on the runner) in one pytest process, uploading its JUnit XML. One process
+takes about 3.5 to 4.8 hours (estimated from samples), past the workflow's 120-minute cap, so a dispatched
+run times out.
 
 `gpu-tests.yml` asserts the image (`halo:blackwell` by default) and runs
 `make test-gpu-core ENV_FILE= AWS_DIR=`: creds-free, `-m "gpu and core"`, JUnit XML as an artifact. Once
@@ -112,9 +113,13 @@ The scope Halo 1.2.0 is validated on:
 - **Multi-node:** two B300 nodes over EFA for the two PP recipes (training; the Qwen3-8B one also a
   per-node save, resume, merge and load) and cross-node `ep16`; the rest is a two-node simulation on one
   host ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).
-- **Upgrades:** checkpoints written by 1.1.0 resume with the optimizer restored exactly, and export and
-  merge: FSDP2 full fine-tuning, LoRA adapters, EP gathered saves, EP sharded saves after
-  `merge_ep_shards.py`, and async GRPO whose prefetched rounds hold plain prompts and answers.
+- **Model size:** full-size checkpoints ran up to Qwen3.5-35B-A3B (`ep8`), plus a few full-depth EP8 LoRA
+  steps of Qwen3.8-Flash-Next. Larger recipes did not run on 1.2.0; gpt-oss-120b and Qwen3.5-122B-A10B at
+  EP8 last ran on earlier code.
+- **Upgrades:** checkpoints written by 1.1.0 resume with the optimizer restored (step counters continue, every
+  second moment carries over, losses continue), and export and merge: FSDP2 full fine-tuning, LoRA adapters, EP
+  gathered saves, EP sharded saves after `merge_ep_shards.py`, and async GRPO whose prefetched rounds hold plain
+  prompts and answers.
 
 ## Contribution gate
 

@@ -7,7 +7,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 ## Foundations
 
 - **[GPU training theory](../reference/gpu-training-theory.md)** — The roofline, training-step bottlenecks, and why each kernel exists — every number measured on Blackwell (B300).
-- **[Throughput benchmarks](throughput-benchmarks.md)** — tokens/s/GPU and achieved TFLOPS on B300 across parallelism modes, sequence lengths, and model sizes.
+- **[Throughput benchmarks](throughput-benchmarks.md)** — 1.2.0 against 1.1.0 on twelve shapes, then tokens/s/GPU and achieved TFLOPS on B300 across parallelism modes, sequence lengths, and model sizes.
 - **[Halo vs stock TRL](halo-vs-stock-trl.md)** — The same gpt-oss-20b run under upstream `trl.SFTTrainer` with native FSDP, at matched model, data, and kernels.
 
 ---

@@ -54,6 +54,8 @@ It drops the dense `attention_mask` (packed rows store none; `coordinated_pack` 
 
 On a flash run (the resolved backend `select_data_collator` reads) it also hands attention that varlen set on every multi-document row: `cu_seq_lens_q`/`cu_seq_lens_k` and host-int `max_length_q`/`max_length_k`, the values transformers would derive from the position IDs. No attention layer then re-derives them — a packed-row check, a `nonzero` and a max length read back, each a device sync, per layer — and a gradient-checkpointing recompute, reentrant or not, re-runs attention on the same set. A one-document row follows [One-document batches](#one-document-batches). PP's kept rows carry none: the schedule splits only batch-dim tensors, so each pipeline stage builds the set, and the segment markers its conv / linear-attention layers read, per microbatch instead ([PP packing](../parallelism/pipeline-parallelism.md#packing)).
 
+On packed Qwen3-8B SFT under FA4 and FSDP2 (8× B300, s4096, 1.2.0, five rounds) the set takes a step from 310 host syncs to 24 and runs 9.5% faster (13,141 → 14,391 tok/s/GPU), step-1 and step-2 loss identical.
+
 Inter-row padding is dropped in the flatten. A pad carries position 0, so every kept pad would be its own varlen segment, and the FA4 backward pays a fixed per-segment cost.
 
 Where pads must survive (a fixed-shape batch), the tail's position IDs are a ramp restarting every `PAD_TAIL_SEGMENT_CHUNK` (256) tokens, keeping it a handful of no-op segments.

@@ -650,7 +650,10 @@ Both reads of a resume (this rank's shard and, for a follower, the writer's) run
 `max_concurrent_loading` throttle, which every rank enters
 ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)). So does the save: each rank's
 host copy of its state lives from the offload to the end of its shard write inside the throttle, so a node
-holds at most that many copies at once, and the low-RAM warning estimates that many.
+holds at most that many copies at once, and the low-RAM warning estimates that many. A resume's reads are
+staggered but its copies are not: each rank keeps its state until the collective apply, so a node holds all
+of them whatever `max_concurrent_loading` is. The warning under-counts there, and lowering the knob does not
+help.
 
 Every restore verdict is rank-uniform — all ranks restore, warm-restart or raise together:
 

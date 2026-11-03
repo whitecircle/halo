@@ -106,7 +106,7 @@ Packing isolates the full-attention layers via the packed mask, and `Qwen3_5MoeG
 Examples under `examples/sft/qwen3_5/`:
 
 - `qwen3.5-35b-a3b-ultrachat-ep.yaml`.
-- `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 single-node, or EP=16 with `ep_scope: global` across two Hopper nodes; it keeps the experts bf16 (`fp32_experts` off), since fp32 expert masters fit the 35B shape but OOM at 122B.
+- `qwen3.5-122b-a10b-ep.yaml` scales the same shape to 122B-A10B at EP=8 single-node. It is also sized for EP=16 with `ep_scope: global` across two Hopper nodes, which has not run. It keeps the experts bf16 (`fp32_experts` off), since fp32 expert masters fit the 35B shape but OOM at 122B.
 - VLM SFT on Qwen3.5-9B: `qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
 
 Online GRPO smoke: `examples/grpo/online/qwen3_5/online-grpo-qwen3.6-35b-a3b-smoke.yaml`. Async GRPO with Environments: `examples/grpo/environmental/qwen3_5/vllm/` plus the `sglang/` ep1 siblings; both pinned engines read the fused expert pair the gather emits, so either `rollout_backend` takes the weight sync ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)).

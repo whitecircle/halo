@@ -58,7 +58,7 @@ The combined modes follow the columns: EP+CP runs where EP and CP both do, EP+TP
 
 ¹² Experimental: EP, pure ETP and EP+ETP pass GPU tests on tiny models; a GPU test also trains, exactly resumes and exports the release cut to four layers under EP8, and at full depth only a few EP8 LoRA steps have run. Text rows, packed rows isolated per document under the toolkit's tiled QSA; the n-gram table stays in host memory and every gathered save writes it ([Qwen3.8-Flash-Next](qwen4_exp.md#n-gram-table)).
 
-¹³ Tiny-model GPU tests only: no released checkpoint is trained under PP here. Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
+¹³ Tiny-model GPU tests, plus a 20-step Qwen3-30B-A3B correctness smoke on Qwen3 MoE: no released checkpoint is otherwise trained under PP here. Per-family balancing under PP: [Model support](../parallelism/pipeline-parallelism.md#model-support).
 
 ¹⁴ Full fine-tuning with `moe_balancing: none`: PP refuses adapters, the split severs `aux_loss`, and the router has no bias slot ([Qwen3.8-Flash-Next](qwen4_exp.md#pipeline-parallelism)).
 

@@ -7,10 +7,7 @@ are the opt-in sharded EP save, a PP save on per-node storage, and LoRA
 adapters.
 
 Every save uses the tensor names of the checkpoint the run loaded, vision towers
-included. FSDP2, CP and TP saves also keep its expert layout. An EP save writes
-the family's own expert layout: per-expert where the serving engines need it,
-fused for Qwen3.5/3.6, DeepSeek-V4, Cohere2 MoE and GLM-5 Next, and the hub
-layout for Step-3.7 Flash
+included, and an EP save writes the family's own expert layout
 ([details](../agent-docs/reference/checkpoints.md#serving-on-vllm--sglang) ↗).
 
 | Training mode | Output | Load directly? |
@@ -31,9 +28,8 @@ model faster. Run `halo run merge-ep-shards` before the checkpoint can be used;
 the merged directory carries every rank's optimizer shard, so it also resumes
 exactly on the topology that wrote it.
 It needs one EP group spanning all ranks, no CP, ETP or expert LoRA, a shared
-filesystem across nodes, and a supported family
+filesystem across nodes and a supported family, all checked at startup
 ([full list](../agent-docs/reference/checkpoints.md#expert-parallelism-ep-eptp-epcp) ↗).
-These are checked at startup.
 
 ## Resume
 
@@ -52,22 +48,27 @@ hand-built model.
 
 A save is safe to interrupt: `save_total_limit` never deletes a checkpoint
 before its successor is complete. LoRA runs restore the adapters onto the base,
-and MoE router-balancing state is saved and restored automatically.
-`load_best_model_at_end` is refused at startup on a full fine-tune whose
-end-of-run reload cannot work: under CP, on an MoE with EP layers, and under TP
-with more than one data-parallel replica
+and MoE router-balancing state is restored automatically. Checkpoints from Halo
+1.1.0 resume on this release; merge a sharded EP save first.
+`load_best_model_at_end` is refused on a full fine-tune under CP, on an MoE with
+EP layers, and under TP with several replicas
 ([full mechanics](../agent-docs/reference/checkpoints.md#resuming-training) ↗).
 
 ## Per-node PP saves
 
 On per-node storage (`DIST_OUTPUT_SHARED_FILESYSTEM=0`) a PP save leaves each
-node only the parts of the stages it ran, beside the full index, and only its
-own ranks' optimizer and RNG state. Each node resumes from its own directory as
-long as the topology and node ranks stay the same. To load, serve or upload the
-result, copy every node's directory onto one host and run `halo run
-merge-pp-stages --input_dir <node0 dir> <node1 dir> --output_dir <merged dir>`;
-it refuses a part or a rank's optimizer shard no directory holds. The merged
-directory also resumes exactly on the same topology
+node only its own stages' parts and its own ranks' optimizer state. Each node
+resumes from its own directory while the topology and node ranks stay the same.
+To load, serve or upload the result, copy every node's directory onto one host
+and merge them:
+
+```bash
+halo run merge-pp-stages --input_dir /copies/node0/checkpoint-500 \
+    /copies/node1/checkpoint-500 --output_dir /models/merged
+```
+
+The merge refuses a missing part or optimizer shard, and the merged directory
+also resumes on the same topology
 ([Per-node export](../agent-docs/parallelism/pipeline-parallelism.md#per-node-export) ↗).
 
 ## Post-processing tools
@@ -88,9 +89,8 @@ flags.
 | `reattach-vision-tower` | restore the vision tower, MTP head and processor files to a `text_only_model` export; SGLang needs it for a Qwen3.8-Flash-Next export |
 
 The tools write to a new directory (only `reset-sinks` takes `--in_place`) and
-reject a sharded EP save until `merge-ep-shards` has run. The conversions keep a
-run's resume files except the optimizer shards, which only `merge-ep-shards` and
-`merge-pp-stages` carry. Flags and input guards:
+reject a sharded EP save until `merge-ep-shards` has run. Only `merge-ep-shards`
+and `merge-pp-stages` carry the optimizer shards. Flags and input guards:
 [Scripts reference](../agent-docs/reference/scripts-reference.md#post-training-scripts) ↗.
 
 ## Serving the result
@@ -105,7 +105,9 @@ only where the pinned engine reads that family's layout:
   and GLM-5 Next and DeepSeek-V4 after `unfuse-moe-experts`. The exports use the
   hub's names, but no engine has served one.
 - **Every other family** serves its normal save as is, except a Cohere2 MoE
-  (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first.
+  (Command A+) EP save on SGLang: rewrite it with `unfuse-moe-experts` first. On
+  1.2.0, of the trained full-size exports, only Gemma 4's has been served, on both
+  engines.
 - **Fused experts on a per-expert-only loader** are refused or dropped without
   an error. Rewrite such a checkpoint with `unfuse-moe-experts` first; the result
   is the hub's own layout
@@ -144,20 +146,17 @@ weights:
 For a LoRA run, upload the adapter directory, or merge it with
 `merge-peft-adapters` for a standalone model.
 
-The inherited `push_to_hub` / `hub_strategy` upload is not tested end to end.
-It pushes `output_dir` from global rank 0 once each checkpoint is complete,
-minus the `checkpoint-*` and `_`-prefixed entries: the model files,
-`log/run.log` and, for online or async GRPO, the `completions/` prompts. `hub_strategy: checkpoint` or `all_checkpoints` also
-uploads training state; `end` uploads nothing
+The inherited `push_to_hub` / `hub_strategy` upload is not tested end to end. It
+pushes `log/run.log` and, for online or async GRPO, the `completions/` prompts
+along with the model files, and `hub_strategy: checkpoint` or `all_checkpoints`
+also uploads training state
 ([details](../agent-docs/reference/checkpoints.md#interrupted-saves) ↗).
 
 ### Model card
 
-Every checkpoint Halo writes, full model, adapter or tool output, holds a
-`README.md` model card tagged `halo`, so the upload lists under that Hub tag.
-Before you publish, fill in its body and replace a local-path `base_model` with
-the Hub id. A tool whose source card has malformed metadata copies that card
-untagged and warns.
+Every checkpoint Halo writes holds a `README.md` model card tagged `halo`, so the
+upload lists under that Hub tag. Before you publish, fill in its body and replace
+a local-path `base_model` with the Hub id.
 
 Shard layouts, merge flags and the full resume mechanics:
 [Checkpoints](../agent-docs/reference/checkpoints.md) ↗ ·

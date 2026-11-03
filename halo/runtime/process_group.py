@@ -72,9 +72,9 @@ def _require_rendezvous_env() -> None:
     raise RuntimeError(
         f"The launcher declares world_size={launcher_global_world_size()} but {missing} is unset, so "
         f"no process group can be built. Bare 'srun --ntasks-per-node=N' provides no env:// "
-        f"rendezvous: launch one torchrun per node instead — 'srun --ntasks-per-node=1 torchrun "
-        f"--nnodes=$SLURM_NNODES --node_rank=$SLURM_NODEID --nproc_per_node=N "
-        f"--master_addr=<head> --master_port=<port> <script> <config>' — or export MASTER_ADDR / "
+        f"rendezvous: launch one torchrun per node instead — 'srun --ntasks-per-node=1 bash -c \"torchrun "
+        f"--nnodes=\\$SLURM_NNODES --node_rank=\\$SLURM_NODEID --nproc_per_node=N "
+        f"--master_addr=<head> --master_port=<port> <script> <config>\"' — or export MASTER_ADDR / "
         f"MASTER_PORT identically on every task (see agent-docs/parallelism/launch-recipes.md)."
     )
 

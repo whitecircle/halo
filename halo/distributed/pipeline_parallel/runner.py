@@ -87,17 +87,16 @@ def resolve_microbatch_count(
             f"{gradient_accumulation_steps} are both set: under PP the microbatches ARE the "
             f"accumulation, so the accumulation would be silently discarded. Set exactly one of them."
         )
-    n_microbatches = config.pp_microbatches or gradient_accumulation_steps
-    if config.pp_schedule == "1f1b" and n_microbatches < config.pp_size:
-        if is_global_main_process():
-            logger.warning(
-                "pipeline_microbatches=%d is below pipeline_parallel_size=%d (Schedule1F1B needs a full "
-                "pipeline); raising to %d.",
-                n_microbatches,
-                config.pp_size,
-                config.pp_size,
-            )
-        n_microbatches = config.pp_size
+    requested = config.pp_microbatches or gradient_accumulation_steps
+    n_microbatches = config.pp_microbatch_count(gradient_accumulation_steps)
+    if n_microbatches != requested and is_global_main_process():
+        logger.warning(
+            "pipeline_microbatches=%d is below pipeline_parallel_size=%d (Schedule1F1B needs a full "
+            "pipeline); raising to %d.",
+            requested,
+            config.pp_size,
+            n_microbatches,
+        )
     if n_microbatches < _BUBBLE_WARN_FACTOR * config.pp_size and is_global_main_process():
         logger.warning(
             "pipeline_microbatches=%d gives a large pipeline bubble at pipeline_parallel_size=%d (idle "

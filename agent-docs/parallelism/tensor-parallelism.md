@@ -194,6 +194,9 @@ the SUM, in the matmul's dtype, where DTensor added `bias / tp_size` to each ran
 biased `o_proj` differs in the last bit (`tests/cpu/parallelism/test_tp_local_linears.py`: every TP family
 of the tiny roster at TP 2, both plans under FSDP2 at dp 2 × tp 2 and under activation checkpointing).
 
+Against DTensor dispatch on 8× B300 at s4096 (1.2.0, three rounds), Qwen3-8B TP2 runs **57.5%** faster with the
+step-1 loss bitwise and gpt-oss-20b ep8 × tp2 11.0% faster.
+
 ## Quick start
 
 ```bash

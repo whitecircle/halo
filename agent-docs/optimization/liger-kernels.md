@@ -389,7 +389,7 @@ The EP MoE layer's own clamped-SwiGLU is independent of Liger: every path — pe
 
 ## Benchmarks
 
-Both measured on the Blackwell image.
+Both measured on the Blackwell image, Halo 1.1.0 or earlier. The host-time figure below is from 1.2.0, on Liger 0.8.4.
 
 **Dense — 1× B300 (SM103), Qwen3-8B, GC on, seq 16384, batch 1:** Liger+CE gives 15,966 vs 11,746
 tokens/s/GPU (**+36%**) at 64.6 vs 78.6 GiB peak (**−14 GiB**).

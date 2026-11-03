@@ -102,7 +102,7 @@ rank), the custom path by DP rank (ranks in a TP/CP group share a batch):
 
 ![Standard dataloader path: with no TP/CP/ETP and no pre-sharded dataset the base Trainer's loader goes through accelerator.prepare with num_processes = world_size, so BatchSamplerShard hands each of the 16 ranks its own batch](../assets/diagrams/dataloader_standard.png)
 
-![Custom dataloader path: under TP/CP/ETP or a pre-sharded dataset the loader passes num_processes = data_parallel_size and process_index = dp_rank, so at tp 2 on 16 ranks the eight TP pairs read eight distinct batches](../assets/diagrams/dataloader_custom.png)
+![Custom dataloader path: under TP/CP/ETP/PP or a pre-sharded dataset the loader passes num_processes = data_parallel_size and process_index = dp_rank, so at tp 2 on 16 ranks the eight TP pairs read eight distinct batches](../assets/diagrams/dataloader_custom.png)
 
 ## Per-trainer sampling
 

@@ -5,11 +5,29 @@ help at MoE shapes.
 
 ## Rough numbers
 
-On 8× B300 with the Blackwell image, Halo 1.1.0 trains GPT-OSS 20B at about
-28,700 tokens/s per GPU at `ep1` (batch 4 × 4096, no checkpointing) and
-Qwen3.5-35B-A3B at about 16,400 at `ep2` with checkpointing on. Every measured
-shape, from one dense GPU to 32k-token EP + CP, is in
-[Throughput Benchmarks](../agent-docs/optimization/throughput-benchmarks.md) ↗.
+Wall-clock throughput on 8× B300 with the Blackwell image, at batch 1, 4,096
+tokens and gradient checkpointing on:
+
+| Shape | Halo 1.2.0, tok/s/GPU | vs 1.1.0 |
+| --- | ---: | ---: |
+| Qwen3-8B FSDP2 | 15,490 | 1.11× |
+| Qwen3-8B CP2 | 8,748 | 1.15× |
+| Qwen3-8B TP2 | 7,013 | 1.82× |
+| GPT-OSS 20B EP1 | 14,304 | 1.29× |
+| GPT-OSS 20B EP8 | 11,896 | 1.15× |
+| GPT-OSS 20B EP4 + ETP2 | 9,521 | 2.07× |
+| Qwen3.5-35B-A3B EP8 | 8,974 | 1.14× |
+
+No shape of the twelve benchmarked against 1.1.0 ran slower. Peak memory matched
+1.1.0 within 0.1 GiB or dropped, except FSDP2 (+0.36 GiB) and EP1 (+1.54 GiB), which
+hold two decoder layers per shard group. A bigger batch goes
+much higher: on 1.1.0, GPT-OSS 20B reached about 28,700 at `ep1` (batch 4, no
+checkpointing) and Qwen3.5-35B-A3B about 16,400 at `ep2` (batch 4, checkpointing
+on). Pipeline parallelism across two nodes reaches 17,740 on Qwen3-8B
+(`pp2`) and 15,500 on GPT-OSS 20B (`pp2 × ep8`), without checkpointing. More
+shapes:
+[Throughput Benchmarks](../agent-docs/optimization/throughput-benchmarks.md) ↗ ·
+[Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput) ↗.
 
 In short:
 
@@ -21,7 +39,7 @@ In short:
 Before you judge a number, check `M = per_device_train_batch_size × max_length`.
 On a B300 MoE run it should be at least ~8k; below that the step is
 latency-bound. Set `enable_efficiency_metrics: true` to log tokens/s/GPU in your
-own run.
+own run; it counts a batch that TP, ETP, CP or PP ranks share once.
 
 ## Levers that help
 
@@ -40,19 +58,14 @@ Set these per run:
   step time on full-attention layers
   ([Tree Packing](../agent-docs/optimization/tree-packing.md) ↗).
 - **`liger_kernel_config: {fused_linear_cross_entropy: true}`** past ~16k
-  tokens, which trades a little speed for a lot of logits memory. Under
-  context parallelism the CP wrapper runs it over each rank's chunk.
+  tokens, which trades a little speed for a lot of logits memory.
 - **`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`** in front of a dense
-  launch: 13–14% less peak reserved memory at the same speed, which is why the
-  dense SFT, DPO and SMPO examples carry it. Under EP it costs throughput, so
-  set it there only to fit
+  launch: 13–14% less peak reserved memory at the same speed. Under EP it costs
+  throughput, so set it there only to fit
   ([Allocator](../agent-docs/optimization/throughput-benchmarks.md#allocator-expandable-segments) ↗).
-- **`torchrun --numa-binding node`** on a multi-socket host: each rank runs on
-  the CPUs next to its GPU. Host-bound runs (TP, CP, small-batch EP) gain up to
-  ~3%; GPU-bound runs are flat.
-  `halo launch <method> <config> -n 8 --numa-binding node` passes it to
-  `torchrun`; an `accelerate` or single-process launch has no NUMA binding and
-  refuses the flag
+- **`--numa-binding node`** on `torchrun` or `halo launch` on a multi-socket
+  host: each rank runs on the CPUs next to its GPU. Host-bound runs (TP, CP,
+  small-batch EP) gain up to ~3%; GPU-bound runs are flat
   ([NUMA binding](../agent-docs/optimization/throughput-benchmarks.md#numa-binding) ↗).
 - **`fsdp_defer_grad_sync: true` with `fsdp_reshard_after_backward: false`**
   under gradient accumulation: one gradient reduce and one re-gather per
@@ -60,13 +73,12 @@ Set these per run:
 - **`use_chunked_grpo_logprobs: true`** on GRPO when the full logits do not fit.
 
 On by default: grouped GEMM for MoE experts, Flash Attention 4 on Blackwell,
-Liger, `AdamWBF16` (6 bytes per parameter instead of 12), the atomic-free
-expert permute and its sync-free routing sort, the fused MoE path
-(`HALO_FUSED_GLU=0` turns off its GLU kernels), TP linears on their local
-shards, two decoder layers per FSDP2 shard group under ZeRO-2, one Ulysses
+Liger, `AdamWBF16` (6 bytes per parameter instead of 12), the atomic-free expert
+permute and its sync-free routing sort, the fused MoE path, TP linears on their
+local shards, two decoder layers per FSDP2 shard group under ZeRO-2, one Ulysses
 all-to-all for Q, K and V under CP, and `sdpa_flex_sliding` for Gemma 4 and
-Step-3.7 (`HALO_FLEX_SLIDING=0`). Each lever's page carries its
-measurements: [Optimization](../agent-docs/optimization/README.md) ↗.
+Step-3.7. Each lever's page carries its measurements:
+[Optimization](../agent-docs/optimization/README.md) ↗.
 
 ## Levers that do not help here
 
@@ -86,8 +98,8 @@ The fix is a bigger `M`, not a faster kernel.
 
 Halo 1.1.0 trains GPT-OSS 20B at 2.6–3.5× stock TRL (dense and `ep2`) on the
 same 8 B300s, with the same kernels on both sides, and both reach the same
-loss. Most of the gap is structural: expert parallelism, no per-micro-step
-parameter re-gather, and 6-byte optimizer state
+loss. Expert parallelism, no per-micro-step parameter re-gather and 6-byte
+optimizer state make up most of the gap
 ([full comparison](../agent-docs/optimization/halo-vs-stock-trl.md) ↗).
 
 For memory rather than speed, start at [Parallelism](parallelism.md). For a run

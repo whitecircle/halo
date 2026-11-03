@@ -38,7 +38,7 @@ At production MoE shapes — EP degree 8, 256–512 tokens per local expert, exp
 
 ## Throughput scaling: where low precision *would* win
 
-Whether low precision can beat bf16 is a question of tokens per expert. Raising sequence length or batch moves the per-expert GEMM rightward along the roofline toward the compute-bound regime where fp8's 2× tensor-core throughput could pay off. Measured crossover, bf16 ÷ native DeepGEMM time on a single B300 (E=8, forward; **>1.0 means DeepGEMM is faster**):
+Figures on this page are from Halo 1.1.0 or earlier. Whether low precision can beat bf16 is a question of tokens per expert. Raising sequence length or batch moves the per-expert GEMM rightward along the roofline toward the compute-bound regime where fp8's 2× tensor-core throughput could pay off. Measured crossover, bf16 ÷ native DeepGEMM time on a single B300 (E=8, forward; **>1.0 means DeepGEMM is faster**):
 
 | K · N | 256 tok/e | 512 | 1024 | 2048 | 4096 | 8192 | 16384 |
 |-------|----|----|----|----|----|----|----|

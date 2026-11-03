@@ -2,6 +2,8 @@
 
 Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU count per section). tokens/s/GPU is the headline metric (hardware- and sparsity-independent); achieved TFLOPS is the diagnostic. Hopper numbers are not included here. What MFU measures and why MoE complicates it: [GPU Training Theory §11](../reference/gpu-training-theory.md#mfu-and-why-moe-complicates-it).
 
+![Twelve bench shapes on 8× B300: 1.2.0 runs each faster than 1.1.0, from 1.11× on Qwen3-8B FSDP2 to 2.07× on gpt-oss-20b ep4 × etp2, and peak memory moves at most 1.65 GiB](../assets/benchmarks/release_comparison.png)
+
 ## Setup
 
 - **GPU**: B300 SXM6 (288 GB HBM3e, 148-SM die). Peak TFLOPS from the toolkit's registry (`halo/hardware.py`): bf16 **2250 TF**, fp8 4500 TF, fp4 9000 TF; the measured best large square bf16 GEMM is ~1800 TF (80% of peak).
@@ -14,17 +16,59 @@ Throughput (tokens/s/GPU) and achieved-TFLOPS benchmarks on **NVIDIA B300** (GPU
 
     Liger's host time per kernel launch is measured in [Liger → Benchmarks](liger-kernels.md#benchmarks). Its fused linear cross-entropy also reads the batch's non-ignored target count to the host in every forward, a host sync inside each fused-loss micro-batch (upstream; on Halo's paths the count feeds only token accuracy).
 
-- **Release**: every table here was measured on Halo 1.1.0 code or earlier (the framework comparison on the main
-  branch of 2026-09-24), except the NUMA A/B, measured on a 1.2.0 development build. The rows predate 1.2.0's MoE
-  route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP, ep1
-  and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower tok/s
-  than the clock these rows used.
+- **Release**: each section names the release that measured it. [1.2.0 against 1.1.0](#120-against-110) and the
+  NUMA A/B ran on 1.2.0 code; every other table ran on Halo 1.1.0 code or earlier. Those older rows predate 1.2.0's
+  MoE route sort, local-shard TP linears, two-layer FSDP2 units and single Ulysses exchange, which run most EP, TP,
+  ep1 and CP rows faster, and its step clock, which counts the host time between steps and reads 1.4–2.1% lower
+  tok/s than the clock these rows used. Their per-GPU rates count a shared batch once ([Metrics](#metrics)).
 - **Optimizer**: AdamWBF16 with stochastic rounding (6 bytes/param). **Gradient checkpointing** on unless a row says "GC off".
 - **Config**: 3 warmup + 7 measured steps (defaults `--warmup 3 --steps 10`); throughput is the warm-step average from `EfficiencyCallback`. Peak memory is its `torch.cuda.max_memory_allocated`, in GiB (2³⁰ bytes). Both are rank 0's.
 
+## 1.2.0 against 1.1.0
+
+One 8× B300 host, batch 1, gradient checkpointing on, the seeded uniform-token corpus of `make bench`
+([Golden performance baselines](../contributing/README.md#golden-performance-baselines)), each release on its own
+image. Each row is the median of three recorded runs per release after a warm-up, interleaved (six on the Qwen3.5
+s4096 row). The rate is wall clock: tokens per step × steps ÷ the wall time of steps 5–20 ÷ 8 GPUs. Logged
+tok/s/GPU does not compare across the two releases, since 1.1.0's counts a shared TP or ETP batch on every rank of
+its group and its clock leaves out the host time between steps. Peak is the highest rank's allocated peak.
+
+| Shape | 1.1.0 tok/s/GPU | 1.2.0 tok/s/GPU | 1.2.0 / 1.1.0 | Peak GiB, 1.1.0 → 1.2.0 |
+|---|---:|---:|---:|---|
+| Qwen3-8B FSDP2, s4096 | 13,935 | 15,490 | 1.11× | 26.02 → 26.38 |
+| Qwen3-8B CP2, s4096 | 7,635 | 8,748 | 1.15× | 25.07 → 24.00 |
+| Qwen3-8B TP2, s4096 | 3,861 | 7,013 | **1.82×** | 22.53 → 22.53 |
+| gpt-oss-20b ep1, s4096 | 11,114 | 14,304 | 1.29× | 60.29 → 61.83 |
+| gpt-oss-20b ep2, s4096 | 12,121 | 14,107 | 1.16× | 78.97 → 77.32 |
+| gpt-oss-20b ep8 with a gathered save, s4096 | 10,349 | 11,896 | 1.15× | 26.87 → 26.47 |
+| gpt-oss-20b ep8, `ep_buffer_backend: legacy`, s4096 | 8,801 | 9,826 | 1.12× | 26.67 → 26.24 |
+| gpt-oss-20b ep8 × tp2, s4096 | 4,749 | 6,013 | 1.27× | 31.11 → 31.16 |
+| gpt-oss-20b ep8 × cp2, s4096 | 7,501 | 9,085 | 1.21× | 25.18 → 23.58 |
+| gpt-oss-20b ep4 × etp2, s4096 | 4,589 | 9,521 | **2.07×** | 26.14 → 25.75 |
+| Qwen3.5-35B-A3B ep8, s4096 | 7,893 | 8,974 | 1.14× | 43.03 → 41.63 |
+| Qwen3.5-35B-A3B ep8, s16384 | 11,618 | 14,275 | 1.23× | 74.89 → 74.96 |
+
+- No row runs slower on 1.2.0. The comparison covers these twelve shapes only. On the two Qwen3.5 rows the attention
+  backend differs too: SDPA on 1.1.0, FA4's head_dim-256 path on 1.2.0.
+- Peak memory falls or stays within 0.07 GiB, except Qwen3-8B FSDP2 (+0.36 GiB) and gpt-oss-20b ep1 (+1.54 GiB), the
+  cost of [two decoder layers per shard group](../parallelism/data-parallelism.md#shard-groups).
+- The gathered save takes 29.13 s on 1.1.0 and 29.08 s on 1.2.0, at 4.94 and 4.87 GiB peak host RSS.
+- The 1.2.0 arm is the release's code freeze. Later product commits touch pipeline parallelism, messages and log
+  lines, which no row runs.
+
+`make bench BAND=1` holds eight of these shapes and the gathered save to the five-repeat baselines in
+`tests/baselines/bench/`, measured on the code freeze. Same-code A/Bs of the largest changes sit on their owner pages:
+[local-shard TP linears](../parallelism/tensor-parallelism.md#local-shard-linears),
+[ETP grouped GEMM](../parallelism/expert-tensor-parallelism.md#forward-path),
+[two-layer shard groups](../parallelism/data-parallelism.md#shard-groups),
+the [routing sort](grouped-gemm.md#performance),
+the [single Ulysses exchange](../parallelism/context-parallelism.md#how-ulysses-works) and the
+[fused AdamWBF16 step](bf16-optimizer.md#benchmarks). Pipeline parallelism did not run on 1.1.0; its 1.2.0 rates are on
+[its own page](../parallelism/pipeline-parallelism.md#measured-throughput).
+
 ## Full-parameter SFT framework comparison
 
-**Gemma 4 26B-A4B**, 2× B300, BF16, micro-batch 1 per GPU. Every framework trains the same tokens, labels and row
+**Gemma 4 26B-A4B**, 2× B300, BF16, micro-batch 1 per GPU, Halo at its main branch of 2026-09-24. Every framework trains the same tokens, labels and row
 order with the same optimizer hyperparameters, each at its newest release (2026-09-24) in its fastest configuration of
 those tried. Tokens/s are measured over steps 6–25 at 2,048 tokens per row (25 steps) and over steps 6–50 at 16,384
 tokens per row (8 rows packed into one causal sequence, 50 steps); peak memory is `max_memory_allocated`, max over
@@ -75,26 +119,23 @@ The kernels Halo runs for Gemma 4: [Gemma 4](../models/gemma4.md).
 ![Gemma 4 SFT throughput against memory at 2,048 and 16,384 tokens per row](../assets/benchmarks/gemma4_sft_pareto.png)
 
 **Mistral Small 4 119B**, 4× B300, BF16, sequence length 2,048, batch size 1 per GPU, 25 total steps, mean
-of all 20 post-warmup steps:
+of all 20 post-warmup steps, Halo 1.1.0 or earlier:
 
 | model | framework | topology | cluster tok/s | peak GiB/GPU |
 |---|---|---|---:|---:|
 | Mistral Small 4 119B | Halo | DP2, EP2, ETP2 | **7,587** | **207.1** |
 | Mistral Small 4 119B | Axolotl 0.18.0 | FSDP2, eager experts | 380 | 251.0 |
 
-![Mistral Small 4 SFT throughput comparison](../assets/benchmarks/sft_throughput_comparison_mistral4.png)
-
-![Mistral Small 4 SFT throughput against memory](../assets/benchmarks/sft_memory_throughput_pareto_mistral4.png)
+In this run set NeMo AutoModel and TRL ran out of memory near 268 GiB, and Megatron Bridge, MS-SWIFT and Unsloth did not
+support the architecture.
 
 Halo's trace runs synthetic tokens (its run JSON records `"dataset_group": "halo_synthetic"`), so its loss and gradient-norm curves
 are numerical-health evidence, not a convergence comparison. The raw 20-step traces are in
 `agent-docs/assets/benchmarks/runs/`.
 
-![Mistral Small 4 measured SFT curves](../assets/benchmarks/sft_training_curves_mistral4.png)
-
 ### Published numbers in similar setups
 
-Vendor-reported figures beside Halo's, with the setup stated. The NeMo AutoModel and transformers
+Vendor-reported figures beside Halo's, with the setup stated; Halo's are from 1.1.0 or earlier. The NeMo AutoModel and transformers
 figures ran on H100; the Megatron-LM figures and the last bullet ran on the same B300s as Halo. B300 has
 2.3× the bf16 peak of H100, so read a cross-GPU row as a ceiling on the gap, not the gap.
 
@@ -180,7 +221,7 @@ PP, `1/cp_size` of it under CP).
 
 ## GPT-OSS-20B (8× B300)
 
-**Model**: `unsloth/gpt-oss-20b-BF16` (20.7B total, 32 experts, top_k=4, 3.5B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted. Every table in this section: 8× B300 on the Blackwell image; the gpt-oss-20b ep8 rows (EP+CP and EP+TP included) are the median of two runs from a separate run set.
+**Model**: `unsloth/gpt-oss-20b-BF16` (20.7B total, 32 experts, top_k=4, 3.5B active). Setup: FA4, liger on, grouped-GEMM on (default), AdamWBF16/bf16, GC on, seq 4096 batch 1 unless noted. Every table in this section: Halo 1.1.0 or earlier, 8× B300 on the Blackwell image; the gpt-oss-20b ep8 rows (EP+CP and EP+TP included) are the median of two runs from a separate run set.
 
 ### EP-only (batch scaling)
 
@@ -268,7 +309,7 @@ for balanced throughput/memory, **ep8 b1** for minimum memory, **ep8+cp8** for 3
 
 Throughput is dominated by the effective per-GPU token count `M = per_device_batch_size × sequence_length` —
 bigger `M` amortizes fixed per-step costs (kernel launches, all-to-all latency, optimizer step) until a
-memory wall. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that you are latency-bound.
+memory wall. This section's figures are from Halo 1.1.0 or earlier. **Target `M` ≥ ~8k on B300 MoE before judging throughput**; below that you are latency-bound.
 Cross-node EP is pinned to `M ≤ 8192` by the Gin dispatch ceiling
 ([DeepEP → EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa)) — the floor of this range by
 construction.
@@ -339,7 +380,7 @@ GC-off: communication ≈93% @ s4096 → ≈88% @ s16384). Compute–comm overla
 
 ## Qwen3.5-35B-A3B MoE (8× B300)
 
-**Model**: `Qwen/Qwen3.5-35B-A3B` (35B total, 256 experts, top_k=8, ~3B active). liger on, grouped-GEMM on, AdamWBF16/bf16, GC on. Attention runs **SDPA** in both tables ([Flash Attention](flash-attention.md#model-specific-handling) has the family's backends). Both tables: 8× B300, Blackwell image.
+**Model**: `Qwen/Qwen3.5-35B-A3B` (35B total, 256 experts, top_k=8, ~3B active). liger on, grouped-GEMM on, AdamWBF16/bf16, GC on. Both tables: Halo 1.1.0, 8× B300, Blackwell image, on **SDPA**, that release's default for the family. 1.2.0 trains it on FA4 ([1.2.0 against 1.1.0](#120-against-110), [Flash Attention](flash-attention.md#model-specific-handling)).
 
 ### EP scaling (seq 4096)
 
@@ -368,7 +409,7 @@ Longer sequences amortize the all-to-all at modest memory growth — ep8 is the 
 
 ## Single-GPU dense (1× B300)
 
-`Qwen/Qwen3-4B-Instruct-2507` (4.02B, hidden 2560) and `Qwen/Qwen3-8B` (8.2B, hidden 4096), both 36 layers and dense. Liger on, AdamWBF16/bf16, FA4 (`--attn_implementation flash_attention_4`) on every cell; the FA4/FA2/SDPA/flex comparison lives in [Flash Attention](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell). tok/s/GPU on one B300 (every cell on the same device), mean of two runs that repeat within 0.9%, Blackwell image.
+`Qwen/Qwen3-4B-Instruct-2507` (4.02B, hidden 2560) and `Qwen/Qwen3-8B` (8.2B, hidden 4096), both 36 layers and dense. Liger on, AdamWBF16/bf16, FA4 (`--attn_implementation flash_attention_4`) on every cell; the FA4/FA2/SDPA/flex comparison lives in [Flash Attention](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell). tok/s/GPU on one B300 (every cell on the same device), mean of two runs that repeat within 0.9%, Blackwell image, Halo 1.1.0 or earlier.
 
 | Model | best no-GC (b16×s2048) | s4096 b1 GC | s32768 b1 GC | b4 no-GC memory |
 |---|---:|---:|---:|---|
@@ -383,7 +424,7 @@ Batch is the dominant lever — raise it with GC off while it fits. At a fixed 3
 
 ## Allocator: expandable segments
 
-`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against PyTorch's default caching allocator on B300. Memory here is peak **reserved** memory (what the allocator holds, fragmentation included), not the allocated peak the tables above report.
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` against PyTorch's default caching allocator on B300, Halo 1.1.0 or earlier. Memory here is peak **reserved** memory (what the allocator holds, fragmentation included), not the allocated peak the tables above report.
 
 | Run | Peak reserved, default → expandable | Throughput |
 |---|---|---|
@@ -398,7 +439,7 @@ The dense runs hold 13–14% less, so the dense SFT, DPO and SMPO examples launc
 
 On a multi-socket host, launch with `torchrun --numa-binding node` (or `halo launch <method> <config> -n 8 --numa-binding node`). Each local rank then runs on the CPUs of the NUMA node that holds `cuda:<local_rank>`, which torchrun reads from the host topology (the GPU's PCI `numa_node` in sysfs), so the flag needs no per-host mapping. torchrun intersects that set with the CPUs the process may use (a container `--cpuset-cpus`) and fails the launch when nothing is left.
 
-On 8× B300 with two NUMA nodes, against an unbound launch (two runs per arm): TP2 Qwen3-8B at s4096 gains **3.4%** tok/s/GPU with disjoint run ranges and a narrower spread, Qwen3.5-35B-A3B EP8 at s4096 1.4% (disjoint), and CP2 0.8%, inside the spread. Step-1 loss is bitwise equal and peak memory unchanged. The gain lands on host-bound rows (TP, CP, small-batch EP); GPU-bound rows are flat.
+On 8× B300 with two NUMA nodes, against an unbound launch (a 1.2.0 development build, two runs per arm): TP2 Qwen3-8B at s4096 gains **3.4%** tok/s/GPU with disjoint run ranges and a narrower spread, Qwen3.5-35B-A3B EP8 at s4096 1.4% (disjoint), and CP2 0.8%, inside the spread. Step-1 loss is bitwise equal and peak memory unchanged. The gain lands on host-bound rows (TP, CP, small-batch EP); GPU-bound rows are flat.
 
 Only `torchrun` takes the flag. `halo launch --numa-binding <mode>` takes torchrun's modes and places the flag on its `torchrun` line, ahead of the script; with `--accelerate` or a single process it refuses the flag, since `accelerate launch` and `python` have no NUMA binding. `HALO_DATASET_NUM_PROC`'s default counts each rank's bound CPUs.
 

@@ -1,5 +1,6 @@
 """The parallelism flags a script parses (``ParallelismArguments``) and the ``ParallelismConfig`` they build."""
 
+import math
 from dataclasses import dataclass, field, fields
 from typing import TYPE_CHECKING
 
@@ -382,5 +383,9 @@ def parallelism_config_from_args(
         ep_declared_max_length=bounded_row_length(training_config) or 0,
     )
     config = ParallelismConfig(**kwargs)
+    if config.pp_size > 1:
+        # One MoE forward carries one microbatch, not the whole step.
+        microbatches = config.pp_microbatch_count(getattr(training_config, "gradient_accumulation_steps", 1) or 1)
+        config.ep_rows_per_device = math.ceil(config.ep_rows_per_device / microbatches)
     reject_cross_domain_determinism(config, bool(getattr(training_config, "full_determinism", False)))
     return config

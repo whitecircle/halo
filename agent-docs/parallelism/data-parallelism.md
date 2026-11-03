@@ -84,11 +84,14 @@ host-bound step. A unit ends early where the layers run out (a pipeline stage's 
 next layer's trainable dtype, outside its nested groups, differs from the unit's. FSDP2 shards each parameter on
 its own, so state-dict keys, shapes and placements, the saved weights and optimizer shards, and the weight sync
 are the same at any unit size, and a run resumes across unit sizes, a switch between ZeRO-2 and ZeRO-3 included.
+Against one-layer groups on 8× B300 at s4096 (1.2.0, three rounds): gpt-oss-20b ep1 **+11.3%**, Qwen3-8B CP2 +8.2%,
+gpt-oss-20b ep4 × etp2 +3.2%, Qwen3-8B TP2 +2.1%, gpt-oss-20b ep2 +1.4%, Qwen3-8B FSDP2 +0.8%, gpt-oss-20b ep8 −0.5%.
 
 ZeRO-2 keeps every layer's parameters gathered from its forward to its backward at any unit size, so a unit adds
 gradient memory: until its first layer's backward ends it holds its later layer's unreduced gradients and
 gathered parameters, which a one-layer group would have reduced and freed, and its reduce-scatter buffer, in the
-reduce dtype, spans both layers. ZeRO-3 (`fsdp_reshard_after_forward: true`) keeps one decoder layer per group:
+reduce dtype, spans both layers, which adds 0.36 GiB on Qwen3-8B FSDP2 and 1.54 GiB on gpt-oss-20b ep1 at s4096, about
+one decoder layer of bf16 weights. ZeRO-3 (`fsdp_reshard_after_forward: true`) keeps one decoder layer per group:
 FSDP2 holds the running group and the one its prefetch gathers, so units of two would gather four layers at the
 backward's peak instead of two, the memory ZeRO-3 is chosen to save.
 
@@ -193,8 +196,8 @@ multi-group EP) rows of `tests/gpu/trainers/sft/test_sft_fsdp_defer_grad_sync.py
 stays within about 4e-4 of the default and the final weights within about 2% of their movement,
 under the 1.2e-3 loss spread between DP and HSDP (both correct) on the same data.
 
-Measured with packed `sft.py` (4k tokens, batch 2, gradient checkpointing, B300; tok/s/GPU, peak allocated
-in GiB). The two GA 4 rows on one 8-GPU node are single runs from a separate run set, whose tok/s the trainer logs to
+Measured on Halo 1.1.0 or earlier with packed `sft.py` (4k tokens, batch 2, gradient checkpointing, B300; tok/s/GPU,
+peak allocated in GiB). The two GA 4 rows on one 8-GPU node are single runs from a separate run set, whose tok/s the trainer logs to
 four significant figures; the other rows are the mean of 3 runs unless noted:
 
 | Run | GA | default | `fsdp_defer_grad_sync` | + `fsdp_reshard_after_backward: false` | peak allocated |

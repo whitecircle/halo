@@ -75,7 +75,7 @@ python -c "from huggingface_hub import snapshot_download; snapshot_download('uns
 
 | Setup | EP | CP | TP | Scope | DP | Flags |
 |-------|----|----|-----|-------|----|-------|
-| Node-local EP (default) | 8 | 1 | 1 | `node` | 16 | `--expert_parallel_size=8 --ep_scope=node` |
+| Node-local EP (default) | 8 | 1 | 1 | `node` | 16 | `--expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true` |
 | Long sequence (8K+) | 8 | 8 | 1 | `node` | 2 | `+ --context_parallel_size=8 --packing=false` (CP refuses packing) |
 | Cross-node EP | 16 | 1 | 1 | `global` | 16 | `--expert_parallel_size=16 --ep_scope=global` |
 | EP+TP (max memory efficiency) | 16 | 1 | 8 | `global` | 2 | `+ --tensor_parallel_size=8` |
@@ -109,7 +109,7 @@ torchrun \
     --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
     --master_addr=$MASTER_ADDR --master_port=$MASTER_PORT \
     scripts/training/sft.py examples/sft/gptoss/gptoss-20b-multinode-ep.yaml \
-    --expert_parallel_size=8 --ep_scope=node \
+    --expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true \
     --output_dir=/workspace/checkpoints/run-001
 ```
 

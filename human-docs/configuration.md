@@ -47,10 +47,10 @@ Notes on the ones that cause trouble:
 
 - **`attn_implementation`**: most examples pin it; keep the pin when you copy.
   Left unset, SFT and self-distillation pick the backend for your GPU and model
-  (FA4 on Blackwell, FA3 on Hopper). Preference, reward, classification, teacher
-  distillation and GRPO take the same pick on Blackwell and default to SDPA on
-  other GPUs. Embedding takes the GPU pick under EP or
-  TP and the transformers default otherwise. Per-family exceptions are in the
+  (FA4 on Blackwell, FA3 on Hopper). The padded-batch scripts (preference, reward,
+  classification, teacher distillation, GRPO) take the same pick on Blackwell and
+  default to SDPA on other GPUs. Embedding takes the GPU pick under EP or TP and
+  the transformers default otherwise. Per-family exceptions are in the
   [Supported matrix](supported-matrix.md#attention-backends).
 - **`model_revision`** pins a Hub commit.
 - **`lora_target_modules`**: a list names modules, one entry or many (`[o_proj]`
@@ -98,9 +98,7 @@ YAML and command line leave the field unset:
 - `use_liger_kernel: true`.
 - `logging_nan_inf_filter: false`. The upstream filter logs the running average
   in place of a NaN, which hides the step where a run diverged.
-- `accelerator_config: {non_blocking: true}` while batches are pinned
-  (`dataloader_pin_memory` not `false`, `use_cpu` off), merged into an
-  `accelerator_config` you set without overriding its keys. A pinned batch then
+- `accelerator_config: {non_blocking: true}` while batches are pinned, so a batch
   copies to the GPU without waiting for the queued kernels.
 
 The trainers also never apply an optimizer step whose gradient norm is NaN or

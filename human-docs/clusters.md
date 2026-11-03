@@ -26,8 +26,9 @@ parallelism flag.
 - The image must already be on every node, pulled or built with `make build-*`.
   Flash Attention and DeepEP are compiled into it; a bare-host install is not
   supported.
-- On SLURM, launch with `--ntasks-per-node=1` and pass `$SLURM_NODEID` as the
-  node rank: one torchrun per node, not one per GPU.
+- On SLURM, run one torchrun per node, not one per GPU: `--ntasks-per-node=1`
+  and `srun bash -c 'torchrun --nnodes=$SLURM_NNODES --node_rank=$SLURM_NODEID ...'`.
+  Without the single quotes every task gets node rank 0.
 
 ## Storage
 
@@ -37,10 +38,8 @@ parallelism flag.
   does the downloads; each rank writes its own optimizer shard.
 - **`0`: per-node local disk** (RunPod pods, ephemeral NVMe). Each node saves its
   own copy. Resume needs no copying as long as every node keeps its
-  `--node_rank`, since optimizer shards stay on the node that wrote them. Resume
-  on per-node storage is validated on two machines for the Qwen3-8B
-  pipeline-parallel recipe, and on one host simulating two nodes for the rest
-  ([Validation](supported-matrix.md#validation)).
+  `--node_rank`, since optimizer shards stay on the node that wrote them
+  ([what has run on real machines](supported-matrix.md#validation)).
 
 A multi-node run checks the declarations against `output_dir` and the HF caches
 at startup and refuses one that contradicts the mount. One input declaration
@@ -73,10 +72,9 @@ Other rules for multi-node storage:
 
 ## Network fabric
 
-InfiniBand and RoCE run on the NCCL defaults in the image. Real multi-node runs
-have used EFA only, and none ran on this release
-([Validation](supported-matrix.md#validation)). Three setups need extra
-environment:
+InfiniBand and RoCE run on the NCCL defaults in the image, though every real
+multi-node run has used EFA ([Validation](supported-matrix.md#validation)). Three
+setups need extra environment:
 
 - **AWS EFA.** Set `NCCL_NET_PLUGIN=ofi NCCL_NET=Libfabric` and pass `--device
   /dev/infiniband`; cross-node expert parallelism also needs `NCCL_GIN_TYPE=2`
@@ -107,8 +105,9 @@ On 2×8 GPUs, `ep8 + tp2` forms two EP groups and is rejected at config time;
 
 ## Pipeline parallelism across nodes
 
-PP puts one stage per node, so only the boundary activations cross nodes; two
-recipes ship, each for 2 × 8 GPUs and launched as above:
+PP puts one stage per node, so only the boundary activations cross nodes. Two
+recipes ship, each for 2 × 8 GPUs and launched as above, both without gradient
+checkpointing:
 
 ```bash
 torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
@@ -117,17 +116,11 @@ torchrun --nnodes=2 --node_rank=$NODE_RANK --nproc_per_node=8 \
 ```
 
 `examples/sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml` adds EP inside each
-stage. With `DIST_SHARED_FILESYSTEM=0` each node saves only its own stage's
-parts: copy both nodes' checkpoint directories onto one host and merge them
-before loading the result.
-
-```bash
-halo run merge-pp-stages --input_dir /copies/node0/checkpoint-500 \
-    /copies/node1/checkpoint-500 --output_dir /models/merged
-```
-
-Only registered families split
-([Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md) ↗).
+stage. Both set `save_only_model: true`, so pass `--save_only_model=false` to
+resume with the optimizer. On per-node storage, merge the nodes' directories
+before you load the result
+([Per-node PP saves](checkpoints.md#per-node-pp-saves)). What PP covers and
+refuses: [Parallelism](parallelism.md#pipeline-parallelism).
 
 ## HSDP
 
@@ -151,7 +144,7 @@ rank and an engine cannot share one. Layouts, ports and the fabric setup:
 
 `launcher-configs/skypilot/{aws,nebius}/{nodelocal,crossnode}-ep.yaml` launch
 GPT-OSS 120B, one task per cloud fabric and EP topology, with rendezvous, fabric
-setup and storage mounts; the [preset table](../agent-docs/infrastructure/skypilot.md#presets)
+setup and storage mounts; the [preset table](../agent-docs/infrastructure/skypilot.md#presets) ↗
 retargets them to the other shipped models at launch:
 
 ```bash

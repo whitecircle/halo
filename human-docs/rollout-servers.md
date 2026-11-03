@@ -34,10 +34,10 @@ the server image of the same Halo release as the trainer, which refuses a vLLM
 server older than 0.32.0.
 
 `docker-compose.vllm.yml` already passes the flags RL depends on. You normally
-set `VLLM_MODEL`, `VLLM_CUDA_DEVICES` (never overlapping `TRAINER_CUDA_DEVICES`),
-`VLLM_TP` to match the device list, `VLLM_GPU_MEM`, `VLLM_TOOL_PARSER` (below),
-`VLLM_REASONING_PARSER` when the run caps reasoning, and `VLLM_CHAT_TEMPLATE` to
-the trainer's `chat_template:` file. Every variable and its default:
+set `VLLM_MODEL`, `VLLM_CUDA_DEVICES`, `VLLM_TP` to match the device list,
+`VLLM_GPU_MEM`, `VLLM_TOOL_PARSER` (below), `VLLM_REASONING_PARSER` when the run
+caps reasoning, and `VLLM_CHAT_TEMPLATE` to the trainer's `chat_template:` file.
+Every variable and its default:
 [Rollout Servers → vLLM](../agent-docs/infrastructure/rollout-servers.md#vllm) ↗.
 
 ### Tool parsers
@@ -137,26 +137,22 @@ halo run weight-sync-transport --server_url http://<server>:8000 --backend vllm 
 
 Async GRPO names one server with `rollout_server_url`, or several with
 `rollout_server_configs` (a list of `{url, group_port}`; two or more turn prefetch
-on by default). Online GRPO dials `vllm_server_host` / `vllm_server_port`: the
-address the **trainer dials**, not a bind address. The weight-sync port,
-bound on the **trainer** host, is `rollout_group_port` for async GRPO (a server
-entry without its own `group_port` takes it plus the entry's index; a
-non-default `vllm_group_port` is refused there) and `vllm_group_port` for Online
-GRPO
+on by default). Online GRPO dials `vllm_server_host` / `vllm_server_port`. The
+weight-sync port binds on the **trainer** host: `rollout_group_port` for async
+GRPO (a server entry without its own `group_port` takes it plus the entry's
+index) and `vllm_group_port` for online GRPO
 ([fields and defaults](../agent-docs/reference/configuration-reference.md#asyncrolloutconfig) ↗).
 
 - **Group ports are unique across servers**, even on different hosts, because
   all of them bind on the trainer.
-- **Name the trainer's address** if the server cannot reach the trainer's
-  address on the route to it (behind NAT, say): `VLLM_GROUP_HOST` (or
-  `SGLANG_GROUP_HOST`) in the trainer's environment, or a `group_host` entry per
-  server.
-- **Keep the group port private.** It listens on the advertised address only and
-  accepts unauthenticated connections until the trainer closes its
-  communicator, so only trusted hosts should reach it.
-- **NAT is refused.** A trainer the server reaches through NAT or a port mapping
-  is rejected. `HALO_WEIGHT_SYNC_BIND_ALL=1` listens on every interface instead;
-  set it only where no untrusted host can reach the port.
+- **Name the trainer's address** when the server cannot dial back to the one on
+  the route to it (asymmetric routing on a multi-homed host): `VLLM_GROUP_HOST`
+  (or `SGLANG_GROUP_HOST`) in the trainer's environment, or a `group_host` entry
+  per server. The trainer must be able to bind it.
+- **Keep the group port private.** It accepts unauthenticated connections until
+  the trainer closes its communicator, so only trusted hosts should reach it.
+- **NAT or a port mapping is refused.** `HALO_WEIGHT_SYNC_BIND_ALL=1` listens on
+  every interface instead; set it only where no untrusted host can reach the port.
 
 ## What weight sync does
 

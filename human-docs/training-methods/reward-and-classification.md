@@ -47,7 +47,7 @@ halo launch classification examples/classification/qwen3_5/clf-qwen3.5-9b-mage.y
 For imbalanced data set `class_weights`, or `derive_class_weights` on single-label data.
 
 **What to watch.** Rank checkpoints on `accuracy` (`exact_match_accuracy` on multi-label), `f1`, or, on
-single-label runs, `mcc`, which stays honest under class imbalance.
+single-label runs, `mcc`, which holds up under class imbalance.
 
 Every knob, the vision-language reward path and the head roster:
 [Reward modeling](../../agent-docs/training-methods/reward-modeling.md) ↗ ·

@@ -40,6 +40,8 @@ Mention these only to confirm, not as new advice:
 [grouped GEMM](../../agent-docs/optimization/grouped-gemm.md) and its atomic-free permute and fused MoE path,
 [Liger](../../agent-docs/optimization/liger-kernels.md), [FA4 on Blackwell](../../agent-docs/optimization/flash-attention.md),
 [AdamWBF16 with stochastic rounding](../../agent-docs/optimization/bf16-optimizer.md) (auto-off under replicated DDP),
+[two-layer FSDP2 shard groups](../../agent-docs/parallelism/data-parallelism.md#shard-groups),
+[local-shard TP linears](../../agent-docs/parallelism/tensor-parallelism.md#local-shard-linears),
 `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image), and FlexAttention on the masked layers of SDPA runs (Gemma 4, Step-3.7)
 ([`sdpa_flex_sliding`](../../agent-docs/optimization/flash-attention.md#sliding-window-and-wide-head-layers-on-sdpa)).
 
@@ -64,6 +66,10 @@ Mention these only to confirm, not as new advice:
   (when cross-sequence boundaries are undesirable); uniform long rows tie
   ([Padding-free collator](../../agent-docs/optimization/padding-free-collator.md#when-to-use-each)). Rows sharing a long prefix:
   [tree packing](../../agent-docs/optimization/tree-packing.md).
+- **Multi-socket host, host-bound rows (TP, CP, small-batch EP) →** `halo launch … --numa-binding node`, torchrun
+  launches only ([NUMA binding](../../agent-docs/optimization/throughput-benchmarks.md#numa-binding)).
+- **Pipeline parallelism, memory allows →** gradient checkpointing off, on dense stages and under EP alike
+  ([Measured throughput](../../agent-docs/parallelism/pipeline-parallelism.md#measured-throughput)).
 - **Convergence speed (fewer steps to a target loss) →** `optim: muon` on matrix params, at a costlier
   optimizer step and higher peak memory; a convergence lever, not a per-step one
   ([Muon](../../agent-docs/optimization/muon-optimizer.md)).

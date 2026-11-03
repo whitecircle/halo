@@ -76,9 +76,9 @@ warning and falls back to the default.
   `full_determinism` on more than one GPU).
 - **RL code sandboxes:** `HALO_SANDBOX_BACKEND`; the default `local` does not
   isolate the program ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)).
-- **A rollout server dialing back to the trainer:** `VLLM_GROUP_HOST` /
-  `SGLANG_GROUP_HOST` when the server cannot reach the trainer's address on
-  the route to it, behind NAT say ([Rollout servers](rollout-servers.md)).
+- **A rollout server that cannot dial back on the trainer's routed address:**
+  `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`
+  ([Rollout servers](rollout-servers.md#how-the-trainer-finds-it)).
 
 The rollout-server switches in the compose files (`VLLM_ENABLE_R3`,
 `VLLM_SPECULATIVE_CONFIG`, the `*_ATTENTION_BACKEND` pair and others) are

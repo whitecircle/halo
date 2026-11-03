@@ -122,8 +122,8 @@ Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs.
 
 ## Limits
 
-- Pipeline parallelism needs `moe_balancing: none`: the stage split drops the aux loss, and the router has no
-  bias slot.
+- Pipeline parallelism passes tiny-model GPU tests only and needs `moe_balancing: none`, since the stage
+  split drops the aux loss and the router has no bias slot.
 - The general limits apply: LoRA is refused under TP and EP+TP, and expert adapters are refused once
   `expert_tensor_parallel_size > 1`.
 
@@ -131,7 +131,8 @@ Add `--expert_parallel_size=2` to shard the experts across the two trainer GPUs.
 
 The gathered save writes the hub's per-expert layout, which transformers, vLLM and SGLang read
 directly. Smoke-test it with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)).
-Serve it from the [host](README.md#serve-from-the-host) with SGLang on port 30000:
+Neither pinned engine has served a Qwen3-30B-A3B export yet, so check the first one you serve. Serve it
+from the [host](README.md#serve-from-the-host) with SGLang on port 30000:
 
 ```bash
 SGLANG_MODEL="$HALO_SCRATCH/checkpoints/qwen3-30b-a3b-sft" \

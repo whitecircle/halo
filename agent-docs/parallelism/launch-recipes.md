@@ -8,7 +8,7 @@ These recipes assume **N × 8-GPU nodes on an RDMA fabric** (InfiniBand/RoCE or 
 
 One `torchrun` per node, incrementing `--node_rank`. The config sets the parallelism layout — it ships `expert_parallel_size: 16` / `ep_scope: global`, cross-node EP across both nodes — and every parallelism field overrides on the command line:
 
-- **Node-local EP + DP:** `--expert_parallel_size=8 --ep_scope=node`.
+- **Node-local EP + DP:** `--expert_parallel_size=8 --ep_scope=node --use_grouped_gemm=true`. The config pins the per-expert loop for `ep16`, and at `ep8` that loop is 28% slower (14,402 against 20,066 tok/s/GPU on one 8× B300 host).
 
 ```bash
 # Node 0 (master): --node_rank=0 ; Node 1: --node_rank=1
@@ -45,15 +45,17 @@ Ranks must sit `gpus_per_node` per machine in rank order: every node-local EP/CP
 export MASTER_ADDR=$(scontrol show hostname $SLURM_NODELIST | head -n 1)
 export MASTER_PORT=29500
 
-srun torchrun \
+srun bash -c 'torchrun \
     --nnodes=$SLURM_NNODES \
     --node_rank=$SLURM_NODEID \
     --nproc_per_node=$SLURM_GPUS_PER_NODE \
     --master_addr=$MASTER_ADDR \
     --master_port=$MASTER_PORT \
     scripts/training/sft.py \
-    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml
+    examples/sft/gptoss/gptoss-20b-multinode-ep.yaml'
 ```
+
+The single quotes make each task expand its own `$SLURM_NODEID`. Unquoted, the batch shell expands it once, to `0`, so every node claims rank 0 and the rendezvous times out with `DistStoreError`.
 
 ## Other schedulers
 

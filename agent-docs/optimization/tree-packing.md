@@ -44,7 +44,7 @@ token less; nothing is assumed from the text.
 The digest order replaces the dataset's row order, in both splits. The trainer still shuffles packed
 rows every epoch.
 
-The gain is the share of tokens that sit in shared prefixes: a dataset where half the rows share a long
+Measured on Halo 1.2.0. The gain is the share of tokens that sit in shared prefixes: a dataset where half the rows share a long
 prefix with others packs into about 1.4× fewer rows. A tree row costs about what a flat row costs where
 sliding-window layers dominate (GPT-OSS). Qwen3-30B-A3B, where every layer is a full layer in the
 `split` form, pays 10% per step, and Qwen3.5-35B-A3B on FA2 (`gather`) about 7%. That cost grows with the

@@ -241,6 +241,10 @@ copies and nothing stays behind. The directory is named after `--output`, so a r
 output first removes the copies a killed bake left there. Completion-only labels are stored at the integer
 width of `input_ids` (`int32`).
 
+A map's callable is pickled once per map, not per worker task (`_PickledOnceCallable`,
+`halo/data/pipeline/coordinated_map.py`), so a 190-worker bake of `HuggingFaceH4/ultrachat_200k` takes 69 s as chat
+rows and 50 s as packed text.
+
 The pack runs on the `--num_proc` workers too. TRL packs each 1000-row batch on its own, so every worker
 packs whole batches and the artifact holds the same rows at any worker count. Packed rows store no
 `attention_mask` (the packing collator builds its own and drops it), so a packed full-sequence text artifact

@@ -328,8 +328,12 @@ operations (on two 8-GPU B300 nodes NCCL all-to-all reaches ~173 GB/s busbw, yet
 dispatch sits ~100× over what that bandwidth predicts). Three consequences:
 
 - **Fewer cross-node partners per rank is faster.** On 2-node 8× B300 EFA, gpt-oss-20b at **EP=2
-  global** (1 cross-node partner) ran ~2.4× the throughput of EP=16 (8 partners): ≈1210 against ≈510
-  tok/s/GPU, at 16 experts/GPU. Combine EP=2 with `expert_tp_size` to shard those experts back down
+  global** (1 cross-node partner, 16 experts/GPU) ran ~2.4× the throughput of EP=16 (8 partners), in an
+  earlier run at an unrecorded batch shape. `gptoss-20b-multinode-ep.yaml` at EP=16 (one 8,192-token row
+  per rank, `gradient_accumulation_steps: 4`, loop path, `aux_loss`, no gradient checkpointing) runs
+  3,636 tok/s/GPU at 8.97 s/step and a 55.4 GiB rank-0 allocated peak. The PP recipe's 15,500 is not
+  comparable: its dispatch stays on NVLink, with grouped GEMM and `bias_update`. Combine EP=2 with
+  `expert_tp_size` to shard those experts back down
   ([Expert Tensor Parallelism](../parallelism/expert-tensor-parallelism.md#process-groups-epetp-combo));
   the ETP partners share one batch, so tok/s/GPU falls as the ETP width grows.
 - **At most ~8k tokens/rank per dispatch.** Above that a proxy-Gin dispatch **wedges instead of
@@ -342,8 +346,8 @@ dispatch sits ~100× over what that bandwidth predicts). Three consequences:
   NVL72, where cross-node EP rides NVLink), collapses the dispatch latency; the limit is EFA's proxy
   path, not cross-node EP itself.
 
-Node-local FSDP on the same setup runs ~122,000 aggregate tok/s, so reserve cross-node EP for a MoE too
-large for one node.
+Reserve cross-node EP for a MoE too large for one node: the same recipe at `ep8` on one 8× B300 host, on
+the same loop path and tokens per step (under `bias_update`), runs 14,402 tok/s/GPU against that 3,636.
 
 ## Troubleshooting
 

@@ -229,7 +229,9 @@ only P2P activations cross stages. This is the cross-node shape for a large MoE.
 - Equivalence gates: gpt-oss against a bf16 ep1 twin (`tests/gpu/parallelism/pp/test_pp_ep_vs_unsplit.py`,
   both sides on the unfused expert-output sum, since the fused un-permute rounds a rank's local top-k
   sum once), and every other registered MoE family against its unsplit ep1 twin through the real
-  trainer at `ep2` (`test_pp_family_vs_reference.py`).
+  trainer at `ep2` (`test_pp_family_vs_reference.py`). One released checkpoint has run the split as a correctness
+  smoke: Qwen3-30B-A3B-Instruct-2507 at `pp2 × ep4` with `moe_balancing: none` tracks `ep8` over 20 steps (mean
+  relative loss gap 3.4e-4, largest 1.16e-3), as two `torchrun` agents on one host.
 
 ## PP + ETP (MoE)
 
@@ -333,8 +335,10 @@ rank.
 
 ## Measured throughput
 
-B300, packed `HuggingFaceH4/ultrachat_200k`, tokens per second per GPU over the steady steps. Every
+Halo 1.2.0, B300, packed `HuggingFaceH4/ultrachat_200k`, tokens per second per GPU over the steady steps. Every
 gpt-oss row runs grouped GEMM and `moe_balancing: bias_update`.
+
+![Pipeline-parallel throughput: on one host pp2 without checkpointing beats dp8 by 14.0% at twice its peak and ep8 by 10.7% at its peak; on two nodes turning checkpointing off gains 18.5% and 21.5% at 1.9× the peak](../assets/benchmarks/pp_throughput.png)
 
 **One 8-GPU host**, `max_length` 8192, 524k tokens (64 rows) per step, steps 6–15; peaks are the
 allocator's maximum over ranks, allocated / reserved. A single `torchrun` refuses an NVLink domain
@@ -373,7 +377,7 @@ agent on the host's 8-GPU domain.
 GC off raises throughput 18.5% (Qwen3-8B) and 21.5% (gpt-oss-20b) for 1.9× the allocated peak. The
 whole-device peaks are 49.2 GiB on stage 0 and 35.7 GiB on stage 1 for Qwen3-8B, 70.4 and 40.8 GiB for
 gpt-oss-20b. On the single host the same recipes, gpt-oss at `ep4` since a 4-GPU stage cannot hold
-`ep8`, gain about 25–30%.
+`ep8`, gain about 30%.
 
 ## Packing
 

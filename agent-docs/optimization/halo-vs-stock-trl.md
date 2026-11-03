@@ -5,7 +5,7 @@ kernels, only the framework changes. Measured with the same `EfficiencyCallback`
 [Throughput Benchmarks](throughput-benchmarks.md). The 4k–16k, grouped-GEMM and GC-off tables share their
 main run set with that page; the FLCE, long-context and Qwen3-30B tables come from a separate run set.
 Compare within one run set. Every Halo number here was measured on Halo 1.1.0 code or earlier (the long-context tables on
-1.0.0), before 1.2.0's kernel and clock changes ([Throughput Benchmarks → Setup](throughput-benchmarks.md#setup)).
+1.0.0), before 1.2.0's kernel and clock changes ([1.2.0 against 1.1.0](throughput-benchmarks.md#120-against-110)).
 
 Unless a header says otherwise, every number is **gpt-oss-20b** (`unsloth/gpt-oss-20b-BF16`, 20.7B, 32
 experts, top_k=4) on **8× B300**, bf16, FA4 + Liger, `grouped_mm` experts, gradient checkpointing on, DeepEP

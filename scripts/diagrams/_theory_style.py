@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt
 from _style_base import assets_dir, save_figure
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-ASSETS = assets_dir("diagrams")
 
 _FONTS = os.path.join(_HERE, "fonts")
 for _f in (
@@ -80,11 +79,11 @@ plt.rcParams.update(
 )
 
 
-def save(fig, name):
-    """Write `<name>.png` into agent-docs/assets/diagrams with consistent options, then close `fig`."""
+def save(fig, name, kind="diagrams"):
+    """Write `<name>.png` into agent-docs/assets/<kind> with consistent options, then close `fig`."""
     save_figure(
         fig,
-        os.path.join(ASSETS, f"{name}.png"),
+        os.path.join(assets_dir(kind), f"{name}.png"),
         dpi=200,
         bbox_inches="tight",
         facecolor=BG,

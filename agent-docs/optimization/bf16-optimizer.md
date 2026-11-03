@@ -35,6 +35,10 @@ SR seeds are drawn from no generator: `sr_seed_pair` (`halo/optimizers/stochasti
 
 ## Benchmarks
 
+Measured on Halo 1.1.0 or earlier, except the fused launch.
+
+**Fused launch (1.2.0, 8× B300, s4096), bitwise against one tensor per launch:** FSDP2 +4.1%, ep1 +2.1%, ep8 +1.5%, ep2 −0.1%. The fixed launch table compiles no variant mid-run, which holds the worst ep8 step to 1.01× the median, against 1.44–1.48× on a table that grows.
+
 **GPT-OSS-20B MoE (24 layers, 32 experts, 20.7B params, ~14B trainable with first 8 layers frozen), single B300 (SM103), Blackwell image:** AdamWBF16 (Triton) steps in 31.8 ms vs 62.0 ms for `adamw_torch_fused` (**−49%**), at identical 134.2 GB peak and identical bf16 (4B) state dtype.
 
 The kernel is faster because it fuses state EMA + weight update + SR into one memory pass (14 B/element). Each lane owns four consecutive elements and one `tl.randint4x` Philox call, whose 4 × 32 bits give every element its two independent 16-bit SR draws: 6.5 TB/s effective against 3.9 TB/s with one Philox call per element, on a 254M-element expert tensor (one B300). This row compares two bf16-state optimizers; the 6-vs-12 B/param memory win is against fp32-state AdamW and is not visible here.

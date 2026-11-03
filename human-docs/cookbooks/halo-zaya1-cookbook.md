@@ -40,6 +40,7 @@ so the one-GPU command needs a B200 or B300 (about 102–124 GB at 16k; its ~72 
 `-n 8 --max_length=8192 --gradient_accumulation_steps=8`; the EP8 recipe fits there as shipped.
 For long context at EP8, raise the limit with `--max_length=32768 --gradient_accumulation_steps=2`,
 which fits at `per_device_train_batch_size: 1` because the fused loss never builds the full logits tensor.
+All of these fits are computed, not measured.
 
 ### Other layouts
 

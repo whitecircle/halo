@@ -11,13 +11,13 @@ Each cookbook takes one MoE family from an empty host to a trained, served check
 | [GLM-4.7-Flash](halo-glm-4.7-flash-cookbook.md) | `zai-org/GLM-4.7-Flash` | 8 | vLLM, SGLang |
 | [Gemma 4 MoE](halo-gemma4-moe-cookbook.md) | `google/gemma-4-26B-A4B-it` | 8 | vLLM, SGLang |
 | [Mistral 4 MoE](halo-mistral4-moe-cookbook.md) | `mistralai/Mistral-Small-4-119B-2603` | 8 | No |
-| [Laguna 2.1](halo-laguna-2.1-cookbook.md) | `poolside/Laguna-S-2.1`, `poolside/Laguna-XS-2.1` | 4, or 1 for XS | vLLM |
+| [Laguna 2.1](halo-laguna-2.1-cookbook.md) | `poolside/Laguna-S-2.1`, `poolside/Laguna-XS-2.1` | 8, or 1 for XS | vLLM |
 | [LFM-2 MoE](halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2.5-8B-A1B`, `LiquidAI/LFM2-24B-A2B` | 2, or 4 for 24B | vLLM, SGLang |
 | [ZAYA1](halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | 1 or 8 | No |
 | [Command A+](halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | 8 | No |
 
 Every cookbook has the same sections: Support, Recipes, Settings that matter, Limits, Export and serve,
-and Reference. The GPU counts are the ones the recipes run on, B300s unless a page says otherwise. On
+and Reference. The GPU counts are the ones the recipes are written for, B300s unless a page says otherwise. On
 H100 or H200, use the Hopper image. Those GPUs have far less memory than a B300, so a recipe may need
 more GPUs or a shorter `max_length` there.
 

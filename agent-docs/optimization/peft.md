@@ -262,7 +262,7 @@ before the checkpoint downloads.
 
 ## Measured cost
 
-Both tables measured on the Blackwell image.
+Both tables measured on the Blackwell image, Halo 1.1.0 or earlier.
 
 Dense — 1× B300 (SM103), `DistributedSFTTrainer`, AdamWBF16, Liger, FA4, Qwen3-8B, seq 16384, BS=1, GC,
 10 steps / 3 warmup (full fine-tuning at this shape: [Liger → Benchmarks](liger-kernels.md#benchmarks)):

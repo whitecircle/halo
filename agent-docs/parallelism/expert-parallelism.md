@@ -461,7 +461,8 @@ mapping and expert layout. FP32-stored masters need a **second read**; BF16 safe
 promote the already-loaded values without rereading their payload. Under `fp32_experts`, FP32 replay
 materializes the **full** expert bank before the EP slice: twice the expert bytes of BF16, plus
 conversion temporaries. Every eager EP path (EP, EP+CP, EP+TP, ETP) stages this bank on each admitted
-CPU rank and slices it before the move to the GPU. `max_concurrent_loading` bounds admitted ranks per
+CPU rank and slices it before the move to the GPU, which holds Qwen3-30B-A3B's eager load at `ep2 × tp2` to about
+34 GiB per GPU against about 62 GiB with the whole bank on the GPU. `max_concurrent_loading` bounds admitted ranks per
 node; the lazy path reads only each rank's expert slice and avoids full-bank staging.
 
 Buffers must be real: a config-less rotary derives `inv_freq` from ctor args it never stores, which a

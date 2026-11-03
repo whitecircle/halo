@@ -27,7 +27,8 @@ halo launch sft examples/sft/laguna/laguna-s-2.1-ultrachat-ep.yaml -n 8 \
   --output_dir=/data/checkpoints/laguna-s-2.1-sft
 ```
 
-The recipe trains without gradient checkpointing, which fits a B300; on smaller GPUs add
+The recipe trains without gradient checkpointing. Its fit on a B300 is computed, not measured: about
+114 GB of activations per row beside about 75 GB of state. On smaller GPUs add
 `--gradient_checkpointing=true`. On four GPUs, launch with `-n 4` and add
 `--expert_parallel_size=4 --max_length=2048 --gradient_accumulation_steps=8` for the same tokens per
 step. EP4 on eight GPUs is rejected at startup.
@@ -99,9 +100,9 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 
 
 ## Limits
 
-- No CP or TP: Laguna attention has no wrapper for either. Pipeline parallelism cuts only on whole
-  four-layer attention periods and refuses a nonzero aux-loss coefficient (the released checkpoints ship
-  `0.0`).
+- No CP or TP: Laguna attention has no wrapper for either.
+- Pipeline parallelism passes tiny-model GPU tests only. It cuts only on whole four-layer attention
+  periods and refuses a nonzero aux-loss coefficient (the released checkpoints ship `0.0`).
 - No SGLang weight sync. SGLang 0.5.22's Laguna loader expects every expert weight in every update,
   which a chunked update can't provide. Online RL runs on vLLM.
 - vLLM 0.32.0 drops the exported correction bias. A model trained with `bias_update` never serves on

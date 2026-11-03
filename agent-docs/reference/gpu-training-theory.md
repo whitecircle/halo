@@ -353,7 +353,7 @@ Split a model across GPUs and a third speed enters the picture: inter-GPU bandwi
 The one recorded collective, an NCCL all-reduce at **767 GB/s** bus bandwidth, ran on 16 GPUs across two
 nodes, so it measures a job that crosses the node boundary, not NVLink alone.
 
-![The bandwidth ladder on a log scale: HBM at 6.6 TB/s measured (spec 8 TB/s), NVLink/NVSwitch inside the node at 1.8 TB/s spec (~4× below HBM), with the repo's one recorded all-reduce bus bandwidth, 767 GB/s across 16 GPUs on 2 nodes, drawn as the measured bar, PCIe Gen5 ×16 at 64 GB/s per direction (~100× below HBM), and InfiniBand NDR across nodes at ~48 GB/s (~130× below HBM, the node boundary). Filled bars are measured, dashed outlines are spec; a collective is priced by the slowest tier it touches](../assets/diagrams/interconnect_tiers.png)
+![The bandwidth ladder on a log scale: HBM at 6.6 TB/s measured (spec 8 TB/s), NVLink/NVSwitch inside the node at 1.8 TB/s spec (~4× below HBM), with the repo's one recorded all-reduce bus bandwidth, 767 GB/s across 16 GPUs on 2 nodes, drawn as the measured bar, PCIe Gen5 ×16 at 64 GB/s per direction by spec (~100× below HBM), and InfiniBand / EFA across nodes: 93 GB/s measured NCCL broadcast on B300 EFA (spec ~100), ~48 GB/s on NDR, 65–130× below HBM, the node boundary. Filled bars are measured, dashed outlines are spec; a collective is priced by the slowest tier it touches](../assets/diagrams/interconnect_tiers.png)
 
 One ratio drives distributed design. Crossing a node boundary costs ~18–36× more per byte than staying on NVLink (1.8 TB/s vs 50–100 GB/s per GPU). A collective inside the NVLink domain is cheap. Stretch it across nodes and it hits the InfiniBand wall.
 
@@ -436,7 +436,7 @@ Every other model-splitting axis prices its traffic per *parameter*; PP prices i
 bubble fraction = (p − 1) / (m + p − 1)
 ```
 
-![A 1F1B pipeline schedule drawn as a grid: 4 stages down, 22 time slots across, one slot per microbatch forward or backward. Every stage runs the same 16 busy slots — 8 forwards and their 8 backwards, alternating one for one once the pipe is full — and sits idle for the other 6. Later stages wait at both ends, while the pipe fills and while the last backwards drain; stage 0 waits in the middle instead, after its warmup forwards, until the first backward comes back down. Those 6 of 22 slots are the bubble, (p−1)/(m+p−1) = 3/11 ≈ 27% of the step](../assets/diagrams/pp_bubble.png)
+![A 1F1B pipeline schedule drawn as a grid: 4 stages down, 22 time slots across, one slot per microbatch forward or backward. Every stage runs the same 16 busy slots — 8 forwards and their 8 backwards, alternating one for one once the pipe is full — and sits idle for the other 6. Later stages wait at both ends, while the pipe fills and while the last backwards drain; stage 0 waits in the middle instead, after its warmup forwards, until the first backward comes back down. Those 6 of 22 slots are the bubble, (p−1)/(m+p−1) = 3/11 ≈ 27% of the step. A second grid runs GPipe, all forwards then all backwards: the same 22 slots and 6 idle, but every stage holds all 8 microbatches live, where 1F1B holds at most 4 on stage 0 and 1 on stage 3](../assets/diagrams/pp_bubble.png)
 
 The formula assumes equal per-stage cost and no cross-step overlap. What sets it is the ratio `m/p`, not either term alone. At `m = 2p` the idle share runs from a fifth (`p = 2`) toward a third (large `p`); planning `m = 9·(p−1)` puts it at 10%.
 

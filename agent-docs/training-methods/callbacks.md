@@ -113,6 +113,8 @@ The contract is checked on the **enabled tree**, not the class declaration: a re
 - **Rows:** only packed rows qualify, where every micro-batch carries up to `per_device_train_batch_size` × `max_length` tokens: SFT with `packing: true`, or a corpus pre-processed packed (the plan reads the rows the collator builds, not the flag). The measured step must hold the run's largest micro-batch: on rows short against `max_length` nearly every pack is full, but packs that fill unevenly (documents near `max_length` under `bfd`) can measure low over few micro-batches, and an OOM then floors the next launch.
 - **Refused** at startup under pipeline parallelism, `torch_compile`, `auto_find_batch_size` (it answers an OOM by halving the batch), trainers that generate rollouts (TRL re-enables checkpointing around generation), rows the collator does not pack (every trainer but SFT), multimodal rows, activation offload, an explicit `every_n_layers`, text decoder layers that are not `GradientCheckpointingLayer` (model-level checkpointing), or with checkpointing off.
 
+On 8× B300 (1.2.0), packed dense SFT at s8192 resolves to no checkpointing and runs 25.5% faster than full checkpointing; packed dense SFT at s32768 and Qwen3.5-35B-A3B ep8 match the best fixed policy within 0.4%.
+
 ### VariableSchedulerCallback
 
 Schedules any numeric attribute on the model over training (`halo/callbacks/variable_scheduler.py`) — `min_log_prob` for offline GRPO, `target_margin` for SMPO.

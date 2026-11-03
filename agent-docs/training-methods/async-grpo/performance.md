@@ -71,6 +71,8 @@ Only the row order changes. Each row is forwarded on its own, so its log-probs, 
 
 `true` raises at construction on those; `false` keeps TRL's shuffle.
 
+On a six-GPU async GRPO test row (1.2.0) the deal takes the update phase from 480.5 to 328.3 s (1.46×), the no-grad pass from 170.7 to 114.0 s (1.50×) and peak memory from 210.25 to 183.35 GiB, the recompute bitwise.
+
 ## Sizing a run
 
 For a new model, environment or GPU, size in order:

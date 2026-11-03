@@ -79,6 +79,8 @@ Every task sets `config.docker.run_options: ["--ipc=host", "--ulimit", "memlock=
 
 `crossnode-ep` sets `resources.network_tier: best` so SkyPilot provisions the EFA/InfiniBand interfaces; `nodelocal-ep` omits it, so a multi-node `nodelocal-ep` launch passes `--network-tier best`.
 
+On AWS, SkyPilot attaches only one EFA interface unless `aws.use_internal_ips: true` is set in `~/.sky/config.yaml`, which needs a private subnet plus `aws.use_ssm` or `aws.ssh_proxy_command`; without it, all ranks share one NIC. A task file cannot set it.
+
 On Nebius that flag is the only fabric guard: its tasks name no `NCCL_NET`, so a multi-node `nodelocal-ep` launched without it runs the cross-node gradient sync over TCP sockets with no error (AWS's `NCCL_NET=Libfabric` fails the launch instead).
 
 GIN-plugin prerequisites and the measured B300 EFA numbers: [DeepEP → Expert parallelism over AWS EFA](../infrastructure/deepep.md#expert-parallelism-over-aws-efa). Per-fabric env and verification (`fi_info -p efa` vs `ibstat`): [Multi-Node → RDMA fabrics](../parallelism/multi-node.md#rdma-fabrics).

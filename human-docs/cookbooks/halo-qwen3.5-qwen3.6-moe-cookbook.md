@@ -13,7 +13,8 @@ Modes: the Qwen3.5 / Qwen3.6 MoE row of the [Supported Matrix](../supported-matr
 
 - **Checkpoints:** `Qwen/Qwen3.6-35B-A3B` at revision `995ad96eacd98c81ed38be0c5b274b04031597b0` and
   `Qwen/Qwen3.5-35B-A3B` at `59d61f3ce65a6d9863b86d2e96597125219dc754`. The 122B-A10B trains from
-  `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` at EP8 on one node, or EP16 across two Hopper nodes.
+  `examples/sft/qwen3_5/qwen3.5-122b-a10b-ep.yaml` at EP8 on one node. The recipe is also sized for EP16
+  across two Hopper nodes, which has not run.
 - **GPUs:** eight at EP8, 32 experts per GPU, at 33,000 tokens.
 
 ## Recipes
@@ -108,8 +109,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 ## Settings that matter
 
 - **Attention.** The SFT recipe pins `flash_attention_2`, and the GRPO recipes pin `sdpa`. Unpinned,
-  Blackwell runs FA4, and FA2 on packed SFT rows. Under `full_determinism` Halo replaces FA4 with SDPA, except on
-  packed SFT rows, which take FA2 even with FA4 pinned.
+  Blackwell runs FA4, and FA2 on packed SFT rows
+  ([Attention backends](../supported-matrix.md#attention-backends)).
 - **Packing, not padding-free.** Halo refuses `padding_free: true` on this family: its variable-length path
   crashes FA2 on the multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
   (`tree_packing: true` with `tree_full_attention: gather`;
@@ -122,14 +123,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
 - **Long context.** The SFT recipe sets `fp32_non_ep_params: true` for stable training at 33,000 tokens.
 - **Tool parser and thinking budget.** vLLM needs `VLLM_TOOL_PARSER=qwen3_xml`. The default `hermes`
   leaves the XML tool calls as text, so every episode scores zero. The code-contests recipes run soft
-  thinking budgets: the template states each level's `thinking_tokens` as a target, and on vLLM the
-  engine closes the reasoning only at its ceiling, `rollout_max_tokens − rollout_max_answer_tokens`
-  (30,000 − 8,192 tokens; 38,192 − 8,192 in the curriculum stages). That ceiling needs
-  `VLLM_REASONING_PARSER=qwen3`, or every request fails with a 400
+  thinking budgets, whose ceiling needs `VLLM_REASONING_PARSER=qwen3`, or every request fails with a 400
   ([Thinking budgets](../training-methods/async-grpo-environments.md#thinking-budgets)).
-- **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup. The
-  soft budgets are stated and priced as on vLLM, but no engine cap closes the reasoning there: only
-  `rollout_max_tokens` bounds a turn.
+- **SGLang rollouts.** `rollout_max_thinking_tokens` and `carry_reasoning` are refused at startup, and
+  only `rollout_max_tokens` bounds a turn.
 
 ## Limits
 
@@ -159,11 +156,8 @@ VLLM_TOOL_PARSER=qwen3_xml \
   docker compose -f docker-compose.vllm.yml up -d vllm-server
 ```
 
-`text_only_model: true` trains through the text-only class and drops the vision tower from the export.
-Its export, and a merge of its LoRA adapter, carry the run's tokenizer but no processor files. Both
-pinned engines (vLLM 0.32.0, SGLang 0.5.22) register the text-only class and read that export as it is,
-though no engine has served one end to end here. To rebuild the multimodal checkpoint, with the vision
-tower and the processor files:
+`text_only_model: true` drops the vision tower and processor files from the export. To rebuild the
+multimodal checkpoint:
 
 ```bash
 halo run reattach-vision-tower --input_dir /data/checkpoints/<text-only-export> \

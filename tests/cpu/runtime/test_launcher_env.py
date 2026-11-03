@@ -135,6 +135,7 @@ def test_bare_srun_without_rendezvous_fails_with_a_recipe(pre_init, monkeypatch)
     message = str(excinfo.value)
     assert "MASTER_ADDR" in message, f"the missing variable must be named: {message}"
     assert "srun" in message and "torchrun" in message, f"the launch recipe must be given: {message}"
+    assert "bash -c" in message and "\\$SLURM_NODEID" in message, f"unquoted, every node expands rank 0: {message}"
     assert "world_size=16" in message, f"the world it detected must be reported: {message}"
 
 

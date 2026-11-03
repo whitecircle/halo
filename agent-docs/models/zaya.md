@@ -89,7 +89,7 @@ router_balancing_rate: 1.0e-3    # gamma; only used when bias_update is active
 | `examples/sft/zaya/zaya-1-8b-ultrachat.yaml` | — | Plain FSDP2, 16K packed rows |
 | `examples/sft/zaya/zaya-1-8b-ultrachat-ep.yaml` | 8 (16 experts → 2/rank) | 16K packed rows |
 
-All of them set `gradient_checkpointing: false` and `output_router_logits: false`, and pack 16,384-token rows at `gradient_accumulation_steps: 4` (65,536 tokens per rank per optimizer step). A row holds about 50 GB of activations: beside EP8's ~11 GB of state that fits an 80 GB GPU. Plain FSDP2 on eight GPUs (~27 GB of state) needs B200/B300 at 16K; since checkpointing is refused, on 80 GB GPUs it takes half the `max_length` at twice the accumulation. On one GPU the ~72 GB of state alone leaves no 80 GB fallback: a single-GPU run needs a B200/B300 (about 102–124 GB at 16K). For long-context EP runs raise `max_length` further (e.g. 32K at `gradient_accumulation_steps: 2`) — FLCE skips the logits tensor.
+All of them set `gradient_checkpointing: false` and `output_router_logits: false`, and pack 16,384-token rows at `gradient_accumulation_steps: 4` (65,536 tokens per rank per optimizer step). A row holds about 50 GB of activations: beside EP8's ~11 GB of state that fits an 80 GB GPU. Plain FSDP2 on eight GPUs (~27 GB of state) needs B200/B300 at 16K; since checkpointing is refused, on 80 GB GPUs it takes half the `max_length` at twice the accumulation. On one GPU the ~72 GB of state alone leaves no 80 GB fallback: a single-GPU run needs a B200/B300 (about 102–124 GB at 16K). These fits are computed, not measured. For long-context EP runs raise `max_length` further (e.g. 32K at `gradient_accumulation_steps: 2`) — FLCE skips the logits tensor.
 
 ## Checkpoint save
 

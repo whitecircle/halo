@@ -537,8 +537,9 @@ everything over TCP and breaks DeepEP; this is the env
 [multi-node training](../parallelism/multi-node.md#rdma-fabrics) already uses. GPUDirect RDMA runs
 through dmabuf with no `nvidia_peermem`; `/dev/gdrdrv` is a cross-node DeepEP requirement, not a sync
 one. Set the entry's `group_host` (or `VLLM_GROUP_HOST` / `SGLANG_GROUP_HOST`) when the server cannot
-dial back to the trainer's address on the route to it (NAT, asymmetric routing); Online GRPO has only
-the env var.
+dial back to the trainer's address on the route to it (asymmetric routing); Online GRPO has only the env
+var. An address the trainer cannot bind, as behind NAT or a port mapping, raises unless
+`HALO_WEIGHT_SYNC_BIND_ALL=1` is set ([Group rendezvous](#group-rendezvous)).
 
 Verify the transport before training, from the trainer container launched as the trainer would be,
 on a GPU the server does not own:

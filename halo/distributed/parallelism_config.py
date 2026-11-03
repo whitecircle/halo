@@ -67,8 +67,8 @@ class ParallelismConfig:
     ep_lazy_loading: bool = True  # every EP path; TP-only MoE ignores it, PP always loads stage-lazily
     ep_buffer_backend: EPBufferBackend = "auto"  # "auto" == "elastic" (DeepEP V2); "legacy" = V1 CUDA-IPC
 
-    # The declared per-device rows and max_length the dispatch-ceiling gate checks; 0 rows = no budget,
-    # max_length 0 = the model's context window.
+    # The rows one MoE forward carries per device and the max_length the dispatch-ceiling gate checks;
+    # 0 rows = no budget, max_length 0 = the model's context window.
     ep_rows_per_device: int = 0
     ep_declared_max_length: int = 0
 
@@ -276,6 +276,11 @@ class ParallelismConfig:
         """FSDP syncs the replicated experts (``ep_group_size == 1``), so the EP layer's grad hooks must
         not; every reader takes this one verdict."""
         return self.fsdp_shard_ep1_experts and self.ep_group_size == 1
+
+    def pp_microbatch_count(self, gradient_accumulation_steps: int) -> int:
+        """``pipeline_microbatches``, else the accumulation, raised to a full pipeline under 1F1B."""
+        count = self.pp_microbatches or gradient_accumulation_steps
+        return max(count, self.pp_size) if self.pp_schedule == "1f1b" else count
 
     @property
     def active_axes(self) -> frozenset[str]:

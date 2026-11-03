@@ -75,10 +75,12 @@ training state ([Uploading to the HuggingFace Hub](checkpoints.md#uploading-to-t
 Most families also serve on vLLM directly; a few need a conversion first or have
 no serving path.
 
-Two kinds of run need one more step:
+Three kinds of run need one more step:
 
 - A LoRA run saves an adapter. Serve it as an adapter or merge it into the base.
 - The opt-in sharded EP save (`save_sharded_ep: true`) needs
   `halo run merge-ep-shards` first.
+- A pipeline-parallel run on per-node storage needs `halo run merge-pp-stages`
+  first.
 
 [Checkpoints](checkpoints.md) covers saving, resuming, export and serving.

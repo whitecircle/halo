@@ -69,25 +69,38 @@ sequence length to fit.
 
 ## Pipeline parallelism
 
+![Pipeline-parallel throughput on one host and on two nodes, with gradient checkpointing on and off](../agent-docs/assets/benchmarks/pp_throughput.png)
+
 `pipeline_parallel_size` splits the decoder layers into stages, each a whole
-number of NVLink domains, so only point-to-point activations cross nodes and a
-run needs at least two nodes. It composes with EP or pure ETP. Which methods
-and families it covers is in the [Supported matrix](supported-matrix.md); any
-other model is refused by name before a weight loads. Every batch pads to
-`max_length`, so use `packing` (except on Inkling, whose packing PP refuses,
-and GLM-5 Next and DeepSeek-V4, which refuse flat packing everywhere). Turn
-gradient checkpointing off where memory allows: a stage holds only a few
-microbatches' activations, and the shipped recipes run 18–22% faster without
-it. On per-node storage, merge the nodes' checkpoint directories with
-`halo run merge-pp-stages` before loading the result
-([Clusters](clusters.md#pipeline-parallelism-across-nodes),
-[Pipeline Parallelism](../agent-docs/parallelism/pipeline-parallelism.md) ↗).
+number of NVLink domains, so only boundary activations cross nodes. A run needs
+at least two nodes, and `pp2` under one `torchrun` on an 8-GPU node is rejected;
+the figure's one-host rows run two 4-GPU `torchrun` agents, which count as two
+nodes. Inside a stage it runs
+FSDP2, EP or pure ETP. The methods and families it covers, multimodal text towers
+and Qwen3.8-Flash-Next included, are in the
+[Supported matrix](supported-matrix.md#model-families); any other model is
+refused by name before a weight loads.
+
+- **Batches.** `pipeline_microbatches` replaces gradient accumulation and must
+  divide `per_device_train_batch_size`. Every batch pads to `max_length`, so use
+  `packing` with one packed row per microbatch. Inkling, GLM-5 Next and
+  DeepSeek-V4 refuse packing under PP and train on padded rows.
+- **Gradient checkpointing.** Turn it off where memory allows. The shipped
+  recipes do, and run 18–22% faster than with it, at about 1.9× the allocated
+  peak. Reentrant checkpointing is refused; `use_reentrant: false` works.
+- **Refused:** LoRA and any PEFT model, QLoRA, tied embeddings, `accelerate
+  launch`, `padding_free`, `torch_compile`, Muon and FlashAdamW, `save_sharded_ep`,
+  image data, and `aux_loss` with a live coefficient, so a MoE without an
+  exportable bias trains at `moe_balancing: none`
+  ([every refusal and why](../agent-docs/parallelism/pipeline-parallelism.md#rejected-combinations) ↗).
+
+Launch recipes and per-node merges:
+[Clusters](clusters.md#pipeline-parallelism-across-nodes).
 
 ## Picking a shape
 
 Sharding costs throughput, so use the least that fits
-([Performance](performance.md)). Which family supports which mode is in the
-[Supported Matrix](supported-matrix.md).
+([Performance](performance.md)).
 
 Deep dives:
 [Expert](../agent-docs/parallelism/expert-parallelism.md) ↗ ·

@@ -68,7 +68,7 @@ The `Dockerfile` force-installs the ABI-compatible pair (`quack-kernels==0.6.4`,
 
 ## Benchmark
 
-Optimizer micro-benchmark on one B300 (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`: synthetic FFN, 8 layers × 4096 × 16384, 1.61B params; median of 20 timed steps; Blackwell image), isolating the optimizer step:
+Optimizer micro-benchmark on one B300, Halo 1.1.0 or earlier (`tests/gpu/optimizers/bench_muon.py --hidden 4096 --layers 8`: synthetic FFN, 8 layers × 4096 × 16384, 1.61B params; median of 20 timed steps; Blackwell image), isolating the optimizer step:
 
 | Optimizer | Optimizer step | Peak mem vs AdamW |
 |---|:---:|:---:|

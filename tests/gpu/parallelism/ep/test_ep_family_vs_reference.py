@@ -27,6 +27,7 @@ from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS
 from tests.common.distributed import world_spread
 from tests.common.ep_reference import gathered_expert_grads, random_token_batch, score_ep_grad_pairs, sweep_ep_grads
+from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
     BAILING_LING_3_TINY,
@@ -238,6 +239,7 @@ def run_family(ctx, family: str, cos_min: float, expert_tp_size: int = 1) -> dic
     log(f"{family}: {pc.mode_string}")
     torch.manual_seed(SEED)
     reference = tiny_family_model(TINY_MOE_FAMILIES[family]).to(ctx.device, torch.bfloat16)
+    pin_fla_autotune_first_fit(ctx)
     model = apply_ep_layers(copy.deepcopy(reference), pc.ep_config())
     vocab = reference.get_input_embeddings().num_embeddings
     input_ids, labels = random_token_batch(vocab, BATCH, SEQ, ctx.device, seed=SEED)

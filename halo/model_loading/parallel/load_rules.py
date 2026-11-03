@@ -64,9 +64,9 @@ def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> 
     if not max_length:
         # max_length: null on a config that states no window — nothing to judge against.
         return
-    # CP is the one axis that shrinks a rank's token count (it holds one sequence chunk). EP is
-    # orthogonal to DP, TP replicates the batch, and a PP microbatch is a fraction of it — so
-    # dividing by none of them keeps this an upper bound.
+    # CP shrinks a rank's token count (it holds one sequence chunk). EP is orthogonal to DP and TP
+    # replicates the batch, so dividing by neither keeps this an upper bound. Under PP the rows are one
+    # microbatch's (parallelism_config_from_args).
     budget = pc.ep_rows_per_device * max_length
     tokens_per_rank = budget // pc.cp_size
     capacity = ep_dispatch_capacity(tokens_per_rank)
@@ -80,11 +80,12 @@ def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> 
     except ValueError as exc:
         cp_note = f" ({budget} / context_parallel_size={pc.cp_size})" if pc.cp_size > 1 else ""
         length_note = "" if pc.ep_declared_max_length else " (no length cap → the model's context window)"
+        rows_lever = "raise pipeline_microbatches" if pc.pp_size > 1 else "lower per_device_train_batch_size"
         raise ValueError(
-            f"Lower per_device_train_batch_size or the row-length cap (max_length, or "
+            f"Either {rows_lever} or lower the row-length cap (max_length, or "
             f"max_prompt_length + max_completion_length where those two bound a row) — or, for the "
             f"cross-node Gin ceiling only, raise HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK. This run's "
-            f"declared token budget cannot be dispatched: {pc.ep_rows_per_device} row(s)/device × "
+            f"declared token budget cannot be dispatched: {pc.ep_rows_per_device} row(s)/forward × "
             f"{max_length} tokens/row{length_note} gives {tokens_per_rank} tokens/rank"
             f"{cp_note}, sized to a {capacity}-token DeepEP arena on an EP group of "
             f"{pc.ep_group_size} rank(s) (ep_scope={pc.ep_scope}, nvlink_domain_size="

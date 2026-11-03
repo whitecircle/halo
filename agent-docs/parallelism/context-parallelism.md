@@ -18,6 +18,10 @@ and V swaps that to the full `S` tokens but `H/cp_size` heads for the attention 
 swaps the output back. The backward runs the same two in reverse.
 Multi-head attention is independent across heads, which is what makes this exact.
 
+Packing Q, K and V into one exchange takes two collectives per layer each way where one per tensor takes three. On
+8× B300 (1.2.0, three rounds) that runs Qwen3-8B CP2 at s4096 4.4% and gpt-oss-20b ep8 × cp2 3.7% faster, and leaves
+long sequences flat (cp4 at s16384 −0.4%, ep8 × cp8 at s32768 −0.1%).
+
 ![Ulysses attention: RoPE runs on the local chunk, one all-to-all on Q, K and V scatters heads and gathers the sequence so each rank attends over the full sequence with 16 of 64 heads, and an all-to-all on the output restores the per-rank chunk layout](../assets/diagrams/ulysses_attention_flow.png)
 
 ![An SFT training step under CP: the wrapper narrows the batch to one contiguous sequence chunk per rank, embeddings and every decoder layer run on that chunk (Ulysses attention, then the MLP or MoE), the logits stay sharded, and the loss is scaled by cp_size over the CP group's all-reduced token count](../assets/diagrams/cp_training_step.png)
@@ -84,7 +88,8 @@ verified head transform (`fused_head_ce_sum` in `halo/model_loading/liger/cross_
 folded onto the hidden states, softcap in the kernel, vocabulary cut on the weight). No logits plane is built. The
 weight gradient accumulates in fp32. The boundary pairing, the token normalization and the aux term are the
 logits loss's. The forward returns `logits=None` and the chunk's `token_accuracy`, so SFT logs accuracy but no
-entropy, as FLCE does without CP.
+entropy, as FLCE does without CP. On GLM-4.7-Flash at ep8 × cp4 and 65,536 tokens (1.2.0) the peak falls from 53.30 to
+46.99 GiB (−11.8%), step-1 loss within 7e-8 relative.
 
 Eval forwards keep the logits loss. A training forward without labels returns the full logits, with one warning:
 only a labelled forward (SFT) runs the fused loss, and SMPO scores its pairs from those logits. A forward that cannot

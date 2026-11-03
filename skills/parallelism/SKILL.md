@@ -83,6 +83,9 @@ advising.
 | expert_tp_size=2 + cp_size=2 | 2 | 2 | — | **NO** — ETP+CP rejected |
 | pp_size=2 | — | — | — | **NO** — a 4-rank stage is not a whole NVLink domain (PP needs 2+ nodes here) |
 
+On two 8-GPU nodes (world 16, domain 8) `pp_size=2` gives `dp_size` 8, `pp_size=2` + `ep_size=8` gives 8, and
+`pp_size=2` + `expert_tp_size=2` gives 4 (PP+ETP, `ep_size=1`).
+
 ## Reject these
 
 - TP+CP, TP+ETP (with or without EP), ETP+CP —
