@@ -49,7 +49,7 @@ def _reject_rendered_bos(processor, tokenizer) -> None:
 
 class VLMDataCollator:
     # Same span policy as the text runtime collators; the SDPG subclass overrides it.
-    _COMPLETION_SPAN_POLICY: dict[str, bool] | None = PADDED_SPAN_POLICY
+    _COMPLETION_SPAN_POLICY: dict[str, bool] = PADDED_SPAN_POLICY
 
     def __init__(
         self,

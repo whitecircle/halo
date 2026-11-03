@@ -200,6 +200,19 @@ def test_is_sharded_dataset():
     print("  is_sharded_dataset: PASSED")
 
 
+def test_a_file_uri_loads_shards_as_its_plain_path_does(tmp_path):
+    source = create_test_sharded_dataset(50, 2, str(tmp_path))
+    uri = f"file://{source}"
+    assert ShardedDatasetLoader.is_sharded_dataset(uri) is True
+
+    loader = ShardedDatasetLoader(dataset_path=uri, dp_rank=0, dp_size=2)
+    rows = loader.load_split("train")["example_id"]
+    expected = ShardedDatasetLoader(dataset_path=source, dp_rank=0, dp_size=2).load_split("train")["example_id"]
+
+    assert list(rows) == list(expected)
+    assert len(rows) == 25
+
+
 def test_is_sharded_dataset_s3_probe_failure_returns_false(tmp_path):
     """With no local mirror any S3 probe failure returns False: the caller reconciles across ranks with an
     all_reduce, and a raise on one rank hangs the peers until the NCCL watchdog."""

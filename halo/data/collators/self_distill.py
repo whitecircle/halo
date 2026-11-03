@@ -11,7 +11,7 @@ from trl.trainer.utils import pad
 
 from halo.data.chat_render import render_conversation, tokenize_rendered
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.completion_spans import build_training_labels
+from halo.data.completion_spans import SELF_DISTILL_SPAN_POLICY, build_training_labels
 from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
 from halo.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
@@ -238,7 +238,7 @@ class SelfDistillVLMDataCollator(SelfDistillBranchMixin, VLMDataCollator):
     """VLM collator (arXiv:2606.04036). The text-only hint leaves the image grid unchanged, so the trainer reuses the
     student's image tensors; ``hint_template=None`` builds no teacher branch."""
 
-    _COMPLETION_SPAN_POLICY = None
+    _COMPLETION_SPAN_POLICY = SELF_DISTILL_SPAN_POLICY
 
     def __init__(
         self,

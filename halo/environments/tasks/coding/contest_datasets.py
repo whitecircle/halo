@@ -15,6 +15,8 @@ from typing import Any
 from datasets import load_dataset
 from huggingface_hub import hf_hub_download
 
+from halo.data.sources.loading import load_dataset_split
+
 # Cumulative releases (test.jsonl = v1, each later appends); the newest file is read first.
 _LCB_RELEASE_FILES: dict[str, list[str]] = {
     f"release_v{v}": [f"test{'' if i == 1 else i}.jsonl" for i in range(1, v + 1)] for v in range(1, 7)
@@ -528,6 +530,12 @@ class CodeDatasetAdapter:
         """A source whose prepared fields need ``normalize`` (and a joined tests table) is scored from its prepared
         pool instead."""
         return self.normalize is None
+
+    def load_rows(self, dataset: str, config: str | None, split: str) -> Iterable[dict[str, Any]]:
+        """The one read of a source's rows: an episode's index in a re-grade selects a row of the eval's order."""
+        if self.load:
+            return self.load(dataset, config, split)
+        return load_dataset_split(dataset, split=split, config=config)
 
     def resolve_split(self, requested: str | None, default: str) -> str:
         """The source's own split where it ships one, else ``requested``, else ``default``. A requested split the

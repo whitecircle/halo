@@ -68,7 +68,7 @@ def select_data_collator(
     one_document = (
         emit_varlen_one_document and not keeps_packed_rows and supports_one_document_varlen_set(model_config)
     )
-    flat_markers = {"return_seq_idx": markers.seq_idx, "emit_varlen_always": True}
+    flat_markers = {"return_seq_idx": markers.seq_idx}
     packed_markers = {
         "return_seq_idx": markers.seq_idx,
         "emit_varlen_always": markers.cu_seq_lens,

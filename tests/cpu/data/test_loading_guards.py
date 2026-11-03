@@ -15,7 +15,7 @@ from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata
 from halo.data.preprocessed.preparation import shard_dataset
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from halo.data.render_columns import alias_tools_column
-from halo.data.sources.loading import load_datasets, load_datasets_auto
+from halo.data.sources.loading import load_dataset_from_source, load_datasets, load_datasets_auto
 from halo.data.sources.paths import METADATA_FILE
 
 _LOADING_LOGGER = "halo.data.sources.loading"
@@ -352,6 +352,51 @@ def test_test_size_warns_once_for_a_preprocessed_load(caplog):
         assert (len(ds["train"]), len(ds["test"])) == (8, 4)
     finally:
         shutil.rmtree(temp_dir)
+
+
+def test_a_sub_one_ratio_is_refused_on_a_preprocessed_dataset(tmp_path):
+    """The rows were fixed at preparation, so the run would otherwise train every row the YAML says to drop."""
+    source = _save_preprocessed_dataset(str(tmp_path / "prepared"))
+    with pytest.raises(ValueError, match=r"dataset_ratio=0\.1 .*pre-processed"):
+        load_datasets_auto(source, test_size=None, dataset_ratio=0.1)
+
+
+def test_a_ratio_list_on_a_preprocessed_string_path_takes_the_raw_path_refusal(tmp_path):
+    source = _save_preprocessed_dataset(str(tmp_path / "prepared"))
+    with pytest.raises(ValueError, match="all of your dataset ratios"):
+        load_datasets_auto(source, test_size=None, dataset_ratio=[0.1])
+
+
+@pytest.mark.parametrize("ratio", [None, 1, 1.0])
+def test_a_ratio_keeping_every_row_loads_a_preprocessed_dataset(tmp_path, ratio):
+    source = _save_preprocessed_dataset(str(tmp_path / "prepared"))
+    ds, is_preprocessed = load_datasets_auto(source, test_size=None, dataset_ratio=ratio)
+    assert is_preprocessed
+    assert (len(ds["train"]), len(ds["test"])) == (8, 4)
+
+
+def test_a_file_uri_reads_a_preprocessed_dataset_as_its_plain_path_does(tmp_path):
+    source = _save_preprocessed_dataset(str(tmp_path / "prepared"))
+    ds, is_preprocessed = load_datasets_auto(f"file://{source}", test_size=None, dataset_ratio=None)
+    assert is_preprocessed
+    assert (len(ds["train"]), len(ds["test"])) == (8, 4)
+
+
+def test_a_file_uri_reads_a_sharded_dataset_as_its_plain_path_does(tmp_path):
+    source = _save_sharded_dataset(str(tmp_path / "sharded"))
+    ds, is_preprocessed = load_datasets_auto(f"file://{source}", test_size=None, dataset_ratio=None)
+    assert not is_preprocessed
+    assert (len(ds["train"]), len(ds["test"])) == (20, 6)
+    assert sorted(ds["train"]["input_ids"][0]) == [0, 1, 2]
+
+
+def test_a_file_uri_reads_a_raw_directory_and_a_data_file_as_their_plain_paths_do(tmp_path):
+    directory = _save_raw_dataset(str(tmp_path / "raw"), _conversation_dataset(4), _conversation_dataset(2))
+    data_file = tmp_path / "rows.jsonl"
+    data_file.write_text('{"row_id": 7}\n')
+
+    assert load_dataset_from_source(f"file://{directory}")["train"]["row_id"] == list(range(4))
+    assert load_dataset_from_source(f"file://{data_file}")["train"]["row_id"] == [7]
 
 
 def test_test_size_still_splits_a_plain_dataset(caplog):

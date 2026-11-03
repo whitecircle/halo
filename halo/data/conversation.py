@@ -84,7 +84,8 @@ def fold_system_into_conversation(
     """Apply ``system_prompt``, folding it in when the model has no system role; folded messages are mutated in place
     (rows here are per-map copies). Text (``demote_existing_system``) prepends a system turn unless one leads, and
     without system-role support merges it into the next user turn or demotes it to ``user``. VLM folds only the
-    configured prompt, onto a leading system or user turn, and leaves a dataset-borne system turn alone."""
+    configured prompt, onto a leading system or user turn, and leaves a dataset-borne system turn alone; where the
+    model has the role, such a turn replaces the prompt, as templates raise on or drop a second system turn."""
     if demote_existing_system:
         if system_prompt and (not messages or messages[0]["role"] != "system"):
             messages = [{"role": "system", "content": system_prompt}, *messages]
@@ -103,6 +104,8 @@ def fold_system_into_conversation(
         if first["role"] in ("system", "user"):
             first["content"] = _prefix_text_to_content(system_prompt, first["content"])
             return messages
+    if messages and messages[0]["role"] == "system":
+        return messages
     return [{"role": "system", "content": system_prompt}, *messages]
 
 

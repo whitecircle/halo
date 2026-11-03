@@ -270,11 +270,11 @@ def test_skip_warns_on_the_main_rank_only():
 
 
 def test_split_ranks_generate_every_world_size_th_sample():
-    """Rank 1 of 3 generates sample positions 1 and 4 of the seeded draw (rows 4, 0, 1, 1, 5 of seven)."""
+    """Rank 1 of 3 generates sample positions 1 and 4 of the seeded draw (rows 5, 0, 6, 2, 4 of seven)."""
     generator = _Generator()
     collectives, _, _ = _evaluate(generator, world_size=3, rank=1, num_examples=5, num_rows=7)
     assert collectives == ["all_gather_object"]
-    assert [prompt for prompt, _, _ in generator.calls] == [[1, 10], [1, 15]]
+    assert [prompt for prompt, _, _ in generator.calls] == [[1, 10], [1, 14]]
 
 
 @pytest.mark.parametrize("flags", list(itertools.product([True, False], repeat=3)))
@@ -290,6 +290,12 @@ def test_gradient_checkpointing_is_off_during_generation_and_restored_exactly(fl
         _evaluate(generator, world_size=1, num_examples=1)
     assert [gc_flags for _, _, gc_flags in generator.calls] == [[False] * 3]
     assert [m.gradient_checkpointing for m in generator.blocks] == list(flags)
+
+
+def test_the_sample_shows_each_row_once():
+    """``num_examples`` is capped at the dataset length, which only means something for distinct rows."""
+    prompts = _callback(_generation_dataset(50), 50).samples["input_ids"]
+    assert len({tuple(prompt) for prompt in prompts}) == 50
 
 
 def test_sample_draw_is_seeded_and_clamped_to_the_dataset():

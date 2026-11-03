@@ -87,6 +87,50 @@ def test_sft_accepts_what_it_honors(config_body, tmp_path):
         _run_main("sft.py", config_body, tmp_path, probe_checkpoint=_stop)
 
 
+def _run_sft_to_the_model_load(
+    tmp_path, config_body: str, *, is_cp: bool, baked_packed: bool | None = None, is_vlm: bool = False
+) -> None:
+    """``baked_packed`` stands in a pre-processed corpus; ``None`` keeps it raw."""
+    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=is_cp))
+    _run_main(
+        "sft.py",
+        config_body,
+        tmp_path,
+        probe_checkpoint=lambda *args, **kwargs: (None, False),
+        init_training_script=lambda *args, **kwargs: runtime,
+        load_script_datasets=lambda *args, **kwargs: ((None, baked_packed is not None), False),
+        resolve_vlm_run=lambda *args, **kwargs: is_vlm,
+        load_preprocessed_metadata=lambda *args, **kwargs: SimpleNamespace(packed=baked_packed),
+        load_policy_model=_stop,
+    )
+
+
+_PACKING_ON = "packing: true\nmax_length: 64\n"
+
+
+@pytest.mark.parametrize(
+    ("config_body", "baked_packed"), [(_PACKING_ON, None), ("", True)], ids=["raw-packing", "baked-packed-rows"]
+)
+def test_sft_refuses_packed_rows_under_context_parallelism_before_the_model_load(tmp_path, config_body, baked_packed):
+    with pytest.raises(ValueError, match="packing is not supported with Context Parallelism"):
+        _run_sft_to_the_model_load(tmp_path, config_body, is_cp=True, baked_packed=baked_packed)
+
+
+@pytest.mark.parametrize(
+    ("config_body", "run"),
+    [
+        pytest.param(_PACKING_ON, {"is_cp": False}, id="no-context-parallelism"),
+        # A corpus baked unpacked trains unpacked whatever `packing` says, as the collator factory reads it.
+        pytest.param(_PACKING_ON, {"is_cp": True, "baked_packed": False}, id="baked-unpacked-rows"),
+        # The VLM route never reaches the collator factory that refuses packed rows.
+        pytest.param("", {"is_cp": True, "baked_packed": True, "is_vlm": True}, id="vlm"),
+    ],
+)
+def test_sft_keeps_the_rows_context_parallelism_can_serve(tmp_path, config_body, run):
+    with pytest.raises(_PastTheGuards):
+        _run_sft_to_the_model_load(tmp_path, config_body, **run)
+
+
 def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> None:
     _run_main(
         "sft.py",

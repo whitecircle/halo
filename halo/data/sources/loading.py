@@ -52,7 +52,7 @@ _UNDECLARED = object()
 
 def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
     """S3 URI, Hub (``id:config`` suffix) or local path, auto-detected."""
-    source_type, _bucket, _key = parse_dataset_source(path)
+    source_type, _bucket, key = parse_dataset_source(path)
 
     if source_type == "s3":
         if is_global_main_process():
@@ -78,13 +78,13 @@ def load_dataset_from_source(path: str) -> Dataset | DatasetDict:
             ) from e
 
     elif source_type == "local":
-        builder = data_file_builder(path)
+        builder = data_file_builder(key)
         if is_global_main_process():
-            logger.info(f"Loading dataset from local {'file' if builder else 'path'}: {path}")
+            logger.info(f"Loading dataset from local {'file' if builder else 'path'}: {key}")
         try:
             if builder is not None:
-                return load_dataset(builder, data_files=path, keep_in_memory=False)
-            return load_from_disk(path, keep_in_memory=False)
+                return load_dataset(builder, data_files=key, keep_in_memory=False)
+            return load_from_disk(key, keep_in_memory=False)
         except (FileNotFoundError, OSError, ValueError) as e:
             raise FileNotFoundError(
                 f"Could not load dataset from local path '{path}'. A path ending in "
@@ -443,6 +443,12 @@ def load_datasets_auto(
         if is_global_main_process():
             logger.info(f"Detected pre-processed dataset at {path}")
         _warn_test_size_ignored(path, test_size, kind="pre-processed")
+        if resolve_dataset_ratios(path, dataset_ratio) != 1:
+            raise ValueError(
+                f"dataset_ratio={dataset_ratio} cannot apply to the pre-processed dataset at {path}: its rows were "
+                f"fixed when the dataset was prepared, and the run would train all of them. Unset dataset_ratio, or "
+                f"subset the source before preparing it."
+            )
         return load_preprocessed_dataset(path, data_parallel_rank, data_parallel_size), True
 
     ds = load_datasets(

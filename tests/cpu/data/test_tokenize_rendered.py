@@ -441,7 +441,6 @@ def test_chat_text_rows_are_length_filtered_on_the_ids_they_train_on():
         args,
         training_config,
         desc="Processing dataset",
-        use_padding=False,
     )
 
     for rows in (train, test):

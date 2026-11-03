@@ -99,7 +99,7 @@ def test_unpacked_rows_batch_alike_with_and_without_the_copy(tmp_path, monkeypat
     assert len({len(row["input_ids"]) for row in rows}) > 1, "rows of one length would pad nothing"
     for collator in (
         DataCollatorForCausalLMWithPadding(tokenizer=tokenizer, mlm=False, pad_to_multiple_of=2),
-        DataCollatorWithFlattening(tokenizer=tokenizer, emit_varlen_always=True),
+        DataCollatorWithFlattening(tokenizer=tokenizer),
         TRLDataCollatorForLanguageModeling(pad_token_id=tokenizer.pad_token_id),
     ):
         _assert_same_batches(collator, rows)

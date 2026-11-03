@@ -28,6 +28,8 @@ from halo.data.pipeline.map_cache_key import (
     kwargs_fingerprint,
     map_cache_file_name,
 )
+from halo.data.pipeline.tree_rows import build_tree_row_processor
+from halo.data.tree_layout import serialize_tree
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import REPO_ROOT
 from tests.common.tokenizers import load_cached_tokenizer
@@ -713,6 +715,53 @@ def test_the_self_distill_encode_map_key_covers_the_encoder_source(helper, monke
     getsource = inspect.getsource
     monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
     assert function_cache_id(encode_self_distill_row) != before, f"editing {helper.__name__} keeps the cache key"
+
+
+def _through_a_generator(rows):
+    return sum(tokenize_rendered(None, row) for row in rows)
+
+
+def _through_a_lambda(rows):
+    return (lambda row: tokenize_rendered(None, row))(rows)
+
+
+def _through_a_nested_def(rows):
+    def one(row):
+        return tokenize_rendered(None, row)
+
+    return one(rows)
+
+
+def _edit_source_of(helper, monkeypatch):
+    getsource = inspect.getsource
+    monkeypatch.setattr(inspect, "getsource", lambda func: getsource(func) + ("\n# edited" if func is helper else ""))
+
+
+@pytest.mark.parametrize(
+    "caller", [_through_a_generator, _through_a_lambda, _through_a_nested_def], ids=lambda caller: caller.__name__
+)
+def test_a_helper_called_from_nested_code_keys_its_caller(caller, monkeypatch):
+    """Nested code holds its own names, so such a helper is absent from the caller's ``co_names``."""
+    before = function_cache_id(caller)
+    _edit_source_of(tokenize_rendered, monkeypatch)
+    assert function_cache_id(caller) != before
+
+
+def test_the_tree_map_key_covers_the_tree_row_layout(monkeypatch):
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    processor = build_tree_row_processor(
+        tokenizer,
+        64,
+        conversation_field="conversation",
+        share_markers=("<tool_response>",),
+        share_requires=None,
+        eos_token_ids=frozenset({tokenizer.eos_token_id}),
+        assistant_message_template="<|im_start|>assistant\n",
+        train_on_last_assistant_only=False,
+    )
+    before = function_cache_id(processor)
+    _edit_source_of(serialize_tree, monkeypatch)
+    assert function_cache_id(processor) != before
 
 
 def test_the_worker_count_is_a_named_parameter_not_a_cache_keyed_kwarg():

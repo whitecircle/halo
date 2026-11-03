@@ -424,13 +424,11 @@ def test_closure_tokenizer_changes_cache_filename():
         tokenizer=_StubTokenizer("modelA", 201088),
         max_length=4096,
         conversation_field="conversation",
-        use_padding=False,
     )
     proc_b = build_chat_row_processor(
         tokenizer=_StubTokenizer("modelB", 262155),
         max_length=4096,
         conversation_field="conversation",
-        use_padding=False,
     )
     name_a = map_cache_file_name("map", proc_a, ds, "Processing dataset", {})
     name_b = map_cache_file_name("map", proc_b, ds, "Processing dataset", {})
@@ -444,13 +442,11 @@ def test_closure_max_length_changes_cache_filename():
         tokenizer=tok,
         max_length=4096,
         conversation_field="conversation",
-        use_padding=False,
     )
     proc_long = build_chat_row_processor(
         tokenizer=tok,
         max_length=36000,
         conversation_field="conversation",
-        use_padding=False,
     )
     name_short = map_cache_file_name("map", proc_short, ds, "Processing dataset", {})
     name_long = map_cache_file_name("map", proc_long, ds, "Processing dataset", {})
@@ -465,12 +461,8 @@ def test_closure_chat_template_changes_cache_filename():
     tok_a.chat_template = "{{ messages }}"
     tok_b = _StubTokenizer("modelA", 201088)
     tok_b.chat_template = "{{ messages }}<|eot|>"
-    proc_a = build_chat_row_processor(
-        tokenizer=tok_a, max_length=4096, conversation_field="conversation", use_padding=False
-    )
-    proc_b = build_chat_row_processor(
-        tokenizer=tok_b, max_length=4096, conversation_field="conversation", use_padding=False
-    )
+    proc_a = build_chat_row_processor(tokenizer=tok_a, max_length=4096, conversation_field="conversation")
+    proc_b = build_chat_row_processor(tokenizer=tok_b, max_length=4096, conversation_field="conversation")
     name_a = map_cache_file_name("map", proc_a, ds, "Processing dataset", {})
     name_b = map_cache_file_name("map", proc_b, ds, "Processing dataset", {})
     assert name_a != name_b, f"chat_template change collided on '{name_a}'"
@@ -484,7 +476,6 @@ def test_closure_fingerprint_deterministic():
             tokenizer=_StubTokenizer("modelA", 201088),
             max_length=4096,
             conversation_field="conversation",
-            use_padding=False,
         )
 
     name_1 = map_cache_file_name("map", mk(), ds, "Processing dataset", {})

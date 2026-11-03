@@ -119,5 +119,25 @@ def test_zaya_max_length_boundary_never_doubles_the_terminator():
         assert not (ids[-1] == eos_id and ids[-2] == eos_id), f"max_length={max_length}: doubled terminator {ids[-4:]}"
 
 
+@pytest.mark.parametrize("add_generation_prompt", [False, True])
+def test_zaya_exact_fit_row_keeps_its_last_token(add_generation_prompt):
+    """At an exact fit the appended suffix overflows the budget, so a truncating re-tokenize would cut the render's
+    trailing newline along with it."""
+    tok = load_cached_tokenizer(ZAYA_8B, trust_remote_code=True)
+    messages = GENERATION_MESSAGES if add_generation_prompt else MESSAGES
+    text = _render(tok, messages, add_generation_prompt)
+    expected = tokenize_rendered(tok, text, for_generation=add_generation_prompt, truncation=False, padding=False)
+    processor = build_chat_row_processor(
+        tok,
+        max_length=len(expected["input_ids"]),
+        conversation_field="messages",
+        add_generation_prompt=add_generation_prompt,
+    )
+
+    ids = processor({"messages": MESSAGES})["input_ids"]
+
+    assert ids == expected["input_ids"], f"an exact-fit row changed: {ids[-4:]} vs {expected['input_ids'][-4:]}"
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

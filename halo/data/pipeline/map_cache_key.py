@@ -40,6 +40,15 @@ _unfingerprintable_warned: set[tuple[str, str]] = set()
 _content_sig_failed_warned: set[str] = set()
 
 
+def _code_names(code: types.CodeType) -> list[str]:
+    """``code``'s names and those of the code nested in it: a generator, lambda or nested def holds its own."""
+    names = list(code.co_names)
+    for constant in code.co_consts:
+        if isinstance(constant, types.CodeType):
+            names.extend(_code_names(constant))
+    return names
+
+
 def _referenced_local_functions(func: Callable, seen: set) -> list[Callable]:
     """The first-party functions ``func``'s code reads from its module globals, which source and closure
     inspection cannot see; third-party source churns without changing our outputs, so it stays out."""
@@ -48,7 +57,8 @@ def _referenced_local_functions(func: Callable, seen: set) -> list[Callable]:
     if code is None or func_globals is None:
         return []
     referenced = []
-    for name in code.co_names:
+    # Ordered, never a set: ``seen`` makes a helper's id depend on the visit order, which ranks must share.
+    for name in dict.fromkeys(_code_names(code)):
         value = func_globals.get(name)
         if (
             isinstance(value, types.FunctionType)

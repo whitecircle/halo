@@ -44,8 +44,6 @@ def find_terminator_positions(
 def filter_eos_after_responses(response_starts: list[int], eos_positions: list[int]) -> list[int]:
     """First EOS within each response's own turn, after its start and before the next one; ``-1`` (a no-op
     span) for a turn missing its own, which must not borrow a later turn's and unmask the turns between."""
-    if not response_starts or not eos_positions:
-        return []
     sorted_eos = sorted(eos_positions)
     filtered = []
     for i, start in enumerate(response_starts):
@@ -96,7 +94,7 @@ def _scan_completion_spans_sequential(
             if not eos_fallback_to_end:
                 starts.append(span_start)
                 ends.append(-1)
-                i += m if m else 1
+                i += m
                 continue
             end = n - 1
         starts.append(span_start)
@@ -133,7 +131,7 @@ def resolve_completion_spans(
         # Shift after pairing so the next-start bound stays anchored on marker positions.
         offset = 0 if include_marker else len(response_token_ids)
         response_starts = [start + offset for start in marker_starts]
-    if train_on_last_assistant_only and response_starts and eos_ends:
+    if train_on_last_assistant_only and response_starts:
         response_starts = [response_starts[-1]]
         eos_ends = [eos_ends[-1]]
     return response_starts, eos_ends
@@ -241,7 +239,7 @@ def mask_batch_to_completion_spans(
     train_on_last_assistant_only: bool,
     response_prompt_template: str | list[int],
     tokenizer: PreTrainedTokenizerBase | None = None,
-    span_policy: dict[str, bool] | None = None,
+    span_policy: dict[str, bool] = PADDED_SPAN_POLICY,
     attention_mask: torch.Tensor | None = None,
     extra_ignore_token_ids: tuple[int, ...] = (),
 ) -> dict[str, Any]:
@@ -250,7 +248,6 @@ def mask_batch_to_completion_spans(
     fallback, which would train pad on padded rows). ``attention_mask`` confines the search to real tokens, so the
     self-distill fallback cannot run into padding. ``extra_ignore_token_ids`` (image tokens) are masked after the
     refill, which would restore them."""
-    policy = PADDED_SPAN_POLICY if span_policy is None else span_policy
     for i in range(batch["labels"].shape[0]):
         input_ids = batch["input_ids"][i]
         lo, hi = _real_token_bounds(input_ids, None if attention_mask is None else attention_mask[i])
@@ -262,7 +259,7 @@ def mask_batch_to_completion_spans(
                 response_token_ids,
                 eos_token_ids,
                 train_on_last_assistant_only=train_on_last_assistant_only,
-                span_policy=policy,
+                span_policy=span_policy,
                 response_prompt_template=response_prompt_template,
                 tokenizer=tokenizer,
                 row_label=f"example {i}",
@@ -284,7 +281,7 @@ def build_training_labels(
     extra_ignore_token_ids: tuple[int, ...] = (),
     attention_mask: torch.Tensor | None = None,
     eos_token_ids: frozenset[int] | None = None,
-    span_policy: dict[str, bool] | None = None,
+    span_policy: dict[str, bool] = SELF_DISTILL_SPAN_POLICY,
 ) -> torch.Tensor:
     """Labels from ``input_ids``: pad and ``extra_ignore_token_ids`` masked, and with ``train_on_completions_only``
     everything outside completions. Shared by text and VLM collators so both branches select the same tokens. Callers
@@ -310,15 +307,11 @@ def build_training_labels(
         train_on_last_assistant_only=False,
         response_prompt_template=response_prompt_template,
         tokenizer=tokenizer,
-        span_policy=_label_span_policy(span_policy),
+        span_policy=span_policy,
         attention_mask=attention_mask,
         extra_ignore_token_ids=extra_ignore_token_ids,
     )
     return batch["labels"]
-
-
-def _label_span_policy(span_policy: dict[str, bool] | None) -> dict[str, bool]:
-    return SELF_DISTILL_SPAN_POLICY if span_policy is None else span_policy
 
 
 def reject_untrainable_completions(
@@ -327,7 +320,7 @@ def reject_untrainable_completions(
     tokenizer,
     response_prompt_template: str,
     eos_token_ids: frozenset[int],
-    span_policy: dict[str, bool] | None,
+    span_policy: dict[str, bool],
     subject: str,
 ) -> None:
     """Refuse completion-only labels that would train no token of ``probe_conversation``: a marker the template never
@@ -336,9 +329,7 @@ def reject_untrainable_completions(
     response_token_ids = tokenize_response_template(response_prompt_template, tokenizer)
     for text in verify_marker_renders(render, (probe_conversation,), response_prompt_template):
         input_ids = tokenizer(text, add_special_tokens=False)["input_ids"]
-        starts, ends = resolve_completion_spans(
-            input_ids, response_token_ids, eos_token_ids, **_label_span_policy(span_policy)
-        )
+        starts, ends = resolve_completion_spans(input_ids, response_token_ids, eos_token_ids, **span_policy)
         if starts and all(end == -1 for end in ends):
             terminators = sorted(tokenizer.convert_ids_to_tokens(sorted(eos_token_ids)))
             raise ValueError(

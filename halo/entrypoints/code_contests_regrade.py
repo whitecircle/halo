@@ -7,7 +7,6 @@ from concurrent.futures import ThreadPoolExecutor
 from functools import cache
 from typing import Any
 
-from halo.data.sources.loading import load_dataset_split
 from halo.environments.eval_runner import GENERATION_ERROR_KEY
 from halo.environments.registry import build_environment
 from halo.environments.tasks.coding.code_contests import (
@@ -71,11 +70,7 @@ def _load_payloads(
         raise SystemExit(
             f"adapter {adapter_name!r} scores prepared pools only; its raw rows carry no gradable payload"
         )
-    rows = (
-        adapter.load(dataset, config, split)
-        if adapter.load
-        else load_dataset_split(dataset, split=split, config=config)
-    )
+    rows = adapter.load_rows(dataset, config, split)
     payloads = tuple(adapter.pack_verification(row) for row in adapter.scored_rows(rows, selection))
     if not payloads:
         raise SystemExit(f"{dataset} ({adapter_name}) yielded no gradable problem")

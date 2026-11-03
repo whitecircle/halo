@@ -57,14 +57,14 @@ def _isolated_datasets_cache(tmp_path, monkeypatch):
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "hf_datasets"))
 
 
-def _bake(input_ids: list[int], span_policy) -> list[int]:
+def _bake(input_ids: list[int], **span_policy) -> list[int]:
     return _completion_only_labels(
         input_ids,
         _Tokenizer(),
         assistant_template="<resp>",
         response_token_ids=TEMPLATE_IDS,
         eos_token_ids=frozenset({EOS}),
-        span_policy=span_policy,
+        **span_policy,
     )
 
 
@@ -83,7 +83,6 @@ def _flattened_collator_labels(input_ids: list[int]) -> list[int]:
         tokenizer=_Tokenizer(),
         response_prompt_template=TEMPLATE_IDS,
         eos_token_ids=frozenset({EOS}),
-        emit_varlen_always=True,
     )
     return collator([{"input_ids": list(input_ids)}])["labels"][0].tolist()
 
@@ -108,8 +107,8 @@ def test_every_route_masks_a_terminated_row_identically(input_ids):
 
     assert _packed_collator_labels(input_ids) == expected
     assert _flattened_collator_labels(input_ids) == expected
-    assert _bake(input_ids, PADDED_SPAN_POLICY) == expected
-    assert _bake(input_ids, PACKED_SPAN_POLICY) == expected
+    assert _bake(input_ids, span_policy=PADDED_SPAN_POLICY) == expected
+    assert _bake(input_ids, span_policy=PACKED_SPAN_POLICY) == expected
 
 
 def test_the_packed_bake_and_the_packed_collators_agree_on_a_terminator_less_turn():
@@ -118,7 +117,7 @@ def test_the_packed_bake_and_the_packed_collators_agree_on_a_terminator_less_tur
     packed_runtime = _packed_collator_labels(UNTERMINATED_ROW)
 
     assert packed_runtime == [IGNORE, RESP_1, RESP_2, 30, 31], packed_runtime
-    assert _bake(UNTERMINATED_ROW, PACKED_SPAN_POLICY) == packed_runtime
+    assert _bake(UNTERMINATED_ROW, span_policy=PACKED_SPAN_POLICY) == packed_runtime
     assert _flattened_collator_labels(UNTERMINATED_ROW) == packed_runtime
 
 
@@ -128,8 +127,8 @@ def test_the_padded_route_still_drops_a_terminator_less_turn():
     padded = _padded_route_labels(UNTERMINATED_ROW)
 
     assert padded == [IGNORE] * len(UNTERMINATED_ROW), padded
-    assert _bake(UNTERMINATED_ROW, PADDED_SPAN_POLICY) == padded
-    assert _bake(UNTERMINATED_ROW, None) == padded, "the bake's default stays the padded policy"
+    assert _bake(UNTERMINATED_ROW, span_policy=PADDED_SPAN_POLICY) == padded
+    assert _bake(UNTERMINATED_ROW) == padded, "the bake's default stays the padded policy"
 
 
 @pytest.mark.parametrize("pack_sequences", [False, True], ids=["unpacked", "packed"])

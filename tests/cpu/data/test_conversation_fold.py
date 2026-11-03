@@ -54,6 +54,12 @@ def test_vlm_supported_prepends_system_turn():
     assert out == _msgs(("system", "sys"), ("user", "hi"))
 
 
+def test_vlm_supported_keeps_a_dataset_system_turn_and_takes_no_second_one():
+    conv = _msgs(("system", "rules"), ("user", "hi"))
+    out = fold_system_into_conversation(conv, "sys", True, demote_existing_system=False)
+    assert out == _msgs(("system", "rules"), ("user", "hi"))
+
+
 def test_vlm_unsupported_prefixes_first_user_turn():
     out = fold_system_into_conversation(_msgs(("user", "hi")), "sys", False, demote_existing_system=False)
     assert out == _msgs(("user", "sys\nhi"))

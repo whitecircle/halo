@@ -68,7 +68,7 @@ equal tokens per step the two masks are the same size.
 Packing's mask is bounded by `max_length` only at `per_device_train_batch_size: 1`, so keep the batch at 1
 there and scale with `gradient_accumulation_steps`.
 
-The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence) shaped `[1, total_tokens]`, plus the varlen kwargs `cu_seq_lens_q`/`cu_seq_lens_k` (1-D int32, length `num_seqs + 1`) and `max_length_q`/`max_length_k` (Python ints). The varlen FA kernel reads `cu_seq_lens` to attend only within each sequence. The varlen kwargs are gated by the collator's `emit_varlen_always=True`. `seq_idx` joins them under `return_seq_idx`, which `select_data_collator` sets for the families whose conv/linear-attention mixers read it (LFM-2, GatedDeltaNet).
+The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence) shaped `[1, total_tokens]`, plus the varlen kwargs `cu_seq_lens_q`/`cu_seq_lens_k` (1-D int32, length `num_seqs + 1`) and `max_length_q`/`max_length_k` (Python ints). The varlen FA kernel reads `cu_seq_lens` to attend only within each sequence. `seq_idx` joins them under `return_seq_idx`, which `select_data_collator` sets for the families whose conv/linear-attention mixers read it (LFM-2, GatedDeltaNet).
 
 ## Benchmark results
 

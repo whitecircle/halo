@@ -299,7 +299,7 @@ def _read_metadata_payload(path: str, *, s3_outage_reads_absent: bool) -> dict[s
         with open(local_path) as f:
             return json.load(f)
 
-    metadata_path = os.path.join(path, METADATA_FILE)
+    metadata_path = os.path.join(key, METADATA_FILE)
     if not os.path.exists(metadata_path):
         return None
     with open(metadata_path) as f:

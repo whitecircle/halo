@@ -431,7 +431,7 @@ def test_flattening_position_ids():
 
 def test_flattening_cu_seq_lens():
     tok = make_tokenizer()
-    collator = DataCollatorWithFlattening(tokenizer=tok, emit_varlen_always=True)
+    collator = DataCollatorWithFlattening(tokenizer=tok)
 
     ex1 = {"input_ids": [USER_A, ASST_A], "labels": [USER_A, ASST_A]}
     ex2 = {"input_ids": [USER_B, ASST_B, EOS], "labels": [USER_B, ASST_B, EOS]}
@@ -1417,7 +1417,7 @@ def test_filter_eos_does_not_cross_into_next_response():
 
 def test_filter_eos_after_responses_empty_inputs():
     assert filter_eos_after_responses([], [5]) == []
-    assert filter_eos_after_responses([2], []) == []
+    assert filter_eos_after_responses([2, 8], []) == [-1, -1], "every start pairs with an end"
 
 
 def test_completion_only_unterminated_turn_does_not_leak_into_user_message():

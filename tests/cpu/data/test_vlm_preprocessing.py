@@ -21,11 +21,11 @@ from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.tokenization import tokenize_vlm_dataset
 from halo.data.vlm_detection import VLM_IMAGE_COLUMNS
-from halo.data.vlm_render import VLM_OUTPUT_FEATURES
+from halo.data.vlm_render import VLM_OUTPUT_FEATURES, extract_conversation_images
 from halo.model_loading.parallel import model_source
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.models.modality import is_vlm_model
-from tests.common.models import QWEN2_5_VL_3B
+from tests.common.models import QWEN2_5_VL_3B, QWEN3_5_MOE_35B
 from tests.common.tokenizers import load_cached_processor
 from tests.common.vlm_fakes import FakeVLMProcessorBase, FakeVLMTokenizer
 
@@ -97,6 +97,23 @@ class _FakeTokenizer:
 
     def __init__(self, pad_token_id=0):
         self.pad_token_id = pad_token_id
+
+
+@pytest.mark.parametrize("model_name", [QWEN3_5_MOE_35B, QWEN2_5_VL_3B])
+def test_a_row_system_turn_renders_alone_beside_a_configured_prompt(model_name):
+    """Qwen3.5's template raises on the stacked pair and Qwen2.5-VL's renders both."""
+    processor = load_cached_processor(model_name, trust_remote_code=True)
+    conversation = [
+        {"role": "system", "content": "row rules"},
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "hello"},
+    ]
+
+    history, _ = extract_conversation_images(conversation, system_prompt="configured prompt")
+    text = processor.apply_chat_template(history, tokenize=False)
+
+    assert "row rules" in text
+    assert "configured prompt" not in text
 
 
 def test_the_preprocessed_vlm_schema_is_the_declared_column_set():

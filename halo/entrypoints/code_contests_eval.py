@@ -7,7 +7,6 @@ import json
 import logging
 from typing import Any
 
-from halo.data.sources.loading import load_dataset_split
 from halo.entrypoints.eval_contract import (
     DEFAULT_SPLIT,
     load_training_contract,
@@ -156,11 +155,7 @@ def build_examples(
 ) -> list[dict[str, Any]]:
     """Compose the rows ``selection`` admits into eval examples via the adapter, logging examples-only problems left
     out. The adapter's own ``load`` applies when it has one (LiveCodeBench and ICPC-Eval need it)."""
-    rows = (
-        adapter.load(args.dataset, args.config, args.split)
-        if adapter.load
-        else load_dataset_split(args.dataset, split=args.split, config=args.config)
-    )
+    rows = adapter.load_rows(args.dataset, args.config, args.split)
     examples = []
     left_out: list[Any] = []
     for row in adapter.scored_rows(rows, selection, left_out):

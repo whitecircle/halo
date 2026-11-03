@@ -62,7 +62,6 @@ def test_sft_pipeline_creates_cache(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
 
     extra_columns = list(set(ds["train"].column_names))
@@ -97,7 +96,6 @@ def test_sft_pipeline_reuses_cache(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
 
@@ -131,7 +129,6 @@ def test_both_ranks_get_identical_results(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
 
@@ -170,7 +167,6 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
     result_a = coordinated_map_and_filter(
@@ -184,7 +180,6 @@ def test_different_tokenizer_produces_different_cache(cache_dir: str, tokenizer,
         tokenizer=alt_tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     ds_b = create_conversation_splits(num_train=20, num_test=5)
     extra_columns_b = list(set(ds_b["train"].column_names))
@@ -211,7 +206,6 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
         add_generation_prompt=False,
-        use_padding=True,
     )
 
     # Different function body.
@@ -220,7 +214,6 @@ def test_generate_dataset_separate_cache(cache_dir: str, tokenizer) -> None:
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
         add_generation_prompt=True,
-        use_padding=True,
     )
 
     extra_columns = list(set(ds["train"].column_names))
@@ -258,7 +251,6 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns = list(set(ds["train"].column_names))
 
@@ -276,7 +268,6 @@ def test_cache_survives_process_restart(cache_dir: str, tokenizer) -> None:
         tokenizer=tokenizer,
         max_length=MAX_LENGTH,
         conversation_field=CONVERSATION_FIELD,
-        use_padding=True,
     )
     extra_columns2 = list(set(ds2["train"].column_names))
 

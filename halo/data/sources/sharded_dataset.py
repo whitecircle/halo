@@ -55,7 +55,7 @@ class ShardedDatasetLoader:
                 )
                 return False
         if source_type == "local":
-            return os.path.exists(os.path.join(path, "train", SHARD_INDEX_FILE))
+            return os.path.exists(os.path.join(key, "train", SHARD_INDEX_FILE))
         return False
 
     def load(self) -> DatasetDict:
@@ -132,7 +132,7 @@ class ShardedDatasetLoader:
             index_key = s3_object_key(self.key, split, SHARD_INDEX_FILE)
             index = ShardIndex.from_dict(read_control_json_with_cache(self.bucket, index_key))
         else:
-            index = ShardIndex.load(os.path.join(self.dataset_path, split, SHARD_INDEX_FILE))
+            index = ShardIndex.load(os.path.join(self.key, split, SHARD_INDEX_FILE))
 
         self._shard_indices[split] = index
         return index
@@ -157,7 +157,7 @@ class ShardedDatasetLoader:
     def _load_shard(self, shard: ShardInfo) -> Dataset:
         if self.source_type == "s3":
             return self._load_shard_from_s3(shard)
-        return load_from_disk(os.path.join(self.dataset_path, shard.path))
+        return load_from_disk(os.path.join(self.key, shard.path))
 
     def _load_shard_from_s3(self, shard: ShardInfo) -> Dataset:
         """Keyed by md5(bucket/key/shard.path): identical shards download once, one re-preprocessed in place again."""

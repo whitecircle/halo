@@ -220,15 +220,13 @@ def log_script_dataset_examples(datasets: dict, tokenizer: PreTrainedTokenizer, 
     )
 
 
-def prepare_chat_text_split(ds, tokenizer, args, training_config, *, desc: str, use_padding: bool):
+def prepare_chat_text_split(ds, tokenizer, args, training_config, *, desc: str):
     """COLLECTIVE: ``(train, eval)`` chat-templated and tokenized once; a row over ``max_length`` is dropped, never
     truncated mid-turn. ``desc`` keys the map's cache."""
     render_kwargs = text_render_kwargs(args)
     ds = coordinated_map_and_filter(
         ds,
-        build_chat_row_processor(
-            tokenizer=tokenizer, max_length=training_config.max_length, use_padding=use_padding, **render_kwargs
-        ),
+        build_chat_row_processor(tokenizer=tokenizer, max_length=training_config.max_length, **render_kwargs),
         # sorted: this list feeds the coordinated-map cache key, and set order is hash-randomized per process.
         remove_columns=sorted(set(ds["train"].column_names)),
         desc=desc,
@@ -248,7 +246,7 @@ def prepare_raw_vlm_split(ds, args, training_config, processor, tokenizer, model
         processor,
         tokenizer,
         training_config.max_length,
-        response_prompt_template=args.assistant_message_template if args.train_on_completions_only else None,
+        response_prompt_template=args.assistant_message_template,
         train_on_completions_only=args.train_on_completions_only,
         model_config=model_config,
     )

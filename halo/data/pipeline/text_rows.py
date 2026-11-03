@@ -80,12 +80,10 @@ def build_chat_row_processor(
     system_prompt: str | None = None,
     model_supports_system_role: bool = True,
     add_generation_prompt: bool = False,
-    use_padding: bool = True,
     interleaved_thinking: bool = False,
     tools_field: str | None = None,
 ) -> Callable[[dict[str, Any]], dict[str, Any]]:
-    """A row map that chat-templates and tokenizes; a row over ``max_length`` becomes the typed rejection row.
-    ``use_padding=False`` for padding-free collation."""
+    """A row map that chat-templates and tokenizes; a row over ``max_length`` becomes the typed rejection row."""
     none_example = build_rejection_row(tokenizer, truncation=True, padding=False, max_length=max_length)
 
     def process_row(row: dict[str, Any]) -> dict[str, Any]:
@@ -106,18 +104,7 @@ def build_chat_row_processor(
         )
         if len(tokenized["input_ids"]) > max_length:
             return none_example.copy()
-
-        if not use_padding:  # the row fits and nothing pads, so a second pass would change nothing
-            return tokenized
-
-        return tokenize_rendered(
-            tokenizer,
-            constructed_prompt,
-            for_generation=add_generation_prompt,
-            truncation=True,
-            padding=use_padding,
-            max_length=max_length,
-        )
+        return tokenized
 
     return process_row
 

@@ -270,7 +270,6 @@ class DataCollatorWithFlattening(DefaultDataCollator):
     """Padding-free: the mini-batch as one ``[1, total_tokens]`` sequence for a varlen flash kernel."""
 
     tokenizer: PreTrainedTokenizerBase = None
-    emit_varlen_always: bool = True
     return_seq_idx: bool = False
     allow_cross_document_linear_attention: bool = False
 
@@ -301,7 +300,7 @@ class DataCollatorWithFlattening(DefaultDataCollator):
             batch["position_ids"] += list(range(len(input_ids)))
 
         batch = {key: torch.tensor([value], dtype=torch.int64) for key, value in batch.items()}
-        markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=self.emit_varlen_always)
+        markers = SegmentMarkers(seq_idx=self.return_seq_idx, cu_seq_lens=True)
         batch.update(segment_marker_kwargs(batch["position_ids"], markers))
         return batch
 

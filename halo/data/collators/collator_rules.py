@@ -146,6 +146,16 @@ def reject_padding_free_conflicts(*, padding_free: bool, packing: bool, use_cont
         )
 
 
+def reject_context_parallel_packing(*, packing: bool, use_context_parallel: bool) -> None:
+    """Reads only the flags, so a script can run it before the model load, once a baked corpus says what it packed."""
+    if use_context_parallel and packing:
+        raise ValueError(
+            "packing is not supported with Context Parallelism: the CP attention path has no "
+            "per-document boundaries (dense causal kernel), so packed documents leak attention "
+            "into each other. Disable packing for CP runs."
+        )
+
+
 def resolve_multi_document_mode(*, packing: bool, padding_free: bool) -> str | None:
     """``"packing"``, ``"padding_free"``, or ``None`` for one document per row."""
     if packing:
@@ -233,9 +243,4 @@ def reject_unsupported_collator_options(
     )
     if train_on_last_assistant_only and not train_on_completions_only:
         raise ValueError("train_on_last_assistant_only=True requires train_on_completions_only=True")
-    if use_context_parallel and packing:
-        raise ValueError(
-            "packing is not supported with Context Parallelism: the CP attention path has no "
-            "per-document boundaries (dense causal kernel), so packed documents leak attention "
-            "into each other. Disable packing for CP runs."
-        )
+    reject_context_parallel_packing(packing=packing, use_context_parallel=use_context_parallel)

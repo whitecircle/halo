@@ -6,7 +6,12 @@ Self-distill: starts after the marker, runs to the first terminator anywhere, fa
 import pytest
 import torch
 
-from halo.data.completion_spans import PADDED_SPAN_POLICY, build_training_labels, resolve_completion_spans
+from halo.data.completion_spans import (
+    PADDED_SPAN_POLICY,
+    SELF_DISTILL_SPAN_POLICY,
+    build_training_labels,
+    resolve_completion_spans,
+)
 
 EOS = 1
 M1, M2 = 10, 11
@@ -52,7 +57,7 @@ def test_fallback_divergence_no_terminator_at_all():
     per span."""
     row = [U, M1, M2, A, A]
 
-    assert _collator_spans(row) == ([1], [])
+    assert _collator_spans(row) == ([1], [-1])
     assert _collator_spans(row, eos_fallback_to_end=True) == ([1], [4])
     assert _self_distill_spans(row) == ([3], [4])
 
@@ -168,7 +173,9 @@ def test_padded_terminated_span_is_unchanged_by_the_pad_guard():
     assert labels.tolist() == [IGNORE, IGNORE, IGNORE, A, A, EOS] + [IGNORE] * 4, labels.tolist()
 
 
-@pytest.mark.parametrize("span_policy", [None, PADDED_SPAN_POLICY], ids=["self_distill", "collator"])
+@pytest.mark.parametrize(
+    "span_policy", [SELF_DISTILL_SPAN_POLICY, PADDED_SPAN_POLICY], ids=["self_distill", "collator"]
+)
 def test_extra_ignore_ids_inside_a_span_stay_masked(span_policy):
     """The span refill copies from ``input_ids``, so extras masked before it come back as targets. The offline bake
     applies them after the refill, and both paths must agree."""

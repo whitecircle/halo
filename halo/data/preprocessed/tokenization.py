@@ -55,7 +55,7 @@ def _completion_only_labels(
     response_token_ids: list[int],
     eos_token_ids: frozenset[int],
     extra_ignore_token_ids: tuple[int, ...] = (),
-    span_policy: dict[str, bool] | None = None,
+    span_policy: dict[str, bool] = PADDED_SPAN_POLICY,
 ) -> list[int]:
     """By the span rule every runtime collator labels through, so a baked row masks exactly like an untouched one;
     ``span_policy`` is that collator's, ``extra_ignore_token_ids`` (image tokens) are masked on top."""
@@ -147,7 +147,6 @@ def _row_processor(config: PreprocessingConfig, tokenizer: PreTrainedTokenizer) 
         system_prompt=config.system_prompt,
         model_supports_system_role=config.model_supports_system_role,
         add_generation_prompt=False,
-        use_padding=False,
         interleaved_thinking=config.interleaved_thinking,
         tools_field=config.tools_field,
     )

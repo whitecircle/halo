@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.completion_spans import build_training_labels, resolve_completion_spans
+from halo.data.completion_spans import SELF_DISTILL_SPAN_POLICY, build_training_labels, resolve_completion_spans
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 
 MARKER_IDS = [7, 7]
@@ -46,10 +46,9 @@ def _labels(row: list[int], span_policy) -> torch.Tensor:
 
 
 def test_terminatorless_row_under_collator_policy_warns_instead_of_crashing():
-    # The precondition a strict zip crashes on, pinned so this test cannot stop covering it: under this
-    # policy the row resolves to a start with NO paired end.
+    # Pinned so this test cannot stop covering it: under this policy the row resolves to a start with a no-op end.
     starts, ends = resolve_completion_spans([5, 7, 7, 9], MARKER_IDS, frozenset({EOS_ID}), **COLLATOR_POLICY)
-    assert starts and not ends
+    assert starts and ends == [-1]
 
     with pytest.warns(UserWarning, match="matched but no completion span has a terminator"):
         labels = _labels([5, 7, 7, 9], COLLATOR_POLICY)
@@ -61,7 +60,7 @@ def test_terminatorless_row_under_collator_policy_warns_instead_of_crashing():
 def test_missing_marker_warns_instead_of_training_zero_tokens_silently():
     """No marker anywhere (a wrong assistant_message_template) must name the template in a warning."""
     with pytest.warns(UserWarning, match="Could not find response key"):
-        labels = _labels([5, 9, 9, EOS_ID], None)
+        labels = _labels([5, 9, 9, EOS_ID], SELF_DISTILL_SPAN_POLICY)
     assert torch.equal(labels, torch.full_like(labels, LABEL_IGNORE_INDEX))
 
 
@@ -69,7 +68,7 @@ def test_terminatorless_row_still_trains_under_the_self_distill_fallback():
     """The default policy falls back to end-of-sequence, so the same row keeps its completion."""
     with warnings.catch_warnings():
         warnings.simplefilter("error")  # a warning here would mean the guard fired on a good row
-        labels = _labels([5, 7, 7, 9], None)
+        labels = _labels([5, 7, 7, 9], SELF_DISTILL_SPAN_POLICY)
     # include_marker=False: the span starts after the marker and runs to the last real token.
     assert labels[0].tolist() == [LABEL_IGNORE_INDEX] * 3 + [9]
 

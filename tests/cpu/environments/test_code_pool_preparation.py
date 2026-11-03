@@ -34,7 +34,7 @@ from halo.entrypoints.code_pool_preparation import (
     load_tests_table,
     suite_rejects_constants,
 )
-from halo.environments.tasks.coding import suite_compaction
+from halo.environments.tasks.coding import contest_datasets, suite_compaction
 from halo.environments.tasks.coding.contest_datasets import (
     CODE_DATASET_ADAPTERS,
     CodeDatasetAdapter,
@@ -436,7 +436,7 @@ def test_the_eval_leaves_out_and_counts_examples_only_problems_unless_asked(capl
 
 def test_the_regrader_rebuilds_the_rows_each_run_scored(monkeypatch):
     """The re-grade reads an episode's problem by index, so it rebuilds the eval's sequence from the meta line."""
-    monkeypatch.setattr(code_contests_regrade, "load_dataset_split", lambda *_, **__: list(_ROWS))
+    monkeypatch.setattr(contest_datasets, "load_dataset_split", lambda *_, **__: list(_ROWS))
     code_contests_regrade._load_payloads.cache_clear()
     meta = {"adapter": "codeforces", "dataset": "examples-only/now", "split": "test"}
     current = code_contests_regrade.build_payloads({**meta, "selection": ContestSelection().to_meta()})

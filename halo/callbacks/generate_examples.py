@@ -102,7 +102,7 @@ class GenerateExamplesCallback(TrainerCallback):
         self.logger_backend = logger_backend
 
         rng = random.Random(_SAMPLE_SEED)
-        sample_indices = rng.choices(range(len(self.dataset)), k=self.num_examples)
+        sample_indices = rng.sample(range(len(self.dataset)), self.num_examples)
         self.samples = self.dataset.select(sample_indices)
 
     @classmethod

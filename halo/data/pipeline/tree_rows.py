@@ -109,7 +109,6 @@ def _trained_tokens(
 ) -> list[bool]:
     """Which tokens of a flat example the packing completion collator trains: each span through its closing token,
     minus pad-valued tokens where pad is not the EOS, never the document's first token."""
-    trained = [False] * len(input_ids)
     spans = resolve_spans_or_warn(
         input_ids,
         response_token_ids,

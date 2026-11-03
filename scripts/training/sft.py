@@ -13,6 +13,7 @@ from halo.configs.sft import TREE_PACKING_FIELDS, SFTScriptArguments
 from halo.data.collators.collator_rules import (
     evaluation_batch_size,
     has_dense_kernel_row_refusal,
+    reject_context_parallel_packing,
     reject_multi_document_rows,
     resolve_multi_document_mode,
 )
@@ -122,7 +123,6 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
                 tokenizer=tokenizer,
                 max_length=sft_config.max_length,
                 add_generation_prompt=True,
-                use_padding=True,
                 **render_kwargs,
             ),
             desc="Processing generate dataset",
@@ -135,7 +135,7 @@ def _prepare_raw_text_splits(ds, args, sft_config, tokenizer, hf_config):
         )
     else:
         train_dataset, eval_dataset = prepare_chat_text_split(
-            ds, tokenizer, args, sft_config, desc="Processing dataset", use_padding=not sft_config.padding_free
+            ds, tokenizer, args, sft_config, desc="Processing dataset"
         )
     _reject_empty_split(train_dataset, "training", sft_config.max_length)
     if sft_config.packing:
@@ -330,6 +330,10 @@ def main():
     if is_vlm:
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
     metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
+    if not is_vlm:
+        reject_context_parallel_packing(
+            packing=_packs_rows(sft_config, metadata), use_context_parallel=parallelism_config.is_cp_mode
+        )
     if not (_packs_rows(sft_config, metadata) or sft_config.padding_free):
         reject_non_default_args("Halo SFT without multi-document rows", args, "allow_cross_document_linear_attention")
     if metadata is not None:
