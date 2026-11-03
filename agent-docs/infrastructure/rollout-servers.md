@@ -19,8 +19,8 @@ rollout_server_configs:          # one entry per server
 
 `url` is required. Group ports are bound on the trainer host and must be unique across servers
 (enforced); the defaults sit inside Linux's ephemeral range (32768–60999), so reserve them
-(`net.ipv4.ip_local_reserved_ports`) or pick ports outside it. Entry keys are read by name without
-validation, so a misspelled `group_port` silently falls back to `rollout_group_port + index`. The
+(`net.ipv4.ip_local_reserved_ports`) or pick ports outside it. The config refuses any other key, a
+missing `url`, a `group_port` outside 0–65535, and a non-default `rollout_server_url` beside a non-empty list. The
 trainer-side mechanics (prefetch and its staleness, sync cadence, trajectory length) live on
 [Async GRPO → Weight synchronization](../training-methods/async-grpo/setup.md#weight-synchronization).
 

@@ -22,6 +22,7 @@ from halo.environments.sandbox.bubblewrap import BubblewrapSandbox
 from halo.environments.sandbox.local import LocalSubprocessSandbox
 from halo.environments.sandbox.remote import RemoteSandbox
 from halo.environments.sandbox.results import SandboxResult
+from halo.environments.tasks.coding import swe as swe_module
 from halo.environments.tasks.coding.code_contests import CodeContestsEnvironment
 from halo.environments.tasks.coding.grading import GradingSpec, grade_solution, run_solution_against_tests
 from halo.environments.tasks.coding.swe import SweEnvironment
@@ -60,6 +61,13 @@ def _run_swe_episode(env: SweEnvironment, context: dict, answer: str):
     ids, _ = env.reset(["fix the bug"], [context])
     env.step(ids, ["writing"], [{**context, "tool_calls": [_tool_call("write_file", path="a.py", content="x")]}])
     return env.step(ids, [answer], [context])[0].trajectory
+
+
+def test_swe_refuses_a_test_function_from_yaml(monkeypatch):
+    """A string would count as a grader, clear ``requires_answer`` and void every episode when called."""
+    monkeypatch.setattr(swe_module, "build_sandbox", lambda **_: pytest.fail("built a sandbox for a refused config"))
+    with pytest.raises(ValueError, match="test_function must be a callable"):
+        build_environment("swe", {"test_function": "my.module:fn"})
 
 
 def test_swe_without_a_test_function_grades_against_the_answer_column():

@@ -72,7 +72,7 @@ Examples:
         default=None,
         help="Override attention implementation (e.g., 'flash_attention_2', 'sdpa')",
     )
-    add_trust_remote_code_arg(parser)
+    add_trust_remote_code_arg(parser, default=None)
     parser.add_argument(
         "--fp32_norms",
         action="store_true",

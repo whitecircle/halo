@@ -383,10 +383,7 @@ def _verify_render_knobs(metadata: PreprocessedDatasetMetadata, render_args: Any
         if "chat_template" in unstated:
             # A stated chat_template replaces a shipped one only with force_chat_template: the exported template
             # is the run tokenizer's.
-            remedy += (
-                ", chat_template together with force_chat_template: true, without which a checkpoint that ships "
-                "its own template keeps and exports it"
-            )
+            remedy += ", chat_template together with force_chat_template: true over a template the checkpoint ships"
         logger.warning(
             f"Preprocessed dataset was prepared with render settings the training config does not "
             f"state ({detail}). Rendering is baked, so the PREPARED value is what trained; {remedy}."
@@ -424,7 +421,7 @@ def _rows_chat_template(metadata: PreprocessedDatasetMetadata) -> tuple[Any, str
 
 
 def _verify_exported_chat_template(
-    metadata: PreprocessedDatasetMetadata, exported: Any, render_args: Any | None, run_model: str | None
+    metadata: PreprocessedDatasetMetadata, exported: Any, run_model: str | None
 ) -> None:
     """Raise when the template the run exports is not the one the rows were rendered with: the model would train on one
     and be served with the other."""
@@ -432,8 +429,6 @@ def _verify_exported_chat_template(
     if rows is None or rows[0] == exported:
         return
     run_side = "no chat template" if exported is None else f"the template {run_model or 'its checkpoint'} ships"
-    if getattr(render_args, "chat_template", None) and not getattr(render_args, "force_chat_template", False):
-        run_side += " (chat_template is set, but without force_chat_template: true it never replaces a shipped one)"
     raise ValueError(
         f"The preprocessed rows were rendered with {rows[1]}, but this run ends with {run_side}. The saved "
         f"checkpoint exports the run's template, so the model would train on one template and be served with "
@@ -494,7 +489,7 @@ def verify_preprocessed_dataset(
     if render_args is not None:
         _verify_render_knobs(metadata, render_args)
     if run_processing_class is not None:
-        _verify_exported_chat_template(metadata, run_processing_class.chat_template, render_args, required_model)
+        _verify_exported_chat_template(metadata, run_processing_class.chat_template, required_model)
 
     if required_packing and not metadata.packed:
         logger.warning(

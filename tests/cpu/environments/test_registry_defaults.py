@@ -3,6 +3,8 @@
 config sets ``max_turns``. Since the shipped templates rely on ``max_turns: null``, the overview's registry table
 is held to the classes."""
 
+from typing import get_type_hints
+
 import pytest
 
 from halo.configs.grpo_environmental import EnvironmentConfig
@@ -44,6 +46,9 @@ _REQUIRES_ANSWER = {"code_contests", "codeforces", "exam_qa", "qa_search", "reac
 # The environments that register ``web_search``, with the options that make them register it.
 _SEARCH_ENV_KWARGS = {"exam_qa": {"open_book": True}, "native_combined": {}, "qa_search": {}, "react_search": {}}
 
+# A boolean a registry factory reads before any constructor, so no class signature declares it.
+_FACTORY_BOOL_KNOBS = {"qa_search": {"include_python_tools"}}
+
 
 def _base_default_max_turns() -> int:
     return EnvironmentBase.DEFAULT_MAX_TURNS
@@ -51,6 +56,20 @@ def _base_default_max_turns() -> int:
 
 def _declared_max_turns(env_type: str) -> int:
     return type(build_environment(env_type, _ENV_KWARGS[env_type])).DEFAULT_MAX_TURNS
+
+
+def _bool_knobs(env_type: str) -> set[str]:
+    """The boolean ``environment_kwargs`` of an environment: every constructor parameter annotated so along its class's
+    MRO, so a new knob is swept by existing."""
+    env = build_environment(env_type, _ENV_KWARGS[env_type])
+    constructors = [vars(klass)["__init__"] for klass in type(env).__mro__ if "__init__" in vars(klass)]
+    declared = {
+        name
+        for constructor in constructors
+        for name, hint in get_type_hints(constructor).items()
+        if hint in (bool, bool | None)
+    }
+    return declared | _FACTORY_BOOL_KNOBS.get(env_type, set())
 
 
 def _documented_max_turns() -> dict[str, int]:
@@ -144,6 +163,13 @@ def test_a_raising_react_validator_voids_the_episode_instead_of_paying_it():
     assert trajectory.info[EPISODE_INVALID_REASON_KEY] == "answer_validator raised RuntimeError: grader down"
 
 
+@pytest.mark.parametrize("env_type", ["react_math", "react_search"])
+def test_a_react_answer_validator_from_yaml_is_refused(env_type):
+    """A string would leave the default grader paying while the config names another."""
+    with pytest.raises(ValueError, match="answer_validator must be a callable"):
+        build_environment(env_type, {"answer_validator": "my.module:fn"})
+
+
 def test_an_explicit_requires_answer_overrides_the_class_declaration():
     """The escape hatch for a run that grades some other way: an environment_kwargs entry, like every
     other constructor knob."""
@@ -188,6 +214,54 @@ def test_the_search_table_names_every_environment_that_registers_web_search():
         if "web_search" in env.registry.names():
             registering.add(env_type)
     assert registering == set(_SEARCH_ENV_KWARGS)
+
+
+@pytest.mark.parametrize("env_type", sorted(_ENV_KWARGS))
+def test_every_boolean_knob_refuses_what_a_truthiness_check_would_take_as_true(env_type):
+    """The parser's own guard stops at the top-level fields: ``open_book: no`` would register web_search and
+    ``carry_reasoning: off`` send the reasoning back. A preset's own ``scratch_allowlist`` collides as a TypeError."""
+    for knob in _bool_knobs(env_type):
+        for spelling in ("no", "off", "false", 0, 1):
+            with pytest.raises((ValueError, TypeError), match=knob):
+                build_environment(env_type, {**_ENV_KWARGS[env_type], knob: spelling})
+
+
+def test_the_boolean_knob_sweep_reaches_the_knobs_that_exist():
+    """Anti-vacuity: an annotation no longer matching would leave the sweep above empty and passing."""
+    swept = set().union(*map(_bool_knobs, _ENV_KWARGS))
+    assert swept >= {
+        "carry_reasoning",
+        "requires_answer",
+        "open_book",
+        "include_python_tools",
+        "stop_on_first_failure",
+        "scratch_allowlist",
+        "episode_scratch",
+    }
+
+
+@pytest.mark.parametrize(
+    ("env_type", "kwargs", "applied"),
+    [
+        ("react_math", {"carry_reasoning": True}, lambda env: env.carry_reasoning),
+        ("exam_qa", {"requires_answer": False}, lambda env: not env.requires_answer),
+        ("exam_qa", {"open_book": False}, lambda env: "web_search" not in env.registry.names()),
+        ("qa_search", {"include_python_tools": True}, lambda env: "python" in env.registry.names()),
+        (
+            "code_contests",
+            {"sandbox_backend": "local", "stop_on_first_failure": True},
+            lambda env: env.grading_spec.stop_on_first_failure,
+        ),
+        ("mcp", {"episode_scratch": False}, lambda env: not env.episode_scratch),
+    ],
+    ids=["carry_reasoning", "requires_answer", "open_book", "include_python_tools", "stop_on_first_failure", "mcp"],
+)
+def test_a_real_boolean_still_reaches_the_environment(env_type, kwargs, applied):
+    assert applied(build_environment(env_type, kwargs))
+
+
+def test_a_null_requires_answer_stays_unset():
+    assert build_environment("exam_qa", {"requires_answer": None}).requires_answer
 
 
 @pytest.mark.parametrize("max_turns", [0, -1])

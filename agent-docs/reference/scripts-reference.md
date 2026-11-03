@@ -166,16 +166,20 @@ Every tool here refuses an input it cannot express, rather than writing a plausi
   (`score.py`, `rejection_sample.py`) through `scripts/inference/reward_model/reward_model_arguments.py`,
   and `deduplicate_dataset.py`.
 
-    **The default follows the input source.** A local checkpoint, adapter or merge input
-    (`--input_dir`, `--adapter_dir`, `merge_models.py`'s `--models`, `--base_model` and
-    `--tokenizer_source`, all local directories) defaults **on**: the remote-code families in the roster
-    (Bailing/Ling, Laguna) do not load without it, and the operator already produced that artifact.
+    **The default follows the input source.** A local checkpoint or merge input (`--input_dir`,
+    `merge_models.py`'s `--models`, `--base_model` and `--tokenizer_source`, all local directories, a Hub
+    id refused) defaults **on**: the remote-code families in the roster (Bailing/Ling, Laguna) do not load
+    without it, and the operator already produced that artifact.
 
     A source that may be a Hub repo (the `--model_id` of `patch_vocab.py`, `convert_deepseek_v4_bf16.py`,
     `reattach_vision_tower.py` and `deduplicate_dataset.py`, the scorers' `--rm_model_id`, and
     `prepare_dataset.py`'s `--model_name_or_path`) defaults **off**: a freshly downloaded
-    third-party repo must not execute its own code merely because a tool was pointed at it. Either
-    way the opposite is one flag away (`--trust_remote_code` / `--no-trust_remote_code`).
+    third-party repo must not execute its own code merely because a tool was pointed at it.
+
+    An adapter (`merge_peft_adapters.py`'s `--adapter_dir`, `convert_to_bf16.py --peft`) follows the base its
+    `base_model_name_or_path` names: **on** for a local directory, **off** for a Hub id, so an adapter on a
+    Hub base of a remote-code family needs `--trust_remote_code`. Everywhere the opposite is one flag away
+    (`--trust_remote_code` / `--no-trust_remote_code`).
 
     The tools that never enable remote code expose no such flag — `merge_ep_shards.py`,
     `merge_pp_stages.py` (it copies files), `unfuse_moe_experts.py`, `quantize_to_lowp.py`, `reset_sinks.py`,

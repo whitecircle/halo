@@ -22,7 +22,7 @@ environment_kwargs:
 | `no_tool_use_penalty` | `0` | Charged once on an episode that made no tool call |
 | `turn_overflow_penalty` | `0` | Charged once on a truncated episode |
 | `length_cutoff_penalty` | `0` | Charged per recovered unproductive turn (engine-cut, or neither a tool call nor visible content). The turn that exhausts the recovery cap, or lands on the last turn, pays `turn_overflow_penalty` instead |
-| `tool_budgets` | `{}` | Per-tool episode caps, `{tool: cap}`; `0` disables a tool ([Tool budgets](#tool-budgets)) |
+| `tool_budgets` | `{}` | Per-tool episode caps, `{tool: cap}`; `0` disables a tool ([Tool budgets](#tool-budgets)). Refused on code contests, which set their tools' budgets with `max_submissions` and `max_test_calls` |
 | `system_prompt` | `None` | Prepended as the episode's system turn |
 
 The [common knobs](../README.md#common-knobs) apply too.

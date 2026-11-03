@@ -371,11 +371,44 @@ def test_a_server_that_takes_no_directory_gets_none_and_refuses_episode_scratch(
 
 
 @pytest.mark.parametrize(
-    "scratch", [{"episode_scratch": True}, {"scratch_allowlist": True}, {"scratch_env": {"MEMORY_FILE_PATH": "m"}}]
+    "spawn_option",
+    [
+        {"episode_scratch": True},
+        {"scratch_allowlist": True},
+        {"scratch_env": {"MEMORY_FILE_PATH": "m"}},
+        {"server_command": "npx"},
+        {"server_args": ["-y"]},
+        {"server_env": {"KEY": "value"}},
+    ],
+    ids=lambda option: next(iter(option)),
 )
-def test_a_scratch_directory_refuses_a_transport_that_spawns_nothing(scratch):
-    with pytest.raises(ValueError, match="spawns none"):
-        NativeMCPClientEnvironment(transport="sse", server_url="http://x/sse", **scratch)
+def test_a_spawn_option_refuses_a_transport_that_spawns_nothing(spawn_option):
+    with pytest.raises(ValueError, match=rf"\['{next(iter(spawn_option))}'\] configure a spawned server"):
+        NativeMCPClientEnvironment(transport="sse", server_url="http://x/sse", **spawn_option)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [{}, {"mcp_server": "fetch"}, {"transport": "stdio"}],
+    ids=["default-preset", "named-preset", "stated-stdio"],
+)
+def test_a_server_url_off_sse_raises_instead_of_spawning_a_preset(config, monkeypatch):
+    """Off ``transport: sse`` the URL would be dropped and the default filesystem preset spawned in its place."""
+    monkeypatch.setattr(mcp_module, "stdio_client", lambda *_: pytest.fail("a server was spawned"))
+    with pytest.raises(ValueError, match="set on the stdio transport"):
+        build_environment("mcp", {"server_url": "http://mcp.example:9000/sse", **config})
+
+
+@pytest.mark.parametrize("config", [{}, {"mcp_server": "fetch"}], ids=["scratch-preset", "plain-preset"])
+def test_an_unknown_transport_raises_at_construction_not_at_the_first_reset(config):
+    with pytest.raises(ValueError, match=r"transport must be one of \('stdio', 'sse'\), got 'bogus'"):
+        build_environment("mcp", {"transport": "bogus", **config})
+
+
+@pytest.mark.parametrize("flag", ["scratch_allowlist", "episode_scratch"])
+def test_a_scratch_flag_refuses_what_a_truthiness_check_would_take_as_true(flag):
+    with pytest.raises(ValueError, match=f"{flag} must be true or false"):
+        NativeMCPClientEnvironment(server_command="npx", **{flag: "no"})
 
 
 class _MemoryServerSession(_StubSession):
@@ -518,15 +551,15 @@ def test_factory_no_declared_env_passes_none():
 def test_sse_transport_is_registry_selectable_and_needs_a_url(monkeypatch):
     """``mcp_server`` selects a command to spawn and ``transport="sse"`` spawns nothing, so the two are mutually
     exclusive."""
-    mcp_module = importlib.import_module("halo.environments.protocols.mcp")
     monkeypatch.setattr(mcp_module, "sse_client", lambda url: ("sse-ctx", url))
 
     env = build_environment("mcp", {"transport": "sse", "server_url": "http://mcp.example:9000/sse"})
     assert env.transport == "sse"
     assert env._transport_context([]) == ("sse-ctx", "http://mcp.example:9000/sse")
 
-    with pytest.raises(ValueError, match="server_url required"):
-        NativeMCPClientEnvironment(transport="sse")._transport_context([])
+    for url in ({}, {"server_url": " "}):
+        with pytest.raises(ValueError, match="server_url must be a non-blank string"):
+            NativeMCPClientEnvironment(transport="sse", **url)
 
 
 def test_sse_config_refuses_a_stdio_preset(monkeypatch):

@@ -1,10 +1,12 @@
 #!/usr/bin/env python
 """One flag surface across the standalone checkpoint tools. A local source defaults ``--trust_remote_code`` on, a Hub
-``--model_id`` off, since a third-party repo must not run its code because a tool was pointed at it."""
+``--model_id`` off, and an adapter follows the base it names, since a third-party repo must not run its code because a
+tool was pointed at it."""
 
 from __future__ import annotations
 
 import argparse
+import inspect
 import json
 import os
 import subprocess
@@ -15,10 +17,13 @@ from types import ModuleType
 from unittest.mock import patch
 
 import pytest
+import torch
 from datasets import DatasetDict
+from safetensors.torch import save_file
 
-from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.checkpoint.tools import adapter_merge, deepseek_v4_dequant, vocab_patch
+from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPE
+from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE
+from halo.checkpoint.tools import adapter_merge, bf16_conversion, deepseek_v4_dequant, vocab_patch
 from halo.data.preprocessed import prepare_dataset_tool, tokenization
 from scripts.cli_arguments import (
     HUB_SOURCE_HELP,
@@ -29,11 +34,12 @@ from scripts.cli_arguments import (
 )
 from tests.common.repo import REPO_ROOT, load_script_module
 
-# (tool, the default its input source earns). Tools that only stream safetensors load no model code and expose no flag.
+# (tool, the default its input source earns, None where the adapter's base decides it). Tools that only stream
+# safetensors load no model code and expose no flag.
 _TOOLS = (
-    ("scripts/after_training/convert_to_bf16.py", True),
+    ("scripts/after_training/convert_to_bf16.py", None),
     ("scripts/after_training/merge_models.py", True),
-    ("scripts/after_training/merge_peft_adapters.py", True),
+    ("scripts/after_training/merge_peft_adapters.py", None),
     ("scripts/after_training/reattach_vision_tower.py", False),
     ("scripts/before_training/convert_deepseek_v4_bf16.py", False),
     ("scripts/before_training/deduplicate_dataset.py", False),
@@ -56,7 +62,7 @@ def _empty_source_dir(tmp_path: Path) -> str:
     return str(source)
 
 
-def _minimal_adapter_dir(tmp_path: Path) -> str:
+def _adapter_dir(tmp_path: Path, base_model: str) -> str:
     adapter = tmp_path / "adapter"
     adapter.mkdir()
     (adapter / "adapter_config.json").write_text(
@@ -64,7 +70,7 @@ def _minimal_adapter_dir(tmp_path: Path) -> str:
             {
                 "peft_type": "LORA",
                 "task_type": "CAUSAL_LM",
-                "base_model_name_or_path": "acme/base-model",
+                "base_model_name_or_path": base_model,
                 "r": 8,
                 "lora_alpha": 16,
                 "target_modules": ["q_proj"],
@@ -74,23 +80,56 @@ def _minimal_adapter_dir(tmp_path: Path) -> str:
     return str(adapter)
 
 
-# (tool, source flag, source builder, driver module and attribute of its first load). A tool that hardcodes
-# trust_remote_code at the load has the same --help as one threading it.
+def _adapter_on_a_hub_base(tmp_path: Path) -> str:
+    return _adapter_dir(tmp_path, "acme/base-model")
+
+
+def _adapter_on_a_local_base(tmp_path: Path) -> str:
+    return _adapter_dir(tmp_path, _empty_source_dir(tmp_path))
+
+
+# (tool, source flag, source builder, driver module and attribute of its first load, the default that load sees). A
+# tool that hardcodes trust_remote_code at the load has the same --help as one threading it.
 _LOAD_SITES = (
-    ("scripts/before_training/patch_vocab.py", "--model_id", _empty_source_dir, vocab_patch, "load_processing_class"),
+    (
+        "scripts/before_training/patch_vocab.py",
+        "--model_id",
+        _empty_source_dir,
+        vocab_patch,
+        "load_processing_class",
+        False,
+    ),
     (
         "scripts/before_training/convert_deepseek_v4_bf16.py",
         "--model_id",
         _empty_source_dir,
         deepseek_v4_dequant,
         "source_config",
+        False,
     ),
     (
         "scripts/after_training/merge_peft_adapters.py",
         "--adapter_dir",
-        _minimal_adapter_dir,
+        _adapter_on_a_hub_base,
         adapter_merge,
         "merge_adapter_into_base",
+        False,
+    ),
+    (
+        "scripts/after_training/merge_peft_adapters.py",
+        "--adapter_dir",
+        _adapter_on_a_local_base,
+        adapter_merge,
+        "merge_adapter_into_base",
+        True,
+    ),
+    (
+        "scripts/after_training/convert_to_bf16.py",
+        "--input_dir",
+        _empty_source_dir,
+        bf16_conversion,
+        "load_processing_class",
+        True,
     ),
 )
 
@@ -279,13 +318,16 @@ def test_the_load_flags_are_the_shared_ones(relative_path: str, flag: str, add_a
         )
 
 
-@pytest.mark.parametrize(("relative_path", "source_flag", "build_source", "driver", "load_site"), _LOAD_SITES)
+@pytest.mark.parametrize(
+    ("relative_path", "source_flag", "build_source", "driver", "load_site", "expected_default"), _LOAD_SITES
+)
 def test_the_parsed_trust_remote_code_reaches_the_first_load(
     relative_path: str,
     source_flag: str,
     build_source: Callable[[Path], str],
     driver: ModuleType,
     load_site: str,
+    expected_default: bool,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -294,7 +336,6 @@ def test_the_parsed_trust_remote_code_reaches_the_first_load(
         f"{driver.__name__} no longer loads through {load_site} — the row is stale, repoint it at the "
         f"call that now reads the flag"
     )
-    expected_default = dict(_TOOLS)[relative_path]
     source, output_dir = build_source(tmp_path), str(tmp_path / "out")
 
     class _LoadReached(Exception):
@@ -322,6 +363,130 @@ def test_the_parsed_trust_remote_code_reaches_the_first_load(
             f"trust_remote_code={seen.get('trust_remote_code')!r}, expected {expected!r}: the flag is "
             f"parsed but not threaded into the load, so --help promises a policy the tool ignores"
         )
+
+
+class _LoadReached(Exception):
+    """Carries control out of a tool once the loads under test ran."""
+
+
+@pytest.mark.parametrize(
+    ("build_adapter", "extra", "expected"),
+    [
+        (_adapter_on_a_hub_base, [], False),
+        (_adapter_on_a_hub_base, ["--trust_remote_code"], True),
+        (_adapter_on_a_local_base, [], True),
+        (_adapter_on_a_local_base, ["--no-trust_remote_code"], False),
+    ],
+    ids=["hub-default", "hub-explicit", "local-default", "local-refused"],
+)
+def test_every_load_of_a_merge_runs_under_the_trust_its_base_earns(
+    build_adapter: Callable[[Path], str],
+    extra: list[str],
+    expected: bool,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """The base's own model and processor, and the adapter's processor, whose ``auto_map`` may name the same repo."""
+    module = load_script_module("scripts/after_training/merge_peft_adapters.py", "merge_peft_adapters_loads")
+    adapter = build_adapter(tmp_path)
+    seen: dict[str, object] = {}
+
+    def _load_base(path, task, **kwargs):
+        seen["base model"] = kwargs["trust_remote_code"]
+        return torch.nn.Linear(1, 1)
+
+    def _load_processor(path, *, trust_remote_code):
+        seen["base processor" if path != adapter else "adapter processor"] = trust_remote_code
+        if path != adapter:
+            raise _LoadReached
+
+    monkeypatch.setattr(adapter_merge, "adapter_module_paths", lambda _adapter: set())
+    monkeypatch.setattr(adapter_merge, "load_task_model", _load_base)
+    monkeypatch.setattr(adapter_merge, "load_processing_class", _load_processor)
+    argv = ["merge", "--adapter_dir", adapter, "--output_dir", str(tmp_path / "out"), *extra]
+    monkeypatch.setattr(sys, "argv", argv)
+
+    with pytest.raises(_LoadReached):
+        module.main()
+
+    assert seen == {"base model": expected, "adapter processor": expected, "base processor": expected}
+
+
+@pytest.mark.parametrize(
+    ("extra", "expected"), [([], False), (["--trust_remote_code"], True)], ids=["default", "explicit"]
+)
+def test_a_converted_adapters_inference_check_holds_a_hub_base_to_the_same_rule(
+    extra: list[str], expected: bool, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """``--peft`` loads no base to convert, so ``--check_inference`` is where the adapter's repo would first run."""
+    module = load_script_module("scripts/after_training/convert_to_bf16.py", "convert_to_bf16_peft_check")
+    adapter = _adapter_on_a_hub_base(tmp_path)
+    save_file({"lora_A.weight": torch.zeros(1)}, os.path.join(adapter, ADAPTER_SAFETENSORS_FILE))
+    seen: dict[str, object] = {}
+
+    def _load_processor(path, *, trust_remote_code):
+        is_base = path == "acme/base-model"
+        seen["base processor" if is_base else "adapter processor"] = trust_remote_code
+        return object() if is_base else None
+
+    def _load_base(path, task, **kwargs):
+        seen["base model"] = kwargs["trust_remote_code"]
+        raise _LoadReached
+
+    monkeypatch.setattr(adapter_merge, "adapter_module_paths", lambda _adapter: set())
+    monkeypatch.setattr(bf16_conversion, "load_processing_class", _load_processor)
+    monkeypatch.setattr(bf16_conversion, "load_task_model", _load_base)
+    argv = ["convert", "--input_dir", adapter, "--output_dir", str(tmp_path / "out"), "--peft", "--check_inference"]
+    monkeypatch.setattr(sys, "argv", [*argv, *extra])
+
+    with pytest.raises(_LoadReached):
+        module.main()
+
+    assert seen == {"adapter processor": expected, "base processor": expected, "base model": expected}
+
+
+@pytest.mark.parametrize("extra", [[], ["--trust_remote_code"]], ids=["default", "explicit"])
+def test_a_full_conversion_refuses_a_hub_repo_before_any_load(
+    extra: list[str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Its default is on because the operator made the checkpoint, which a Hub repo does not show."""
+    module = load_script_module("scripts/after_training/convert_to_bf16.py", "convert_to_bf16_hub_refusal")
+
+    def _reached(*_args, **_kwargs):
+        pytest.fail("a load ran on a refused source")
+
+    monkeypatch.setattr(bf16_conversion, "load_processing_class", _reached)
+    monkeypatch.setattr(bf16_conversion, "load_model", _reached)
+    monkeypatch.setattr(
+        sys, "argv", ["convert", "--input_dir", "acme/base-model", "--output_dir", str(tmp_path / "out"), *extra]
+    )
+
+    with pytest.raises(
+        ValueError, match=r"not a local directory\. Download the repo first \(hf download acme/base-model "
+    ):
+        module.main()
+
+
+def test_an_expert_lora_adapter_still_reaches_its_own_refusal_with_the_flag_unset(tmp_path: Path):
+    """Resolving the default reads the adapter first, and PEFT's config class raises a bare KeyError on this type."""
+    adapter = tmp_path / "adapter"
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text(
+        json.dumps({"peft_type": EXPERT_LORA_PEFT_TYPE, "base_model_name_or_path": "acme/base-model"})
+    )
+
+    with pytest.raises(ValueError, match="merge_expert_lora_on_save"):
+        adapter_merge.merge_peft_adapter(str(adapter), str(tmp_path / "out"))
+
+
+@pytest.mark.parametrize(
+    "loader",
+    [adapter_merge.merge_adapter_into_base, adapter_merge.load_task_base_model, bf16_conversion.run_test_inference],
+    ids=lambda loader: loader.__name__,
+)
+def test_below_the_clis_an_unstated_trust_stays_off(loader: Callable):
+    """Only the tools resolve a default off the source, so a direct caller of these must state the trust it gives."""
+    assert inspect.signature(loader).parameters["trust_remote_code"].default is False
 
 
 def test_prepare_dataset_threads_the_flag_into_the_label_bake_config_read(tmp_path: Path, monkeypatch):

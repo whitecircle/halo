@@ -35,8 +35,8 @@ recorded as resolved template *text*, so a path and the text it names compare eq
 The template the rows were rendered with is recorded too (`rendered_chat_template`, the processor's under
 `--is_vlm`), and training raises when the tokenizer or processor it ends with, whose template the checkpoint
 exports, carries another. Preparation applies `--chat_template` whatever template the tokenizer ships, while
-training applies `chat_template` over a shipped one only with `force_chat_template: true`, so a `--chat_template`
-bake trains with the same `chat_template` plus that flag. A stamp without `rendered_chat_template` is held to its
+training applies `chat_template` over a shipped one only with `force_chat_template: true` and raises on a differing
+one without it, so a `--chat_template` bake trains with the same `chat_template` plus that flag. A stamp without `rendered_chat_template` is held to its
 recorded `--chat_template` outside `--is_vlm`, and to nothing otherwise.
 
 The checked set is every `PreprocessingConfig` field outside `_UNCOMPARED_FIELDS`, so a new knob is

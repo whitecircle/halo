@@ -113,6 +113,19 @@ def load_chat_template(chat_template: str | None) -> str | None:
     return chat_template
 
 
+def reject_dropped_chat_template(args: CommonScriptArguments, tokenizer: PreTrainedTokenizerBase) -> None:
+    """Refuse a stated ``chat_template`` the run would not apply, keeping a different shipped one to train on and
+    export. By value, as a frozen reference's second pass and a resume meet the template the first one set or saved."""
+    chat_template = load_chat_template(args.chat_template)
+    if chat_template is None or args.force_chat_template or tokenizer.chat_template in (None, chat_template):
+        return
+    raise ValueError(
+        f"chat_template differs from the template {tokenizer.name_or_path or 'the checkpoint'} ships, which the run "
+        f"would keep, train on and export. Set force_chat_template: true to use chat_template, or remove chat_template "
+        f"to keep the shipped one."
+    )
+
+
 def sync_special_token_id(model: PreTrainedModel | None, field: str, token_id) -> None:
     """Record a special-token id on every config level declaring ``field`` and the generation config. Composite
     families need the per-level write: pooling keys on ``get_text_config().pad_token_id``, so a top-level-only write
@@ -226,6 +239,7 @@ def configure_run_tokenizer(
             f"config keeps whatever the checkpoint shipped. An out-of-vocab pad_token is the usual "
             f"cause; both the padding collators and sequence-classification pooling read this id."
         )
+    reject_dropped_chat_template(args, tokenizer)
     if tokenizer.chat_template is None or (args.chat_template is not None and args.force_chat_template):
         set_run_chat_template(tokenizer, load_chat_template(args.chat_template))
 

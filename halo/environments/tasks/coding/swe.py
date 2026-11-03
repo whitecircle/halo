@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from halo.config_validation import present, require_callable
 from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.episode_scoring import EpisodeGrade
 from halo.environments.messages import Trajectory
@@ -55,6 +56,7 @@ Tips:
         sandbox_url: str | None = None,
         **kwargs,
     ):
+        require_callable(type(self).__name__, **present(test_function=test_function))
         self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url)
         warn_if_unisolated(self.sandbox, type(self).__name__)
         self._sessions: dict[int, SandboxSession] = {}

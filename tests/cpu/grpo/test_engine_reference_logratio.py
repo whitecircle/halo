@@ -125,18 +125,18 @@ def test_rescore_clients_are_built_per_rank_from_the_server_urls(monkeypatch):
         _train_loader_batch_size=lambda: 8,
         async_config=AsyncRolloutConfig(
             rollout_connection_timeout=7.0,
-            rollout_server_url="http://single:8000",
             rollout_server_configs=[{"url": "http://a:8000"}, {"url": "http://b:8001"}],
         ),
     )
     build = DistributedAsyncEnvironmentalGRPOTrainer._build_engine_rescore_clients.__get__(host)
     assert len(build()) == 2
-    assert built == [("http://a:8000", 7.0), ("http://b:8001", 7.0)], "the configs list overrides the single URL"
+    assert built == [("http://a:8000", 7.0), ("http://b:8001", 7.0)], "the configs list names the servers"
     # Trajectory t re-scores on server t mod N: a one-trajectory round reaches server 0 alone.
     host._train_loader_batch_size = lambda: 1
     before = len(built)
     assert len(build()) == 1 and built[before:] == [("http://a:8000", 7.0)]
     host._train_loader_batch_size = lambda: 8
+    host.async_config.rollout_server_url = "http://single:8000"
     for single_server in (None, []):
         host.async_config.rollout_server_configs = single_server
         before = len(built)

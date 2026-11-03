@@ -236,5 +236,72 @@ def test_depth_one_passes_anywhere():
     assert AsyncRolloutConfig().prefetch_depth == 1
 
 
+_URL = "http://s0:8000"
+
+
+@pytest.mark.parametrize(
+    ("servers", "match"),
+    [
+        ({"url": _URL}, r"rollout_server_configs must be a list of mappings"),
+        (_URL, r"rollout_server_configs must be a list of mappings"),
+        ([_URL], r"rollout_server_configs\[0\] must be a mapping"),
+        ([{"url": _URL, "grup_port": 1}], r"rollout_server_configs\[0\] has unknown keys \['grup_port'\]"),
+        ([{"group_port": 51216}], r"rollout_server_configs\[0\]: url must be a non-blank string, got None"),
+        ([{"url": " "}], r"url must be a non-blank string"),
+        ([{"url": _URL}, {"url": _URL, "group_port": "51216"}], r"rollout_server_configs\[1\]: group_port must be"),
+        ([{"url": _URL, "group_port": -5}], r"group_port must be an integer in \[0, 65535\]"),
+        ([{"url": _URL, "group_port": 65536}], r"group_port must be an integer in \[0, 65535\]"),
+        ([{"url": _URL, "group_port": True}], r"group_port must be an integer in \[0, 65535\]"),
+        ([{"url": _URL, "group_port": None}], r"group_port must be an integer in \[0, 65535\]"),
+        ([{"url": _URL, "group_host": ""}], r"group_host must be a non-blank string"),
+    ],
+    ids=[
+        "mapping",
+        "string",
+        "string-entry",
+        "misspelled-key",
+        "no-url",
+        "blank-url",
+        "string-port",
+        "negative-port",
+        "port-past-range",
+        "bool-port",
+        "null-port",
+        "blank-host",
+    ],
+)
+def test_a_malformed_rollout_server_list_is_refused_at_parse(servers, match):
+    with pytest.raises(ValueError, match=match):
+        AsyncRolloutConfig(rollout_server_configs=servers)
+
+
+@pytest.mark.parametrize(
+    "servers",
+    [
+        [{"url": _URL}],
+        [{"url": _URL, "group_port": 0}],
+        [{"url": _URL, "group_port": 65535, "group_host": "10.0.0.1"}],
+        [{"url": _URL, "group_port": 51216}, {"url": "http://s1:8000", "group_port": 51217}],
+    ],
+    ids=["url-only", "kernel-port", "every-key", "two-servers"],
+)
+def test_a_well_formed_rollout_server_list_reaches_its_consumers(servers):
+    config = AsyncRolloutConfig(rollout_server_configs=servers)
+    assert config.rollout_server_configs == servers
+    assert config.get_server_urls() == [server["url"] for server in servers]
+
+
+def test_a_server_url_beside_the_list_is_refused_instead_of_never_dialed():
+    with pytest.raises(ValueError, match=r"rollout_server_url='http://elsewhere:8000' is set beside"):
+        AsyncRolloutConfig(rollout_server_url="http://elsewhere:8000", rollout_server_configs=[{"url": _URL}])
+
+
+def test_a_server_url_beside_no_list_is_the_server():
+    """An empty list names no server, so the URL is the one dialed either way."""
+    for servers in (None, []):
+        config = AsyncRolloutConfig(rollout_server_url="http://elsewhere:8000", rollout_server_configs=servers)
+        assert config.get_server_urls() == ["http://elsewhere:8000"]
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

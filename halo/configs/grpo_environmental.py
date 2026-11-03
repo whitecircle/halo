@@ -6,7 +6,14 @@ from dataclasses import dataclass, field, fields
 from datetime import timedelta
 from typing import Any, ClassVar, Literal
 
-from halo.config_validation import ValidatedConfig, differs_from_default, present, require_finite, require_int
+from halo.config_validation import (
+    ValidatedConfig,
+    differs_from_default,
+    present,
+    require_finite,
+    require_int,
+    require_text,
+)
 from halo.configs.grpo import (
     AdvantageShapingArguments,
     ChunkedLogprobsArguments,
@@ -28,6 +35,8 @@ from halo.rewards.terms import ENVIRONMENT_REWARD_SOURCES, RewardTerm, parse_rew
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
+
+_ROLLOUT_SERVER_KEYS = frozenset({"url", "group_port", "group_host"})
 
 
 @dataclass(frozen=True)
@@ -297,7 +306,8 @@ class AsyncRolloutConfig(
         metadata={
             "help": "Rollout servers of a multi-server run, each a dict with 'url' and optional 'group_port' and "
             "'group_host' (the weight-transfer address the serving node dials back to), like "
-            "[{'url': 'http://node1:8000', 'group_port': 51216}]. Overrides rollout_server_url."
+            "[{'url': 'http://node1:8000', 'group_port': 51216}]. Any other key raises, as does a non-default "
+            "rollout_server_url beside a non-empty list."
         },
     )
     rollout_group_port: int = field(
@@ -460,6 +470,7 @@ class AsyncRolloutConfig(
             ),
         )
         require_int(owner, ge=0, le=65535, rollout_group_port=self.rollout_group_port)
+        self._validate_rollout_servers(owner)
         # Above 1 the depth sizes the prefetch pipeline; without one it would parse and hold no round.
         if self.prefetch_depth > 1 and not self.prefetch_active():
             why = (
@@ -515,6 +526,32 @@ class AsyncRolloutConfig(
                 "rollout_max_thinking_tokens is not supported with rollout_backend='sglang': the "
                 "thinking_token_budget request field is vLLM-only and SGLang would silently ignore it, "
                 "leaving reasoning uncapped. Steer with the environment's reasoning_effort instead."
+            )
+
+    def _validate_rollout_servers(self, owner: str) -> None:
+        """The pool reads an entry by key: a misspelled ``group_port`` takes ``rollout_group_port + index`` instead, and
+        a URL beside the list is never dialed."""
+        servers = self.rollout_server_configs
+        if servers is None:
+            return
+        if not isinstance(servers, list):
+            raise ValueError(f"{owner}: rollout_server_configs must be a list of mappings, got {servers!r}")
+        for index, server in enumerate(servers):
+            where = f"{owner}: rollout_server_configs[{index}]"
+            if not isinstance(server, Mapping):
+                raise ValueError(f"{where} must be a mapping with a 'url', got {server!r}")
+            unknown = sorted(map(str, set(server) - _ROLLOUT_SERVER_KEYS))
+            if unknown:
+                raise ValueError(f"{where} has unknown keys {unknown}; allowed: {sorted(_ROLLOUT_SERVER_KEYS)}")
+            require_text(where, url=server.get("url"))
+            if "group_port" in server:
+                require_int(where, ge=0, le=65535, group_port=server["group_port"])
+            if "group_host" in server:
+                require_text(where, group_host=server["group_host"])
+        if servers and differs_from_default(self, "rollout_server_url"):
+            raise ValueError(
+                f"{owner}: rollout_server_url={self.rollout_server_url!r} is set beside rollout_server_configs, whose "
+                "entries alone name the servers, so it would never be dialed. Remove it, or add it to the list."
             )
 
     def _stops_on_skipped_updates(self) -> bool:

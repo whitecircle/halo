@@ -214,7 +214,11 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
         },
     )
     force_chat_template: bool = field(
-        default=False, metadata={"help": "Use chat_template even when the tokenizer ships its own."}
+        default=False,
+        metadata={
+            "help": "Replace the tokenizer's own template with chat_template, which it needs: a chat_template that "
+            "differs from a shipped one raises without this flag."
+        },
     )
     added_special_tokens: list[str] | None = field(
         default=None, metadata={"help": "Special tokens added to the tokenizer's existing extra-special set."}
@@ -365,6 +369,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
         require_finite(owner, gt=0, **present(num_full_model_params=self.num_full_model_params))
         require_finite(owner, gt=0, router_balancing_rate=self.router_balancing_rate)
         require_int(owner, ge=0, max_consecutive_nonfinite_steps=self.max_consecutive_nonfinite_steps)
+        if self.force_chat_template and not self.chat_template:
+            raise ValueError(f"{owner}: force_chat_template: true has no chat_template to apply. Set one, or drop it.")
 
 
 @dataclass

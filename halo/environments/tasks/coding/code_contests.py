@@ -167,6 +167,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
         **kwargs,
     ):
+        if kwargs.get("tool_budgets"):
+            raise ValueError(
+                f"{type(self).__name__} sets its tools' budgets from max_submissions and max_test_calls at every "
+                "reset, so tool_budgets would never apply. Set those instead, or per level in "
+                "reasoning_effort_profiles."
+            )
         knobs = self._resolve_eval_protocol_knobs(
             eval_protocol, max_submissions=max_submissions, max_test_calls=max_test_calls
         )

@@ -4,6 +4,7 @@ import numbers
 import re
 from typing import Any
 
+from halo.config_validation import require_bool
 from halo.environments.episode_keys import ANSWER_KEY
 from halo.environments.episode_scoring import EpisodeGrade
 from halo.environments.messages import Trajectory
@@ -82,6 +83,7 @@ def build_qa_search_environment(
     **kwargs,
 ) -> NativeToolUseEnvironment:
     """A factual-QA-with-search environment (SimpleQA/GAIA/TriviaQA/PopQA)."""
+    require_bool("qa_search", include_python_tools=include_python_tools)
     registry = build_search_tools(backend=search_backend)
     if include_python_tools:
         registry.merge(build_python_tools())
@@ -124,6 +126,7 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
         system_prompt: str | None = None,
         **kwargs,
     ):
+        require_bool(type(self).__name__, open_book=open_book)
         if open_book:
             registry = build_search_tools(backend=search_backend)
             instruction = " using the available tools to search for information"

@@ -4,6 +4,7 @@ the run's attention through the per-mode loader to the post-load policies."""
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 
 import torch
 from transformers import AutoConfig, AutoModelForCausalLM, AutoTokenizer, PreTrainedModel, PreTrainedTokenizer
@@ -352,11 +353,12 @@ def load_distributed_model(
     revision: str | None = None,
     text_only_model: bool = False,
     preserve_checkpoint_precision: bool = False,
+    check_tokenizer: Callable[[PreTrainedTokenizer], None] | None = None,
     **model_kwargs,
 ) -> tuple[PreTrainedModel, PreTrainedTokenizer]:
     """COLLECTIVE: load the policy and its tokenizer under ``parallelism_config``. ``text_only_model`` picks a
     multimodal checkpoint's text-only class; ``preserve_checkpoint_precision`` marks a full-finetune resume and
-    requires complete fp32-master coverage."""
+    requires complete fp32-master coverage; ``check_tokenizer`` refuses the tokenizer before any weight is read."""
     # Latched: free after the entry script's own pre-load call, a backstop for a caller without it.
     agree_rank_uniform_env()
     reject_unsupported_run(parallelism_config, dtype)
@@ -417,6 +419,8 @@ def load_distributed_model(
     # (GLM-4.7-Flash, Gemma 4) makes the packing collator read leading pads as an attended document and drop the last
     # document's labels.
     tokenizer.padding_side = "right"
+    if check_tokenizer is not None:
+        check_tokenizer(tokenizer)
 
     model = _dispatch_model_loading(
         source,

@@ -80,7 +80,7 @@ Flags and the `--training_config` contract: [Evaluation](../../evaluation.md).
 
 ## From Python
 
-`test_function` (grades the finished trajectory) and `extra_tools` (a registry merged in) are Python objects, so only the constructor sets them:
+`test_function` (grades the finished trajectory) and `extra_tools` (a registry merged in) are Python objects, so only the constructor sets them; a `test_function` that is no callable, a YAML string included, raises:
 
 ```python
 env = SweEnvironment(language="python", test_function=my_test_fn, extra_tools=my_tools)

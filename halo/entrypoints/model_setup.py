@@ -4,6 +4,7 @@ preference run's policy with its reference."""
 import logging
 import os
 from collections.abc import Sequence
+from functools import partial
 from typing import Any, NamedTuple
 
 import torch
@@ -34,7 +35,11 @@ from halo.model_loading.parallel.frozen_models import load_reference_model_for_p
 from halo.model_loading.parallel.loader import load_distributed_model, resolve_policy_attn_implementation
 from halo.model_loading.parallel.model_source import fetch_checkpoint_config, probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
-from halo.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, configure_run_tokenizer
+from halo.model_loading.tokenizer_setup import (
+    adopt_tokenizer_chat_template,
+    configure_run_tokenizer,
+    reject_dropped_chat_template,
+)
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.layout import has_gated_delta_net_layers, has_mrope_rotary
 from halo.models.attention.selection import (
@@ -325,6 +330,7 @@ def load_model_and_tokenizer(
         revision=model_config.model_revision,
         text_only_model=args.text_only_model,
         preserve_checkpoint_precision=context.policy_from_checkpoint,
+        check_tokenizer=partial(reject_dropped_chat_template, args),
     )
     finalize_liger_after_direct_load(training_config, use_liger_kernel, model)
     if context.policy_from_checkpoint:

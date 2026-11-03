@@ -117,8 +117,8 @@ Two safe setups:
 - **Custom**: `chat_template: <file>.jinja` plus `force_chat_template: true` on the trainer and
   `--chat-template <same file>` on the server, the file visible inside its container.
 
-`chat_template:` without `force_chat_template: true` is a no-op wherever the checkpoint ships a template. With it, and
-no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths
+A `chat_template:` that differs from a template the checkpoint ships raises without `force_chat_template: true`. With
+it, and no `--chat-template` on the server, the two sides diverge silently. The re-tokenization paths
 ([Training rows](objective.md#training-rows)) then score log-probs against a prompt the policy never generated under;
 per-turn rows take the engine's ids and cannot drift.
 

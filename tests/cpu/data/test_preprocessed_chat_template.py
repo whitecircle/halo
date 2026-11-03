@@ -1,15 +1,20 @@
 #!/usr/bin/env python
 """A preprocessed SFT run must end with the chat template its rows were rendered with, the one it exports. A run
-applies its own ``chat_template`` only where the checkpoint ships none or ``force_chat_template`` is set, so the
-startup check holds its final tokenizer or processor to the template the bake records."""
+applies its own ``chat_template`` only where the checkpoint ships none or ``force_chat_template`` is set, and raises
+where one it would not apply differs from the shipped one, so the startup check holds its final tokenizer or processor
+to the template the bake records."""
 
 import json
 import logging
 import os
+from types import SimpleNamespace
 
 import pytest
 from datasets import Dataset, DatasetDict
+from transformers import AutoTokenizer, Qwen3Config
 
+import halo.model_loading.parallel.loader as loader
+from halo.configs.script_arguments import ModelArguments
 from halo.configs.sft import SFTScriptArguments
 from halo.data.preprocessed.metadata import (
     PreprocessingConfig,
@@ -20,9 +25,11 @@ from halo.data.preprocessed.preparation import preprocess_dataset
 from halo.data.preprocessed.prepare_dataset_tool import apply_tokenizer_overrides, load_vlm_processor
 from halo.data.sources.paths import METADATA_FILE
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
-from halo.entrypoints.model_setup import install_resolved_tokenizer
+from halo.entrypoints.model_setup import install_resolved_tokenizer, load_model_and_tokenizer
+from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
 from tests.common.models import QWEN3_0_6B, QWEN3_5_9B
+from tests.common.parallelism import make_parallelism_config
 from tests.common.tokenizers import load_cached_processor, load_cached_tokenizer
 
 MAX_LENGTH = 128
@@ -52,13 +59,17 @@ def _bake_chat(output_dir, **overrides):
     return metadata, tokenizer.decode(baked[0]["input_ids"])
 
 
+def _configure(args: SFTScriptArguments, tokenizer):
+    return configure_run_tokenizer(args, None, tokenizer, MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded)
+
+
 def _run_tokenizer(args: SFTScriptArguments, shipped_template: str | None = None):
     """The tokenizer a training run ends with after its tokenizer setup; ``shipped_template`` stands in for a
     checkpoint shipping another template than the bake's."""
     tokenizer = load_cached_tokenizer(QWEN3_0_6B)
     if shipped_template is not None:
         tokenizer.chat_template = shipped_template
-    return configure_run_tokenizer(args, None, tokenizer, MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded)
+    return _configure(args, tokenizer)
 
 
 def _verify(metadata, args: SFTScriptArguments, processing_class, model: str = QWEN3_0_6B) -> None:
@@ -91,17 +102,116 @@ def test_the_bake_records_the_template_it_rendered_with(tmp_path):
     assert stock.rendered_chat_template == load_cached_tokenizer(QWEN3_0_6B).chat_template
 
 
-def test_a_stated_override_without_force_is_refused(tmp_path):
-    """Every stated knob matches the artifact, yet the run keeps the checkpoint's template and would export it."""
-    metadata, _ = _bake_chat(tmp_path, chat_template=OVERRIDE)
-    args = SFTScriptArguments(chat_template=OVERRIDE)
-    tokenizer = _run_tokenizer(args)
-    assert tokenizer.chat_template != OVERRIDE, "premise: the checkpoint's own template survives the run's setup"
-
+def test_a_stated_template_a_run_would_drop_is_refused():
+    """The run would keep the checkpoint's template, train on it and export it, with no sign of the one the config
+    names."""
     with pytest.raises(ValueError, match="force_chat_template") as raised:
-        _verify(metadata, args, tokenizer)
-    assert "--chat_template override" in str(raised.value)
+        _run_tokenizer(SFTScriptArguments(chat_template=OVERRIDE))
     assert f"the template {QWEN3_0_6B} ships" in str(raised.value)
+
+
+def test_a_stated_template_file_is_compared_by_its_text(tmp_path):
+    template = tmp_path / "other.jinja"
+    template.write_text(OVERRIDE, encoding="utf-8")
+    with pytest.raises(ValueError, match="force_chat_template"):
+        _run_tokenizer(SFTScriptArguments(chat_template=str(template)))
+
+    shipped = load_cached_tokenizer(QWEN3_0_6B).chat_template
+    template.write_text(shipped, encoding="utf-8")
+    assert _run_tokenizer(SFTScriptArguments(chat_template=str(template))).chat_template == shipped
+
+
+def test_a_missing_template_file_raises_whether_or_not_it_would_apply():
+    with pytest.raises(FileNotFoundError, match="absent.jinja"):
+        _run_tokenizer(SFTScriptArguments(chat_template="absent.jinja"))
+
+
+def test_a_stated_template_equal_to_the_shipped_one_needs_no_force():
+    shipped = load_cached_tokenizer(QWEN3_0_6B).chat_template
+    assert _run_tokenizer(SFTScriptArguments(chat_template=shipped)).chat_template == shipped
+
+
+def test_a_stated_template_applies_without_force_where_none_ships():
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    tokenizer.chat_template = None
+    assert _configure(SFTScriptArguments(chat_template=OVERRIDE), tokenizer).chat_template == OVERRIDE
+
+
+@pytest.mark.parametrize("force", [False, True], ids=["unforced", "forced"])
+def test_a_frozen_references_second_pass_meets_the_template_the_first_one_set(force):
+    """A frozen reference runs the setup again on the one tokenizer."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    tokenizer.chat_template = None
+    args = SFTScriptArguments(chat_template=OVERRIDE, force_chat_template=force)
+    for _ in range(2):
+        assert _configure(args, tokenizer).chat_template == OVERRIDE
+
+
+def test_a_resume_meets_the_template_its_checkpoint_saved(tmp_path):
+    """The saved tokenizer ships the run's template now, so the config naming it again is no conflict."""
+    tokenizer = load_cached_tokenizer(QWEN3_0_6B)
+    tokenizer.chat_template = None
+    args = SFTScriptArguments(chat_template=OVERRIDE)
+    _configure(args, tokenizer)
+    tokenizer.save_pretrained(tmp_path)
+
+    resumed = AutoTokenizer.from_pretrained(tmp_path)
+    assert resumed.chat_template == OVERRIDE, "premise: the checkpoint now ships the template"
+    assert _configure(args, resumed).chat_template == OVERRIDE
+
+
+@pytest.mark.parametrize("stated", [None, ""], ids=["unset", "blank"])
+def test_force_with_no_template_to_apply_is_refused(stated):
+    with pytest.raises(ValueError, match="force_chat_template: true has no chat_template"):
+        SFTScriptArguments(chat_template=stated, force_chat_template=True)
+
+
+class _WeightsReached(Exception):
+    """The load passed every tokenizer check and would read the weights now."""
+
+
+def _load_up_to_the_weights(args: SFTScriptArguments, monkeypatch) -> None:
+    """The real policy load on a checkpoint shipping ``OTHER_CHECKPOINT_TEMPLATE``, stopped where the weights load."""
+
+    def _read_weights(*_args, **_kwargs):
+        raise _WeightsReached
+
+    tokenizer = SimpleNamespace(chat_template=OTHER_CHECKPOINT_TEMPLATE, name_or_path="org/base")
+    monkeypatch.setattr(loader, "resolve_model_source", lambda path, revision, **_: ModelSource(path, revision, path))
+    monkeypatch.setattr(loader.AutoConfig, "from_pretrained", lambda *_args, **_kwargs: Qwen3Config())
+    monkeypatch.setattr(loader.AutoTokenizer, "from_pretrained", lambda *_args, **_kwargs: tokenizer)
+    monkeypatch.setattr(loader, "reject_unsupported_structure", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(loader, "_dispatch_model_loading", _read_weights)
+    context = SimpleNamespace(
+        model_source="org/base",
+        parallelism_config=make_parallelism_config(world_size=8, gpus_per_node=8),
+        policy_from_checkpoint=False,
+    )
+    training = SimpleNamespace(
+        model_init_kwargs=None, bf16=True, fp16=False, use_liger_kernel=False, liger_kernel_config=None
+    )
+    load_model_and_tokenizer(context, training, ModelArguments(model_name_or_path="org/base"), args)
+
+
+def test_a_dropped_template_is_refused_before_any_weight_is_read(monkeypatch):
+    with pytest.raises(ValueError, match="force_chat_template"):
+        _load_up_to_the_weights(SFTScriptArguments(chat_template=OVERRIDE), monkeypatch)
+
+
+def test_a_missing_template_file_is_refused_before_any_weight_is_read(monkeypatch):
+    args = SFTScriptArguments(chat_template="absent.jinja", force_chat_template=True)
+    with pytest.raises(FileNotFoundError, match="absent.jinja"):
+        _load_up_to_the_weights(args, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "stated",
+    [{}, {"chat_template": OVERRIDE, "force_chat_template": True}, {"chat_template": OTHER_CHECKPOINT_TEMPLATE}],
+    ids=["unset", "forced", "equal-to-shipped"],
+)
+def test_a_template_the_run_applies_reaches_the_weights(stated, monkeypatch):
+    with pytest.raises(_WeightsReached):
+        _load_up_to_the_weights(SFTScriptArguments(**stated), monkeypatch)
 
 
 def test_a_forced_override_trains_and_exports_the_rows_template(tmp_path):
@@ -142,9 +252,8 @@ def test_a_stamp_predating_the_recorded_template(tmp_path):
 
     _bake_chat(tmp_path / "override", chat_template=OVERRIDE)
     override = _as_predating_the_recorded_template(tmp_path / "override")
-    unforced = SFTScriptArguments(chat_template=OVERRIDE)
-    with pytest.raises(ValueError, match="force_chat_template"):
-        _verify(override, unforced, _run_tokenizer(unforced))
+    with pytest.raises(ValueError, match="--chat_template override .*force_chat_template"):
+        _verify(override, args, _run_tokenizer(args))
     forced = SFTScriptArguments(chat_template=OVERRIDE, force_chat_template=True)
     _verify(override, forced, _run_tokenizer(forced))
 
@@ -163,10 +272,7 @@ def test_a_text_artifact_renders_no_template_to_hold(tmp_path):
 def _vlm_run(args: SFTScriptArguments):
     """The processing class a VLM run hands its trainer, after the tokenizer seam."""
     processor = load_cached_processor(QWEN3_5_9B)
-    tokenizer = configure_run_tokenizer(
-        args, None, processor.tokenizer, MAX_LENGTH, embeddings_sharded=is_input_embedding_tp_sharded
-    )
-    return install_resolved_tokenizer(processor, tokenizer)
+    return install_resolved_tokenizer(processor, _configure(args, processor.tokenizer))
 
 
 def test_a_vlm_run_is_held_to_the_template_its_processor_rendered_with(tmp_path):
@@ -183,9 +289,9 @@ def test_a_vlm_run_is_held_to_the_template_its_processor_rendered_with(tmp_path)
     )
     assert metadata.rendered_chat_template == VLM_OVERRIDE
 
-    unforced = SFTScriptArguments(chat_template=VLM_OVERRIDE)
+    unstated = SFTScriptArguments()
     with pytest.raises(ValueError, match="force_chat_template"):
-        _verify(metadata, unforced, _vlm_run(unforced), QWEN3_5_9B)
+        _verify(metadata, unstated, _vlm_run(unstated), QWEN3_5_9B)
     forced = SFTScriptArguments(chat_template=VLM_OVERRIDE, force_chat_template=True)
     _verify(metadata, forced, _vlm_run(forced), QWEN3_5_9B)
 
@@ -205,8 +311,8 @@ def test_a_vlm_stamp_predating_the_recorded_template_is_not_held_to_its_override
     )
     legacy = _as_predating_the_recorded_template(tmp_path)
 
-    unforced = SFTScriptArguments(chat_template=VLM_OVERRIDE)
-    _verify(legacy, unforced, _vlm_run(unforced), QWEN3_5_9B)
+    unstated = SFTScriptArguments()
+    _verify(legacy, unstated, _vlm_run(unstated), QWEN3_5_9B)
 
 
 if __name__ == "__main__":

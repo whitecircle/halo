@@ -11,6 +11,22 @@ from halo.model_loading.dtype import DTYPE_BY_NAME
 
 # What ``--model_id`` accepts; kept in step with ``resolve_checkpoint_source``.
 HUB_SOURCE_HELP = "Hub repo id or a local checkpoint directory"
+# Each ``--trust_remote_code`` default's rationale and way out, by the source that earns it.
+_TRUST_REMOTE_CODE_DEFAULTS = {
+    True: (
+        "True — the remote-code families, e.g. Bailing/Ling, do not load without it",
+        "Pass --no-trust_remote_code for a source you do not trust",
+    ),
+    False: (
+        "False — this source may be a Hub repo",
+        "Pass --trust_remote_code for a remote-code family (Bailing/Ling, Laguna) you trust",
+    ),
+    None: (
+        "on for a local checkpoint or an adapter on a local base, off for an adapter whose base is a Hub repo",
+        "Pass --trust_remote_code for a remote-code family (Bailing/Ling, Laguna) you trust, "
+        "or --no-trust_remote_code for a source you do not",
+    ),
+}
 
 
 def add_max_shard_size_arg(parser: argparse.ArgumentParser, *, note: str = "") -> argparse.ArgumentParser:
@@ -47,17 +63,19 @@ def add_hub_source_args(
     return parser
 
 
-def add_trust_remote_code_arg(parser: argparse.ArgumentParser, *, default: bool = True) -> argparse.ArgumentParser:
+def add_trust_remote_code_arg(
+    parser: argparse.ArgumentParser, *, default: bool | None = True
+) -> argparse.ArgumentParser:
     """The default follows the source: a local checkpoint defaults on, since remote-code families (Bailing/Ling,
     Laguna) ship their modeling files inside it; a possible Hub repo (``--model_id``) defaults off, so a downloaded
-    third-party repo does not run its code."""
+    third-party repo does not run its code. ``None`` is a tool loading the base an adapter names, which resolves the
+    unset flag off that base."""
+    note, remedy = _TRUST_REMOTE_CODE_DEFAULTS[default]
     parser.add_argument(
         "--trust_remote_code",
         action=argparse.BooleanOptionalAction,
         default=default,
-        help=f"Execute the checkpoint's own modeling/config code when loading it (default: {default} "
-        f"— {'the remote-code families, e.g. Bailing/Ling, do not load without it' if default else 'this source may be a Hub repo'}). "
-        f"Pass {'--no-trust_remote_code for a source you do not trust' if default else '--trust_remote_code for a remote-code family (Bailing/Ling, Laguna) you trust'}.",
+        help=f"Execute the checkpoint's own modeling/config code when loading it (default: {note}). {remedy}.",
     )
     return parser
 

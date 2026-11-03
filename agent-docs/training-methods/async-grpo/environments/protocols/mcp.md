@@ -16,13 +16,13 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `mcp_server` | `filesystem` | Stdio preset to spawn; read by the factory, not the class |
-| `transport` | `stdio` | `sse` connects to a running server instead |
-| `server_url` | `None` | Required under `sse` |
+| `transport` | `stdio` | `sse` connects to a running server instead; any other value raises |
+| `server_url` | `None` | Required under `sse`, refused under `stdio` |
 | `env_vars` | `{}` | Satisfies or overrides a preset's credentials, or its scratch file (`MEMORY_FILE_PATH`) |
 | `episode_scratch` | `true` for `filesystem` and `memory` | Scope of the scratch directory a `filesystem` server is jailed to, or a `memory` server keeps its graph file in: `true` gives each episode its own server and directory, removed with the episode; `false` one server and directory for the environment, removed when it closes. Refused for a preset that takes no directory |
 
 - A preset's credentials are resolved at construction, so a missing key raises at launch.
-- An `sse` config spawns nothing; passing `mcp_server` or `env_vars` with it raises.
+- An `sse` config spawns nothing; passing `mcp_server`, `env_vars` or any other spawn option with it raises.
 
 ## Tools
 

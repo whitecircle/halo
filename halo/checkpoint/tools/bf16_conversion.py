@@ -14,7 +14,12 @@ from halo.checkpoint.atomic import save_safetensors_file
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA
 from halo.checkpoint.reading import header_numel, iter_checkpoint_shard_entries, reject_partial_checkpoint
 from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
-from halo.checkpoint.tools.adapter_merge import adapter_input_gates, apply_adapter, load_base_for_adapter
+from halo.checkpoint.tools.adapter_merge import (
+    adapter_base_trust,
+    adapter_input_gates,
+    apply_adapter,
+    load_base_for_adapter,
+)
 from halo.checkpoint.tools.offline_export import (
     ADAPTER_TASKS,
     TASK_MODEL_CLASSES,
@@ -132,7 +137,7 @@ def verify_adapter_conversion(adapter_path):
         return _stored_bf16_share_passes((reader.get_slice(key) for key in keys), adapter_path)
 
 
-def run_test_inference(model_path, task, is_peft=False, trust_remote_code=True) -> None:
+def run_test_inference(model_path, task, is_peft=False, trust_remote_code=False) -> None:
     """Log what the converted model produces; diagnostic only, as ``--verify`` is the gate that raises."""
     if task == "base":
         logger.warning("Test inference not implemented for base model type — skipping the inference check")
@@ -247,11 +252,23 @@ def convert_to_bf16(
     device_map=None,
     verify=False,
     check_inference=False,
-    trust_remote_code=True,
+    trust_remote_code=None,
     max_shard_size=DEFAULT_MAX_SHARD_SIZE,
 ):
+    """An unset ``trust_remote_code`` trusts a full checkpoint, which must be a local directory, and follows an
+    adapter's base (:func:`adapter_base_trust`)."""
     if is_peft:
         _reject_adapter_task(task)
+        trust_remote_code = adapter_base_trust(model_path, trust_remote_code)
+    else:
+        # A Hub repo here would run a third-party repo's code under this tool's local default.
+        if not os.path.isdir(model_path):
+            raise ValueError(
+                f"--input_dir {model_path!r} is not a local directory. Download the repo first "
+                f"(hf download {model_path} --local-dir <dir>) and point --input_dir at that directory."
+            )
+        if trust_remote_code is None:
+            trust_remote_code = True
 
     logger.info(f"Loading model from {model_path}...")
 

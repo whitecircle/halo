@@ -55,6 +55,13 @@ def require_bool(owner: str, **values: Any) -> None:
             raise ValueError(f"{owner}: {key} must be true or false, got {value!r}")
 
 
+def require_callable(owner: str, **values: Any) -> None:
+    """Refuse anything but a callable, for a knob only Python can set: from YAML it arrives as a string."""
+    for key, value in values.items():
+        if not callable(value):
+            raise ValueError(f"{owner}: {key} must be a callable passed from Python, got {value!r}")
+
+
 def require_text(owner: str, **values: Any) -> None:
     """Refuse anything but a non-blank string."""
     for key, value in values.items():

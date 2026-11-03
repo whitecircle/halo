@@ -44,7 +44,7 @@ rewards:
 | [`max_grading_seconds`](grading.md#grading-budget) | `None` | Wall-clock budget for one grade |
 | `max_output_size` | 1 MB | Over-cap stdout is OUTPUT LIMIT EXCEEDED, not truncated. A test's cap rises to 4× its expected output |
 | `stop_on_first_failure` | `false` | Stop at the first failing test. The grade is unchanged; `outcome/test_pass_frac` becomes a lower bound |
-| `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level. The tuning lever; `max_turns` (15) is a backstop |
+| `max_submissions` / `max_test_calls` | 2 / 5 | Per-episode tool budgets, overridable per effort level, and set here rather than in `tool_budgets`, which raises. The tuning lever; `max_turns` (15) is a backstop |
 | [`eval_protocol`](evaluation.md#evaluation-protocols) | `harness` | `leaderboard` pins both tool budgets |
 
 `timeout_per_test`, `max_time_limit` and `compiled_time_limit_scale` must be finite and > 0; a non-positive

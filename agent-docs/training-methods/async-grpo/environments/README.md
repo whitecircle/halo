@@ -57,6 +57,7 @@ environment_kwargs:
 ```
 
 - Any other constructor parameter of the resolved class is settable from `environment_kwargs`. A key no constructor binds (a typo, or another `environment_type`'s option) raises `TypeError` at construction.
+- A boolean knob takes YAML `true` or `false`; any other value, `no` and `off` included, raises at construction.
 - The ReAct presets refuse a set `system_prompt`, `mcp` reads `mcp_server` in its factory, and `native_combined` reads `search_backend` in its own.
 - `rewards` reaches the constructor as `reward_terms` ([Reward Terms](../../grpo/rewards/README.md#environment-arm)).
 

@@ -218,8 +218,11 @@ def _async_config(
 ) -> AsyncRolloutConfig:
     return AsyncRolloutConfig(
         rollout_backend=backend,
-        rollout_server_url=server_url,
-        rollout_server_configs=[{"url": url} for url in pool_urls] or None,
+        **(
+            {"rollout_server_configs": [{"url": url} for url in pool_urls]}
+            if pool_urls
+            else {"rollout_server_url": server_url}
+        ),
         rollout_group_port=group_port,
         rollout_connection_timeout=180.0,
         num_rollout_workers=2,

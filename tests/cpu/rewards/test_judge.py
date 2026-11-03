@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from halo.inference import openai_client as client_module
+from halo.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL, LOCAL_SERVER_API_KEY
 from halo.rewards.samples import NO_FINAL_ANSWER, ScoringSample
 from halo.rewards.scorers import judge as judge_module
 from halo.rewards.scorers.judge import (
@@ -873,17 +874,60 @@ def test_verify_raises_on_a_failed_or_unparseable_probe():
         asyncio.run(judge.verify())
 
 
-def test_api_key_comes_from_the_term_variable_then_the_hosted_chain(monkeypatch):
-    for name in ("OPENAI_API_KEY_MY", "OPENROUTER_API_KEY", "OPENAI_API_KEY"):
+_PRIVATE_URL = "http://judge.internal:8000/v1"
+_LOOPBACK_URLS = (
+    "http://localhost:8000/v1",
+    "http://127.0.0.1:8000/v1",
+    "http://127.1.2.3:8000/v1",
+    "http://0.0.0.0:8000/v1",
+    "http://[::1]:8000/v1",
+)
+
+
+@pytest.fixture
+def no_api_keys(monkeypatch):
+    for name in ("MY_JUDGE_KEY", "OPENROUTER_API_KEY", "OPENAI_API_KEY", "VLLM_API_KEY"):
         monkeypatch.delenv(name, raising=False)
-    with pytest.raises(RuntimeError, match="set OPENAI_API_KEY_MY or OPENROUTER_API_KEY or OPENAI_API_KEY"):
-        scorer_api_key(_term(api_key_env="OPENAI_API_KEY_MY"))
-    with pytest.raises(RuntimeError, match="set OPENROUTER_API_KEY or OPENAI_API_KEY$"):
-        scorer_api_key(_term())
+
+
+@pytest.mark.parametrize("base_url", [DEFAULT_OPENROUTER_BASE_URL, _PRIVATE_URL, _LOOPBACK_URLS[0]])
+def test_a_named_key_variable_is_that_key_or_a_refusal(no_api_keys, monkeypatch, base_url):
+    """The other vendors' keys sit in the environment, and must not reach the endpoint the term names its own key for."""
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-chain")
-    assert scorer_api_key(_term(api_key_env="OPENAI_API_KEY_MY")) == "sk-or-chain"
-    monkeypatch.setenv("OPENAI_API_KEY_MY", "sk-or-mine")
-    assert scorer_api_key(_term(api_key_env="OPENAI_API_KEY_MY")) == "sk-or-mine"
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    term = _term(api_key_env="MY_JUDGE_KEY", base_url=base_url)
+
+    with pytest.raises(RuntimeError, match="no API key — set MY_JUDGE_KEY$"):
+        scorer_api_key(term)
+
+    monkeypatch.setenv("MY_JUDGE_KEY", "sk-mine")
+    assert scorer_api_key(term) == "sk-mine"
+
+
+@pytest.mark.parametrize("base_url", _LOOPBACK_URLS)
+def test_a_loopback_endpoint_takes_the_local_key_and_needs_none(no_api_keys, monkeypatch, base_url):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-chain")
+    term = _term(base_url=base_url)
+    assert scorer_api_key(term) == LOCAL_SERVER_API_KEY, "a local vLLM takes no hosted key, and starts without one"
+
+    monkeypatch.setenv("VLLM_API_KEY", "sk-local")
+    assert scorer_api_key(term) == "sk-local"
+
+
+@pytest.mark.parametrize("base_url", [DEFAULT_OPENROUTER_BASE_URL, _PRIVATE_URL])
+def test_any_other_endpoint_at_the_default_variable_reads_the_hosted_chain(no_api_keys, monkeypatch, base_url):
+    term = _term(base_url=base_url)
+    with pytest.raises(RuntimeError, match="set OPENROUTER_API_KEY or OPENAI_API_KEY$"):
+        scorer_api_key(term)
+
+    monkeypatch.setenv("VLLM_API_KEY", "sk-local")
+    with pytest.raises(RuntimeError, match="no API key"):
+        scorer_api_key(term)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    assert scorer_api_key(term) == "sk-openai"
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-chain")
+    assert scorer_api_key(term) == "sk-or-chain"
 
 
 def test_client_is_built_against_the_term_endpoint(monkeypatch):
@@ -897,6 +941,28 @@ def test_client_is_built_against_the_term_endpoint(monkeypatch):
     monkeypatch.setattr(judge_module, "build_openai_client", fake_build_openai_client)
     GenerativeJudge(_term(base_url="http://judge:8000/v1"))._connect()
     assert captured == {"base_url": "http://judge:8000/v1", "api_key_override": "sk-or-test"}
+
+
+def test_a_judge_on_an_unset_named_variable_builds_no_client_with_another_key(no_api_keys, monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or-chain")
+    monkeypatch.setattr(judge_module, "build_openai_client", lambda *a, **k: pytest.fail("a client took another key"))
+
+    (result,) = asyncio.run(GenerativeJudge(_term(api_key_env="MY_JUDGE_KEY", base_url=_PRIVATE_URL)).score([SAMPLE]))
+
+    assert result.score is None and "no API key — set MY_JUDGE_KEY" in result.error
+
+
+def test_a_loopback_judge_connects_with_no_key_in_the_environment(no_api_keys, monkeypatch):
+    """The endpoint a config points at a local vLLM, which the SDK refuses to build a client for without some key."""
+    captured = {}
+
+    def fake_build_openai_client(base_url, api_key_override):
+        captured.update(base_url=base_url, api_key_override=api_key_override)
+        return _FakeClient([])
+
+    monkeypatch.setattr(judge_module, "build_openai_client", fake_build_openai_client)
+    GenerativeJudge(_term(base_url=_LOOPBACK_URLS[0]))._connect()
+    assert captured == {"base_url": _LOOPBACK_URLS[0], "api_key_override": LOCAL_SERVER_API_KEY}
 
 
 if __name__ == "__main__":

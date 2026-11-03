@@ -13,6 +13,7 @@ from halo.config_validation import (
     reject_non_default_args,
     reject_unsupported_args,
     require_bool,
+    require_callable,
     require_finite,
     require_int,
     require_text,
@@ -86,6 +87,16 @@ def test_require_text_refuses_anything_but_a_non_blank_string(value):
 def test_type_guards_pass_valid_values():
     require_bool("Cfg", a=True, b=False)
     require_text("Cfg", a="x", b=" y ")
+
+
+@pytest.mark.parametrize("value", ["my.module:fn", None, 1])
+def test_require_callable_refuses_anything_but_a_callable(value):
+    with pytest.raises(ValueError, match="Cfg: hook must be a callable"):
+        require_callable("Cfg", hook=value)
+
+
+def test_require_callable_admits_a_callable():
+    require_callable("Cfg", hook=len)
 
 
 def test_validated_config_guards_before_the_next_post_init():

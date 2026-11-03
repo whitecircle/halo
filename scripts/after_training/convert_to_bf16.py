@@ -14,7 +14,12 @@ from scripts.cli_arguments import add_device_map_arg, add_max_shard_size_arg, ad
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Convert model to BF16 format")
-    parser.add_argument("--input_dir", type=str, required=True, help="Path to the source model directory")
+    parser.add_argument(
+        "--input_dir",
+        type=str,
+        required=True,
+        help="Local source directory; a Hub repo id is refused, so download it first",
+    )
     parser.add_argument(
         "--output_dir",
         type=str,
@@ -45,7 +50,7 @@ def parse_args():
         help="Run a test inference on the converted model to verify functionality",
     )
     add_max_shard_size_arg(parser, note="A --peft save writes no model weights and ignores it.")
-    add_trust_remote_code_arg(parser)
+    add_trust_remote_code_arg(parser, default=None)
     return parser.parse_args()
 
 

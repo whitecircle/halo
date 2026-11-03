@@ -11,6 +11,7 @@ import pytest
 
 from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment, NativeToolUseEnvironment
 from halo.environments.protocols.react import ReActEnvironment
+from halo.environments.registry import build_environment
 from halo.environments.tool_accounting import EPISODE_TOOL_BUDGETS_KEY, TOOL_CALL_COUNTS_KEY
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
 
@@ -82,6 +83,22 @@ def test_native_budget_refuses_past_the_cap_and_counts_only_admitted_calls():
     assert observations[3] == "pong"
     assert traj.info[TOOL_CALL_COUNTS_KEY] == {"echo": 1, "ping": 1}
     assert traj.total_reward == pytest.approx(-0.2), "two refusals charged as tool errors; admitted calls pay 0"
+
+
+@pytest.mark.parametrize("env_type", ["code_contests", "codeforces"])
+def test_code_contests_refuse_budgets_their_own_knobs_would_overwrite(env_type):
+    with pytest.raises(ValueError, match="from max_submissions and max_test_calls"):
+        build_environment(env_type, {"sandbox_backend": "local", "tool_budgets": {"submit_solution": 1}})
+
+
+@pytest.mark.parametrize("unset", [None, {}], ids=["null", "empty"])
+def test_code_contests_stamp_their_own_knobs_with_no_tool_budgets_stated(unset):
+    env = build_environment(
+        "code_contests",
+        {"sandbox_backend": "local", "tool_budgets": unset, "max_submissions": 3, "max_test_calls": 4},
+    )
+    _, (step,) = env.reset(["solve"], [{"answer": [{"input": "", "output": ""}]}])
+    assert step.trajectory.info[EPISODE_TOOL_BUDGETS_KEY] == {env.test_tool_name: 4, "submit_solution": 3}
 
 
 def test_tool_budgets_must_name_registered_tools_with_non_negative_int_caps():

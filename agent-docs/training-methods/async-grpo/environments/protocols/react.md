@@ -75,7 +75,7 @@ Flags and the `--training_config` contract: [Evaluation](../../evaluation.md).
 
 ## From Python
 
-`answer_validator` is a callable, so only the Python path sets it:
+`answer_validator` is a callable, so only the Python path sets it; a YAML string raises:
 
 ```python
 from halo.environments.protocols.react import build_react_math_environment

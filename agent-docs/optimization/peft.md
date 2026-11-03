@@ -466,8 +466,9 @@ python scripts/after_training/merge_peft_adapters.py \
 ```
 
 Add `--task classification --num_labels N` for classification models. Handles causal LM, sequence
-classification, multimodal/VLM, and trust_remote_code architectures. Use `--device_map auto` for large
-models.
+classification, multimodal/VLM, and trust_remote_code architectures: `--trust_remote_code` defaults on for
+a local base and off for a Hub base ([Scripts](../reference/scripts-reference.md#post-training-scripts)). Use
+`--device_map auto` for large models.
 
 The base loads through the class the adapter's tensor keys address: an adapter from a `text_only_model: true`
 run (keys under `model.layers`) loads the text-only `*ForCausalLM`, not the multimodal wrapper, and keys

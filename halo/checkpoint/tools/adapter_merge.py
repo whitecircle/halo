@@ -13,7 +13,7 @@ import torch
 from peft import PeftConfig, PeftModel
 from transformers import PreTrainedModel
 
-from halo.checkpoint.adapters import adapter_module_paths, reject_expert_lora_adapter
+from halo.checkpoint.adapters import adapter_module_paths, read_adapter_config, reject_expert_lora_adapter
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, MERGED_ADAPTER_CONFIG_DIR, PROCESSOR_FILES
 from halo.checkpoint.reading import reject_partial_checkpoint
 from halo.checkpoint.sidecars import apply_training_sidecars, copy_training_sidecars
@@ -158,6 +158,17 @@ def adapter_input_gates(adapter_dir: str, output_dir: str) -> PeftConfig:
     return peft_config
 
 
+def adapter_base_trust(adapter_dir: str, trust_remote_code: bool | None) -> bool:
+    """``trust_remote_code`` where stated, else whether the adapter's base is a local directory: that is the operator's
+    own artifact, while a Hub id names a repo whose code must not run because an adapter points at it."""
+    if trust_remote_code is not None:
+        return trust_remote_code
+    # Read raw, before the input gates, which give a directory PEFT's own config class cannot read a better refusal.
+    config = read_adapter_config(adapter_dir, missing_ok=True) or {}
+    base_model_path = config.get("base_model_name_or_path")
+    return bool(base_model_path) and os.path.isdir(base_model_path)
+
+
 def merge_adapter_into_base(
     adapter_dir: str,
     output_dir: str,
@@ -166,7 +177,7 @@ def merge_adapter_into_base(
     tool: str,
     device_map: str | None = None,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool = False,
     prepare_for_save: Callable[[PreTrainedModel], None] | None = None,
     verbose: bool = True,
 ) -> PreTrainedModel:
@@ -232,7 +243,7 @@ def load_task_base_model(
     *,
     excuse_task_head: bool = False,
     text_only: bool = False,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool = False,
 ):
     """The base loaded as ``task`` through :func:`load_task_model`'s coverage gate, since a truncated directory would
     random-initialize absent tensors and the merge ship them. A causal-LM base's head is always excused, since its
@@ -264,13 +275,15 @@ def merge_peft_adapter(
     num_labels: int = 1,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     attn_implementation: str | None = None,
-    trust_remote_code: bool = True,
+    trust_remote_code: bool | None = None,
     fp32_norms: bool = False,
     verbose: bool = True,
 ):
-    """Merge a PEFT adapter into its base model and save the result; ``fp32_norms`` writes norm leaves in fp32."""
+    """Merge a PEFT adapter into its base model and save the result; ``fp32_norms`` writes norm leaves in fp32, and an
+    unset ``trust_remote_code`` follows the base (:func:`adapter_base_trust`)."""
     if verbose:
         logger.info(f"Task: {task}, dtype: {dtype}")
+    trust_remote_code = adapter_base_trust(adapter_dir, trust_remote_code)
 
     def load_base_model(base_model_path: str, *, excuse_task_head: bool, text_only: bool = False):
         return load_task_base_model(

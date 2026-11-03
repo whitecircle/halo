@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from halo.config_validation import require_finite
+from halo.config_validation import present, require_bool, require_callable, require_finite
 from halo.environments.environment_base import EnvironmentBase
 from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, LAST_TURN_KEY
 from halo.environments.episode_scoring import EpisodeGrade
@@ -194,10 +194,11 @@ Always think before acting, and provide a Final Answer when you're done."""
     ):
         """``answer_validator`` replaces the default check; ``tool_budgets`` caps calls per tool per episode (a call
         past its cap is refused unrun)."""
+        require_callable(type(self).__name__, **present(answer_validator=answer_validator))
         # Only the default check makes the answer column load-bearing. ``None`` is unset, so a YAML
         # ``requires_answer: null`` still lands on the class declaration.
         if kwargs.get("requires_answer") is None:
-            kwargs["requires_answer"] = not callable(answer_validator)
+            kwargs["requires_answer"] = answer_validator is None
         super().__init__(**kwargs)
 
         require_finite(
@@ -207,6 +208,7 @@ Always think before acting, and provide a Final Answer when you're done."""
             thought_reward=thought_reward,
             no_thought_penalty=no_thought_penalty,
         )
+        require_bool(type(self).__name__, require_thought=require_thought)
 
         self.registry = tool_registry
         self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
@@ -313,7 +315,7 @@ Always think before acting, and provide a Final Answer when you're done."""
             return EpisodeGrade(0.0)
 
         # The validator is the grader wherever configured, so an answer-less row is its verdict to give.
-        if callable(self.answer_validator):
+        if self.answer_validator is not None:
             try:
                 validated = self.answer_validator(final_answer, expected)
             except Exception as exc:

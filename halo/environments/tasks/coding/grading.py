@@ -11,6 +11,7 @@ from dataclasses import dataclass, field, fields, replace
 from math import isfinite
 from typing import Any, NamedTuple
 
+from halo.config_validation import require_bool
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.languages import find_language
@@ -307,6 +308,7 @@ class GradingSpec:
 
     def __post_init__(self) -> None:
         # ``replace`` re-runs this, so a restored meta block is held to the same contract.
+        require_bool(type(self).__name__, stop_on_first_failure=self.stop_on_first_failure)
         for name, seconds in (
             ("default_timeout (timeout_per_test)", self.default_timeout),
             ("max_time_limit", self.max_time_limit),

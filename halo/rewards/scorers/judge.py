@@ -7,12 +7,18 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
+from urllib.parse import urlparse
 
 from openai import AsyncOpenAI
 
 from halo.config_validation import is_finite_number
 from halo.env import env_str
-from halo.inference.endpoints import EXTERNAL_API_KEY_CHAIN, resolve_external_api_key
+from halo.inference.endpoints import (
+    EXTERNAL_API_KEY_CHAIN,
+    is_loopback,
+    resolve_external_api_key,
+    resolve_local_api_key,
+)
 from halo.inference.openai_client import build_openai_client, chat_completion
 from halo.inference.response import get_finish_reason
 from halo.rewards.samples import (
@@ -62,9 +68,18 @@ class Verdict:
 
 
 def scorer_api_key(term: JudgeTerm) -> str:
-    key = env_str(term.api_key_env) or resolve_external_api_key()
+    """A variable the term names is that key or a refusal, since a fallback would send another vendor's key to the
+    term's endpoint. At the default name a loopback server takes the local key, which needs none, and any other
+    endpoint the hosted chain."""
+    if term.api_key_env != JudgeTerm.api_key_env:
+        key = env_str(term.api_key_env)
+        names = term.api_key_env
+    elif is_loopback(urlparse(term.base_url).hostname or ""):
+        return resolve_local_api_key()
+    else:
+        key = resolve_external_api_key()
+        names = " or ".join(EXTERNAL_API_KEY_CHAIN)
     if not key:
-        names = " or ".join(dict.fromkeys((term.api_key_env, *EXTERNAL_API_KEY_CHAIN)))
         raise RuntimeError(f"{term.owner}: no API key — set {names}")
     return key
 

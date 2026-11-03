@@ -247,7 +247,7 @@ Those two helpers carry their own rank ordering and must never be nested in a ma
 
 ```yaml
 chat_template: "jinja-templates/qwen3/qwen3-instruct.jinja"  # file path or inline Jinja string
-force_chat_template: true                                 # override model's own template
+force_chat_template: true                                 # needed over a template the model ships, or the run raises
 
 pad_token: "<|endoftext|>"
 eos_token: "<|im_end|>"

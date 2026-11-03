@@ -13,6 +13,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.sse import sse_client
 from mcp.client.stdio import get_default_environment, stdio_client
 
+from halo.config_validation import require_bool, require_text
 from halo.env import env_str
 from halo.environments.protocols.native_tool_use import AsyncNativeToolUseEnvironment
 from halo.environments.tools.definitions import NativeTool, NativeToolRegistry, ToolParameter
@@ -24,6 +25,8 @@ _MCP_DISCONNECT_TIMEOUT_S = 30.0
 
 # The SDK waits forever by default, so a hung server would hold the episode to its deadline.
 MCP_REQUEST_TIMEOUT_S = 120.0
+
+_MCP_TRANSPORTS = ("stdio", "sse")
 
 MCP_SERVERS = {
     "brave_search": {
@@ -62,6 +65,26 @@ MCP_SERVERS = {
         "env": ["SLACK_BOT_TOKEN", "SLACK_TEAM_ID"],
     },
 }
+
+
+def _require_transport(owner: str, transport: str, server_url: str | None, **spawn_options: Any) -> None:
+    """``stdio`` spawns a server and ``sse`` connects to a running one, so the other's settings would never apply."""
+    if transport not in _MCP_TRANSPORTS:
+        raise ValueError(f"{owner}: transport must be one of {_MCP_TRANSPORTS}, got {transport!r}")
+    if transport == "stdio":
+        if server_url is not None:
+            raise ValueError(
+                f"{owner}: server_url={server_url!r} is set on the stdio transport, which spawns a server and dials "
+                f"none. Set transport: sse to connect to it, or drop server_url."
+            )
+        return
+    require_text(owner, server_url=server_url)
+    set_options = sorted(name for name, value in spawn_options.items() if value)
+    if set_options:
+        raise ValueError(
+            f"{owner}: {set_options} configure a spawned server, but transport={transport!r} connects to one running "
+            f"server and spawns none. Use the stdio transport, or drop them."
+        )
 
 
 class _ServerConnection:
@@ -170,14 +193,21 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         """``scratch_allowlist`` appends a fresh scratch directory to the server's arguments (the filesystem server's
         allowlist); ``scratch_env`` maps env vars to file names inside it (the memory server's graph).
         ``episode_scratch`` gives each episode its own server and directory; otherwise one serves every episode."""
+        owner = type(self).__name__
+        require_bool(owner, scratch_allowlist=scratch_allowlist, episode_scratch=episode_scratch)
+        _require_transport(
+            owner,
+            transport,
+            server_url,
+            server_command=server_command,
+            server_args=server_args,
+            server_env=server_env,
+            scratch_allowlist=scratch_allowlist,
+            scratch_env=scratch_env,
+            episode_scratch=episode_scratch,
+        )
         super().__init__(tool_registry=NativeToolRegistry(), **kwargs)
         takes_scratch = scratch_allowlist or bool(scratch_env)
-        if transport != "stdio" and (takes_scratch or episode_scratch):
-            raise ValueError(
-                f"scratch_allowlist, scratch_env and episode_scratch give a spawned server its scratch directory, "
-                f"but transport={transport!r} connects to one running server and spawns none. Use the stdio "
-                f"transport, or drop them."
-            )
         if overlap := sorted(set(scratch_env or {}) & set(server_env or {})):
             raise ValueError(
                 f"server_env sets {overlap}, which scratch_env would point into the scratch directory instead. "
@@ -225,11 +255,7 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
             # The SDK passes ``env`` verbatim when set, dropping PATH/HOME and breaking the spawn.
             env = {**get_default_environment(), **server_env} if server_env else None
             return stdio_client(StdioServerParameters(command=self.server_command, args=args, env=env))
-        if self.transport == "sse":
-            if not self.server_url:
-                raise ValueError("server_url required for sse transport")
-            return sse_client(self.server_url)
-        raise ValueError(f"Unknown transport: {self.transport}")
+        return sse_client(self.server_url)
 
     async def _register_tools(self, session: ClientSession) -> None:
         for mcp_tool in (await session.list_tools()).tools:
