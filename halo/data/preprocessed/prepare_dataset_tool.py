@@ -47,9 +47,6 @@ class PrepareDatasetArguments:
         default=None, metadata={"help": "Fraction of a single-split input held out as the test split."}
     )
     private: bool = field(default=False, metadata={"help": "Make a Hub dataset private."})
-    hf_token: str | None = field(
-        default=None, metadata={"help": "Token for the hf:// upload; the loads use the ambient login."}
-    )
     overwrite: bool = field(default=False, metadata={"help": "Replace an existing output."})
     dry_run: bool = field(default=False, metadata={"help": "Show what would be done without processing."})
     verbose: bool = field(default=False, metadata={"help": "Log at DEBUG."})
@@ -199,14 +196,13 @@ def save_to_hf_hub(
     output_dir: str,
     repo_id: str,
     private: bool = False,
-    token: str | None = None,
     overwrite: bool = False,
 ):
     """Upload the staged dataset to the Hub, ``metadata.json`` (the completion marker) cleared first and uploaded
     last, so an interrupted upload reads as raw rather than as a truncated preprocessed dataset."""
     logger.info(f"Uploading to HuggingFace Hub: {repo_id}")
 
-    api = HfApi(token=token)
+    api = HfApi()
 
     # upload_folder overwrites unconditionally.
     if not overwrite and api.repo_exists(repo_id, repo_type="dataset"):
@@ -221,7 +217,6 @@ def save_to_hf_hub(
         folder_path=output_dir,
         repo_id=repo_id,
         repo_type="dataset",
-        token=token,
         ignore_patterns=[METADATA_FILE],
     )
     api.upload_file(
@@ -318,6 +313,6 @@ def run_dataset_preparation(args: PrepareDatasetArguments, config: Preprocessing
             if output_type == "s3":
                 save_to_s3(temp_dir, args.output, args.overwrite)
             else:
-                save_to_hf_hub(temp_dir, output_key, args.private, args.hf_token, args.overwrite)
+                save_to_hf_hub(temp_dir, output_key, args.private, args.overwrite)
 
     logger.info("Done!")

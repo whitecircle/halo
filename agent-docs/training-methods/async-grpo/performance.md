@@ -6,11 +6,10 @@ Async GRPO is rollout-bound at the step level and logits-bound inside the traini
 
 TRL's GRPO computes per-token log-probs from a full `[B, T, vocab]` logits tensor. At gpt-oss's ~201k vocab, a 24k-token trajectory is ~9 GiB of bf16 logits, roughly doubled by the log-softmax saved for the backward.
 
-Neither EP nor TP shrinks the logits: EP and MoE TP leave `lm_head` whole, and dense TP gathers its full-vocab output on every rank. Three levers help:
+Neither EP nor TP shrinks the logits: EP and MoE TP leave `lm_head` whole, and dense TP gathers its full-vocab output on every rank. Two levers help:
 
 - [Chunked log-probs](#chunked-log-probs).
 - `per_device_train_batch_size: 1`. Both forwards chunk to this many rows, so peak follows the longest single row.
-- `fp32_output_conversion: false` (the default), keeping logits in bf16.
 
 With chunked log-probs off, every GRPO trainer weighs the logits plane against free device memory at construction: `rows × (completion width + 1) × vocab × 4 B`.
 

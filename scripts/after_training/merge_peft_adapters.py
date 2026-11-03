@@ -66,12 +66,6 @@ Examples:
         help="Number of labels for classification models (default: 1)",
     )
     add_max_shard_size_arg(parser)
-    parser.add_argument(
-        "--attn_implementation",
-        type=str,
-        default=None,
-        help="Override attention implementation (e.g., 'flash_attention_2', 'sdpa')",
-    )
     add_trust_remote_code_arg(parser, default=None)
     parser.add_argument(
         "--fp32_norms",
@@ -93,7 +87,6 @@ Examples:
         device_map=args.device_map,
         num_labels=args.num_labels,
         max_shard_size=args.max_shard_size,
-        attn_implementation=args.attn_implementation,
         trust_remote_code=args.trust_remote_code,
         fp32_norms=args.fp32_norms,
         verbose=not args.quiet,

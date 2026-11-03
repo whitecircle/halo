@@ -73,7 +73,6 @@ def _load(path: str, *, excuse_task_head: bool):
         torch.float32,
         None,
         1,
-        None,
         excuse_task_head=excuse_task_head,
     )
 

@@ -5,7 +5,7 @@ Offline GRPO trains on pre-collected, off-policy data: several completions per p
 - **Models:** decoder-only, text-only. An encoder-decoder model is refused at construction, and the script refuses an image column.
 - **Parallelism:** EP, TP, EP+TP, EP+ETP, pure ETP (`ep_size=1`), CP, EP+CP, PP, PP+EP and PP+ETP.
 - **CP:** full fine-tuning only. PEFT and native expert LoRA are rejected under CP, even at `kl_beta: 0`.
-- **PP:** full fine-tuning with both `max_prompt_length` and `max_completion_length` set; rows pad to `max_length`, or to the two caps' sum when it is unset. `use_chunked_grpo_logprobs`, `compute_metrics` and PEFT are refused ([Trainer support](../../parallelism/pipeline-parallelism.md#trainer-support)).
+- **PP:** full fine-tuning with both `max_prompt_length` and `max_completion_length` set; rows pad to the two caps' sum. `use_chunked_grpo_logprobs`, `compute_metrics` and PEFT are refused ([Trainer support](../../parallelism/pipeline-parallelism.md#trainer-support)).
 
 ![Offline GRPO pipeline: per-group advantages at tokenization, then a floored per-token loss with optional k3 KL, normalized by loss_type](../../assets/diagrams/offline_grpo_pipeline.png)
 
@@ -46,7 +46,7 @@ expert_parallel_size: 8
 learning_rate: 5.0e-06
 ```
 
-Per token the default `policy_gradient_formulation: prob_weighted` trains `-(π·A)`, and `reinforce` trains `-(log π·A)`. `min_log_prob` floors the log-probs of negative-advantage rows only, ramped linearly from `initial_min_log_prob` when that is set; `kl_beta` is the k3 KL coefficient (Schulman's KL estimator, [Reference model](#reference-model)). `max_length` is read only under pipeline parallelism, as the fixed padded row length; set off PP, it is refused. Types and defaults: [OfflineGRPOConfig](../../reference/configuration-reference.md#offlinegrpoconfig).
+Per token the default `policy_gradient_formulation: prob_weighted` trains `-(π·A)`, and `reinforce` trains `-(log π·A)`. `min_log_prob` floors the log-probs of negative-advantage rows only, ramped linearly from `initial_min_log_prob` when that is set; `kl_beta` is the k3 KL coefficient (Schulman's KL estimator, [Reference model](#reference-model)). Types and defaults: [OfflineGRPOConfig](../../reference/configuration-reference.md#offlinegrpoconfig).
 
 - The shipped recipes run `learning_rate: 5.0e-06`, the top of the SFT full-FT band; a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 - Both length knobs truncate, and the tokenizer's window is pinned only when both are bounded. A completion cut at its cap gets no EOS, so it is never taught to stop there.

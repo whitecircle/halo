@@ -17,7 +17,6 @@ from halo.config_validation import reject_non_default_args
 from halo.configs.distillation import SelfDistillScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
-from halo.configs.sft import TREE_PACKING_FIELDS
 from halo.data.collators.self_distill import (
     SelfDistillTextCollator,
     SelfDistillVLMDataCollator,
@@ -248,12 +247,6 @@ def main():
         SelfDistillScriptArguments, SFTConfig, ModelArguments, ParallelismArguments
     )
 
-    # Unreachable: GenerateExamplesCallback needs a tokenized "generate" split and this keeps the dataset raw.
-    # num_eval_examples's own default (50) is truthy, hence the default-comparing form.
-    reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
-    # Tree packing lives in the SFT script's data path; the collators here make no multi-document row at all.
-    reject_non_default_args("Self-distillation", args, *TREE_PACKING_FIELDS, "allow_cross_document_linear_attention")
-
     # Both only feed the reference term, which is not built at all below this coefficient.
     if args.reference_kl_coef <= 0:
         reject_non_default_args(
@@ -282,13 +275,6 @@ def main():
         raise ValueError(
             "self-distillation renders each row's raw conversation, so conversation_field must name its "
             "column. Set conversation_field in the YAML."
-        )
-    # Inherited options the SelfDistill collators do not implement; ignoring them would train something else.
-    if args.train_on_last_assistant_only:
-        raise ValueError(
-            "train_on_last_assistant_only is not implemented for self-distillation (the SelfDistill "
-            "collators mask all assistant turns when train_on_completions_only is set). Remove it "
-            "from the YAML."
         )
     if sft_config.packing or sft_config.padding_free:
         raise ValueError(

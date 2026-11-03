@@ -2,7 +2,6 @@
 """The toolkit's sequence-length contract (``agent-docs/reference/configuration-reference.md``): the context-window
 resolver, SMPO's budget shares, and the writers of ``tokenizer.model_max_length``."""
 
-import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -14,8 +13,7 @@ from halo.configs.preference import SMPOConfig
 from halo.entrypoints.model_setup import apply_max_length, apply_prompt_completion_window, apply_tokenizer_window
 from halo.models.context_window import resolve_length_to_context, resolve_model_context_window
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
-from halo.trainers.grpo.offline.offline_rules import reject_inert_max_length
-from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
+from halo.trainers.grpo.offline.offline_rules import resolve_pp_max_length
 
 _CPU_OK = {"output_dir": "/tmp/test_length_budget", "bf16": False, "use_cpu": True}
 
@@ -280,33 +278,21 @@ def test_smpo_budget_requires_a_resolved_max_length(unresolved):
         cfg.resolve_length_budget()
 
 
-def _offline_config(**kwargs) -> OfflineGRPOConfig:
-    return OfflineGRPOConfig(output_dir="/tmp/test_length_budget", bf16=False, use_cpu=True, **kwargs)
+def test_offline_grpo_max_length_is_no_constructor_argument():
+    with pytest.raises(TypeError, match="max_length"):
+        OfflineGRPOConfig(output_dir="/tmp/test_length_budget", bf16=False, use_cpu=True, max_length=4096)
 
 
 @pytest.mark.parametrize("parallelism_config", [None, SimpleNamespace(is_pp_mode=False)])
-def test_offline_grpo_max_length_is_refused_off_pipeline_parallelism(parallelism_config):
-    """Only the PP path reads ``max_length``; off PP the budget is the two caps, so a set value would reach nothing
-    and leave the run uncapped."""
-    with pytest.raises(ValueError, match="pipeline-parallel-only"):
-        reject_inert_max_length(_offline_config(max_length=4096), parallelism_config)
-
-
-def test_offline_grpo_max_length_is_accepted_under_pipeline_parallelism():
-    reject_inert_max_length(_offline_config(max_length=4096), SimpleNamespace(is_pp_mode=True))
-
-
-def test_offline_grpo_unset_max_length_is_the_normal_case():
-    reject_inert_max_length(_offline_config(), SimpleNamespace(is_pp_mode=False))
-
-
-def test_offline_grpo_construction_runs_the_inert_max_length_guard():
-    """Called from ``__init__`` before every dataset map, so the rejection costs no tokenization."""
-    assert "reject_inert_max_length" in inspect.getsource(OfflineGRPOTrainer.__init__)
+def test_offline_grpo_row_length_is_unset_off_pipeline_parallelism(parallelism_config):
+    """The window off PP is the two caps the tokenization applies, so a second trainer on the same args must not read
+    the first one's fixed shape."""
+    args = SimpleNamespace(max_prompt_length=512, max_completion_length=1024, max_length=1536)
+    assert resolve_pp_max_length(args, parallelism_config) is None
 
 
 def test_legacy_max_seq_length_yaml_is_refused_by_the_parser(tmp_path):
-    """TRL's retired ``max_seq_length`` is refused, since it would silently stop capping on this inert field."""
+    """TRL's retired ``max_seq_length`` is refused, since it would silently cap nothing here."""
     path = tmp_path / "offline_grpo.yaml"
     path.write_text("output_dir: /tmp/test_length_budget\nbf16: false\nuse_cpu: true\nmax_seq_length: 4096\n")
     with pytest.raises(ValueError, match="max_seq_length"):

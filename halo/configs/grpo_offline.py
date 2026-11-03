@@ -36,22 +36,13 @@ class OfflineGRPOConfig(
             "cap, which loss_type='dr_grpo' (its normalizer) and pipeline parallelism refuse."
         },
     )
-    max_length: int | None = field(
-        default=None,
-        metadata={
-            "help": "Fixed total row length under pipeline parallelism, every batch padded to it; unset = "
-            "max_prompt_length + max_completion_length. Rejected at trainer construction without pipeline "
-            "parallelism. See agent-docs/reference/configuration-reference.md#offlinegrpoconfig."
-        },
-    )
+    # Not a key: the trainer writes pipeline parallelism's fixed row length here, and the attribute's presence is how a
+    # config declares rows to the EP capacity gate.
+    max_length: int | None = field(default=None, init=False)
     kl_beta: float = field(
         default=0.0, metadata={"help": "Coefficient of the KL penalty to the reference policy; 0 = no KL term."}
     )
     disable_dropout: bool = field(default=True, metadata={"help": "Whether to disable dropout in the model."})
-    padding_value: int | None = field(
-        default=None,
-        metadata={"help": "Pad token id used by the collator; unset takes the processing class's pad token."},
-    )
     advantage_method: Literal["z_norm", "minmax", "quantile_norm", "quantile_uniform", "robust"] = field(
         default="quantile_norm",
         metadata={
@@ -134,8 +125,5 @@ class OfflineGRPOConfig(
             **present(
                 max_prompt_length=self.max_prompt_length,
                 max_completion_length=self.max_completion_length,
-                max_length=self.max_length,
             ),
         )
-        # A token id indexes the embedding table.
-        require_int(owner, ge=0, **present(padding_value=self.padding_value))

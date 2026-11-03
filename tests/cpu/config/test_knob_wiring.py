@@ -264,17 +264,6 @@ def test_script_rejects_knobs_it_cannot_honor(script, fields):
     assert fields <= _rejected_knobs(script), f"{script} no longer rejects {sorted(fields - _rejected_knobs(script))}"
 
 
-def test_self_distill_guards_both_generation_eval_knobs():
-    """Self-distillation keeps its dataset raw, so GenerateExamplesCallback is unreachable and both knobs are inert."""
-    source = (REPO_ROOT / "scripts/training/distillation/self_distill.py").read_text()
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "reject_non_default_args":
-            guarded = {arg.value for arg in node.args if isinstance(arg, ast.Constant)}
-            assert {"generate_eval_examples", "num_eval_examples"} <= guarded
-            return
-    raise AssertionError("self_distill.py no longer calls reject_non_default_args")
-
-
 def _run_script_main(script: str, config_body: str, tmp_path: Path) -> None:
     """Drive ``scripts/training/<script>:main()`` from a minimal YAML, with nothing past the parse stubbed."""
     module = load_script_module(f"scripts/training/{script}", "halo_test_knob_wiring_" + script.replace("/", "_"))

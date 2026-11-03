@@ -20,7 +20,6 @@ counts. Partial credit would pay a brute force that times out on the large tests
 | `reward/objective` | `rewards:` `weight` | `1.0` | a solve: every hidden test passed |
 | `reward/submission` | `submission_reward` | `0` | once a contentful graded submission lands |
 | `reward/resubmission` | `resubmission_penalty` | `0` | `−resubmission_penalty` per admitted `submit_solution` call after the first |
-| `reward/unrun_submission` | `unrun_submission_penalty` | `0` | once, in an episode that never passed, when a failed graded submission was a program the scratchpad never ran as submitted before its turn while a run was left (comments, whitespace and dropped output statements aside). The match is textual, so a tested program that a guard, a rename or a harness changed counts as unrun: the recipes leave it at `0` and price the failure through `untested_submission`, which reads the change |
 | `reward/tool_shaping` | `no_tool_use_penalty` / `turn_overflow_penalty` | `0` | zero tool calls / ending truncated: `max_turns` or the output budget spent, or a cut it could not recover |
 | `reward/tool_shaping` | `length_cutoff_penalty` | `0` | per engine-cut or empty turn the episode recovers from |
 | `reward/turn_shaping` | `tool_success_reward` / `tool_error_penalty` | `0` / `0` | per executed call; this env zeroes the protocol's 0.05 / 0.1 |
@@ -96,8 +95,7 @@ limit on gpt-oss, whose template states no budget.
 `tests/cpu/config/test_env_grpo_reward_economy.py` holds every shipped recipe to these relations:
 
 - The floor's weight and the price's cap each stay under one more failed submission at its worst honest price
-  (the resubmission penalty plus `unrun_submission_penalty` and `untested_submission`, which a program never run as
-  submitted can both raise), so reasoning length never outweighs whether to resubmit. An episode pays the floor or the price, never both.
+  (the resubmission penalty plus `untested_submission`), so reasoning length never outweighs whether to resubmit. An episode pays the floor or the price, never both.
 - A graded submission that passes nothing scores above an episode that never attempts; raising every audit process
   flag, it scores no lower at the same length terms.
 - At every level, a solve that pays every per-episode price (its resubmissions, admitted recoveries, the worst
@@ -122,7 +120,7 @@ limit on gpt-oss, whose template states no budget.
 - `episode/tested_before_submission`: over submitting episodes
 - `episode/grading_budget_hit`
 - `episode/identical_resubmissions`: programs refused as already graded
-- `episode/unrun_failed_submission`: a failed graded submission was a program never run as submitted while a run was left (priced as `reward/unrun_submission` where `unrun_submission_penalty` is set)
+- `episode/unrun_failed_submission`: a failed graded submission was a program never run as submitted while a run was left, comments, whitespace and dropped output statements aside. The match is textual, so a tested program that a guard, a rename or a harness changed counts as unrun; `untested_submission` is the price that reads the change
 - `episode/resubmission_improved`: [Resubmissions](#resubmissions)
 - `episode/language_switches`: where the model picks the language
 

@@ -39,7 +39,7 @@ token less; nothing is assumed from the text.
 - A group longer than `max_length` splits into several trees that each repeat the prefix. A row
   longer than `max_length` on its own is dropped, as on the flat path.
 - A row with no marker, or with the marker more than once, shares only with an exact duplicate.
-- A shared span shorter than `tree_min_shared_tokens` is repeated per row, not split off.
+- A shared span under 16 tokens is repeated per row, not split off.
 
 The digest order replaces the dataset's row order, in both splits. The trainer still shuffles packed
 rows every epoch.

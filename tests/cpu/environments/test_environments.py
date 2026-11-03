@@ -1842,7 +1842,7 @@ def test_all_registered_envs_resolvable():
 def test_react_step_does_not_double_add_assistant_message():
     """EnvironmentBase.step already appends the assistant action, so a double-add corrupts the history and halves
     max_turns."""
-    env = ReActEnvironment(tool_registry=NativeToolRegistry(), require_thought=False)
+    env = ReActEnvironment(tool_registry=NativeToolRegistry(), no_thought_penalty=0.0)
     episode_ids, _ = env.reset(["Solve: 1+1"])
     eid = episode_ids[0]
 
@@ -1854,6 +1854,20 @@ def test_react_step_does_not_double_add_assistant_message():
     roles = [m.role for m in traj.messages]
     assert roles.count("assistant") == 1, f"expected exactly 1 assistant message, got roles={roles}"
     assert not any(roles[i] == "assistant" and roles[i + 1] == "assistant" for i in range(len(roles) - 1)), roles
+
+
+@pytest.mark.parametrize(("penalty", "reward"), [(0.05, -0.05), (0.0, 0.0)])
+def test_react_prices_an_answer_with_no_thought_at_its_penalty(penalty, reward):
+    env = ReActEnvironment(
+        tool_registry=NativeToolRegistry(), no_thought_penalty=penalty, answer_validator=lambda answer, expected: False
+    )
+    ids, _ = env.reset(["Solve: 1+1"])
+    assert env.step(ids, ["Final Answer: 8"], [{}])[0].trajectory.total_reward == pytest.approx(reward)
+
+
+def test_react_refuses_a_thought_gate_beside_its_penalty():
+    with pytest.raises(TypeError, match="require_thought"):
+        ReActEnvironment(tool_registry=NativeToolRegistry(), require_thought=False)
 
 
 def test_grading_nonzero_exit_is_runtime_error_not_pass():

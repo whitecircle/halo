@@ -239,7 +239,6 @@ def load_task_base_model(
     dtype: torch.dtype,
     device_map: str | None,
     num_labels: int,
-    attn_implementation: str | None,
     *,
     excuse_task_head: bool = False,
     text_only: bool = False,
@@ -254,8 +253,6 @@ def load_task_base_model(
     }
     if device_map:
         model_kwargs["device_map"] = device_map
-    if attn_implementation:
-        model_kwargs["attn_implementation"] = attn_implementation
 
     if task == "classification":
         model_kwargs["num_labels"] = num_labels
@@ -274,7 +271,6 @@ def merge_peft_adapter(
     device_map: str | None = None,
     num_labels: int = 1,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
-    attn_implementation: str | None = None,
     trust_remote_code: bool | None = None,
     fp32_norms: bool = False,
     verbose: bool = True,
@@ -292,7 +288,6 @@ def merge_peft_adapter(
             dtype,
             device_map,
             num_labels,
-            attn_implementation,
             excuse_task_head=excuse_task_head,
             text_only=text_only,
             trust_remote_code=trust_remote_code,

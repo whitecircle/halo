@@ -140,20 +140,8 @@ def run(ctx):
     dataset = build_dataset()
     checks, metrics = {}, {}
 
-    # All raise before any collective or model load.
-    expect_construction_error(
-        OfflineGRPOTrainer,
-        "undersized_max_length_rejected",
-        checks,
-        "below max_prompt_length",
-        model=build_dense_model(tokenizer, vocab_size=VOCAB_SIZE),
-        args=build_args(ctx.output_dir + "/short", max_length=8),
-        train_dataset=dataset,
-        processing_class=tokenizer,
-        parallelism_config=config,
-    )
-    # This prediction_step returns (loss, None, None) in every mode, so compute_metrics under PP would broadcast the
-    # raw logits plane and feed metrics a tensor no non-PP run produces.
+    # Raises before any collective or model load. This prediction_step returns (loss, None, None) in every mode, so
+    # compute_metrics under PP would broadcast the raw logits plane and feed metrics a tensor no non-PP run produces.
     expect_construction_error(
         OfflineGRPOTrainer,
         "compute_metrics_rejected",

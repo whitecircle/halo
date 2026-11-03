@@ -187,7 +187,6 @@ def test_reward_std_of_a_single_rollout_is_finite():
 
 def _offline_args(**overrides):
     args = types.SimpleNamespace(
-        padding_value=0,
         max_prompt_length=64,
         max_completion_length=64,
         advantage_method="z_norm",
@@ -235,6 +234,12 @@ def test_unknown_pg_formulation_is_rejected_at_construction_without_pp():
         _construct_offline(policy_gradient_formulation="nonsense")
 
 
+def test_batches_pad_with_the_tokenizers_pad_token():
+    host = object.__new__(OfflineGRPOTrainer)
+    host._configure_objective(_offline_args(), types.SimpleNamespace(pad_token_id=7))
+    assert host.padding_value == 7
+
+
 def test_a_missing_processing_class_is_refused():
     """The stored rollouts are tokenized at construction."""
     host = object.__new__(OfflineGRPOTrainer)
@@ -247,7 +252,7 @@ def test_an_encoder_decoder_model_is_refused():
     never computes."""
     model = types.SimpleNamespace(config=types.SimpleNamespace(is_encoder_decoder=True, _name_or_path="t5"))
     host = object.__new__(OfflineGRPOTrainer)
-    args = _offline_args(max_length=None, use_chunked_grpo_logprobs=False, model_init_kwargs=None)
+    args = _offline_args(use_chunked_grpo_logprobs=False, model_init_kwargs=None)
     with pytest.raises(ValueError, match="decoder-only"):
         OfflineGRPOTrainer.__init__(
             host, model=model, args=args, processing_class=types.SimpleNamespace(pad_token_id=0)

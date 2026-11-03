@@ -282,13 +282,6 @@ class ParallelismArguments(ValidatedConfig):
             "See agent-docs/training-methods/pretraining.md#random-initialization."
         },
     )
-    fp32_output_conversion: bool = field(
-        default=ParallelismConfig.fp32_output_conversion,
-        metadata={
-            "help": "Keep accelerate's wrapper that converts model outputs (the logits) to fp32. Off by default: "
-            "the upcast can OOM on long sequences, and a bf16 model needs no fp32 outputs."
-        },
-    )
 
     def _validate_fields(self) -> None:
         super()._validate_fields()

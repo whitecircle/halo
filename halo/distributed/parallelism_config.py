@@ -77,7 +77,6 @@ class ParallelismConfig:
     # At ep_group_size == 1, FSDP-shard the replicated experts so their reduce-scatter is the grad sync.
     fsdp_shard_ep1_experts: bool = True
     use_hsdp: bool = False  # shard within an NVLink domain, replicate across domains
-    fp32_output_conversion: bool = False  # accelerate's fp32 logits upcast, which OOMs on long sequences
     expert_lora: Optional[ExpertLoraSpec] = None
     merge_expert_lora_on_save: bool = False
 
@@ -486,8 +485,6 @@ class ParallelismConfig:
             )
         if self.requires_rdma:
             lines.append("  EP spans NVLink domains — requires RDMA")
-        if not self.fp32_output_conversion:
-            lines.append("  FP32 output conversion: disabled (bf16 native)")
 
         lines.append("=" * 60)
         return "\n".join(lines)

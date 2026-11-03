@@ -9,7 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from halo.config_validation import present, require_bool, require_callable, require_finite
+from halo.config_validation import present, require_callable, require_finite
 from halo.environments.environment_base import EnvironmentBase
 from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, LAST_TURN_KEY
 from halo.environments.episode_scoring import EpisodeGrade
@@ -146,7 +146,7 @@ def parse_react_output(text: str) -> _ReActStep:
 
 class ReActEnvironment(EnvironmentBase):
     """Actions are parsed out of the text, so no tool schema reaches the server; the tools are named in the system
-    prompt. ``require_thought`` penalizes acting without a Thought."""
+    prompt. ``no_thought_penalty`` prices acting without a Thought."""
 
     # The default check grades against ``context["answer"]``; an ``answer_validator`` clears this per instance.
     requires_answer = True
@@ -187,7 +187,6 @@ Always think before acting, and provide a Final Answer when you're done."""
         system_prompt: str | None = None,
         thought_reward: float = 0.02,
         no_thought_penalty: float = 0.05,
-        require_thought: bool = True,
         answer_validator: Callable[[Any, Any], bool] | None = None,
         tool_budgets: dict[str, int] | None = None,
         **kwargs,
@@ -208,13 +207,11 @@ Always think before acting, and provide a Final Answer when you're done."""
             thought_reward=thought_reward,
             no_thought_penalty=no_thought_penalty,
         )
-        require_bool(type(self).__name__, require_thought=require_thought)
 
         self.registry = tool_registry
         self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)
         self.thought_reward = thought_reward
         self.no_thought_penalty = no_thought_penalty
-        self.require_thought = require_thought
         self.answer_validator = answer_validator
 
         if system_prompt:
@@ -255,7 +252,7 @@ Always think before acting, and provide a Final Answer when you're done."""
         reward = 0.0
         if step.thought:
             reward += self.thought_reward
-        elif self.require_thought and (step.has_action or step.has_final_answer):
+        elif step.has_action or step.has_final_answer:
             reward -= self.no_thought_penalty
 
         if step.has_final_answer:

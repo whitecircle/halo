@@ -32,7 +32,7 @@ def _native(**kwargs):
 
 
 def _react(**kwargs):
-    return ReActEnvironment(tool_registry=_echo_registry(), thought_reward=0.0, require_thought=False, **kwargs)
+    return ReActEnvironment(tool_registry=_echo_registry(), thought_reward=0.0, no_thought_penalty=0.0, **kwargs)
 
 
 def _native_call(name: str, cid: str):

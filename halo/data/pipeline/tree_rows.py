@@ -40,6 +40,9 @@ logger = info_logger(__name__)
 
 SHARE_KEY_COLUMN = "tree_key"
 
+# A shared span under this many tokens is repeated per row, not split off.
+MIN_SHARED_TOKENS = 16
+
 # All per token, at the narrowest types: inferred, the two layout columns would be 8-byte integers.
 TREE_ROW_FEATURES = Features(
     {
@@ -133,15 +136,15 @@ def build_tree_row_processor(
     conversation_field: str,
     share_markers: tuple[str, ...],
     share_requires: str | None,
-    min_shared_tokens: int,
     eos_token_ids: frozenset[int],
     assistant_message_template: str,
     train_on_last_assistant_only: bool,
     **render_kwargs,
 ) -> Callable[[dict[str, list]], dict[str, list]]:
     """Batched map turning runs of adjacent rows with one share key into tree columns: one row per tree, more when a
-    run overflows ``max_length``, several roots in one row when they share under ``min_shared_tokens``. A conversation
-    over ``max_length`` is dropped; a run a batch or worker boundary cuts becomes two trees and changes no example."""
+    run overflows ``max_length``, several roots in one row when they share under :data:`MIN_SHARED_TOKENS`. A
+    conversation over ``max_length`` is dropped; a run a batch or worker boundary cuts becomes two trees and changes no
+    example."""
     # Partials: the map's cache key reads a partial's bound arguments and skips a dict a closure captures.
     render = functools.partial(
         render_row_conversation,
@@ -168,7 +171,7 @@ def build_tree_row_processor(
                 for i in run
             ]
             trained = [trained_tokens(path) for path in paths]
-            nodes = build_trie(paths, [share_limit(mask) for mask in trained], min_shared_tokens)
+            nodes = build_trie(paths, [share_limit(mask) for mask in trained], MIN_SHARED_TOKENS)
             trees, dropped = split_to_budget(nodes, max_length)
             for tree_row in [*(serialize_tree(tree, paths, trained) for tree in trees), *[_DROPPED_ROW] * dropped]:
                 for column in TREE_ROW_FEATURES:

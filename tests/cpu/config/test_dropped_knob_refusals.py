@@ -232,15 +232,24 @@ def test_self_distill_refuses_trl_dataset_prep_knobs(config_body, knob, tmp_path
         _run_main("distillation/self_distill.py", config_body, tmp_path, init_training_script=_stop)
 
 
-def test_self_distill_refuses_the_cross_document_opt_in(tmp_path):
-    """Inherited from SFTScriptArguments, but self-distillation packs no row for it to admit."""
-    with pytest.raises(ValueError, match=rf"{_REFUSED}.*allow_cross_document_linear_attention"):
-        _run_main(
-            "distillation/self_distill.py",
-            "allow_cross_document_linear_attention: true\n",
-            tmp_path,
-            init_training_script=_stop,
-        )
+@pytest.mark.parametrize(
+    "line",
+    [
+        "generate_eval_examples: false",
+        "num_eval_examples: 50",
+        "train_on_last_assistant_only: false",
+        "allow_cross_document_linear_attention: false",
+        "tree_packing: false",
+        "tree_share_markers: []",
+        "tree_share_requires: null",
+        "tree_full_attention: split",
+    ],
+)
+def test_self_distill_has_no_key_for_what_its_data_path_cannot_do(line, tmp_path):
+    """Its dataset stays raw and its collators pad one row per conversation, masking every assistant turn. Each value
+    is the SFT default, which an inherited field would accept."""
+    with pytest.raises(ValueError, match=line.partition(":")[0]):
+        _run_main("distillation/self_distill.py", f"{line}\n", tmp_path, init_training_script=_stop)
 
 
 def test_self_distill_accepts_the_defaults(tmp_path):
@@ -299,6 +308,23 @@ def test_self_distill_accepts_both_spellings_of_its_own_nll(loss_type, tmp_path)
     """TRL's default either side of 1.7, and the loss the trainer computes."""
     with pytest.raises(_PastTheGuards):
         _run_main("distillation/self_distill.py", f"loss_type: {loss_type}\n", tmp_path, init_training_script=_stop)
+
+
+# Offline GRPO: at the parse.
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        # Only masked positions ever held it; ``pad_token`` overrides the tokenizer's pad.
+        "padding_value",
+        # The budget is the two caps; pipeline parallelism pads to their sum.
+        "max_length",
+    ],
+)
+def test_offline_grpo_has_no_such_key(key, tmp_path):
+    with pytest.raises(ValueError, match=key):
+        _run_main("grpo/offline.py", f"{key}: 64\n", tmp_path, init_training_script=_stop)
 
 
 # Environmental GRPO: before init_training_script.

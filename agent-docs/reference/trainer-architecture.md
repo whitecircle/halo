@@ -258,10 +258,9 @@ custom path only (`_needs_custom_accelerator()`; otherwise it delegates to the b
 `build_plain_accelerator` applies no DDP wrapping (manual gradient sync), sets
 `gradient_accumulation_steps=1` (the Trainer drives accumulation) and bf16/fp16 autocast.
 
-On either path `fp32_output_conversion: false` (the default) clears `accelerator.native_amp`,
-dropping the fp32 logits upcast that can cost many GB at long sequence. Under `fp16` it is ignored
-with a warning: `native_amp` also gates GradScaler unscaling there, so clearing it would clip and
-step on scaled gradients.
+On either path the trainer clears `accelerator.native_amp`, dropping the fp32 logits upcast that can
+cost many GB at long sequence. Under `fp16` it stays: `native_amp` also gates GradScaler unscaling
+there, so clearing it would clip and step on scaled gradients.
 
 **`_configure_distributed_modes()`** takes back TRL's construction-time writes
 (`_restore_trl_overrides`), runs the pre-wrap gates (adapters under TP, inert router logits,

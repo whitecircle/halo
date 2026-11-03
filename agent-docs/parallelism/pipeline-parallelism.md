@@ -82,8 +82,8 @@ How they interact with the trainer's batch settings:
 - A `pipeline_split` sums to the layer count with boundaries on the `layer_types` period
   ([Split-offset constraint](#split-offset-constraint)).
 - `max_length` must be set: the pipeline freezes its P2P shapes on the first step and pads every batch
-  to it. Offline GRPO fills an unset one from `max_prompt_length + max_completion_length` (both
-  required) and rejects a smaller explicit one. A `max_length` at the model's context window is
+  to it. Offline GRPO has no such key and pads to `max_prompt_length + max_completion_length` (both
+  required). A `max_length` at the model's context window is
   warned, since every row then pays full-window compute. The train dataloader runs with
   `drop_last=True`, forced and logged when the config leaves it off.
 

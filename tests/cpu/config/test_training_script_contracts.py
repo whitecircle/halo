@@ -300,12 +300,6 @@ def _run_main_with_yaml(module, yaml_body: str, tmp_path: Path):
         module.main()
 
 
-def test_self_distill_rejects_train_on_last_assistant_only(tmp_path):
-    module = _load_script_module("distillation/self_distill.py")
-    with pytest.raises(ValueError, match="train_on_last_assistant_only"):
-        _run_main_with_yaml(module, "train_on_last_assistant_only: true\n", tmp_path)
-
-
 def test_self_distill_requires_a_conversation_column(tmp_path):
     """The loader only checks a declared column; an unset one would reach the collators."""
     module = _load_script_module("distillation/self_distill.py")

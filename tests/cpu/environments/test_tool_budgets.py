@@ -221,7 +221,7 @@ async def test_two_calls_in_one_async_turn_cannot_double_spend_a_one_call_cap():
 
 
 def test_react_budget_refuses_past_the_cap():
-    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 1}, require_thought=False)
+    env = ReActEnvironment(tool_registry=_registry(), tool_budgets={"echo": 1}, no_thought_penalty=0.0)
     ids, _ = env.reset(["t"])
     for _ in range(2):
         env.step(ids, ['Thought: go\nAction: echo(code="x")'])

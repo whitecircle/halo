@@ -106,7 +106,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     # Agentic solvers iterate test→fix→submit, which the protocol's generic budget cuts mid-loop.
     DEFAULT_MAX_TURNS = 15
 
-    SHAPING_COMPONENTS = ("submission", "resubmission", "unrun_submission")
+    SHAPING_COMPONENTS = ("submission", "resubmission")
 
     EPISODE_FACTS = (FAILED_WITH_NO_RUNS_LEFT,)
 
@@ -161,7 +161,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         max_test_calls: int | None = None,
         submission_reward: float = 0.0,
         resubmission_penalty: float = 0.0,
-        unrun_submission_penalty: float = 0.0,
         reasoning_effort: str | None = DEFAULT_REASONING_EFFORT,
         reasoning_effort_profiles: dict[str, dict[str, int | float | bool]] | None = None,
         eval_protocol: str = DEFAULT_EVAL_PROTOCOL,
@@ -187,7 +186,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             why=MAGNITUDE_WHY,
             submission_reward=submission_reward,
             resubmission_penalty=resubmission_penalty,
-            unrun_submission_penalty=unrun_submission_penalty,
         )
         self.languages = tuple(spec.name for spec in specs)
         self.language = self.languages[0]
@@ -196,8 +194,6 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         self.submission_reward = submission_reward
         # Each graded submission after the first probes the judge; free, probing would out-earn testing.
         self.resubmission_penalty = resubmission_penalty
-        # Failure-only: the policy tests when it is unsure, and an outcome-only price would charge the testing.
-        self.unrun_submission_penalty = unrun_submission_penalty
         self.max_submissions = max_submissions
         self.max_test_calls = max_test_calls
         self.sandbox = sandbox or build_sandbox(backend=sandbox_backend, url=sandbox_url)
@@ -530,10 +526,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         # Gated on graded_content, not submission_count: _submit bumps the count before grading.
         submission = self.submission_reward if graded_content else 0.0
         resubmission = -self.resubmission_penalty * max(0, self._submissions(trajectory) - 1)
-        unrun = -self.unrun_submission_penalty if not objective and info.get(UNRUN_FAILED_SUBMISSION_KEY) else 0.0
-        return EpisodeGrade(
-            objective, {"submission": submission, "resubmission": resubmission, "unrun_submission": unrun}
-        )
+        return EpisodeGrade(objective, {"submission": submission, "resubmission": resubmission})
 
     def _final_answer(self, trajectory: Trajectory) -> str | None:
         """The last submitted program as a fenced block, or nothing, so a scorer reads that no submission was made,

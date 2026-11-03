@@ -71,7 +71,7 @@ class OfflineGRPOPipelineMixin:
                 "labels": (labels, LABEL_IGNORE_INDEX),
             },
             self.args.max_length,
-            "Lower max_prompt_length/max_completion_length so their sum fits, or raise max_length.",
+            "The fixed shape is max_prompt_length + max_completion_length; raise them to fit the rows.",
         )
         self._pp_min_log_prob = self._live_min_log_prob
         out = {**padded, "advantage": batch["advantage"], "group_size": batch["group_size"]}

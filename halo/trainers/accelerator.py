@@ -115,17 +115,9 @@ class AcceleratorMixin:
         )
 
     def _configure_fp32_output_conversion(self) -> None:
-        """Drop ``native_amp``'s upcast of the full ``[B, S, V]`` logits when asked. Under fp16 it stays, since it also
-        gates ``unscale_gradients`` and clearing it would clip and step on GradScaler-scaled gradients."""
-        if self.parallelism_config.fp32_output_conversion:
-            return
+        """Drop ``native_amp``'s upcast of the full ``[B, S, V]`` logits. Under fp16 it stays, since it also gates
+        ``unscale_gradients`` and clearing it would clip and step on GradScaler-scaled gradients."""
         if self.args.fp16:
-            if is_global_main_process():
-                logger.warning(
-                    "fp32_output_conversion=false is IGNORED under fp16: accelerate's native_amp also "
-                    "owns GradScaler unscaling, so disabling it would clip and step on scaled gradients. "
-                    "Use bf16 (the toolkit default) to drop the fp32 logits upcast."
-                )
             return
         self.accelerator.native_amp = False
         if is_global_main_process():

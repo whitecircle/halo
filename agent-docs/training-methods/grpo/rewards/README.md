@@ -77,7 +77,7 @@ The episode reward is the sum of its `reward/*` components:
 
 - `reward/turn_shaping`: per-turn deltas (tool credit and penalties, ReAct thought credit).
 - `reward/tool_shaping`: [native-protocol](../../async-grpo/environments/protocols/native-tool-use.md) episode knobs (`no_tool_use_penalty`, `turn_overflow_penalty`, `length_cutoff_penalty`).
-- `reward/<name>`: each environment shaping term (code contests: `submission`, `resubmission`, `unrun_submission`) and each external term.
+- `reward/<name>`: each environment shaping term (code contests: `submission`, `resubmission`) and each external term.
 - `reward/objective`: `weight × grade ^ exponent` from the `environment` term.
 
 The trainer adds its length charges, `reward/reasoning_floor` and `reward/reasoning_price` (each only while its knob is on), outside these components ([Reasoning length reward](../../async-grpo/reasoning.md#reasoning-length-reward)). Components and rationales are saved with each completion ([Saved trajectories](../../async-grpo/monitoring.md#saved-trajectories)).

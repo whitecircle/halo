@@ -141,7 +141,7 @@ class PipelineTrainerMixin:
             logger.warning(
                 "Pipeline parallelism pads EVERY batch to max_length=%d, which is the model's full "
                 "context window — each row pays full-window compute regardless of its true length. "
-                "Set max_length to a cap matched to the data.",
+                "Lower the config's length caps to match the data.",
                 training_args.max_length,
             )
         return kwargs

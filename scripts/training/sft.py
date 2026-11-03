@@ -100,7 +100,6 @@ def _prepare_tree_rows(ds, args, sft_config, tokenizer, hf_config, **processor_k
         sft_config.max_length,
         share_markers=tuple(args.tree_share_markers),
         share_requires=args.tree_share_requires,
-        min_shared_tokens=args.tree_min_shared_tokens,
         eos_token_ids=resolve_eos_token_ids(tokenizer, hf_config),
         assistant_message_template=args.assistant_message_template,
         train_on_last_assistant_only=args.train_on_last_assistant_only,

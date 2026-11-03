@@ -20,6 +20,7 @@ from halo.data.collators.packing import DataCollatorForCompletionOnlyLMWithPacki
 from halo.data.collators.tree_packing import DataCollatorWithTreePacking
 from halo.data.pipeline.text_rows import build_chat_row_processor
 from halo.data.pipeline.tree_rows import (
+    MIN_SHARED_TOKENS,
     SHARE_KEY_COLUMN,
     TREE_ROW_FEATURES,
     _share_key_order,
@@ -91,7 +92,7 @@ def tokenizer():
     return tokenizer
 
 
-def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, min_shared_tokens=16, last_only=True) -> list[dict]:
+def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, last_only=True) -> list[dict]:
     """Processed tree rows, read back from a dataset of the declared column types as the trainer reads them."""
     processor = build_tree_row_processor(
         tokenizer,
@@ -102,7 +103,6 @@ def _process(tokenizer, conversations, *, max_length=MAX_LENGTH, min_shared_toke
         eos_token_ids=resolve_eos_token_ids(tokenizer),
         assistant_message_template=RESPONSE,
         train_on_last_assistant_only=last_only,
-        min_shared_tokens=min_shared_tokens,
     )
     return list(Dataset.from_dict(processor({"conversation": conversations}), features=TREE_ROW_FEATURES))
 
@@ -344,9 +344,17 @@ def test_rows_that_are_not_adjacent_do_not_share(tokenizer):
 def test_two_questions_and_the_first_alone_share_a_second_level(tokenizer):
     trees = _process(tokenizer, _conversations()[:4])
     assert len(trees) == 1 and max(trees[0][DEPTH_COLUMN]) == 2
-    unshared = _process(tokenizer, _conversations()[:4], min_shared_tokens=10**6)
+    with mock.patch("halo.data.pipeline.tree_rows.MIN_SHARED_TOKENS", 10**6):
+        unshared = _process(tokenizer, _conversations()[:4])
     assert len(unshared) == 1 and max(unshared[0][DEPTH_COLUMN]) == 0
     assert unshared[0][POSITION_COLUMN].count(0) == 4
+
+
+@pytest.mark.parametrize(("span", "nodes"), [(15, 4), (16, 5)])
+def test_a_shared_span_under_sixteen_tokens_is_repeated_per_row(span, nodes):
+    """Three paths share a root and two of them ``span`` tokens more, which form their own node only from 16 up."""
+    paths = [[*[1] * 32, *[2] * span, 3], [*[1] * 32, *[2] * span, 4], [*[1] * 32, 5]]
+    assert len(build_trie(paths, [len(path) for path in paths], MIN_SHARED_TOKENS)) == nodes
 
 
 def test_a_row_over_the_length_budget_is_dropped_and_counted(tokenizer):
@@ -526,7 +534,6 @@ def test_the_sft_data_path_packs_the_same_examples_as_trees_and_flat(tokenizer, 
             tree_packing=tree_packing,
             tree_share_markers=list(MARKERS),
             tree_share_requires=REQUIRES,
-            tree_min_shared_tokens=16,
             tree_full_attention="split",
             generate_eval_examples=False,
             allow_cross_document_linear_attention=False,

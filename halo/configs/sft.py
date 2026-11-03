@@ -1,9 +1,8 @@
-"""SFT script arguments, the conversation-rendering fields it shares with teacher distillation, and tree packing."""
+"""SFT script arguments, the conversation-rendering fields both distillation scripts share, and tree packing."""
 
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
-from halo.config_validation import ValidatedConfig, require_int
 from halo.configs.script_arguments import (
     CommonScriptArguments,
     CrossDocumentLinearAttentionArguments,
@@ -56,7 +55,7 @@ class ConversationRenderArguments:
 
 
 @dataclass
-class _TreePackingArguments(ValidatedConfig):
+class _TreePackingArguments:
     """``tree_packing`` and the ``tree_*`` options it gates (``agent-docs/optimization/tree-packing.md``)."""
 
     tree_packing: bool = field(
@@ -81,10 +80,6 @@ class _TreePackingArguments(ValidatedConfig):
             "the long part, so rows that put it after the marker are left alone instead of sharing a short header."
         },
     )
-    tree_min_shared_tokens: int = field(
-        default=16,
-        metadata={"help": "Tree packing: a span shared by fewer tokens than this is repeated per row, not split off."},
-    )
     tree_full_attention: FullAttentionForm = field(
         default="split",
         metadata={
@@ -93,10 +88,6 @@ class _TreePackingArguments(ValidatedConfig):
             "well; memory grows with fan-out x prefix length)."
         },
     )
-
-    def _validate_fields(self) -> None:
-        super()._validate_fields()
-        require_int(type(self).__name__, ge=1, tree_min_shared_tokens=self.tree_min_shared_tokens)
 
 
 # What a run that packs no trees must find at its default: set there, these options do nothing.

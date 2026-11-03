@@ -104,7 +104,6 @@ def _economy(path: Path) -> dict:
         "solve": sum(term.get("weight", 1.0) for term in terms if term["source"] == "environment"),
         "submission": env.get("submission_reward", 0.0),
         "resubmission": env.get("resubmission_penalty", 0.0),
-        "unrun": env.get("unrun_submission_penalty", 0.0),
         "no_tool_use": env.get("no_tool_use_penalty", 0.0),
         "turn_overflow": env.get("turn_overflow_penalty", 0.0),
         "cut": env.get("length_cutoff_penalty", 0.0),
@@ -166,10 +165,8 @@ def _worst_length(economy: dict) -> float:
 
 
 def _failure_only_price(economy: dict) -> float:
-    """The most one failed submission adds in failure-only prices: the environment's price for a program never
-    run as submitted and the failure-only checks, which also cover a program no earlier run exercised, so both
-    can fire on one submission."""
-    return economy["unrun"] + sum(economy["process_prices"].get(name, 0.0) for name in _FAILURE_ONLY_CHECKS)
+    """The most one failed submission adds in failure-only prices: the failure-only checks."""
+    return sum(economy["process_prices"].get(name, 0.0) for name in _FAILURE_ONLY_CHECKS)
 
 
 def _failed_resubmission(economy: dict) -> float:

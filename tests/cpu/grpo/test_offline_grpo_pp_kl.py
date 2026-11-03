@@ -325,7 +325,6 @@ def test_the_pp_ctor_gate_accepts_a_kl_term():
     args = types.SimpleNamespace(
         kl_beta=0.1,
         use_chunked_grpo_logprobs=False,
-        max_length=None,
         max_prompt_length=PROMPT,
         max_completion_length=COMPLETION,
     )
@@ -339,7 +338,6 @@ def test_the_pp_ctor_gate_refuses_chunked_logprobs():
     args = types.SimpleNamespace(
         kl_beta=0.0,
         use_chunked_grpo_logprobs=True,
-        max_length=None,
         max_prompt_length=PROMPT,
         max_completion_length=COMPLETION,
     )
@@ -353,17 +351,15 @@ def test_the_pp_ctor_gate_refuses_chunked_logprobs():
         ({"max_prompt_length": None}, r"requires bounded sequences .* max_prompt_length \(got None\)"),
         ({"max_completion_length": None}, r"requires bounded sequences .* max_completion_length \(got None\)"),
         ({"max_completion_length": 0}, r"requires bounded sequences .* max_completion_length \(got 0\)"),
-        ({"max_length": PROMPT + COMPLETION - 1}, r"below max_prompt_length \+ max_completion_length .* fixed shape"),
     ],
-    ids=["unbounded-prompt", "unbounded-completion", "zero-completion", "max-length-below-caps"],
+    ids=["unbounded-prompt", "unbounded-completion", "zero-completion"],
 )
 def test_the_pp_ctor_gate_refuses_a_shape_the_fixed_buffers_cannot_hold(lengths, match):
-    """The P2P buffers freeze on the first step, so both caps must be bounded and ``max_length`` must hold them."""
+    """The P2P buffers freeze on the first step at the caps' sum, so both caps must be bounded."""
     args = types.SimpleNamespace(
         **{
             "kl_beta": 0.0,
             "use_chunked_grpo_logprobs": False,
-            "max_length": None,
             "max_prompt_length": PROMPT,
             "max_completion_length": COMPLETION,
             **lengths,
@@ -373,17 +369,6 @@ def test_the_pp_ctor_gate_refuses_a_shape_the_fixed_buffers_cannot_hold(lengths,
     with pytest.raises(ValueError, match=match):
         reject_offline_pp_options(args, pipeline, None, None)
     reject_offline_pp_options(args, types.SimpleNamespace(is_pp_mode=False), None, None)
-
-
-def test_the_pp_ctor_gate_accepts_a_max_length_holding_both_caps():
-    args = types.SimpleNamespace(
-        kl_beta=0.0,
-        use_chunked_grpo_logprobs=False,
-        max_length=PROMPT + COMPLETION,
-        max_prompt_length=PROMPT,
-        max_completion_length=COMPLETION,
-    )
-    reject_offline_pp_options(args, types.SimpleNamespace(is_pp_mode=True), None, None)
 
 
 if __name__ == "__main__":

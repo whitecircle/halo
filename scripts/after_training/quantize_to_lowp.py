@@ -29,14 +29,6 @@ def parse_args():
     p.add_argument("--output_dir", required=True, help="Output directory for the quantized checkpoint.")
     p.add_argument("--format", choices=list(QUANTIZERS), required=True, help="Block-scaled target format.")
     p.add_argument(
-        "--contraction_axis",
-        type=int,
-        default=-1,
-        help="Reduction axis to block along, for 2-D `*.weight` matrices only (default -1 = in_features "
-        "for [out,in] Linear weights). Fused 3-D expert tensors use the axis their family spec "
-        "declares and ignore this flag.",
-    )
-    p.add_argument(
         "--include",
         default=DEFAULT_INCLUDE,
         help="Regex narrowing the quantized set (dense MLP projections and declared expert weights).",
@@ -82,7 +74,6 @@ def main() -> None:
         a.input_dir,
         a.output_dir,
         a.format,
-        contraction_axis=a.contraction_axis,
         include=a.include,
         exclude=a.exclude,
         apply_dense_mlp=a.lowp_apply_dense_mlp,

@@ -11,14 +11,17 @@ from torch.distributed.tensor import DTensor
 from halo.kernels.lowp.quantization import fake_quant
 from halo.kernels.lowp.spec import QuantFormat
 
+# The ``in_features`` of an ``[out, in]`` weight; an export blocks 2-D weights on this axis too, or loses QAT parity.
+DENSE_CONTRACTION_AXIS = -1
+
 
 def _fake_quant_contraction_axis(t: torch.Tensor, quant_format: QuantFormat) -> torch.Tensor:
     """Shard-local for a DTensor, as a TP placement leaves the axis whole or splits it on block boundaries, so
     quantizing the shard is bit-identical and skips DTensor dispatch, which has no rule for fp4's ``bucketize``."""
     if isinstance(t, DTensor):
-        local = fake_quant(t.to_local(), quant_format, axis=-1)
+        local = fake_quant(t.to_local(), quant_format, axis=DENSE_CONTRACTION_AXIS)
         return DTensor.from_local(local, t.device_mesh, t.placements, run_check=False)
-    return fake_quant(t, quant_format, axis=-1)
+    return fake_quant(t, quant_format, axis=DENSE_CONTRACTION_AXIS)
 
 
 def lowp_linear(

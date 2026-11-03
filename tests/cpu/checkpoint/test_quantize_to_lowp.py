@@ -4,7 +4,9 @@ The dequantized weight must reproduce the fake-quant forward exactly."""
 import json
 import os
 import re
+import sys
 import tempfile
+from unittest import mock
 
 import pytest
 import torch
@@ -18,6 +20,7 @@ from halo.kernels.lowp.spec import MLP_PROJECTIONS
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
 from halo.models.moe.family_specs import per_expert_layouts
 from tests.common.checkpoint_io import weight_files
+from tests.common.repo import load_script_module
 
 _FMT_TOL = {"mxfp8": 0.08, "nvfp4": 0.25, "mxfp4": 0.35}
 
@@ -585,6 +588,36 @@ def test_an_unreadable_config_is_refused_before_any_write(tmp_path):
     with pytest.raises(json.JSONDecodeError):
         lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8")
     assert not out.exists(), "an unreadable config must be refused before the output directory is created"
+
+
+def test_a_dense_weight_blocks_on_the_axis_the_qat_forward_quantizes(tmp_path):
+    """Blocked on another axis the dequantized weight reproduces no QAT forward, so the axis takes no flag."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    src.mkdir()
+    gate = _make_checkpoint(str(src))
+    tool = load_script_module("scripts/after_training/quantize_to_lowp.py", "quantize_to_lowp_flags")
+    argv = ["quantize_to_lowp.py", "--input_dir", str(src), "--output_dir", str(out), "--format", "mxfp8"]
+    with mock.patch.object(sys, "argv", [*argv, "--contraction_axis", "0"]), pytest.raises(SystemExit):
+        tool.main()
+    assert not out.exists()
+
+    with mock.patch.object(sys, "argv", argv):
+        tool.main()
+    with open(out / "quantization_config.json") as f:
+        manifest = json.load(f)
+    assert manifest["contraction_axis"] == -1
+    assert manifest["weight_axes"]["model.layers.0.mlp.gate_proj.weight"] == -1
+    saved = load_file(str(out / "model.safetensors"))
+    expected = fake_quant(gate.float(), "mxfp8", axis=-1)
+    q = BlockScaledTensor(
+        saved["model.layers.0.mlp.gate_proj.weight_packed"],
+        saved["model.layers.0.mlp.gate_proj.weight_scale"],
+        32,
+        -1,
+        packed=False,
+        pow2_scale=True,
+    )
+    assert torch.equal(dequantize(q).float(), expected.float())
 
 
 def test_quantize_refuses_to_write_into_its_own_input_dir():

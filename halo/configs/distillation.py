@@ -7,7 +7,7 @@ from transformers import TrainingArguments
 
 from halo.config_validation import ValidatedConfig, present, require_finite, require_int
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments, DatasetNumProcArguments
-from halo.configs.sft import ConversationRenderArguments, SFTScriptArguments
+from halo.configs.sft import ConversationRenderArguments
 from halo.data.collators.self_distill import format_field_names
 
 PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT state that you were given the answer.\n"
@@ -103,7 +103,7 @@ class SDPGArguments(ValidatedConfig):
 
 
 @dataclass
-class SelfDistillScriptArguments(SFTScriptArguments, SDPGArguments):
+class SelfDistillScriptArguments(ConversationRenderArguments, CommonScriptArguments, SDPGArguments):
     """Offline privileged-context self-distillation SFT (SDPG-style, text or VLM): one model is student (prompt only)
     and teacher (plus a gold-answer hint), whose full-vocab distribution supervises shared response tokens."""
 

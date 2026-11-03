@@ -18,7 +18,7 @@ from halo.config_validation import (
     require_int,
     require_text,
 )
-from halo.configs.distillation import SelfDistillScriptArguments
+from halo.configs.sft import SFTScriptArguments
 
 
 @dataclass(kw_only=True)
@@ -151,18 +151,18 @@ def test_reject_unsupported_args_names_every_set_field():
 def test_reject_non_default_args_passes_at_the_declared_defaults():
     """``num_eval_examples`` defaults to 50, which is truthy, so the truthiness gate could not guard it without
     rejecting every run."""
-    reject_non_default_args("Some script", SelfDistillScriptArguments(), "generate_eval_examples", "num_eval_examples")
+    reject_non_default_args("Some script", SFTScriptArguments(), "generate_eval_examples", "num_eval_examples")
 
 
 def test_reject_non_default_args_rejects_a_changed_truthy_default():
-    args = SelfDistillScriptArguments()
+    args = SFTScriptArguments()
     args.num_eval_examples = 8
     with pytest.raises(ValueError, match="num_eval_examples"):
         reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
 
 
 def test_reject_non_default_args_still_rejects_a_flipped_flag():
-    args = SelfDistillScriptArguments()
+    args = SFTScriptArguments()
     args.generate_eval_examples = True
     with pytest.raises(ValueError, match="generate_eval_examples"):
         reject_non_default_args("Self-distillation", args, "generate_eval_examples", "num_eval_examples")
@@ -171,7 +171,7 @@ def test_reject_non_default_args_still_rejects_a_flipped_flag():
 def test_reject_non_default_args_refuses_a_field_the_dataclass_does_not_declare():
     """A typo'd name is a guard that can never fire."""
     with pytest.raises(ValueError, match="num_gen_exmaples"):
-        reject_non_default_args("Some script", SelfDistillScriptArguments(), "num_gen_exmaples")
+        reject_non_default_args("Some script", SFTScriptArguments(), "num_gen_exmaples")
 
 
 def test_reject_non_default_args_judges_a_factory_default_by_its_value():

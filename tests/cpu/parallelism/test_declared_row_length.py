@@ -44,7 +44,7 @@ def test_non_positive_lengths_read_as_unset(unset):
 
 
 def test_the_builder_hands_the_ep_gate_the_bounded_row_length(tmp_path):
-    """Offline GRPO refuses ``max_length``, so its budget reaches the gate only through this wiring; dropped, the
+    """Offline GRPO has no ``max_length`` key, so its budget reaches the gate only through this wiring; dropped, the
     gate judges the whole context window."""
     config = _offline(tmp_path, max_prompt_length=512, max_completion_length=1024, per_device_train_batch_size=2)
     args = ParallelismArguments(expert_parallel_size=8, ep_scope="node", fsdp_shard_ep1_experts=False)

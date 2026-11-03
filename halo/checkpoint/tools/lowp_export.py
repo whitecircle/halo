@@ -26,6 +26,7 @@ from halo.checkpoint.reading import (
 )
 from halo.checkpoint.tools.offline_export import copy_checkpoint_aux_files, reject_in_place_conversion
 from halo.checkpoint.writing import remove_stale_checkpoint_files, write_merged_index
+from halo.kernels.lowp.linear import DENSE_CONTRACTION_AXIS
 from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS, BlockScaledTensor, dequantize
 from halo.kernels.lowp.spec import LOWP_RECIPES, MLP_PROJECTIONS, LowpSpec, kept_block_indices
 from halo.models.module_tree import decoder_layer_index, decoder_layer_stack_prefix
@@ -181,12 +182,10 @@ def _stored_global_scale(name: str, weight: torch.Tensor, global_scale: torch.Te
     return torch.ones(1, dtype=stored.dtype)
 
 
-def _contraction_axis(
-    name: str, tensor: torch.Tensor, fused_expert_axis: int | None, contraction_axis: int, input_dir: str
-) -> int:
-    """The family's fused-expert axis for a 3-D bank, else ``contraction_axis``; a 3-D bank no spec claims raises."""
+def _contraction_axis(name: str, tensor: torch.Tensor, fused_expert_axis: int | None, input_dir: str) -> int:
+    """The family's fused-expert axis for a 3-D bank, else the QAT forward's; a 3-D bank no spec claims raises."""
     if tensor.dim() != 3:
-        return contraction_axis
+        return DENSE_CONTRACTION_AXIS
     if fused_expert_axis is None:
         raise ValueError(
             f"{name!r} is a fused 3-D expert tensor, but this checkpoint's model_type "
@@ -238,7 +237,6 @@ class _ExportPlan:
     apply_dense_mlp: bool
     apply_moe_experts: bool
     fused_expert_axis: int | None
-    contraction_axis: int
     input_dir: str
 
 
@@ -277,7 +275,7 @@ def _reject_empty_export(plan: _ExportPlan) -> None:
         header = torch.empty(reader.get_slice(name).get_shape(), device="meta")
         if not _plan_selects(name, header, plan):
             continue
-        axis = _contraction_axis(name, header, plan.fused_expert_axis, plan.contraction_axis, plan.input_dir)
+        axis = _contraction_axis(name, header, plan.fused_expert_axis, plan.input_dir)
         if header.shape[axis] % block == 0:
             return
     raise ValueError(
@@ -297,7 +295,7 @@ def _export_shard(entries, plan: _ExportPlan, tally: _ExportTally, *, verify: bo
             out_tensors[name] = t
             tally.copied += 1
             continue
-        axis = _contraction_axis(name, t, plan.fused_expert_axis, plan.contraction_axis, plan.input_dir)
+        axis = _contraction_axis(name, t, plan.fused_expert_axis, plan.input_dir)
         if t.shape[axis] % block != 0:
             out_tensors[name] = t  # contraction axis not block-divisible; leave high precision
             tally.skipped.append(name)
@@ -335,7 +333,6 @@ def _write_manifest(
     output_dir: str,
     fmt: str,
     block: int,
-    axis: int,
     names: list[str],
     weight_axes: dict[str, int],
     scope: dict,
@@ -349,7 +346,7 @@ def _write_manifest(
         "weight_dtype": "float8_e4m3fn" if fmt == "mxfp8" else "uint8_packed_e2m1",
         "scale_dtype": "uint8_e8m0" if fmt in ("mxfp8", "mxfp4") else "float8_e4m3fn",
         "block_size": block,
-        "contraction_axis": axis,
+        "contraction_axis": DENSE_CONTRACTION_AXIS,
         # 3-D fused experts differ by family, so a loader reads the axis per weight, falling back to contraction_axis.
         "weight_axes": weight_axes,
         "layout": "compressed-tensors block-scaled (weight_packed / weight_scale / weight_shape)",
@@ -383,7 +380,6 @@ def quantize_checkpoint(
     output_dir: str,
     fmt: str,
     *,
-    contraction_axis: int = -1,
     include: str = DEFAULT_INCLUDE,
     exclude: str = DEFAULT_EXCLUDE,
     apply_dense_mlp: bool = LowpSpec.apply_dense_mlp,
@@ -395,7 +391,7 @@ def quantize_checkpoint(
     inc, exc = re.compile(include), re.compile(exclude)
     reject_in_place_conversion(input_dir, output_dir)
 
-    # Fused 3-D experts contract on the axis their family declares; 2-D weights use contraction_axis.
+    # Fused 3-D experts contract on the axis their family declares.
     fused_expert_axis = _fused_expert_axis(input_dir)
     # Index-driven: a co-located adapter_model.safetensors is never quantized into the rebuilt index, and a per-rank
     # input is rejected before the output exists, which the lazy walks below would do only after.
@@ -410,9 +406,7 @@ def quantize_checkpoint(
         apply_moe_experts=apply_moe_experts,
         moe_family=fused_expert_axis is not None,
     )
-    plan = _ExportPlan(
-        fmt, inc, exc, kept_blocks, apply_dense_mlp, apply_moe_experts, fused_expert_axis, contraction_axis, input_dir
-    )
+    plan = _ExportPlan(fmt, inc, exc, kept_blocks, apply_dense_mlp, apply_moe_experts, fused_expert_axis, input_dir)
     _reject_empty_export(plan)
     tally = _ExportTally()
     os.makedirs(output_dir, exist_ok=True)
@@ -430,7 +424,8 @@ def quantize_checkpoint(
         raise ValueError(
             f"--verify: {tally.worst_relerr_name!r} round-trips with relerr {tally.max_relerr:.4f}, past the "
             f"{fmt} tolerance {_VERIFY_RELERR_TOL[fmt]}. Beyond the format's own error the cause is structural, "
-            f"usually the wrong --contraction_axis; {output_dir} was stopped before its index and config."
+            f"usually a wrong fused_contraction_axis on the family's spec; {output_dir} was stopped before its index "
+            f"and config."
         )
 
     # Anything but a single model.safetensors needs an index so the renamed keys stay discoverable; keyed on the
@@ -448,5 +443,5 @@ def quantize_checkpoint(
         "kept_blocks": sorted(kept_blocks),
     }
     block = FORMAT_BLOCK_SIZE[fmt]
-    _write_manifest(input_dir, output_dir, fmt, block, contraction_axis, tally.quantized, tally.weight_axes, scope)
+    _write_manifest(input_dir, output_dir, fmt, block, tally.quantized, tally.weight_axes, scope)
     _log_export(tally, fmt, verify=verify)

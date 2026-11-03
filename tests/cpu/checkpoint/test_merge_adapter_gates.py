@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,7 @@ from halo.checkpoint.format import (
     SAFETENSORS_INDEX_FILE,
 )
 from halo.checkpoint.tools import adapter_merge, bf16_conversion
+from tests.common.repo import load_script_module
 
 # Each one is the check under test.
 _REAL_GATES = (
@@ -224,6 +226,16 @@ def test_the_merge_tool_folds_through_the_shared_sequence(tmp_path, monkeypatch)
     adapter_merge.merge_peft_adapter(adapter_dir=adapter, output_dir=str(tmp_path / "out"), verbose=False)
 
     assert tools == ["merge_peft_adapters"], f"merge_peft_adapters did not reach the shared merge (reached: {tools})"
+
+
+def test_the_merge_takes_no_attention_flag(monkeypatch, capsys):
+    """A merge runs no forward, so nothing would read the attention implementation."""
+    tool = load_script_module("scripts/after_training/merge_peft_adapters.py", "merge_peft_adapters_flags")
+    argv = ["merge_peft_adapters.py", "--adapter_dir", "a", "--output_dir", "b", "--attn_implementation", "sdpa"]
+    monkeypatch.setattr(sys, "argv", argv)
+    with pytest.raises(SystemExit):
+        tool.main()
+    assert "unrecognized arguments: --attn_implementation" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("side", ["adapter", "base"])

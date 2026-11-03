@@ -27,8 +27,7 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `thought_reward` | `0.02` | Added on a turn that carries a Thought |
-| `no_thought_penalty` | `0.05` | Subtracted on a turn that acts or answers with no Thought |
-| `require_thought` | `true` | Gate for that penalty; a turn doing neither is free either way |
+| `no_thought_penalty` | `0.05` | Subtracted on a turn that acts or answers with no Thought; `0` turns it off, and a turn doing neither is free either way |
 | `tool_budgets` | `{}` | Per-tool episode caps, `{tool: cap}`; `0` disables a tool, an over-cap call is refused as a tool error |
 | `search_backend` | auto | `react_search` only: the `web_search` backend, named and validated as on [`qa_search`](../tasks/qa-benchmarks.md#configuration) |
 

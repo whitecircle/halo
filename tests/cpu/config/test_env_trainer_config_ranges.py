@@ -53,11 +53,14 @@ def _parse_targets() -> list[type]:
 
 
 def _numeric_knobs(config: type) -> list[tuple[type, str, bool]]:
-    """``(declaring class, name, int-only)`` for every int- or float-annotated field of ``config`` that a
-    toolkit class declares, optional or not; a bool is neither here. Upstream's fields are upstream's."""
+    """``(declaring class, name, int-only)`` for every int- or float-annotated key of ``config`` that a toolkit class
+    declares, optional or not; a bool is neither here. Upstream's fields are upstream's, and an ``init=False`` field is
+    no key."""
     hints = get_type_hints(config)
     knobs = []
     for f in fields(config):
+        if not f.init:
+            continue
         annotation = hints[f.name]
         members = get_args(annotation) if get_origin(annotation) in (Union, types.UnionType) else (annotation,)
         if not {int, float} & set(members):

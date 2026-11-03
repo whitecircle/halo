@@ -55,7 +55,7 @@ def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
 def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
     """``main()`` on a local ``output`` with everything but the bake's placement and the publish stubbed."""
     args = types.SimpleNamespace(
-        input="in", output=output, overwrite=True, verbose=False, dry_run=False, private=False, hf_token=None
+        input="in", output=output, overwrite=True, verbose=False, dry_run=False, private=False
     )
     config = types.SimpleNamespace(
         pack_sequences=False, is_vlm=False, model_name_or_path="model", max_length=8, num_shards=1
@@ -188,9 +188,6 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
     calls = []
 
     class _FakeApi:
-        def __init__(self, token=None):
-            pass
-
         def repo_exists(self, repo_id, repo_type=None):
             return True
 
@@ -203,7 +200,7 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
         def upload_file(self, path_or_fileobj=None, path_in_repo=None, repo_id=None, repo_type=None):
             calls.append(("upload_metadata", path_in_repo))
 
-    def _fake_upload_folder(folder_path=None, repo_id=None, repo_type=None, token=None, ignore_patterns=None):
+    def _fake_upload_folder(folder_path=None, repo_id=None, repo_type=None, ignore_patterns=None):
         calls.append(("upload_folder", tuple(ignore_patterns or ())))
 
     monkeypatch.setattr(prepare_dataset_tool, "HfApi", _FakeApi)
@@ -227,6 +224,13 @@ def _parse(argv_extra):
         return prepare_dataset.parse_args()[1]
     finally:
         sys.argv = old
+
+
+def test_a_token_is_refused_on_the_command_line(capsys):
+    """argv is world-readable through ``ps``; the Hub client reads ``HF_TOKEN`` or the stored login itself."""
+    with pytest.raises(SystemExit):
+        _parse(["--hf_token", "hf_secret"])
+    assert "--hf_token" in capsys.readouterr().err
 
 
 def test_conversation_field_default_matches_the_training_side():

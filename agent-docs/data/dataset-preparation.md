@@ -171,8 +171,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--chat_template` | `None` | Override chat template (Jinja2 string, or a path to a `.jinja`/`.jinja2`/`.j2` file), applied whatever template the tokenizer ships. The resolved text is recorded and re-checked; training applies it over a shipped template only with `force_chat_template: true` |
 | `--overwrite` | `False` | Replace an existing output. Only the local writer keeps the previous dataset intact through a failed publish (see below) |
 | `--dry_run` | `False` | Print the planned output paths and exit before the tokenizer or input dataset load — it validates nothing about the data |
-| `--private` | `False` | Make Hub dataset private |
-| `--hf_token` | `None` | Hub token for the `hf://` upload; the input and tokenizer loads use the ambient credentials (`HF_TOKEN` or the stored login) |
+| `--private` | `False` | Make Hub dataset private. The `hf://` upload and every load read the ambient credentials (`HF_TOKEN` or the stored login) |
 | `--verbose` | `False` | Log at DEBUG |
 
 ## Output structure

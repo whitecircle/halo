@@ -66,7 +66,7 @@ Notes on the ones that cause trouble:
   means the model's context window. `max_prompt_length` and
   `max_completion_length` mean different things per trainer
   ([Sequence length](../agent-docs/reference/configuration-reference.md#sequence-length-caps-vs-generation-budgets) ↗).
-  Online and async GRPO have no `max_length` field, so the key fails to parse
+  Online, offline and async GRPO take no `max_length` key, so it fails to parse
   there.
 
 ## Overriding on the command line

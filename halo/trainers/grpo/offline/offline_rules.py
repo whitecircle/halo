@@ -22,21 +22,6 @@ def require_tokenizer(processing_class):
     return resolve_tokenizer(processing_class)
 
 
-def reject_inert_max_length(args, parallelism_config) -> None:
-    """Off PP the window is the two caps the tokenization applies, so a set ``max_length`` would read as a cap and
-    change nothing."""
-    if parallelism_config is not None and parallelism_config.is_pp_mode:
-        return
-    if args.max_length is None:
-        return
-    raise ValueError(
-        f"max_length={args.max_length!r} is a pipeline-parallel-only knob (the fixed shape every "
-        f"batch is padded to), and this run has no pipeline parallelism — nothing would read it. "
-        f"The offline-GRPO budget is two caps: set max_prompt_length (prompt left-truncation) "
-        f"and/or max_completion_length (completion truncation) instead, and remove max_length."
-    )
-
-
 def reject_offline_pp_options(args, parallelism_config, peft_config, compute_metrics) -> None:
     """Its own gate rather than the spine's ``_reject_unsupported_pp_options`` hook, which never sees ``peft_config``
     and ``compute_metrics``, explicit constructor parameters."""
@@ -68,23 +53,13 @@ def reject_offline_pp_options(args, parallelism_config, peft_config, compute_met
             f"the first step): set both max_prompt_length (got {args.max_prompt_length!r}) and "
             f"max_completion_length (got {args.max_completion_length!r}) to positive values."
         )
-    fixed_length = args.max_prompt_length + args.max_completion_length
-    if args.max_length is not None and 0 < args.max_length < fixed_length:
-        raise ValueError(
-            f"max_length={args.max_length} is below max_prompt_length + max_completion_length "
-            f"({fixed_length}): a batch at the caps would not fit the pipeline's fixed shape, "
-            f"and truncating there would silently drop loss tokens."
-        )
 
 
 def resolve_pp_max_length(args, parallelism_config) -> int | None:
-    """The fixed shape every pipeline batch pads to, which bounds the P2P buffers: ``max_length``, or the two caps' sum
-    when it is unset. Off PP, ``max_length`` as set."""
+    """The fixed shape every pipeline batch pads to, which bounds the P2P buffers: the two caps' sum. ``None`` off PP."""
     if parallelism_config is None or not parallelism_config.is_pp_mode:
-        return args.max_length
-    if args.max_length is None or args.max_length <= 0:
-        return args.max_prompt_length + args.max_completion_length
-    return args.max_length
+        return None
+    return args.max_prompt_length + args.max_completion_length
 
 
 def reject_offline_cp_options(parallelism_config, ref_model, reference_mode: ReferenceMode) -> None:

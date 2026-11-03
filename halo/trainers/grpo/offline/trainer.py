@@ -66,7 +66,6 @@ from halo.trainers.grpo.offline.group_rows import tokenize_offline_splits
 from halo.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
 from halo.trainers.grpo.offline.offline_rules import (
     reject_encoder_decoder,
-    reject_inert_max_length,
     reject_offline_cp_options,
     reject_offline_pp_options,
     reject_unsupported_reference_input,
@@ -164,7 +163,6 @@ class OfflineGRPOTrainer(
         # (the full-logits path's implicit temperature); the chunked kernel divides by this.
         self.temperature = 1.0
 
-        reject_inert_max_length(args, parallelism_config)
         reject_offline_pp_options(args, parallelism_config, peft_config, compute_metrics)
         args.max_length = resolve_pp_max_length(args, parallelism_config)
         model = resolve_trainer_model(model, args, parallelism_config=parallelism_config)
@@ -221,7 +219,7 @@ class OfflineGRPOTrainer(
     def _configure_objective(self, args: OfflineGRPOConfig, tokenizer) -> None:
         """The loss-type and PG dispatches branch on these strings, so they are refused here rather than at the first
         microbatch."""
-        self.padding_value = args.padding_value if args.padding_value is not None else tokenizer.pad_token_id
+        self.padding_value = tokenizer.pad_token_id
         self.max_completion_length = args.max_completion_length
         self.min_log_prob = args.min_log_prob
         self.loss_type = args.loss_type
