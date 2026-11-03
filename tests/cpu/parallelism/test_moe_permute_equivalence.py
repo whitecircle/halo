@@ -157,6 +157,10 @@ class _GroupedPathLayer(StubEPLayerBase):
         self.ep_size = ep_size
         self.experts_per_rank = experts_per_rank
         self._use_grouped_mm = True
+        self.expert_scale = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
+
+    def _grouped_expert_ffn(self, sorted_tokens, offs, sorted_expert_ids, output_dtype):
+        return sorted_tokens * self.expert_scale[sorted_expert_ids, None]
 
 
 @pytest.mark.parametrize(
@@ -171,23 +175,16 @@ def test_the_grouped_path_permutes_atomic_free_at_every_top_k_and_ep_size(monkey
             cls, "apply", lambda *args, _apply=apply, _name=cls.__name__: calls.append(_name) or _apply(*args)
         )
     layer = _GroupedPathLayer(ep_size, experts_per_rank=3)
+    scale = layer.expert_scale
     g = torch.Generator().manual_seed(top_k * 10 + ep_size)
     recv_n, hidden = 11, 5
     tokens = torch.randn(recv_n, hidden, dtype=torch.float64, generator=g)
     experts = torch.randint(-1, 5, (recv_n, top_k), generator=g)  # -1 padding; 3..4 are not this rank's.
     weights = torch.rand(recv_n, top_k, dtype=torch.float64, generator=g)
-    scale = torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64)
 
     local_ids = experts[(experts >= 0) & (experts < 3)]
     recv_counts = tuple(torch.bincount(local_ids, minlength=3).tolist())
-    out = layer._run_grouped_mm_compute(
-        tokens,
-        experts,
-        weights,
-        torch.float64,
-        lambda rows, _offs, eids: rows * scale[eids, None],
-        recv_counts=recv_counts,
-    )
+    out = layer._compute_experts_grouped(tokens, experts, weights, torch.float64, recv_counts=recv_counts)
 
     assert calls == ["MoEGatherPermute", "MoEWeightedUnpermute"]
     local = (experts >= 0) & (experts < 3)

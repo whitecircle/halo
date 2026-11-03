@@ -12,7 +12,6 @@ from accelerate.state import GradientState
 
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.distributed.grad_reduce import reduce_grad
-from halo.runtime.ranks import has_process_group
 
 
 def should_sync_gradients() -> bool:
@@ -20,16 +19,9 @@ def should_sync_gradients() -> bool:
     return GradientState().sync_gradients
 
 
-def has_grad_sync_peers(ep_config: EPConfig) -> bool:
-    """Read live, since the default process group is initialized independently of the config."""
-    return has_process_group() and ep_config.stage_world_size > 1
-
-
 def build_dp_average_grad_hook(ep_config: EPConfig) -> Callable[[torch.Tensor], None]:
     """Router-param hook: ``all_reduce(SUM)`` over the DP-scope group (under PP this stage's rank block),
     divided by its size ``stage_world_size``."""
-    if not has_grad_sync_peers(ep_config):
-        return lambda param: None
     divisor, group, fp32 = ep_config.stage_world_size, ep_config.dp_scope_group, ep_config.fp32_grad_reduce
 
     def router_grad_hook(param):
@@ -48,10 +40,6 @@ class EPGradSyncMixin:
     def reattach_dp_average_grad_hooks(self) -> int:
         """Hook the trainable router/replicated params again for PEFT ``modules_to_save``, which trains a copy the
         construction hooks never saw; returns how many."""
-        if not self.ep_config.uses_backward_grad_hooks:
-            return 0
-        if not has_grad_sync_peers(self.ep_config):
-            return 0
         return self._hook_dp_averaged_params()
 
     def synced_trainable_param_ids(self) -> set:
@@ -65,14 +53,13 @@ class EPGradSyncMixin:
         return ids
 
     def _install_gradient_sync_hooks(self) -> None:
-        # FSDP reduce-scatters fully replicated experts (ep_group_size==1, not pure ETP), and the deferred
-        # sweep owns every cross-replica topology and PP rank block: a hook would double-sync or race it.
-        if not self.ep_config.uses_backward_grad_hooks:
-            return
-        if has_grad_sync_peers(self.ep_config):
-            self._hook_dp_averaged_params()
+        self._hook_dp_averaged_params()
 
     def _hook_dp_averaged_params(self) -> int:
+        # FSDP reduce-scatters fully replicated experts (ep_group_size==1, not pure ETP), and the deferred
+        # sweep owns every cross-replica topology and PP rank block: a hook would double-sync or race it.
+        if not (self.ep_config.uses_backward_grad_hooks and self.ep_config.has_grad_sync_peers):
+            return 0
         dp_hook = build_dp_average_grad_hook(self.ep_config)
         trainable = [param for _, param in self._dp_averaged_named_params() if param.requires_grad]
         for param in trainable:

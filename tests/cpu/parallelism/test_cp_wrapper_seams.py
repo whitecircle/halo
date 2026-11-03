@@ -103,6 +103,25 @@ def test_strip_cp_attention_level_inverts_the_level_the_wrappers_insert(tmp_path
         dist.destroy_process_group()
 
 
+@pytest.mark.parametrize("strict", [True, False], ids=["strict", "non_strict"])
+def test_load_state_dict_refuses_instead_of_skipping_the_attention_keys(tmp_path, strict):
+    """``state_dict()`` drops the inner attention level the wrapped model's keys carry, so a non-strict load through to
+    the wrapped model would leave every attention projection stale and only say so in its return value."""
+    dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")
+    try:
+        wrapper, _ = _cp_wrapped_model()
+        attention = next(param for name, param in wrapper.named_parameters() if ".self_attn." in name)
+        before = attention.detach().clone()
+        state = {key: value.detach() + 1 for key, value in wrapper.state_dict().items()}
+
+        with pytest.raises(NotImplementedError, match="restore_adapters"):
+            wrapper.load_state_dict(state, strict=strict)
+
+        assert torch.equal(attention, before)
+    finally:
+        dist.destroy_process_group()
+
+
 def test_parameters_yield_each_tensor_once_under_its_hub_name(tmp_path):
     """An optimizer built from ``parameters()`` steps each tensor once; the trainer keys state by hub names."""
     dist.init_process_group("gloo", rank=0, world_size=1, init_method=f"file://{tmp_path / 'pg'}")

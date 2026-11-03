@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 
-from halo.distributed.group_layout import NodeLocalLayout
+from halo.distributed.group_layout import NodeLocalLayout, job_group_lists
 from halo.runtime.collectives import build_groups
 from halo.runtime.ranks import get_global_rank, get_global_world_size, has_process_group, is_global_main_process
 
@@ -40,23 +40,10 @@ class CPConfig:
         layout = NodeLocalLayout(world_size=stage_world_size, group_size=cp_size, domain_size=nvlink_domain_size)
         self.cp_rank, self.cp_group_idx = layout.rank_and_group(global_rank - stage_base_rank)
         groups_per_stage = layout.num_groups
-        rank_lists = [
-            [base + rank for rank in layout.group_ranks(group_idx)]
-            for base in range(0, get_global_world_size(), stage_world_size)
-            for group_idx in range(groups_per_stage)
-        ]
+        rank_lists = job_group_lists(layout, get_global_world_size(), stage_world_size)
         mine = stage_base_rank // stage_world_size * groups_per_stage + self.cp_group_idx
         self.process_group = build_groups(rank_lists, mine=mine, what="CP group")
         self._cp_group_ranks = rank_lists[mine]
-
-        # Membership and layout must agree, or the first CP all-to-all hangs.
-        if global_rank not in self._cp_group_ranks:
-            raise RuntimeError(
-                f"CP group selection inconsistency: global_rank={global_rank} not in its "
-                f"selected CP group {self._cp_group_ranks} (cp_group_idx={self.cp_group_idx}, "
-                f"cp_rank={self.cp_rank}, stage_base_rank={stage_base_rank}, "
-                f"nvlink_domain_size={nvlink_domain_size})."
-            )
 
         if is_global_main_process():
             logger.info(

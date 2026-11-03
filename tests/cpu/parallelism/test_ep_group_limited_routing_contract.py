@@ -69,7 +69,7 @@ class _GroupRoutedBlock(nn.Module):
 
 
 class _BareBlock(_GroupRoutedBlock):
-    """``norm_topk_prob`` absent, so the family default applies."""
+    """``norm_topk_prob`` absent, so the default applies."""
 
     def __init__(self):
         super().__init__()
@@ -122,7 +122,7 @@ def test_no_family_forks_the_shared_routing_body(cls):
     forked = [name for name in ("route_tokens_to_experts", "_group_limited_topk") if name in vars(cls)]
     assert not forked, (
         f"{cls.__name__} re-implements {forked} instead of inheriting the shared group-limited "
-        f"routing. Express the family's difference as _routing_scores / _NORM_TOPK_PROB_DEFAULT / "
+        f"routing. Express the family's difference as _routing_scores / _OPTIONAL_ROUTING_KNOBS / "
         f"_TOPK_WEIGHT_NORM_EPS, or subclass EPSharedExpertsMoELayerBase if the routing is genuinely "
         f"a different one."
     )
@@ -142,11 +142,11 @@ def test_every_consumed_knob_is_populated(cls):
     assert int(layer.top_k) == K
 
 
-def test_the_family_default_decides_only_where_the_family_opted_the_knob_out():
+def test_the_default_decides_only_where_the_family_opted_the_knob_out():
     """A fallback would silently change routed-weight scale on a block that simply renamed the attribute."""
     torch.manual_seed(0)
     assert "norm_topk_prob" in EPStep3p7MoELayer._OPTIONAL_ROUTING_KNOBS
-    assert _build(EPStep3p7MoELayer, _Step3p7Block()).norm_topk_prob is EPStep3p7MoELayer._NORM_TOPK_PROB_DEFAULT
+    assert _build(EPStep3p7MoELayer, _Step3p7Block()).norm_topk_prob is True
 
     assert "norm_topk_prob" not in EPGlm4MoELayer._OPTIONAL_ROUTING_KNOBS
     with pytest.raises(AttributeError, match="norm_topk_prob"):

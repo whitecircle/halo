@@ -494,19 +494,12 @@ class _LegacyBackend(DeepEPBackend):
         return grad_x
 
 
-def resolve_ep_buffer_backend(choice: str | None) -> str:
-    choice = (choice or "auto").strip().lower()
-    if choice == "auto":
-        choice = "elastic"
-    if choice not in get_args(EPBufferBackend):
-        expected = ", ".join(repr(name) for name in sorted(get_args(EPBufferBackend)))
-        raise ValueError(f"Unknown ep_buffer_backend={choice!r}; expected one of {expected}.")
-    return choice
-
-
-def build_ep_backend(dispatcher: DeepEPDispatcher, backend: str | None) -> DeepEPBackend:
+def build_ep_backend(dispatcher: DeepEPDispatcher, backend: str) -> DeepEPBackend:
     """A legacy one is checked against the dispatch group first, the backstop for a hand-built ``EPConfig``."""
-    if resolve_ep_buffer_backend(backend) == "elastic":
+    if backend not in get_args(EPBufferBackend):
+        expected = ", ".join(repr(name) for name in sorted(get_args(EPBufferBackend)))
+        raise ValueError(f"Unknown ep_buffer_backend={backend!r}; expected one of {expected}.")
+    if backend != "legacy":
         return _ElasticBackend(dispatcher)
     reject_legacy_backend_topology(
         dispatcher.ep_size,

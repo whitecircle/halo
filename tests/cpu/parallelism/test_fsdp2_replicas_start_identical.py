@@ -159,7 +159,7 @@ def _ep_shape_wrap(rank: int, family: str, fields: dict) -> dict:
     torch.manual_seed(ADAPTER_SEED + rank)
     apply_ep_layers(model, ep_config)
     layers = [layer for _, layer in named_ep_layers(model)]
-    # ``parameters()`` order, the same on every rank: the adapter accessors iterate a frozenset of names.
+    # ``parameters()`` order, the same on every rank.
     params = [param for layer in layers for param in layer.parameters()]
     adapter_ids = {id(param) for layer in layers for _, param in layer.expert_lora_named_params()}
     expert_ids = {id(param) for layer in layers for _, param in layer.expert_named_params()}

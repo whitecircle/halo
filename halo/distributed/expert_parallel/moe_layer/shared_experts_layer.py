@@ -42,12 +42,8 @@ class EPSharedExpertsMoELayerBase(EPMoELayerBase):
 
 class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
     """EP MoE layer routing DeepSeek-V3 style: score -> selection-only bias -> group-limited top-k. The sharing
-    families differ only in the score function, ``norm_topk_prob`` fallback and renormalization floor, so a mis-ordered
+    families differ only in the score function, optional routing knobs and renormalization floor, so a mis-ordered
     bias add cannot land in one alone. ``n_group: 1`` is plain top-k."""
-
-    # Fallback when neither the block, its router nor its config declares ``norm_topk_prob``: GLM-4 MoE Lite leaves
-    # the gate weights un-normalized, the others normalize.
-    _NORM_TOPK_PROB_DEFAULT: bool = True
 
     # Routing knobs this family genuinely does not declare (Laguna and Step-3.7 carry no group limiting or
     # ``norm_topk_prob``). Any other absence is an upstream rename, where the neutral default would be a wrong live
@@ -85,7 +81,7 @@ class EPGroupLimitedMoELayerBase(EPSharedExpertsMoELayerBase):
         # group-limited routing.
         self.n_group = _resolve(("n_group", "num_group"), 1)
         self.topk_group = _resolve("topk_group", 1)
-        self.norm_topk_prob = _resolve("norm_topk_prob", self._NORM_TOPK_PROB_DEFAULT)
+        self.norm_topk_prob = _resolve("norm_topk_prob", True)
         self.routed_scaling_factor = float(_resolve("routed_scaling_factor", 1.0))
 
     def _routing_scores(self, router_logits: torch.Tensor) -> torch.Tensor:

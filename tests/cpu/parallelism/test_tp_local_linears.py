@@ -308,7 +308,7 @@ def _hf_worker(rank: int, checkpoint: str, load_class, variant: Variant, out_pat
     for model in (reference, local):
         _prepare(model, variant)
         if variant.dp > 1:
-            apply_fsdp2_for_tp(model, TP, compute_dtype=torch.float32, fp32_reduce=False, dp_size=variant.dp)
+            apply_fsdp2_for_tp(model, mesh, compute_dtype=torch.float32, fp32_reduce=False, dp_size=variant.dp)
     dp_rank = mesh["dp"].get_local_rank() if variant.dp > 1 else 0
     result = _compare_counting(reference, local, styles, tp_mesh, bitwise=bitwise, dp_rank=dp_rank)
     result |= {"styles": sorted(set(styles.values())), "planned": len(styles), **localized}
@@ -346,8 +346,7 @@ def _selective_worker(rank: int, model_type: str, variant: Variant, out_path: st
     for model in (reference, local):
         _prepare(model, variant)
         if variant.dp > 1:
-            model._device_mesh = mesh
-            apply_fsdp2_for_tp(model, TP, compute_dtype=torch.float32, fp32_reduce=False, dp_size=variant.dp)
+            apply_fsdp2_for_tp(model, mesh, compute_dtype=torch.float32, fp32_reduce=False, dp_size=variant.dp)
     dp_rank = mesh["dp"].get_local_rank() if variant.dp > 1 else 0
     bitwise = not _has_rowwise_bias(local, styles)
     result = _compare_counting(reference, local, styles, tp_mesh, bitwise=bitwise, dp_rank=dp_rank)

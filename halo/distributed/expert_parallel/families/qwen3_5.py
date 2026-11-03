@@ -57,8 +57,7 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
         """Top-k on the bias-adjusted probabilities, gated by the unbiased renormalized softmax
         (``Qwen3_5MoeTopKRouter``'s arithmetic), so a zero bias selects and gates identically up to the router's bf16
         cast. ``_deepseek_biased_route`` applies the routing replay."""
-        topk_weights, topk_indices = self._deepseek_biased_route(router_logits)
-        return topk_indices, topk_weights
+        return self._deepseek_biased_route(router_logits)
 
     def _shared_expert_output(self, hidden_states: torch.Tensor) -> torch.Tensor:
         shared_output = self.shared_expert(hidden_states)

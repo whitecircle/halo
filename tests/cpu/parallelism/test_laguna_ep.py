@@ -55,15 +55,13 @@ def test_laguna_owns_its_wrapper_by_module_name_and_model_type():
     assert issubclass(EPLagunaMoELayer, EPGlm4MoELayer)
 
 
-def test_library_block_declares_no_norm_topk_prob_so_the_family_default_decides():
-    """Anti-vacuity: if transformers puts the attribute back, the parity assert stops exercising
-    `_NORM_TOPK_PROB_DEFAULT`."""
+def test_library_block_declares_no_norm_topk_prob_so_the_normalizing_default_decides():
+    """Anti-vacuity: if transformers puts the attribute back, the parity assert stops exercising the default."""
     block = _library_block()
     assert not any(hasattr(source, "norm_topk_prob") for source in (block, block.gate, _library_config()))
-    # Laguna opts out of the knob, letting its default decide; GLM-4 declares it, so no default may stand in.
+    # Laguna opts out of the knob, letting the default decide; GLM-4 declares it, so no default may stand in.
     assert "norm_topk_prob" in EPLagunaMoELayer._OPTIONAL_ROUTING_KNOBS
     assert "norm_topk_prob" not in EPGlm4MoELayer._OPTIONAL_ROUTING_KNOBS
-    assert EPLagunaMoELayer._NORM_TOPK_PROB_DEFAULT is True
 
     layer = EPLagunaMoELayer(block, single_process_ep_config(E)).cpu()
     assert layer.norm_topk_prob is True

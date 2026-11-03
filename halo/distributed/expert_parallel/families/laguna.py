@@ -7,13 +7,12 @@ from halo.models.moe.family_specs import LAGUNA
 
 
 class EPLagunaMoELayer(EPGlm4MoELayer):
-    """Shares GLM-4 MoE Lite's whole EP contract but for the top-k weight default: ``LagunaTopKRouter.forward``
-    normalizes unconditionally and ``LagunaConfig`` declares no ``norm_topk_prob``, so for the in-library block the
-    family default is the only source. Hub remote-code revisions set it on the router, and that wins."""
+    """Shares GLM-4 MoE Lite's whole EP contract but for the routing knobs it may omit: ``LagunaTopKRouter.forward``
+    normalizes unconditionally and ``LagunaConfig`` declares no ``norm_topk_prob``, so the in-library block resolves to
+    the normalizing default. Hub remote-code revisions set it on the router, and that wins."""
 
     HF_MODULE_NAMES = ("LagunaSparseMoeBlock",)
     FAMILY = LAGUNA
 
-    _NORM_TOPK_PROB_DEFAULT = True
     # ``LagunaSparseMoeBlock`` declares only ``routed_scaling_factor``, which stays required.
     _OPTIONAL_ROUTING_KNOBS = ("n_group", "topk_group", "norm_topk_prob")

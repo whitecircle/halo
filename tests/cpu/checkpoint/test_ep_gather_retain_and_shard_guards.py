@@ -11,6 +11,7 @@ import torch.nn as nn
 from halo.checkpoint.parallel.ep import reject_unmergeable_ep_sharded_save
 from halo.distributed.expert_parallel.moe_layer import gather as expert_gather
 from halo.models.moe.expert_layout import ExpertLayout, ExpertLayoutKind
+from halo.models.moe.expert_lora_spec import EXPERT_LORA_SUFFIXES
 from halo.models.moe.family_specs import MoEFamilySpec
 from halo.runtime import collectives
 from tests.common.ep_stubs import StubEPLayerBase
@@ -60,6 +61,30 @@ def test_retain_false_runs_the_gather_but_keeps_nothing():
     assert layer.gather_calls == [False], (
         "the expert gather is a collective — it must run on every rank, and the flag must reach it"
     )
+
+
+class _ReverseOrderedSet(frozenset):
+    """Iterates in the one order a sorted reader cannot produce, where a real frozenset's order is per-process."""
+
+    def __iter__(self):
+        return iter(sorted(frozenset.__iter__(self), reverse=True))
+
+
+def test_expert_adapters_list_in_one_order_on_every_rank():
+    """The readers' order reaches any collective a later consumer runs over them, and a rank-dependent one hangs it."""
+    layer = _StubEPLayer()
+    attrs = ("down_proj", "gate_up_proj")
+    layer._expert_lora_attrs = _ReverseOrderedSet(attrs)
+    for attr in attrs:
+        for suffix in EXPERT_LORA_SUFFIXES:
+            setattr(layer, f"{attr}{suffix}", nn.Parameter(torch.zeros(2, 4, 4)))
+
+    assert [name for name, _ in layer.expert_lora_named_params()] == [
+        "down_proj_lora_A",
+        "down_proj_lora_B",
+        "gate_up_proj_lora_A",
+        "gate_up_proj_lora_B",
+    ]
 
 
 def test_gather_exports_persistent_buffers_only():

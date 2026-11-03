@@ -103,14 +103,9 @@ class EPExpertComputeMixin:
     def _store_separate_glu_params(self, gate: torch.Tensor, up: torch.Tensor, down: torch.Tensor) -> None:
         """Store this rank's ``F.linear``-convention ``gate``/``up`` ``[E, M, H]`` and ``down`` ``[E, H, M]`` as
         matmul-convention ``gate_proj``/``up_proj``/``down_proj``, ETP-sharded."""
-        if self.expert_tp_size > 1:
-            self.gate_proj = nn.Parameter(self._etp_narrow(gate, 1).transpose(1, 2).contiguous())
-            self.up_proj = nn.Parameter(self._etp_narrow(up, 1).transpose(1, 2).contiguous())
-            self.down_proj = nn.Parameter(self._etp_narrow(down, 2).transpose(1, 2).contiguous())
-        else:
-            self.gate_proj = nn.Parameter(gate.transpose(1, 2).contiguous())  # [E, H, M]
-            self.up_proj = nn.Parameter(up.transpose(1, 2).contiguous())  # [E, H, M]
-            self.down_proj = nn.Parameter(down.transpose(1, 2).contiguous())  # [E, M, H]
+        self.gate_proj = nn.Parameter(self._etp_narrow(gate, 1).transpose(1, 2).contiguous())
+        self.up_proj = nn.Parameter(self._etp_narrow(up, 1).transpose(1, 2).contiguous())
+        self.down_proj = nn.Parameter(self._etp_narrow(down, 2).transpose(1, 2).contiguous())
 
     def _etp_narrow(self, tensor: torch.Tensor, dim: int) -> torch.Tensor:
         """A view of this ETP rank's contiguous slice of ``tensor`` along the expert-intermediate axis ``dim``."""
@@ -219,9 +214,7 @@ class EPExpertComputeMixin:
         ``[T, top_k]`` local ids and gate weights; ``recv_counts`` counts per local expert, None at ``ep_size`` 1."""
         if self._use_grouped_mm and tokens.shape[0] > 0:
             return self._compute_experts_grouped(tokens, experts, weights, output_dtype, recv_counts=recv_counts)
-        return self._compute_experts_loop(
-            tokens, experts, weights, output_dtype, self._expert_forward, recv_counts=recv_counts
-        )
+        return self._compute_experts_loop(tokens, experts, weights, output_dtype, recv_counts=recv_counts)
 
     def _compute_experts_grouped(
         self,
@@ -232,10 +225,18 @@ class EPExpertComputeMixin:
         *,
         recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
-        def compute(sorted_tokens, offs, eids):
-            return self._grouped_expert_ffn(sorted_tokens, offs, eids, output_dtype)
+        """Sort -> :meth:`_grouped_expert_ffn` under autocast -> weighted unpermute. ``F.grouped_mm`` does not autocast,
+        so the FFN casts its weights to ``output_dtype``."""
+        sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map = (
+            self._sort_tokens_for_grouped_mm(tokens, experts, weights, recv_counts=recv_counts)
+        )
 
-        return self._run_grouped_mm_compute(tokens, experts, weights, output_dtype, compute, recv_counts=recv_counts)
+        with torch.amp.autocast("cuda", dtype=output_dtype):
+            expert_out = self._grouped_expert_ffn(sorted_tokens, offs, sorted_expert_ids, output_dtype)
+
+        return MoEWeightedUnpermute.apply(
+            expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
+        )
 
     def _grouped_expert_ffn(
         self,
@@ -246,32 +247,6 @@ class EPExpertComputeMixin:
     ) -> torch.Tensor:
         """The expert FFN over tokens sorted by expert; ``offs`` are their int32 group ends."""
         return self._glu_ffn(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
-
-    def _run_grouped_mm_compute(
-        self,
-        tokens: torch.Tensor,
-        experts: torch.Tensor,
-        weights: torch.Tensor,
-        output_dtype: torch.dtype,
-        compute_fn,
-        *,
-        recv_counts: tuple[int, ...] | None,
-    ) -> torch.Tensor:
-        """Sort -> ``compute_fn(sorted_tokens, offs, sorted_expert_ids)`` under autocast -> weighted unpermute.
-        ``F.grouped_mm`` does not autocast, so ``compute_fn`` casts its weights to ``output_dtype``."""
-        if tokens.shape[0] == 0:
-            return torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
-
-        sorted_tokens, offs, sorted_token_idx, sorted_weights, sorted_expert_ids, inv_map = (
-            self._sort_tokens_for_grouped_mm(tokens, experts, weights, recv_counts=recv_counts)
-        )
-
-        with torch.amp.autocast("cuda", dtype=output_dtype):
-            expert_out = compute_fn(sorted_tokens, offs, sorted_expert_ids)
-
-        return MoEWeightedUnpermute.apply(
-            expert_out.to(output_dtype).contiguous(), sorted_weights.to(output_dtype), sorted_token_idx, inv_map
-        )
 
     def _require_recv_counts(self, recv_counts: tuple[int, ...] | None) -> tuple[int, ...]:
         """``recv_counts`` when it holds one count per local expert; at ``ep_size > 1`` it sizes the index reads."""
@@ -339,11 +314,10 @@ class EPExpertComputeMixin:
         experts: torch.Tensor,
         weights: torch.Tensor,
         output_dtype: torch.dtype,
-        compute_fn,
         *,
         recv_counts: tuple[int, ...] | None,
     ) -> torch.Tensor:
-        """The per-expert loop: ``compute_fn(local_idx, x)`` per expert, outputs weighted and accumulated."""
+        """The per-expert loop: :meth:`_expert_forward` per expert, outputs weighted and accumulated."""
         if tokens.shape[0] == 0:
             return torch.zeros((0, tokens.shape[-1]), device=tokens.device, dtype=output_dtype)
 
@@ -363,7 +337,7 @@ class EPExpertComputeMixin:
                 if token_idx.numel() == 0:
                     continue
                 expert_weights = weights[token_idx, top_k_pos]
-                out = compute_fn(local_idx, tokens.index_select(0, token_idx))
+                out = self._expert_forward(local_idx, tokens.index_select(0, token_idx))
                 expert_output = out.to(output_dtype) * expert_weights.unsqueeze(-1).to(output_dtype)
                 output.index_add_(0, token_idx, expert_output)
 

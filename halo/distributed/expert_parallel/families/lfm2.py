@@ -74,20 +74,10 @@ class EPLfm2MoELayer(EPSharedExpertsMoELayerBase):
         routing_weights = router_logits.sigmoid()
 
         # Both biases perturb selection only; the gate weights gathered below stay unbiased.
-        scores_for_routing = self._selection_scores(routing_weights)
-
-        # Identity, not equality: an unbiased selection returns the same object, which selects the
-        # cheaper single-topk path below (values and indices in one call).
-        if scores_for_routing is routing_weights:
-            topk_weights, selected_experts = torch.topk(routing_weights, k=self.top_k, dim=-1)
-        else:
-            _, selected_experts = torch.topk(scores_for_routing, k=self.top_k, dim=-1)
-            topk_weights = torch.gather(routing_weights, dim=1, index=selected_experts)
-
-        if self._forced_topk_indices is not None:
-            # Replay re-gathers weights from the live unbiased scores, keeping norm/scaling native.
-            selected_experts = self._apply_routing_replay(selected_experts)
-            topk_weights = torch.gather(routing_weights, dim=1, index=selected_experts)
+        selected_experts = self._apply_routing_replay(
+            torch.topk(self._selection_scores(routing_weights), k=self.top_k, dim=-1)[1]
+        )
+        topk_weights = routing_weights.gather(1, selected_experts)
 
         if self.norm_topk_prob:
             topk_weights = self._renormalize_topk_weights(topk_weights)

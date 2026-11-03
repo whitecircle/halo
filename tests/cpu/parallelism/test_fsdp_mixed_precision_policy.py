@@ -9,6 +9,7 @@ import torch.nn as nn
 
 import halo.distributed.fsdp as fsdp
 from halo.distributed.fsdp import mixed_precision_policy
+from halo.distributed.parallelism_config import ParallelismConfig
 
 
 @pytest.mark.parametrize(
@@ -29,14 +30,10 @@ def test_policy_dtypes_follow_the_precision_flags(compute_dtype, fp32_reduce, re
 
 
 @pytest.mark.parametrize(
-    ("fp32_reduce", "fp32_master_weights", "reduce_dtype"),
-    [
-        (False, False, torch.bfloat16),
-        (True, False, torch.float32),
-        (False, True, torch.float32),
-    ],
+    ("fp32_reduce", "reduce_dtype"),
+    [(False, torch.bfloat16), (True, torch.float32)],
 )
-def test_the_wrap_reduces_in_fp32_under_either_knob(fp32_reduce, fp32_master_weights, reduce_dtype):
+def test_the_wrap_reduces_in_the_dtype_it_is_handed(fp32_reduce, reduce_dtype):
     policies = []
 
     def record(_model, _mesh, policy, *_):
@@ -53,9 +50,28 @@ def test_the_wrap_reduces_in_fp32_under_either_knob(fp32_reduce, fp32_master_wei
             compute_dtype=torch.bfloat16,
             fp32_reduce=fp32_reduce,
             topology="1D full-shard",
-            fp32_master_weights=fp32_master_weights,
         )
     assert [(p.param_dtype, p.reduce_dtype) for p in policies] == [(torch.bfloat16, reduce_dtype)]
+
+
+@pytest.mark.parametrize(
+    ("fp32_grad_reduce", "fp32_non_ep_params", "reduces_in_fp32"),
+    [
+        (False, False, False),
+        (True, False, True),
+        (False, True, True),
+        (True, True, True),
+    ],
+)
+def test_fsdp_reduces_in_fp32_under_either_knob(fp32_grad_reduce, fp32_non_ep_params, reduces_in_fp32):
+    config = ParallelismConfig(
+        world_size=2,
+        gpus_per_node=2,
+        fp32_grad_reduce=fp32_grad_reduce,
+        fp32_non_ep_params=fp32_non_ep_params,
+        fsdp_shard_ep1_experts=False,
+    )
+    assert config.fsdp_reduces_in_fp32 is reduces_in_fp32
 
 
 if __name__ == "__main__":

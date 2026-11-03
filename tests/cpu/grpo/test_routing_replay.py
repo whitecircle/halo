@@ -186,9 +186,9 @@ def test_deepseek_biased_route_forced_equals_natural():
     layer.balancing_biases = torch.zeros(E)
     layer.expert_load_counter = None
     logits = torch.randn(T, E)
-    base_scores, base_idx = layer._deepseek_biased_route(logits)
+    base_idx, base_scores = layer._deepseek_biased_route(logits)
     layer._forced_topk_indices = base_idx.clone()
-    forced_scores, forced_idx = layer._deepseek_biased_route(logits)
+    forced_idx, forced_scores = layer._deepseek_biased_route(logits)
     assert torch.equal(forced_idx, base_idx)
     assert torch.equal(forced_scores, base_scores)
 
@@ -199,9 +199,9 @@ def test_forced_selection_keeps_router_grad_path():
     layer.balancing_biases = torch.zeros(E)
     layer.expert_load_counter = None
     logits = torch.randn(T, E, requires_grad=True)
-    _, natural_idx = layer._deepseek_biased_route(logits)
+    natural_idx, _ = layer._deepseek_biased_route(logits)
     layer._forced_topk_indices = _shuffled_valid_indices(natural_idx)
-    scores, idx = layer._deepseek_biased_route(logits)
+    idx, scores = layer._deepseek_biased_route(logits)
     # A plain scores.sum() is constant (softmax rows sum to 1) and would zero the grad by algebra.
     (scores * torch.randn_like(scores)).sum().backward()
     grad_at_forced = logits.grad.gather(1, idx)

@@ -93,7 +93,7 @@ class EPGptOssMoELayer(EPMoELayerBase):
         # transient-fallback route on a bias-less router.
         bias = self.router.bias
         logits = F.linear(router_input, self.router.weight, bias if bias is None else bias.to(router_input.dtype))
-        weights, experts = self._deepseek_biased_route(logits)
+        experts, weights = self._deepseek_biased_route(logits)
         self._record_expert_load(experts)
         return logits, weights, experts.long()
 

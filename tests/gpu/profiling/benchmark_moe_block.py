@@ -116,7 +116,7 @@ def padded_gather_block():
 
 
 def halo_block(combine=None):
-    """``_run_grouped_mm_compute`` at ``ep_size`` 1."""
+    """``_compute_experts_grouped`` at ``ep_size`` 1."""
     glu = combine or GluCombine.gelu_tanh().packed
 
     def run(x, idx, w, gate_up_w, down_w):

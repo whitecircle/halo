@@ -232,7 +232,7 @@ def test_zero_bias_routing_matches_the_stock_qwen3_5_router():
             return indices
 
     logits, router_weights, router_indices = router(torch.randn(64, config.hidden_size))
-    weights, indices = _Wrapper()._deepseek_biased_route(logits)
+    indices, weights = _Wrapper()._deepseek_biased_route(logits)
 
     assert torch.equal(indices, router_indices), "a zero bias must select exactly the router's experts"
     assert torch.allclose(weights, router_weights.float(), atol=1e-6), "and gate them the same way"

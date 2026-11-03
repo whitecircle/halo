@@ -113,6 +113,37 @@ def ep_layout(
     return layout(world_size=world_size, group_size=group_size, domain_size=domain_size)
 
 
+def job_group_lists(
+    layout: NodeLocalLayout | CrossNodeLayout, world_size: int, stage_world_size: int
+) -> list[list[int]]:
+    """Every group of the job, block-major. Each rank builds the other stages' groups too, or the stages' ``new_group``
+    sequences differ and the job hangs."""
+    return [
+        [base + rank for rank in layout.group_ranks(group_idx)]
+        for base in range(0, world_size, stage_world_size)
+        for group_idx in range(layout.num_groups)
+    ]
+
+
+def etp_rank_lists(
+    layout: NodeLocalLayout | CrossNodeLayout, groups: list[list[int]], ep_size: int, expert_tp_size: int
+) -> tuple[list[list[int]], list[list[int]]]:
+    """``(expert_tp_lists, dispatch_lists)`` of every EP group in ``groups``, each rank filed where
+    ``layout.etp_partition`` places it."""
+    expert_tp_lists: list[list[int]] = []
+    dispatch_lists: list[list[int]] = []
+    for ranks in groups:
+        by_dispatch_rank: list[list[int]] = [[] for _ in range(ep_size)]
+        by_expert_tp_rank: list[list[int]] = [[] for _ in range(expert_tp_size)]
+        for ep_rank, rank in enumerate(ranks):
+            dispatch_ep_rank, expert_tp_rank = layout.etp_partition(ep_rank, ep_size, expert_tp_size)
+            by_dispatch_rank[dispatch_ep_rank].append(rank)
+            by_expert_tp_rank[expert_tp_rank].append(rank)
+        expert_tp_lists += by_dispatch_rank
+        dispatch_lists += by_expert_tp_rank
+    return expert_tp_lists, dispatch_lists
+
+
 def reject_node_local_ep_group(ep_group_size: int, domain_size: int, *, ep_size: int, expert_tp_size: int) -> None:
     shape = f"ep_group_size = expert_parallel_size({ep_size}) * expert_tensor_parallel_size({expert_tp_size})."
     if ep_group_size > domain_size:

@@ -220,8 +220,8 @@ def _assemble_preloaded_pipeline(
             modules.append(Normalize())
 
     st_model = SentenceTransformer(modules=[transformer_module, *modules], **source.model_settings)
-    # The TP loader attaches the mesh to the backbone but the trainer reads it off the ST model: unpropagated, TP+DP
-    # builds a conflicting mesh and pure TP skips the TP grad-sync.
+    # The TP loader attaches the mesh to the backbone but the trainer reads it off the ST model, and refuses a TP run
+    # without one.
     mesh = getattr(backbone, "_device_mesh", None)
     if mesh is not None:
         st_model._device_mesh = mesh

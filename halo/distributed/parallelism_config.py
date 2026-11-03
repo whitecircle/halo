@@ -23,7 +23,7 @@ from halo.distributed.parallelism_rules import (
 )
 from halo.kernels.lowp.spec import LowpPrecision, LowpSpec
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
-from halo.runtime.consensus import reject_across_ranks, reject_divergent_settings
+from halo.runtime.consensus import refusal_text, reject_across_ranks, reject_divergent_settings
 from halo.runtime.ranks import get_global_rank, get_global_world_size, get_local_world_size, is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -103,7 +103,7 @@ class ParallelismConfig:
         try:
             self._resolve_and_validate()
         except Exception as exc:  # any type, or the raising rank would skip the gather its peers wait in
-            local_reason = str(exc) if isinstance(exc, ValueError) else f"{type(exc).__name__}: {exc}"
+            local_reason = refusal_text(exc)
         else:
             local_reason = None
         reject_across_ranks(local_reason, "parallelism config", exc_type=ValueError)
@@ -141,15 +141,10 @@ class ParallelismConfig:
         self._validate_lowp()
 
     def _validate_field_values(self) -> None:
-        for _name, _val in (
-            ("expert_parallel_size", self.ep_size),
-            ("tensor_parallel_size", self.tp_size),
-            ("context_parallel_size", self.cp_size),
-            ("expert_tensor_parallel_size", self.expert_tp_size),
-            ("pipeline_parallel_size", self.pp_size),
-        ):
-            if _val < 1:
-                raise ValueError(f"{_name} must be >= 1 (1 = disabled), got {_val}")
+        for axis in AXES:
+            size = getattr(self, axis.size_field)
+            if size < 1:
+                raise ValueError(f"{axis.flag} must be >= 1 (1 = disabled), got {size}")
         if self.pp_schedule not in get_args(PPSchedule):
             raise ValueError(f"pipeline_schedule must be one of {get_args(PPSchedule)}, got {self.pp_schedule!r}")
         if self.pp_microbatches < 0:
@@ -244,11 +239,7 @@ class ParallelismConfig:
         self.num_nodes = self.world_size // self.gpus_per_node
         self.num_nvlink_domains = self.stage_world_size // self.nvlink_domain_size
 
-        dp_divisor = max(self.tp_size, self.cp_size, self.expert_tp_size)
-        if dp_divisor > 1:
-            self.data_parallel_size = self.stage_world_size // dp_divisor
-        else:
-            self.data_parallel_size = self.stage_world_size
+        self.data_parallel_size = self.stage_world_size // max(self.tp_size, self.cp_size, self.expert_tp_size)
 
         self.global_rank = get_global_rank()
         self.pp_rank = self.global_rank // self.stage_world_size
@@ -269,6 +260,11 @@ class ParallelismConfig:
         """FSDP syncs the replicated experts (``ep_group_size == 1``), so the EP layer's grad hooks must not."""
         return self.fsdp_shard_ep1_experts and self.ep_group_size == 1
 
+    @property
+    def fsdp_reduces_in_fp32(self) -> bool:
+        """Whether FSDP2 reduces gradients in fp32: on request, or for fp32 non-expert masters."""
+        return self.fp32_grad_reduce or self.fp32_non_ep_params
+
     def pp_microbatch_count(self, gradient_accumulation_steps: int) -> int:
         """``pipeline_microbatches``, else the accumulation, raised to a full pipeline under 1F1B."""
         count = self.pp_microbatches or gradient_accumulation_steps
@@ -288,8 +284,6 @@ class ParallelismConfig:
     @property
     def num_ep_groups(self) -> int:
         """EP groups per stage, counted off the layout ``EPConfig`` builds its groups from."""
-        if self.ep_group_size <= 1:
-            return self.stage_world_size  # one singleton group per rank
         return self.ep_layout.num_groups
 
     @property
@@ -406,7 +400,6 @@ class ParallelismConfig:
         if self._ep_config is None:
             self._ep_config = EPConfig(
                 ep_size=self.ep_size,
-                ep_group_size=self.ep_group_size,
                 # EP lives inside one pipeline stage: tile stage_world_size from this stage's base.
                 stage_world_size=self.stage_world_size,
                 stage_base_rank=self.stage_base_rank,

@@ -677,9 +677,7 @@ def where_expert_loop(layer, tokens: torch.Tensor, experts: torch.Tensor, weight
     ep_size = layer.ep_size
     layer.ep_size = 1
     try:
-        return layer._compute_experts_loop(
-            tokens, experts, weights, output_dtype, layer._expert_forward, recv_counts=None
-        )
+        return layer._compute_experts_loop(tokens, experts, weights, output_dtype, recv_counts=None)
     finally:
         layer.ep_size = ep_size
 

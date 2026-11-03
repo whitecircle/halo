@@ -100,11 +100,11 @@ class EPRoutingMixin:
             logger.info(f"{type(self).__name__}: FP32 router (compute stays BF16)")
 
     def _deepseek_biased_route(self, logits: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """DeepSeek-V3 routing off logits: ``(scores, indices)``, each ``[T, top_k]``, selected by
+        """DeepSeek-V3 routing off logits: ``(indices, weights)``, each ``[T, top_k]``, selected by
         :meth:`_biased_topk` and gated by the unbiased softmax over the selected logits."""
         indices = self._biased_topk(logits)
-        scores = F.softmax(torch.gather(logits.float(), -1, indices), dim=-1)
-        return scores, indices
+        weights = F.softmax(torch.gather(logits.float(), -1, indices), dim=-1)
+        return indices, weights
 
     def _softmax_gate_weights_at(
         self, router_logits: torch.Tensor, indices: torch.Tensor, *, normalize: bool

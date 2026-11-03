@@ -80,10 +80,11 @@ def init_distributed(backend: str = "nccl") -> bool:
     timeout = nccl_timeout()
     # Bare srun has a multi-rank world without RANK; skipping init would leave every rank "main" on one output_dir.
     world = launcher_global_world_size()
-    if ("RANK" not in os.environ and world <= 1) or has_process_group():
-        if has_process_group():
-            _apply_default_pg_timeout(timeout)
-            resolve_shared_filesystem_consensus()
+    if has_process_group():
+        _apply_default_pg_timeout(timeout)
+        resolve_shared_filesystem_consensus()
+        return False
+    if "RANK" not in os.environ and world <= 1:
         return False
     if world > 1:
         _require_rendezvous_env()

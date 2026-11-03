@@ -49,8 +49,8 @@ def require_tp_mesh(mesh, tp_size: int):
         return mesh
     raise RuntimeError(
         f"Tensor parallelism is active (tensor_parallel_size={tp_size}) "
-        "but no device mesh reached the trainer: FSDP did not build one (pure TP) and the model "
-        "carries no `_device_mesh` from the loader. Without it the TP group is unknown, so "
+        "but no device mesh reached the trainer: the model carries no `_device_mesh` from the "
+        "loader. Without it the TP group is unknown, so "
         "replicated gradients are never averaged and the TP gradient-norm bucket is never "
         "reduced. Load the model through load_distributed_model, which attaches the mesh."
     )
@@ -133,6 +133,7 @@ class ModeSetupMixin:
             self._apply_cp_fsdp2()
             mode = "CP"
         elif config.is_tp_mode:
+            self._device_mesh = require_tp_mesh(getattr(self._top_level_model(), "_device_mesh", None), config.tp_size)
             self._apply_tp_fsdp2()
             self._install_tp_clip()
             mode = "TP"
@@ -199,23 +200,16 @@ class ModeSetupMixin:
         return find_ulysses_model(self._top_level_model())
 
     def _apply_tp_fsdp2(self) -> None:
-        """Pure TP (DP=1) skips FSDP. Over the top level since the loader attaches the mesh there (the backbone would
-        mint a conflicting one) and ``lm_head`` must sit under FSDP for its DP sync."""
-        model = self._top_level_model()
+        """Pure TP (DP=1) skips FSDP. Over the top level, since ``lm_head`` must sit under FSDP for its DP sync."""
         config = self.parallelism_config
-        self._fsdp_wrapped, mesh = apply_fsdp2_for_tp(
-            model,
-            config.tp_size,
+        self._fsdp_wrapped = apply_fsdp2_for_tp(
+            self._top_level_model(),
+            self._device_mesh,
             compute_dtype=resolve_training_dtype(self.args),
-            fp32_reduce=config.fp32_grad_reduce,
+            fp32_reduce=config.fsdp_reduces_in_fp32,
             dp_size=config.data_parallel_size,
-            fp32_master_weights=config.fp32_non_ep_params,
             reshard_after_forward=config.fsdp_reshard_after_forward,
         )
-        if mesh is None:
-            # Pure TP built no mesh; the loader's names the TP group clipping and the grad sync read.
-            mesh = getattr(model, "_device_mesh", None)
-        self._device_mesh = require_tp_mesh(mesh, config.tp_size)
 
     def _apply_ep_fsdp2(self) -> None:
         """FSDP2 for the EP (and EP+CP) gradient sync: experts FSDP-ignored, everything else sharded."""
@@ -234,14 +228,13 @@ class ModeSetupMixin:
         """The EP+TP DP leg: the 2D (dp, tp) mesh with EP modules left out. Through the TP entry point, so it runs the
         shared wrap body and takes the mesh the DTensors are sharded on, never a fresh one."""
         config = self.parallelism_config
-        self._fsdp_wrapped, _ = apply_fsdp2_for_tp(
+        self._fsdp_wrapped = apply_fsdp2_for_tp(
             self.model,
-            config.tp_size,
+            self._device_mesh,
             compute_dtype=resolve_training_dtype(self.args),
-            fp32_reduce=config.fp32_grad_reduce,
+            fp32_reduce=config.fsdp_reduces_in_fp32,
             dp_size=config.data_parallel_size,
             ignored_params=self._fsdp_exclusions().params,
-            fp32_master_weights=config.fp32_non_ep_params,
             reshard_after_forward=config.fsdp_reshard_after_forward,
         )
 
@@ -298,11 +291,10 @@ class ModeSetupMixin:
             model,
             dp_size,
             compute_dtype=resolve_training_dtype(self.args),
-            fp32_reduce=config.fp32_grad_reduce,
+            fp32_reduce=config.fsdp_reduces_in_fp32,
             ignored_params=excluded_params or None,
             dp_group=dp_group,
             reshard_after_forward=config.fsdp_reshard_after_forward,
-            fp32_master_weights=config.fp32_non_ep_params,
             dp_replicate_size=dp_replicate_size,
             # No expert is distributed, so whatever the wrap leaves out is a whole copy on every DP rank.
             ignored_params_replicated=config.ep_group_size == 1,

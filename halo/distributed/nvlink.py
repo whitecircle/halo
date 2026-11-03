@@ -172,11 +172,8 @@ def validate_nvlink_domain_against_fabric(nvlink_domain_size: int, world_size: i
     group_world = dist.get_world_size()
     if group_world <= 1 or group_world != world_size:
         return
-    slots: list[tuple[int | None, int, str] | None] = [None] * group_world
-    dist.all_gather_object(slots, (nvlink_fabric_clique_id(), gpus_per_node, socket.gethostname()))
-    gathered = [entry for entry in slots if entry is not None]
-    if len(gathered) != group_world:
-        return
+    gathered: list[tuple[int | None, int, str]] = [None] * group_world
+    dist.all_gather_object(gathered, (nvlink_fabric_clique_id(), gpus_per_node, socket.gethostname()))
 
     reason = node_placement_contradiction([entry[2] for entry in gathered], gpus_per_node)
     if reason:

@@ -17,7 +17,7 @@ from torch.distributed.tensor import DTensor
 from torch.distributed.utils import _apply_to_tensors
 from transformers.modeling_utils import PreTrainedModel
 
-from halo.distributed.mesh import MeshDim, build_dp_mesh, build_dp_tp_mesh, mesh_dim_names
+from halo.distributed.mesh import MeshDim, build_dp_mesh, mesh_dim_names
 from halo.models.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
     backbone_with_layers,
@@ -331,11 +331,8 @@ def apply_fsdp2_per_layer(
                 f"dtype per group: {sorted(set(split_off))}"
             )
 
-    if model is not embed_backbone:
-        _shard(model, reserved=IdentityParamSet())
-        sharded += 1
-    elif layers is None:
-        # No reachable layer list: shard the root anyway, or nothing would sync its gradients.
+    # With no reachable layer list the root is sharded anyway, or nothing would sync its gradients.
+    if model is not embed_backbone or layers is None:
         _shard(model, reserved=IdentityParamSet())
         sharded += 1
 
@@ -351,11 +348,10 @@ def _apply_fsdp2(
     topology: str,
     ignored_params: list[nn.Parameter] | None = None,
     reshard_after_forward: bool = False,
-    fp32_master_weights: bool = False,
 ) -> None:
     mp_policy = mixed_precision_policy(
         compute_dtype,
-        fp32_reduce=fp32_reduce or fp32_master_weights,
+        fp32_reduce=fp32_reduce,
         cast_forward_inputs=_should_cast_forward_inputs(model),
     )
     label = "FULL_SHARD" if reshard_after_forward else "SHARD_GRAD_OP"
@@ -436,7 +432,6 @@ def apply_fsdp2_for_dp(
     ignored_params: list[nn.Parameter] | None = None,
     dp_group: dist.ProcessGroup | None = None,
     reshard_after_forward: bool = False,
-    fp32_master_weights: bool = False,
     dp_replicate_size: int = 1,
     ignored_params_replicated: bool = False,
 ) -> bool:
@@ -464,7 +459,6 @@ def apply_fsdp2_for_dp(
         ),
         ignored_params=ignored_params,
         reshard_after_forward=reshard_after_forward,
-        fp32_master_weights=fp32_master_weights,
     )
     replicated = IdentityParamSet((ignored_params or ()) if ignored_params_replicated else ())
     broadcast = _start_replicas_identical(model, dp_mesh, replicated)
@@ -475,33 +469,24 @@ def apply_fsdp2_for_dp(
 
 def apply_fsdp2_for_tp(
     model: nn.Module,
-    tp_size: int,
+    device_mesh: DeviceMesh,
     *,
     compute_dtype: torch.dtype,
     fp32_reduce: bool,
     dp_size: int,
     ignored_params: list[nn.Parameter] | None = None,
-    fp32_master_weights: bool = False,
     reshard_after_forward: bool = False,
-) -> tuple[bool, DeviceMesh | None]:
-    """Wrap the DP dimension of a TP run; returns ``(fsdp_wrapped, device_mesh)``. ``dp_size`` is the caller's
-    ``data_parallel_size``, never ``world // tp_size``. ``ignored_params`` are EP modules, which sync themselves."""
+) -> bool:
+    """Wrap the DP dimension of a TP run over ``device_mesh``, the one its params are sharded on; returns whether it
+    ran. ``dp_size`` is the caller's ``data_parallel_size``, never ``world // tp_size``. ``ignored_params`` are EP
+    modules, which sync themselves."""
     if dp_size <= 1:
         logger.info("  DP=1 under TP: no FSDP2 wrap (DTensor and EP sync carry the gradients)")
-        return False, None
+        return False
 
     _require_single_device_params(model)
 
-    # A wrongly shaped loader mesh raises rather than being rebuilt: the params stay sharded on it.
-    device_mesh = getattr(model, "_device_mesh", None)
-    if device_mesh is None:
-        try:
-            device_mesh = build_dp_tp_mesh(tp_size=tp_size, dp_size=dp_size)
-        except (RuntimeError, ValueError) as e:
-            raise RuntimeError(
-                f"Could not create the (dp={dp_size}, tp={tp_size}) device mesh required for FSDP2 DP grad sync: {e}"
-            ) from e
-    elif MeshDim.DP not in mesh_dim_names(device_mesh):
+    if MeshDim.DP not in mesh_dim_names(device_mesh):
         raise RuntimeError(
             f"TP+DP (dp_size={dp_size}) requires a device mesh with a {MeshDim.DP!r} dimension, but the "
             f"model's mesh has {mesh_dim_names(device_mesh)}. Rebuild the mesh via "
@@ -513,12 +498,11 @@ def apply_fsdp2_for_tp(
         device_mesh[MeshDim.DP],
         compute_dtype=compute_dtype,
         fp32_reduce=fp32_reduce,
-        topology=f"DP×TP {dp_size}×{tp_size}",
+        topology=f"DP×TP {dp_size}×{device_mesh[MeshDim.TP].size()}",
         ignored_params=ignored_params,
         reshard_after_forward=reshard_after_forward,
-        fp32_master_weights=fp32_master_weights,
     )
-    return True, device_mesh
+    return True
 
 
 def fsdp2_modules(model: nn.Module) -> list[FSDPModule]:

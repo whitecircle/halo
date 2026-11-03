@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+from collections.abc import Iterator
 
 import torch
 import torch.nn as nn
@@ -79,45 +80,42 @@ class EPExpertLoraMixin:
         """Whether adapters were built: the config can request projections the live layout lacks."""
         return bool(self._expert_lora_attrs)
 
+    def _expert_lora_slots(self) -> Iterator[tuple[str, str]]:
+        """``(attribute, checkpoint key)`` of each adapter. Sorted: the gathers and DTensor copies over them are
+        collectives, and frozenset order varies per process."""
+        for attr in sorted(self._expert_lora_attrs):
+            for suffix, key in zip(EXPERT_LORA_SUFFIXES, expert_lora_checkpoint_keys(attr), strict=True):
+                yield f"{attr}{suffix}", key
+
     def expert_lora_named_params(self) -> list:
-        out = []
-        for attr in self._expert_lora_attrs:
-            out.append((f"{attr}_lora_A", getattr(self, f"{attr}_lora_A")))
-            out.append((f"{attr}_lora_B", getattr(self, f"{attr}_lora_B")))
-        return out
+        return [(name, getattr(self, name)) for name, _ in self._expert_lora_slots()]
 
     def gather_expert_lora_state_dict(self, *, retain: bool = True) -> dict:
         """COLLECTIVE over the dispatch-EP group: this layer's adapters at the full expert count, keyed
         ``experts.<attr>.lora_{A,B}``; ``{}`` without adapters or ``retain``. Never ETP-sharded, since
         ``ParallelismConfig`` rejects expert LoRA under expert TP."""
         state: dict[str, torch.Tensor] = {}
-        for attr in sorted(self._expert_lora_attrs):
-            for suffix, key in zip(EXPERT_LORA_SUFFIXES, expert_lora_checkpoint_keys(attr), strict=True):
-                adapter = materialize_dtensor(getattr(self, f"{attr}{suffix}").data)
-                adapter = all_gather_cat(adapter, 0, self.ep_config.dispatch_ep_group, self.ep_config.ep_size)
-                if retain:
-                    state[key] = adapter.contiguous().cpu()
+        for name, key in self._expert_lora_slots():
+            adapter = materialize_dtensor(getattr(self, name).data)
+            adapter = all_gather_cat(adapter, 0, self.ep_config.dispatch_ep_group, self.ep_config.ep_size)
+            if retain:
+                state[key] = adapter.contiguous().cpu()
         return state
 
     def expert_lora_checkpoint_shapes(self) -> dict[str, tuple[int, ...]]:
         """The key and shape :meth:`gather_expert_lora_state_dict` saves each adapter under: the live (global, for an
         FSDP2 DTensor) shape, its expert dim concatenated across the dispatch-EP group."""
         shapes = {}
-        for attr in sorted(self._expert_lora_attrs):
-            for suffix, key in zip(EXPERT_LORA_SUFFIXES, expert_lora_checkpoint_keys(attr), strict=True):
-                experts, *rest = getattr(self, f"{attr}{suffix}").shape
-                shapes[key] = (experts * self.ep_config.ep_size, *rest)
+        for name, key in self._expert_lora_slots():
+            experts, *rest = getattr(self, name).shape
+            shapes[key] = (experts * self.ep_config.ep_size, *rest)
         return shapes
 
     def load_expert_lora_state_dict(self, layer_state: dict) -> None:
         """Load :meth:`gather_expert_lora_state_dict`'s output into the live adapters, slicing this rank's experts.
         COLLECTIVE where the adapters are FSDP2 DTensors (ep1 with ``fsdp_shard_ep1_experts``)."""
-        # sorted(): the DTensor copy is a collective, and frozenset order varies per process.
-        for attr in sorted(self._expert_lora_attrs):
-            for suffix, key in zip(EXPERT_LORA_SUFFIXES, expert_lora_checkpoint_keys(attr), strict=True):
-                copy_full_tensor(
-                    getattr(self, f"{attr}{suffix}"), layer_state[key][self.expert_start : self.expert_end]
-                )
+        for name, key in self._expert_lora_slots():
+            copy_full_tensor(getattr(self, name), layer_state[key][self.expert_start : self.expert_end])
 
 
 def expert_lora_layers(model: nn.Module) -> list[tuple[str, EPExpertLoraMixin]]:

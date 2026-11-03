@@ -185,7 +185,12 @@ class UlyssesModel(nn.Module):
         return {f"{prefix}{key}": value for key, value in cleaned.items()} if prefix else cleaned
 
     def load_state_dict(self, *args, **kwargs):
-        return self.model.load_state_dict(*args, **kwargs)
+        """Refuse a load, which :meth:`state_dict`'s hub keys cannot reach: the wrapped model's keys keep the attention
+        level, so a non-strict load would leave every attention projection stale."""
+        raise NotImplementedError(
+            "Context Parallelism does not support load_state_dict(): whole weights load when the model is constructed, "
+            "and adapters through restore_adapters."
+        )
 
     def _split_inputs(self, input_ids, attention_mask, position_ids, kwargs):
         if any(kwargs.get(key) is not None for key in ("pixel_values", "pixel_attention_mask")):

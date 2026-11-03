@@ -7,10 +7,10 @@ from __future__ import annotations
 from collections.abc import Iterator
 
 import torch
-import torch.distributed as dist
 import torch.nn as nn
 
 from halo.distributed.mesh import model_tp_mesh
+from halo.runtime.collectives import all_gather_cat
 from halo.runtime.dtensor import materialize_dtensor
 
 _HAND_SLICED_ATTR = "_halo_tp_hand_sliced"
@@ -61,9 +61,7 @@ def iter_hand_sliced_full(model: nn.Module) -> Iterator[tuple[str, torch.Tensor]
                 tensor = materialize_dtensor(param.data)
                 if tensor.device.type == "cpu":
                     tensor = tensor.to(f"cuda:{torch.cuda.current_device()}")
-                gathered = [torch.empty_like(tensor) for _ in range(tp_size)]
-                dist.all_gather(gathered, tensor.contiguous(), group=tp_group)
-                yield name, torch.cat(gathered, dim=shard_dim)
+                yield name, all_gather_cat(tensor, shard_dim, tp_group, tp_size)
                 break
 
 

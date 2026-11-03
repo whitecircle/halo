@@ -197,9 +197,7 @@ def _router_hook_from(**ep_attrs):
         "fp32_grad_reduce": False,
         "dp_scope_group": None,
     }
-    ep = SimpleNamespace(**{**defaults, **ep_attrs})
-    with patch(f"{_GS_MOD}.has_process_group", return_value=True):
-        return build_dp_average_grad_hook(ep)
+    return build_dp_average_grad_hook(SimpleNamespace(**{**defaults, **ep_attrs}))
 
 
 def test_router_hook_reduces_over_dp_scope_group():
