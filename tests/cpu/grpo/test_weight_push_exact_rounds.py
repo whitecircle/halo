@@ -21,7 +21,7 @@ from tests.common.parallelism import single_process_ep_config
 from tests.common.tiny_models import TINY_MOE_FAMILIES, tiny_family_model
 from tests.common.weight_sync import RecordingSender
 
-_ROWS = [[1, 2, 3, 4], [5, 6, 7]]
+_ROWS = [[1, 2, 3, 4], [5, 6, 7], [8, 9, 10], [11, 12, 13]]
 _GATE_WEIGHT = "gate.weight"
 _GATE_BIAS = "gate.expert_bias"
 
@@ -83,6 +83,13 @@ def _tiny_ep_ling():
     return model
 
 
+def _engine_scores_of_the_trainer(model, rows, device) -> list[float]:
+    """What the stand-in engine would score holding this model's push: its scores are no log-probs a forward could match."""
+    recorder = RecordingSender(keep_values=True)
+    weight_push_exact.sync_weights_to_client(model, recorder, True, True)
+    return weight_push_exact._score(_Engine({param.name: param.value for param in recorder.params}, "sglang"), rows)
+
+
 @pytest.fixture
 def run_row(monkeypatch):
     """Drive one row against ``engine_args`` with ``as_served`` on the server. Single rank, on the host."""
@@ -102,6 +109,8 @@ def run_row(monkeypatch):
     monkeypatch.setattr(weight_push_exact, "load_policy", lambda *args, **kwargs: (model, None))
     monkeypatch.setattr(weight_push_exact, "_token_rows", lambda checkpoint, limit: _ROWS)
     monkeypatch.setattr(weight_push_exact, "weight_transfer_port", lambda knob: 0)
+    monkeypatch.setattr(weight_push_exact, "dist", SimpleNamespace(broadcast_object_list=lambda objects, src: None))
+    monkeypatch.setattr(weight_push_exact, "_trainer_scores", _engine_scores_of_the_trainer)
 
     def run(backend: str, drop_from_push: str | None = None) -> dict[str, bool]:
         engine = _Engine(as_served, backend, drop_from_push)
@@ -149,6 +158,41 @@ def test_a_control_that_moves_nothing_fails(run_row, monkeypatch):
     checks = run_row("sglang")
 
     assert not checks["control_moved_past_the_bar"]
+
+
+def test_a_real_step_that_moves_nothing_fails(run_row, monkeypatch):
+    """The round proves nothing about the sync unless the trainer left what the engine serves."""
+    monkeypatch.setattr(weight_push_exact, "_REAL_STEP_LEARNING_RATE", 0.0)
+
+    checks = run_row("sglang")
+
+    assert not checks["a_real_step_moved_the_trainer_past_the_floor"]
+    assert not checks["a_push_after_a_real_step_moved_the_server"]
+
+
+def test_a_push_that_misses_the_real_step_fails(run_row, monkeypatch):
+    """The engine keeps serving what it held before the trainer stepped."""
+    stepped = []
+    take_step = weight_push_exact._take_one_real_step
+
+    def recorded_step(*args) -> None:
+        take_step(*args)
+        stepped.append(True)
+
+    update = _Engine.update_named_param
+
+    def deaf_after_the_step(self, name, weights):
+        if not stepped:
+            update(self, name, weights)
+
+    monkeypatch.setattr(weight_push_exact, "_take_one_real_step", recorded_step)
+    monkeypatch.setattr(_Engine, "update_named_param", deaf_after_the_step)
+
+    checks = run_row("sglang")
+
+    assert checks["a_real_step_moved_the_trainer_past_the_floor"]
+    assert not checks["a_push_after_a_real_step_moved_the_server"]
+    assert not checks["a_push_after_a_real_step_serves_the_trainer"]
 
 
 def test_a_family_with_nothing_declared_runs_no_leave_out_round(run_row, monkeypatch):

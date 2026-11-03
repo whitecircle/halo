@@ -122,13 +122,21 @@ def test_sft_refuses_packed_rows_under_context_parallelism_before_the_model_load
         pytest.param(_PACKING_ON, {"is_cp": False}, id="no-context-parallelism"),
         # A corpus baked unpacked trains unpacked whatever `packing` says, as the collator factory reads it.
         pytest.param(_PACKING_ON, {"is_cp": True, "baked_packed": False}, id="baked-unpacked-rows"),
-        # The VLM route never reaches the collator factory that refuses packed rows.
-        pytest.param("", {"is_cp": True, "baked_packed": True, "is_vlm": True}, id="vlm"),
     ],
 )
 def test_sft_keeps_the_rows_context_parallelism_can_serve(tmp_path, config_body, run):
     with pytest.raises(_PastTheGuards):
         _run_sft_to_the_model_load(tmp_path, config_body, **run)
+
+
+def test_sft_refuses_an_image_run_under_context_parallelism_whatever_its_corpus_packed(tmp_path):
+    with pytest.raises(ValueError, match="image data does not support Context Parallelism"):
+        _run_sft_to_the_model_load(tmp_path, "", is_cp=True, baked_packed=True, is_vlm=True)
+
+
+def test_sft_takes_a_packed_corpus_to_the_load_on_an_image_run_off_context_parallelism(tmp_path):
+    with pytest.raises(_PastTheGuards):
+        _run_sft_to_the_model_load(tmp_path, "", is_cp=False, baked_packed=True, is_vlm=True)
 
 
 def _run_sft_to_dataset(tmp_path, config_body: str, *, preprocessed: bool) -> None:

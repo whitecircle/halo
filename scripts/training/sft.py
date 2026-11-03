@@ -337,10 +337,9 @@ def main():
         if parallelism_config.is_cp_mode:
             raise ValueError("SFT on image data does not support Context Parallelism: drop context_parallel_size.")
     metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
-    if not is_vlm:
-        reject_context_parallel_packing(
-            packing=_packs_rows(sft_config, metadata), use_context_parallel=parallelism_config.is_cp_mode
-        )
+    reject_context_parallel_packing(
+        packing=_packs_rows(sft_config, metadata), use_context_parallel=parallelism_config.is_cp_mode
+    )
     if not (_packs_rows(sft_config, metadata) or sft_config.padding_free):
         reject_non_default_args("Halo SFT without multi-document rows", args, "allow_cross_document_linear_attention")
     if metadata is not None:

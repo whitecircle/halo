@@ -148,17 +148,16 @@ def _forward_on_a_kernel_raising(monkeypatch, error: Exception):
 
 
 def test_an_oom_in_the_native_kernel_is_not_taken_for_a_rejected_shape(monkeypatch):
-    """OutOfMemoryError is a RuntimeError, so without the re-raise the step retries in bf16 on a full GPU."""
+    """OutOfMemoryError is a RuntimeError, so without the re-raise a full GPU would read as a shape the kernel refused."""
     with pytest.raises(torch.cuda.OutOfMemoryError):
         _forward_on_a_kernel_raising(monkeypatch, torch.cuda.OutOfMemoryError("CUDA out of memory"))
 
 
-def test_a_shape_the_native_kernel_rejects_falls_back(monkeypatch):
-    key = ("mxfp8", N, K, E)
-    try:
-        assert _forward_on_a_kernel_raising(monkeypatch, RuntimeError("narrow N")) is None
-    finally:
-        deepgemm._warned_fallback_shapes.discard(key)
+def test_a_shape_the_native_kernel_rejects_raises_instead_of_retrying_in_bf16(monkeypatch):
+    """A bf16 retry would change this expert's numerics mid-run."""
+    with pytest.raises(RuntimeError, match=rf"DeepGEMM rejected the mxfp8 .*E={E}: narrow N") as refusal:
+        _forward_on_a_kernel_raising(monkeypatch, RuntimeError("narrow N"))
+    assert not isinstance(refusal.value, torch.cuda.OutOfMemoryError)
 
 
 def test_a_direct_call_without_deep_gemm_raises_import_error(monkeypatch):
