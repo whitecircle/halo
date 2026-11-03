@@ -138,6 +138,19 @@ def test_the_drain_deadline_is_read_once_from_the_env(monkeypatch, value, expect
     assert float(deadline) == expected
 
 
+def test_a_refused_drain_deadline_warns_with_the_value_it_uses(monkeypatch):
+    monkeypatch.setenv("HALO_NCCL_SYNC_TIMEOUT_SECONDS", "0")
+    script = (
+        "import logging; captured = []; handler = logging.Handler(); "
+        "handler.emit = lambda record: captured.append(record.getMessage()); "
+        "logging.getLogger('halo.env').addHandler(handler); "
+        "from halo.weight_sync.transport import bounded_waits; "
+        f"print({_DRAIN_MARKER!r} + '|'.join(captured))"
+    )
+    [warning] = probe_findings(script, _DRAIN_MARKER)
+    assert "HALO_NCCL_SYNC_TIMEOUT_SECONDS" in warning and "using 600.0" in warning, warning
+
+
 def test_a_warm_up_that_passes_its_deadline_aborts_the_communicator(monkeypatch):
     """A peer that never joins leaves the kernel spinning, and every later device sync hangs behind it."""
     library = _WarmUpNeverCompletesLibrary()

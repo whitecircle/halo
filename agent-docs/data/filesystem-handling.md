@@ -11,9 +11,9 @@ When multiple ranks download a model, load a dataset, or create a directory, one
 | `DIST_OUTPUT_SHARED_FILESYSTEM` | Write side: checkpoints, `run.log`, dumped artifacts |
 
 Defaults and the other `DIST_*` knobs: [Environment variables](../reference/configuration-reference.md#environment-variables).
-Each is read through `env_flag`: **true** for `1`/`true`/`yes`/`on` (case-insensitive), **false** for
-any other value — including a typo. Empty counts as unset and yields the default, so a side var set to
-`""` still falls back to the umbrella; any other value wins over it in either direction.
+Each is read through `env_flag`: **true** for `1`/`true`/`yes`/`on` and **false** for `0`/`false`/`no`/`off`
+(case-insensitive). Any other value, a typo included, warns and yields the default, and empty yields it silently,
+so a side var set to `""` still falls back to the umbrella; a recognized value wins over it in either direction.
 
 Shared: global rank 0 goes first, all other ranks wait then read the result — for shared NFS / Lustre
 / GPFS. Non-shared: each node's local rank 0 operates independently, in parallel — for per-node local

@@ -317,8 +317,9 @@ across EP groups need no reduce: the clip runs the deferred sweep first, which l
 
 Under `full_determinism: true` the EP path (dispatch, expert compute, combine) repeats bit for bit,
 expert weight gradients included, as long as each EP group sits inside one NVLink domain. The rest of
-the model needs its own deterministic kernels: the gated-DeltaNet families (Qwen3.5/3.6 MoE, Qwen3-Next, Qwen3.8-Flash-Next) need
-`CAUSAL_CONV1D_DETERMINISTIC=1`, which `full_determinism` does not set.
+the model needs its own deterministic kernels: the conv backward of the gated-DeltaNet families (Qwen3.5/3.6 MoE, Qwen3-Next, Qwen3.8-Flash-Next)
+takes its deterministic path under torch's deterministic-algorithms flag, which `full_determinism` turns on, unless
+the launch exports `CAUSAL_CONV1D_DETERMINISTIC=0`.
 
 DeepEP's default dispatch claims each receive slot with an atomic, so the order an expert's tokens
 arrive in changes from step to step, and with it the summation order of the expert weight gradient

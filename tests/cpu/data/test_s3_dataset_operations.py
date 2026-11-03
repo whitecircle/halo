@@ -669,32 +669,17 @@ def test_cli_owns_the_root_handler_it_inherited():
     assert inherited not in cli_handlers, "the inherited handler survived, so the CLI configured nothing"
 
 
-@pytest.mark.parametrize("raw", ["0", "-1"])
-def test_non_positive_cache_lock_timeout_warns_and_falls_back(raw, caplog):
-    """``filelock`` reads 0 as fail immediately and a negative as wait forever, so a non-positive override is
-    refused out loud."""
-    saved = os.environ.get("HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS")
+def test_cache_lock_wait_follows_the_store_budget():
+    """That budget bounds the peers waiting on this rank, so a shorter wait would fail a fetch they can still outlast."""
+    saved = os.environ.get("DIST_STORE_TIMEOUT_HOURS")
     try:
-        os.environ["HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS"] = raw
-        importlib.reload(env_mod)
-        with caplog.at_level(logging.WARNING):
-            s3r = importlib.reload(s3_mod)
-        derived_default = int(s3r.store_timeout().total_seconds())
-        assert derived_default == s3r._CACHE_LOCK_TIMEOUT_SECONDS
-        assert any("HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS" in message for message in caplog.messages), (
-            f"{raw} was swallowed silently instead of being refused"
-        )
-
-        os.environ["HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS"] = "120"
-        importlib.reload(env_mod)
-        s3r = importlib.reload(s3_mod)
-        assert s3r._CACHE_LOCK_TIMEOUT_SECONDS == 120
+        os.environ["DIST_STORE_TIMEOUT_HOURS"] = "2"
+        assert importlib.reload(s3_mod)._CACHE_LOCK_TIMEOUT_SECONDS == 2 * 3600
     finally:
         if saved is None:
-            os.environ.pop("HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS", None)
+            os.environ.pop("DIST_STORE_TIMEOUT_HOURS", None)
         else:
-            os.environ["HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS"] = saved
-        importlib.reload(env_mod)
+            os.environ["DIST_STORE_TIMEOUT_HOURS"] = saved
         importlib.reload(s3_mod)
 
 

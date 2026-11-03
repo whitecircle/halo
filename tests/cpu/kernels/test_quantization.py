@@ -213,7 +213,6 @@ def test_compiled_mxfp4_round_trip_matches_eager_without_tracing_the_cache():
 def fresh_compile_state(monkeypatch):
     monkeypatch.setattr(quantization, "_compiled_round_trip", None)
     monkeypatch.setattr(quantization, "_compile_failed", False)
-    monkeypatch.setenv("HALO_LOWP_COMPILE", "1")
 
 
 def test_a_callers_error_leaves_compile_on(fresh_compile_state):

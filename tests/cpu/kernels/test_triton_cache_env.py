@@ -64,6 +64,28 @@ def test_explicit_setting_is_respected(monkeypatch):
     assert os.environ[_TRITON_VAR] == "/elsewhere/triton", "an operator's explicit choice was overridden"
 
 
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_export_counts_as_unset(monkeypatch, temp_root, tmp_path, blank):
+    """``.env.example`` promises it, and the libraries would read a blank value as the cwd."""
+    hf_home = tmp_path / "hf"
+    hf_home.mkdir()
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    monkeypatch.setenv(_TRITON_VAR, blank)
+    anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
+    assert os.environ[_TRITON_VAR] == os.path.join(str(hf_home), _TRITON_SUBDIR)
+
+
+def test_a_blank_export_with_no_writable_location_leaves_the_library_default(monkeypatch, temp_root, tmp_path):
+    hf_home = tmp_path / "hf"
+    hf_home.mkdir()
+    monkeypatch.setenv("HF_HOME", str(hf_home))
+    monkeypatch.setenv(_TRITON_VAR, "")
+    _deny_writes_under(monkeypatch, hf_home)
+    _deny_writes_under(monkeypatch, temp_root)
+    anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)
+    assert _TRITON_VAR not in os.environ
+
+
 def test_falls_back_to_tempdir_without_hf_home(monkeypatch, temp_root):
     monkeypatch.delenv("HF_HOME", raising=False)
     anchor_jit_cache_dir(_TRITON_VAR, _TRITON_SUBDIR)

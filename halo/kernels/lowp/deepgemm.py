@@ -10,7 +10,7 @@ import logging
 import torch
 import torch.nn.functional as F
 
-from halo.env import env_flag, env_int
+from halo.env import env_flag
 from halo.kernels.grouped_mm import grouped_mm_grads
 from halo.kernels.lowp.quantization import WeightVersionCache
 from halo.kernels.lowp.spec import QuantFormat
@@ -21,8 +21,8 @@ logger = logging.getLogger(__name__)
 # MXFP4 has no native DeepGEMM grouped kernel, so it is simulated only.
 DEEPGEMM_FORMATS: tuple[QuantFormat, ...] = ("mxfp8", "nvfp4")
 
-_MIN_TOKENS_PER_EXPERT = env_int("HALO_DEEPGEMM_MIN_TOKENS_PER_EXPERT", 1024)
-_MIN_N = env_int("HALO_DEEPGEMM_MIN_N", 4096)
+_MIN_TOKENS_PER_EXPERT = 1024
+_MIN_N = 4096
 _ALIGN = 128  # the contiguous layout pads each expert's row (M) segment to this
 _FP4_K_ALIGN = 256  # the fp4 kernel's contraction (K) multiple, two e2m1 per byte
 

@@ -5,11 +5,14 @@ Comparing raw strings would kill a job whose launcher exports a default on the h
 from __future__ import annotations
 
 import importlib
+import logging
+import os
 
 import pytest
 
 from halo.distributed import grad_reduce as grad_reduce_mod
 from halo.distributed import rank_uniform_env
+from halo.distributed.expert_parallel.deepep import backends as backends_mod
 from halo.distributed.expert_parallel.deepep import capacity as capacity_mod
 from halo.distributed.expert_parallel.deepep import settings as settings_mod
 
@@ -24,6 +27,8 @@ _KNOBS_AT_DEFAULT = {
     "DIST_NCCL_TIMEOUT_MINUTES": "30",
     "DIST_STORE_TIMEOUT_HOURS": "4",
     "DIST_FS_PROBE_TIMEOUT_SECONDS": "60",
+    "HALO_FLEX_SLIDING": "1",
+    "HALO_FP32_MATMUL_PRECISION": "highest",
 }
 
 
@@ -93,6 +98,15 @@ def test_a_real_difference_still_differs(monkeypatch):
     assert bucket != default, "divergent bucket sizes desync the deferred sweep's chunk boundaries"
 
 
+@pytest.mark.parametrize("knob", ["HALO_DEEPEP_NUM_SMS", "HALO_DEEPEP_NUM_QPS"])
+def test_a_negative_deepep_count_means_auto(monkeypatch, caplog, knob):
+    """A negative is truthy, so it would reach DeepEP as the count to use."""
+    with caplog.at_level(logging.WARNING, logger="halo.env"):
+        assert _settings_with(monkeypatch, {knob: "-4"})[knob] == 0
+    assert f"{knob}=-4" in caplog.text
+    assert _settings_with(monkeypatch, {knob: "8"})[knob] == 8
+
+
 def test_coordination_timeouts_are_compared(monkeypatch):
     """The node giving up first dies in a healthy collective, and the survivors blame the next one."""
     default = _settings_with(monkeypatch, {})
@@ -110,14 +124,54 @@ def test_the_filesystem_probe_budget_is_compared(monkeypatch):
     assert _settings_with(monkeypatch, {"DIST_FS_PROBE_TIMEOUT_SECONDS": "180"}) != default
 
 
+@pytest.mark.parametrize("raw", ["0", "-64"])
+def test_a_non_positive_grad_bucket_keeps_the_default(monkeypatch, raw):
+    """A cap of zero or less means one collective per tensor."""
+    assert _settings_with(monkeypatch, {"HALO_GRAD_BUCKET_MB": raw})["HALO_GRAD_BUCKET_MB"] == 256
+    assert grad_reduce_mod.BUCKET_MAX_BYTES == 256 * 1024 * 1024
+
+
+def test_the_attention_backend_and_matmul_precision_knobs_are_compared(monkeypatch):
+    """One rank on another backend compiles and waits where its peers do not; TF32 on one rank drifts its replica."""
+    default = _settings_with(monkeypatch, {})
+    assert default["HALO_FLEX_SLIDING"] is True
+    assert default["HALO_FP32_MATMUL_PRECISION"] == "highest"
+    assert _settings_with(monkeypatch, {"HALO_FLEX_SLIDING": "0"}) != default
+    assert _settings_with(monkeypatch, {"HALO_FP32_MATMUL_PRECISION": "high"}) != default
+
+
+def test_an_invalid_matmul_precision_compares_as_its_fallback(monkeypatch):
+    default = _settings_with(monkeypatch, {})
+    with pytest.warns(UserWarning, match="HALO_FP32_MATMUL_PRECISION"):
+        assert _settings_with(monkeypatch, {"HALO_FP32_MATMUL_PRECISION": "not-a-precision"}) == default
+
+
 def test_grad_bucket_is_reported_in_operator_units(monkeypatch):
     """MB, the unit the operator can grep their ``--env-file`` for."""
     assert _settings_with(monkeypatch, {})["HALO_GRAD_BUCKET_MB"] == 256
 
 
+@pytest.mark.parametrize(
+    ("raw", "spans_domains", "expected"), [("", True, "0"), ("  ", False, "1"), ("1", True, "1"), ("0", False, "0")]
+)
+def test_the_gin_switch_derives_from_the_topology_unless_given_a_value(monkeypatch, raw, spans_domains, expected):
+    """A blank export must not reach DeepEP's own read of the variable."""
+    monkeypatch.setattr(backends_mod, "_deepep_env_configured", False)
+    monkeypatch.setenv("EP_DISABLE_GIN", raw)
+    backends_mod._configure_deepep_env(spans_domains)
+    assert os.environ["EP_DISABLE_GIN"] == expected
+
+
+def test_a_blank_gin_switch_compares_as_unset(monkeypatch):
+    monkeypatch.delenv("EP_DISABLE_GIN", raising=False)
+    unset = _settings_with(monkeypatch, {})
+    assert _settings_with(monkeypatch, {"EP_DISABLE_GIN": " "}) == unset
+    assert _settings_with(monkeypatch, {"EP_DISABLE_GIN": "1"}) != unset
+
+
 def test_every_resolved_knob_is_a_plain_value(monkeypatch):
     settings = _settings_with(monkeypatch, _KNOBS_AT_DEFAULT)
-    for name in _KNOBS_AT_DEFAULT:
+    for name in _KNOBS_AT_DEFAULT.keys() - {"HALO_FP32_MATMUL_PRECISION"}:  # a precision is a name by nature
         assert isinstance(settings[name], (bool, int)), (
             f"{name} resolved to {settings[name]!r} ({type(settings[name]).__name__}); a raw string "
             f"here means unset-vs-default would compare unequal across ranks"

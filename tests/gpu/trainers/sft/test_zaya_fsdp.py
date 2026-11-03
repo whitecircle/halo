@@ -10,7 +10,7 @@ import torch
 from trl import SFTConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.env import env_flag, env_int, env_str
+from halo.env import env_int, env_str
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -64,12 +64,8 @@ def run(ctx):
         gradient_accumulation_steps=1,
         learning_rate=LR,
         bf16=True,
-        # GC recompute faults in cuDNN on the CCA Conv1d pair, so the patch refuses it; HALO_TEST_ZAYA_GC=1 asserts the
-        # refusal.
-        gradient_checkpointing=env_flag("HALO_TEST_ZAYA_GC"),
-        gradient_checkpointing_kwargs={
-            "use_reentrant": env_flag("HALO_TEST_ZAYA_GC_REENTRANT", True),
-        },
+        # GC recompute faults in cuDNN on the CCA Conv1d pair, so the patch refuses it.
+        gradient_checkpointing=False,
         # FLCE: outputs.logits is a placeholder, so TRL must take its Liger path or its metrics crash on the empty
         # tensor.
         use_liger_kernel=True,

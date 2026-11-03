@@ -73,7 +73,7 @@ FSDP2-managed experts (the `ep_size==1` + `fsdp_shard_ep1_experts` default) quan
 
 `HALO_LOWP_WEIGHT_CACHE=0` disables it; the cache holds a dequantized copy per expert weight for the step, which costs memory under gradient checkpointing.
 
-**Eager activation.** The activation quant runs eager (`HALO_LOWP_COMPILE=0` only affects the weight): after EP dispatch the token count varies every step, so a compiled activation round-trip recompiles until it falls back to eager. With weight cached+compiled and activation eager, simulated mxfp8 is ≈8× a bf16 step (≈11× uncached); the fp4 formats are ≈17–19×, floored by the fp4 activation quant (pack + bucketize), which is identical for mxfp4 and nvfp4.
+**Eager activation.** The activation quant runs eager: after EP dispatch the token count varies every step, so a compiled activation round-trip recompiles until it falls back to eager. With weight cached+compiled and activation eager, simulated mxfp8 is ≈8× a bf16 step (≈11× uncached); the fp4 formats are ≈17–19×, floored by the fp4 activation quant (pack + bucketize), which is identical for mxfp4 and nvfp4.
 
 The simulated path is a convergence-validation tool — run a few hundred steps to confirm the loss tracks bf16, not a production run. For bf16 throughput leave low precision off (`lowp_precision: bf16`).
 
@@ -81,7 +81,7 @@ The simulated path is a convergence-validation tool — run a few hundred steps 
 
 Native fp8/fp4 calls **DeepGEMM** ([deepseek-ai/DeepGEMM](https://github.com/deepseek-ai/DeepGEMM)), DeepSeek's Blackwell grouped block-scaled GEMM, via `halo/kernels/lowp/deepgemm.py`. At MoE token counts the grouped GEMM is host-launch-bound, not math-bound, so the winning kernel constructs nothing per call: DeepGEMM resolves each row's expert on device via a single int32 `m_indices[M]` in the tile scheduler and launches one JIT-compiled kernel (cached to disk). Per-call host cost at small M is ~240 µs, mostly the activation-quant pass.
 
-Even with the host wall removed, **DeepGEMM is net-slower than bf16 at every training shape** (the per-token activation-quant pass remains), so it is **never auto-selected**. Opt-in via `HALO_DEEPGEMM_NATIVE=1`, and even then only above a shape floor (`HALO_DEEPGEMM_MIN_TOKENS_PER_EXPERT` default 1024, `HALO_DEEPGEMM_MIN_N` default 4096).
+Even with the host wall removed, **DeepGEMM is net-slower than bf16 at every training shape** (the per-token activation-quant pass remains), so it is **never auto-selected**. Opt-in via `HALO_DEEPGEMM_NATIVE=1`, and even then only above a fixed shape floor (1024 tokens per expert, output width 4096).
 
 Only `fp8` (mxfp8) and `fp4` (nvfp4) have a native path; `mxfp4` is simulated-only, and a shape the kernel rejects falls back to bf16 with a one-time warning. What it gives, opted in:
 
@@ -184,7 +184,7 @@ lowp_keep_first_blocks: 0      # keep the first/last N blocks bf16 (NVFP4 recipe
 lowp_keep_last_blocks: 0
 ```
 
-Low precision is the fake-quant oracle by default; there is no backend knob. The native DeepGEMM kernel is opt-in via `HALO_DEEPGEMM_NATIVE=1` (never a throughput win). Two env knobs tune the simulated path: `HALO_LOWP_COMPILE=0` runs the weight round-trip eager instead of compiled, `HALO_LOWP_WEIGHT_CACHE=0` disables the per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
+Low precision is the fake-quant oracle by default; there is no backend knob. The native DeepGEMM kernel is opt-in via `HALO_DEEPGEMM_NATIVE=1` (never a throughput win). `HALO_LOWP_WEIGHT_CACHE=0` disables the simulated path's per-step expert-weight cache. The master weight stays bf16/fp32 and the checkpoint is unchanged.
 
 Rejected at config/load time, loudly: any trainer but SFT; a `quantization_config` (QLoRA/bitsandbytes — the weights are not plain `nn.Linear`); `fp16: true` masters; both `lowp_apply_dense_mlp` and `lowp_apply_moe_experts` false, which would apply low precision to nothing; and pipeline parallelism, whose stages re-base block indices so the `lowp_keep_*` windows would land on each stage's own ends ([PP rejected combinations](../parallelism/pipeline-parallelism.md#rejected-combinations)).
 

@@ -6,19 +6,18 @@ serves the step-0 quantization all run. If FSDP2 stops pinning, the first half f
 go.
 """
 
-import os
-
-# Numerically identical to the compiled path, skipping the per-rank compile warm-up.
-os.environ.setdefault("HALO_LOWP_COMPILE", "0")
-
 import torch
 import torch.nn as nn
 from torch.distributed.fsdp import fully_shard
 from torch.distributed.tensor import DTensor
 
 from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.lowp import quantization
 from halo.kernels.lowp.quantization import cached_fake_quant, fake_quant
 from tests.common.harness import gpu_test_main
+
+# Numerically identical to the compiled path, skipping the per-rank compile warm-up.
+quantization._compile_failed = True
 
 FMT = "mxfp8"
 STEPS = 3

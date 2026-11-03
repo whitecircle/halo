@@ -1,10 +1,14 @@
 import importlib
+import logging
 import os
 
 import pytest
 
 import halo.env as env_mod
-from halo.env import env_flag, env_float, env_int, env_positive_float, env_positive_int, env_str
+from halo.env import env_flag, env_float, env_int, env_non_negative_int, env_positive_float, env_positive_int, env_str
+from tests.common.repo import probe_findings
+
+_THREADS_MARKER = "TORCH_THREADS:"
 
 _VARS = ("HALO_TEST_A", "HALO_TEST_B")
 
@@ -26,9 +30,24 @@ def test_env_flag_truthiness():
     for truthy in ("1", "true", "TRUE", "Yes", "on"):
         os.environ["HALO_TEST_A"] = truthy
         assert env_flag("HALO_TEST_A") is True
-    for falsy in ("0", "false", "no", "off", "", "banana"):
+    for falsy in ("0", "false", "FALSE", "No", "off", " off "):
         os.environ["HALO_TEST_A"] = falsy
-        assert env_flag("HALO_TEST_A") is False
+        assert env_flag("HALO_TEST_A", default=True) is False
+
+
+def test_env_flag_typo_keeps_the_default_and_warns_once_per_name(monkeypatch, caplog):
+    """A typo must not flip a default-on knob off, and a flag read on every call must not warn on every call."""
+    monkeypatch.setattr(env_mod, "_warned_flags", set())
+    os.environ["HALO_TEST_A"] = "ture"
+    os.environ["HALO_TEST_B"] = "banana"
+    with caplog.at_level(logging.WARNING, logger=env_mod.__name__):
+        assert env_flag("HALO_TEST_A", default=True) is True
+        assert env_flag("HALO_TEST_A", default=True) is True
+        assert env_flag("HALO_TEST_B", default=False) is False
+    warned = [record.getMessage() for record in caplog.records]
+    assert len(warned) == 2, warned
+    assert "HALO_TEST_A='ture'" in warned[0] and "using True" in warned[0]
+    assert "HALO_TEST_B='banana'" in warned[1] and "using False" in warned[1]
 
 
 def test_env_flag_default_when_absent():
@@ -37,8 +56,8 @@ def test_env_flag_default_when_absent():
 
 
 def test_env_flag_empty_value_falls_back_to_default():
-    """Compose pass-through (``- HALO_FOO``) exports an absent name as empty; reading that as False would disable
-    every default-on knob."""
+    """Compose's ``${HALO_FOO:-}`` and a blank ``--env-file`` line export the name empty; reading that as False would
+    disable every default-on knob."""
     for empty in ("", "   ", "\t"):
         os.environ["HALO_TEST_A"] = empty
         assert env_flag("HALO_TEST_A", default=True) is True
@@ -71,13 +90,33 @@ def test_env_positive_helpers_reject_non_positive_values():
     assert env_positive_float("HALO_TEST_A", 2.5) == 2.5
 
 
-def test_env_positive_helpers_accept_positive_and_none_default():
+def test_env_positive_helpers_accept_positive_values():
     os.environ["HALO_TEST_A"] = "42"
     assert env_positive_int("HALO_TEST_A", 7) == 42
     os.environ["HALO_TEST_A"] = "1.5"
     assert env_positive_float("HALO_TEST_A", 2.5) == 1.5
     assert env_positive_int("HALO_TEST_B", 7) == 7
-    assert env_positive_float("HALO_TEST_B", None) is None
+    assert env_positive_float("HALO_TEST_B", 2.5) == 2.5
+
+
+def test_env_non_negative_int_keeps_zero_and_refuses_a_negative(caplog):
+    """``0`` means auto or off; a negative is truthy, so a caller's ``if value:`` would act on it."""
+    for value, expected in (("0", 0), ("3", 3)):
+        os.environ["HALO_TEST_A"] = value
+        assert env_non_negative_int("HALO_TEST_A", 7) == expected
+    assert not caplog.records
+    os.environ["HALO_TEST_A"] = "-1"
+    with caplog.at_level(logging.WARNING, logger=env_mod.__name__):
+        assert env_non_negative_int("HALO_TEST_A", 7) == 7
+    assert "HALO_TEST_A=-1" in caplog.text and "using 7" in caplog.text
+
+
+@pytest.mark.parametrize(("raw", "expected"), [("0", 1), ("3", 3)])
+def test_the_package_import_applies_a_valid_thread_count_only(monkeypatch, raw, expected):
+    """A non-positive count would raise from ``torch.set_num_threads`` at ``import halo``."""
+    monkeypatch.setenv("HALO_TORCH_NUM_THREADS", raw)
+    script = f"import halo, torch; print({_THREADS_MARKER!r} + str(torch.get_num_threads()))"
+    assert probe_findings(script, _THREADS_MARKER) == [str(expected)]
 
 
 def test_env_number_empty_value_falls_back_silently():

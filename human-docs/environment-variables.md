@@ -45,8 +45,9 @@ keyed OpenAI-compatible endpoint.
 
 ## When to set the others
 
-Boolean variables accept `1`, `true`, `yes` and `on`; a malformed number logs a
-warning and falls back to the default.
+Boolean variables accept `1`, `true`, `yes` and `on`, or `0`, `false`, `no` and
+`off`; any other value, like a malformed number, logs a warning and falls back to
+the default.
 
 - **Per-node disks:** `DIST_SHARED_FILESYSTEM=0`. On NFS or EFS that reports
   `Stale file handle`, set only `DIST_INPUT_SHARED_FILESYSTEM=0` and keep the
@@ -72,8 +73,8 @@ warning and falls back to the default.
   quarters of the CPUs the process may use, at most 64; all but two in
   `prepare_dataset.py`), for example on a memory-tight host.
 - **A fused kernel fails on your GPU:** `HALO_FUSED_GLU=0` (the GLU kernels) or
-  `HALO_FLEX_SLIDING=0` (FlexAttention on SDPA runs of Gemma 4 and Step-3.7, also needed for
-  `full_determinism` on more than one GPU).
+  `HALO_FLEX_SLIDING=0` on every rank (FlexAttention on SDPA runs of Gemma 4 and Step-3.7,
+  also needed for `full_determinism` on more than one GPU).
 - **RL code sandboxes:** `HALO_SANDBOX_BACKEND`; the default `local` does not
   isolate the program ([Async GRPO](training-methods/async-grpo-environments.md#the-environments)).
 - **A rollout server that cannot dial back on the trainer's routed address:**

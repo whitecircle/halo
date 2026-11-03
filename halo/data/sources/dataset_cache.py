@@ -11,7 +11,7 @@ from collections.abc import Callable
 
 import filelock
 
-from halo.env import data_path, env_positive_int, env_str, store_timeout
+from halo.env import data_path, env_str, store_timeout
 from halo.log import info_logger
 
 logger = info_logger(__name__)
@@ -21,10 +21,8 @@ HALO_S3_DATASET_CACHE_DIR = env_str("HALO_S3_DATASET_CACHE_DIR") or data_path("s
 
 _MARKER_FINGERPRINT_PREFIX = "etag_fingerprint="
 
-# The wait for a peer downloading the same entry; positive because filelock reads 0 and negatives as modes.
-_CACHE_LOCK_TIMEOUT_SECONDS = env_positive_int(
-    "HALO_S3_CACHE_LOCK_TIMEOUT_SECONDS", int(store_timeout().total_seconds())
-)
+# The wait for a peer downloading the same entry, the budget that also bounds the peers waiting on this rank.
+_CACHE_LOCK_TIMEOUT_SECONDS = int(store_timeout().total_seconds())
 
 # Written inside a published cache dir; its presence is what makes the cache servable.
 DOWNLOAD_COMPLETE_MARKER = ".download_complete"

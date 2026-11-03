@@ -22,6 +22,14 @@ THIRD_PARTY_ROWS = {
         "read by the vLLM server; the row exists because a 0 there overrides the image's pinned Model Runner V2, "
         "which thinking budgets and R3 capture run on"
     ),
+    "CAUSAL_CONV1D_DETERMINISTIC": (
+        "read by causal_conv1d's backward; the row exists because it overrides torch's deterministic flag, which "
+        "selects the same path under full_determinism"
+    ),
+    "EP_SUPPRESS_NCCL_CHECK": (
+        "read by DeepEP as it imports; the row exists because the variable must reach the process environment, which "
+        "both images do for it"
+    ),
     "NCCL_CUMEM_ENABLE": "read by NCCL in the SGLang server; the row exists because docker-compose.sglang.yml must pre-set it",
     "PYTORCH_CUDA_ALLOC_CONF": (
         "read by PyTorch's CUDA caching allocator; the row exists because the dense examples launch with "

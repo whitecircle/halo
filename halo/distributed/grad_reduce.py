@@ -8,15 +8,15 @@ from typing import NamedTuple
 import torch
 import torch.distributed as dist
 
-from halo.env import env_int
+from halo.env import env_positive_int
 from halo.runtime.collectives import collective_device
 
 # Flat-buffer cap for bucketed reduction: bounds the transient cat allocation while keeping collectives few.
-GRAD_BUCKET_MB = env_int("HALO_GRAD_BUCKET_MB", 256)
+GRAD_BUCKET_MB = env_positive_int("HALO_GRAD_BUCKET_MB", 256)
 BUCKET_MAX_BYTES = GRAD_BUCKET_MB * 1024 * 1024
 # Buckets in flight: after backward the only latency to hide is the sweep's own framing (cat, fp32
 # upcast, scatter-back). Peak transient is this many flat buffers, 3x under ``fp32`` (bf16 flat + upcast).
-BUCKET_MAX_INFLIGHT = env_int("HALO_GRAD_BUCKET_MAX_INFLIGHT", 2)
+BUCKET_MAX_INFLIGHT = 2
 
 
 class _PendingChunk(NamedTuple):

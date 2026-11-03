@@ -9,6 +9,7 @@ from typing import TypeGuard, overload
 logger = logging.getLogger(__name__)
 
 _TRUE_VALUES = {"1", "true", "yes", "on"}
+_FALSE_VALUES = {"0", "false", "no", "off"}
 
 DEFAULT_NCCL_TIMEOUT_MINUTES = 30
 # Past this fraction of the NCCL watchdog, a rollout straggler leaves the cancelled rank too little margin to unwind.
@@ -18,17 +19,30 @@ DEFAULT_STORE_TIMEOUT_HOURS = 4
 # NFS's default ``acdirmax``: a cached negative lookup can hide a peer's new file this long.
 DEFAULT_FS_PROBE_TIMEOUT_SECONDS = 60
 
+# Per name, as some flags are read on every call.
+_warned_flags: set[str] = set()
+
 
 def _is_set(raw: str | None) -> TypeGuard[str]:
-    """Absent and blank both read as unset: a compose pass-through (``- HALO_FOO``) exports an absent var empty."""
+    """Absent and blank both read as unset: compose's ``${HALO_FOO:-}`` and a blank ``--env-file`` line export the name
+    empty."""
     return raw is not None and bool(raw.strip())
 
 
 def env_flag(name: str, default: bool = False) -> bool:
-    """Boolean env var: ``1/true/yes/on`` (any case) → True, anything else → False, unset → ``default``."""
+    """Boolean env var, any case: ``1/true/yes/on`` → True, ``0/false/no/off`` → False, unset → ``default``. Any other
+    value warns once per name and falls back to ``default``, so a typo cannot flip a default-on knob off."""
     raw = os.environ.get(name)
-    if _is_set(raw):
-        return raw.strip().lower() in _TRUE_VALUES
+    if not _is_set(raw):
+        return default
+    value = raw.strip().lower()
+    if value in _TRUE_VALUES:
+        return True
+    if value in _FALSE_VALUES:
+        return False
+    if name not in _warned_flags:
+        _warned_flags.add(name)
+        logger.warning(f"Ignoring invalid {name}={raw!r} (expected 1/true/yes/on or 0/false/no/off); using {default}.")
     return default
 
 
@@ -65,16 +79,25 @@ def env_float(name: str, default: float | None) -> float | None:
 def env_positive_int(name: str, default: int) -> int:
     """Integer env var that must be >= 1 (a ``0`` timeout would expire at once); else warns and falls back."""
     value = env_int(name, default)
-    if value is None or value < 1:
+    if value < 1:
         logger.warning(f"Ignoring {name}={value!r} (expected a positive integer); using {default}.")
         return default
     return value
 
 
-def env_positive_float(name: str, default: float | None) -> float | None:
+def env_non_negative_int(name: str, default: int) -> int:
+    """Integer env var whose ``0`` means auto or off; a negative warns and falls back, as it would read as truthy."""
+    value = env_int(name, default)
+    if value < 0:
+        logger.warning(f"Ignoring {name}={value!r} (expected a non-negative integer); using {default}.")
+        return default
+    return value
+
+
+def env_positive_float(name: str, default: float) -> float:
     """Float env var that must be positive; else warns and falls back."""
     value = env_float(name, default)
-    if value is not None and value <= 0:
+    if value <= 0:
         logger.warning(f"Ignoring {name}={value!r} (expected a positive number); using {default}.")
         return default
     return value

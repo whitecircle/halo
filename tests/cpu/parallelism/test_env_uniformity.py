@@ -154,8 +154,8 @@ def test_the_guidance_does_not_scope_the_rule_to_an_ep_group(monkeypatch):
 
 
 def test_the_legacy_backend_timeout_warning_gates_on_the_parsed_value(monkeypatch):
-    """A docker-compose pass-through exports the name with an empty value, so a presence test warns about a knob
-    nobody set."""
+    """Compose's ``${VAR:-}`` and a blank ``--env-file`` line export the name empty, so a presence test warns about a
+    knob nobody set."""
     monkeypatch.setenv("HALO_DEEPEP_GPU_TIMEOUT_SECONDS", "")
     reloaded = importlib.reload(settings_mod)
     try:

@@ -481,6 +481,10 @@ def register_flex_sliding_attention() -> str:
     return SDPA_FLEX_SLIDING
 
 
+def flex_sliding_enabled() -> bool:
+    return env_flag("HALO_FLEX_SLIDING", True)
+
+
 def resolve_flex_sliding_attn_implementation(model_config, attn_implementation: str) -> str:
     """Taken where the run resolved to ``sdpa`` on CUDA for a model with sliding-window layers or a head wider than
     flash runs. Plain SDPA stays for a model whose every call carries what these kernels are not given (GptOss's sinks,
@@ -489,7 +493,7 @@ def resolve_flex_sliding_attn_implementation(model_config, attn_implementation: 
     if (
         attn_implementation != "sdpa"
         or not torch.cuda.is_available()
-        or not env_flag("HALO_FLEX_SLIDING", True)
+        or not flex_sliding_enabled()
         or uses_gpt_oss_sinks(model_config)
         or has_attention_logit_softcap(model_config)
     ):

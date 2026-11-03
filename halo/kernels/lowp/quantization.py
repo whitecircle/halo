@@ -218,7 +218,7 @@ def _block_round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Ten
 def _warn_compile_disabled(exc: Exception) -> None:
     logger.warning(
         "Low-precision quantization could not run compiled (%s: %s) — falling back to eager "
-        "block-scale quantization for the rest of the run. Set HALO_LOWP_COMPILE=0 to silence.",
+        "block-scale quantization for the rest of the run.",
         type(exc).__name__,
         exc,
     )
@@ -227,7 +227,7 @@ def _warn_compile_disabled(exc: Exception) -> None:
 def _round_trip(t: torch.Tensor, fmt: QuantFormat, axis: int) -> torch.Tensor:
     """Compiled for the power-of-two-scale formats (fixed-shape weights), eager otherwise."""
     global _compiled_round_trip, _compile_failed
-    if fmt not in _COMPILABLE or _compile_failed or not env_flag("HALO_LOWP_COMPILE", default=True):
+    if fmt not in _COMPILABLE or _compile_failed:
         return _block_round_trip(t, fmt, axis)
     if _compiled_round_trip is None:
         try:

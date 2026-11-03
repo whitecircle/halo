@@ -119,10 +119,7 @@ def resolve_quantization_config(model_config, training_config):
     return quantization_config
 
 
-def configure_float32_matmul_precision() -> None:
-    """Pin fp32 matmuls and cuDNN convolutions to true fp32, since TF32's 10-bit mantissa collapses adjacent RoPE
-    positions past 2048. ``HALO_FP32_MATMUL_PRECISION=high`` opts back into TF32, for cuDNN too, whose ``allow_tf32``
-    is a separate switch defaulting to True (Zaya's fp32 Conv1d)."""
+def resolved_float32_matmul_precision() -> str:
     precision = env_str("HALO_FP32_MATMUL_PRECISION") or "highest"
     if precision not in _VALID_FP32_MATMUL_PRECISION:
         warnings.warn(
@@ -130,7 +127,15 @@ def configure_float32_matmul_precision() -> None:
             f"(expected one of {_VALID_FP32_MATMUL_PRECISION}); using 'highest'.",
             stacklevel=2,
         )
-        precision = "highest"
+        return "highest"
+    return precision
+
+
+def configure_float32_matmul_precision() -> None:
+    """Pin fp32 matmuls and cuDNN convolutions to true fp32, since TF32's 10-bit mantissa collapses adjacent RoPE
+    positions past 2048. ``HALO_FP32_MATMUL_PRECISION=high`` opts back into TF32, for cuDNN too, whose ``allow_tf32``
+    is a separate switch defaulting to True (Zaya's fp32 Conv1d)."""
+    precision = resolved_float32_matmul_precision()
     torch.set_float32_matmul_precision(precision)
     torch.backends.cudnn.allow_tf32 = precision != "highest"
 

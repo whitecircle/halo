@@ -7,7 +7,7 @@ from trl import SFTConfig
 
 from halo.distributed.expert_parallel.families.zaya import EPZayaMoELayer
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.env import env_flag, env_int, env_str
+from halo.env import env_int, env_str
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.datasets import create_sft_dataset
@@ -20,10 +20,6 @@ MODEL = env_str("HALO_TEST_ZAYA_MODEL", ZAYA_8B)
 MAX_STEPS = env_int("HALO_TEST_ZAYA_EP_STEPS", 4)
 SEQ = env_int("HALO_TEST_ZAYA_EP_SEQ", 512)
 LR = 5e-6
-# Zaya refuses gradient checkpointing: the recompute faults in cuDNN on the CCA Conv1d pair, and per-layer GC re-wraps
-# the EDA state with a fresh grad_fn, whose recompute graph autograd processes polynomially in the layer count.
-# HALO_TEST_ZAYA_GC=1 asserts the refusal.
-GC_DEFAULT = False
 
 
 @gpu_test_main(min_world_size=2, prefix="test_zaya_ep")
@@ -81,10 +77,10 @@ def run(ctx):
         gradient_accumulation_steps=1,
         learning_rate=LR,
         bf16=True,
-        gradient_checkpointing=env_flag("HALO_TEST_ZAYA_GC", GC_DEFAULT),
-        gradient_checkpointing_kwargs={
-            "use_reentrant": env_flag("HALO_TEST_ZAYA_GC_REENTRANT", True),
-        },
+        # Zaya refuses gradient checkpointing: the recompute faults in cuDNN on the CCA Conv1d pair, and per-layer GC
+        # re-wraps the EDA state with a fresh grad_fn, whose recompute graph autograd processes polynomially in the
+        # layer count.
+        gradient_checkpointing=False,
         # The mixin defers TRL's re-application and restores the flag, so TRL's compute_loss takes its Liger path:
         # under FLCE outputs.logits is a placeholder, not the [B*S, V] tensor TRL needs for entropy.
         use_liger_kernel=True,

@@ -8,14 +8,12 @@ only ``increment_version`` advances the key; without it the cache serves the ste
 import argparse
 import os
 
-# Numerically identical to the compiled path, without a per-rank compile warm-up.
-os.environ.setdefault("HALO_LOWP_COMPILE", "0")
-
 import torch
 from transformers import AutoTokenizer, TrainerCallback
 from trl import SFTConfig
 
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.lowp import quantization
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.optimizers.adamw_bf16 import AdamWBF16
@@ -29,6 +27,9 @@ from tests.common.models import QWEN3_0_6B
 from tests.common.rank_log import log
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.training_checks import step_losses
+
+# Numerically identical to the compiled path, without a per-rank compile warm-up.
+quantization._compile_failed = True
 
 SEED = 42
 TOTAL_STEPS = 3

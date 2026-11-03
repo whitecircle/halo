@@ -45,6 +45,18 @@ def test_message_names_the_mechanism_and_the_levers():
     assert "HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK" in text
 
 
+def test_a_negative_ceiling_keeps_the_default(monkeypatch):
+    """A negative is truthy, so every cross-domain dispatch would raise against it."""
+    monkeypatch.setenv("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", "-1")
+    _reload()
+    try:
+        assert capacity_mod.GIN_MAX_TOKENS_PER_RANK == 8192
+        _reject_cross_node(8192)
+    finally:
+        monkeypatch.delenv("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", raising=False)
+        _reload()
+
+
 def test_env_override_and_disable(monkeypatch):
     """Via module reload."""
     monkeypatch.setenv("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", "0")

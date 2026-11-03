@@ -2,7 +2,7 @@
 
 import os
 
-from halo.env import env_int
+from halo.env import env_positive_int
 from halo.log import configure_root_logging
 
 # Tokenizer parallelism deadlocks against dataset multiprocessing; setdefault so a user export wins.
@@ -12,7 +12,7 @@ configure_root_logging()
 import torch  # noqa: E402  after the logging setup above
 
 # One CPU thread per rank: ranks share a host and compute runs on the GPU, so extra threads contend.
-torch.set_num_threads(env_int("HALO_TORCH_NUM_THREADS", 1))
+torch.set_num_threads(env_positive_int("HALO_TORCH_NUM_THREADS", 1))
 
 import transformers  # noqa: E402
 

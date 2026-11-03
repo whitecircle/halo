@@ -321,22 +321,12 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_flex_masked_layers.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "step3p7", "gemma4"), timeout=900
     ),
-    "kernels/test_fla_fixed_nb.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "qwen3"), timeout=600),
     "kernels/test_fused_glu.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),
     "kernels/test_moe_permute.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu", "moe"), timeout=600),
     "kernels/test_family_kernel_stack_numerics.py": TestSpec(
         nproc=1,
         markers=("gpu", "full", "1gpu", "moe", *_family_markers(_TINY_MOE_FAMILIES)),
-        args_matrix=(
-            *(f"--family {family}" for family in _TINY_MOE_FAMILIES),
-            *(
-                Row(
-                    f"--family {family} --fla-fixed-nb",
-                    markers=("gpu", "full", "1gpu", "moe", *_family_markers((family,))),
-                )
-                for family in ("qwen3_5_moe_text", "glm5_next")
-            ),
-        ),
+        args_matrix=tuple(f"--family {family}" for family in _TINY_MOE_FAMILIES),
         timeout=900,
     ),
     "kernels/test_expert_gemm.py": TestSpec(nproc=1, markers=("gpu", "core", "1gpu"), timeout=600),

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 
 from halo.distributed.expert_parallel.deepep.settings import EP_CAPACITY_DEDUP
-from halo.env import env_int
+from halo.env import env_non_negative_int
 
 # DeepEP V1 (legacy) drives its CUDA-IPC buffer over at most this many NVLink peers; its NVSHMEM
 # internode path is not wired up here, hence ``num_rdma_bytes=0``.
@@ -21,7 +21,7 @@ DEEPEP_HIDDEN_ALIGN = 256
 DEEPEP_INDEX_LIMIT = 2**31
 # Cross-node (Gin) dispatch above this many tokens/rank wedges instead of erroring; 0 disables.
 # Boundary and fault signatures: agent-docs/infrastructure/deepep.md#expert-parallelism-over-aws-efa.
-GIN_MAX_TOKENS_PER_RANK = env_int("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", 8192)
+GIN_MAX_TOKENS_PER_RANK = env_non_negative_int("HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK", 8192)
 
 
 class CapacityScope:

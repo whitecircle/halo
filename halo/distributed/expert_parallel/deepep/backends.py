@@ -215,14 +215,7 @@ def _configure_deepep_env(spans_domains: bool) -> None:
     if _deepep_env_configured:
         return
     _deepep_env_configured = True
-    if os.environ.get("EP_SUPPRESS_NCCL_CHECK") != "1":
-        logger.warning(
-            "EP_SUPPRESS_NCCL_CHECK != 1. The NGC image ships HPC-X libnccl-net alongside the pip "
-            "libnccl.so, and DeepEP's duplicate-NCCL guard flags the plugin as a second runtime. "
-            "Set it in the process environment (both prebuilt images do); a Python-level write "
-            "here is too late — DeepEP latches it at import."
-        )
-    if "EP_DISABLE_GIN" not in os.environ:
+    if not os.environ.get("EP_DISABLE_GIN", "").strip():
         os.environ["EP_DISABLE_GIN"] = "0" if spans_domains else "1"
     elif is_global_main_process():
         logger.info(f"DeepEP Gin backend: honoring explicit EP_DISABLE_GIN={os.environ['EP_DISABLE_GIN']}")
@@ -431,8 +424,8 @@ class _LegacyBackend(DeepEPBackend):
                 "'elastic' backend only.",
                 DEEPEP_NUM_QPS,
             )
-        # The parsed value, not the variable's presence: a docker-compose pass-through exports the
-        # name with an empty value when it is absent, which resolves to the default.
+        # The parsed value, not the variable's presence: compose's ``${VAR:-}`` and a blank ``--env-file`` line
+        # export the name empty, which resolves to the default.
         if DEEPEP_GPU_TIMEOUT_S != DEEPEP_DEFAULT_GPU_TIMEOUT_S:
             warn_once(
                 logger,

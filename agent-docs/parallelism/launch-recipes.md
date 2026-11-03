@@ -98,9 +98,9 @@ Inter-node EP runs the DeepEP V2 NCCL **Gin** (RDMA) backend; intra-node EP runs
 path. The dispatcher sets `EP_DISABLE_GIN` from the EP topology (honoring an explicit value).
 
 `EP_SUPPRESS_NCCL_CHECK=1` is baked into both images as an `ENV` and must reach the process
-environment: DeepEP latches it at `import deep_ep`, so a Python-level write is too late, and the
-dispatcher can only warn. Without it DeepEP's duplicate-NCCL guard flags the image's HPC-X transport
-plugin as a second NCCL runtime.
+environment: DeepEP latches it at `import deep_ep`, so a Python-level write is too late. Without it
+DeepEP's duplicate-NCCL guard flags the image's HPC-X transport plugin as a second NCCL runtime and
+fails the import.
 
 ## Checkpointing with EP
 

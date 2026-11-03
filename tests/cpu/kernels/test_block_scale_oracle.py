@@ -3,7 +3,6 @@
 reference. The registry-enumerated checks police a format added later."""
 
 import math
-import os
 
 import pytest
 import torch
@@ -138,33 +137,18 @@ def test_round_trip_is_scale_invariant_across_magnitudes(fmt):
         )
 
 
-def test_mxfp4_round_trip_compile_bit_identical():
+def test_mxfp4_round_trip_compile_bit_identical(monkeypatch):
     """The module claims the e8m0 MXFP4 round-trip compiles bit-identically."""
     torch.manual_seed(0)
     weight = torch.randn(64, 128, dtype=torch.float32) * 3.0
+    # Reset the compile caches. importlib.reload would rebind the classes and fail isinstance checks in sibling tests
+    # order-dependently.
+    monkeypatch.setattr(q, "_compiled_round_trip", None)
+    monkeypatch.setattr(q, "_compile_failed", False)
 
-    def _round_trip_with_compile(flag: str) -> torch.Tensor:
-        prev = os.environ.get("HALO_LOWP_COMPILE")
-        prev_compiled = q._compiled_round_trip
-        prev_failed = q._compile_failed
-        os.environ["HALO_LOWP_COMPILE"] = flag
-        # Reset the compile caches. importlib.reload would rebind the classes and fail isinstance checks in sibling
-        # tests order-dependently.
-        q._compiled_round_trip = None
-        q._compile_failed = False
-        try:
-            out = q._round_trip(weight, "mxfp4", -1)
-        finally:
-            if prev is None:
-                os.environ.pop("HALO_LOWP_COMPILE", None)
-            else:
-                os.environ["HALO_LOWP_COMPILE"] = prev
-            q._compiled_round_trip = prev_compiled
-            q._compile_failed = prev_failed
-        return out
-
-    off = _round_trip_with_compile("0")
-    on = _round_trip_with_compile("1")
+    on = q._round_trip(weight, "mxfp4", -1)
+    assert q._compiled_round_trip is not None and not q._compile_failed, "the round-trip did not run compiled"
+    off = q._block_round_trip(weight, "mxfp4", -1)
     assert off.dtype == on.dtype == torch.bfloat16
     assert torch.equal(off, on), "MXFP4 round-trip not bit-identical between compile off and on"
 

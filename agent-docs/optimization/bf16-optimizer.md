@@ -100,7 +100,7 @@ NCCL's bf16 all-reduce accumulates in bf16, so error grows with world size. On 8
 
 The bucketed sweeps (`reduce_grads_bucketed`: the deferred cross-replica EP sweep, the TP replicated / per-head-norm sweep, the QLoRA sweep) hold **3× `HALO_GRAD_BUCKET_MB` per in-flight bucket** under `fp32_grad_reduce`, not 1×. Each chunk keeps its bf16 flat buffer alive for the scatter-back alongside the fp32 upcast it reduces.
 
-At the defaults (256 MB, 2 in flight) that is ~1.5 GB allocated post-backward, while every gradient is still live. That is the worst memory moment of the step, and exactly the multi-node EP path where 100–400B models run. Halve `HALO_GRAD_BUCKET_MB` there if the step OOMs at the sweep.
+At the default bucket size (256 MB, 2 in flight) that is ~1.5 GB allocated post-backward, while every gradient is still live. That is the worst memory moment of the step, and exactly the multi-node EP path where 100–400B models run. Halve `HALO_GRAD_BUCKET_MB` there if the step OOMs at the sweep.
 
 Default `false`. `fp32_non_ep_params` implies it only for the FSDP2 reduce dtype — the EP router hooks and deferred sweep, the TP and QLoRA sweeps read `fp32_grad_reduce` directly, so set it explicitly to cover them. Enable for many-rank / multi-node runs. It applies only on the mixin-managed (torchrun) path — an `accelerate launch` that manages FSDP/DDP itself takes its reduce dtype from accelerate's plugin, and the trainer warns that the knob is unapplied.
 

@@ -76,21 +76,23 @@ before the process starts. It does not make the racy single-domain multi-group s
 `HALO_DEEPEP_GPU_TIMEOUT_SECONDS`, `HALO_DEEPEP_NUM_SMS`, `HALO_DEEPEP_NUM_QPS`,
 `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`, `HALO_GRAD_BUCKET_MB`, `HALO_CHECKPOINT_WRITE_THREADS`,
 `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`, `DIST_FS_PROBE_TIMEOUT_SECONDS`, `EP_DISABLE_GIN`,
-`FLASH_ATTENTION_DETERMINISTIC`. A divergence is a hang, not a slow run: the dedup changes how many
+`FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`, `HALO_FP32_MATMUL_PRECISION`. A divergence is a hang
+or a silent drift, not a slow run: the dedup changes how many
 collectives a rank runs, the grad-bucket size sets the chunk boundaries of the bucketed gradient
 reductions (EP, TP and QLoRA alike), the write-thread count decides whether a rank refuses a save its
 peers have entered (a negative count raises on every rank once the ranks agree), the timeouts decide
 which rank gives up on a join first (the survivors then die on the next collective and blame it) and how
 long each rank looks for the filesystem probe's file, transformers' determinism switch picks a head_dim-256 model's attention backend (FA4 or its
-fallback, [Flash Attention](../optimization/flash-attention.md#model-specific-handling)), and the rest are
-wire parameters both ends of the all-to-all share.
+fallback, [Flash Attention](../optimization/flash-attention.md#model-specific-handling)), the flex-sliding
+switch an SDPA run's backend, the matmul precision whether a rank's fp32 matmuls round through TF32, and the
+rest are wire parameters both ends of the all-to-all share.
 
 `agree_rank_uniform_env` (`halo/distributed/rank_uniform_env.py`) gathers them after the device bind and
 **before the weight load**, and `load_distributed_model` repeats it as a latched backstop; a mismatch
 raises `Rank-uniform toolkit environment differs across ranks` with rank 0's values. It compares the
 resolved settings, so a knob left unset and one exported at its default are the same; `EP_DISABLE_GIN`,
-which DeepEP reads as a raw string, is compared as one, and `FLASH_ATTENTION_DETERMINISTIC` by
-transformers' own rule (only `1` turns it on).
+which DeepEP reads as a raw string, is compared as one with a blank export reading as unset, and
+`FLASH_ATTENTION_DETERMINISTIC` by transformers' own rule (only `1` turns it on).
 
 The NCCL watchdog (`DIST_NCCL_TIMEOUT_MINUTES`) applies to every group the EP config creates. It does
 **not** bound the dispatch/combine barrier, a GPU spin-wait on DeepEP's own budget,

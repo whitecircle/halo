@@ -193,10 +193,11 @@ the rank *not* in a collective is the culprit.
 For the definitive "which collective did rank K miss?", enable the NCCL flight recorder
 (`TORCH_NCCL_TRACE_BUFFER_SIZE`, `TORCH_NCCL_DUMP_ON_TIMEOUT`).
 
-One class of hang is refused up front instead: a job whose ranks disagree on an EP, timeout, save or
-attention-determinism knob (`HALO_EP_CAPACITY_DEDUP`, the DeepEP wire parameters, `HALO_GRAD_BUCKET_MB`,
+One class of hang is refused up front instead: a job whose ranks disagree on an EP, timeout, save, attention
+or matmul-precision knob (`HALO_EP_CAPACITY_DEDUP`, the DeepEP wire parameters, `HALO_GRAD_BUCKET_MB`,
 `HALO_CHECKPOINT_WRITE_THREADS`, `DIST_NCCL_TIMEOUT_MINUTES`, `DIST_STORE_TIMEOUT_HOURS`,
-`DIST_FS_PROBE_TIMEOUT_SECONDS`, `FLASH_ATTENTION_DETERMINISTIC`) raises
+`DIST_FS_PROBE_TIMEOUT_SECONDS`, `FLASH_ATTENTION_DETERMINISTIC`, `HALO_FLEX_SLIDING`,
+`HALO_FP32_MATMUL_PRECISION`) raises
 `Rank-uniform toolkit environment` in distributed setup, before the weight load — a per-node `--env-file`
 rollout that reached only some nodes would otherwise diverge the collective counts from the second MoE layer
 on, or load a head_dim-256 model on a different attention backend per rank, naming nothing.

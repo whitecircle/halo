@@ -30,8 +30,10 @@ def _accepts_writes(path: str) -> bool:
 
 def anchor_jit_cache_dir(var: str, subdir: str) -> None:
     """Point ``var`` at ``HF_HOME/subdir`` (else the temp dir) unless set; defaults die with a ``--rm`` container."""
-    if var in os.environ:
+    if os.environ.get(var, "").strip():
         return
+    # A blank value, as an ``--env-file`` line exports it, would otherwise read as the cwd.
+    os.environ.pop(var, None)
     hf_home = os.environ.get("HF_HOME")
     anchor = os.path.join(hf_home, subdir) if hf_home else None
     if anchor is not None and _accepts_writes(anchor):

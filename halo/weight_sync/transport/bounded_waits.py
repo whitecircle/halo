@@ -10,7 +10,7 @@ from halo.env import env_positive_float
 
 # Covers the update RPC that declares a chunk and the drain of its broadcasts. Read once at import so a malformed
 # value cannot raise mid-RL-step.
-CHUNK_SYNC_TIMEOUT_S = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", None) or 600.0
+CHUNK_SYNC_TIMEOUT_S = env_positive_float("HALO_NCCL_SYNC_TIMEOUT_SECONDS", 600.0)
 
 
 @contextmanager
