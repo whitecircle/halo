@@ -9,6 +9,7 @@ import logging
 import os
 from collections.abc import Iterable
 from dataclasses import replace
+from functools import partial
 
 import torch
 from peft import PeftModel
@@ -34,7 +35,7 @@ from halo.checkpoint.parallel.completeness import mark_resume_adapter_complete
 from halo.checkpoint.parallel.context import CheckpointContext
 from halo.checkpoint.parallel.reading import consensus_read
 from halo.checkpoint.sidecars import write_training_provenance
-from halo.checkpoint.writing import adapter_save_dtype_caster, cast_to_save_dtype
+from halo.checkpoint.writing import adapter_save_dtype_caster
 from halo.distributed.expert_parallel.moe_layer.expert_lora import (
     gather_expert_lora_adapters,
     load_expert_lora_adapters,
@@ -52,8 +53,8 @@ from halo.models.unwrapping import (
     unwrap_framework_wrappers,
     unwrap_toolkit_wrappers,
 )
-from halo.runtime.consensus import agree_across_ranks, barrier_on_exit, reject_across_ranks
-from halo.runtime.dtensor import copy_full_tensor, full_cpu_tensor
+from halo.runtime.consensus import DeferredRankFailure, agree_across_ranks, barrier_on_exit, reject_across_ranks
+from halo.runtime.dtensor import copy_full_tensor, gather_full_tensors
 from halo.runtime.filesystem import fs_aware_makedirs
 from halo.runtime.ranks import is_global_main_process
 
@@ -72,18 +73,32 @@ def _saves_embedding_layers(peft_model: PeftModel) -> bool | str:
     return True if vocabulary_grown(peft_model) else "auto"
 
 
-def gather_adapter_state(peft_model: PeftModel) -> dict:
+def gather_adapter_state(peft_model: PeftModel, *, retain: bool = True) -> dict:
     """COLLECTIVE: the PEFT adapter state, resolving only adapter-relevant params, since all of them would retain the
-    frozen base on every rank. Buffers ride along because a ``modules_to_save`` clone with a balancing buffer would
-    otherwise KeyError PEFT's key lookup at the first save."""
-    full_state = {
-        name: full_cpu_tensor(t.data)
-        for name, t in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
-        if _is_adapter_relevant(name)
-    }
-    return get_peft_model_state_dict(
-        peft_model, state_dict=full_state, save_embedding_layers=_saves_embedding_layers(peft_model)
+    frozen base on every rank; empty off ``retain``, which joins every gather and keeps nothing. Buffers ride along
+    because a ``modules_to_save`` clone with a balancing buffer would otherwise KeyError PEFT's key lookup at the first
+    save. Only ``retain`` runs that lookup, so its failure is joined."""
+    full_state = gather_full_tensors(
+        (
+            (name, t.data)
+            for name, t in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
+            if _is_adapter_relevant(name)
+        ),
+        retain=retain,
     )
+    guard = DeferredRankFailure("Building the PEFT adapter state")
+    state = {}
+    if retain:
+        state = guard.run(
+            partial(
+                get_peft_model_state_dict,
+                peft_model,
+                state_dict=full_state,
+                save_embedding_layers=_saves_embedding_layers(peft_model),
+            )
+        )
+    guard.reject()
+    return state
 
 
 def _cp_normalized_config(peft_config):
@@ -140,7 +155,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     )
     state, expert_state = None, {}
     if mixed or gathered:
-        state = gather_adapter_state(peft_model)
+        state = gather_adapter_state(peft_model, retain=ctx.is_save_rank)
     elif is_cp_mode:
         # CP without DTensors (QLoRA+CP, which skips FSDP2) still needs the manual write for its changed key paths.
         state = get_peft_model_state_dict(peft_model, save_embedding_layers=_saves_embedding_layers(peft_model))
@@ -168,9 +183,7 @@ def save_peft_adapters(ctx: CheckpointContext, output_dir: str) -> None:
                 peft_model.save_pretrained(output_dir, save_embedding_layers=_saves_embedding_layers(peft_model))
                 apply_umask_mode(os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
             elif mixed:
-                write_mixed_adapter_config(
-                    peft_config, getattr(ctx.parallelism_config, "expert_lora", None), output_dir
-                )
+                write_mixed_adapter_config(peft_config, ctx.parallelism_config.expert_lora, output_dir)
             else:
                 peft_config.save_pretrained(output_dir)
             if state is not None:
@@ -191,19 +204,15 @@ def save_expert_lora_adapters(ctx: CheckpointContext, output_dir: str) -> None:
     fs_aware_makedirs(output_dir)
     # Collective on every rank; only the writer keeps the result, else one host holds local_ranks copies.
     adapters = gather_expert_lora_adapters(model, retain=ctx.is_save_rank)
-    spec = getattr(ctx.parallelism_config, "expert_lora", None)
     base_name = getattr(ctx.model.config, "_name_or_path", None)
-    adapter_config = None if spec is None else expert_lora_adapter_config(spec, base_name)
     with barrier_on_exit(f"Writing the EP LoRA adapters to {output_dir}"):
         if ctx.is_save_rank:
-            state = (
-                adapters if ctx.training_checkpoint else {key: cast_to_save_dtype(t) for key, t in adapters.items()}
+            save_safetensors_file(
+                _adapter_file_state(ctx, adapters), os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE)
             )
-            save_safetensors_file(state, os.path.join(output_dir, ADAPTER_SAFETENSORS_FILE))
-            if adapter_config is not None:
-                write_adapter_config(adapter_config, output_dir)
+            write_adapter_config(expert_lora_adapter_config(ctx.parallelism_config.expert_lora, base_name), output_dir)
             tag_model_card(output_dir)
-            logger.info(f"✓ EP LoRA adapters saved to {output_dir} ({len(state)} tensors)")
+            logger.info(f"✓ EP LoRA adapters saved to {output_dir} ({len(adapters)} tensors)")
 
 
 def save_resume_adapter(ctx: CheckpointContext, checkpoint_dir: str) -> None:

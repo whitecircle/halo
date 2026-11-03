@@ -69,9 +69,8 @@ def _load(config, build, *, text_only: bool, liger_kernel_config: dict | None, l
     """Liger, class resolution and the build stay real; what a CPU process cannot run is stubbed."""
     with (
         patch.object(model_loading, "configure_float32_matmul_precision"),
-        patch.object(model_loading, "apply_remote_code_compat_shims"),
         patch.object(model_loading, "resolve_model_source", lambda name, revision, **k: ModelSource(name, None, name)),
-        patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(model_loading, "resolve_build_config", lambda *a, **k: config),
         patch.object(model_loading, "resolve_attn_implementation", lambda *a, **k: "sdpa"),
         patch.object(
             model_loading, "apply_family_patches", lambda model_config, attn_implementation: attn_implementation

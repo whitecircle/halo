@@ -8,7 +8,7 @@ import logging
 import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 import torch.distributed as dist
@@ -16,6 +16,9 @@ import torch.distributed as dist
 from halo.checkpoint.atomic import atomic_torch_save
 from halo.checkpoint.format import OPTIMIZER_META_FILE
 from halo.runtime.ranks import get_global_rank, get_global_world_size
+
+if TYPE_CHECKING:
+    from halo.distributed.parallelism_config import ParallelismConfig
 
 logger = logging.getLogger(__name__)
 
@@ -43,26 +46,28 @@ class OptimizerStateFingerprint:
     expert_replica_size: int
 
     @classmethod
-    def capture(cls, parallelism_config: Any, optimizer: Any, world_size: int) -> OptimizerStateFingerprint:
+    def capture(
+        cls, parallelism_config: ParallelismConfig, optimizer: Any, world_size: int
+    ) -> OptimizerStateFingerprint:
         """Rank-uniform, since ``parallelism_config`` is."""
         pc = parallelism_config
         # The dedup runs only where experts are FSDP-ignored plain tensors every EP group replicates; stamping the
         # group count elsewhere would mismatch every checkpoint of a topology that never changed.
-        experts_replicated = not getattr(pc, "experts_fsdp_managed", True)
+        experts_replicated = not pc.experts_fsdp_managed
         return cls(
             world_size=world_size,
-            ep_size=getattr(pc, "ep_size", 1) or 1,
-            expert_tp_size=getattr(pc, "expert_tp_size", 1) or 1,
-            cp_size=getattr(pc, "cp_size", 1) or 1,
-            tp_size=getattr(pc, "tp_size", 1) or 1,
-            pp_size=getattr(pc, "pp_size", 1) or 1,
-            fsdp_shard_ep1_experts=bool(getattr(pc, "fsdp_shard_ep1_experts", True)),
+            ep_size=pc.ep_size,
+            expert_tp_size=pc.expert_tp_size,
+            cp_size=pc.cp_size,
+            tp_size=pc.tp_size,
+            pp_size=pc.pp_size,
+            fsdp_shard_ep1_experts=bool(pc.fsdp_shard_ep1_experts),
             optimizer_class=type(optimizer).__name__,
-            ep_scope=str(getattr(pc, "ep_scope", "node")),
-            use_grouped_gemm=bool(getattr(pc, "use_grouped_gemm", True)),
-            use_hsdp=bool(getattr(pc, "use_hsdp", False)),
-            nvlink_domain_size=int(getattr(pc, "nvlink_domain_size", 0) or 0),
-            expert_replica_size=int(getattr(pc, "num_ep_groups", 1) or 1) if experts_replicated else 1,
+            ep_scope=str(pc.ep_scope),
+            use_grouped_gemm=bool(pc.use_grouped_gemm),
+            use_hsdp=bool(pc.use_hsdp),
+            nvlink_domain_size=int(pc.nvlink_domain_size),
+            expert_replica_size=int(pc.num_ep_groups) if experts_replicated else 1,
         )
 
     def to_dict(self) -> dict[str, Any]:

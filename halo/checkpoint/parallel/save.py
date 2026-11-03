@@ -129,18 +129,14 @@ def save_cp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     _streamed_save(ctx, output_dir, inner, chunks, f"Saved CP model to {output_dir}")
 
 
-def _tp_chunks(
-    model: nn.Module, model_to_save: nn.Module, *, retain: bool, keep_live_dtype: bool
-) -> Iterator[dict[str, torch.Tensor]]:
+def _tp_chunks(model: nn.Module, *, retain: bool) -> Iterator[dict[str, torch.Tensor]]:
     """COLLECTIVE: the DTensor walk, then the hand-sliced params whole. Plain TP-sharded params (GptOss sinks) leave
     the walk, which would flush this rank's ``[heads/tp]`` slice before the gathered tensor arrives under the same
     key."""
     hand_sliced = hand_sliced_suffixes(model)
-    items = ((name, tensor) for name, tensor in saveable_items(model_to_save) if not name.endswith(hand_sliced))
-    yield from chunked_saveable_tensors(model_to_save, retain=retain, items=items)
-    sharded_plain: dict = {}
-    gather_hand_sliced_params(model, sharded_plain, retain=retain, keep_live_dtype=keep_live_dtype)
-    yield sharded_plain
+    items = ((name, tensor) for name, tensor in saveable_items(model) if not name.endswith(hand_sliced))
+    yield from chunked_saveable_tensors(model, retain=retain, items=items)
+    yield gather_hand_sliced_params(model, retain=retain)
 
 
 def save_tp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
@@ -149,5 +145,6 @@ def save_tp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     if ctx.is_save_rank:
         logger.info(f"Saving TP model to {output_dir}...")
     model = unwrap_toolkit_wrappers(ctx.model)
-    chunks = _tp_chunks(ctx.model, model, retain=ctx.is_save_rank, keep_live_dtype=ctx.training_checkpoint)
-    _streamed_save(ctx, output_dir, model, chunks, f"✓ TP model saved to {output_dir}")
+    _streamed_save(
+        ctx, output_dir, model, _tp_chunks(model, retain=ctx.is_save_rank), f"✓ TP model saved to {output_dir}"
+    )

@@ -49,6 +49,13 @@ class _StubParallelismConfig:
         self.is_pp_mode = pp_size > 1
         self.is_cp_mode = cp_size > 1
         self.is_tp_mode = tp_size > 1
+        self.ep_scope = "node"
+        self.use_grouped_gemm = True
+        self.use_hsdp = False
+        self.nvlink_domain_size = 8
+        self.max_concurrent_loading = None
+        self.experts_fsdp_managed = ep_size == 1
+        self.num_ep_groups = 1
 
 
 class _Backbone(nn.Module):

@@ -102,9 +102,8 @@ the trainer.
 ## Export and serve
 
 Gathered saves write the hub's per-expert layout, which both engines read, and the other writers keep
-the layout the checkpoint was loaded in. A checkpoint fused before Halo loaded it, or one from a save
-that logged `revert_weight_conversion failed`, holds the fused pair and needs
-`halo run unfuse-moe-experts` before serving.
+the layout the checkpoint was loaded in. A checkpoint fused before Halo loaded it holds the fused pair
+and needs `halo run unfuse-moe-experts` before serving.
 
 Smoke-test with `AutoModelForCausalLM` ([snippet](README.md#smoke-test-a-checkpoint)). Serve from the
 [host](README.md#serve-from-the-host) with SGLang on port 30000:

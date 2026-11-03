@@ -7,6 +7,9 @@ import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
 
+import halo.checkpoint.parallel.adapters as adapters_mod
+import halo.runtime.consensus as consensus_mod
+import halo.runtime.dtensor as dtensor_mod
 from halo.checkpoint.parallel.adapters import gather_adapter_state
 from halo.checkpoint.writing import adapter_save_dtype_caster
 from halo.models.moe.balancing import is_balancing_state_key
@@ -51,6 +54,43 @@ def test_non_persistent_buffers_stay_out_of_adapter_state():
     state = gather_adapter_state(peft_model)
     leaked = [k for k in state if "score_cache" in k]
     assert not leaked, f"non-persistent buffer leaked into the adapter file: {leaked}"
+
+
+def test_off_the_writer_the_state_joins_every_gather_and_keeps_nothing(monkeypatch):
+    """A resolve per tensor is a mesh collective; a host copy per local rank is what ``retain`` saves."""
+    peft_model = get_peft_model(_Tiny(), LoraConfig(target_modules=["attn"], modules_to_save=["gate"], r=4))
+    gathers = {"retained": 0, "dropped": 0}
+    real_resolve = dtensor_mod.full_cpu_tensor
+
+    def resolve(tensor):
+        gathers["retained"] += 1
+        return real_resolve(tensor)
+
+    def materialize(tensor):
+        gathers["dropped"] += 1
+        return tensor
+
+    monkeypatch.setattr(dtensor_mod, "full_cpu_tensor", resolve)
+    monkeypatch.setattr(dtensor_mod, "materialize_dtensor", materialize)
+    assert gather_adapter_state(peft_model)
+    assert gather_adapter_state(peft_model, retain=False) == {}
+    assert gathers["retained"] == gathers["dropped"] > 0
+
+
+def test_a_failing_peft_lookup_reaches_the_peers_through_a_join(monkeypatch):
+    """Only the writer runs the lookup: a bare raise there strands the others in the save's next collective."""
+    peft_model = get_peft_model(_Tiny(), LoraConfig(target_modules=["attn"], modules_to_save=["gate"], r=4))
+    joined = []
+    monkeypatch.setattr(consensus_mod, "reject_across_ranks", lambda reason, *a, **k: joined.append(reason))
+
+    def missing_key(*_args, **_kwargs):
+        raise KeyError("gate.modules_to_save.default.bias")
+
+    monkeypatch.setattr(adapters_mod, "get_peft_model_state_dict", missing_key)
+    gather_adapter_state(peft_model)
+    assert joined == ["KeyError: 'gate.modules_to_save.default.bias'"]
+    gather_adapter_state(peft_model, retain=False)
+    assert joined[-1] is None, "a peer enters the same join"
 
 
 def test_adapter_cast_keeps_balancing_tensors_at_trained_dtype():

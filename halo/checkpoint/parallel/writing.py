@@ -18,7 +18,6 @@ from halo.checkpoint.writing import (
     StreamingShardWriter,
     is_tie_reconcile_key,
     reconcile_tie_word_embeddings,
-    save_dtype_caster,
 )
 from halo.distributed.tensor_parallel.plain_params import iter_hand_sliced_full
 from halo.models.attention.gpt_oss_sinks import neutralized_gpt_oss_sinks
@@ -75,24 +74,19 @@ def chunked_saveable_tensors(
         yield gather_full_tensors(group if fold is None else ((name, fold(t)) for name, t in group), retain=retain)
 
 
-def gather_hand_sliced_params(
-    model: nn.Module,
-    state_dict: dict[str, torch.Tensor],
-    retain: bool = True,
-    keep_live_dtype: bool = False,
-) -> None:
-    """COLLECTIVE over the TP group: write hand-sliced TP params into ``state_dict`` as full CPU tensors;
-    ``retain=False`` joins every gather but writes nothing. Cast through :func:`save_dtype_caster`, since a blanket
-    cast would push a pinned hand-sliced tensor down to bf16 while its gathered twin kept the trained dtype."""
-    cast = save_dtype_caster(model, keep_live_dtype=keep_live_dtype)
+def gather_hand_sliced_params(model: nn.Module, *, retain: bool) -> dict[str, torch.Tensor]:
+    """COLLECTIVE over the TP group: the hand-sliced TP params as full CPU tensors at their live dtype; ``retain=False``
+    joins every gather and keeps nothing."""
+    state_dict: dict[str, torch.Tensor] = {}
     gathered_count = 0
     for name, full_tensor in iter_hand_sliced_full(model):
         if retain:
-            state_dict[name] = cast(name, full_tensor.cpu())
+            state_dict[name] = full_tensor.cpu()
         gathered_count += 1
 
     if gathered_count > 0 and is_global_main_process():
         logger.info(f"All-gathered {gathered_count} TP-sharded non-DTensor params")
+    return state_dict
 
 
 def stream_gathered_checkpoint(

@@ -93,11 +93,10 @@ def _resolve(requested, reset_sinks, train_sinks, init_from_scratch, context_par
     pc = make_parallelism_config(world_size=2, gpus_per_node=2, cp_size=2 if context_parallel else 1)
     with (
         patch.object(model_loading, "configure_float32_matmul_precision"),
-        patch.object(model_loading, "apply_remote_code_compat_shims"),
         patch.object(
             model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
         ),
-        patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(model_loading, "resolve_build_config", lambda *a, **k: config),
         patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=lambda *a, **k: MagicMock())),
         patch.object(model_loading, "preferred_flash_impl", lambda **kwargs: "flash_attention_2"),
         patch.object(model_loading, "patch_flex_attention_compile"),

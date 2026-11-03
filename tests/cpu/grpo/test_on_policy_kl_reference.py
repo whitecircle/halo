@@ -171,7 +171,6 @@ def test_a_run_that_holds_no_reference_loads_none(beta, peft_config):
     with stub_frozen_loader() as caps:
         assert _load_reference(BASE, beta=beta, peft_config=peft_config) is None
     caps.auto_load.assert_not_called()
-    caps.vlm_load.assert_not_called()
 
 
 def test_a_reference_trl_asks_for_with_none_passed_is_refused(tmp_path, base_dir):

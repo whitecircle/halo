@@ -37,6 +37,7 @@ from halo.models.config_access import text_config
 from halo.models.context_window import bounded_row_length, is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
 from halo.models.moe.config_fields import has_routed_experts, resolve_router_topk
+from halo.models.moe.family_specs import wraps_experts
 from halo.trainers.dataloaders import uses_dp_sharded_loader
 from tests.common.hub_seed import is_hub_repo
 from tests.common.parallelism import make_parallelism_config
@@ -553,7 +554,7 @@ def test_example_parallelism_fits_the_model_shape(config):
         parallelism,
         model_config,
         sinks_policy=SinksPolicy.NEUTRALIZED,
-        wraps_experts=parallelism.needs_ep_layers and has_routed_experts(model_config),
+        wraps_experts=wraps_experts(model_config, ep_layers_requested=parallelism.needs_ep_layers),
     )
 
 

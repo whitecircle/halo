@@ -15,8 +15,9 @@ from unittest.mock import patch
 import pytest
 import torch
 from torch.distributed.tensor import DTensor
-from transformers import AutoModelForCausalLM, AutoModelForImageTextToText
+from transformers import AutoConfig, AutoModelForCausalLM, AutoModelForImageTextToText
 from transformers.distributed.tensor_parallel import apply_tensor_parallelism
+from transformers.models.mixtral import MixtralConfig
 from transformers.models.qwen3 import Qwen3Config
 from transformers.models.qwen3_moe import Qwen3MoeConfig
 from transformers.models.qwen3_vl import Qwen3VLConfig
@@ -31,8 +32,8 @@ from halo.model_loading.dtype import resolve_load_dtype
 from halo.model_loading.lazy_safetensors.meta_shell import instantiate_on_meta
 from halo.model_loading.parallel import load_rules, whole_model
 from halo.model_loading.parallel import loader as model_loading
+from halo.model_loading.parallel import pp as pp_loading
 from halo.model_loading.parallel import tp as tp_loading
-from halo.model_loading.parallel.cp import load_cp_model
 from halo.model_loading.parallel.ep import load_ep_model_lazy
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.model_loading.parallel.load_rules import reject_unsupported_model, reject_unsupported_run
@@ -44,10 +45,9 @@ from halo.models.attention.selection import resolve_attn_implementation
 from halo.models.moe.family_specs import GEMMA4, MoEFamilySpec
 from halo.trainers.accelerator import accelerate_manages_ddp
 from tests.common.distributed import fake_process_group_mesh
-from tests.common.models import TINY_QWEN3_MOE_CONFIG
+from tests.common.models import TINY_MIXTRAL_CONFIG, TINY_QWEN3_MOE_CONFIG
 from tests.common.parallelism import make_parallelism_config
 
-_CP_LOADING = "halo.model_loading.parallel.cp"
 _SOURCE = ModelSource("org/x", None, "org/x")
 
 _MULTI_GPU_ENV = {"ACCELERATE_MIXED_PRECISION": "bf16"}
@@ -405,7 +405,7 @@ def test_the_family_gate_is_wired_into_the_loader_right_after_the_config_read():
         patch.object(
             model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
         ),
-        patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(model_loading, "resolve_build_config", lambda *a, **k: config),
         pytest.raises(ValueError, match="fp32_non_ep_params"),
     ):
         load_distributed_model(
@@ -452,7 +452,7 @@ def test_every_load_refusal_fires_before_attention_the_tokenizer_and_the_weight_
         patch.object(
             model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
         ),
-        patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(model_loading, "resolve_build_config", lambda *a, **k: config),
         patch.object(model_loading, "_resolve_run_attention", _reached("the attention resolution")),
         patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=_reached("the tokenizer load"))),
         patch.object(model_loading, "_dispatch_model_loading", _reached("the weight read")),
@@ -469,6 +469,85 @@ def test_qlora_passes_plain_data_parallelism_and_is_refused_under_the_expert_wra
         load_rules.reject_unsupported_load(
             _pc(), torch.bfloat16, quantization_config=_QUANTIZED, init_from_scratch=False, wraps_experts=True
         )
+
+
+def _resolve_run_flag(config, pc, *, quantization_config=None) -> bool:
+    """``wraps_experts`` as the run config resolves it, every refusal off ``config.json`` raised on the way."""
+    with (
+        patch.object(
+            model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
+        ),
+        patch.object(AutoConfig, "from_pretrained", lambda *a, **k: config),
+    ):
+        *_, wraps_experts = model_loading._resolve_run_config(
+            "org/x",
+            None,
+            pc,
+            torch.bfloat16,
+            trust_remote_code=False,
+            model_config_overrides=None,
+            sinks_policy=SinksPolicy.NEUTRALIZED,
+            quantization_config=quantization_config,
+            init_from_scratch=False,
+            model_class=None,
+            text_only_model=False,
+        )
+    return wraps_experts
+
+
+@pytest.mark.parametrize(
+    "launch_env", [{}, _MULTI_GPU_ENV, _FSDP_ENV], ids=["torchrun", "accelerate", "accelerate-fsdp"]
+)
+def test_a_moe_with_no_ep_layer_takes_qlora_under_any_launcher(launch_env):
+    """Its family has no EP layer to swap in, so the refusals of the expert wrappers do not apply to it."""
+    with patch.dict(os.environ, _env(launch_env), clear=True):
+        assert not _resolve_run_flag(MixtralConfig(**TINY_MIXTRAL_CONFIG), _pc(), quantization_config=_QUANTIZED)
+
+
+def test_a_moe_with_an_ep_layer_is_refused_qlora_and_accelerate_through_the_same_path():
+    config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
+    with patch.dict(os.environ, _env({}), clear=True):
+        assert _resolve_run_flag(config, _pc())
+        with pytest.raises(ValueError, match="grouped-GEMM MoE loaders"):
+            _resolve_run_flag(config, _pc(), quantization_config=_QUANTIZED)
+    with patch.dict(os.environ, _env(_MULTI_GPU_ENV), clear=True):
+        with pytest.raises(ValueError, match=r"Grouped GEMM for MoE experts .* require 'torchrun'"):
+            _resolve_run_flag(config, _pc())
+
+
+@pytest.mark.parametrize(
+    ("config", "pc_fields", "has_ep_config"),
+    [
+        (MixtralConfig(**TINY_MIXTRAL_CONFIG), {"ep_size": 2}, True),
+        (MixtralConfig(**TINY_MIXTRAL_CONFIG), {}, False),
+        (Qwen3Config(), {"ep_size": 2}, False),
+    ],
+    ids=["ep-on-a-moe-with-no-ep-layer", "grouped-gemm-on-a-moe-with-no-ep-layer", "ep-on-a-dense-model"],
+)
+def test_a_pp_stage_builds_an_ep_config_for_apply_ep_layers_to_refuse_it(config, pc_fields, has_ep_config):
+    """The stage load is the one rung whose EP layers hang off the config: without one, EP on a MoE no EP layer wraps
+    would train replicated experts instead of raising."""
+    pc = make_parallelism_config(world_size=4, gpus_per_node=2, pp_size=2, **pc_fields)
+    stage_kwargs = {}
+
+    def _stage(*args, **kwargs):
+        stage_kwargs.update(kwargs)
+
+    with (
+        patch.object(pp_loading, "agree_lazy_load", lambda *a, **k: True),
+        patch.object(pp_loading, "timed_global_load", lambda _mode, _method, load: load()),
+        patch.object(pp_loading, "_load_stage_lazy", _stage),
+        patch.object(ParallelismConfig, "ep_config", lambda self: "ep-config"),
+    ):
+        pp_loading.load_pp_stage_model(
+            _SOURCE,
+            pc,
+            AutoModelForCausalLM,
+            {"config": config},
+            preserve_checkpoint_precision=False,
+            wraps_experts=False,
+        )
+    assert stage_kwargs["ep_config"] == ("ep-config" if has_ep_config else None)
 
 
 def test_scratch_and_lowp_pass_where_each_is_supported():
@@ -507,50 +586,6 @@ def test_the_run_dtype_reaches_transformers_under_its_own_key(tp_materialized_mo
     assert passed["dtype"] is torch.bfloat16
     assert "torch_dtype" not in passed
     assert common["dtype"] is torch.bfloat16, "the caller's dict is shared with the other loaders"
-
-
-def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
-    """An optional config with an unconditional install branch would pass the raw request, training GPT-OSS with
-    live sinks on a silently different kernel."""
-    seen = {}
-
-    def fake_load_whole_model(model_class, source, pc, **kwargs):
-        seen.update(kwargs)
-        return torch.nn.Linear(2, 2)
-
-    pc = SimpleNamespace(
-        cp_config=lambda: SimpleNamespace(cp_size=2), max_concurrent_loading=None, fp32_non_ep_params=False
-    )
-    config = Qwen3Config(num_hidden_layers=1, hidden_size=8, intermediate_size=8, num_attention_heads=2)
-    with (
-        patch(f"{_CP_LOADING}.load_whole_model", fake_load_whole_model),
-        patch(f"{_CP_LOADING}.UlyssesModel", lambda model, cp_config: model),
-        patch(
-            "halo.models.attention.selection.select_supported_attn_implementation", return_value="sdpa"
-        ) as validator,
-    ):
-        with pytest.raises(KeyError, match="config"):
-            load_cp_model(
-                _SOURCE,
-                pc,
-                AutoModelForCausalLM,
-                {"attn_implementation": "flash_attention_2"},
-                preserve_checkpoint_precision=False,
-                wraps_experts=False,
-            )
-        load_cp_model(
-            _SOURCE,
-            pc,
-            AutoModelForCausalLM,
-            {"config": config, "attn_implementation": "flash_attention_2"},
-            preserve_checkpoint_precision=False,
-            wraps_experts=False,
-        )
-
-    validator.assert_called_once_with(config, "flash_attention_2")
-    assert seen["attn_implementation"] == "sdpa", (
-        f"the loader forwarded {seen.get('attn_implementation')!r}, not the validator's verdict"
-    )
 
 
 def test_every_loader_names_the_run_dtype_dtype():

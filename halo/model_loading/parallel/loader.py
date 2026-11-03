@@ -20,6 +20,7 @@ from halo.model_loading.model_preparation import (
     apply_family_patches,
     apply_run_model_policies,
     resolve_auto_model_class,
+    resolve_build_config,
 )
 from halo.model_loading.parallel.cp import load_cp_model, load_ep_cp_model
 from halo.model_loading.parallel.ep import load_ep_model
@@ -40,7 +41,6 @@ from halo.model_loading.parallel.tp import (
     uses_attention_only_tp,
 )
 from halo.model_loading.parallel.whole_model import cast_loaded_parameters, load_whole_model, warm_attention_kernels
-from halo.model_loading.remote_code import apply_remote_code_compat_shims
 from halo.models.attention.backend_setup import patch_flex_attention_compile
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.models.attention.selection import (
@@ -50,9 +50,8 @@ from halo.models.attention.selection import (
     select_supported_attn_implementation,
     supports_fa4_backward,
 )
-from halo.models.config_access import apply_config_overrides, drop_toolkit_stamps, text_config
-from halo.models.moe.config_fields import has_routed_experts
-from halo.runtime.consensus import reject_across_ranks
+from halo.models.config_access import apply_config_overrides, text_config
+from halo.models.moe import family_specs
 from halo.runtime.load_coordination import joined_node_load
 from halo.runtime.ranks import get_local_rank, is_global_main_process
 
@@ -91,7 +90,6 @@ def _resolve_run_attention(
     dtype: torch.dtype,
     *,
     sinks_policy: SinksPolicy,
-    reset_sinks: bool,
     init_from_scratch: bool,
 ) -> str:
     """The attention implementation the model is built with: resolved against this model and dtype,
@@ -134,12 +132,12 @@ def _resolve_run_attention(
                 f"Context Parallelism."
             )
 
-    # EP recompiles deadlock with NCCL all-to-all; FSDP2 + trainable sinks NaN in the compiled backward.
+    # EP recompiles deadlock with NCCL all-to-all; FSDP2 + GptOss sinks NaN in the compiled backward.
     if attn_implementation == "flex_attention":
         if pc.has_ep_group:
             patch_flex_attention_compile("EP recompilation deadlock avoidance")
-        elif uses_gpt_oss_sinks(model_config) and reset_sinks:
-            patch_flex_attention_compile("FSDP2 + trainable attention sinks NaN gradient fix")
+        elif uses_gpt_oss_sinks(model_config) and sinks_policy is SinksPolicy.NEUTRALIZED:
+            patch_flex_attention_compile("FSDP2 + GptOss sinks NaN gradient fix")
 
     # Gemma 4 builds `sdpa_flex_sliding` for `sdpa`, whose FlexAttention graphs warm_attention_kernels
     # compiles on every rank before training.
@@ -160,9 +158,6 @@ def _build_random_init(model_class, pc: ParallelismConfig, from_pretrained_kwarg
         cast_loaded_parameters(
             model, from_pretrained_kwargs.get("dtype"), keep_fp32=pc.fp32_non_ep_params, ep_wrapped=wraps_experts
         )
-    # A random init has no checkpoint masters to restore; the join stays in the load's collective
-    # sequence, as after a checkpoint load.
-    reject_across_ranks(None, f"FP32-master checkpoint load from {model_class.__name__} config")
     finalize_loaded_model(model)
     return model
 
@@ -298,16 +293,14 @@ def _resolve_run_config(
 ) -> tuple[ModelSource, AutoConfig, type, bool]:
     """COLLECTIVE: the agreed source, the config, its model class and whether EP layers apply, with every refusal
     config.json answers raised before the process groups and the meta shell."""
-    apply_remote_code_compat_shims()
     # Every read below (config, tokenizer, weights) takes this source's revision, so a Hub source loads
     # one agreed commit on every rank, straight from the cache.
     source = resolve_model_source(model_name_or_path, revision, tag="policy")
-    model_config = AutoConfig.from_pretrained(
-        model_name_or_path, trust_remote_code=trust_remote_code, revision=source.revision
+    model_config = resolve_build_config(
+        model_name_or_path, revision=source.revision, trust_remote_code=trust_remote_code
     )
-    drop_toolkit_stamps(model_config)
     apply_config_overrides(model_config, model_config_overrides)
-    wraps_experts = pc.needs_ep_layers and has_routed_experts(model_config)
+    wraps_experts = family_specs.wraps_experts(model_config, ep_layers_requested=pc.needs_ep_layers)
     reject_unsupported_model(pc, model_config, sinks_policy=sinks_policy, wraps_experts=wraps_experts)
     reject_unsupported_load(
         pc,
@@ -387,7 +380,6 @@ def load_distributed_model(
         attn_implementation,
         dtype,
         sinks_policy=sinks_policy,
-        reset_sinks=reset_sinks,
         init_from_scratch=init_from_scratch,
     )
     # After the family patches, which stamp the config of a model that builds an external table.

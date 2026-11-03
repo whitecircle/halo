@@ -60,15 +60,9 @@ def resume_numel_coverage(model, checkpoint_keys: set[str]) -> tuple[bool, set[s
     DTensor shard counts in full. Reads named_parameters/named_buffers, as ``state_dict()`` reshards FSDP2 on the
     calling rank."""
     model = unwrap_framework_wrappers(model)
-    non_persistent = {
-        f"{prefix}.{name}" if prefix else name
-        for prefix, module in model.named_modules()
-        for name in module._non_persistent_buffers_set
-    }
     live = {
         name: tensor.shape.numel()
-        for name, tensor in itertools.chain(model.named_parameters(), model.named_buffers())
-        if name not in non_persistent
+        for name, tensor in itertools.chain(model.named_parameters(), persistent_buffers(model))
     }
     matched_numel = sum(numel for name, numel in live.items() if name in checkpoint_keys)
     total_numel = sum(live.values())
@@ -105,29 +99,23 @@ def _resume_onto_constructed_model(
     reload. A marked merged checkpoint resumes its adapters onto a model built from the BASE; any other checkpoint
     shipping base weights must be what the model was built from. Rank 0 probes all inputs in one broadcast, so refusals
     fire everywhere."""
-    probe = (False, False, None, False)
-    if is_global_main_process():
-        read_failed, ships_base_weights = False, False
-        try:
-            ships_base_weights = bool(resolve_checkpoint_weights(checkpoint).key_set()) or is_ep_sharded_checkpoint(
-                checkpoint
-            )
-        except Exception as e:
-            read_failed = True
-            logger.warning(f"Unreadable checkpoint key set at {checkpoint}: {e}")
-        probe = (
+
+    def probe() -> tuple[bool, bool, str | None]:
+        ships_base_weights = bool(resolve_checkpoint_weights(checkpoint).key_set()) or is_ep_sharded_checkpoint(
+            checkpoint
+        )
+        return (
             built_from_checkpoint(weights_read_from(model), checkpoint),
             ships_base_weights,
             resume_adapter_dir(checkpoint),
-            read_failed,
         )
-    built_from_ckpt, ships_base_weights, merged_resume_adapter, read_failed = broadcast_from_rank0(probe)
-    if read_failed:
-        # Degrading to no base weights would take the adapter-only path and silently continue on base weights.
-        raise RuntimeError(
-            f"Unreadable checkpoint key set at {checkpoint} (torn index or safetensors header) — cannot decide "
-            "whether it ships base weights. Repair or re-save the checkpoint, then resume."
-        )
+
+    # A failed read degrading to no base weights would take the adapter-only path and silently continue on base weights.
+    built_from_ckpt, ships_base_weights, merged_resume_adapter = rank0_verdict(
+        probe,
+        f"Reading the key set at {checkpoint}, which decides whether it ships base weights (a torn index or safetensors "
+        "header: repair or re-save the checkpoint, then resume)",
+    )
     if ships_base_weights and for_best_model:
         raise ValueError(
             f"load_best_model_at_end cannot reload {checkpoint} under EP/CP full fine-tune — base weights only load "

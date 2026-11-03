@@ -33,7 +33,6 @@ def stub_frozen_loader():
         patch.object(frozen_loader, "resolve_build_config") as build_config,
         patch.object(frozen_loader, "resolve_attn_implementation", fake_resolve),
         patch.object(frozen_loader, "auto_load_model") as auto_load,
-        patch.object(frozen_loader, "from_pretrained_verified") as vlm_load,
         patch.object(frozen_loader, "resolve_model_source") as fetch_scope,
         # Where they are defined: the loader reaches them through ``apply_sinks_policy``, keeping the assertion
         # end-to-end.
@@ -51,17 +50,15 @@ def stub_frozen_loader():
             resolver_calls=resolver_calls,
             build_config=build_config,
             auto_load=auto_load,
-            vlm_load=vlm_load,
             fetch_scope=fetch_scope,
             reset_sinks=reset_sinks,
             freeze_sinks=freeze_sinks,
         )
 
 
-def captured_load(caps, *, is_vlm: bool = False):
-    """The single weight fetch recorded, with its config fetch and resolver call; ``is_vlm`` picks the expected
-    loader."""
-    loader_mock = caps.vlm_load if is_vlm else caps.auto_load
+def captured_load(caps):
+    """The single weight fetch recorded, with its config fetch and resolver call."""
+    loader_mock = caps.auto_load
     assert loader_mock.call_count == 1, f"expected exactly one frozen weight fetch, got {loader_mock.call_count}"
     assert len(caps.resolver_calls) == 1, caps.resolver_calls
     return types.SimpleNamespace(

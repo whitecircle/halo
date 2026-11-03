@@ -72,11 +72,10 @@ def _load_policy(config, seam, seen) -> None:
 
     with (
         patch.object(model_loading, "configure_float32_matmul_precision"),
-        patch.object(model_loading, "apply_remote_code_compat_shims"),
         patch.object(
             model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
         ),
-        patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(model_loading, "resolve_build_config", lambda *a, **k: config),
         patch.object(model_loading, "resolve_attn_implementation", lambda *a, **k: "sdpa"),
         patch.object(model_loading, "apply_family_patches", seam),
         patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=lambda *a, **k: MagicMock())),

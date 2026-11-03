@@ -25,6 +25,7 @@ from halo.checkpoint.format import (
     ADAPTER_CONFIG_FILE,
     ADAPTER_SAFETENSORS_FILE,
     RESUME_ADAPTER_DIR,
+    SAFETENSORS_INDEX_FILE,
     SAFETENSORS_WEIGHTS_FILE,
 )
 from halo.checkpoint.parallel.adapters import restore_adapters, save_resume_adapter
@@ -402,6 +403,20 @@ def test_an_unmarked_merged_checkpoint_refuses_an_expert_only_adapter_run(tmp_pa
 
     with pytest.raises(ValueError, match="without its resume adapter"):
         load_resume_weights(_load_context(model), checkpoint, model)
+
+
+def test_a_torn_key_set_refuses_the_resume(tmp_path, monkeypatch):
+    """A failed read taken for no base weights would go the adapter-only way and continue on the base weights."""
+    checkpoint = _merged_checkpoint(tmp_path / "checkpoint-3", marked=False)
+    with open(os.path.join(checkpoint, SAFETENSORS_INDEX_FILE), "w") as fh:
+        fh.write('{"weight_map": {"a"')
+    restored = _Recorder(result=None)
+    monkeypatch.setattr(loader_mod, "restore_adapters", restored)
+    model = _built_from(nn.Linear(4, 4), BASE)
+
+    with pytest.raises(RuntimeError, match="JSONDecodeError"):
+        load_resume_weights(_load_context(model), checkpoint, model)
+    assert not restored.calls
 
 
 def test_an_unmarked_full_checkpoint_still_resumes_a_full_fine_tune(tmp_path):

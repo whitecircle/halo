@@ -53,7 +53,7 @@ def test_expert_count_not_divisible_by_ep_size_is_rejected():
 @pytest.mark.parametrize("flag", ["ep_fp32_router", "ep_fp32_experts"])
 @pytest.mark.parametrize(
     ("model_type", "wraps_experts"),
-    [("qwen3", False), ("gpt_oss", False), ("mixtral", True)],
+    [("qwen3", False), ("gpt_oss", False), ("mixtral", False)],
     ids=["dense", "ep_layers_off", "family_without_an_ep_layer"],
 )
 def test_an_fp32_ep_master_needs_an_ep_layer(flag, model_type, wraps_experts):

@@ -96,7 +96,7 @@ def _ep_gathered_chunks(
     for name, buf in gather_full_tensors(buffers, retain=retain).items():
         state.setdefault(name, buf)
     # EP+TP: attention sinks are TP-sharded as plain tensors, needing this explicit mesh gather.
-    gather_hand_sliced_params(model, state, retain=retain, keep_live_dtype=True)
+    state.update(gather_hand_sliced_params(model, retain=retain))
     if retain:
         # GptOss FA2 fine-tuning sets self_attn.sinks=None; the checkpoint still needs them.
         for name, sink in neutralized_gpt_oss_sinks(model).items():
@@ -301,7 +301,8 @@ def _rank_shard(model: torch.nn.Module, ep_layers, rank: int, *, keep_live_dtype
     shard.update(_resolve_and_cast(replicated, cast, retain=rank == 0))
     # The walk above wrote TP-sharded plain tensors (GptOss sinks) as rank 0's head slice under the
     # full-tensor key, a truncated sinks the merge cannot complete.
-    gather_hand_sliced_params(model, shard, retain=rank == 0, keep_live_dtype=keep_live_dtype)
+    for name, full_tensor in gather_hand_sliced_params(model, retain=rank == 0).items():
+        shard[name] = cast(name, full_tensor)
     if rank == 0:
         # Persistent buffers only, so rotary caches stay out; the sinks GptOss FA2 dropped, neutralized.
         buffers = ((name, buf.detach().cpu()) for name, buf in persistent_buffers(model))

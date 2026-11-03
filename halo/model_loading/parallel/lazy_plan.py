@@ -12,7 +12,7 @@ from enum import Enum, auto
 import torch
 import torch.nn as nn
 
-from halo.checkpoint.reading import read_checkpoint_config, resolve_checkpoint_weights
+from halo.checkpoint.reading import has_whole_model_weight_file, read_checkpoint_config, resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.dtype import resolve_load_dtype
@@ -20,9 +20,11 @@ from halo.model_loading.lazy_safetensors.conversion import Concat
 from halo.model_loading.lazy_safetensors.conversion_selection import family_key_mapping
 from halo.model_loading.lazy_safetensors.materialization import WeightAction, WeightPlan
 from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError
+from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
 from halo.models.moe.config_fields import require_expert_count
 from halo.models.moe.expert_layout import HF_FUSED_EXPERT_KEYS
 from halo.models.moe.family_specs import experts_container_attrs, find_moe_family_spec, per_expert_fusion_map
+from halo.runtime.collectives import broadcast_from_rank0
 from halo.runtime.filesystem import fs_aware_main_first
 from halo.runtime.ranks import get_global_rank
 
@@ -74,6 +76,16 @@ def is_lazy_loadable(model_path: str) -> bool:
     except (FileNotFoundError, KeyError, OSError, ValueError):
         return True
     return not any(_NESTED_EXPERT_KEY_PATTERN.search(k) for k in weight_map)
+
+
+def agree_lazy_load(source: ModelSource) -> bool:
+    """COLLECTIVE: refuse an EP-sharded ``source``, then return whether every rank streams it lazily. Rank 0 decides,
+    as the branches enter different collectives and a per-rank probe of a partially populated cache would split
+    them."""
+    reject_ep_sharded_checkpoint(source)
+    return broadcast_from_rank0(
+        has_whole_model_weight_file(source.local_dir, safetensors_only=True) and is_lazy_loadable(source.local_dir)
+    )
 
 
 class WeightPlanner:

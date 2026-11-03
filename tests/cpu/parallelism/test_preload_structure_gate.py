@@ -86,7 +86,7 @@ def _gate_outcome(name: str, tmp_path, host: str = "hopper", **pc_fields) -> str
         patch.object(
             model_loading, "resolve_model_source", lambda *_a, **_k: ModelSource("org/x", None, str(tmp_path))
         ),
-        patch.object(model_loading, "AutoConfig", SimpleNamespace(from_pretrained=lambda *a, **k: config)),
+        patch.object(model_loading, "resolve_build_config", lambda *a, **k: config),
         patch.object(model_loading, "AutoTokenizer", SimpleNamespace(from_pretrained=_tokenizer_load)),
         patch.object(model_loading, "_dispatch_model_loading", _weight_read),
         # They install process-wide and would outlive this test; the gate reads only the label.

@@ -330,8 +330,8 @@ def test_vlm_load_pins_the_image_text_class_and_placement():
             download_tag="aux",
             trust_remote_code=False,
         )
-    captured = captured_load(caps, is_vlm=True)
-    assert captured.load_positional[0] is AutoModelForImageTextToText
+    captured = captured_load(caps)
+    assert captured.load["model_class"] is AutoModelForImageTextToText
     assert captured.load["device_map"] == {"": 2}
     captured.fetch_scope.assert_called_once_with(AUX_MODEL, None, tag="aux")
 
@@ -344,7 +344,7 @@ def test_the_frozen_load_keeps_the_task_head(is_vlm):
         load_frozen_auxiliary_model(
             AUX_MODEL, dtype=torch.bfloat16, is_vlm=is_vlm, trust_remote_code=False, download_tag=None
         )
-    assert captured_load(caps, is_vlm=is_vlm).load["excuse_task_head"] is False
+    assert captured_load(caps).load["excuse_task_head"] is False
 
 
 def test_the_frozen_load_applies_the_remote_code_shims_before_the_config_fetch():

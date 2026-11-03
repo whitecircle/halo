@@ -125,6 +125,13 @@ def _write_wrapper_state(
     return guard.run(writer.close) or ({}, 0)
 
 
+def _merge_writer_fragments(gathered: list[list[tuple[dict[str, str], int]] | None]) -> tuple[dict[str, str], int]:
+    """Each writer's stage and wrapper fragments stay apart, as every node's save rank writes the same-named wrapper
+    parts beside its own stage's and :func:`merge_shard_index` counts a fragment only when none of its files were
+    seen."""
+    return merge_shard_index([fragment for fragments in gathered if fragments for fragment in fragments])
+
+
 def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
     """COLLECTIVE: one safetensors shard per stage under hub names plus a merged index, loadable by plain
     ``from_pretrained``. The index has HF metadata only, since the repo ``format`` marker means per-rank partial
@@ -140,18 +147,16 @@ def save_pp_checkpoint(ctx: CheckpointContext, output_dir: str) -> None:
 
     # Writes interleave with the gathers below, so a raise would strand the other stage ranks until the watchdog fires.
     guard = DeferredRankFailure(f"PP checkpoint write to {output_dir}")
-    stage_weight_map, shard_bytes = _write_stage_tensors(ctx, output_dir, guard, is_writer=is_writer)
+    fragments = [_write_stage_tensors(ctx, output_dir, guard, is_writer=is_writer)]
     if ctx.is_save_rank and ctx.pp_wrapper_state:
-        wrapper_map, wrapper_bytes = _write_wrapper_state(ctx, output_dir, guard)
-        stage_weight_map = {**stage_weight_map, **wrapper_map}
-        shard_bytes += wrapper_bytes
+        fragments.append(_write_wrapper_state(ctx, output_dir, guard))
     # A failed write stops every rank here, before an index is built over a missing or truncated shard; over the
     # store, since the peers wait out each stage writer's last part.
     guard.store_reject("checkpoint/pp_stages")
 
     # A global parameter lives on exactly one stage, so the merge's collision check is a real gate here.
     weight_map, total_size = combine_across_ranks(
-        (stage_weight_map, shard_bytes) if is_writer else None, merge_shard_index, what="the checkpoint index"
+        fragments if is_writer else None, _merge_writer_fragments, what="the checkpoint index"
     )
 
     with barrier_on_exit(f"Writing the PP checkpoint index to {output_dir}"):

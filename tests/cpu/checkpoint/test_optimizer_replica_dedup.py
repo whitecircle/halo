@@ -426,6 +426,15 @@ def test_a_run_with_frozen_ep_layers_resumes_from_per_node_copies(resume_runs):
 class _StubParallelismConfig:
     def __init__(self, num_ep_groups):
         self.ep_size = 2
+        self.expert_tp_size = 1
+        self.cp_size = 1
+        self.tp_size = 1
+        self.pp_size = 1
+        self.fsdp_shard_ep1_experts = True
+        self.ep_scope = "node"
+        self.use_grouped_gemm = True
+        self.use_hsdp = False
+        self.nvlink_domain_size = 8
         self.experts_fsdp_managed = False  # ep2: the experts are FSDP-ignored and replica-duplicated.
         self.num_ep_groups = num_ep_groups
 

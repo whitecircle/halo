@@ -194,7 +194,6 @@ def test_the_cp_flex_fallback_labels_the_kernel_ulysses_runs(hopper, fa4_trains,
             "flex_attention",
             torch.bfloat16,
             sinks_policy=SinksPolicy.NEUTRALIZED,
-            reset_sinks=True,
             init_from_scratch=False,
         )
     assert resolved == label
@@ -213,7 +212,6 @@ def _resolve_on_blackwell(config, requested, dtype=torch.bfloat16, **pc_fields) 
             requested,
             dtype,
             sinks_policy=SinksPolicy.NEUTRALIZED,
-            reset_sinks=True,
             init_from_scratch=False,
         )
 

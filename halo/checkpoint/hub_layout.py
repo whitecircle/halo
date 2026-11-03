@@ -4,7 +4,6 @@ load conversions only inside ``save_pretrained``, which the gathered, TP, PP and
 from __future__ import annotations
 
 import itertools
-import logging
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from copy import deepcopy
@@ -16,8 +15,6 @@ from transformers.core_model_loading import PrefixChange, WeightConverter, Weigh
 
 from halo.model_loading.checkpoint_keys import build_key_plan, is_expert_bank_merge, resolve_model_conversions
 from halo.models.param_roles import persistent_buffers
-
-logger = logging.getLogger(__name__)
 
 
 def _has_child_at_prefix(model: torch.nn.Module, dotted_prefix: str) -> bool:
@@ -95,17 +92,8 @@ def revert_conversions(model: torch.nn.Module, state_dict: dict, conversions: li
 
 def revert_to_load_layout(model: torch.nn.Module, state_dict: dict) -> dict:
     """Map a module-layout state dict back to its load layout, or a MoE save with no EP layer emits fused keys
-    per-expert engines refuse. A failure warns: peers may be past their barrier, and the dict loads after
-    ``unfuse_moe_experts.py``."""
-    try:
-        return revert_conversions(model, state_dict, conversions_to_revert(model))
-    except Exception as e:
-        logger.warning(
-            f"revert_weight_conversion failed ({e}); writing the module-layout state "
-            f"dict instead — run scripts/after_training/unfuse_moe_experts.py before "
-            f"serving this checkpoint on a per-expert engine."
-        )
-        return state_dict
+    per-expert engines refuse."""
+    return revert_conversions(model, state_dict, conversions_to_revert(model))
 
 
 def reversed_export_transforms(conversions: list) -> tuple[list[WeightRenaming], list[WeightConverter]]:

@@ -24,12 +24,11 @@ from halo.model_loading.parallel.lazy_plan import (
     FUSED_EXPERT_KEY_PATTERN,
     ExpertKeyLayout,
     LazyLoadPlan,
-    is_lazy_loadable,
+    agree_lazy_load,
     lazy_load_prologue,
 )
-from halo.model_loading.parallel.model_source import ModelSource, agree_lazy_load, reject_ep_sharded_checkpoint
+from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint
 from halo.model_loading.parallel.whole_model import load_whole_model
-from halo.models.attention.selection import reselect_attn_kwarg
 from halo.models.moe.config_fields import require_expert_count
 from halo.runtime.load_coordination import timed_global_load
 from halo.runtime.ranks import get_global_rank, is_global_main_process
@@ -66,7 +65,6 @@ def load_ep_model_lazy(
     model_class = model_class or AutoModelForCausalLM
     rank = get_global_rank()
     logger.info(f"[Rank {rank}] EP lazy loader: {model_name_or_path}")
-    reselect_attn_kwarg(model_kwargs, config)
 
     base = lazy_load_prologue(
         model_name_or_path,
@@ -139,7 +137,6 @@ def _load_ep_model_huggingface(
     if ep_config.num_experts is None:
         ep_config.finalize_expert_assignment(num_experts)
     kwargs["dtype"] = resolve_load_dtype(kwargs.get("dtype"), config)
-    reselect_attn_kwarg(kwargs, config)
     model = load_whole_model(
         model_class,
         source,
@@ -177,7 +174,7 @@ def load_ep_model(
                 "(higher CPU RAM than lazy safetensors path)"
             )
         method = "huggingface_ep_lazy_disabled"
-    elif agree_lazy_load(source, lazy_requested=True, layout_supported=is_lazy_loadable):
+    elif agree_lazy_load(source):
         if main:
             logger.info(f"[Rank 0] Using lazy safetensors loader from {source.local_dir}")
         return timed_global_load(

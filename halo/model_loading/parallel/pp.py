@@ -31,12 +31,13 @@ from halo.model_loading.parallel.lazy_load import load_planned_weights
 from halo.model_loading.parallel.lazy_plan import (
     ExpertKeyLayout,
     LazyLoadPlan,
-    is_lazy_loadable,
+    agree_lazy_load,
     lazy_load_prologue,
 )
-from halo.model_loading.parallel.model_source import ModelSource, agree_lazy_load
+from halo.model_loading.parallel.model_source import ModelSource
 from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, tie_flag_configs
 from halo.models.module_tree import split_layer_path
+from halo.models.moe.config_fields import has_routed_experts
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.load_coordination import timed_global_load
 from halo.runtime.ranks import get_global_rank
@@ -332,9 +333,11 @@ def load_pp_stage_model(
 ) -> nn.Module:
     """COLLECTIVE: this pipeline stage's decoder layers only, streamed per rank from safetensors, MoE stages
     already EP- or grouped-GEMM-wrapped (``wraps_experts``); ``build_pipeline_stage`` finishes the split."""
-    # Before the lazy gate: ep_config() issues new_group on every rank, which no per-rank file probe may precede.
-    ep_config = pc.ep_config() if wraps_experts else None
-    if not agree_lazy_load(source, lazy_requested=True, layout_supported=is_lazy_loadable):
+    # Before the lazy gate: ep_config() issues new_group on every rank, which no per-rank file probe may precede. EP on
+    # a MoE with no EP layer takes it too, for apply_ep_layers' refusal.
+    config = from_pretrained_kwargs["config"]
+    ep_config = pc.ep_config() if wraps_experts or (pc.has_ep_group and has_routed_experts(config)) else None
+    if not agree_lazy_load(source):
         raise ValueError(
             f"Pipeline parallelism needs a safetensors checkpoint the stage-aware loader can read, "
             f"but {source.name!r} has none. Falling back to a whole-model load would make "
@@ -344,9 +347,6 @@ def load_pp_stage_model(
             f"under an extra module (pre-5.14 Zaya checkpoints), in which case the model cannot "
             f"use PP at all (see agent-docs/parallelism/pipeline-parallelism.md)."
         )
-    # No reason left to carry (resolve_model_source verified every rank's directory); the join stays in the
-    # load's collective sequence.
-    reject_across_ranks(None, "Resolving the pipeline stage checkpoint")
     return timed_global_load(
         "PP",
         "pp_stage_lazy",

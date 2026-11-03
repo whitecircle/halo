@@ -244,14 +244,14 @@ def select_supported_attn_implementation(
     model_config, attn_impl: str, sinks_policy: SinksPolicy | None = None, *, dtype: torch.dtype | None = None
 ) -> str:
     """``attn_impl`` or the first fallback the class's flags and the sink matrix accept. A neutralized ``sinks_policy``
-    allows SDPA on a sinks model (the dropped column is 0), a live one never; ``None`` re-validates against the verdict
-    recorded on this config. A float32 ``dtype`` keeps the fallback off FA3 and FA2, which are half-precision only."""
+    allows SDPA on a sinks model (the dropped column is 0), a live one never; ``None`` reads the verdict recorded on this
+    config. A float32 ``dtype`` keeps the fallback off FA3 and FA2, which are half-precision only."""
     has_sinks = uses_gpt_oss_sinks(model_config)
     sinks_reset = None if sinks_policy is None else not sinks_policy.live
     if attn_impl == "sdpa" and has_sinks and sinks_reset:
         install_sdpa_for_reset_sinks(model_config)
 
-    # Recorded per config instance, so nested re-validations see it while a fresh config cannot inherit
+    # Recorded per config instance, so a later check of this config sees it while a fresh config cannot inherit
     # an earlier model's sdpa approval; run-scoped, so no exported config.json carries it.
     if sinks_reset is not None:
         set_config_field_run_scoped(model_config, RESOLVED_SINKS_RESET_ATTR, sinks_reset)
@@ -326,13 +326,6 @@ def select_supported_attn_implementation(
         f"{type(model_config).__name__} accepts none of the attention implementations tried "
         f"({', '.join(candidates)}); set attn_implementation to one this model's config accepts."
     )
-
-
-def reselect_attn_kwarg(model_kwargs: dict, model_config) -> None:
-    """So a family whose ``_supports_*`` flags refuse the policy's choice fails before the load."""
-    attn_impl = model_kwargs.pop("attn_implementation", None)
-    if attn_impl is not None:
-        model_kwargs["attn_implementation"] = select_supported_attn_implementation(model_config, attn_impl)
 
 
 def verify_live_sinks_carried(model) -> None:

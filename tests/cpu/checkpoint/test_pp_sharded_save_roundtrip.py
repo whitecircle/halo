@@ -24,7 +24,7 @@ from halo.checkpoint.hub_layout import export_conversions, revert_conversions
 from halo.checkpoint.parallel.context import CheckpointLoadContext
 from halo.checkpoint.parallel.ep import save_ep_gathered_checkpoint
 from halo.checkpoint.parallel.optimizer import OptimizerShardStore
-from halo.checkpoint.parallel.pp import is_pp_shard_writer, save_pp_checkpoint
+from halo.checkpoint.parallel.pp import _merge_writer_fragments, is_pp_shard_writer, save_pp_checkpoint
 from halo.checkpoint.parallel.resume_weights import load_resume_weights
 from halo.checkpoint.reading import checkpoint_shard_files, is_ep_sharded_checkpoint
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
@@ -541,6 +541,70 @@ def test_pp_save_of_a_text_only_multimodal_wrapper_reloads_as_the_wrapper(tmp_pa
     """Reloads as the composite class with no random-initialized keys, so no reattach step is needed."""
     verdict = str(tmp_path / "verdict.txt")
     run_gloo_ranks(_composite_worker, WORLD_SIZE, str(tmp_path / "ckpt"), verdict)
+    with open(verdict) as fh:
+        result = fh.read()
+    assert result == "PASS", result
+
+
+def test_a_writers_stage_and_wrapper_bytes_count_apart():
+    """Each node's save rank writes the same-named wrapper part, so a writer's one fragment would be skipped whole."""
+    wrapper = ({"model.visual.weight": "model-wrapper-00001.safetensors"}, 7)
+    stages = [
+        ({f"model.layers.{stage}.weight": f"model-pp{stage:05d}-of-00002-00001.safetensors"}, 100)
+        for stage in range(2)
+    ]
+
+    weight_map, total = _merge_writer_fragments([[stages[0], wrapper], None, [stages[1], wrapper], None])
+
+    assert total == 207
+    assert set(weight_map) == {"model.layers.0.weight", "model.layers.1.weight", "model.visual.weight"}
+
+
+def _per_node_wrapper_worker(rank: int, root: str, verdict_path: str) -> None:
+    os.environ["LOCAL_RANK"] = str(rank % GPUS_PER_NODE)
+    config = _parallelism_config()
+    model = _tiny_composite()
+    is_node_writer = rank % GPUS_PER_NODE == 0
+    wrapper_state = stash_wrapper_state(model) if is_node_writer else {}
+    stage = build_pipeline_stage(model, config.pp_rank, PP_SIZE, moe_balancing="none")
+    node_dirs = [os.path.join(root, f"node{node}") for node in range(WORLD_SIZE // GPUS_PER_NODE)]
+    if is_node_writer:
+        os.makedirs(node_dirs[rank // GPUS_PER_NODE])
+    dist.barrier()
+
+    ctx = _context(stage, config)
+    ctx.pp_wrapper_state = wrapper_state
+    save_pp_checkpoint(ctx, node_dirs[rank // GPUS_PER_NODE])
+    dist.barrier()
+
+    if rank != 0:
+        return
+    payload_bytes: dict[str, int] = {}
+    for node_dir in node_dirs:
+        for name in os.listdir(node_dir):
+            if name.endswith(".safetensors"):
+                with safe_open(os.path.join(node_dir, name), framework="pt") as reader:
+                    payload_bytes[name] = sum(reader.get_tensor(key).nbytes for key in reader.keys())  # noqa: SIM118
+    problems = []
+    if sum(name.startswith("model-wrapper-") for name in payload_bytes) != 1:
+        problems.append(f"premise: both nodes write one same-named wrapper part: {sorted(payload_bytes)}")
+    with open(os.path.join(node_dirs[0], "model.safetensors.index.json")) as fh:
+        total_size = json.load(fh)["metadata"]["total_size"]
+    if total_size != sum(payload_bytes.values()):
+        problems.append(f"total_size {total_size} != {sum(payload_bytes.values())} bytes across {payload_bytes}")
+    with open(verdict_path, "w") as fh:
+        fh.write("PASS" if not problems else "FAIL: " + "; ".join(problems))
+
+
+def test_a_per_node_pp_save_of_a_multimodal_wrapper_indexes_every_parts_bytes(tmp_path):
+    verdict = str(tmp_path / "verdict.txt")
+    run_gloo_ranks(
+        _per_node_wrapper_worker,
+        WORLD_SIZE,
+        str(tmp_path),
+        verdict,
+        env={"DIST_OUTPUT_SHARED_FILESYSTEM": "0", "LOCAL_WORLD_SIZE": str(GPUS_PER_NODE)},
+    )
     with open(verdict) as fh:
         result = fh.read()
     assert result == "PASS", result

@@ -7,7 +7,6 @@ import logging
 import os
 import socket
 import traceback
-from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -19,7 +18,6 @@ from transformers import AutoConfig, PretrainedConfig
 from halo.checkpoint.format import SAFETENSORS_INDEX_FILE, index_declares_ep_shards
 from halo.checkpoint.reading import (
     ep_sharded_checkpoint_reason,
-    has_whole_model_weight_file,
     read_checkpoint_index,
     resolve_checkpoint_weights,
 )
@@ -196,18 +194,6 @@ def reject_ep_sharded_checkpoint(source: ModelSource) -> None:
         f"EP checkpoint-format probe of {source.name!r}",
     ):
         raise ValueError(ep_sharded_checkpoint_reason(source.local_dir))
-
-
-def agree_lazy_load(source: ModelSource, *, lazy_requested: bool, layout_supported: Callable[[str], bool]) -> bool:
-    """COLLECTIVE: refuse an EP-sharded ``source``, then return whether every rank streams it lazily. Rank 0 decides,
-    as the branches enter different collectives and a per-rank probe of a partially populated cache would split
-    them."""
-    reject_ep_sharded_checkpoint(source)
-    return broadcast_from_rank0(
-        lazy_requested
-        and has_whole_model_weight_file(source.local_dir, safetensors_only=True)
-        and layout_supported(source.local_dir)
-    )
 
 
 def fetch_checkpoint_config(model_config: ModelArguments, *, tag: str) -> PretrainedConfig:

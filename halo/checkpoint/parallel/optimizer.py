@@ -159,7 +159,7 @@ class OptimizerShardStore:
         disk. Any rank's failure raises on every rank, since the caller rotates the previous checkpoint away after a
         save that returned."""
         ctx = self.ctx
-        max_concurrent = getattr(ctx.parallelism_config, "max_concurrent_loading", None)
+        max_concurrent = ctx.parallelism_config.max_concurrent_loading
         # A rank leaving early while its peers block on the closing barrier() hangs the job.
         try:
             _warn_if_low_host_ram(ctx.optimizer, "the cpu_offload of the shard save", max_concurrent)
@@ -454,7 +454,7 @@ class OptimizerShardStore:
     def _read_local_state(self, checkpoint: str, shard_path: str) -> tuple[object | None, str | None]:
         """COLLECTIVE. This rank's state (own shard plus the replica writer's) and why it could not be read, under the
         node's load throttle, since every follower of a replica group opens the writer's file."""
-        max_concurrent = getattr(self.ctx.parallelism_config, "max_concurrent_loading", None)
+        max_concurrent = self.ctx.parallelism_config.max_concurrent_loading
         _warn_if_low_host_ram(self.ctx.optimizer, f"restoring {os.path.basename(shard_path)}", max_concurrent)
         with joined_node_load(f"Reading the per-rank optimizer shards from {checkpoint}", max_concurrent):
             osd, failure = self._read_shard(shard_path)

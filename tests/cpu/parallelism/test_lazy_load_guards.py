@@ -14,6 +14,7 @@ from safetensors.torch import save_file
 from transformers import AutoConfig, GptOssConfig, GptOssForCausalLM
 
 import halo.model_loading.parallel.ep as ep_lazy_loader
+import halo.model_loading.parallel.lazy_plan as lazy_plan
 import halo.model_loading.parallel.model_source as model_source
 from halo.checkpoint.reading import resolve_checkpoint_weights
 from halo.distributed.expert_parallel.config import EPConfig
@@ -358,7 +359,7 @@ def test_a_rank_local_shard_failure_surfaces_through_the_consensus_seam(
 
 def _ungated(monkeypatch):
     """The EP-sharded refusal has its own tests."""
-    monkeypatch.setattr(model_source, "reject_ep_sharded_checkpoint", lambda source: None)
+    monkeypatch.setattr(lazy_plan, "reject_ep_sharded_checkpoint", lambda source: None)
 
 
 _SOURCE = model_source.ModelSource("org/model", None, "/dir")
@@ -368,39 +369,37 @@ def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
     """The branches enter different collectives and every input is a per-rank probe; a split verdict is a hang with
     no diagnostic."""
     _ungated(monkeypatch)
-    monkeypatch.setattr(model_source, "has_whole_model_weight_file", lambda _dir, **_kw: True)
-    monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda _value: "rank0-verdict")
+    monkeypatch.setattr(lazy_plan, "has_whole_model_weight_file", lambda _dir, **_kw: True)
+    monkeypatch.setattr(lazy_plan, "broadcast_from_rank0", lambda _value: "rank0-verdict")
 
     for layout_supported in (False, True):
-        verdict = model_source.agree_lazy_load(
-            _SOURCE, lazy_requested=True, layout_supported=lambda _dir, supported=layout_supported: supported
-        )
-        assert verdict == "rank0-verdict"
+        monkeypatch.setattr(lazy_plan, "is_lazy_loadable", lambda _dir, supported=layout_supported: supported)
+        assert lazy_plan.agree_lazy_load(_SOURCE) == "rank0-verdict"
 
 
 @pytest.mark.parametrize(
-    ("lazy_requested", "has_safetensors", "layout_supported", "expected"),
+    ("has_safetensors", "layout_supported", "expected"),
     [
-        (True, True, True, True),
-        (True, True, False, False),  # A layout the fuser would silently misload (pre-5.14 Zaya).
-        (True, False, True, False),
-        (False, True, True, False),
+        (True, True, True),
+        (True, False, False),  # A layout the fuser would silently misload (pre-5.14 Zaya).
+        (False, True, False),
     ],
 )
-def test_the_lazy_gate_needs_the_request_safetensors_and_a_supported_layout(
-    monkeypatch, lazy_requested, has_safetensors, layout_supported, expected
+def test_the_lazy_gate_needs_safetensors_and_a_supported_layout(
+    monkeypatch, has_safetensors, layout_supported, expected
 ):
     _ungated(monkeypatch)
     asked: list[str] = []
-    monkeypatch.setattr(model_source, "has_whole_model_weight_file", lambda _dir, **_kw: has_safetensors)
-    monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda value: value)
+    monkeypatch.setattr(lazy_plan, "has_whole_model_weight_file", lambda _dir, **_kw: has_safetensors)
+    monkeypatch.setattr(lazy_plan, "broadcast_from_rank0", lambda value: value)
 
     def _layout(path):
         asked.append(path)
         return layout_supported
 
-    assert model_source.agree_lazy_load(_SOURCE, lazy_requested=lazy_requested, layout_supported=_layout) is expected
-    if not (lazy_requested and has_safetensors):
+    monkeypatch.setattr(lazy_plan, "is_lazy_loadable", _layout)
+    assert lazy_plan.agree_lazy_load(_SOURCE) is expected
+    if not has_safetensors:
         assert asked == [], "the layout probe was handed a directory that does not hold a checkpoint"
 
 

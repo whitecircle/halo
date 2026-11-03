@@ -24,7 +24,7 @@ import halo.checkpoint.parallel.adapters as peft_saver
 from halo.checkpoint import model_card
 from halo.checkpoint.adapters import EXPERT_LORA_PEFT_TYPES
 from halo.checkpoint.config_export import finalize_exported_config, save_model_config
-from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
+from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.model_card import MalformedModelCardError, tag_model_card
 from halo.checkpoint.parallel.adapters import save_expert_lora_adapters, save_peft_adapters
 from halo.checkpoint.tools import model_merge as merge_models_script
@@ -35,6 +35,7 @@ from halo.configs.embedding import EmbeddingConfig
 from halo.configs.script_arguments import ModelArguments
 from halo.model_loading.model_preparation import apply_run_model_policies
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.trainers.sft import DistributedSFTTrainer
 from scripts.training.embedding import build_sentence_transformer
 from tests.common.checkpoint_io import save_context
@@ -538,8 +539,10 @@ def test_an_adapter_save_onto_a_malformed_card_fails_naming_it(tmp_path):
 
 
 def test_the_expert_adapter_writer_tags_its_output(tmp_path):
-    save_expert_lora_adapters(save_context(_tiny_qwen3(), is_save_rank=True), str(tmp_path))
+    config = make_parallelism_config(world_size=1, gpus_per_node=1, expert_lora=ExpertLoraSpec(r=2, alpha=2))
+    save_expert_lora_adapters(save_context(_tiny_qwen3(), config, is_save_rank=True), str(tmp_path))
     assert (tmp_path / ADAPTER_SAFETENSORS_FILE).is_file(), "premise: the writer ran"
+    assert (tmp_path / ADAPTER_CONFIG_FILE).is_file(), "a resume refuses an adapter saved without its config"
     assert metadata_load(tmp_path / CARD) == {"tags": [HALO_TAG]}
 
 

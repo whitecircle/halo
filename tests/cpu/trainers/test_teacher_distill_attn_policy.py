@@ -62,7 +62,7 @@ def _script_teacher_load_capturing(
             is_vlm=is_vlm,
             local_rank=LOCAL_RANK,
         )
-    captured = captured_load(caps, is_vlm=is_vlm)
+    captured = captured_load(caps)
     assert teacher is captured.model
     return captured
 
@@ -106,7 +106,7 @@ def test_script_teacher_load_treats_an_empty_pin_as_unset(unset):
 def test_script_vlm_teacher_load_pins_the_weight_fetch():
     caps = _script_teacher_load_capturing(revision=PINNED_SHA, is_vlm=True)
     assert caps.load["revision"] == PINNED_SHA
-    assert caps.load_positional[0] is AutoModelForImageTextToText, "the VLM teacher class must be pinned"
+    assert caps.load["model_class"] is AutoModelForImageTextToText, "the VLM teacher class must be pinned"
     # Only the VLM teacher is placed on the local device; the text teacher lands in host memory and
     # the trainer moves it, so a device_map leaking onto that branch would change where it loads.
     assert caps.load["device_map"] == {"": LOCAL_RANK}

@@ -15,7 +15,6 @@ from transformers import AutoModelForImageTextToText, PreTrainedModel
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.log import warn_once
-from halo.model_loading.checkpoint_coverage import from_pretrained_verified
 from halo.model_loading.dtype import cast_parameters_to_run_dtype, resolve_training_dtype
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.model_preparation import (
@@ -133,10 +132,9 @@ def load_frozen_auxiliary_model(
         if download_tag
         else contextlib.nullcontext()
     ):
-        if is_vlm:
-            model = from_pretrained_verified(AutoModelForImageTextToText, model_name_or_path, **load_kwargs)
-        else:
-            model = auto_load_model(model_name_or_path, **load_kwargs)
+        model = auto_load_model(
+            model_name_or_path, model_class=AutoModelForImageTextToText if is_vlm else None, **load_kwargs
+        )
     cast_parameters_to_run_dtype(model, dtype)
 
     # Repairs non-persistent buffers; an uninitialized inv_freq biases every logprob this model scores.

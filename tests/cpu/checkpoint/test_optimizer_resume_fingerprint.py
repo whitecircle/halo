@@ -81,6 +81,10 @@ class _StubParallelismConfig:
         self.is_pp_mode = False
         self.is_cp_mode = cp_size > 1
         self.is_tp_mode = tp_size > 1
+        self.pp_size = 1
+        self.max_concurrent_loading = None
+        self.experts_fsdp_managed = fsdp_shard_ep1_experts and ep_size * expert_tp_size == 1
+        self.num_ep_groups = 1
 
 
 def _ctx(
@@ -133,10 +137,12 @@ def test_capture_maps_config_fields():
     assert fp.optimizer_class == "SGD"
 
 
-def test_capture_without_parallelism_config_defaults():
-    fp = OptimizerStateFingerprint.capture(None, torch.optim.SGD([torch.nn.Parameter(torch.zeros(1))], lr=0.1), 2)
-    assert (fp.ep_size, fp.expert_tp_size, fp.cp_size, fp.tp_size) == (1, 1, 1, 1)
-    assert fp.fsdp_shard_ep1_experts is True
+def test_capture_raises_on_a_config_missing_a_field():
+    """A default would land in the saved and the live fingerprint alike, so a renamed field would pass the gate."""
+    pc = _StubParallelismConfig()
+    del pc.ep_scope
+    with pytest.raises(AttributeError, match="ep_scope"):
+        OptimizerStateFingerprint.capture(pc, _sgd(_TinyModel()), 1)
 
 
 def test_dict_round_trip():

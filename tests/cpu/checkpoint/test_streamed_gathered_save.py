@@ -10,6 +10,7 @@ import torch
 from safetensors import safe_open
 from transformers import CONFIG_MAPPING, AutoModelForCausalLM, BertConfig, BertModel
 
+import halo.checkpoint.hub_layout as hub_layout
 import halo.checkpoint.parallel.save as checkpoint_save_mod
 import halo.checkpoint.parallel.writing as checkpoint_write_mod
 import halo.checkpoint.writing as writing_mod
@@ -127,6 +128,21 @@ def test_streamed_artifact_matches_the_whole_dict_conversion(tmp_path):
     assert any(".experts.0." in key for key in streamed_state), "premise: the hub layout is per-expert"
 
 
+def test_a_failing_revert_raises_and_leaves_no_loadable_checkpoint(tmp_path, monkeypatch):
+    """Writing on past one failed chunk would mix two expert layouts in one checkpoint."""
+    real_revert = hub_layout.revert_weight_conversion
+
+    def fail_on_layer_one(model, state_dict):
+        if any(".layers.1." in key for key in state_dict):
+            raise OSError("revert failed on layer 1")
+        return real_revert(model, state_dict)
+
+    monkeypatch.setattr(hub_layout, "revert_weight_conversion", fail_on_layer_one)
+    with pytest.raises(RuntimeError, match="revert failed on layer 1"):
+        _stream(_tiny_moe(), str(tmp_path))
+    assert weight_files(str(tmp_path), include_index=True) == []
+
+
 def test_writer_never_holds_more_than_one_shard(tmp_path):
     """Live tensors are bounded by one shard however large the model is."""
     peak_bytes, peak_count = [], []
@@ -159,10 +175,9 @@ def test_a_tp_hand_sliced_param_is_written_once_at_its_gathered_width(tmp_path, 
     register_hand_sliced(model, "self_attn.sinks", 0)
     key = "model.layers.0.self_attn.sinks"
 
-    def _gathered(_model, state_dict, retain=True, keep_live_dtype=False):
+    def _gathered(_model, *, retain):
         """Stubbed to its result: the full-width tensor on the save rank."""
-        if retain:
-            state_dict[key] = torch.ones(4)
+        return {key: torch.ones(4)} if retain else {}
 
     monkeypatch.setattr(checkpoint_save_mod, "gather_hand_sliced_params", _gathered)
 
