@@ -94,7 +94,7 @@ under FSDP (`ep_size=1`) and under EP, and assert step-0 loss matches within
 `TOL.parallel_vs_baseline_train_loss_abs`. Existing exemplars to copy:
 
 All live in `tests/gpu/parallelism/ep/`, under two spellings — `test_ep_vs_fsdp_*`
-(cohere2_moe, deepseek_v4, glm4_moe, glm5_next, step3p7) and `test_ep_vs_reference_*`
+(cohere2_moe, deepseek_v4, glm4_moe, glm5_next, nemotron_h, step3p7) and `test_ep_vs_reference_*`
 (bailing_v3, inkling, qwen3_moe) — plus `test_ep_vs_no_ep.py` for gptoss.
 
 Every MoE family on the roster (`agent-docs/models/README.md`) needs one. New family → add the

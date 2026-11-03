@@ -31,6 +31,7 @@ Toolkit-covered families (upstream has none). ✅ = patched, — = left unfused,
 |---|---|:--:|:--:|:--:|:--:|:--:|
 | Mistral 4 | `mistral4` (a `mistral3` wrapper resolves through its text tower: `mistral4` here, `mistral` upstream) | ✅ | ✅ | — interleaved YARN; the llama-4 log scale follows it | ✅ | ✅ text-only checkpoints; [forced off under the wrapper](#fused-loss-under-a-multimodal-wrapper) |
 | Zaya | `zaya` | ✅ | — EP wrapper owns the experts | — partial rotary | ✅ | ✅ **default** |
+| NemotronH | `nemotron_h` | ✅ | — non-gated relu² MLP; the mixer's grouped gated norm is not a Liger kernel | — NoPE attention | ✅ | ✅ **default** |
 | DeepSeek-V4 | `deepseek_v4` | — no parity test covers the swap; the loaders cast the fp32-pinned weights to the run dtype, where the eager norm matches the kernel's output dtype | — clamped SwiGLU | — interleaved partial | ✅ | ✅ **default** |
 | GLM-4.7-Flash | `glm4_moe_lite` | ✅ torch's fused `F.rms_norm` in the llama casting mode (`rms_norm_kernel="native"`) | ✅ | — dual interleave/plain MLA | ✅ | ✅ **default** |
 | Laguna | `laguna` | ✅ | ✅ | — half-width on full-attention layers, full on sliding | ✅ | ✅ |

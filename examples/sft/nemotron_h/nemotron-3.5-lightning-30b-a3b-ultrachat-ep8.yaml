@@ -1,0 +1,60 @@
+# Nemotron 3.5 Lightning 30B-A3B (nemotron_h: Mamba-2 / MoE / attention hybrid) — EP8 full SFT on
+# UltraChat 200K, single 8-GPU node. CP and TP unsupported. See agent-docs/models/nemotron-h.md.
+# Launch: torchrun --nproc_per_node=8 scripts/training/sft.py <this config>
+
+# --- Model ---
+model_name_or_path: nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16
+
+# --- Dataset ---
+dataset:
+- HuggingFaceH4/ultrachat_200k@train_sft
+conversation_field: messages
+test_size: 0.01
+train_on_completions_only: true
+assistant_message_template: "<|im_start|>assistant\n"
+eos_token: "<|im_end|>"
+
+# --- Parallelism & MoE precision ---
+expert_parallel_size: 8              # 128 routed experts -> 16/rank; one dispatch group on 8 GPUs
+moe_balancing: bias_update           # sign-updates land in the router's own e_score_correction_bias
+save_sharded_ep: false               # gather a standard Hugging Face checkpoint on save
+use_grouped_gemm: true
+fp32_router: true
+
+# --- Attention & kernels ---
+# The Mamba-2 layers read the collator's seq_idx, so packed documents stay isolated in every layer.
+packing: true
+max_length: 8192
+bf16: true
+
+# --- Training ---
+per_device_train_batch_size: 1
+per_device_eval_batch_size: 1
+gradient_accumulation_steps: 8
+num_train_epochs: 1.0
+gradient_checkpointing: true
+
+# --- Optimizer & LR schedule ---
+learning_rate: 5.0e-06
+lr_scheduler_type: cosine
+warmup_steps: 32
+max_grad_norm: 1.0
+
+# --- Checkpointing & evaluation ---
+save_strategy: steps
+save_steps: 1000
+eval_strategy: steps
+eval_steps: 300
+save_total_limit: 1
+save_only_model: true
+output_dir: checkpoints/nemotron-3.5-lightning-30b-a3b-ultrachat-ep8
+
+# --- Logging ---
+logging_steps: 1
+logging_first_step: true
+report_to: none
+remove_unused_columns: false
+dataloader_num_workers: 2
+
+# --- PEFT ---
+use_peft: false

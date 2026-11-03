@@ -248,6 +248,10 @@ def test_the_hidden_dim_and_expert_count_come_from_the_block(family, wrapper, fa
     expected_hidden = router.weight.shape[1] if router is not None and hasattr(router, "weight") else None
     if expected_hidden is None:
         expected_hidden = experts.gate_up_proj.shape[2]
+    # A block projecting into a latent before its experts (NemotronH) dispatches the latent rows.
+    latent = getattr(block, "fc1_latent_proj", None)
+    if isinstance(latent, nn.Linear):
+        expected_hidden = latent.out_features
     assert layer.hidden_dim == expected_hidden, f"{family}: hidden_dim {layer.hidden_dim} != {expected_hidden}"
 
     param = layer.expert_named_params()[0][1]

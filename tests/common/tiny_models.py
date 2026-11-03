@@ -44,6 +44,8 @@ from transformers import (
     Lfm2VlForConditionalGeneration,
     Mistral3Config,
     Mistral3ForConditionalGeneration,
+    NemotronHConfig,
+    NemotronHForCausalLM,
     PreTrainedModel,
     Qwen3_5ForCausalLM,
     Qwen3_5MoeConfig,
@@ -83,6 +85,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MISTRAL4_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_PIXTRAL_VISION_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
@@ -298,6 +301,8 @@ TINY_MOE_FAMILIES: dict[str, TinyFamily] = {
     "mistral4": TinyFamily(
         _causal(Mistral4Config, Mistral4ForCausalLM, TINY_MISTRAL4_CONFIG), load_class=Mistral4ForCausalLM
     ),
+    # Mamba-2 layers: a conv and a recurrent scan along the sequence.
+    "nemotron_h": TinyFamily(_causal(NemotronHConfig, NemotronHForCausalLM, TINY_NEMOTRON_H_CONFIG), ulysses_cp=False),
     # Gated DeltaNet layers: a conv and a recurrent scan along the sequence.
     "qwen3_5_moe_text": TinyFamily(
         _causal(Qwen3_5MoeTextConfig, Qwen3_5MoeForCausalLM, TINY_QWEN35_MOE_CONFIG), ulysses_cp=False

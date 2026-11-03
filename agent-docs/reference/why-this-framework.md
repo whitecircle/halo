@@ -87,7 +87,7 @@ reimplementation or a checkpoint conversion.
 For EP, that is a wrapper under `src/distributed/expert_parallel/layers/` (most under 140 lines)
 subclassing `EPMoELayerBase` and declaring its `HF_MODULE_NAMES` /
 `HF_MODEL_TYPES`, with `MOE_LAYER_MAP` derived from the subclass tree so the family self-registers on
-import. Fifteen MoE families ship one; the per-family × per-mode matrix is
+import. Sixteen MoE families ship one; the per-family × per-mode matrix is
 [Supported Models](../models/README.md), and [Adding a New Model](../models/adding-a-model.md) is the
 procedure. Trainer × parallelism support is separate — see
 [Trainer Compatibility](trainer-architecture.md#trainer-compatibility).

@@ -27,8 +27,9 @@ SCORE_PASSES = 6.0
 INDEX_PASSES = 2.0
 
 # ``config.layer_types`` entry -> cost kind. "hybrid" (Zaya's CCA, Inkling) is full attention with a
-# convolution branch; "conv" (LFM-2 ShortConv) and "linear_attention" (GatedDeltaNet, KDA) score no
-# key matrix. An entry outside this table raises rather than costing an unknown mixer as full attention.
+# convolution branch; "conv" (LFM-2 ShortConv), "linear_attention" (GatedDeltaNet, KDA, Mamba-2) and the
+# FFN-only layers of a one-mixer-per-layer stack (NemotronH's "moe" / "mlp") score no key matrix. An
+# entry outside this table raises rather than costing an unknown mixer as full attention.
 LAYER_TYPE_KINDS: dict[str, str] = {
     "full_attention": "full",
     "hybrid": "full",
@@ -40,6 +41,8 @@ LAYER_TYPE_KINDS: dict[str, str] = {
     "heavily_compressed_attention": "compressed",
     "linear_attention": "none",
     "conv": "none",
+    "moe": "none",
+    "mlp": "none",
 }
 
 # The layer types that select their keys through a QK-only indexer bounded by ``index_topk``: GLM-5's

@@ -305,6 +305,7 @@ _ROSTER = {
     "lfm2": {"full"},
     "mistral4": {"full"},
     "mistral": {"window"},
+    "nemotron_h": {"full", "none"},
     "step3p7": {"full"},
     "zaya": {"full"},
 }

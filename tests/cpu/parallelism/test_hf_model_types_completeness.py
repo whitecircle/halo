@@ -44,6 +44,7 @@ _EXPECTED_CLAIMS: dict[str, tuple[str, ...]] = {
     "EPQwen3MoELayer": ("qwen3_moe",),
     "EPQwen3_5MoELayer": ("qwen3_5_moe", "qwen3_5_moe_text"),
     "EPStep3p7MoELayer": ("step3p7", "step3p5"),
+    "EPNemotronHMoELayer": ("nemotron_h",),
     "EPZayaMoELayer": ("zaya",),
 }
 

@@ -43,7 +43,8 @@ GDN_SEGMENT_AWARE_BACKENDS = (
 class SegmentMarkers:
     """Which segment markers a family's forward reads.
 
-    ``seq_idx`` is the per-token document index (LFM2 ShortConv, the GatedDeltaNet conv).
+    ``seq_idx`` is the per-token document index (LFM2 ShortConv, the GatedDeltaNet conv, NemotronH's
+    Mamba-2 conv and scan).
     ``cu_seq_lens`` is the varlen set ``cu_seq_lens_q/k`` + ``max_length_q/k``: GatedDeltaNet's chunked
     delta rule reads ``cu_seq_lens_q``, and flash attention consumes the set in place of re-deriving
     it from ``position_ids``.
@@ -63,7 +64,7 @@ def segment_markers_for(model_config) -> SegmentMarkers:
     if model_config is None:
         return SegmentMarkers()
     return SegmentMarkers(
-        seq_idx=model_type_matches(model_config, "lfm2", *GDN_MODEL_TYPE_PREFIXES),
+        seq_idx=model_type_matches(model_config, "lfm2", "nemotron_h", *GDN_MODEL_TYPE_PREFIXES),
         cu_seq_lens=model_type_matches(model_config, *GDN_MODEL_TYPE_PREFIXES),
     )
 

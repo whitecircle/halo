@@ -27,6 +27,7 @@ The registries behind the matrix: EP wrappers under `src/distributed/expert_para
 | [Cohere2 MoE (Command A+)](cohere2-moe.md) | Yes | Yes ⁹ | Yes ⁹ | Yes ⁹ | Yes ⁶ ⁹ | Yes ⁹ | Yes ¹² | `examples/sft/cohere2_moe/*` |
 | [GLM-5 Next (GLM-5.3-Flash)](glm5-next.md) | Yes | **No** ¹⁰ | **No** ¹⁰ | Yes | **No** | **No** | Yes | `examples/sft/glm5_next/*` |
 | [Step-3.7 Flash](step3p7.md) | Yes | **No** ¹¹ | **No** ¹¹ | Yes | **No** | **No** | Yes | `examples/sft/step3p7/*` |
+| [NemotronH (Nemotron 3.5 Lightning)](nemotron-h.md) | Yes | **No** ¹³ | **No** ¹³ | Yes | **No** | **No** | Yes | `examples/sft/nemotron_h/*` |
 | Any other HF model with `tp_plan` (Llama, Mistral, Phi, …) | — | — | Yes | — | — | — | Yes | — |
 
 **Pipeline parallelism** is not a column above because it is [not yet available in this release](../parallelism/pipeline-parallelism.md).
@@ -57,6 +58,8 @@ Trainer × parallelism support is tracked in [Trainer Compatibility](../referenc
 
 ¹² Tiny-model LoRA verified: `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` trains expert and mixed adapters at ep2, ep1 and ep2+cp2 (Inkling's CP row checks the refusal) through a merged save and an exact resume. No full-scale LoRA run.
 
+¹³ NemotronH's Mamba-2 layers scan along the sequence axis, so validation rejects its `layer_types` for CP; `NemotronHAttention` is outside the selective-TP accept-list. See [nemotron-h.md](nemotron-h.md#why-cp-and-tp-arent-supported).
+
 ¹³ A tiny-model LoRA row is the only GPU test of the shape: Ling 2.0 and Mistral4 EP+CP in `tests/gpu/trainers/lora/test_lora_merged_save_resume_families.py` (`--cp-size 2`, ep2+cp2). Validate a short run first.
 
 ## MoE knobs
@@ -77,7 +80,7 @@ Families spell the count and the width differently (`num_experts`, `num_local_ex
 
 [MoEMetricsCallback](../training-methods/callbacks.md#moemetricscallback) logs per-layer expert load by default (`enable_moe_metrics`).
 
-**Hybrid families** — [Qwen3.5 / 3.6](qwen3_5.md) (GatedDeltaNet), [LFM-2](lfm2.md) (short convolution), [GLM-5 Next](glm5-next.md) (KDA) and [Bailing](bailing.md)'s Ling 3.0 (KDA) / Ring (Lightning Attention) interleave linear or convolutional attention with standard attention. Their MoE side runs under EP, but the sequence-axis recurrence cannot be split, so CP is unavailable on released checkpoints.
+**Hybrid families** — [Qwen3.5 / 3.6](qwen3_5.md) (GatedDeltaNet), [LFM-2](lfm2.md) (short convolution), [GLM-5 Next](glm5-next.md) (KDA), [NemotronH](nemotron-h.md) (Mamba-2) and [Bailing](bailing.md)'s Ling 3.0 (KDA) / Ring (Lightning Attention) interleave linear or convolutional attention with standard attention. Their MoE side runs under EP, but the sequence-axis recurrence cannot be split, so CP is unavailable on released checkpoints.
 
 ## Load precision
 
@@ -128,6 +131,7 @@ The matrix carries each family's supported modes; the per-family page covers mod
 - [Cohere2 MoE](cohere2-moe.md) — Command A+ VLM text backbone; interleaved sliding/NoPE attention, averaged shared expert.
 - [GLM-5 Next](glm5-next.md) — GLM-5.3-Flash composite VLM; KDA + DeepSeek sparse attention, hyper-connections, 288 routed experts.
 - [Step-3.7 Flash](step3p7.md) — StepFun composite VLM; full/sliding attention interleave with per-layer head counts and per-head sigmoid gates, 288 routed experts.
+- [NemotronH](nemotron-h.md) — NVIDIA Nemotron 3.5 Lightning; Mamba-2 / MoE / attention hybrid, non-gated relu² experts with a sigmoid router and shared expert.
 - [Adding a new model](adding-a-model.md) — per-mode checklists for EP, CP, TP, or vendoring.
 
 ## Choosing a parallelism configuration
@@ -139,7 +143,7 @@ The matrix carries each family's supported modes; the per-family page covers mod
 | Dense, doesn't fit per GPU | any | [TP](../parallelism/tensor-parallelism.md) via native `tp_plan` |
 | MoE with full coverage (Qwen3 MoE, GPT-OSS, GLM-4, Mistral4, Cohere2 MoE) | ≤ 32K | [EP](../parallelism/expert-parallelism.md), or EP+TP at very large scale |
 | Same MoEs, long context | > 32K | EP+CP (on Mistral4 only a tiny-model LoRA row runs it) |
-| MoE without CP (Qwen3.5/3.6, LFM-2, Gemma 4, DeepSeek-V4, Laguna, Inkling, Ling 3.0, GLM-5 Next, Step-3.7 Flash) | any | EP; add EP+TP for Qwen3.5/3.6 and LFM-2, or pure ETP (`ep_size=1`) when expert memory is the bottleneck |
+| MoE without CP (Qwen3.5/3.6, LFM-2, Gemma 4, DeepSeek-V4, Laguna, Inkling, Ling 3.0, GLM-5 Next, Step-3.7 Flash, NemotronH) | any | EP; add EP+TP for Qwen3.5/3.6 and LFM-2, or pure ETP (`ep_size=1`) when expert memory is the bottleneck |
 | Ling 2.0, long context | > 32K | EP, plus CP once the sequence exceeds one GPU |
 | Zaya | any | EP without GC (optionally + ETP), or plain FSDP2 without GC |
 

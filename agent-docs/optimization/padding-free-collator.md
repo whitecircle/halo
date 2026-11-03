@@ -4,7 +4,7 @@ Concatenates variable-length sequences into one flattened tensor and emits `cu_s
 
 SMPO also supports `padding_free`, but flattens the batch itself in `_forward_padding_free` (`src/trainers/preference/smpo.py`) rather than using these collators. Padded rows pay full GEMM cost; the M-dimension argument is in [GPU Training Theory §2](../reference/gpu-training-theory.md#2-the-roofline--arithmetic-intensity-and-the-ridge-point).
 
-SMPO's flattened row isolates its documents too: attention through `position_ids`, and LFM-2 and GatedDeltaNet through `seq_idx` / `cu_seq_lens` segment markers built by the same gate these collators use (`src/models/segment_markers.py`).
+SMPO's flattened row isolates its documents too: attention through `position_ids`, and LFM-2, NemotronH's Mamba-2 and GatedDeltaNet through `seq_idx` / `cu_seq_lens` segment markers built by the same gate these collators use (`src/models/segment_markers.py`).
 
 Implementations live in `src/data/collators/packing.py`:
 
@@ -60,7 +60,7 @@ equal tokens per step the two masks are the same size.
 Packing's mask is bounded by `max_length` only at `per_device_train_batch_size: 1`, so keep the batch at 1
 there and scale with `gradient_accumulation_steps`.
 
-The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence) shaped `[1, total_tokens]`, plus the varlen kwargs `cu_seq_lens_q`/`cu_seq_lens_k` (1-D int32, length `num_seqs + 1`) and `max_length_q`/`max_length_k` (Python ints). The varlen FA kernel reads `cu_seq_lens` to attend only within each sequence. The varlen kwargs are gated by the collator's `return_flash_attn_kwargs=True`. `seq_idx` joins them under `return_seq_idx`, which `select_data_collator` sets for the families whose conv/linear-attention mixers read it (LFM-2, GatedDeltaNet).
+The collator emits `input_ids`, `labels`, and `position_ids` (reset per sequence) shaped `[1, total_tokens]`, plus the varlen kwargs `cu_seq_lens_q`/`cu_seq_lens_k` (1-D int32, length `num_seqs + 1`) and `max_length_q`/`max_length_k` (Python ints). The varlen FA kernel reads `cu_seq_lens` to attend only within each sequence. The varlen kwargs are gated by the collator's `return_flash_attn_kwargs=True`. `seq_idx` joins them under `return_seq_idx`, which `select_data_collator` sets for the families whose conv/linear-attention mixers read it (LFM-2, NemotronH, GatedDeltaNet).
 
 ## Benchmark results
 

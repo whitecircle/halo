@@ -29,6 +29,7 @@ from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.layers.laguna import EPLagunaMoELayer
 from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.layers.nemotron_h import EPNemotronHMoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
 from src.models.moe_balancing import is_transient_balancing_router, iter_balancing_routers
@@ -83,6 +84,7 @@ FAMILIES = [
     (EPDeepseekV4MoELayer, "e_score_correction_bias", False),
     (EPInklingMoELayer, "e_score_correction_bias", True),
     (EPStep3p7MoELayer, "e_score_correction_bias", False),
+    (EPNemotronHMoELayer, "e_score_correction_bias", False),
 ]
 # LFM-2 declares the slot on the WRAPPER (and materializes it on use_expert_bias:false checkpoints),
 # and GPT-OSS adopts the trainable logit-space `router.bias`; both get dedicated tests below.

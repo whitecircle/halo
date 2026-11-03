@@ -34,6 +34,7 @@ MISTRAL3_119B_MOE = "mistralai/Mistral-Small-4-119B-2603"
 COMMAND_A_PLUS = "CohereLabs/command-a-plus-05-2026-bf16"
 ZAYA_8B = "Zyphra/ZAYA1-8B"
 STEP3P7_FLASH = "stepfun-ai/Step-3.7-Flash"
+NEMOTRON_3_5_LIGHTNING = "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16"
 
 # Local checkpoints (scripts/before_training/patch_vocab.py output) under the toolkit scratch root;
 # agent-docs/contributing/README.md gives the command that writes each one. A suite defaulting to one
@@ -306,6 +307,32 @@ TINY_LFM2_MOE_CONFIG = {
     "conv_L_cache": 3,
     "max_position_embeddings": 512,
     "tie_word_embeddings": True,
+}
+
+# Tiny NemotronH (``nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-BF16``): the hybrid Mamba-2 / MoE /
+# attention stack, non-gated relu2 experts, sigmoid routing with the ``e_score_correction_bias``
+# selection buffer and a shared expert, behind the latent projection the larger releases carry.
+# hidden_size=256 keeps the DeepEP transport pad (multiple of 256) exact, as does moe_latent_size.
+TINY_NEMOTRON_H_CONFIG = {
+    "vocab_size": 1024,
+    "hidden_size": 256,
+    "layers_block_type": ["mamba", "moe", "attention", "moe"],
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "mamba_num_heads": 8,
+    "mamba_head_dim": 32,
+    "n_groups": 2,
+    "ssm_state_size": 16,
+    "chunk_size": 64,
+    "n_routed_experts": 8,
+    "num_experts_per_tok": 2,
+    "moe_intermediate_size": 64,
+    "moe_shared_expert_intermediate_size": 128,
+    "moe_latent_size": 256,
+    "routed_scaling_factor": 2.5,
+    "norm_topk_prob": True,
+    "max_position_embeddings": 512,
 }
 
 # Tiny Bailing MoE V2 (``inclusionAI/Ling-mini-2.0``): dense first layer + sparse MoE layers, sigmoid
@@ -721,6 +748,12 @@ MODEL_CONFIGS = {
         "full_params": 30e9,
         "num_experts": 128,
         "top_k": 8,
+    },
+    "nemotron-3.5-lightning": {
+        "hf_name": NEMOTRON_3_5_LIGHTNING,
+        "full_params": 31.58e9,
+        "num_experts": 128,
+        "top_k": 6,
     },
     "glm4-flash": {
         "hf_name": GLM4_FLASH,

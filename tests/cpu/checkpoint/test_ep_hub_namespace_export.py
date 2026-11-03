@@ -59,7 +59,7 @@ from src.distributed.expert_parallel.expert_weights import (
     is_expert_weight_attr,
     to_hub_layer_key,
 )
-from src.distributed.expert_parallel.lazy_loader import build_family_key_mapping
+from src.distributed.expert_parallel.lazy_loader import build_family_key_mapping, lazy_loader_supports_checkpoint
 from src.distributed.expert_parallel.patching import patch_moe_model_for_ep
 from src.models.loading.lazy_safetensors.conversion import Concat
 from src.models.structure import persistent_buffers
@@ -312,6 +312,8 @@ def test_lazy_loader_maps_the_gathered_save(name, tmp_path):
     (whose per-expert form the expert fuser owns) must land on a live tensor, the SigLIP towers'
     ``vision_model`` level included."""
     loaded = _loaded(name, tmp_path)
+    if not lazy_loader_supports_checkpoint(loaded.ep_dir):
+        pytest.skip(f"{name} loads its saves through from_pretrained, never the lazy loader")
     shell = tiny_family_model(loaded.family)
     disk_to_model, fanout = build_family_key_mapping(shell, list(loaded.saved))
 

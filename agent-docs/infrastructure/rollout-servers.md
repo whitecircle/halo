@@ -238,8 +238,8 @@ Checkpoint layout and expert un-fuse rules live in
 ### Construction gates
 
 Which families each backend accepts for RL is gated trainer-side at construction
-(`validate_weight_sync_support`, `src/trainers/grpo/rollout/weight_sync.py`). Inkling, GLM-5 Next
-and Cohere2 MoE declare `_supports_weight_sync = False` and are refused on both engines; every other
+(`validate_weight_sync_support`, `src/trainers/grpo/rollout/weight_sync.py`). Inkling, GLM-5 Next,
+Cohere2 MoE and NemotronH declare `_supports_weight_sync = False` and are refused on both engines; every other
 refusal is an engine fact on that engine's client
 ([Which families each engine serves](#which-families-each-engine-serves)).
 
@@ -300,7 +300,7 @@ Each client declares those with the loader fact (`UNSERVABLE_MODEL_TYPES`), quot
 
 The families not in that table sync on both engines, expert distribution included ([CI](ci.md) has
 the per-family pass): dense families, GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4,
-Ling 2.0, LFM-2 MoE. Inkling, GLM-5 Next and Cohere2 MoE are the exception — they declare
+Ling 2.0, LFM-2 MoE. Inkling, GLM-5 Next, Cohere2 MoE and NemotronH are the exception — they declare
 `_supports_weight_sync = False` and are refused on both ([Construction gates](#construction-gates)).
 
 Three SGLang 0.5.17 loader facts shape its image and its client.

@@ -84,7 +84,7 @@ naming the family and the reason.
 | Dense families, GPT-OSS, Qwen3 MoE, Qwen3.5/3.6, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 | Yes | Yes |
 | Laguna, Step-3.7 Flash | Yes | No (SGLang's loaders assert full coverage per call) |
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No |
-| Inkling, GLM-5 Next, Cohere2 MoE | No | No (no online RL at all) |
+| Inkling, GLM-5 Next, Cohere2 MoE, NemotronH | No | No (no online RL at all) |
 
 `rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only. SGLang must
 be served from this repo's image. Setup, ports, weight sync and
@@ -133,6 +133,7 @@ advanced parallelism. What each family is for:
 | Inkling | Yes | Yes | No | No | Yes | No | No | Yes | multimodal MoE; LoRA passes tiny-model GPU tests only |
 | GLM-5 Next (GLM-5.3-Flash) | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM, SDPA only; the fp8 release needs `halo run convert-glm5-bf16` first |
 | Step-3.7 Flash | Yes | Yes | No | No | Yes | No | No | Yes | composite VLM, SDPA only; sharded EP saves refused |
+| NemotronH (Nemotron 3.5 Lightning) | Yes | Yes | No | No | Yes | No | No | Yes | Mamba-2 layers block CP; Mamba-2 kernels from the `kernels-community/mamba-ssm` Hub build |
 | Any other HF causal LM | Yes | — | No | if the model has a `tp_plan` | — | — | — | Yes | a dense model without a TP plan raises under TP |
 
 `partial` marks a shape that only a tiny-model LoRA GPU test runs; validate a

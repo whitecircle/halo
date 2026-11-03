@@ -123,7 +123,7 @@ _KNOB_WRITER_FAMILIES = sorted(
 )
 
 
-def test_the_roster_routing_this_way_is_exactly_the_five_families_that_do():
+def test_the_roster_routing_this_way_is_exactly_the_six_families_that_do():
     """Anti-vacuity for the derived roster, as an EQUALITY: a superset check passes just as happily
     when a family is reparented off this base, which silently drops its fork check below (and, with
     it, the only thing pinning that it still routes the shared way)."""
@@ -133,6 +133,7 @@ def test_the_roster_routing_this_way_is_exactly_the_five_families_that_do():
         "EPMistral4MoELayer",
         "EPGlm5NextMoELayer",
         "EPStep3p7MoELayer",
+        "EPNemotronHMoELayer",
     }
 
 

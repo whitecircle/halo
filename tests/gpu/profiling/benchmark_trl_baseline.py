@@ -62,6 +62,7 @@ _LAYER_CLS = {
     "qwen3-4b": "Qwen3DecoderLayer",
     "gemma4-26b-a4b": "Gemma4TextDecoderLayer",
     "mistral3-119b-moe": "Mistral4DecoderLayer",
+    "nemotron-3.5-lightning": "NemotronHBlock",
 }
 
 

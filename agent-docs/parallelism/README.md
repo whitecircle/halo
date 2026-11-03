@@ -18,7 +18,7 @@ Multi-GPU DP modes run on FSDP2 for gradient sync (pure TP at DP=1 and single-GP
 - **Context parallelism (CP)** — splits long sequences across GPUs via Ulysses-style attention with all-to-all. For long-context training (32K+ tokens); see [Context Parallelism Guide](context-parallelism.md).
 - **Pipeline parallelism (PP)** — would split decoder layers into stages, one contiguous rank block each, as the only axis meant to cross NVLink domains. **Not yet available in this release**: the config surface and seams ship, the schedule engine does not, and `pipeline_parallel_size > 1` is rejected at config time. See [Pipeline Parallelism](pipeline-parallelism.md) and [the rationale](#when-pipeline-parallelism-is-worth-it).
 
-Wrapped MoE families: [Qwen3 MoE](../models/qwen3.md#qwen3-moe), [Qwen3.5/3.6 MoE](../models/qwen3_5.md), [GPT-OSS](../models/gpt-oss.md), [GLM-4 MoE Lite](../models/glm4.md), [Laguna](../models/laguna.md), [Inkling](../models/inkling.md), [Gemma 4](../models/gemma4.md), [Bailing / Ling](../models/bailing.md), [LFM-2](../models/lfm2.md), [Mistral4](../models/mistral4.md), [DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md), [Cohere2 MoE](../models/cohere2-moe.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md). Full list and per-family quirks: [Supported Models](../models/README.md).
+Wrapped MoE families: [Qwen3 MoE](../models/qwen3.md#qwen3-moe), [Qwen3.5/3.6 MoE](../models/qwen3_5.md), [GPT-OSS](../models/gpt-oss.md), [GLM-4 MoE Lite](../models/glm4.md), [Laguna](../models/laguna.md), [Inkling](../models/inkling.md), [Gemma 4](../models/gemma4.md), [Bailing / Ling](../models/bailing.md), [LFM-2](../models/lfm2.md), [Mistral4](../models/mistral4.md), [DeepSeek-V4](../models/deepseek-v4.md), [Zaya](../models/zaya.md), [Cohere2 MoE](../models/cohere2-moe.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md), [NemotronH](../models/nemotron-h.md). Full list and per-family quirks: [Supported Models](../models/README.md).
 
 ## Supported combinations
 
@@ -163,7 +163,7 @@ pooling and dual models are the reasons behind them, not properties CP itself de
 | **MoE — EP/ETP only** ([Inkling](../models/inkling.md) ⁸, Ring-mini-linear-2.0, Ling 3.0) | EP | EP at max single-GPU seq | pure ETP | **No** ² |
 | **MoE — EP / pure ETP** ([Gemma 4](../models/gemma4.md), [Laguna](../models/laguna.md) ⁷) | EP | EP at max single-GPU seq | pure ETP ⁷ | **No** ³ |
 | **MoE w/ CCA** ([Zaya](../models/zaya.md)) | EP (no GC) ⁴ or pure ETP (no GC) | — | Plain FSDP2 (no GC) | **No** ⁴ |
-| **MoE — EP/ETP, no CP/TP** ([DeepSeek-V4](../models/deepseek-v4.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md)) | EP | EP at max single-GPU seq | pure ETP | **No** |
+| **MoE — EP/ETP, no CP/TP** ([DeepSeek-V4](../models/deepseek-v4.md), [GLM-5 Next](../models/glm5-next.md), [Step-3.7 Flash](../models/step3p7.md), [NemotronH](../models/nemotron-h.md)) | EP | EP at max single-GPU seq | pure ETP | **No** |
 | **VLM** ([Qwen3-VL](../models/qwen3.md#qwen3-vl)) | Standard | Standard at max single-GPU seq ⁹ | ZeRO-3 FSDP2 ⁹ | Text-only runs ⁹ |
 
 ¹ Qwen3.5/3.6 — CP blocked by interleaved linear-attention layers; see [qwen3_5.md](../models/qwen3_5.md).

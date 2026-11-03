@@ -147,6 +147,7 @@ accept list to keep in sync.
 - **DeepSeek-V4** — the CSA/HCA compressors (and the Lightning Indexer scoring against them) pool non-overlapping token windows along the sequence axis, so a CP shard would compress incomplete windows at every chunk boundary. Validation rejects the classes. Use EP instead — see [DeepSeek-V4](../models/deepseek-v4.md).
 - **GLM-5 Next** (`glm5_next`) — 34 of 45 layers are `Glm5NextTextLinearAttention`, a KDA linear recurrence (sequence-axis conv1d k=4 + delta-rule scan); validation rejects the class by name (and the `"linear_attention"` entries in `layer_types`). Use EP instead — see [GLM-5 Next](../models/glm5-next.md).
 - **Step-3.7 Flash** — `Step3p7Attention` has no Ulysses wrapper registered, so validation rejects the model as having no supported attention module. Nothing architectural blocks a wrapper (plain full/sliding GQA; 64/96 heads and 8 KV heads divide cp 2/4/8). Use EP instead — see [Step-3.7 Flash](../models/step3p7.md).
+- **NemotronH** (`nemotron_h`) — the Mamba-2 layers scan along the sequence axis; validation rejects the `"linear_attention"` entries in `layer_types`. Use EP instead — see [NemotronH](../models/nemotron-h.md).
 
 ## CP with EP
 

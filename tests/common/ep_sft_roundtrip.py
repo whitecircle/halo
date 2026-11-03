@@ -63,9 +63,9 @@ class EPSftRoundTrip:
     loader admits the hub-layout checkpoint. ``native_bias_layer``, the first sparse layer, marks a
     family whose EP layers can adopt the native ``e_score_correction_bias`` slot: after training every
     EP layer's bias is set to a distinctive bf16-exact value, which the save must write once at fp32
-    and the reloaded model must carry at that layer. ``balancing_callbacks`` builds the script's own
-    callback wiring at the default ``moe_balancing: auto``. ``reload_in_bf16`` casts the whole reloaded
-    model to bf16.
+    and the reloaded model must carry at that layer, under its decoder layer's ``moe_block_attr``.
+    ``balancing_callbacks`` builds the script's own callback wiring at the default
+    ``moe_balancing: auto``. ``reload_in_bf16`` casts the whole reloaded model to bf16.
 
     Each hook returns the checks it adds.
     """
@@ -79,6 +79,7 @@ class EPSftRoundTrip:
     composite_token_ids: Mapping[str, int] = MappingProxyType({})
     hub_conversion: bool = False
     native_bias_layer: int | None = None
+    moe_block_attr: str = "mlp"
     balancing_callbacks: bool = False
     reload_in_bf16: bool = False
 
@@ -207,9 +208,8 @@ class EPSftRoundTrip:
         if self.reload_in_bf16:
             reloaded.to(torch.bfloat16)
         if self.native_bias_layer is not None:
-            reloaded_bias = (
-                backbone_with_layers(reloaded).layers[self.native_bias_layer].mlp.gate.e_score_correction_bias
-            )
+            reloaded_layer = backbone_with_layers(reloaded).layers[self.native_bias_layer]
+            reloaded_bias = getattr(reloaded_layer, self.moe_block_attr).gate.e_score_correction_bias
             checks["e_score_bias_roundtrip"] = torch.equal(
                 reloaded_bias.float().cpu(), ep_layers[0].gate.e_score_correction_bias.float().cpu()
             )

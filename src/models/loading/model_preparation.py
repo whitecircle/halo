@@ -32,6 +32,7 @@ from src.models.patches.attention import (
 )
 from src.models.patches.flex_sliding_attention import resolve_flex_sliding_attn_implementation
 from src.models.patches.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
+from src.models.patches.nemotron_h import apply_nemotron_h_patches
 from src.models.patches.remote_code_compat import apply_remote_code_compat_shims
 from src.models.patches.zaya import apply_zaya_patches
 
@@ -169,6 +170,9 @@ def apply_family_attention_patches(model_config, attn_implementation: str) -> st
     # position_ids plumbing as Mistral4, since Zaya's model forward never passes the tensor down.
     if model_type_matches(model_config, "zaya"):
         apply_zaya_patches(attn_implementation)
+    # The packed rows' seq_idx into the Mamba-2 mixer, and its scan kernel resolved before training.
+    if model_type_matches(model_config, "nemotron_h"):
+        apply_nemotron_h_patches()
     # Else FA4's varlen backward JIT-recompiles every step on transformers' 0-dim max_seqlen tensor.
     if attn_implementation == "flash_attention_4":
         patch_transformers_flash_varlen_int_seqlen()

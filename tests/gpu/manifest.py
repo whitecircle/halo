@@ -53,7 +53,7 @@ Markers (selection):
                                  (``make test-gpu-vllm`` then ``... SERVER_TIER=moe``).
     <model family>             — gptoss / qwen3 / glm4 / glm5 / gemma4 / mistral4 /
                                  bailing / lfm2 / zaya / deepseek_v4 / inkling / cohere2_moe /
-                                 step3p7 / laguna.
+                                 step3p7 / laguna / nemotron_h.
 """
 
 from dataclasses import dataclass
@@ -109,6 +109,7 @@ _TINY_MOE_FAMILY_MARKERS = {
     "laguna": "laguna",
     "lfm2_moe": "lfm2",
     "mistral4": "mistral4",
+    "nemotron_h": "nemotron_h",
     "qwen3_5_moe_text": "qwen3",
     "qwen3_moe": "qwen3",
     "step3p7": "step3p7",
@@ -454,6 +455,9 @@ MANIFEST: dict[str, TestSpec] = {
     ),
     "parallelism/ep/test_ep_vs_fsdp_step3p7.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "step3p7"), timeout=900
+    ),
+    "parallelism/ep/test_ep_vs_fsdp_nemotron_h.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "nemotron_h"), timeout=900
     ),
     "parallelism/ep/test_ep_vs_reference_inkling.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "inkling"), timeout=900
@@ -1351,6 +1355,9 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_step3p7.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "step3p7"), timeout=1200
     ),
+    "trainers/sft/test_sft_nemotron_h.py": TestSpec(
+        nproc=2, markers=("gpu", "core", "2gpu", "ep", "moe", "nemotron_h"), timeout=1200
+    ),
     "trainers/sft/test_sft_glm4_moe.py": TestSpec(
         nproc=2, markers=("gpu", "full", "2gpu", "ep", "moe", "glm4"), timeout=1500
     ),
@@ -1459,6 +1466,7 @@ ALL_MARKERS = (
     "cohere2_moe",
     "glm5",
     "step3p7",
+    "nemotron_h",
 )
 
 

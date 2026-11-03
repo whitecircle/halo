@@ -52,6 +52,7 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LFM2_MOE_CONFIG,
     TINY_MINICPM3_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
     TINY_QWEN35_CONFIG,
@@ -123,6 +124,7 @@ _TINY_MODELS = {
     "laguna": lambda: _model("LagunaForCausalLM", "LagunaConfig", **TINY_LAGUNA_CONFIG),
     "lfm2_moe": lambda: _model("Lfm2MoeForCausalLM", "Lfm2MoeConfig", **TINY_LFM2_MOE_CONFIG),
     "zaya": lambda: _model("ZayaForCausalLM", "ZayaConfig", **TINY_ZAYA_CONFIG),
+    "nemotron_h": lambda: _model("NemotronHForCausalLM", "NemotronHConfig", **TINY_NEMOTRON_H_CONFIG),
     "deepseek_v4": lambda: _model("DeepseekV4ForCausalLM", "DeepseekV4Config", **TINY_DSV4_CONFIG),
     "glm5_next": lambda: _model(
         "Glm5NextForConditionalGeneration",

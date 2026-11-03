@@ -56,6 +56,8 @@ from transformers.models.lfm2_moe.configuration_lfm2_moe import Lfm2MoeConfig
 from transformers.models.lfm2_moe.modeling_lfm2_moe import Lfm2MoeSparseMoeBlock
 from transformers.models.mistral4.configuration_mistral4 import Mistral4Config
 from transformers.models.mistral4.modeling_mistral4 import Mistral4MoE
+from transformers.models.nemotron_h.configuration_nemotron_h import NemotronHConfig
+from transformers.models.nemotron_h.modeling_nemotron_h import NemotronHMoE
 from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import Qwen3_5MoeConfig
 from transformers.models.qwen3_5_moe.modeling_qwen3_5_moe import Qwen3_5MoeSparseMoeBlock
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
@@ -75,6 +77,7 @@ from src.distributed.expert_parallel.layers.gpt_oss import EPGptOssMoELayer
 from src.distributed.expert_parallel.layers.inkling import EPInklingMoELayer
 from src.distributed.expert_parallel.layers.lfm2 import EPLfm2MoELayer
 from src.distributed.expert_parallel.layers.mistral4 import EPMistral4MoELayer
+from src.distributed.expert_parallel.layers.nemotron_h import EPNemotronHMoELayer
 from src.distributed.expert_parallel.layers.qwen3 import EPQwen3MoELayer
 from src.distributed.expert_parallel.layers.qwen3_5 import EPQwen3_5MoELayer
 from src.distributed.expert_parallel.layers.step3p7 import EPStep3p7MoELayer
@@ -270,6 +273,29 @@ def _step3p7() -> Step3p7SparseMoeBlock:
     )
 
 
+def _nemotron_h(moe_latent_size: int | None = None) -> NemotronHMoE:
+    """Non-gated relu2 experts. ``moe_latent_size`` builds the latent variant, whose experts read a
+    width other than the hidden size, so a wrapper that dispatched the hidden states unprojected fails
+    on shape rather than matching by accident."""
+    return NemotronHMoE(
+        NemotronHConfig(
+            n_routed_experts=E,
+            num_experts_per_tok=K,
+            moe_shared_expert_intermediate_size=M,
+            moe_latent_size=moe_latent_size,
+            n_group=1,
+            topk_group=1,
+            layers_block_type=["moe"],
+            **_ROUTING_KNOBS,
+            **{key: value for key, value in _COMMON.items() if key != "hidden_act"},
+        )
+    )
+
+
+def _nemotron_h_latent() -> NemotronHMoE:
+    return _nemotron_h(moe_latent_size=H // 2)
+
+
 def _block_inputs(dtype: torch.dtype) -> tuple[torch.Tensor, ...]:
     """Whole-block families take 3-D hidden states and route internally."""
     generator = torch.Generator().manual_seed(11)
@@ -298,6 +324,8 @@ FAMILIES = [
     ("inkling", EPInklingMoELayer, _inkling, _block_inputs),
     ("cohere2_moe", EPCohere2MoELayer, _cohere2_moe, _block_inputs),
     ("step3p7", EPStep3p7MoELayer, _step3p7, _block_inputs),
+    ("nemotron_h", EPNemotronHMoELayer, _nemotron_h, _block_inputs),
+    ("nemotron_h_latent", EPNemotronHMoELayer, _nemotron_h_latent, _block_inputs),
 ]
 _FIELDS = ("family", "wrapper", "factory", "inputs")
 _IDS = [family[0] for family in FAMILIES]
@@ -460,7 +488,7 @@ def test_the_fixtures_carry_non_neutral_routing_knobs():
     """Anti-vacuity for the fixtures themselves: the families that HAVE a normalization and a routed
     scaling factor must be built with both switched away from their neutral values, or a wrapper that
     dropped either would still reproduce the block exactly."""
-    for factory in (_glm4_moe_lite, _glm5_next, _mistral4, _lfm2_moe):
+    for factory in (_glm4_moe_lite, _glm5_next, _mistral4, _lfm2_moe, _nemotron_h):
         gate = factory().gate  # 5.14 moved both knobs onto the *TopkRouter
         assert gate.norm_topk_prob is True, f"{factory.__name__}: normalization is off"
         assert gate.routed_scaling_factor == _ROUTING_KNOBS["routed_scaling_factor"], (

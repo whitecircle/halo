@@ -133,6 +133,7 @@ All EP MoE families use grouped GEMM. GEMM-call count follows the weight layout:
 | Cohere2 MoE | `EPCohere2MoELayer` | 2 (gate_up+down) | Fused GLU, sigmoid/softmax top-k-then-activate gating, averaged shared expert |
 | GLM-5 Next | `EPGlm5NextMoELayer` | 2 (gate_up+down) | Fused `[E, 2M, H]` storage; fused Triton clamped SwiGLU (`swiglu_limit`) overrides the fused-GLU seam; shared expert |
 | Step-3.7 Flash | `EPStep3p7MoELayer` | 2 (gate_up+down) | Fused `[E, 2M, H]` storage; per-layer **post-activation** fused Triton clamped SwiGLU (`swiglu_limits`, layers 43–44 only — unclamped layers take the base fused-SiLU combine); shared expert |
+| NemotronH | `EPNemotronHMoELayer` | 2 (up+down) | Non-gated relu² experts; dispatches at the latent width where the block carries `moe_latent_size`; shared expert |
 
 Families whose activation is a standard SiLU gate fuse the activation and the multiply into one Triton kernel, armed by a behavioral probe — see [GLM-4 → Fused SwiGLU](../models/glm4.md#fused-swiglu).
 

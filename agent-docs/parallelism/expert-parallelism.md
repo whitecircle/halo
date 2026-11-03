@@ -36,6 +36,7 @@ Parallelism](expert-tensor-parallelism.md) further shards each expert's FFN insi
 | Cohere2 MoE | `Cohere2MoeSparseMoeBlock` | `EPCohere2MoELayer` | [cohere2-moe.md](../models/cohere2-moe.md) |
 | GLM-5 Next | `Glm5NextTextMoE` | `EPGlm5NextMoELayer` | [glm5-next.md](../models/glm5-next.md) |
 | Step-3.7 Flash | `Step3p7SparseMoeBlock` | `EPStep3p7MoELayer` | [step3p7.md](../models/step3p7.md) |
+| NemotronH | `NemotronHMoE` | `EPNemotronHMoELayer` | [nemotron-h.md](../models/nemotron-h.md) |
 
 Source of truth: `MOE_LAYER_MAP` in `src/distributed/expert_parallel/patching.py`, derived from the
 `EPMoELayerBase` subclass tree.
@@ -71,6 +72,8 @@ EP surface. The table is pinned against the classes by
 | Cohere2 MoE | RL weight sync — no end-to-end sync validated against either pinned server | `_supports_weight_sync` |
 | Cohere2 MoE | lazy loading — no lazy load of the Command A+ checkpoint has been checked against `from_pretrained` | `_supports_lazy_loading` |
 | GLM-5 Next | RL weight sync — neither pinned rollout engine registers `glm5_next` | `_supports_weight_sync` |
+| NemotronH | RL weight sync — no end-to-end sync of the non-gated per-expert export validated against either pinned server | `_supports_weight_sync` |
+| NemotronH | lazy loading — the lazy loader's per-expert vocabulary is the gated `(gate, up, down)` triple, where a bare `up_proj` is a GLU half | `_supports_lazy_loading` |
 
 A second class of weight-sync restriction sits outside that table, keyed on the model type **and**
 the engine. Each client declares the model types its pinned release cannot take an online update for

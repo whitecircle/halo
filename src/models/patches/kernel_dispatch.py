@@ -84,11 +84,48 @@ def _segmented_chunk_gated_delta_rule(torch_function, query, key, value, **kwarg
     return torch.cat(outputs, dim=1), state
 
 
+def _segmented_mamba_chunk_scan(torch_function, hidden_states, dt, A, B, C, chunk_size, **kwargs):
+    """Run the torch Mamba-2 chunk scan per packed document.
+
+    The torch-path ``mamba_chunk_scan_combined`` swallows ``seq_idx`` and scans the whole row as one
+    recurrence; only the kernel resets the state at a document boundary. Inputs are ``[batch, seq, ...]``
+    and each document restarts from a zero state, which is what the kernel's reset computes. A call
+    carrying state in or out (``initial_states`` / ``return_final_states``) falls through unsegmented.
+    """
+    seq_idx = kwargs.pop("seq_idx", None)
+    if seq_idx is None or kwargs.get("initial_states") is not None or kwargs.get("return_final_states"):
+        return torch_function(hidden_states, dt, A, B, C, chunk_size, **kwargs)
+    out = torch.empty_like(hidden_states, dtype=torch.float32)
+    for row in range(hidden_states.shape[0]):
+        boundaries = (seq_idx[row][1:] != seq_idx[row][:-1]).nonzero().flatten() + 1
+        edges = [0, *boundaries.tolist(), hidden_states.shape[1]]
+        for start, end in zip(edges[:-1], edges[1:], strict=False):
+            rows, span = slice(row, row + 1), slice(start, end)
+            out[rows, span] = torch_function(
+                hidden_states[rows, span], dt[rows, span], A, B[rows, span], C[rows, span], chunk_size, **kwargs
+            )
+    return out
+
+
 # CPU-route fixups: the original packages are CUDA-only, and 5.16's torch fallbacks are not always
 # faithful to them. Keyed by the kernel name the decorator factory is called with.
 _CPU_FALLBACK_FIXUPS = {
     "causal_conv1d_fn": _segmented_conv1d,
     "chunk_gated_delta_rule": _segmented_chunk_gated_delta_rule,
+    "mamba_chunk_scan_combined": _segmented_mamba_chunk_scan,
+}
+
+# Hub builds of packages the images do not install, keyed by the modeling module and kernel they
+# replace and pinned to the verified revision. Where the decorator captured the torch body, a CUDA
+# call runs the Hub op instead: the torch Mamba-2 scan is several times slower, far heavier on
+# activation memory, and ignores ``seq_idx``. The build's fused ``mamba_split_conv1d_scan_combined``
+# is left out: it asserts on ``causal_conv1d_cuda``, which causal-conv1d 1.6 no longer exports, so the
+# mixer takes its unfused path, where the installed causal-conv1d kernel runs the conv.
+_MAMBA_SSM_HUB = ("kernels-community/mamba-ssm", "c8ffc584c147878a6eb978ae0e8db4d116c93a8c")
+_NEMOTRON_H_MODELING = "transformers.models.nemotron_h.modeling_nemotron_h"
+_HUB_KERNELS = {
+    (_NEMOTRON_H_MODELING, "mamba_chunk_scan_combined"): _MAMBA_SSM_HUB,
+    (_NEMOTRON_H_MODELING, "selective_state_update"): _MAMBA_SSM_HUB,
 }
 
 
@@ -141,6 +178,32 @@ def _warn_if_torch_captured(dispatched, torch_function, func_name: str, package:
         )
 
 
+@functools.cache
+def _hub_kernel_function(repo_id: str, revision: str, func_name: str):
+    """``func_name`` from the Hub kernel ``repo_id`` at ``revision``, with kwargs filtered to its signature
+    as transformers filters them for an installed package. Resolved once per process."""
+    import kernels  # noqa: PLC0415 — optional Hub-kernel backend, fetched only for a family that uses it
+
+    function = getattr(kernels.get_kernel(repo_id, revision=revision), func_name)
+    params = frozenset(inspect.signature(function).parameters)
+
+    @functools.wraps(function)
+    def filtered(*args, **kwargs):
+        return function(*args, **{key: value for key, value in kwargs.items() if key in params})
+
+    return filtered
+
+
+def resolve_hub_kernels(modeling_module: str) -> None:
+    """Fetch and bind every Hub kernel ``modeling_module`` routes to, so a missing or offline build fails
+    at model load rather than inside the first forward. A no-op without CUDA, where none of them run."""
+    if not torch.cuda.is_available():
+        return
+    for (module, func_name), (repo_id, revision) in _HUB_KERNELS.items():
+        if module == modeling_module:
+            _hub_kernel_function(repo_id, revision, func_name)
+
+
 def ensure_device_aware_kernel_dispatch() -> None:
     """Idempotent; patches the factory in ``hub_kernels`` and any materialized re-export."""
     if getattr(hub_kernels, _PATCHED_FLAG, False):
@@ -156,6 +219,8 @@ def ensure_device_aware_kernel_dispatch() -> None:
             _warn_if_torch_captured(dispatched, torch_function, func_name, package)
 
             fixup = _CPU_FALLBACK_FIXUPS.get(func_name)
+            hub = _HUB_KERNELS.get((torch_function.__module__, func_name))
+            hub = hub if hub is not None and _capture_fell_back(dispatched, torch_function) else None
 
             @functools.wraps(torch_function)
             def device_aware(*args, **kwargs):
@@ -164,6 +229,8 @@ def ensure_device_aware_kernel_dispatch() -> None:
                     if fixup is not None:
                         return fixup(torch_function, *args, **kwargs)
                     return torch_function(*args, **kwargs)
+                if hub is not None:
+                    return _hub_kernel_function(*hub, func_name)(*args, **kwargs)
                 return dispatched(*args, **kwargs)
 
             return device_aware

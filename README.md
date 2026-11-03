@@ -58,7 +58,7 @@ On 8× B300, Halo trains gpt-oss-20b at up to 3.5× the throughput of stock TRL 
   token-mass balance and fixed engine log-probs for async GRPO, RL environments that pay only for real
   solutions, and context parallelism for offline GRPO.
 - **2026-08-20 — Halo 1.0.0.** First public release: EP / CP / TP / ETP on native HuggingFace models
-  (LLM and VLM), 15 MoE families, pre-training through multi-turn RL with vLLM or SGLang rollouts,
+  (LLM and VLM), 16 MoE families, pre-training through multi-turn RL with vLLM or SGLang rollouts,
   FlashAttention-4, DeepEP V2, DeepGEMM, and the bf16 `AdamW` optimizer.
 
 </br>

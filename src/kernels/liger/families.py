@@ -34,6 +34,16 @@ LIGER_FAMILY_SPECS: tuple[LigerFamilySpec, ...] = (
         causal_lm=("ZayaForCausalLM",),
         flce_default=True,
     ),
+    # NemotronH. RMSNorm and the loss only: the Mamba-2 mixer's gated norm is grouped (`n_groups` groups
+    # over the intermediate) and the MLPs are non-gated relu², neither a Liger kernel. The attention is
+    # NoPE, so there is no rotary to fuse. FLCE by default — the `[B*S, 131072]` logits plane binds first.
+    LigerFamilySpec(
+        model_types=("nemotron_h",),
+        modeling_module="transformers.models.nemotron_h.modeling_nemotron_h",
+        rms_norm=("NemotronHRMSNorm",),
+        causal_lm=("NemotronHForCausalLM",),
+        flce_default=True,
+    ),
     # DeepSeek-V4. No RMSNorm: no parity test covers the swap. The loaders cast the fp32-pinned
     # `DeepseekV4RMSNorm` weights to the run dtype, where the eager norm returns the input dtype as
     # Liger's kernel does. No GLU: the experts run a *clamped* SwiGLU (`swiglu_limit`). Rotary is interleaved
