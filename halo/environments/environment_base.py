@@ -319,7 +319,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
             info=trajectory.info,
         )
 
-    def _release_episode(self, episode_id: int) -> None:  # noqa: B027  optional hook; subclasses override
+    def _release_episode(self, episode_id: int) -> None:  # optional hook; subclasses override
         """Release one episode's external resources (a sandbox session, a connection) as :meth:`cleanup` drops it."""
 
     def _run_or_schedule(self, coroutine) -> None:

@@ -60,8 +60,9 @@ def claim_optimizer_step(trainer, marker_attr: str) -> bool:
 
 class GradientSyncMixin:
     def _install_grad_accum_window(self) -> None:
-        """Empty unless ``fsdp_reshard_after_backward=False`` or ``fsdp_defer_grad_sync`` is set on this trainer's
-        wrap. Called after every wrap, which is what makes an ``FSDPModule``."""
+        """Cache the FSDP2 modules :meth:`_set_window_end` toggles: empty unless ``fsdp_reshard_after_backward=False``
+        or ``fsdp_defer_grad_sync`` is set on this trainer's wrap. Called after every wrap, which is what makes an
+        ``FSDPModule``."""
         config = self.parallelism_config
         toggled = self._fsdp_wrapped and (not config.fsdp_reshard_after_backward or config.fsdp_defer_grad_sync)
         # The outermost model, not ``_top_level_model()``: every mode wraps at or below it.
@@ -76,8 +77,9 @@ class GradientSyncMixin:
             )
 
     def _set_window_end(self, is_last: bool) -> None:
-        """Off for microbatches 1..n-1, on for the last. A reshard left off on the last leaves grad-less unsharded
-        params the optimizer never captured; a reduce left off never reaches the sharded grads."""
+        """FSDP2's post-backward reshard and reduce: off for microbatches 1..n-1, on for the last. A reshard left off on
+        the last leaves grad-less unsharded params the optimizer never captured; a reduce left off never reaches the
+        sharded grads."""
         if not self._window_modules or is_last == self._window_end_armed:
             return
         config = self.parallelism_config
@@ -90,7 +92,8 @@ class GradientSyncMixin:
 
     def _finish_fsdp2_backward(self, model: nn.Module) -> None:
         """COLLECTIVE where a group reduces. Complete the post-backward a reentrant recompute skipped, then refuse one
-        still undone, before the clip."""
+        still undone, before the clip. Groups come off the model the step ran, which an accelerate launch wraps only in
+        ``train()``."""
         cached_model, groups = getattr(self, "_fsdp2_groups_of", (None, None))
         if cached_model is not model:
             groups = fsdp2_param_groups(model)

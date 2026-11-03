@@ -275,7 +275,7 @@ DeepEP is required for EP — there is no NCCL fallback. The recurring failure m
 
     The Xid 43 / launch-failure form surfaces in whatever kernel is on-stream (often the expert
     GEMM) and reads like a compute bug, but the trigger is the oversized dispatch. A declared
-    `per_device_train_batch_size × max_length` over `8192` tokens/rank
+    `per_device_train_batch_size × max_length` (under PP, one microbatch's rows × `max_length`) over `8192` tokens/rank
     (`HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK`) is rejected at config time, before the model loads. That
     gate reads the train batch only, so an evaluation over the ceiling (`per_device_eval_batch_size`
     defaults to 8) passes it, starts training, and raises at the dispatcher's buffer-sizing check on

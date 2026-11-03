@@ -310,7 +310,6 @@ def preflight_model_load_resources(
     *,
     tool: str,
     device_map: str | None = None,
-    writes_full_model: bool = True,
 ) -> None:
     """Size preflight for a whole-checkpoint ``from_pretrained``, from the source's safetensors bytes. Silent for a hub
     id, a weightless directory and a per-rank one, whose usability is the tool's own gates' call."""
@@ -322,6 +321,4 @@ def preflight_model_load_resources(
         return
     total = sum(os.path.getsize(shard) for shard in shards)
     lands_on_host = device_map in (None, "cpu")
-    preflight_resource_warning(
-        tool, output_dir, disk_bytes=total if writes_full_model else None, ram_bytes=total if lands_on_host else None
-    )
+    preflight_resource_warning(tool, output_dir, disk_bytes=total, ram_bytes=total if lands_on_host else None)

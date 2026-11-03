@@ -48,8 +48,7 @@ a 1 MB file-size cap (optional: `pipx install pre-commit`, then `pre-commit inst
 
 `cpu-tests.yml` asserts the image is present and runs `make test-cpu` (the image without `--gpus`, so it
 does not contend with GPU jobs on the runner) in one pytest process, uploading its JUnit XML. One process
-takes about 3.5 to 4.8 hours (estimated from samples), past the workflow's 120-minute cap, so a dispatched
-run times out.
+takes about 3.5 to 4.8 hours (estimated from samples), inside the workflow's 360-minute cap.
 
 `gpu-tests.yml` asserts the image (`halo:blackwell` by default) and runs
 `make test-gpu-core ENV_FILE= AWS_DIR=`: creds-free, `-m "gpu and core"`, JUnit XML as an artifact. Once

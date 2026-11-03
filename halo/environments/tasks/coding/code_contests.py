@@ -324,9 +324,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
             raise ValueError(f"{ANSWER_KEY!r} must be a dict or list of tests, got {type(answer).__name__}")
         return answer
 
-    def _apply_effort_profile(
-        self, traj: Trajectory, level: str | None, profile: dict[str, int | float | bool]
-    ) -> None:
+    def _apply_effort_profile(self, traj: Trajectory, profile: dict[str, int | float | bool]) -> None:
         """The task message states none of these budgets: the level the chat template states and the engine's caps
         control an episode, and a refused call is told so."""
         max_subs = profile.get("max_submissions", self.max_submissions)

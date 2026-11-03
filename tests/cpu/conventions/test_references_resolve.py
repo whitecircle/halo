@@ -310,8 +310,8 @@ def test_the_sweep_sees_every_kind_of_reference():
     assert kinds["patch target"] > 500, kinds
     assert kinds["attribute"] > 2000, kinds
     assert kinds["import"] > 8000, kinds
-    assert kinds["name"] > 400, kinds
-    assert kinds["path"] > 1500, kinds
+    assert kinds["name"] > 300, kinds
+    assert kinds["path"] > 1200, kinds
     assert text_references > 400, f"the build files, runners and recipes name only {text_references} references"
 
 

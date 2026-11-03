@@ -35,7 +35,7 @@ from halo.weight_sync.registry import resolve_weight_sync_client, rollout_backen
 
 logger = logging.getLogger(__name__)
 
-# Of the uniform score scale 1/num_experts: a sign step above the warn fraction oscillates, the other is quoted.
+# Of the uniform scale 1/num_experts: a sign step above the warn fraction oscillates; the warning quotes the other.
 _TRANSIENT_STEP_WARN_FRACTION_OF_UNIFORM = 0.25
 _TRANSIENT_STEP_SUGGESTED_FRACTION_OF_UNIFORM = 0.1
 # Far below the routed slots' bias range, so the discard slot never wins a top-k comparison it would not win unbiased.

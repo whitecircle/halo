@@ -154,7 +154,7 @@ class ImportanceSamplingMixin:
                     if len(values) != completion_ids.numel():
                         raise ValueError(f"row {i}: {len(values)} log-probs for {completion_ids.numel()} tokens")
                     scored[i] = torch.tensor(values, dtype=torch.float32, device=completion_ids.device)
-                except Exception as e:  # noqa: BLE001 — a transport/shape failure on one row is that row's miss
+                except Exception as e:  # a transport/shape failure on one row is that row's miss
                     failures.append(e)
         self._world_metrics.fraction("sampling/engine_rescore_miss_frac", len(failures), len(indices))
         if failures:

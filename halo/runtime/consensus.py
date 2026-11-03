@@ -89,9 +89,9 @@ def rank_max(values: list[int], group: dist.ProcessGroup | None = None) -> list[
     return reduced.tolist()
 
 
-def rank_min(values: list[int], group: dist.ProcessGroup | None = None) -> list[int]:
-    """COLLECTIVE: each int64 value's MIN across ``group``."""
-    return [-value for value in rank_max([-value for value in values], group)]
+def rank_min(values: list[int]) -> list[int]:
+    """COLLECTIVE: each int64 value's MIN across the world."""
+    return [-value for value in rank_max([-value for value in values])]
 
 
 def reject_across_ranks(local_reason: str | None, what: str, exc_type: type[Exception] = RuntimeError) -> None:

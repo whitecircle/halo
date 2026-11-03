@@ -89,7 +89,8 @@ class ReasoningBudgetMixin:
         return all(effort.budget_soft for effort in self._efforts_by_level().values())
 
     def _resolve_reasoning_end_ids(self) -> tuple[int, ...] | None:
-        """On a budgeted vLLM run; a marker the tokenizer does not write resolves none, warned on the main process."""
+        """The reasoning-end ids on a budgeted vLLM run, else ``None``; a marker the tokenizer does not write resolves
+        none, warned on the main process."""
         cfg = self.async_config
         if cfg.rollout_backend == SGLANG_BACKEND or not has_thinking_budget(self._efforts_by_level()):
             return None

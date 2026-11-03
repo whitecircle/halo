@@ -505,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
     path = write_evidence(
         "efficiency_callback", base=base, head=head, image=args.image, verdict=verdict, findings=findings
     )
-    print(  # noqa: T201 — the CLI's report
+    print(
         f"efficiency callback: {verdict}, {findings['cases']} cases compared ({len(findings['new'])} new, "
         f"{len(findings['dropped'])} dropped), {len(findings['deltas'])} deltas, {len(findings['accepted'])} "
         f"accepted, {len(findings['raised'])} raising, negative control unseen in "

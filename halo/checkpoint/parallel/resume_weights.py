@@ -256,10 +256,10 @@ def _copy_into_live(
 
 
 def _load_streamed(ctx: CheckpointLoadContext, checkpoint: str, model, *, for_best_model: bool) -> bool:
-    """Load a gathered checkpoint into a model each rank holds whole or TP-sharded, collective-free with
-    ``src_data_rank=None``; False when rank 0 finds no readable weights. TP+DP's strided 2-D placement does not invert,
-    so it only resumes a model built FROM the checkpoint. Every verdict is joined before any write, a failed copy
-    after."""
+    """COLLECTIVE. Load a gathered checkpoint into a model each rank holds whole or TP-sharded, each copy
+    collective-free with ``src_data_rank=None``; False when rank 0 finds no readable weights. TP+DP's strided 2-D
+    placement does not invert, so it only resumes a model built FROM the checkpoint. Every verdict is joined before any
+    write, a failed copy after."""
     mode = "TP" if ctx.parallelism_config.is_tp_mode else "Unsharded"
     reject_ep_sharded_resume(checkpoint)
     readable = False
@@ -347,7 +347,8 @@ def load_resume_weights(
     """COLLECTIVE. Reload ``checkpoint_dir``'s weights into ``model`` for the active mode, in place; False leaves the
     reload to the base Trainer's loader. PP reads this stage's tensors; EP/CP restores adapters only; FSDP2 distributes
     rank 0's tensors; TP and single-process/DDP stream the node's copy. A PEFT adapter-only checkpoint restores at the
-    live dtype, where the base's ``load_adapter`` would recast to fp32. ``for_best_model`` always reads."""
+    live dtype, where the base's ``load_adapter`` would recast to fp32. ``for_best_model`` never takes the built-from-
+    checkpoint skips, since the live weights trained past it; EP/CP full fine-tune and TP+DP raise instead."""
     model = model if model is not None else ctx.model
     if ctx.parallelism_config.is_pp_mode:
         # First: a stage's re-based local names misresolve under every other path.

@@ -19,7 +19,7 @@ per_device_train_batch_size: 1
 per_device_eval_batch_size: 1
 num_train_epochs: 1
 gradient_accumulation_steps: 8
-gradient_checkpointing: false   # a full 2 x 4,096 pair holds ~52 GB of activations; set true on 80 GB GPUs
+gradient_checkpointing: false   # reserves 96 GiB per GPU on a full 2 x 4,096 pair; set true on 80 GB GPUs
 learning_rate: 1.0e-05
 lr_scheduler_type: cosine
 warmup_steps: 20

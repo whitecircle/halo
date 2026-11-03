@@ -28,8 +28,9 @@ def prefix_lm_token_type_ids(labels: torch.Tensor) -> torch.Tensor:
 
 
 def apply_prefix_lm_causal_decoder(model: torch.nn.Module, model_config) -> None:
-    """So a forward without ``token_type_ids`` scores each token on its past alone. A forward with them still gets the
-    prefix-LM mask, as every non-flash backend reads ``is_causal`` only when no mask is passed."""
+    """Make the decoder attention causal, so a forward without ``token_type_ids`` scores each token on its past alone.
+    A forward with them still gets the prefix-LM mask, as every non-flash backend reads ``is_causal`` only when no mask
+    is passed."""
     if not has_prefix_lm_attention(model_config):
         return
     decoder = backbone_with_layers(model)

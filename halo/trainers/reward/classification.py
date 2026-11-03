@@ -267,7 +267,7 @@ class ClassificationTrainer(DistributedTrainerMixin, Trainer):
     ) -> tuple[torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """``ignore_keys`` is inert: the loss returns ``logits`` directly."""
         if self._pp_runner is not None:
-            return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
+            return self._pp_prediction_step(inputs, prediction_loss_only)
         inputs = self._prepare_inputs(inputs)
 
         with torch.no_grad():

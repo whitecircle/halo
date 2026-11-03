@@ -88,10 +88,10 @@ def _move_into_holding(output_dir: str, checkpoints: list[str]) -> None:
 
 
 def resolve_resume_checkpoint(output_dir: str, requested: str | None = None) -> str | None:
-    """COLLECTIVE. The checkpoint to resume from, the same on every rank: ``requested`` if complete everywhere, else
-    the newest step directory complete everywhere; raises, moving nothing, when nothing complete is found. Incomplete
-    step directories move aside, since one numbered above this run's next saves would make rotation delete the complete
-    ones."""
+    """COLLECTIVE. The checkpoint to resume from, the same on every rank: ``requested``, which must be complete
+    everywhere, else the newest step directory complete everywhere, or ``None`` with no step directories. Raises,
+    moving nothing, when nothing complete is found. Incomplete step directories move aside, since one numbered above
+    this run's next saves would make rotation delete the complete ones."""
     names = _world_step_directories(output_dir, requested)
     candidates = [os.path.join(output_dir, name) for name in names]
     complete = [complete_on_every_rank(path) for path in candidates]

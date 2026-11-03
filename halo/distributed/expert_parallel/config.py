@@ -77,7 +77,7 @@ class EPConfig:
         self.expert_start_idx = None
         self.expert_end_idx = None
         # Single-process values (rank 0 of each group, which CPU tests plan with); _build_process_groups replaces them.
-        # dispatch_ep_group stays None at ep_size == 1; dp_scope_group None is the world, per stage under PP.
+        # dispatch_ep_group stays None at ep_size == 1; dp_scope_group None is the world, a per-stage group under PP.
         self.process_group = None
         self.dispatch_ep_group = None
         self.expert_tp_group = None

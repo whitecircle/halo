@@ -142,7 +142,6 @@ class _ScoringSchedule(FakeSchedule):
             losses.append(self._loss_fn(_logits(args[0], self._kind), target))
 
     def step(self, *args, target=None, losses=None, return_outputs=False, **kwargs):
-        self.step_calls += 1
         arg_mbs, kwarg_mbs = self._split_inputs(args, kwargs)
         target_mbs = None if target is None else list(torch.tensor_split(target, self._n_microbatches))
         self._step_microbatches(arg_mbs, kwarg_mbs, target_mbs, losses)

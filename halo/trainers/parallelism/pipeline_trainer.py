@@ -364,10 +364,9 @@ class PipelineTrainerMixin:
     def _pp_broadcast_loss_from_last_stage(self, tensor) -> torch.Tensor:
         return broadcast_scalar_from_last_stage(tensor, self._pp_last_stage_rank, self._pp_chain_group)
 
-    def _pp_prediction_step(self, inputs, prediction_loss_only: bool, ignore_keys=None):
+    def _pp_prediction_step(self, inputs, prediction_loss_only: bool):
         """COLLECTIVE over the chain. With ``compute_metrics``, one forward-only pass yields the last stage's output;
         without it the schedule runs its own microbatched loss. Final-round padding comes back as inert filler rows."""
-        del ignore_keys
         adapter = self._pp_adapter
         inputs = self._prepare_inputs(inputs)
         if adapter.batch_transform is not None:

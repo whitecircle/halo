@@ -149,7 +149,8 @@ def uses_fa4_dedicated_head_dim(model_config) -> bool:
 
 
 def fa4_dedicated_kernel_refusal(model_config) -> str | None:
-    """It asserts on Gemma 2's softcap and Gemma 3's sliding windows; latent attention stays on FA2 as a precaution."""
+    """Why FA4's dedicated kernel refuses this model, or ``None``: it asserts on Gemma 2's softcap and Gemma 3's sliding
+    windows; latent attention stays on FA2 as a precaution."""
     if not uses_fa4_dedicated_head_dim(model_config):
         return None
     if has_attention_logit_softcap(model_config):

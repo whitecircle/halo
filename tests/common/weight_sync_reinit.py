@@ -78,7 +78,7 @@ def serve_the_checkpoint(
 def _probe_or_none(server_url: str, model_name: str) -> dict[str, float] | None:
     try:
         return probe_top_logprobs(server_url, model_name)
-    except Exception as e:  # noqa: BLE001 — the verdict is "unusable", whatever the engine failed with
+    except Exception as e:  # the verdict is "unusable", whatever the engine failed with
         log(f"served-policy probe failed: {type(e).__name__}: {e}")
         return None
 
@@ -116,7 +116,7 @@ def run_reinit_cycles(
             param.mul_(PERTURBATION)
         try:
             _sync(client_class, server_url, [(PERTURBED_PARAM, param.detach())], ctx.device, group_port)
-        except Exception as e:  # noqa: BLE001 — a refused re-init is the defect under test, not an error
+        except Exception as e:  # a refused re-init is the defect under test, not an error
             errors.append(f"cycle {cycle}: {type(e).__name__}: {e}")
             log(errors[-1])
             break
@@ -127,14 +127,14 @@ def run_reinit_cycles(
     server_growth = _server_gpu_used_mib(server_gpu) - server_before
     trainer_growth = _trainer_gpu_used_mib(ctx.device) - trainer_before
 
-    # Trainer only: vLLM 0.26.0's packed consumer receives on fresh streams per update, so its reserved memory grows
+    # Trainer only: vLLM's packed consumer receives on fresh streams per update, so its reserved memory grows
     # until PyTorch's stream pool wraps, whatever the trainer does.
     whole_completed = whole_before = 0
     while not errors and whole_completed < WHOLE_CHECKPOINT_CYCLES:
         named_params = ((name, tensor.detach()) for name, tensor in model.named_parameters())
         try:
             _sync(client_class, server_url, named_params, ctx.device, group_port)
-        except Exception as e:  # noqa: BLE001 — same verdict as a failed cycle
+        except Exception as e:  # same verdict as a failed cycle
             errors.append(f"whole-checkpoint cycle {whole_completed + 1}: {type(e).__name__}: {e}")
             log(errors[-1])
             break
@@ -148,7 +148,7 @@ def run_reinit_cycles(
     if not errors:
         try:
             _sync(client_class, server_url, [(PERTURBED_PARAM, original)], ctx.device, group_port)
-        except Exception as e:  # noqa: BLE001 — same verdict as a failed cycle
+        except Exception as e:  # same verdict as a failed cycle
             errors.append(f"restore cycle: {type(e).__name__}: {e}")
             log(errors[-1])
         else:

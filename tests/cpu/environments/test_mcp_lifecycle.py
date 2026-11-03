@@ -128,13 +128,13 @@ async def test_the_session_bounds_every_request_it_makes(monkeypatch):
 async def test_connect_discovers_tools_and_disconnect_unwinds_in_owner_task():
     env = _StubMCPEnv()
     await env.connect()
-    assert env._connected
+    assert env._server.is_open
     assert env.registry.get("stub_tool") is not None
     assert env.stub_transport.entered and env.stub_session.entered
 
     await env.disconnect()
     assert env.stub_session.exited and env.stub_transport.exited
-    assert env._server.session is None and not env._connected
+    assert env._server.session is None and not env._server.is_open
     assert env.registry.get("stub_tool") is None
     # anyio cancel-scope contract: enter and exit happened in the same task.
     assert env.stub_transport.enter_task is env.stub_transport.exit_task
@@ -149,7 +149,7 @@ async def test_failed_connect_unwinds_partial_state():
     assert env.stub_transport.entered and env.stub_transport.exited
     # A session entered but never exited holds the anyio cancel scope open, so the unwind must exit it.
     assert env.stub_session.entered and env.stub_session.exited
-    assert env._server.session is None and not env._connected
+    assert env._server.session is None and not env._server.is_open
 
 
 async def test_a_start_cancelled_mid_connect_leaves_no_server_running():
@@ -164,7 +164,7 @@ async def test_a_start_cancelled_mid_connect_leaves_no_server_running():
     owner = env.stub_transport.enter_task
     assert owner.done(), "the owner task outlived the cancelled start"
     assert env.stub_session.exited and env.stub_transport.exited
-    assert not env._connected
+    assert not env._server.is_open
 
     await env.disconnect()
     assert not os.path.exists(env.stub_transport.args[-1])
@@ -179,7 +179,7 @@ async def test_sync_close_from_running_loop_drives_disconnect():
     assert env._background_tasks, "close() on the owning loop schedules the disconnect"
     await asyncio.gather(*env._background_tasks)
     assert env.stub_session.exited and env.stub_transport.exited
-    assert env._server.session is None and not env._connected
+    assert env._server.session is None and not env._server.is_open
 
 
 async def test_disconnect_is_idempotent():
@@ -187,7 +187,7 @@ async def test_disconnect_is_idempotent():
     await env.connect()
     await env.disconnect()
     await env.disconnect()
-    assert not env._connected
+    assert not env._server.is_open
 
 
 def test_close_after_asyncio_run_unwound_the_connection_warns_nothing(caplog):
@@ -200,7 +200,7 @@ def test_close_after_asyncio_run_unwound_the_connection_warns_nothing(caplog):
     with caplog.at_level(logging.WARNING, logger=mcp_module.__name__):
         env.close()
     assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
-    assert not env._connected
+    assert not env._server.is_open
 
 
 def test_close_still_warns_when_a_stopped_loop_left_the_connection_open(caplog):

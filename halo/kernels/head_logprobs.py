@@ -14,7 +14,8 @@ VOCAB_TILE = 16384
 _COMPILED_DEVICE_TYPES = frozenset({"cuda"})
 
 # ``deterministic`` skips on-device benchmarking, so ranks seeing the same tiles (TP, ETP replicas) and reruns compile
-# the same kernels. One thread builds a graph's few small kernels in-process, over a pool of up to 32 workers per rank.
+# the same kernels. One thread builds a graph's few small kernels in-process, sparing a pool of up to 32 workers per
+# rank.
 _TILE_COMPILE_OPTIONS = {"deterministic": True, "compile_threads": 1}
 
 

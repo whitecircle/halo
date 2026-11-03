@@ -69,7 +69,7 @@ Gemma-4 26B-A4B (30 EP layers, `Gemma4ForConditionalGeneration`) trains text-onl
 
 `text_only_model` is refused for `gemma4`: transformers' CausalLM mapping names `Gemma4ForConditionalGeneration` itself, so no text-only sibling exists to drop the vision tower into (`resolve_auto_model_class`).
 
-The DPO, SMPO and reward configs (`examples/{preference,reward}/gemma4/`, EP=8 at 4,096 tokens) train without gradient checkpointing. A full-length chosen/rejected pair holds about 52 GB of activations. The fit is computed, not measured: beside the LoRA DPO state that comes to about 64 GB, plus up to about 10 GB of saved attention scores on the global layers, which is tight on an 80 GB part; beside the full fine-tune state it needs B200/B300, and on 80 GB parts the full fine-tunes pass `--gradient_checkpointing=true`. The 32k SFT config keeps it.
+The DPO and SMPO configs (`examples/preference/gemma4/`, EP=8 at 4,096 tokens) keep gradient checkpointing and reserved 47 and 62 GiB per GPU over three steps at a full-length chosen/rejected pair; without it they reserved 98 and 111 GiB. The reward config (`examples/reward/gemma4/`) trains without it, reserved 96 GiB and so needs B200/B300; on 80 GB parts pass `--gradient_checkpointing=true`. The 32k SFT config keeps it.
 
 Async GRPO with Environments: `examples/grpo/environmental/gemma4/vllm/` plus the `sglang/` ep1 siblings; both need `use_chunked_grpo_logprobs` for the 262k vocabulary, and the chunked sweep applies the head's `final_logit_softcapping` ([Memory and Throughput](../training-methods/async-grpo/performance.md#chunked-log-probs)). Either `rollout_backend` takes the weight sync ([Export](#export)).
 

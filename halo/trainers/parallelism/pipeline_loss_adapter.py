@@ -22,7 +22,7 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 class PipelineLossAdapter:
     """``token_loss_fn`` is ``(output, target) -> summed loss``, target being labels or ``{"labels", **extras}``. A
     ``None`` normalizer is the DP-global loss-token count / dp, a ``None`` eval one this rank's count over real rows.
-    ``metrics_fn`` names from config: only values cross the chain."""
+    ``metrics_fn`` must name its metrics from config: only values cross the chain."""
 
     token_loss_fn: TokenLossFn
     batch_transform: Callable[[dict], dict] | None = None

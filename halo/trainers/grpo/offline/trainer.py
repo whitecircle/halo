@@ -478,7 +478,7 @@ class OfflineGRPOTrainer(
     def prediction_step(self, model, inputs, prediction_loss_only, ignore_keys: list[str] | None = None):
         if self._pp_runner is not None:
             # compute_loss and its sign metrics need the full model, so the mixin drives the schedule.
-            return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
+            return self._pp_prediction_step(inputs, prediction_loss_only)
         inputs = self._prepare_inputs(inputs)
         with torch.no_grad():
             with self.compute_loss_context_manager():

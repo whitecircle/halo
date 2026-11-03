@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Distributed DPO training (text or VLM): ``load_policy_model`` auto-detects the modality, and a VLM's processor flips
-TRL's DPOTrainer into vision mode.
+TRL 1.14's DPOTrainer into vision mode.
 
 CP is not supported (``concatenated_forward`` needs full sequences). Under EP/TP use PEFT (``ref_model=None``) or
 ``precompute_ref_log_probs``, as the reference is not parallelized; PP runs text-only full fine-tuning of the per-pair

@@ -63,7 +63,7 @@ def bake_num_proc() -> int:
 
 
 def apply_tokenizer_overrides(tokenizer, config: PreprocessingConfig) -> None:
-    """Apply recorded pad/eos/bos/chat-template overrides, then guarantee a pad token; tokenizer or processor."""
+    """Apply recorded pad/eos/bos/chat-template overrides, then guarantee a pad token; both load paths share it."""
     if config.pad_token:
         tokenizer.pad_token = config.pad_token
     if config.eos_token:

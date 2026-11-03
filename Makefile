@@ -262,7 +262,7 @@ docs: ## links, anchors and code references in agent-docs/, human-docs/, skills/
 	./scripts/docs/check_links.sh
 
 # One `python` per generator: most write their figures at import time with no `__main__` guard, and
-# `_style_base.py` / `_theory_style.py` / `_pipeline_style.py` are shared style, not generators.
+# `_style_base.py` / `_theory_style.py` / `_pipeline_style.py` / `_chart_style.py` are shared style, not generators.
 diagrams: ## regenerate agent-docs/assets figures from scripts/diagrams (in-image; matplotlib ships there)
 	$(DOCKER_RUN_CPU) bash -lc 'set -e; for g in scripts/diagrams/gen_*.py; do echo "$$g"; python "$$g"; done'
 

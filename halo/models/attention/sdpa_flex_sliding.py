@@ -379,9 +379,10 @@ def _flex_serves(
     window: int | None,
     scaling: float | None,
 ) -> bool:
-    """It needs more queries than the window and one tile (a single-tile row gives the block mask size-1 dims, which
-    Dynamo specializes on), and the call the warm-up compiles for the module, so no call compiles mid-run. TP hands a
-    call the rank's share of the heads, which the module does not declare, so such a call keeps SDPA."""
+    """Whether FlexAttention takes a masked call: more queries than the window and one tile (a single-tile row gives
+    the block mask size-1 dims, which Dynamo specializes on), and the heads, widths and scaling of the call the warm-up
+    compiles for the module, so no call compiles mid-run. TP hands a call the rank's share of the heads, which the
+    module does not declare, so such a call keeps SDPA."""
     if not (
         attention_mask is not None
         and attention_mask.shape == (query.shape[0], 1, query.shape[-2], key.shape[-2])

@@ -199,8 +199,9 @@ def _emit_rank_rows(trainer, guard: DeferredRankFailure, *, console: bool, save:
 
 
 def emit_completion_artifacts(trainer, *, console: bool, save: bool, mode: str | None = None) -> None:
-    """COLLECTIVE. Then empty the logs on every rank, since they are unbounded on the async trainer. ``mode`` names the
-    rows' mode when it is not the model's current one. A failure on any rank raises on every rank, so no peer waits."""
+    """COLLECTIVE. Write the requested artifacts, then empty the logs on every rank, since they are unbounded on the
+    async trainer. ``mode`` names the rows' mode when it is not the model's current one. A failure on any rank raises on
+    every rank, so no peer waits."""
     if not (console or save):
         _clear_completion_logs(trainer._logs)
         return

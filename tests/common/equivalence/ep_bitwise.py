@@ -428,7 +428,7 @@ def main(argv: list[str] | None = None) -> int:
         **assessed,
     }
     path = write_evidence("ep_bitwise", base=base, head=head, image=args.image, verdict=verdict, findings=findings)
-    print(  # noqa: T201 — the CLI's report
+    print(
         f"EP bitwise ({args.tier}): {verdict}, {len(assessed['deltas'])} deltas, {len(assessed['accepted'])} "
         f"accepted, {len(assessed['raised'])} records raising, {len(assessed['unexpected_raised'])} cases "
         f"unexpected, negative control unseen in {len(assessed['negative_control']['unseen'])}, skipped as absent "

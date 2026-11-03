@@ -242,7 +242,7 @@ class SMPOTrainer(StoredMetricsMixin, DistributedTrainerMixin, Trainer):
         if self._pp_runner is not None:
             # No pipeline rank holds the full model the path below needs; the mixin drives the
             # schedule instead (loss-only, or loss plus adapter-reduced predictions for metrics).
-            return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
+            return self._pp_prediction_step(inputs, prediction_loss_only)
         with torch.no_grad(), peft_bf16_autocast(self._peft_has_been_casted_to_bf16, self.accelerator.device):
             loss, metrics, rewards = self.get_batch_loss_metrics(model, inputs, train_eval="eval")
 

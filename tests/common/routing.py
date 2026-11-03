@@ -16,7 +16,7 @@ class BareEPLayer(EPGroupLimitedMoELayerBase):
 
     FAMILY = MoEFamilySpec(model_types=())
 
-    def __init__(self, *, top_k: int, num_experts: int, **attrs):  # noqa: D107 — test double
+    def __init__(self, *, top_k: int, num_experts: int, **attrs):
         nn.Module.__init__(self)
         self.top_k = top_k
         self.num_experts = num_experts

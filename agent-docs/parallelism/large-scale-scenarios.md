@@ -234,7 +234,7 @@ the experts is the single-node escape: LoRA on EP experts, or `unfreeze_layers_p
 from 8 to 2 bytes/param. That is arithmetic, not a validated cell.
 
 **`Steady 32k` is not reachable on the `global` rows.** Cross-node EP dispatches
-`per_device_train_batch_size × max_length` tokens per rank in one MoE forward.
+`per_device_train_batch_size × max_length` tokens per rank in one MoE forward (under PP, one microbatch's rows × `max_length`).
 `reject_unsupported_model` refuses a declared budget above
 `HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK` (8192) before any weight is read, and the dispatcher re-checks at
 buffer sizing; above it a proxy-GIN dispatch wedges in transit instead of erroring.

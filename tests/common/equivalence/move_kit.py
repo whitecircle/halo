@@ -744,8 +744,8 @@ def main(argv: list[str] | None = None) -> int:
         findings={"required": args.require, "renames": dataclasses.asdict(renames), "checks": checks},
     )
     for name, check in checks.items():
-        print(f"{name:18} {check['verdict']}")  # noqa: T201 — the CLI's report
-    print(f"move kit: {verdict} ({path})")  # noqa: T201 — the CLI's report
+        print(f"{name:18} {check['verdict']}")
+    print(f"move kit: {verdict} ({path})")
     return 0 if verdict == "pass" else 1
 
 

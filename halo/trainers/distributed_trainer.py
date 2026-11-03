@@ -626,7 +626,7 @@ class DistributedTrainerMixin(
     def prediction_step(self, model, inputs, prediction_loss_only=True, ignore_keys=None):
         """Under PP the eval step must run through the schedule (no rank holds the whole model)."""
         if self._pp_runner is not None:
-            return self._pp_prediction_step(inputs, prediction_loss_only, ignore_keys)
+            return self._pp_prediction_step(inputs, prediction_loss_only)
         return super().prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
 
     def create_optimizer(self, model=None):  # base Trainer passes it; the mixin builds from self

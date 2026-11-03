@@ -315,7 +315,7 @@ def main(argv: list[str] | None = None) -> int:
     path = write_evidence(
         "checkpoint_artifacts", base=base, head=head, image=args.image, verdict=verdict, findings=findings
     )
-    print(  # noqa: T201 — the CLI's report
+    print(
         f"checkpoint artifacts: {verdict}, {findings['files']} files, {len(deltas)} deltas, {len(accepted)} "
         f"accepted, {len(raised)} cases raising, skipped as absent from a tree's roster: {skipped or 'none'} ({path})"
     )

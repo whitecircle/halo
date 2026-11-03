@@ -98,8 +98,9 @@ class ParallelismConfig:
     _cp_config: Optional["CPConfig"] = field(default=None, init=False, repr=False)
 
     def __post_init__(self):
-        """COLLECTIVE. Resolve and validate, then raise one world-uniform ValueError on any rank's failure. The inputs
-        are per-node, so a local raise would leave other ranks in the fabric collectives until the watchdog fires."""
+        """COLLECTIVE. Resolve and validate, then raise one world-uniform ValueError on any rank's failure. Two inputs
+        are per-node (``gpus_per_node``, ``NVLINK_DOMAIN_SIZE``), so a local raise would leave other ranks in the fabric
+        collectives until the watchdog fires."""
         try:
             self._resolve_and_validate()
         except Exception as exc:  # any type, or the raising rank would skip the gather its peers wait in

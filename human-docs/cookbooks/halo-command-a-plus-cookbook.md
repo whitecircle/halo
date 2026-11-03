@@ -65,8 +65,9 @@ pre-generated, scored completions and needs no server: see [Offline GRPO](../tra
 - **Precision.** The experts train in BF16 (`fp32_experts: false`). FP32 masters for 200B of expert
   parameters do not fit.
 - **Pinned settings.** The recipe pins the model revision its memory numbers were measured on and
-  leaves attention to the loader, which picks FA4 on Blackwell. It keeps `packing: false` to stay on
-  that measured shape, though text data supports packing.
+  leaves attention to the loader, which picks FA4 on Blackwell. Those numbers come from FA2; the fit on
+  FA4 is computed, not measured. It keeps `packing: false` to stay on that shape, though text data
+  supports packing.
 
 ## Limits
 

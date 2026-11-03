@@ -207,10 +207,6 @@ class NativeMCPClientEnvironment(AsyncNativeToolUseEnvironment):
         self._server = _ServerConnection(scratch=takes_scratch, on_ready=self._register_tools)
         self._episode_servers: dict[int, _ServerConnection] = {}
 
-    @property
-    def _connected(self) -> bool:
-        return self._server.is_open
-
     async def _reset_single_async(self, prompt, context=None):
         # No caller enters the env as a context manager, so connect lazily on the first episode.
         await self.connect()

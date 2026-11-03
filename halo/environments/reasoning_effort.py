@@ -103,13 +103,13 @@ class EffortProfilesMixin:
         """Empty where the level is undetermined at reset, so the hook still runs and can state the class caps."""
         level = self.reset_effort_level(context)
         profile = self.reasoning_effort_profiles.get(level, {}) if level is not None else {}
-        self._apply_effort_profile(trajectory, level, profile)
+        self._apply_effort_profile(trajectory, profile)
 
-    def _apply_effort_profile(  # noqa: B027  optional hook; task envs override
-        self, trajectory: Trajectory, level: str | None, profile: dict[str, int | float | bool]
+    def _apply_effort_profile(  # optional hook; task envs override
+        self, trajectory: Trajectory, profile: dict[str, int | float | bool]
     ) -> None:
-        """Bind a task's own profile keys for one episode; ``level`` is ``None`` and ``profile`` empty when the effort
-        is undetermined at reset."""
+        """Bind a task's own profile keys for one episode; ``profile`` is empty when the effort is undetermined at
+        reset."""
 
 
 @dataclass(frozen=True)

@@ -369,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     findings = {"tier": args.tier, "families": families, "skipped": skipped, "levels": levels, **assessed}
     path = write_evidence("cp_equivalence", base=base, head=head, image=args.image, verdict=verdict, findings=findings)
-    print(  # noqa: T201 — the CLI's report
+    print(
         f"CP equivalence ({args.tier}): {verdict}, {len(assessed['deltas'])} deltas, {len(assessed['accepted'])} "
         f"accepted, {len(assessed['enveloped'])} records judged by envelope, {len(assessed['raised'])} raising, "
         f"negative control unseen in {len(assessed['negative_control']['unseen'])}, skipped as absent from a tree's "

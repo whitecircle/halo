@@ -316,8 +316,8 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
     class _Task(NativeToolUseEnvironment):
         EFFORT_PROFILE_KEY_MINIMA = {"max_probes": 0}
 
-        def _apply_effort_profile(self, trajectory, level, profile):
-            trajectory.info["seen"] = (level, dict(profile))
+        def _apply_effort_profile(self, trajectory, profile):
+            trajectory.info["seen"] = dict(profile)
 
     with pytest.raises(ValueError, match=r"allowed: \['enforce_thinking_cap', 'max_probes', 'thinking_tokens'\]"):
         _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_submissions": 1}})
@@ -325,9 +325,9 @@ def test_a_subclass_extends_the_admitted_keys_over_the_mro():
         tool_registry=_registry(), reasoning_effort="medium", reasoning_effort_profiles={"medium": {"max_probes": 2}}
     )
     ids, _ = env.reset(["t"])
-    assert env.get_trajectories(ids)[0].info["seen"] == ("medium", {"max_probes": 2})
+    assert env.get_trajectories(ids)[0].info["seen"] == {"max_probes": 2}
     ids, _ = env.reset(["t"], [{"reasoning_effort": "random"}])
-    assert env.get_trajectories(ids)[0].info["seen"] == (None, {}), "an undetermined level binds an empty profile"
+    assert env.get_trajectories(ids)[0].info["seen"] == {}, "an undetermined level binds an empty profile"
     with pytest.raises(ValueError, match=r"reasoning_effort_profiles\['low'\]: max_probes must be an integer >= 0"):
         _Task(tool_registry=_registry(), reasoning_effort_profiles={"low": {"max_probes": -1}})
 

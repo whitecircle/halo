@@ -86,7 +86,6 @@ class FakeSchedule:
         self._stage_forward_initialized = True
         self._stage_backward_initialized = True
         self.eval_calls = 0
-        self.step_calls = 0
         self.captured = None
         self.cleared_before_microbatches = None
 
@@ -104,7 +103,6 @@ class FakeSchedule:
         self._stage.perform_reduce_grad(1)
 
     def step(self, *args, target=None, losses=None, return_outputs=False, **kwargs):
-        self.step_calls += 1
         self._step_microbatches(None, None, None, losses)
 
     def eval(self, *args, target=None, losses=None, return_outputs=False, **kwargs):

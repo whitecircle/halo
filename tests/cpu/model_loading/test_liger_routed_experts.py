@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """Liger's fused MoE kernel never runs routed experts; ``LigerExperts`` computed the input gradient wrong on
-Blackwell before liger-kernel 0.8.3, which has not been re-measured."""
+Blackwell until the fix that shipped in liger-kernel 0.8.3, which has not been re-measured."""
 
 from __future__ import annotations
 

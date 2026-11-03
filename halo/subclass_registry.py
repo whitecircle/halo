@@ -67,12 +67,10 @@ def swap_registered_modules(
     return swapped
 
 
-def import_package_modules(package: ModuleType, *, skip: frozenset[str] = frozenset()) -> None:
+def import_package_modules(package: ModuleType) -> None:
     """Import every module directly under ``package`` so its self-registering classes exist; a
     subpackage raises, since importing it would register nothing."""
     for module in pkgutil.iter_modules(package.__path__):
-        if module.name in skip:
-            continue
         if module.ispkg:
             raise RuntimeError(f"{package.__name__}.{module.name} is a package; families are single modules")
         importlib.import_module(f"{package.__name__}.{module.name}")

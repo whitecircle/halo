@@ -81,7 +81,7 @@ Inside the multimodal wrapper the text backbone is at `model.model.language_mode
 
 ## Configs
 
-Mistral-Small-4-119B (`mistralai/Mistral-Small-4-119B-2603`) trains under EP at 32K max length. The expert count (128 routed + 1 shared, top-4) divides evenly across 8 and 16 ranks, so EP=8 (16 experts/rank) and EP=16 are the natural fits. Example: `examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml`.
+Mistral-Small-4-119B (`mistralai/Mistral-Small-4-119B-2603`) trains under EP at 32K max length. The expert count (128 routed + 1 shared, top-4) divides evenly across 8 and 16 ranks, so EP=8 (16 experts/rank) and EP=16 are the natural fits. Example: `examples/sft/mistral4/mistral-small-4-119b-ultrachat-ep.yaml`, whose fit is computed, not measured: this shape has not run on the full-size model.
 
 ## Serving
 
