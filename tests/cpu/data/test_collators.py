@@ -1438,7 +1438,7 @@ def test_completion_only_unterminated_turn_does_not_leak_into_user_message():
     print("  PASS: test_completion_only_unterminated_turn_does_not_leak_into_user_message")
 
 
-def test_build_completion_only_labels_preserves_eos_when_pad_equals_eos():
+def test_build_training_labels_preserves_eos_when_pad_equals_eos():
     """Masking must use the attention_mask, or every real eos is erased to -100 and the model never learns to stop."""
     tok = MagicMock()
     tok.pad_token_id = 1
@@ -1460,7 +1460,7 @@ def test_build_completion_only_labels_preserves_eos_when_pad_equals_eos():
         input_ids, tok, response_prompt_template=None, train_on_completions_only=False
     )
     assert labels_fallback[0, 2].item() == IGNORE
-    print("  PASS: test_build_completion_only_labels_preserves_eos_when_pad_equals_eos")
+    print("  PASS: test_build_training_labels_preserves_eos_when_pad_equals_eos")
 
 
 # GLM-style markers: tokenizer.eos_token_id never appears mid-conversation; turns end at role markers in
@@ -1664,7 +1664,7 @@ def test_flattening_completion_stops_at_config_eos_markers():
     print("  PASS: test_flattening_completion_stops_at_config_eos_markers")
 
 
-def test_build_completion_only_labels_stops_at_config_eos_markers():
+def test_build_training_labels_stops_at_config_eos_markers():
     """The shared label builder trains after the marker, so turn 1 = 4..5, turn 2 = 9..11."""
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     tok.encode.return_value = RESPONSE_TEMPLATE_IDS
@@ -1680,7 +1680,7 @@ def test_build_completion_only_labels_stops_at_config_eos_markers():
     assert {4, 5} <= unmasked, f"turn 1 content not trained: {sorted(unmasked)}"
     assert {9, 10, 11} <= unmasked, f"turn 2 content not trained: {sorted(unmasked)}"
     assert unmasked.isdisjoint({0, 1, 6}), f"non-assistant tokens leaked: {sorted(unmasked)}"
-    print("  PASS: test_build_completion_only_labels_stops_at_config_eos_markers")
+    print("  PASS: test_build_training_labels_stops_at_config_eos_markers")
 
 
 def test_flattening_completion_collator_refuses_a_missing_marker():

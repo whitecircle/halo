@@ -17,7 +17,7 @@ from trl import SFTConfig
 
 from halo.configs.distillation import PRIVILEGED_HINT_TEMPLATE, SDPGArguments, SelfDistillScriptArguments
 from halo.configs.grpo import RLRRConfig
-from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments, parallelism_config_from_args
 from halo.entrypoints.data_setup import reject_trl_dataset_prep_args
@@ -698,27 +698,27 @@ def test_self_distill_trainer_has_no_spelling_of_the_tunables_of_its_own():
 
 
 # Searched for the construction, so the trainer may move it into a helper without this test going quiet.
-_IS_MASK_CONSUMER_ROOT = "halo/trainers/grpo"
+_ISR_MASK_CONSUMER_ROOT = "halo/trainers/grpo"
 
-# ISMaskConfig field -> the ``isr_``-prefixed AsyncRolloutConfig knob supplying it; derived, so a new stage is covered.
-_IS_MASK_SOURCES = {f.name: f"isr_{f.name}" for f in dataclasses.fields(ISMaskConfig)}
+# ISRMaskConfig field -> the ``isr_``-prefixed AsyncRolloutConfig knob supplying it; derived, so a new stage is covered.
+_ISR_MASK_SOURCES = {f.name: f"isr_{f.name}" for f in dataclasses.fields(ISRMaskConfig)}
 
-# Not an ISMaskConfig field: the circuit breaker reads the stages' output, so the trainer reads it off the config,
+# Not an ISRMaskConfig field: the circuit breaker reads the stages' output, so the trainer reads it off the config,
 # unprefixed.
 _MASK_FRACTION_KNOB = "skip_update_masked_frac"
 
 
 def _grpo_trainer_trees() -> list[ast.Module]:
-    return [ast.parse(path.read_text()) for path in sorted((REPO_ROOT / _IS_MASK_CONSUMER_ROOT).rglob("*.py"))]
+    return [ast.parse(path.read_text()) for path in sorted((REPO_ROOT / _ISR_MASK_CONSUMER_ROOT).rglob("*.py"))]
 
 
-def test_every_is_mask_knob_reaches_the_mask_config():
+def test_every_isr_mask_knob_reaches_the_mask_config():
     """A dropped keyword leaves the stage off while the YAML says on, and the run keeps training on the drifted
     tokens the band exists to mask."""
     stages = {"geo_band_min": 0.98, "geo_band_max": 1.02, "veto_min": 1e-4, "opsm_delta": 0.3}
-    assert set(stages) == set(_IS_MASK_SOURCES), "a mask stage this test does not set"
-    config = AsyncRolloutConfig(**{_IS_MASK_SOURCES[name]: value for name, value in stages.items()})
-    assert dataclasses.asdict(config.build_is_mask_config()) == stages
+    assert set(stages) == set(_ISR_MASK_SOURCES), "a mask stage this test does not set"
+    config = AsyncRolloutConfig(**{_ISR_MASK_SOURCES[name]: value for name, value in stages.items()})
+    assert dataclasses.asdict(config.build_isr_mask_config()) == stages
 
 
 def test_the_trainer_reads_the_configs_mask_config():
@@ -727,22 +727,22 @@ def test_the_trainer_reads_the_configs_mask_config():
         node
         for tree in _grpo_trainer_trees()
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "build_is_mask_config"
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", None) == "build_isr_mask_config"
     ]
     constructions = [
         node
         for tree in _grpo_trainer_trees()
         for node in ast.walk(tree)
-        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "ISMaskConfig"
+        if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "ISRMaskConfig"
     ]
     assert len(builds) == 1 and not constructions, (len(builds), len(constructions))
 
 
-def test_every_is_mask_stage_has_a_config_knob():
+def test_every_isr_mask_stage_has_a_config_knob():
     """Reverse direction: a mask stage with no ``isr_`` knob is unreachable from a config file."""
     declared = {f.name for f in dataclasses.fields(AsyncRolloutConfig)}
-    unreachable = sorted(knob for knob in _IS_MASK_SOURCES.values() if knob not in declared)
-    assert unreachable == [], f"ISMaskConfig stages with no AsyncRolloutConfig knob: {unreachable}"
+    unreachable = sorted(knob for knob in _ISR_MASK_SOURCES.values() if knob not in declared)
+    assert unreachable == [], f"ISRMaskConfig stages with no AsyncRolloutConfig knob: {unreachable}"
 
 
 def test_the_masked_fraction_circuit_breaker_is_read_from_the_config():
@@ -751,7 +751,7 @@ def test_the_masked_fraction_circuit_breaker_is_read_from_the_config():
     assert _MASK_FRACTION_KNOB in {f.name for f in dataclasses.fields(AsyncRolloutConfig)}
     reads = {node.attr for tree in _grpo_trainer_trees() for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
     assert _MASK_FRACTION_KNOB in reads, (
-        f"nothing under {_IS_MASK_CONSUMER_ROOT} reads config.{_MASK_FRACTION_KNOB} any more"
+        f"nothing under {_ISR_MASK_CONSUMER_ROOT} reads config.{_MASK_FRACTION_KNOB} any more"
     )
 
 

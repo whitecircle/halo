@@ -84,9 +84,10 @@ CUDA_VISIBLE_DEVICES=4,5,6,7 halo launch grpo/environmental laguna-grpo.yaml -n 
 ## Settings that matter
 
 - **Attention.** Keep `attn_implementation: sdpa`. The pinned modeling code passes the sliding window
-  only through the attention mask, which flash attention ignores, so a flash label would silently run
-  the sliding-window layers as full attention. Halo does not switch to SDPA for you. SDPA rules out
-  `padding_free`, so the recipes use `packing`.
+  only through the attention mask, which flash attention ignores, so a flash kernel would run the
+  sliding-window layers as full attention. Through the remote code, Halo takes SDPA with a warning when
+  the key is unset and refuses a flash label. SDPA rules out `padding_free`, so the recipes use
+  `packing`.
 - **Pad and EOS tokens.** `pad_token: "〈|PAD|〉"` and `eos_token: "〈|EOS|〉"` use the CJK angle
   brackets U+3008 and U+3009. Typing ASCII `<` and `>` instead adds new tokens without any error.
 - **Remote code.** The recipes set `trust_remote_code: true` with a pinned `model_revision`, the

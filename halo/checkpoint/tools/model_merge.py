@@ -317,7 +317,7 @@ def _validated_request(
     if tokenizer_source is not None and not os.path.isdir(tokenizer_source):
         raise ValueError(
             f"--tokenizer_source {tokenizer_source!r} is not a local directory. Download the repo first "
-            f"(huggingface-cli download {tokenizer_source} --exclude '*.safetensors' --local-dir <dir>) and "
+            f"(hf download {tokenizer_source} --exclude '*.safetensors' --local-dir <dir>) and "
             f"point --tokenizer_source at that directory."
         )
     return paths, weights, knob_values

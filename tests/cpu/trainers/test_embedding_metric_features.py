@@ -4,13 +4,15 @@ The forwards run anchors alone, candidates column-major, cached losses by chunk,
 
 import pytest
 import torch
-from sentence_transformers import SentenceTransformer, losses
+from sentence_transformers import SentenceTransformer
 from sentence_transformers.models import Pooling
+from sentence_transformers.sentence_transformer import losses
 from transformers import Qwen3Config, Qwen3Model
 
 from halo.trainers.embedding.preloaded_transformer import PreloadedTransformer
 from halo.trainers.embedding.trainer import _METRIC_MAX_SAMPLES, EmbeddingTrainer, _group_heads, _group_samples
 from tests.common.models import TINY_QWEN3_CONFIG
+from tests.common.repo import probe_findings
 from tests.common.tiny_models import word_level_tokenizer
 
 _WORDS = ("alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel")
@@ -20,6 +22,17 @@ _COLUMNS = {
     "positive": ["bravo alpha", "charlie delta", "foxtrot", "golf hotel alpha"],
     "negative": ["hotel", "echo echo", "alpha golf bravo charlie", "delta"],
 }
+
+
+def test_the_trainer_imports_no_deprecated_sentence_transformers_path():
+    script = """
+import warnings
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    import halo.trainers.embedding.trainer
+print("FINDINGS:" + "|".join(str(w.message) for w in caught if "from 'sentence_transformers" in str(w.message)))
+"""
+    assert not probe_findings(script, "FINDINGS:")
 
 
 def _pipeline() -> SentenceTransformer:

@@ -169,7 +169,7 @@ def agree_plan(plan: GradientCheckpointingPlan) -> None:
     )
 
 
-def save_run_plan(directory: str, plan: GradientCheckpointingPlan) -> None:
+def save_gradient_checkpointing_plan(directory: str, plan: GradientCheckpointingPlan) -> None:
     """COLLECTIVE: publish ``plan`` as ``directory/RUN_PLAN_FILE`` from the FS-aware save rank(s); a write failure
     raises on every rank."""
     with barrier_on_exit(f"Writing {RUN_PLAN_FILE} to {directory}"):
@@ -179,7 +179,7 @@ def save_run_plan(directory: str, plan: GradientCheckpointingPlan) -> None:
                 staged.write_text(json.dumps(asdict(plan), indent=1, sort_keys=True))
 
 
-def _read_run_plan(path: str) -> GradientCheckpointingPlan | None:
+def _read_gradient_checkpointing_plan(path: str) -> GradientCheckpointingPlan | None:
     """The record at ``path``, or None when there is none or another record version wrote it (no floor)."""
     if not os.path.isfile(path):
         return None
@@ -199,7 +199,7 @@ def restore_recompute_floor(output_dir: str, fingerprint: dict, num_layers: int)
     and the world takes the highest floor; an unreadable copy raises on every rank."""
     path = os.path.join(output_dir, RUN_PLAN_FILE)
     guard = DeferredRankFailure(f"Reading {path} (delete it on every node to plan without its floor)", ValueError)
-    record = guard.run(lambda: _read_run_plan(path))
+    record = guard.run(lambda: _read_gradient_checkpointing_plan(path))
     floor = guard.run(lambda: recompute_floor_index(record, fingerprint, num_layers))
     guard.reject()
     world_floor = rank_max([floor])[0]
@@ -316,7 +316,7 @@ class GradientCheckpointingPlanCallback(TrainerCallback):
         self.plan = GradientCheckpointingPlan(every_n_layers=every_n, fingerprint=self.context.fingerprint)
         agree_plan(self.plan)
         apply_checkpointing_policy(model, every_n)
-        save_run_plan(args.output_dir, self.plan)
+        save_gradient_checkpointing_plan(args.output_dir, self.plan)
         if is_global_main_process():
             gib = 2**30
             floor = (
@@ -333,7 +333,7 @@ class GradientCheckpointingPlanCallback(TrainerCallback):
 
     def on_train_end(self, args, state, control, **kwargs):
         if self.plan is not None:
-            save_run_plan(args.output_dir, replace(self.plan, finished=True))
+            save_gradient_checkpointing_plan(args.output_dir, replace(self.plan, finished=True))
 
 
 def build_gradient_checkpointing_plan_callback(

@@ -30,7 +30,7 @@ from halo.callbacks.gradient_checkpointing_plan import (
     build_plan_context,
     build_plan_fingerprint,
     restore_recompute_floor,
-    save_run_plan,
+    save_gradient_checkpointing_plan,
     step_memory_across_ranks,
 )
 from halo.checkpoint.format import RUN_PLAN_FILE
@@ -559,7 +559,9 @@ def test_a_floor_never_relaxes_the_plan_the_launch_measures(tmp_path):
     target = (predict_peak(reading, LAYERS, 4) + predict_peak(reading, LAYERS, 8)) // 2
     tight = int(target / DENSE_BUDGET_FRACTION)
     tracker, out = _LiveBytes(), str(tmp_path)
-    save_run_plan(out, GradientCheckpointingPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT))
+    save_gradient_checkpointing_plan(
+        out, GradientCheckpointingPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT)
+    )
     assert _launch(tracker, out, finish=False, total_device_bytes=tight) == 4  # not the floor's every 8
     assert _launch(tracker, out, finish=False, total_device_bytes=tight) == 3  # every 4 did not finish
     # The same budget with no record measures every 4.
@@ -579,12 +581,12 @@ def _record_worker(rank: int, out_dir: str):
     shared = os.path.join(out_dir, "shared")
     unfinished = GradientCheckpointingPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT)
     with mock.patch.object(plan_callback, "staged_file", counting_staged_file):
-        save_run_plan(shared, unfinished)
+        save_gradient_checkpointing_plan(shared, unfinished)
     outcome["writes"] = len(writers)
     outcome["floor"] = restore_recompute_floor(shared, FINGERPRINT, LAYERS)
-    save_run_plan(shared, dataclasses.replace(unfinished, finished=True))
+    save_gradient_checkpointing_plan(shared, dataclasses.replace(unfinished, finished=True))
     outcome["finished"] = restore_recompute_floor(shared, FINGERPRINT, LAYERS)
-    save_run_plan(shared, unfinished)
+    save_gradient_checkpointing_plan(shared, unfinished)
     outcome["other_inputs"] = restore_recompute_floor(shared, {**FINGERPRINT, "max_length": 4096}, LAYERS)
     outcome["absent"] = restore_recompute_floor(os.path.join(out_dir, "empty"), FINGERPRINT, LAYERS)
     # A record another version wrote sets no floor, and is not refused.
@@ -800,9 +802,11 @@ def _builder_worker(rank: int, out_dir: str, case: str):
             outcome["floor"] = fresh.floor_index
             outcome["layers"] = fresh.context.num_layers
             outcome["total_device_bytes"] = [fresh.total_device_bytes, fresh.context.fingerprint["total_device_bytes"]]
-            save_run_plan(out_dir, GradientCheckpointingPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint))
+            save_gradient_checkpointing_plan(
+                out_dir, GradientCheckpointingPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint)
+            )
             outcome["after_unfinished"] = build().floor_index
-            save_run_plan(
+            save_gradient_checkpointing_plan(
                 out_dir,
                 GradientCheckpointingPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint, finished=True),
             )

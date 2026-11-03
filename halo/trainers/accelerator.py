@@ -93,7 +93,7 @@ class AcceleratorMixin:
                 logger.info(f"Created Accelerator with distributed_type: {self.accelerator.state.distributed_type}")
 
         # In both branches, since the fp32 logits upcast costs the same under an accelerate-managed launch.
-        self._configure_fp32_output_conversion()
+        self._disable_native_amp_logits_upcast()
 
     def _needs_custom_accelerator(self) -> bool:
         config = self.parallelism_config
@@ -114,7 +114,7 @@ class AcceleratorMixin:
             f"torchrun to get them, or drop them from the config."
         )
 
-    def _configure_fp32_output_conversion(self) -> None:
+    def _disable_native_amp_logits_upcast(self) -> None:
         """Drop ``native_amp``'s upcast of the full ``[B, S, V]`` logits. Under fp16 it stays, since it also gates
         ``unscale_gradients`` and clearing it would clip and step on GradScaler-scaled gradients."""
         if self.args.fp16:

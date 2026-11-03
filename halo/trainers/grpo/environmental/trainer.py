@@ -162,7 +162,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             reject_unbalanceable_token_mass(self.args)
         self._arm_update_breaker()
         self._warned_once: set[str] = set()
-        self._isr_mask_config = cfg.build_is_mask_config()
+        self._isr_mask_config = cfg.build_isr_mask_config()
 
     def train(self, *args, **kwargs):
         try:

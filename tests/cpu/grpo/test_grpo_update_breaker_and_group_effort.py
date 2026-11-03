@@ -12,7 +12,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.environments.reasoning_effort import bind_episode_effort, stable_reasoning_effort
 from halo.environments.rollout_config import VALID_REASONING_EFFORTS
 from halo.trainers.grpo.environmental import step_batch
@@ -204,7 +204,7 @@ def _vetoed_round(threshold: float):
         policy,
         training=True,
         is_correction=True,
-        isr_mask_config=ISMaskConfig(veto_min=0.5),
+        isr_mask_config=ISRMaskConfig(veto_min=0.5),
         skip_update_masked_frac=threshold,
         save_completions=True,
     )

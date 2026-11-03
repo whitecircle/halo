@@ -44,7 +44,7 @@ def test_run_to_run_stability_datasetdict() -> None:
         )
 
 
-def test_different_content_different_fingerprint() -> None:
+def test_different_content_different_key() -> None:
     with tempfile.TemporaryDirectory() as a, tempfile.TemporaryDirectory() as b:
         small = _on_disk_dataset(a, {"x": list(range(16))}, fingerprint="fp")
         large = _on_disk_dataset(b, {"x": list(range(128))}, fingerprint="fp")

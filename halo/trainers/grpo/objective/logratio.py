@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import torch
 
-from halo.configs.grpo_environmental import ISMaskConfig
+from halo.configs.grpo_environmental import ISRMaskConfig
 
 KL_LOGRATIO_CLAMP = 5.0
 """Cap on ``ref − logp`` (nats) in the k3 KL estimator, bounding per-token KL at ``exp(5) ≈ 148``."""
@@ -147,7 +147,7 @@ def apply_is_masks(
     logps_diff: torch.Tensor,
     corrected_mask: torch.Tensor,
     traj_ids: torch.Tensor,
-    config: ISMaskConfig,
+    config: ISRMaskConfig,
 ) -> tuple[torch.Tensor, dict[str, tuple[torch.Tensor, int]]]:
     """The veto tests the raw ratio ``exp(logps_diff)``, so the clip cannot hide a catastrophic token. Returns the
     masked ratio and each active stage's ``(masked, total)`` counts, the masked count left on device."""

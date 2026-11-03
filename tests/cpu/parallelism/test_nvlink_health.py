@@ -128,5 +128,18 @@ def test_a_gpu_short_of_links_fails_the_check(monkeypatch, capsys):
     assert "GPU 0: 1 active links, peers have 2" in capsys.readouterr().out
 
 
+def test_a_host_without_nvidia_smi_gets_one_line_and_a_failing_exit(monkeypatch, capsys):
+    def absent(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory", "nvidia-smi")
+
+    monkeypatch.setattr(nvlink_health.subprocess, "run", absent)
+    monkeypatch.setattr(sys, "argv", ["nvlink_health.py"])
+
+    assert nvlink_health.main() == 1
+    captured = capsys.readouterr()
+    assert captured.err.count("\n") == 1 and captured.err.startswith("nvidia-smi is not on PATH")
+    assert not captured.out
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

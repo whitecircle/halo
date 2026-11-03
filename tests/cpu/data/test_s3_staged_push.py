@@ -397,7 +397,7 @@ def test_recover_from_pending_push_loads_the_sealed_tree_and_guards_recursion(mo
     assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is None
 
 
-def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
+def test_load_s3_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
     client, fake = _client()
     fake._write(f"{KEY}/train/data-00000-of-00001.arrow", b"torn")
     recovered = MagicMock(spec=Dataset)
@@ -418,7 +418,7 @@ def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
             s3_dataset_store.load_s3_dataset(client, KEY)
 
 
-def test_load_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
+def test_load_s3_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
     """The fetch is the client's own download into the cache's publish temp, every object once, with no
     datasets-side copy."""
     client, fake = _client()

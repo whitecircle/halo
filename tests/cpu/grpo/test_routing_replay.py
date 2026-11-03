@@ -388,7 +388,7 @@ def test_injector_capture_token_count_mismatch_raises():
             layers[0]._captured_routing_chunks.append(torch.zeros(5, K, dtype=torch.int16))
 
 
-def test_injector_flip_rate_drains_counters():
+def test_injector_drain_flip_rate_empties_the_counters():
     layers = [_BareLayer(), _BareLayer()]
     injector = _injector(layers)
     layers[0]._replay_flip_counts = torch.tensor([2.0, 10.0])

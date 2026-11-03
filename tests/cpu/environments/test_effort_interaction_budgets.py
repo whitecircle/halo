@@ -221,7 +221,7 @@ def test_thinking_only_profiles_keep_the_class_caps():
     assert not retired_budget_phrases(_task_message(traj))
 
 
-def test_reset_effort_level_contract():
+def test_effort_level_at_reset_contract():
     env = _make_env(reasoning_effort="medium")
     assert env.effort_level_at_reset({"reasoning_effort": "high"}) == "high"
     assert env.effort_level_at_reset(None) == "medium"

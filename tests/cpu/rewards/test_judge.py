@@ -945,9 +945,7 @@ def test_a_hosted_vendor_takes_its_own_key_and_no_other(no_api_keys, monkeypatch
     [_PRIVATE_URL, "https://api.mistral.ai/v1", "https://openrouter.ai.gateway.example/v1"],
     ids=["private", "another_vendor", "a_host_only_starting_like_a_vendors"],
 )
-def test_any_other_endpoint_at_the_default_variable_is_refused_with_both_keys_set(
-    no_api_keys, monkeypatch, base_url
-):
+def test_any_other_endpoint_at_the_default_variable_is_refused_with_both_keys_set(no_api_keys, monkeypatch, base_url):
     monkeypatch.setenv("OPENROUTER_API_KEY", "sk-or")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
     with pytest.raises(RuntimeError, match="set api_key_env to the variable holding this endpoint's key$"):

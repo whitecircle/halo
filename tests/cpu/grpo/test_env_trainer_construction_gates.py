@@ -15,14 +15,14 @@ from datasets import Dataset
 from transformers import CONFIG_MAPPING
 from trl import GRPOConfig, GRPOTrainer
 
-from halo.configs.grpo_environmental import AsyncRolloutConfig, ISMaskConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, ISRMaskConfig
 from halo.environments.reasoning_effort import has_thinking_budget
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import SGLANG_BACKEND, VLLM_BACKEND, resolve_reasoning_end_token_id
 from halo.trainers.grpo.environmental import reasoning
 from halo.trainers.grpo.environmental.environmental_rules import (
     reject_answerless_datasets,
-    reject_inert_is_stages,
+    reject_inert_isr_stages,
     reject_inert_reasoning_terms,
     reject_off_policy_mask_threshold,
     reject_straddling_train_groups,
@@ -55,7 +55,7 @@ _INIT_GATES = (
     "_resolve_reasoning_end_ids",
     "_resolve_forced_close_ids",
     "reject_unneutralized_forced_closes",
-    "reject_inert_is_stages",
+    "reject_inert_isr_stages",
     "reject_off_policy_mask_threshold",
     "reject_vespo_loss",
     "reject_inert_std_floor",
@@ -429,14 +429,14 @@ def test_the_reasoning_count_reads_up_to_a_one_token_close_on_every_budgeted_vll
     assert _count_end_id({"high": 16384}, knows_close=False, rollout_reasoning_end_token=_OPENER) is None
 
 
-_VETO = ISMaskConfig(veto_min=0.1)
-_NO_STAGE = ISMaskConfig()
+_VETO = ISRMaskConfig(veto_min=0.1)
+_NO_STAGE = ISRMaskConfig()
 
 
 def test_the_shape_is_and_replay_gates_pass_a_supported_run():
     reject_straddling_train_groups(per_device_train_batch_size=2, steps_per_generation=2, num_generations=4)
-    reject_inert_is_stages(_VETO, is_correction=True, skip_update_masked_frac=0.5)
-    reject_inert_is_stages(_NO_STAGE, is_correction=False, skip_update_masked_frac=None)
+    reject_inert_isr_stages(_VETO, is_correction=True, skip_update_masked_frac=0.5)
+    reject_inert_isr_stages(_NO_STAGE, is_correction=False, skip_update_masked_frac=None)
     reject_unsupported_routing_replay("rollout", train_on_sampled_tokens=True, runs_logprob_recompute=False)
     reject_unsupported_routing_replay("recompute", train_on_sampled_tokens=False, runs_logprob_recompute=True)
     reject_unsupported_routing_replay("none", train_on_sampled_tokens=False, runs_logprob_recompute=False)
@@ -452,15 +452,15 @@ def test_the_shape_is_and_replay_gates_pass_a_supported_run():
             r"\(3\) must be divisible by num_generations \(2\): .* a group cannot straddle ranks",
         ),
         (
-            lambda: reject_inert_is_stages(_VETO, is_correction=False, skip_update_masked_frac=None),
+            lambda: reject_inert_isr_stages(_VETO, is_correction=False, skip_update_masked_frac=None),
             r"isr_geo_band/isr_veto/isr_opsm knobs require the importance-sampling correction",
         ),
         (
-            lambda: reject_inert_is_stages(_NO_STAGE, is_correction=True, skip_update_masked_frac=0.5),
+            lambda: reject_inert_isr_stages(_NO_STAGE, is_correction=True, skip_update_masked_frac=0.5),
             r"skip_update_masked_frac requires .* the circuit breaker would silently never fire",
         ),
         (
-            lambda: reject_inert_is_stages(_NO_STAGE, is_correction=False, skip_update_masked_frac=0.5),
+            lambda: reject_inert_isr_stages(_NO_STAGE, is_correction=False, skip_update_masked_frac=0.5),
             r"skip_update_masked_frac requires .* the circuit breaker would silently never fire",
         ),
         (

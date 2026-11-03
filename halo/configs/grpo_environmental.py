@@ -40,7 +40,7 @@ _ROLLOUT_SERVER_KEYS = frozenset({"url", "group_port", "group_host"})
 
 
 @dataclass(frozen=True)
-class ISMaskConfig:
+class ISRMaskConfig:
     """Mask/veto stages on the truncated IS ratio, all off by default: the geometric-mean band (set both ends) masks a
     trajectory whose ``exp(mean log-ratio)`` over corrected tokens leaves it, the veto one with any corrected token's
     ratio below ``veto_min``, and OPSM (``opsm_delta``) a negative-advantage one past that many nats."""
@@ -135,7 +135,7 @@ class ISCorrectionArguments(ValidatedConfig):
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
-        self.build_is_mask_config()
+        self.build_isr_mask_config()
         require_int(type(self).__name__, ge=1, isr_engine_rescore_per_server=self.isr_engine_rescore_per_server)
         if not self.isr_engine_reference and differs_from_default(self, "isr_engine_rescore_per_server"):
             raise ValueError(
@@ -147,8 +147,8 @@ class ISCorrectionArguments(ValidatedConfig):
             type(self).__name__, gt=0, le=1, **present(skip_update_masked_frac=self.skip_update_masked_frac)
         )
 
-    def build_is_mask_config(self) -> ISMaskConfig:
-        return ISMaskConfig(
+    def build_isr_mask_config(self) -> ISRMaskConfig:
+        return ISRMaskConfig(
             geo_band_min=self.isr_geo_band_min,
             geo_band_max=self.isr_geo_band_max,
             veto_min=self.isr_veto_min,

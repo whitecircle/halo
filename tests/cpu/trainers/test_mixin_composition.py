@@ -17,7 +17,7 @@ from halo.trainers.step_guard import NonFiniteStepGuardMixin
 # name -> the sub-mixin that must own it, so an owner change stays MRO-visible from the composed class.
 _OWNERSHIP = {
     AcceleratorMixin: (
-        "_configure_fp32_output_conversion",
+        "_disable_native_amp_logits_upcast",
         "_inner_training_loop",
         "_needs_custom_accelerator",
         "_warn_knobs_unapplied_under_accelerate",

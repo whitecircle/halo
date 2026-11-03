@@ -12,7 +12,7 @@ from halo.configs.parser import HaloArgumentParser
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 
-_configure = DistributedTrainerMixin._configure_fp32_output_conversion
+_disable_upcast = DistributedTrainerMixin._disable_native_amp_logits_upcast
 _warn_unapplied = DistributedTrainerMixin._warn_knobs_unapplied_under_accelerate
 
 
@@ -47,14 +47,14 @@ def _capture_warnings(fn) -> list[str]:
 
 def test_native_amp_disabled_outside_fp16():
     me = _fake_self()
-    _configure(me)
+    _disable_upcast(me)
     assert me.accelerator.native_amp is False
 
 
 def test_native_amp_kept_under_fp16():
     # native_amp also gates GradScaler unscaling; clearing it would clip on scaled grads.
     me = _fake_self(fp16=True)
-    _configure(me)
+    _disable_upcast(me)
     assert me.accelerator.native_amp is True
 
 

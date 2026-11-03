@@ -143,7 +143,7 @@ def test_push_dataset_no_overwrite_raises_on_existing():
     mock_dataset.save_to_disk.assert_not_called()
 
 
-def test_load_dataset_cache_hit():
+def test_load_s3_dataset_cache_hit():
     print("Testing load_s3_dataset (cache hit)...")
 
     with patch.object(S3Client, "__post_init__"):
@@ -177,7 +177,7 @@ def test_load_dataset_cache_hit():
     print("  load_s3_dataset cache hit: PASSED")
 
 
-def test_load_dataset_cache_miss():
+def test_load_s3_dataset_cache_miss():
     print("Testing load_s3_dataset (cache miss)...")
 
     with patch.object(S3Client, "__post_init__"):
@@ -264,7 +264,7 @@ def test_content_fingerprint_lists_prefix():
     assert client.content_fingerprint("my/dataset") == expected
 
 
-def test_load_dataset_stale_cache_redownloads():
+def test_load_s3_dataset_stale_cache_redownloads():
     """The marker records the old fingerprint and live S3 reports a new one, so the load re-downloads and records
     it."""
     client = _make_validating_client(live_fingerprint="newfp")
@@ -285,7 +285,7 @@ def test_load_dataset_stale_cache_redownloads():
         assert _read_marker_fingerprint(marker) == "newfp"
 
 
-def test_load_dataset_offline_serves_cache():
+def test_load_s3_dataset_offline_serves_cache():
     """S3 unreachable (fingerprint probe returns None) → the complete cache is served as-is."""
     client = _make_validating_client(live_fingerprint=None)
 
@@ -302,7 +302,7 @@ def test_load_dataset_offline_serves_cache():
         assert _read_marker_fingerprint(marker) == "oldfp", "offline load must not rewrite the marker"
 
 
-def test_load_dataset_matching_fingerprint_serves_cache():
+def test_load_s3_dataset_matching_fingerprint_serves_cache():
     client = _make_validating_client(live_fingerprint="fp")
 
     with tempfile.TemporaryDirectory() as cache_root:
@@ -317,7 +317,7 @@ def test_load_dataset_matching_fingerprint_serves_cache():
                 assert mock_load.call_args[0][0] == cache_path
 
 
-def test_load_dataset_legacy_marker_served_and_upgraded():
+def test_load_s3_dataset_legacy_marker_served_and_upgraded():
     """A marker with no fingerprint stays valid and is upgraded in place when S3 is reachable, so the next load can
     detect an overwrite."""
     client = _make_validating_client(live_fingerprint="livefp")

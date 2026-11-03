@@ -62,7 +62,7 @@ def test_the_opt_out_accepts_a_tokenizer_less_artifact(tmp_path):
 def test_merge_models_refuses_a_hub_tokenizer_source(tmp_path):
     """A Hub id here would run a third-party repo's config code under the local default."""
     out = tmp_path / "out"
-    with pytest.raises(ValueError, match="--tokenizer_source 'org/third-party' is not a local directory"):
+    with pytest.raises(ValueError, match="--tokenizer_source 'org/third-party' is not a local directory.*hf download"):
         model_merge.merge_models(["/nope/a", "/nope/b"], str(out), method="linear", tokenizer_source="org/third-party")
     assert not out.exists(), "a refused merge left an output directory behind"
 
@@ -172,7 +172,7 @@ def test_a_peft_merge_copies_the_base_directory_not_the_adapter(tmp_path, monkey
     )
 
 
-def test_an_unknown_additional_field_raises(tmp_path):
+def test_an_unknown_keep_field_raises(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
 
     with pytest.raises(ValueError) as excinfo:
@@ -186,7 +186,7 @@ def test_an_unknown_additional_field_raises(tmp_path):
     assert "'sorce'" in str(excinfo.value) or "sorce" in str(excinfo.value)
 
 
-def test_known_additional_fields_still_narrow_the_output(tmp_path):
+def test_known_keep_fields_still_narrow_the_output(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
     output = tmp_path / "out.jsonl"
 

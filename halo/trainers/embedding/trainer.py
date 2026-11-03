@@ -16,9 +16,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 import transformers
 from datasets import Dataset, DatasetDict, IterableDataset
-from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer, losses
+from sentence_transformers import SentenceTransformer, SentenceTransformerTrainer
 from sentence_transformers.base.sampler import NoDuplicatesBatchSampler
-from sentence_transformers.evaluation import SentenceEvaluator
+from sentence_transformers.sentence_transformer import losses
+from sentence_transformers.sentence_transformer.evaluation import SentenceEvaluator
 from torch.utils.data import DataLoader
 from transformers import PreTrainedTokenizerBase
 from transformers.data.data_collator import DataCollator

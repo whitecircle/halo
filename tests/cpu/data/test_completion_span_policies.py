@@ -112,7 +112,7 @@ class _MarkerTokenizer:
         [U, U, U],  # no marker: everything stays masked
     ],
 )
-def test_build_completion_only_labels_matches_reference(row):
+def test_build_training_labels_matches_reference(row):
     """Fails if the self-distill policy drifts toward the collator policy."""
     input_ids = torch.tensor([row], dtype=torch.long)
     labels = build_training_labels(

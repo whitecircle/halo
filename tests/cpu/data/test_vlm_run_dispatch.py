@@ -171,12 +171,12 @@ def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm
     assert verdict is vlm_checkpoint
 
 
-def test_dataset_declares_images_accepts_a_single_split():
+def test_dataset_declares_images_across_ranks_accepts_a_single_split():
     assert dataset_declares_images_across_ranks(Dataset.from_dict({"images": [[]], "prompt": [TEXT_TURNS]}))
     assert not dataset_declares_images_across_ranks(Dataset.from_dict({"prompt": [TEXT_TURNS]}), "prompt")
 
 
-def test_dataset_declares_images_needs_the_conversation_field_to_see_embedded_images():
+def test_dataset_declares_images_across_ranks_needs_the_conversation_field_to_see_embedded_images():
     """Without the field name there is no column to probe."""
     dataset = _dataset([IMAGE_TURNS])
     assert not dataset_declares_images_across_ranks(dataset)

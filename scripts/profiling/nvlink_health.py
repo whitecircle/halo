@@ -149,7 +149,14 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="emit the raw report as JSON")
     args = parser.parse_args()
 
-    report = collect()
+    try:
+        report = collect()
+    except FileNotFoundError:
+        print(
+            "nvidia-smi is not on PATH: run this check on the GPU host, or in a container started with GPUs.",
+            file=sys.stderr,
+        )
+        return 1
     if args.json:
         print(json.dumps(report, indent=2))
 

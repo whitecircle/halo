@@ -590,7 +590,12 @@ def test_a_composite_whose_tower_refuses_flash_takes_sdpa_before_the_build(reque
     config = CONFIG_MAPPING["lfm2_vl"]()
     assert not attention_mod.declares_flash_attention(config)
     is_avail, capability = _blackwell()
-    with is_avail, capability, patch.object(attention_mod.logger, "info"), patch.object(attention_mod.logger, "warning"):
+    with (
+        is_avail,
+        capability,
+        patch.object(attention_mod.logger, "info"),
+        patch.object(attention_mod.logger, "warning"),
+    ):
         resolved = attention_mod.resolve_attn_implementation(
             config, requested, torch.bfloat16, sinks_policy=SinksPolicy.NEUTRALIZED
         )

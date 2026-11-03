@@ -16,7 +16,7 @@ of them are MoE.
 | [GLM-4 MoE Lite](cookbooks/halo-glm-4.7-flash-cookbook.md) | `zai-org/GLM-4.7-Flash` | MoE | compressed (MLA) attention |
 | [Gemma 4 MoE](cookbooks/halo-gemma4-moe-cookbook.md) | `google/gemma-4-26B-A4B-it` | MoE | no flash kernel (SDPA, FlexAttention on sliding layers); no router balancing |
 | [Mistral 4 MoE](cookbooks/halo-mistral4-moe-cookbook.md) | `mistralai/Mistral-Small-4-119B-2603` | MoE | convert the fp8 release to bf16 first |
-| [Laguna 2.1](cookbooks/halo-laguna-2.1-cookbook.md) | `poolside/Laguna-S-2.1` | MoE | set `attn_implementation: sdpa`; there is no automatic fallback |
+| [Laguna 2.1](cookbooks/halo-laguna-2.1-cookbook.md) | `poolside/Laguna-S-2.1` | MoE | SDPA through `trust_remote_code: true`, and a flash pin is refused |
 | [LFM-2 MoE](cookbooks/halo-lfm2-moe-cookbook.md) | `LiquidAI/LFM2-24B-A2B` | MoE | hybrid short-convolution layers |
 | [ZAYA1](cookbooks/halo-zaya1-cookbook.md) | `Zyphra/ZAYA1-8B` | MoE | trains without gradient checkpointing, always |
 | [Command A+](cookbooks/halo-command-a-plus-cookbook.md) | `CohereLabs/command-a-plus-05-2026-bf16` | MoE | 200B+; pinned revision |

@@ -101,8 +101,9 @@ The code-contests environment reads a prepared pool, not a plain dataset:
 1. `halo run compact-code-tests` compacts a test corpus into one row per
    problem, capping the tests in each suite.
 2. `halo run prepare-code-dataset` builds the pool. With `--push_bands` it also
-   pushes one config per rating band: the `<repo>:<band>` the shipped examples
-   name in `dataset:`.
+   pushes one config per rating band: the `<repo>:<band>` most shipped examples
+   name in `dataset:`. `--config_name` pushes one named config instead, which is
+   how stage 1 of the curriculum builds its pool.
 
 Pool format, build flags and bands:
 [Code Contests datasets](../agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md) ↗.

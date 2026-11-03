@@ -172,7 +172,7 @@ def reject_unneutralized_forced_closes(forced_close_ids: tuple[int, ...] | None,
         )
 
 
-def reject_inert_is_stages(isr_mask_config, is_correction: bool, skip_update_masked_frac: float | None) -> None:
+def reject_inert_isr_stages(isr_mask_config, is_correction: bool, skip_update_masked_frac: float | None) -> None:
     if isr_mask_config.any_stage_active and not is_correction:
         raise ValueError(
             "isr_geo_band/isr_veto/isr_opsm knobs require the importance-sampling "

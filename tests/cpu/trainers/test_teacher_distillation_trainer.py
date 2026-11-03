@@ -145,7 +145,7 @@ def _construct(args, *, peft_config=None, teacher_model=None):
         )
 
 
-def test_the_loss_is_the_alpha_mix_of_two_global_token_means():
+def test_the_loss_is_the_alpha_mix_of_two_pooled_token_means():
     trainer, stored = _trainer()
     expected, distill, clm = _oracle(trainer)
     torch.testing.assert_close(_loss(trainer), expected)

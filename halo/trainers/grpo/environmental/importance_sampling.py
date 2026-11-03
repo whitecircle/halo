@@ -13,7 +13,7 @@ from transformers import TrainerCallback
 from halo.runtime.ranks import get_global_rank, get_global_world_size, is_global_main_process
 from halo.trainers.grpo.early_stop import build_early_stop_callback
 from halo.trainers.grpo.environmental.environmental_rules import (
-    reject_inert_is_stages,
+    reject_inert_isr_stages,
     reject_unneutralized_forced_closes,
     reject_unsupported_engine_reference,
 )
@@ -102,7 +102,7 @@ class ImportanceSamplingMixin:
                 "--return-tokens-as-token-ids), or set the correction to false deliberately."
             )
         reject_unneutralized_forced_closes(self._forced_close_ids, self._is_correction)
-        reject_inert_is_stages(self._isr_mask_config, self._is_correction, cfg.skip_update_masked_frac)
+        reject_inert_isr_stages(self._isr_mask_config, self._is_correction, cfg.skip_update_masked_frac)
         early_stop = build_early_stop_callback(
             cfg.build_early_stop_config(), gap_key=LOGRATIO_MEAN_KEY, gap_logged=self._is_correction
         )

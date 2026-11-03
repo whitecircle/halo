@@ -13,7 +13,7 @@ import torch
 from transformers.trainer_callback import CallbackHandler
 from trl import GRPOConfig
 
-from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig, ISMaskConfig
+from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig, ISRMaskConfig
 from halo.environments.environment_base import EnvironmentBase
 from halo.trainers.grpo.early_stop import GRPOEarlyStopCallback
 from halo.trainers.grpo.environmental import async_rollouts, importance_sampling
@@ -75,7 +75,7 @@ def test_the_rollout_state_follows_the_async_config(tmp_path):
     assert trainer._reasoning_end_ids is None and trainer._forced_close_ids is None, (
         "an unbudgeted run forces no close"
     )
-    assert trainer._isr_mask_config == ISMaskConfig(veto_min=0.1)
+    assert trainer._isr_mask_config == ISRMaskConfig(veto_min=0.1)
     assert len(_callbacks(trainer, _BreakerOptimizerSkipCallback)) == 1, "the breaker's optimizer-skip hook"
     assert trainer._breaker_tripped_this_step is False
 

@@ -310,7 +310,7 @@ def main():
         top_k=async_config.rollout_top_k,
         min_p=async_config.rollout_min_p,
         repetition_penalty=async_config.rollout_repetition_penalty,
-        sequence_ratio_active=async_config.build_is_mask_config().sums_sequence_logratio,
+        sequence_ratio_active=async_config.build_isr_mask_config().sums_sequence_logratio,
         backend=async_config.rollout_backend,
     )
     # The engine re-score reads each train row off the prompt log-probs: they must not depend on the batch.
