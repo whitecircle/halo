@@ -20,8 +20,9 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
     HF_MODULE_NAMES = ("Qwen3_5MoeSparseMoeBlock",)
     FAMILY = QWEN3_5
 
-    # The only balancing under PP, which rejects ``aux_loss``. ``SEVERS_AUX_LOSS`` stays False: the EP layer
-    # calls the real ``Qwen3_5MoeTopKRouter``, so the recorder still fires for the text-only sibling.
+    # The gate has no slot to export a bias, so this admits only the trainer-only bias_update_transient.
+    # ``SEVERS_AUX_LOSS`` stays False: the EP layer calls the real ``Qwen3_5MoeTopKRouter``, so the recorder still
+    # fires for the text-only sibling.
     SUPPORTS_BIAS_BALANCING = True
 
     # ``Qwen3_5MoeTopKRouter`` renormalizes with no floor.

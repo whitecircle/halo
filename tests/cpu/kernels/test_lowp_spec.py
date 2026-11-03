@@ -11,7 +11,7 @@ import pytest
 
 from halo.hardware import GPU_PEAK_FLOPS
 from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS
-from halo.kernels.lowp.quantization import FORMAT_BLOCK_SIZE, QUANTIZERS
+from halo.kernels.lowp.quantization import _POW2_SCALE, FORMAT_BLOCK_SIZE, QUANTIZERS
 from halo.kernels.lowp.spec import LOWP_RECIPES, LowpPrecision, LowpSpec, QuantFormat
 
 
@@ -29,6 +29,7 @@ def test_recipes_cover_every_quant_format_once():
 def test_the_kernel_tables_are_keyed_on_the_quant_formats():
     assert set(FORMAT_BLOCK_SIZE) == set(get_args(QuantFormat))
     assert set(QUANTIZERS) == set(get_args(QuantFormat))
+    assert set(_POW2_SCALE) == set(get_args(QuantFormat))
     assert set(DEEPGEMM_FORMATS) <= set(get_args(QuantFormat))
 
 

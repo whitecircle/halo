@@ -16,12 +16,14 @@ Run: pytest tests/cpu/config/test_examples_parse.py
 import ast
 import dataclasses
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import transformers.training_args
 import yaml
 
 from halo.configs.parser import _TOOLKIT_DEFAULTS, HaloArgumentParser, _load_yaml
+from halo.data.collators.collator_rules import evaluation_batch_size
 from halo.distributed.expert_parallel.deepep.capacity import GIN_MAX_TOKENS_PER_RANK
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -244,9 +246,9 @@ def test_cross_node_ep_example_fits_the_gin_dispatch_ceiling(config):
     """A cross-node EP example must not ship a token budget its first MoE dispatch would refuse.
 
     Cross-node dispatch wedges rather than errors above ``HALO_DEEPEP_GIN_MAX_TOKENS_PER_RANK``
-    tokens/rank, so the dispatcher rejects a buffer sized past it. ``per_device_train_batch_size ×
-    max_length`` is the most one MoE forward can present, and packing makes it the usual case — an
-    over-budget example dies on step 1, after every rank has loaded the model.
+    tokens/rank, so the dispatcher rejects a buffer sized past it. The larger of the train and eval
+    batch × ``max_length`` is the most one MoE forward can present, and packing makes it the usual
+    case: an over-budget train batch dies on step 1, an over-budget eval batch at the first eval.
     """
     parsed = parser_for(script_for(config)).parse_yaml_file(str(config))
     max_length = parsed_field(parsed, "max_length")
@@ -254,10 +256,16 @@ def test_cross_node_ep_example_fits_the_gin_dispatch_ceiling(config):
         f"{config.name} declares cross-node EP but pins no max_length, leaving its per-rank token "
         f"budget unknown until the model loads; set it at or below {GIN_MAX_TOKENS_PER_RANK}"
     )
-    tokens_per_rank = parsed_field(parsed, "per_device_train_batch_size") * max_length
+    eval_rows = evaluation_batch_size(
+        SimpleNamespace(
+            per_device_eval_batch_size=parsed_field(parsed, "per_device_eval_batch_size"),
+            eval_strategy=parsed_field(parsed, "eval_strategy"),
+        )
+    )
+    tokens_per_rank = max(parsed_field(parsed, "per_device_train_batch_size"), eval_rows) * max_length
     assert tokens_per_rank <= GIN_MAX_TOKENS_PER_RANK, (
         f"{config.name} presents {tokens_per_rank} tokens/rank per MoE forward "
-        f"(per_device_train_batch_size × max_length), over the validated cross-node ceiling "
+        f"(the larger of its train and eval batch × max_length), over the validated cross-node ceiling "
         f"{GIN_MAX_TOKENS_PER_RANK}. Lower either, or move the example to node-local EP "
         f"(ep_scope: node), which dispatches over NVLink and is not bound by it."
     )

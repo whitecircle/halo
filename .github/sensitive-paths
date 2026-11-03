@@ -19,6 +19,9 @@ halo/kernels/moe_permute.py
 halo/kernels/moe_route_sort.py
 halo/kernels/fused_glu.py
 halo/kernels/lowp/spec.py
+halo/kernels/logprobs.py
+halo/kernels/head_logprobs.py
+halo/kernels/fp32_matmul.py
 halo/models/gradient_checkpointing.py
 halo/models/moe/**
 halo/model_loading/parallel/**

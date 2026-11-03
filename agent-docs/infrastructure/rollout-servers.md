@@ -210,8 +210,8 @@ be synced.
 
 ### Construction gates
 
-The trainer refuses at construction a model the selected engine cannot take a sync for
-(`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`), on every rank alike:
+The online and async GRPO trainers refuse at construction a model the selected engine cannot take a
+sync for (`reject_unsyncable_model`, `halo/trainers/grpo/rollout/weight_push.py`), on every rank alike:
 
 - **The family.** An engine fact on that engine's client (`UNSERVABLE_MODEL_TYPES`,
   [below](#which-families-each-engine-serves)), or a `weight_sync_refusal` on the family spec, which
@@ -231,6 +231,8 @@ The trainer refuses at construction a model the selected engine cannot take a sy
   eager, as the shipped GRPO configs set; `train_sinks: true` (SFT-only) is refused too.
 - **Enabled bias-update balancing**, adopted or transient: the parameter-only payload never pushes the
   bias. The shipped GRPO scripts downgrade `moe_balancing` to `none` themselves.
+
+Offline GRPO needs no server and passes none of these gates.
 
 **Hub names.** The sync forwards every tensor under the key a gathered checkpoint would carry: a
 family's `export_key_renames`, then transformers' own save-side revert of what the load converted
@@ -259,9 +261,9 @@ update for; each client declares those with the loader fact (`UNSERVABLE_MODEL_T
 | Step-3.7 (`step3p7`, `step3p5`) | ✓ | ✗ | `Step3p5ForCausalLM.load_weights` asserts full parameter coverage per call |
 
 Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next and Cohere2 MoE are refused on both engines by their
-family spec. Every other family not in the table syncs on both, expert distribution included: dense families,
-GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4, Ling 2.0, LFM-2 MoE. Per-family server flags:
-[Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
+family spec ([construction gates](#construction-gates)). Every other family not in the table syncs on both,
+expert distribution included: dense families, GptOss, Qwen3 MoE, Qwen3.5/3.6 MoE, GLM-4 MoE Lite, Gemma 4,
+Ling 2.0, LFM-2 MoE. Per-family server flags: [Step-3.7](../models/step3p7.md#serving-for-grpo-vllm).
 
 The sync ships hub names and full unsharded tensors into the engine's own `load_weights`: each TP rank
 narrows its slice, and under `--ep-size` the loader keeps its local experts. An expert name that

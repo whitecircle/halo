@@ -31,7 +31,7 @@ pad_token: "<|unused|>"
 # --- Parallelism & MoE ---
 expert_parallel_size: 16              # 256 routed experts → 16/rank across both nodes
 ep_scope: global
-max_concurrent_loading: 4             # 532 GB checkpoint: 4 ranks at a time (~2.1 TB peak CPU RAM)
+max_concurrent_loading: 4             # only the from_pretrained fallback reads it (~2.1 TB peak CPU RAM); lazy loading is the default
 
 # --- Kernels / attention ---
 # Packing stays off: Inkling's four depthwise convs per layer cross packed documents (the modeling
@@ -42,6 +42,7 @@ max_length: 4096
 
 # --- Training schedule ---
 per_device_train_batch_size: 2
+per_device_eval_batch_size: 2      # the cross-node ceiling binds eval batches too
 gradient_accumulation_steps: 1
 num_train_epochs: 1.0
 

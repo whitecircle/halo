@@ -120,6 +120,7 @@ naming the family and the reason.
 | Mistral4, Zaya, DeepSeek-V4, Ling 3.0 and Ring's linear checkpoints | No | No |
 | Inkling, GLM-5 Next, Qwen3-Next, Qwen3.8-Flash-Next, Cohere2 MoE | No | No (no online RL at all) |
 
+Offline GRPO needs no server, so these refusals do not apply to it.
 `rollout_max_thinking_tokens` and `carry_reasoning` are vLLM-only. SGLang must
 be served from this repo's image. Setup, ports, weight sync and
 `routing_replay`: [Rollout Servers](rollout-servers.md).
@@ -157,7 +158,7 @@ advanced parallelism. What each family is for:
 | Qwen3.5 / Qwen3.6 / Qwen3.8-27B (dense) | — | — | No | Yes | Yes | the 9B-VL checkpoint trains on plain FSDP with `sdpa`; PP takes the text tower |
 | Qwen3.5 / Qwen3.6 MoE | Yes | Yes | No | Yes | Yes | TP up to 2; the MoE-VL checkpoints train with EP; PP takes the text tower and needs `moe_balancing: none` |
 | Qwen3-Next | Yes | Yes | No | No | No | EP and ETP pass tiny-model GPU tests only |
-| Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental: EP, pure ETP and EP+ETP pass tiny-model GPU tests, and EP8 trains the release cut to four layers; full fine-tuning, LoRA and expert LoRA; plain FSDP2 (`ep_size: 1`) loads the whole model on every GPU, so tiny models only; PP takes the text tower, full fine-tuning with `moe_balancing: none` on tiny models only; text rows, packed or padded; the n-gram table stays in host memory; no RL weight sync |
+| Qwen3.8-Flash-Next | Yes | Yes | No | No | Yes | experimental: EP, pure ETP and EP+ETP pass tiny-model GPU tests, and EP8 trains the release cut to four layers; full fine-tuning, LoRA and expert LoRA; plain FSDP2 (`ep_size: 1`) loads the whole model on every GPU, so tiny models only; PP takes the text tower, full fine-tuning with `moe_balancing: none` on tiny models only; text rows, packed or padded; the n-gram table stays in host memory; RL weight sync refused on both engines (offline GRPO needs no server) |
 | GPT-OSS | Yes | Yes | Yes | Yes | Yes | trainable attention sinks |
 | GLM-4 MoE Lite | Yes | Yes | Yes | Yes | Yes | PP passes tiny-model GPU tests only |
 | Laguna S / XS 2.1 | Yes | Yes | No | No | Yes | ETP and PP pass tiny-model GPU tests only; set `attn_implementation: sdpa` (no automatic fallback), so use `packing`, not `padding_free` |

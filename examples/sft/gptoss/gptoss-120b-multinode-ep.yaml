@@ -42,6 +42,7 @@ max_length: 8192
 
 # --- Training schedule ---
 per_device_train_batch_size: 1
+per_device_eval_batch_size: 1      # the cross-node ceiling binds eval batches too
 gradient_accumulation_steps: 8
 num_train_epochs: 1.0
 

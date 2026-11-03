@@ -253,11 +253,14 @@ def group_max_abs_diff(tensor: torch.Tensor, group: dist.ProcessGroup | None = N
 
     ``0.0`` means bit-identical across the group, the replica-identity verdict. A NaN on any rank
     returns NaN, which fails every bound: the reduction stays in torch, whose ``max`` propagates NaN
-    where Python's drops it. Collective over ``group`` (default: the world).
+    where Python's drops it. An empty tensor, the FSDP2 shard of a size-1 dimension, reads ``0.0``.
+    Collective over ``group`` (default: the world).
     """
     local = tensor.detach().contiguous()
     gathered = [torch.empty_like(local) for _ in range(dist.get_world_size(group))]
     dist.all_gather(gathered, local, group=group)
+    if local.numel() == 0:
+        return 0.0
     return torch.stack([(g - gathered[0]).abs().max() for g in gathered]).max().item()
 
 
