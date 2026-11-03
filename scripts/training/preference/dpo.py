@@ -13,7 +13,9 @@ from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import DPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.render_columns import alias_images_column
+from halo.data.vlm_detection import reject_unsupported_media_across_ranks
 from halo.entrypoints.data_setup import (
+    apply_vision_options,
     load_script_datasets,
     prepare_script_preference_data,
     resolve_preference_vlm_run,
@@ -61,8 +63,10 @@ def main():
         # TRL's DataCollatorForVisionPreference templates the rows without `tools=`, so a declared
         # tools column would survive the signature filter and render toolless.
         reject_unsupported_args("DPO VLM mode", tools_field=args.tools_field)
+        reject_unsupported_media_across_ranks(ds, ("prompt", "chosen", "rejected"), "DPO")
 
     models = load_preference_models(context, dpo_config, model_config, args, vlm_run=is_vlm_data, method="DPO")
+    apply_vision_options(args, models.model, model_config, models.processing_class, is_vlm=is_vlm_data)
     tokenizer = models.tokenizer
 
     apply_text_path_padding_side(tokenizer, is_vlm_data)

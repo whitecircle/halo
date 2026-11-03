@@ -24,6 +24,7 @@ from halo.models.qwen4_exp.documents import (
 from halo.models.qwen4_exp.ngram_table import HostNGramTable
 from halo.models.qwen4_exp.sparse_attention import qsa_attention_forward
 from halo.models.segment_markers import document_starts
+from halo.models.upstream_guard import verify_upstream_parameters
 from halo.runtime.ranks import is_global_main_process
 
 logger = logging.getLogger(__name__)
@@ -41,15 +42,6 @@ def apply_qwen4_exp_patches(model_config) -> None:
     patch_qwen4_exp_ngram_embedding()
     patch_qwen4_exp_document_forwards()
     set_config_field_run_scoped(model_config, EXTERNAL_TABLES_STAMP, True)
-
-
-def _verify_upstream_parameters(function, expected: tuple[str, ...], patch: str) -> None:
-    names = tuple(inspect.signature(function).parameters)
-    if names != expected:
-        raise RuntimeError(
-            f"{function.__qualname__} takes {names} in this transformers release, but the toolkit's replacement "
-            f"({patch}) is written for {expected}: re-derive it on this release's forward."
-        )
 
 
 def _host_table_forward(module: nn.Module, input_ids: torch.Tensor, past_key_values) -> torch.Tensor:
@@ -79,11 +71,11 @@ def patch_qwen4_exp_ngram_embedding() -> None:
     if getattr(embedding_cls.forward, _HOST_TABLE_ATTR, False):
         return
     patch = "patch_qwen4_exp_ngram_embedding"
-    _verify_upstream_parameters(
+    verify_upstream_parameters(
         embedding_cls.__init__, ("self", "config", "embedding_dim", "layer_idx", "ple_layer_index"), patch
     )
-    _verify_upstream_parameters(embedding_cls.forward, ("self", "input_ids", "past_key_values"), patch)
-    _verify_upstream_parameters(embedding_cls._shift_right_ignore_eos, ("self", "token_ids", "shift"), patch)
+    verify_upstream_parameters(embedding_cls.forward, ("self", "input_ids", "past_key_values"), patch)
+    verify_upstream_parameters(embedding_cls._shift_right_ignore_eos, ("self", "token_ids", "shift"), patch)
     pretrained_cls = qwen4_exp_modeling.Qwen4ExpPreTrainedModel
     original_init, original_forward = embedding_cls.__init__, embedding_cls.forward
     original_save = pretrained_cls.save_pretrained
@@ -190,7 +182,7 @@ def patch_qwen4_exp_document_forwards() -> None:
     if getattr(model_cls.forward, _DOCUMENT_FORWARDS_ATTR, False):
         return
     patch = "patch_qwen4_exp_document_forwards"
-    _verify_upstream_parameters(
+    verify_upstream_parameters(
         model_cls.forward,
         (
             "self",
@@ -206,7 +198,7 @@ def patch_qwen4_exp_document_forwards() -> None:
         patch,
     )
     _verify_upstream_mask_kinds(model_cls.forward)
-    _verify_upstream_parameters(
+    verify_upstream_parameters(
         layer_cls.forward,
         (
             "self",
@@ -220,26 +212,26 @@ def patch_qwen4_exp_document_forwards() -> None:
         ),
         patch,
     )
-    _verify_upstream_parameters(
+    verify_upstream_parameters(
         qwen4_exp_modeling.Qwen4ExpTextPLELayer.forward,
         ("self", "hidden_states", "input_ids", "past_key_values", "conv_mask"),
         patch,
     )
-    _verify_upstream_parameters(
+    verify_upstream_parameters(
         qwen4_exp_modeling.Qwen4ExpTextPLELayer._short_conv, ("self", "hidden_states", "past_key_values"), patch
     )
-    _verify_upstream_parameters(qwen4_exp_modeling.Qwen4ExpTextGatedResidual.forward, ("self", "hyper_input"), patch)
-    _verify_upstream_parameters(
+    verify_upstream_parameters(qwen4_exp_modeling.Qwen4ExpTextGatedResidual.forward, ("self", "hyper_input"), patch)
+    verify_upstream_parameters(
         create_recurrent_attention_mask,
         ("config", "inputs_embeds", "attention_mask", "past_key_values", "kwargs"),
         patch,
     )
-    _verify_upstream_parameters(
+    verify_upstream_parameters(
         attention_cls.forward,
         ("self", "hidden_states", "position_embeddings", "attention_mask", "past_key_values", "kwargs"),
         patch,
     )
-    _verify_upstream_parameters(
+    verify_upstream_parameters(
         qwen4_exp_modeling.Qwen4ExpTextQSAIndexer.forward,
         ("self", "hidden_states", "position_embeddings", "attention_mask", "past_key_values"),
         patch,

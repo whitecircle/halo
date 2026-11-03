@@ -32,6 +32,7 @@ from halo.data.pipeline.text_rows import text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.render_columns import reject_missing_render_column
 from halo.entrypoints.data_setup import (
+    apply_vision_options,
     disable_trl_dataset_prep,
     load_script_datasets,
     log_script_dataset_examples,
@@ -329,6 +330,7 @@ def main():
     processing_class = install_resolved_tokenizer(policy.processing_class, tokenizer)
     apply_text_path_padding_side(tokenizer, is_vlm)
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
+    apply_vision_options(args, model, model_config, processing_class, is_vlm=is_vlm)
     log_model_info(model, tokenizer)
 
     # No teacher branch is built while the OPD term is off.

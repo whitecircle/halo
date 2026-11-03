@@ -110,13 +110,17 @@ reduce after it, the same sum added in another order.
 `fully_shard` unshards a group from a forward pre-hook, so `embed_tokens` has to sit in a group whose
 `__call__` runs before the lookup: on a multimodal wrapper that is the composite `model.model`, which
 builds `inputs_embeds` itself before handing them to the decoder backbone below it
-(`input_embedding_backbone`, `halo/models/module_tree.py`). The rule is ancestry — `model.model` is
+(`input_embedding_backbone`, `halo/models/module_tree.py`). A composite with no `.model` that holds
+`language_model` itself (Llama 4) embeds at its root, so the group holding the embedding is the wrap's root,
+the module whose `__call__` a wrapper above the composite cannot bypass. The rule is ancestry — `model.model` is
 taken whenever the layer backbone sits under it, however the text stack is spelled — and the probe
 reads the plain transformers tree under every wrapper: a `PeftModel`'s attribute forwarding answers
 with the head module, whose `__call__` the adapter's tuner bypasses, and the CP wrapper's `.model` is
 the head too. A tied embedding is reserved for the root group and does not depend on any of this; a
 classification head (no `lm_head`), a `modules_to_save` copy or a second embedding table (Gemma 4's
 per-layer inputs) is untied and does.
+
+On a composite the embedding and root groups also hold what only an image row reaches, so a rank whose batch has no image would enter their reduce-scatter with a shorter list than its peers'. Before reducing, those groups agree across their process groups which parameters any rank holds a gradient for and zero-fill the rest (`_agree_unsharded_grad_presence`); what no rank reached keeps `grad is None`, so a text-only run never writes its tower. That is one small all-reduce per group and backward, two under HSDP. Accelerate-managed FSDP2 takes no such wrap, so mixed rows there need `freeze_vision_tower: true`, as does a frozen input embedding beside a trainable tower: a text row's first layer then gets no gradient-carrying input, so that layer's group reduces at the end of the backward on a text rank and in order on an image rank, and the ranks' reduces stop pairing.
 
 Two setups **raise** rather than wrap:
 

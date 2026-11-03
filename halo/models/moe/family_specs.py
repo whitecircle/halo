@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import lru_cache
 
-from halo.models.config_access import config_sources
+from halo.models.config_access import config_sources, text_config
 from halo.models.moe.config_fields import has_routed_experts
 from halo.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS, ExpertLayout, ExpertLayoutKind
 
@@ -19,6 +19,22 @@ class NativeBalancingSlot:
 
     attrs: tuple[str, ...]
     config_flag: str | None = None
+
+
+@dataclass(frozen=True)
+class CompositeTextLayout:
+    """Where a composite checkpoint stores what its text-only export keeps at the root: the tower's keys under
+    ``composite_tower``, the head's under ``composite_head``. The defaults are transformers' multimodal wrapper layout."""
+
+    tower: str = "model."
+    composite_tower: str = "model.language_model."
+    head: str = "lm_head."
+    composite_head: str = "lm_head."
+
+    def to_composite_key(self, key: str) -> str:
+        if key.startswith(self.tower):
+            return self.composite_tower + key[len(self.tower) :]
+        return self.composite_head + key[len(self.head) :] if key.startswith(self.head) else key
 
 
 @dataclass(frozen=True, eq=False)
@@ -43,6 +59,8 @@ class MoEFamilySpec:
     fused_contraction_axis: int = -1
     # transformers' conversion-mapping keys for a vendor-namespace hub checkpoint.
     hub_conversion_keys: tuple[str, ...] = ()
+    # A composite transformers' CausalLM mapping does not name: ``text_only_model`` builds its text sub-config's class.
+    text_only_layout: CompositeTextLayout | None = None
     supports_lazy_loading: bool = True
     supports_fp32_non_ep_params: bool = True
     supports_routing_replay: bool = True
@@ -54,6 +72,8 @@ class MoEFamilySpec:
     # Its forward passes no ``position_ids`` into mask construction, so a packed row on a dense backend runs as
     # one causal sequence.
     dense_packing_leaks: bool = False
+    # Its attention reads a token's row index, not only relative distance, so a left-padded row scores as another row.
+    attention_reads_row_positions: bool = False
     # The sequence mixer its forward reaches with no segment marker, so it carries every document of a
     # multi-document row into the next on every backend, named for the refusal.
     unmarked_sequence_mixer: str | None = None
@@ -95,6 +115,7 @@ DEEPSEEK_V4 = MoEFamilySpec(
     shared_expert_attrs=("shared_experts",),
     hub_conversion_keys=("deepseek_v4",),
     token_indexed_table="gate.tid2eid",
+    attention_reads_row_positions=True,
     eager_only_attention=(
         "its head_dim=512 exceeds every flash kernel, SDPA and flex cannot carry its sink column, and its "
         "compressor concatenates KV entries after the mask is built"
@@ -184,6 +205,7 @@ MISTRAL4 = MoEFamilySpec(
     # The published Mistral-Small-4 checkpoints are composite: ``mistral3`` wrapping a ``mistral4`` text tower.
     model_types=("mistral4", "mistral3"),
     shared_expert_attrs=("shared_experts",),
+    attention_reads_row_positions=True,
 )
 QWEN3 = MoEFamilySpec(
     model_types=("qwen3_moe",), expert_layout=ExpertLayout(ExpertLayoutKind.SEPARATE_GLU, SEPARATE_GLU_PROJECTIONS)
@@ -278,6 +300,12 @@ def find_moe_family_spec_for_config(config) -> MoEFamilySpec | None:
         if spec := find_moe_family_spec(getattr(source, "model_type", None)):
             return spec
     return None
+
+
+def attention_reads_row_positions(config) -> bool:
+    """Read off the text tower's own type, since the composite ``mistral3`` also wraps a dense ``mistral`` tower."""
+    spec = find_moe_family_spec(getattr(text_config(config), "model_type", None)) if config is not None else None
+    return spec is not None and spec.attention_reads_row_positions
 
 
 def wraps_experts(config, *, ep_layers_requested: bool) -> bool:

@@ -94,13 +94,13 @@ The grouped GEMM is one part of an EP step (also: all-to-all dispatch/combine, p
 2. **Smallest EP degree that fits the experts.** Fewer ranks = smaller all-to-all + larger per-rank GEMMs.
 3. **GC off when the batch fits** ([the gpt-oss-20b EP step breakdown](throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
 4. **Atomic-free expert permute** (above) — always on the grouped path; +18% (seq 4k) to +65% (seq 16k) on qwen3.6 EP8, +24% on gpt-oss-20b EP8.
-5. **Do not use low precision** (fp8/fp4) — measured net-slower (experts are tiny-M / bandwidth-bound, bf16 at the roofline). See [Low-Precision Kernels](low-precision-moe-kernels.md).
+5. **Leave `lowp_precision` off for throughput**; Halo's fp8/fp4 paths are for QAT. See [Low-Precision Kernels](low-precision-moe-kernels.md).
 
 Compute–comm overlap is the remaining structural lever. One narrow form ships opt-in: `HALO_EP_SHARED_OVERLAP=1` runs the shared-expert FFN on a side stream concurrent with the dispatch all-to-all, on the families that have one (see [DeepEP](../infrastructure/deepep.md)). The broader async dispatch/combine restructure (hiding the all-to-all behind the routed compute) is not implemented — it needs a larger forward restructure, and gpt-oss is already compute-bound at production seq lengths.
 
 ## Low precision
 
-This is the bf16 path, the MoE production default. fp8/fp4 grouped GEMM and the opt-in DeepGEMM kernel (`HALO_DEEPGEMM_NATIVE=1`) are net-slower than bf16 at the toolkit's MoE shapes — the per-expert GEMM is bandwidth-bound at the bf16 roofline. See [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`halo/kernels/expert_gemm.py`, called by the EP layer's `_grouped_mm` in `moe_layer/compute.py`): `quant_format=None` is this bf16 path.
+This is the bf16 path, the MoE production default. Halo's fp8/fp4 paths and the opt-in DeepGEMM adapter (`HALO_DEEPGEMM_NATIVE=1`) measured slower than bf16; see [Low-Precision Kernels](low-precision-moe-kernels.md). The quantization-format dispatch is `expert_gemm()` (`halo/kernels/expert_gemm.py`, called by the EP layer's `_grouped_mm` in `moe_layer/compute.py`): `quant_format=None` is this bf16 path.
 
 ## Requirements and compatibility
 

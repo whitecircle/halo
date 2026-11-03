@@ -199,13 +199,14 @@ def test_fp4_eager_path_builds_its_tables_once(fmt):
     assert probe.calls == 0
 
 
-def test_compiled_mxfp4_round_trip_matches_eager_without_tracing_the_cache():
+@pytest.mark.parametrize("fmt", quantization._COMPILABLE)
+def test_compiled_round_trip_matches_eager_without_tracing_the_cache(fmt):
     torch._dynamo.reset()
     x = torch.randn(64, 128) * 3
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        compiled = torch.compile(quantization._block_round_trip, dynamic=True)(x, "mxfp4", -1)
-    assert torch.equal(compiled, quantization._block_round_trip(x, "mxfp4", -1))
+        compiled = torch.compile(quantization._block_round_trip, dynamic=True)(x, fmt, -1)
+    assert torch.equal(compiled, quantization._block_round_trip(x, fmt, -1))
     assert not [w for w in caught if "lru_cache" in str(w.message)]
 
 

@@ -10,7 +10,13 @@ import torch.distributed as dist
 import torch.nn as nn
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.fsdp import FSDPModule, MixedPrecisionPolicy, fully_shard
-from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState, _cast_fp_tensor, is_bw
+from torch.distributed.fsdp._fully_shard._fsdp_common import (
+    DDPMeshInfo,
+    FSDPMeshInfo,
+    TrainingState,
+    _cast_fp_tensor,
+    is_bw,
+)
 from torch.distributed.fsdp._fully_shard._fsdp_param_group import FSDPParamGroup
 from torch.distributed.fsdp._fully_shard._fsdp_state import disable_if_config_true
 from torch.distributed.tensor import DTensor
@@ -18,6 +24,7 @@ from torch.distributed.utils import _apply_to_tensors
 from transformers.modeling_utils import PreTrainedModel
 
 from halo.distributed.mesh import MeshDim, build_dp_mesh, mesh_dim_names
+from halo.models.modality import config_declares_multimodality
 from halo.models.module_tree import (
     DECODER_LAYER_LIST_ATTRS,
     backbone_with_layers,
@@ -263,6 +270,50 @@ def _install_unit_hooks(unit: list[nn.Module]) -> None:
     last.register_forward_hook(last_post_forward)
 
 
+def _agree_unsharded_grad_presence(group: FSDPParamGroup) -> None:
+    """COLLECTIVE over the group's reduce: a rank whose batch holds no image reaches no tower parameter, so its
+    reduce-scatter would take a smaller list than its peers' and fault or hang. Zero-filled where another rank holds a
+    gradient; what no rank reached keeps ``grad is None``, so a text-only run never writes its tower."""
+    trainable = [fsdp_param for fsdp_param in group.fsdp_params if fsdp_param.sharded_param.requires_grad]
+    if not trainable:
+        return
+    local = [
+        fsdp_param.unsharded_param.grad is not None or fsdp_param.unsharded_accumulated_grad is not None
+        for fsdp_param in trainable
+    ]
+    present = torch.tensor(local, dtype=torch.uint8, device=group.device)
+    # MAX along the shard dim, then along the replicate dim, is the MAX over every rank of an HSDP mesh.
+    if isinstance(group.mesh_info, FSDPMeshInfo):
+        dist.all_reduce(present, op=dist.ReduceOp.MAX, group=group._reduce_scatter_process_group)
+    if isinstance(group.mesh_info, DDPMeshInfo):
+        dist.all_reduce(present, op=dist.ReduceOp.MAX, group=group._all_reduce_process_group)
+    for fsdp_param, here, anywhere in zip(trainable, local, present.tolist(), strict=True):
+        if anywhere and not here:
+            fsdp_param.unsharded_param.grad = torch.zeros_like(fsdp_param.unsharded_param)
+    # The reduce takes one dtype, and an earlier microstep moved its parameters' gradients to the reduce dtype.
+    if any(fsdp_param.unsharded_accumulated_grad is not None for fsdp_param in trainable):
+        for fsdp_param in trainable:
+            fsdp_param.accumulate_unsharded_grad_if_needed()
+            fsdp_param.to_accumulated_grad_if_needed()
+
+
+def _agree_grad_presence_before_reducing(module: nn.Module) -> None:
+    """On a composite's embedding and root groups, the ones holding what only an image row reaches."""
+    group = module._get_fsdp_state()._fsdp_param_group if isinstance(module, FSDPModule) else None
+    if group is None:
+        return
+    post_backward = group.post_backward
+
+    def agreeing_post_backward(*unused) -> None:
+        # Both flags are rank-uniform, so every rank enters together: a backward leaves a group resharded or, held
+        # gathered, still gathered everywhere, and an accumulating one reduces nothing yet.
+        if group.reduce_grads and group.is_unsharded:
+            _agree_unsharded_grad_presence(group)
+        post_backward(*unused)
+
+    group.post_backward = agreeing_post_backward
+
+
 def apply_fsdp2_per_layer(
     model: nn.Module,
     dp_mesh: DeviceMesh,
@@ -336,6 +387,9 @@ def apply_fsdp2_per_layer(
         _shard(model, reserved=IdentityParamSet())
         sharded += 1
 
+    if config_declares_multimodality(getattr(model, "config", None)):
+        for module in {embed_backbone, model}:
+            _agree_grad_presence_before_reducing(module)
     return sharded
 
 

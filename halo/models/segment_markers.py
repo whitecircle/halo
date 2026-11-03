@@ -17,7 +17,7 @@ from halo.models.attention.layout import (
     has_gated_delta_net_layers,
     has_linear_attention_layers,
 )
-from halo.models.config_access import model_type_matches
+from halo.models.config_access import config_sources, model_type_matches
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from halo.runtime.ranks import is_global_main_process
 
@@ -25,6 +25,30 @@ logger = logging.getLogger(__name__)
 
 # A script refuses before the model load and the collator again after it.
 _crossing_allowed_warned: set[tuple[str | None, str]] = set()
+
+# Dense families measured to keep packed documents apart; a MoE family's verdict is on its spec. No config states
+# whether a forward carries position_ids into its mask or keeps a recurrence per document.
+_PACKING_MEASURED_DENSE_MODEL_TYPES = frozenset(
+    {
+        "cohere2",
+        "gemma",
+        "gemma2",
+        "gemma3",
+        "gemma3_text",
+        "lfm2",
+        "llama",
+        "mistral",
+        "mixtral",
+        "olmo3",
+        "paligemma",
+        "qwen2",
+        "qwen3",
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_vl",
+        "qwen3_vl_text",
+    }
+)
 
 # transformers' own predicates selecting its segment-aware GatedDeltaNet kernels (a bare ``find_spec`` would drop the
 # ``fla>=0.2.2`` floor and the CUDA-capable-torch conjunct); the torch fallbacks ignore the markers.
@@ -46,6 +70,16 @@ class SegmentMarkers:
 def has_dense_packing_leak(model_config) -> bool:
     spec = find_moe_family_spec_for_config(model_config)
     return spec is not None and spec.dense_packing_leaks
+
+
+def packing_isolation_is_measured(model_config) -> bool:
+    """Read through the text sub-config, so a composite resolves like its decoder."""
+    if find_moe_family_spec_for_config(model_config) is not None:
+        return True
+    return any(
+        getattr(source, "model_type", None) in _PACKING_MEASURED_DENSE_MODEL_TYPES
+        for source in config_sources(model_config)
+    )
 
 
 def segment_markers_for(model_config) -> SegmentMarkers:

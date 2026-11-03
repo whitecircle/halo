@@ -3,11 +3,11 @@
 from dataclasses import dataclass, field
 from typing import ClassVar
 
-from halo.configs.script_arguments import CommonScriptArguments
+from halo.configs.script_arguments import CommonScriptArguments, VisionTrainingArguments
 
 
 @dataclass
-class RewardScriptArguments(CommonScriptArguments):
+class RewardScriptArguments(VisionTrainingArguments, CommonScriptArguments):
     PROJECT_NAME: ClassVar[str] = "reward-modeling"
 
     images_field: str | None = field(

@@ -4,6 +4,7 @@ A reset sink column contributes ``exp(dtype_min) == 0``, so SDPA matches eager; 
 import functools
 import sys
 import types
+from unittest import mock
 
 import pytest
 import torch
@@ -15,6 +16,7 @@ from transformers import (
     LlamaConfig,
     PreTrainedModel,
 )
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.configs.script_arguments import ModelArguments
 from halo.distributed.parallelism_config import ParallelismConfig
@@ -23,7 +25,13 @@ from halo.model_loading.liger.dispatch import LIGER_APPLIED_CONFIG_ATTR
 from halo.model_loading.model_preparation import apply_run_model_policies
 from halo.model_loading.parallel.frozen_models import load_reference_model_for_preference
 from halo.models.attention import gpt_oss_sinks
-from halo.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
+from halo.models.attention import selection as selection_module
+from halo.models.attention.gpt_oss_sinks import (
+    SinksPolicy,
+    holds_unneutralized_sinks,
+    install_sdpa_for_reset_sinks,
+    uses_gpt_oss_sinks,
+)
 from halo.models.attention.selection import (
     _attn_impl_handles_sinks,
     select_supported_attn_implementation,
@@ -155,6 +163,57 @@ def test_a_built_gptoss_that_drops_its_live_sinks_is_refused(attn_implementation
         with pytest.raises(ValueError, match="drops its attention sinks"):
             verify_live_sinks_carried(model)
     else:
+        verify_live_sinks_carried(model)
+
+
+_TINY_GRANITE_SWA = {
+    "pad_token_id": 0,
+    "vocab_size": 32,
+    "hidden_size": 64,
+    "intermediate_size": 64,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "max_position_embeddings": 64,
+}
+
+
+@pytest.mark.parametrize("model_type", ["granite_swa", "granitemoe_swa"])
+@pytest.mark.parametrize(
+    ("attn_implementation", "neutralized", "refused"),
+    [
+        ("flash_attention_2", False, True),
+        ("flash_attention_3", False, True),
+        ("sdpa", False, True),
+        ("eager", False, False),
+        ("flash_attention_2", True, False),
+    ],
+)
+def test_a_family_no_spec_names_is_read_off_its_sinks_too(model_type, attn_implementation, neutralized, refused):
+    """Hopper's unset pick is FA3 here, whose build drops the column while FA4 and eager apply it."""
+    config = CONFIG_MAPPING[model_type](**_TINY_GRANITE_SWA)
+    assert not uses_gpt_oss_sinks(config), "the premise: no spec routes it through the GPT-OSS policy"
+    model = AutoModelForCausalLM.from_config(config)
+    if neutralized:
+        for module in model.modules():
+            if getattr(module, "sinks", None) is not None:
+                module.sinks.data.fill_(torch.finfo(module.sinks.dtype).min)
+    else:
+        assert holds_unneutralized_sinks(model), "the premise: the class default is live"
+    model.config._attn_implementation = attn_implementation
+    if refused:
+        with pytest.raises(ValueError, match="drops its attention sinks"):
+            verify_live_sinks_carried(model)
+    else:
+        verify_live_sinks_carried(model)
+
+
+def test_a_model_with_no_sinks_never_asks_a_kernel():
+    """The check runs on every load, so a model with nothing to carry must not import a flash build for it."""
+    model = AutoModelForCausalLM.from_config(CONFIG_MAPPING["llama"](**_TINY_GRANITE_SWA))
+    model.config._attn_implementation = "flash_attention_2"
+    with mock.patch.object(selection_module, "_attn_impl_handles_sinks", side_effect=AssertionError):
         verify_live_sinks_carried(model)
 
 

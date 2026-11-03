@@ -132,6 +132,8 @@ class Scenario:
     bf16: bool = True
     tf32: bool = False
     lowp_precision: str = "bf16"
+    # Stands in for the callback's read of a grouped native layer, as this harness's CPU layers run no grouped GEMM.
+    native_lowp: bool = False
     full_model_params: float | None = None
     report_mfu_diagnostics: bool = True
     measured_attention: bool = True
@@ -152,8 +154,9 @@ SCENARIOS = {
     "config_attention": Scenario(measured_attention=False),
     "lora": Scenario(model="lora"),
     "no_device": Scenario(device=None),
-    "no_peak": Scenario(device="a100", lowp_precision="fp8"),
+    "no_peak": Scenario(device="a100", lowp_precision="fp8", native_lowp=True),
     "fp8": Scenario(lowp_precision="fp8"),
+    "fp8_native": Scenario(lowp_precision="fp8", native_lowp=True),
     "fp32": Scenario(bf16=False),
     "tf32": Scenario(bf16=False, tf32=True),
     # The model handed over at train begin only, so the first setup reads the precision off the args alone.
@@ -382,7 +385,12 @@ def run_case(case: EfficiencyCase, scratch: str, *, perturb: bool = False) -> di
         device, work = ScriptedDevice(scenario.device), AttentionWork()
         state, control = transformers.TrainerState(), transformers.TrainerControl()
         steps = []
-        with device.installed(), captured_records() as records:
+        native = (
+            patch("halo.callbacks.efficiency._runs_native_expert_gemms", return_value=True)
+            if scenario.native_lowp
+            else contextlib.nullcontext()
+        )
+        with device.installed(), captured_records() as records, native:
             callback = EfficiencyCallback(
                 parallelism,
                 n_warmup_steps=WARMUP_STEPS,

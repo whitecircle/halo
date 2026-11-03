@@ -11,7 +11,6 @@ import shutil
 import sys
 import time
 import traceback
-from typing import get_args
 
 import torch
 import torch.distributed as dist
@@ -25,13 +24,18 @@ from halo.callbacks.torch_profiler import TorchProfilerCallback
 from halo.distributed.expert_parallel.moe_layer.layer import EPMoELayerBase, named_ep_layers
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.env import env_float, torch_trace_dir
-from halo.kernels.lowp.spec import LowpPrecision, LowpSpec
+from halo.kernels.lowp.spec import LowpSpec
 from halo.log import configure_training_logging
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.models.moe.expert_lora_spec import ExpertLoraSpec
 from halo.runtime.collectives import barrier, broadcast_from_rank0
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.benchmark_args import axis_tags, create_benchmark_parser, pp_topology_kwargs
+from tests.common.benchmark_args import (
+    add_lowp_precision_argument,
+    axis_tags,
+    create_benchmark_parser,
+    pp_topology_kwargs,
+)
 from tests.common.checkpoint_io import file_digests
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (
@@ -149,14 +153,7 @@ def main() -> int:
         "attn_implementation=sdpa when unset (FA4/FA3 are bf16/fp16-only). Refused under EP — "
         "DeepEP's dispatch buffer is sized for 2-byte tokens — so pair it with --ep 1.",
     )
-    parser.add_argument(
-        "--lowp_precision",
-        type=str,
-        default="bf16",
-        choices=get_args(LowpPrecision),
-        help="Low-precision GEMM compute for the dense MLP and MoE experts; master weights and "
-        "checkpoints stay bf16. 'bf16' = off, 'fp8' = mxfp8, 'fp4' = nvfp4, 'mxfp4' = fast fp4.",
-    )
+    add_lowp_precision_argument(parser)
     parser.add_argument(
         "--profile",
         action="store_true",

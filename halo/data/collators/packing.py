@@ -237,10 +237,13 @@ class DataCollatorForCompletionOnlyLMWithPacking(DataCollatorWithPacking):
                 batch["labels"][i] = self._mask_sequence(labels, input_ids=input_ids)
                 continue
 
+            # Every token of a document is real, so a pad-valued one the parent masked trains as on the padded routes.
+            restored = (input_ids == self.tokenizer.pad_token_id) & (batch["position_ids"][i] != 0)
+            document_labels = torch.where(restored, input_ids, labels)
             new_labels = torch.full_like(labels, LABEL_IGNORE_INDEX)
             offset = 0
             for seq_len in example["seq_lengths"]:
-                seq_labels = labels[offset : offset + seq_len]
+                seq_labels = document_labels[offset : offset + seq_len]
                 seq_input_ids = input_ids[offset : offset + seq_len]
                 new_labels[offset : offset + seq_len] = self._mask_sequence(seq_labels, input_ids=seq_input_ids)
                 offset += seq_len

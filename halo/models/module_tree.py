@@ -12,6 +12,20 @@ from halo.models.unwrapping import base_transformers_model
 DECODER_LAYER_LIST_ATTRS: tuple[str, ...] = ("layers", "h", "layer")
 # ``<attr>.<N>`` at a name boundary (``xlayers.3`` and ``layers.3x`` do not match).
 _DECODER_LAYER_INDEX = re.compile(rf"(?<![^.])(?:{'|'.join(map(re.escape, DECODER_LAYER_LIST_ATTRS))})\.(\d+)(?![^.])")
+# A composite's towers and the projectors beside them (``model.visual``, ``model.vision_tower``, ``model.embed_vision``,
+# ``model.audio_tower``, ``model.multi_modal_projector``), which only an image or audio row reaches.
+_MEDIA_MODULE_NAME = re.compile(r"visual|vision_\w+|\w+_vision|audio_\w+|\w+_audio|multi_modal_projector|mm_projector")
+
+
+def media_module_names(model: torch.nn.Module) -> list[str]:
+    """The outermost parameter-bearing modules named as a composite's towers and projectors, by their full names."""
+    names: list[str] = []
+    for name, module in model.named_modules():
+        leaf = name.rpartition(".")[2]
+        nested = any(name.startswith(f"{outer}.") for outer in names)
+        if not nested and _MEDIA_MODULE_NAME.fullmatch(leaf) and next(module.parameters(), None) is not None:
+            names.append(name)
+    return names
 
 
 def find_attr_name(module: torch.nn.Module, candidates: Sequence[str]) -> str | None:
@@ -67,12 +81,17 @@ def backbone_with_layers(model: torch.nn.Module) -> torch.nn.Module | None:
 
 
 def input_embedding_backbone(model: torch.nn.Module) -> torch.nn.Module | None:
-    """Usually :func:`backbone_with_layers`; a multimodal composite builds ``inputs_embeds`` in its own forward."""
+    """Usually :func:`backbone_with_layers`; a multimodal composite builds ``inputs_embeds`` in its own forward. One
+    holding ``language_model`` itself answers ``model``, the outermost module: the PEFT tuner above it calls its
+    ``.forward()``, which runs no hook of its own."""
     layer_backbone = backbone_with_layers(model)
     if layer_backbone is None:
         return None
-    composite = getattr(base_transformers_model(model), "model", None)
-    if composite is None or composite is layer_backbone:
+    root = base_transformers_model(model)
+    composite = getattr(root, "model", None)
+    if composite is None:
+        return model if getattr(root, "language_model", None) is not None else layer_backbone
+    if composite is layer_backbone:
         return layer_backbone
     return composite if any(module is layer_backbone for module in composite.modules()) else layer_backbone
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env python
-"""The opt-in native DeepGEMM fp8 / fp4 path: correctness, since it is net-slower than bf16 at training shapes.
+"""The opt-in native DeepGEMM fp8 / mxfp4 path: correctness of its forward, backward and per-step weight cache.
 
 ``deepgemm_available`` swallows every import error, so a broken ``deep_gemm`` must be told apart from an absent one, or
-both kernel checks vanish while the node exits 0. fp4 also exercises the K-not-÷256 zero-pad (K=2880 → 3072).
+both kernel checks vanish while the node exits 0. mxfp4 also exercises the K-not-÷256 zero-pad (K=2880 → 3072).
 """
 
 import importlib
@@ -12,14 +12,15 @@ import sys
 import torch
 import torch.nn.functional as F
 
-from halo.kernels.lowp.deepgemm import deepgemm_available, deepgemm_grouped_gemm, use_deepgemm
+from halo.kernels.lowp import deepgemm
+from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS, deepgemm_available, deepgemm_grouped_gemm, use_deepgemm
 from tests.common.numerics import fro_rel_err
 from tests.common.tolerances import TOL
 
 DEV = "cuda"
 
 # Lower bound > 0, so a silent bf16 fallback (relerr ≈ 0) fails.
-_BANDS = {"mxfp8": (0.005, 0.10), "nvfp4": (0.03, 0.30)}
+_BANDS = {"mxfp8": (0.005, 0.10), "mxfp4": (0.03, 0.30)}
 
 
 def _bf16_ref(x, w, offs):
@@ -35,11 +36,15 @@ def _bf16_ref(x, w, offs):
 
 def test_deepgemm_forward_backward():
     torch.manual_seed(0)
-    for precision in ("mxfp8", "nvfp4"):
+    for precision in DEEPGEMM_FORMATS:
         lo, hi = _BANDS[precision]
         for name, E, K, N, counts in [
             ("even", 8, 2880, 2880, [256] * 8),
             ("uneven+empty", 8, 2880, 2880, [100, 245, 0, 156, 203, 0, 134, 90]),
+            # The narrow and few-row shapes a gate on width or rows per expert would divert.
+            ("one row", 4, 2048, 1024, [1] * 4),
+            ("narrow gate_up", 4, 256, 256, [64] * 4),
+            ("narrow down", 4, 128, 256, [64] * 4),
         ]:
             T = sum(counts)
             x = (torch.randn(T, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
@@ -69,46 +74,56 @@ def test_deepgemm_forward_backward():
             )
 
 
+def _same_cast(a: tuple, b: tuple) -> bool:
+    """As floats, the one read of fp8 elements the production path itself runs on CUDA."""
+    return all(torch.equal(x.float(), y.float()) for x, y in zip(a, b, strict=True))
+
+
 def test_weight_cache_across_steps():
-    torch.manual_seed(0)
+    """Every step's forward runs on a cast of the weight as it is then: the entry the forward leaves equals a fresh cast
+    and moves with the optimizer's write. The summed loss sizes that write past bf16's rounding, as a mean over these
+    rows moves no block's largest element and so no scale."""
     E, K, N = 8, 2048, 2048
-    w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * (K**-0.5)).requires_grad_(True)
-    opt = torch.optim.SGD([w], lr=1e-2)
     offs = torch.cumsum(torch.full((E,), 256, device=DEV, dtype=torch.int32), 0).to(torch.int32)
-    losses = []
-    for _ in range(3):
-        x = torch.randn(8 * 256, K, device=DEV, dtype=torch.bfloat16) * 0.3
-        out = deepgemm_grouped_gemm(x, w, offs=offs, quant_format="mxfp8")
-        loss = out.float().pow(2).mean()
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
-        losses.append(loss.item())
-    assert all(torch.isfinite(torch.tensor(l)) for l in losses), losses
-    print(f"  weight cache across 3 opt steps: losses {[f'{l:.4f}' for l in losses]} finite — OK")
+    for precision in DEEPGEMM_FORMATS:
+        torch.manual_seed(0)
+        w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * (K**-0.5)).requires_grad_(True)
+        opt = torch.optim.SGD([w], lr=1e-3)
+        previous = None
+        for step in range(3):
+            x = torch.randn(8 * 256, K, device=DEV, dtype=torch.bfloat16) * 0.3
+            out = deepgemm_grouped_gemm(x, w, offs=offs, quant_format=precision)
+            served = deepgemm._weight_cache.get(w, (w._version, precision))
+            assert served is not None, f"{precision} step {step}: the forward left no entry for this version"
+            with torch.no_grad():
+                fresh = deepgemm._quant_weight(w, precision, K, cacheable=False)
+            assert _same_cast(served, fresh), f"{precision} step {step}: the cached cast is not of the current weight"
+            if previous is not None:
+                assert not torch.equal(previous, served[0].float()), f"{precision} step {step}: the cast did not move"
+            previous = served[0].float()
+            loss = out.float().pow(2).sum()
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+            assert torch.isfinite(loss), f"{precision} step {step}: loss {loss.item()}"
+        print(f"  {precision} weight cache across 3 opt steps tracks the weight — OK")
 
 
 def test_gate():
-    # Off by default at every shape: native is never auto-selected.
-    assert not use_deepgemm(256, 2880), "default must not route to DeepGEMM"
-    assert not use_deepgemm(8192, 8192), "default must not route to DeepGEMM even at a wide shape"
-    # Opt-in: only for qualifying (wide / large-M) shapes.
+    """Off by default; once opted in the decision reads the format and the package, never a shape."""
+    assert not any(use_deepgemm(fmt) for fmt in ("mxfp8", "mxfp4", "nvfp4")), "default must not route to DeepGEMM"
     prev = os.environ.get("HALO_DEEPGEMM_NATIVE")
     os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
     try:
-        assert not use_deepgemm(256, 2880), "opted-in but below the shape floor → still off"
-        # The gate also requires deep_gemm importable, an opt-in install, so it stays off without it even at a
-        # qualifying shape.
-        if deepgemm_available():
-            assert use_deepgemm(2048, 8192), "opted-in at a qualifying wide/large-M shape → on"
-        else:
-            assert not use_deepgemm(2048, 8192), "deep_gemm not importable → off even when opted-in"
+        for fmt in DEEPGEMM_FORMATS:
+            assert use_deepgemm(fmt) == deepgemm_available(), f"opted in: {fmt} follows the package"
+        assert not use_deepgemm("nvfp4"), "no native kernel takes nvfp4"
     finally:
         if prev is None:
             os.environ.pop("HALO_DEEPGEMM_NATIVE", None)
         else:
             os.environ["HALO_DEEPGEMM_NATIVE"] = prev
-    print("  use_deepgemm gate: OFF by default; opt-in only above the wide/large-M floor — OK")
+    print("  use_deepgemm gate: OFF by default; opt-in follows the format and the package — OK")
 
 
 def test_availability_gate_is_honest():
@@ -131,10 +146,10 @@ def test_availability_gate_is_honest():
         absent = isinstance(error, ModuleNotFoundError) and error.name == "deep_gemm"
         assert absent, (
             f"deep_gemm is installed but does not import: {type(error).__name__}: {error}. "
-            "That is a regression, not the opt-in package being absent — the fp8/fp4 kernel tests "
+            "That is a regression, not the package being absent — the fp8/mxfp4 kernel tests "
             "below would otherwise be skipped silently."
         )
-        print("  deep_gemm not installed (opt-in); gate reports unavailable and the fp8/fp4 tests are skipped — OK")
+        print("  deep_gemm not installed; the gate reports unavailable and the fp8/mxfp4 tests are skipped — OK")
     else:
         print("  deep_gemm imports and the gate reports available — OK")
     return error is None
@@ -149,8 +164,8 @@ if __name__ == "__main__":
     print("test_availability_gate_is_honest")
     installed = test_availability_gate_is_honest()
     if not installed:
-        # The normal path, since neither image ships deep_gemm. A SKIP, since the fp8/fp4 kernel tests below never ran.
-        print("SKIP: deep_gemm absent (opt-in); the gate is verified, the fp8/fp4 kernel tests are not")
+        # The Hopper image ships no deep_gemm. A SKIP, since the fp8/mxfp4 kernel tests below never ran.
+        print("SKIP: deep_gemm absent; the gate is verified, the fp8/mxfp4 kernel tests are not")
         sys.exit(0)
     print("test_deepgemm_forward_backward")
     test_deepgemm_forward_backward()

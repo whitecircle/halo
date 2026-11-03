@@ -15,6 +15,7 @@ from functools import partial
 import torch
 import torch.nn as nn
 from safetensors import safe_open
+from transformers import PreTrainedModel
 
 from halo.log import KEY_PREVIEW_COUNT
 from halo.model_loading.checkpoint_coverage import verify_checkpoint_coverage
@@ -219,6 +220,17 @@ def materialize_empty_like(model: nn.Module, key: str, device: str, dtype: torch
     assign_tensor_to_model(model, key, torch.empty_like(old, device=device, dtype=target_dtype))
 
 
+def _nearest_init_weights(model: nn.Module, owner: str) -> Callable[[nn.Module], None]:
+    """The ``_init_weights`` of the closest ``PreTrainedModel`` at or above ``owner``, as ``from_pretrained`` dispatches
+    them: a composite's own knows nothing of a parameter its tower declares and leaves it uninitialized."""
+    init_weights, module = model._init_weights, model
+    for name in owner.split(".") if owner else ():
+        module = getattr(module, name)
+        if isinstance(module, PreTrainedModel):
+            init_weights = module._init_weights
+    return init_weights
+
+
 def init_checkpoint_absent_modules(
     model: nn.Module,
     planned: set[str],
@@ -256,8 +268,7 @@ def init_checkpoint_absent_modules(
 
     verify_checkpoint_coverage(model, absent, source=context)
 
-    init_weights = getattr(model, "_init_weights", None)
-    if not callable(init_weights):
+    if not callable(getattr(model, "_init_weights", None)):
         raise RuntimeError(
             f"{context}: {len(absent)} live tensor(s) are absent from the checkpoint and "
             f"{type(model).__name__} exposes no _init_weights to initialize them the way "
@@ -268,7 +279,7 @@ def init_checkpoint_absent_modules(
         module = model.get_submodule(owner)
         for key in sorted(keys):
             materialize_empty_like(model, key, device, dtype)
-        module.apply(init_weights)
+        module.apply(_nearest_init_weights(model, owner))
 
     logger.info(
         f"{context}: initialized {len(absent)} tensor(s) absent from the checkpoint: {absent[:KEY_PREVIEW_COUNT]}"

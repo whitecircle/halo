@@ -15,6 +15,7 @@ Per-axis support: [Compatibility matrix](README.md#compatibility-matrix). Why ea
     vLLM 0.32.0 serves V4 in tree, with a bf16 o-projection path, but its routed-expert loader maps only the release's per-expert `experts.{i}.w1/w2/w3` names. A gathered save writes the names transformers' own `save_pretrained` reverts to (`model.layers.N.attn.*`, `model.layers.N.ffn.*`, `head.weight`), with the experts as the fused pair, which that loader does not take. Serving a BF16 checkpoint there is unverified.
 
     SGLang 0.5.22 maps per-expert `w1/w3/w2` names where the gather emits the fused pair, and no end-to-end sync has been validated for the family. No key mapping fixes this from the gather side. A saved checkpoint reaches that layout through `unfuse_moe_experts.py`; serving one on SGLang is unverified.
+- **Offline GRPO** — always scores through the per-row chunked path, since the compressors cut KV windows at fixed row indices a left pad would move, and refuses a pipeline batch above one row ([Row positions](../training-methods/grpo/offline.md#row-positions)).
 
 ## Attention: eager-only
 

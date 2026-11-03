@@ -13,6 +13,7 @@ import torch
 from transformers.conversion_mapping import get_model_conversion_mapping
 from transformers.core_model_loading import WeightConverter, WeightRenaming, dot_natural_key, rename_source_key
 
+import halo.models.conversion_overrides  # noqa: F401  registers the family overrides before any mapping read
 from halo.models.model_classes import transformers_model_class
 
 # A conversion source addressing one tensor per module-list index (``…experts.*.w1.weight``).

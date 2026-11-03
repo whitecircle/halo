@@ -75,6 +75,9 @@ _EXPECTED = {
         "unfreeze_layers_patterns": "None",
     },
     "DPOScriptArguments": {
+        "freeze_vision_tower": "False",
+        "max_pixels": "None",
+        "min_pixels": "None",
         "generate_eval_examples": "True",
         "generation_max_prompt_length": "512",
         "images_field": "None",
@@ -88,6 +91,9 @@ _EXPECTED = {
         "prompt_field": "'prompt'",
     },
     "KTOScriptArguments": {
+        "freeze_vision_tower": "False",
+        "max_pixels": "None",
+        "min_pixels": "None",
         "completion_field": "'completion'",
         "images_field": "None",
         "label_field": "'label'",
@@ -130,9 +136,15 @@ _EXPECTED = {
         "use_sdpg": "False",
     },
     "RewardScriptArguments": {
+        "freeze_vision_tower": "False",
+        "max_pixels": "None",
+        "min_pixels": "None",
         "images_field": "None",
     },
     "SFTScriptArguments": {
+        "freeze_vision_tower": "False",
+        "max_pixels": "None",
+        "min_pixels": "None",
         "allow_cross_document_linear_attention": "False",
         "assistant_message_template": "None",
         "conversation_field": "'prompt'",
@@ -150,10 +162,16 @@ _EXPECTED = {
         "tree_share_requires": "None",
     },
     "SMPOScriptArguments": {
+        "freeze_vision_tower": "False",
+        "max_pixels": "None",
+        "min_pixels": "None",
         "generate_eval_examples": "True",
         "num_eval_examples": "50",
     },
     "SelfDistillScriptArguments": {
+        "freeze_vision_tower": "False",
+        "max_pixels": "None",
+        "min_pixels": "None",
         "assistant_message_template": "None",
         "confidence_field": "None",
         "confidence_power": "4.0",
@@ -178,6 +196,9 @@ _EXPECTED = {
         "train_on_completions_only": "True",
     },
     "TeacherDistillScriptArguments": {
+        "freeze_vision_tower": "False",
+        "max_pixels": "None",
+        "min_pixels": "None",
         "assistant_message_template": "None",
         "conversation_field": "'messages'",
         "images_field": "None",

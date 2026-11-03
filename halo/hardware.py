@@ -69,13 +69,27 @@ GPU_PEAK_FLOPS = {
     ),
     "B200": GpuPeak(
         aliases=("B200",),
-        flops={"bf16": 2250.0e12, "fp16": 2250.0e12, "fp8": 4500.0e12, "tf32": 1125.0e12, "fp32": 75.0e12},
+        flops={
+            "bf16": 2250.0e12,
+            "fp16": 2250.0e12,
+            "fp8": 4500.0e12,
+            "fp4": 9000.0e12,
+            "tf32": 1125.0e12,
+            "fp32": 75.0e12,
+        },
     ),
     "GB200": GpuPeak(
         aliases=("GB200",),
-        flops={"bf16": 2500.0e12, "fp16": 2500.0e12, "fp8": 5000.0e12, "tf32": 1250.0e12, "fp32": 80.0e12},
+        flops={
+            "bf16": 2500.0e12,
+            "fp16": 2500.0e12,
+            "fp8": 5000.0e12,
+            "fp4": 10000.0e12,
+            "tf32": 1250.0e12,
+            "fp32": 80.0e12,
+        },
     ),
-    "B300": GpuPeak(  # same 148-SM die as B200; FP4 and HBM are the uplift
+    "B300": GpuPeak(  # same 148-SM die as B200; the published 6x FP4 names GB300, so this keeps the 4x
         aliases=("B300",),
         flops={
             "bf16": 2250.0e12,

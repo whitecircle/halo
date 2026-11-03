@@ -138,6 +138,12 @@ def test_tensor_core_dtype_ratios_match_the_datapath(gpu_key):
         )
 
 
+@pytest.mark.parametrize("gpu_key", [key for key, spec in _DIE_SPECS.items() if spec[2] == "blackwell"])
+def test_every_blackwell_die_has_an_fp4_peak(gpu_key):
+    """The tensor cores run MXFP4 and NVFP4 on every Blackwell die; a missing entry leaves a native 4-bit run unscored."""
+    assert "fp4" in GPU_PEAK_FLOPS[gpu_key].flops
+
+
 def test_b300_matches_the_b200_dense_tensor_core_rates():
     """Same 148-SM die, since Blackwell Ultra's uplift is FP4 and HBM.
     A ~1.47x-inflated B300 row would understate every MFU by ~32%."""

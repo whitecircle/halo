@@ -198,9 +198,11 @@ trains and reloads but that the merge tools or the pinned server refuse. It rewr
   only through its `auto_map` modules (`exports_source_config_schema`, Step-3.7 Flash):
   `export_source_config_schema` writes the run's changed values back under the source's spellings and
   copies the `auto_map` modules in transitively. The source is the checkpoint the model was loaded from,
-  so a resume or a `patch_vocab.py` output carries the schema on. The rewritten config is re-parsed
-  against the live one, so a change the source schema swallows raises; a source with no `auto_map` warns
-  and keeps transformers' own.
+  so a resume or a `patch_vocab.py` output carries the schema on. A change lands under the spelling the source
+  already uses: the key itself, its `attribute_map` alias or its `_legacy_field_names` alias. The rewritten config
+  is re-parsed against the live one, so a change the source schema swallows raises; a source with no `auto_map` warns
+  and keeps transformers' own, and a source of another `model_type` (a text-only load of a composite) keeps it with
+  no warning.
 - **The `auto_map` trim**: an entry naming a module the directory does not carry is dropped (an
   in-library load serializes the hub's `auto_map` without copying the code — Laguna without
   `trust_remote_code`); a cross-repo `repo--module.Class` reference stays.
@@ -303,7 +305,8 @@ reads the checkpoint through its `*ForCausalLM` sibling, which strips `model.lan
 Every writer (the gathered and EP saves, the base-Trainer save, the weight sync, the tools'
 `save_full_checkpoint`) reverts the load's conversions minus that strip (`save_pretrained_layout`), so the
 export stores `model.*` under its `*_text` config; `reattach_vision_tower.py` restores the multimodal
-layout ([Qwen3.5/3.6](../models/qwen3_5.md)).
+layout ([Qwen3.5/3.6](../models/qwen3_5.md)). A family whose composite keeps its text tower elsewhere declares where
+(`text_only_layout`, [Adding a model](../models/adding-a-model.md#text-only-load-of-a-composite)).
 
 ## Saving by parallelism mode
 
@@ -500,10 +503,11 @@ loader, the reference/teacher loads) routes its absent set through `verify_check
 which also keeps the checkpoint's weights on every rank under accelerate's `fsdp_cpu_ram_efficient_loading`
 ([Accelerate launch configs](../parallelism/data-parallelism.md#accelerate-launch-configs)).
 
-Legitimate absences are read off the model class: a task head outside `base_model_prefix` (`score`,
+Legitimate absences are read off the model: a task head outside `base_model_prefix` (`score`,
 `classifier`, an untied `lm_head` — what makes reward / classification training on a base checkpoint
 work), a tensor the checkpoint carried under another name (object identity over
-`state_dict(keep_vars=True)`), and the class's `_keys_to_ignore_on_load_missing`. A class that *is* the
+`state_dict(keep_vars=True)`), and the instance's `_keys_to_ignore_on_load_missing`, which `post_init` unions over
+the nested models, so a composite honors what its tower declares. A class that *is* the
 backbone excuses nothing, and the gate inspects `missing_keys` only. A caller that only consumes a head
 passes `excuse_task_head=False` (reward-model inference), so a plain causal-LM directory raises instead of
 scoring through a random `score` head.

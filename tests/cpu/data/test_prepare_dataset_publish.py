@@ -55,7 +55,13 @@ def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
 def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
     """``main()`` on a local ``output`` with everything but the bake's placement and the publish stubbed."""
     args = types.SimpleNamespace(
-        input="in", output=output, overwrite=True, verbose=False, dry_run=False, private=False
+        input="in",
+        output=output,
+        overwrite=True,
+        verbose=False,
+        dry_run=False,
+        private=False,
+        allow_cross_document_linear_attention=False,
     )
     config = types.SimpleNamespace(
         pack_sequences=False, is_vlm=False, model_name_or_path="model", max_length=8, num_shards=1

@@ -45,7 +45,7 @@ Memory keys take no prefix: `allocated_gb`, `reserved_gb`, `peak_allocated_gb`, 
 
 Off by default: utilization misleads for multi-sequence trainers — DPO / SMPO / reward forward both chosen and rejected, distillation also the teacher. Turning it on sets `include_num_input_tokens_seen="all"`: each micro-batch adds its input shape on the host, and the callback's step end sums the step over the world in the same host read as the step's attention work (HF's own count gathers and syncs on every micro-batch). Without the callback the count is summed at each log and before each save, so it is exact in the logs and in `trainer_state.json` but lags between them in the state a callback sees.
 
-The peak is keyed on `lowp_precision` where low-precision compute is on, since bf16 masters name a peak the GEMMs never run at. S-MFU scales the expert term by `(top_k / num_experts) × ep_size`; `expert_tp_size` already divides the local expert params.
+The peak is keyed on `lowp_precision` only on the native path; the simulated path runs bf16 matmuls and scores against the bf16 peak. S-MFU scales the expert term by `(top_k / num_experts) × ep_size`; `expert_tp_size` already divides the local expert params.
 
 Throughput is measured only where the collator emits `input_ids`. SMPO and embedding emit none, so every step falls back to a padded-length estimate (`per_device_train_batch_size × gradient_accumulation_steps × max_seq × 0.8`) behind one warning — a figure that reads as measured but is not.
 

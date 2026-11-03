@@ -64,7 +64,7 @@ torchrun --nproc_per_node=8 scripts/training/distillation/teacher_distill.py \
 
 ## Vision-language
 
-One script serves both modalities. The student class follows its checkpoint; the data path follows the run, so a multimodal student distilled on text-only rows takes the text path. Images ride embedded in messages or in an `images_field` column, as in [VLM SFT](../sft.md#vision-language-models).
+One script serves both modalities. The student class follows its checkpoint; the data path follows the run, so a multimodal student distilled on text-only rows takes the text path, a text teacher included. An image run refuses a text teacher, which cannot score its rows. Images ride embedded in messages or in an `images_field` column, as in [VLM SFT](../sft.md#vision-language-models).
 
 An image run maps through the shared `prepare_vlm_dataset` and forces `remove_unused_columns=False` so the `history`/`images` columns reach `VLMDataCollator`. `pixel_values` thread to both forwards, and the two models must share processor geometry as well as vocabulary.
 

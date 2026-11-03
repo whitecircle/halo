@@ -41,6 +41,10 @@ logger = logging.getLogger(__name__)
 
 
 class CheckpointingMixin:
+    # What exports carry where ``processing_class`` has to stay the tokenizer: TRL reads a processor as a vision run, and
+    # an engine builds a multimodal class's processor from the export.
+    export_processing_class = None
+
     # Whether this save's collectives are behind it, the line before which a failure raises rank-locally.
     _model_save_collectives_done: bool = False
     # True while :meth:`_save_checkpoint` runs ``save_model``: tensors keep their live dtype, unlike an export.
@@ -206,7 +210,11 @@ class CheckpointingMixin:
         """COLLECTIVE. Commit the trainer state, then push (which uploads the directory as it stands), then rotate."""
         commit_trainer_state(checkpoint_dir)
         if self.args.push_to_hub:
-            self._push_from_checkpoint(checkpoint_dir)
+            with pristine_model_max_length(self._exported_processing_class()):
+                # The base push resaves ``processing_class`` alone beside the weights it copies.
+                if self.export_processing_class is not None and self.args.should_save:
+                    self.export_processing_class.save_pretrained(self.args.output_dir)
+                self._push_from_checkpoint(checkpoint_dir)
         self._rotate_checkpoints_after_sidecars(trial)
 
     def _rotate_checkpoints_after_sidecars(self, trial) -> None:
@@ -233,10 +241,15 @@ class CheckpointingMixin:
             save_sharded_ep=self.save_sharded_ep,
             has_expert_lora=model_has_expert_lora(model),
             cp_wrapper=self._find_cp_wrapper(),
-            tokenizer=getattr(self, "processing_class", None),
+            tokenizer=self._exported_processing_class(),
             pp_wrapper_state=self._pp_wrapper_state,
             training_checkpoint=self._writing_training_checkpoint,
         )
+
+    def _exported_processing_class(self):
+        if self.export_processing_class is not None:
+            return self.export_processing_class
+        return getattr(self, "processing_class", None)
 
     def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
         """Write the model on every rank. A trainer with its own model layout overrides this step of
@@ -254,6 +267,9 @@ class CheckpointingMixin:
             # A family-less vendor config (Bailing/Ling) or a source-schema family (Step-3.7) saved single-GPU/DDP is
             # unreadable to the merge tools and the pinned server without the rewrites the parallel paths get.
             if self.args.should_save:
+                # The base save wrote ``processing_class``.
+                if self.export_processing_class is not None:
+                    self.export_processing_class.save_pretrained(output_dir)
                 finalize_exported_config(ctx.model.config, output_dir, source=config_schema_source(ctx.model))
                 apply_umask_mode(output_dir)
 

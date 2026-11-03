@@ -497,6 +497,22 @@ def install_resolved_tokenizer(processing_class, tokenizer: PreTrainedTokenizer)
     return processing_class
 
 
+def load_export_processor(model_config: ModelArguments, args, tokenizer: PreTrainedTokenizer):
+    """COLLECTIVE: what an export carries when the run's ``processing_class`` has to stay the tokenizer, as GRPO's does.
+    vLLM and SGLang build a multimodal class's processor at startup, so a composite's export cannot be served without
+    it. ``None`` for a text checkpoint, a ``text_only_model`` load and a checkpoint shipping no processor. Called before
+    the trainer's construction, whose reference sweep or server preflights a failed load would waste."""
+    if args.text_only_model:
+        return None
+    _, multimodal = probe_checkpoint(
+        model_config.model_name_or_path,
+        revision=model_config.model_revision,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    processor = load_vlm_processor(model_config, required=False) if multimodal else None
+    return None if processor is None else install_resolved_tokenizer(processor, tokenizer)
+
+
 def apply_text_path_padding_side(tokenizer: PreTrainedTokenizer, vlm_run: bool) -> None:
     """Pad a text-path run on the right: Gemma 4 and GLM-4.7-Flash keep left padding, which the packing collator
     rejects and the padding collators read as an attended leading document. A VLM run keeps the processor's side, as

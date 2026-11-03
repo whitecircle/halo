@@ -1,11 +1,16 @@
 """Conversation shaping shared by the text and VLM pipelines."""
 
 import json
+from collections.abc import Iterator
 from typing import Any
 
-# The image content part ``{"type": IMAGE_PART_TYPE, IMAGE_PART_PAYLOAD_KEY: <image>}`` every reader matches.
+# The image content part ``{"type": IMAGE_PART_TYPE, IMAGE_PART_PAYLOAD_KEY: <image>}`` every reader matches, or the
+# transformers chat format's spelling of its source under one of ``IMAGE_PART_SOURCE_KEYS``.
 IMAGE_PART_TYPE = "image"
 IMAGE_PART_PAYLOAD_KEY = "image"
+IMAGE_PART_SOURCE_KEYS = ("path", "base64", "url")
+# No collator hands these to a processor, while chat templates render their placeholders.
+UNSUPPORTED_MEDIA_PART_TYPES = frozenset({"video", "audio", "image_url", "video_url", "audio_url", "input_audio"})
 
 
 def resolve_json_value(value):
@@ -26,22 +31,45 @@ def as_conversation(prompt: Any) -> Any:
     return prompt
 
 
-def conversation_carries_images(conversation: Any) -> bool:
-    """Anything that is not a message list reads as text, left for the renderer to refuse."""
+def _content_parts(conversation: Any) -> Iterator[dict]:
+    """Anything that is not a message list yields nothing, left for the renderer to refuse."""
     conversation = resolve_json_value(conversation)
     if not isinstance(conversation, list):
-        return False
-    return any(
-        isinstance(part, dict) and part.get("type") == IMAGE_PART_TYPE
-        for message in conversation
-        if isinstance(message, dict) and isinstance(message.get("content"), list)
-        for part in message["content"]
+        return
+    for message in conversation:
+        if isinstance(message, dict) and isinstance(message.get("content"), list):
+            yield from (part for part in message["content"] if isinstance(part, dict))
+
+
+def conversation_carries_images(conversation: Any) -> bool:
+    return any(part.get("type") == IMAGE_PART_TYPE for part in _content_parts(conversation))
+
+
+def is_image_placeholder(part: dict) -> bool:
+    """An image part with no source: a falsy ``image`` payload counts, as the images column fills those; Arrow pads the
+    keys a part lacks with ``None``."""
+    return (
+        part.get("type") == IMAGE_PART_TYPE
+        and not part.get(IMAGE_PART_PAYLOAD_KEY)
+        and all(part.get(key) is None for key in IMAGE_PART_SOURCE_KEYS)
     )
+
+
+def reject_unsupported_media_parts(conversation: Any, source: str) -> None:
+    """Refused on the text and VLM pipelines alike: their placeholders would train with nothing behind them."""
+    found = {part.get("type") for part in _content_parts(conversation)} & UNSUPPORTED_MEDIA_PART_TYPES
+    if found:
+        raise ValueError(
+            f"{source} carries {sorted(found)} content parts, which no Halo collator feeds a processor, so their "
+            f"placeholders would train with nothing behind them. Images train from a '{IMAGE_PART_TYPE}' part whose "
+            f"source is '{IMAGE_PART_PAYLOAD_KEY}' or one of {list(IMAGE_PART_SOURCE_KEYS)}, or from an images column."
+        )
 
 
 def reject_image_content(conversation: Any, source: str) -> None:
     """Refuse image parts on a text renderer, which would train placeholder tokens with no pixels: the per-row backstop
     for what the run-intent dispatch cannot see."""
+    reject_unsupported_media_parts(conversation, source)
     if not conversation_carries_images(conversation):
         return
     raise ValueError(

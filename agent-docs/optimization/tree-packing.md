@@ -176,8 +176,8 @@ run's.
 row below a tree), `eval_packing` is left on and `train_on_completions_only` is on. It is refused
 under context, tensor and pipeline parallelism, with `torch_compile`, with `train_sinks`, on a
 pre-processed dataset and on the VLM path. The other `tree_*` options raise when set without it.
-Expert parallelism and FSDP2 data parallelism never slice a row and run tree rows unchanged. Pure ETP and
-EP+ETP are admitted but unverified on tree rows.
+Expert parallelism and FSDP2 data parallelism never slice a row, so both admit tree rows; the end-to-end run is
+FSDP2 on Qwen3-0.6B. Pure ETP and EP+ETP are admitted.
 
 Families are admitted one by one (`TREE_FAMILIES` in `halo/models/attention/tree.py`), each by passing
 the per-example oracle test; every other family is refused before the model loads. Backends are admitted

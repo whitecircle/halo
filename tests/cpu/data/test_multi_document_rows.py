@@ -9,17 +9,20 @@ import types
 from unittest import mock
 
 import pytest
+from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 
 from halo.data.collators import collator_rules
-from halo.data.collators.collator_rules import reject_multi_document_rows
+from halo.data.collators.collator_rules import reject_multi_document_rows, reject_unpackable_family
 from halo.data.collators.factory import select_data_collator
 from halo.models import segment_markers
+from halo.models.segment_markers import packing_isolation_is_measured
 from tests.common.repo import load_script_module
 from tests.common.tiny_models import (
     TINY_BAILING_RING_FAMILY,
     TINY_DENSE_ATTENTION_FAMILIES,
     TINY_DENSE_FAMILIES,
     TINY_MOE_FAMILIES,
+    TINY_MOE_VLM_FAMILIES,
     tiny_family_model,
 )
 
@@ -148,6 +151,63 @@ def test_the_collator_factory_refuses_through_the_one_rule(rule):
             keeps_packed_rows=kwargs.get("keeps_packed_rows", False),
             allow_cross_document_linear_attention=kwargs.get("allow_cross_document_linear_attention", False),
         )
+
+
+@pytest.mark.parametrize(
+    ("family", "kwargs", "refused"),
+    [
+        (TINY_BAILING_RING_FAMILY, {}, "linear-attention layers"),
+        (TINY_MOE_FAMILIES["glm5_next"], {"allow_cross_document_linear_attention": True}, "packing=True"),
+        (TINY_MOE_FAMILIES["deepseek_v4"], {"allow_cross_document_linear_attention": True}, "is refused"),
+        (TINY_BAILING_RING_FAMILY, {"allow_cross_document_linear_attention": True}, None),
+        (TINY_MOE_FAMILIES["gpt_oss"], {}, None),
+        (TINY_DENSE_FAMILIES["qwen3_5"], {}, None),
+        (TINY_DENSE_FAMILIES["qwen3"], {}, None),
+    ],
+    ids=["ring", "glm5_next_opted_in", "dsv4_opted_in", "ring_opted_in", "gpt_oss", "qwen3_5", "qwen3"],
+)
+def test_a_bake_refuses_the_rows_training_would_refuse(family, kwargs, refused):
+    """Read off the family alone: a bake holds no backend, and the host baking may lack what training needs."""
+    config = _config(family)
+    options = {"allow_cross_document_linear_attention": False, **kwargs}
+    with mock.patch.object(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _KERNELS_MISSING):
+        if refused is None:
+            reject_unpackable_family(config, flag="--pack_sequences", **options)
+        else:
+            with pytest.raises(ValueError, match=refused):
+                reject_unpackable_family(config, flag="--pack_sequences", **options)
+
+
+_ROSTER = {**TINY_DENSE_FAMILIES, **TINY_DENSE_ATTENTION_FAMILIES, **TINY_MOE_FAMILIES, **TINY_MOE_VLM_FAMILIES}
+
+
+@pytest.mark.parametrize("family", list(_ROSTER))
+def test_every_family_of_the_roster_is_measured(family):
+    assert packing_isolation_is_measured(_config(_ROSTER[family]))
+
+
+@pytest.mark.parametrize("model_type", ["bart", "opt", "biogpt", "gpt_neo", "moshi"])
+@pytest.mark.parametrize("mode", ["packing", "padding_free"])
+def test_a_family_outside_the_table_is_warned_about(model_type, mode):
+    with mock.patch.object(collator_rules.logger, "warning") as warning:
+        collator_rules._warn_unmeasured_multi_document_family(CONFIG_MAPPING[model_type](), multi_document=True)
+    assert warning.call_count == 1
+    assert "outside the table" in warning.call_args.args[0]
+
+
+def test_one_document_rows_warn_about_no_family():
+    with mock.patch.object(collator_rules.logger, "warning") as warning:
+        collator_rules._warn_unmeasured_multi_document_family(CONFIG_MAPPING["bart"](), multi_document=False)
+    assert warning.call_count == 0
+
+
+def test_the_collator_factory_warns_on_a_family_outside_the_table():
+    tokenizer = types.SimpleNamespace(pad_token_id=0, eos_token_id=1, padding_side="right")
+    config = CONFIG_MAPPING["opt"]()
+    config._attn_implementation = FA2
+    with mock.patch.object(collator_rules.logger, "warning") as warning:
+        select_data_collator(tokenizer, train_on_completions_only=False, packing=True, model_config=config)
+    assert any("outside the table" in str(call.args[0]) for call in warning.call_args_list)
 
 
 class _Initialized(Exception):

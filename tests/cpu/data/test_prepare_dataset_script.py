@@ -223,6 +223,29 @@ def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
     assert "REACHED_LOAD" not in output, f"the refusal came after the input dataset was fetched:\n{output}"
 
 
+_RING_PRELUDE = (
+    "from tests.common.tiny_models import TINY_BAILING_RING_FAMILY, tiny_family_model\n"
+    "prepare_dataset_tool.AutoConfig = types.SimpleNamespace(\n"
+    "    from_pretrained=lambda *a, **k: tiny_family_model(TINY_BAILING_RING_FAMILY).config\n"
+    ")"
+)
+
+
+def test_packing_a_model_training_refuses_is_refused_at_the_bake_unless_opted_in():
+    refused = _run(_DOC_TEXT_ARGV, prelude=_RING_PRELUDE)
+    assert "allow_cross_document_linear_attention" in refused, refused
+    assert "REACHED_LOAD" not in refused, f"the refusal came after the input dataset was fetched:\n{refused}"
+
+    opted_in = _run([*_DOC_TEXT_ARGV, "--allow_cross_document_linear_attention", "true"], prelude=_RING_PRELUDE)
+    assert "REACHED_LOAD" in opted_in or "REACHED_PREPROCESS" in opted_in, opted_in
+
+
+def test_the_bake_opt_in_needs_packed_rows():
+    argv = [arg for arg in _DOC_TEXT_ARGV if arg != "--pack_sequences"]
+    output = _run([*argv, "--allow_cross_document_linear_attention", "true"])
+    assert "needs --pack_sequences" in output, output
+
+
 def test_a_sharded_publish_is_partitioned_disjointly_across_data_parallel_ranks():
     """The real script, unstubbed, with ``--num_shards 4``: a gap silently drops data and an overlap double-trains
     it."""

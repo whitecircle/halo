@@ -6,7 +6,12 @@ from typing import Any, ClassVar, Literal, get_args
 from transformers import TrainingArguments
 
 from halo.config_validation import ValidatedConfig, present, reject_non_default_args, require_finite, require_int
-from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments, DatasetNumProcArguments
+from halo.configs.script_arguments import (
+    DEFAULT_ANSWER_FIELD,
+    CommonScriptArguments,
+    DatasetNumProcArguments,
+    VisionTrainingArguments,
+)
 from halo.configs.sft import ConversationRenderArguments
 from halo.data.collators.self_distill import format_field_names
 
@@ -105,7 +110,9 @@ class SDPGArguments(ValidatedConfig):
 
 
 @dataclass
-class SelfDistillScriptArguments(ConversationRenderArguments, CommonScriptArguments, SDPGArguments):
+class SelfDistillScriptArguments(
+    VisionTrainingArguments, ConversationRenderArguments, CommonScriptArguments, SDPGArguments
+):
     """Offline privileged-context self-distillation SFT (SDPG-style, text or VLM): one model is student (prompt only)
     and teacher (plus a gold-answer hint), whose full-vocab distribution supervises shared response tokens."""
 
@@ -205,7 +212,7 @@ class SelfDistillScriptArguments(ConversationRenderArguments, CommonScriptArgume
 
 
 @dataclass
-class TeacherDistillScriptArguments(ConversationRenderArguments, CommonScriptArguments):
+class TeacherDistillScriptArguments(VisionTrainingArguments, ConversationRenderArguments, CommonScriptArguments):
     PROJECT_NAME: ClassVar[str] = "llm_distillation"
 
     teacher_model: str | None = field(default=None, metadata={"help": "Name or path of the teacher model."})

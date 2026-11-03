@@ -1,10 +1,13 @@
 #!/usr/bin/env python
-"""Grouped-GEMM dispatch: bf16 matches a per-expert loop, and mxfp8 / nvfp4 take the simulated fake-quant path by
-default."""
+"""Grouped-GEMM dispatch: bf16 matches a per-expert loop, every format takes the simulated fake-quant path by default,
+and ``HALO_DEEPGEMM_NATIVE=1`` takes mxfp8 / mxfp4 native at every shape."""
+
+import os
 
 import torch
 
 from halo.kernels.expert_gemm import expert_gemm
+from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.deepgemm import deepgemm_available
 from tests.common.harness import gpu_test_main, record_check
 from tests.common.numerics import fro_rel_err
@@ -59,7 +62,7 @@ def test_simulated_lowprecision_matches_format_error():
         x = (torch.randn(E * M, K, device=DEV, dtype=torch.bfloat16) * 0.3).requires_grad_(True)
         w = (torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.02).requires_grad_(True)
         offs = torch.arange(M, E * M + 1, M, device=DEV, dtype=torch.int32)
-        out = expert_gemm(x, w, offs=offs, quant_format=prec)  # Fine-grained shape: simulated fake-quant.
+        out = expert_gemm(x, w, offs=offs, quant_format=prec)  # The flag is off: simulated fake-quant.
         (out * torch.randn_like(out)).sum().backward()
         ref = _reference(x.detach(), w.detach(), offs).float()
         rel = fro_rel_err(out.detach(), ref)
@@ -78,13 +81,31 @@ def test_dispatch_contract():
     w = torch.randn(E, K, N, device=DEV, dtype=torch.bfloat16) * 0.02
     offs = torch.arange(M, E * M + 1, M, device=DEV, dtype=torch.int32)
 
-    # At this fine-grained shape low precision routes to the simulated path; the DeepGEMM gate needs wide experts and
-    # large tokens/expert.
     assert expert_gemm(x, w, offs=offs).shape == (E * M, N)
-    for prec in ("mxfp8", "nvfp4"):
-        out = expert_gemm(x, w, offs=offs, quant_format=prec)
-        assert out.shape == (E * M, N), f"{prec} wrong shape"
-    print(f"  dispatch contract PASS (lowp=simulated at this shape; deepgemm_available={deepgemm_available()})")
+    real_forward = deepgemm._deepgemm_forward
+    native_calls = []
+
+    def counted_forward(*args):
+        native_calls.append(args[3])
+        return real_forward(*args)
+
+    deepgemm._deepgemm_forward = counted_forward
+    try:
+        for prec in ("mxfp8", "mxfp4", "nvfp4"):
+            out = expert_gemm(x, w, offs=offs, quant_format=prec)
+            assert out.shape == (E * M, N), f"{prec} wrong shape"
+        assert not native_calls, f"the default ran native: {native_calls}"
+
+        os.environ["HALO_DEEPGEMM_NATIVE"] = "1"
+        for prec in ("mxfp8", "mxfp4", "nvfp4"):
+            out = expert_gemm(x, w, offs=offs, quant_format=prec)
+            assert out.shape == (E * M, N), f"opted-in {prec} wrong shape"
+    finally:
+        os.environ.pop("HALO_DEEPGEMM_NATIVE", None)
+        deepgemm._deepgemm_forward = real_forward
+    expected = ["mxfp8", "mxfp4"] if deepgemm_available() else []
+    assert native_calls == expected, f"opted in, native ran {native_calls}, expected {expected}"
+    print(f"  dispatch contract PASS (deepgemm_available={deepgemm_available()}; opted-in native {native_calls})")
 
 
 @gpu_test_main(exact_world_size=1, prefix="grouped_gemm", partial_state=False)

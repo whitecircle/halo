@@ -461,6 +461,37 @@ class ModelInitKwargsArguments:
 
 
 @dataclass
+class VisionTrainingArguments(ValidatedConfig):
+    """The image-run options of the scripts with a vision path."""
+
+    freeze_vision_tower: bool = field(
+        default=False,
+        metadata={
+            "help": "Freeze a multimodal checkpoint's vision and audio towers and their projectors, training the text "
+            "tower on image data. Refused with adapters, which freeze the base already, and on a checkpoint with no "
+            "tower."
+        },
+    )
+    min_pixels: int | None = field(
+        default=None,
+        metadata={"help": "Image run: floor on the pixels per image, for a processor that resizes by pixel count."},
+    )
+    max_pixels: int | None = field(
+        default=None,
+        metadata={
+            "help": "Image run: cap on the pixels per image, for a processor that resizes by pixel count; it bounds "
+            "the tokens each image costs. Exported with the processor."
+        },
+    )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        require_int(type(self).__name__, ge=1, **present(min_pixels=self.min_pixels, max_pixels=self.max_pixels))
+        if self.min_pixels is not None and self.max_pixels is not None and self.min_pixels > self.max_pixels:
+            raise ValueError(f"min_pixels={self.min_pixels} is over max_pixels={self.max_pixels}.")
+
+
+@dataclass
 class CrossDocumentLinearAttentionArguments:
     """The opt-in of configs whose multi-document rows (``packing``, ``padding_free``) are refused on sequence mixers
     no document boundary reaches."""

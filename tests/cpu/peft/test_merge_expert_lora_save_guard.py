@@ -156,6 +156,8 @@ class _SaveRoutingTrainer(_StubTrainer):
     _write_model_payload = DistributedTrainerMixin._write_model_payload
     _mark_model_save_collectives_done = DistributedTrainerMixin._mark_model_save_collectives_done
     _checkpoint_context = DistributedTrainerMixin._checkpoint_context
+    _exported_processing_class = DistributedTrainerMixin._exported_processing_class
+    export_processing_class = None
     _find_cp_wrapper = DistributedTrainerMixin._find_cp_wrapper
     _get_tp_rank = DistributedTrainerMixin._get_tp_rank
 

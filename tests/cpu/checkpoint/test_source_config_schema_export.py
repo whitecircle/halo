@@ -14,11 +14,17 @@ from transformers.models.step3p7.configuration_step3p7 import Step3p7Config
 from transformers.models.step3p7.modeling_step3p7 import Step3p7ForConditionalGeneration
 
 from halo.checkpoint import config_export
-from halo.checkpoint.config_export import save_model_config
+from halo.checkpoint.config_export import export_source_config_schema, save_model_config
 from halo.checkpoint.tools.offline_export import save_full_checkpoint
 from halo.checkpoint.weights_source import LOADED_WEIGHTS_FROM_ATTR
 from halo.distributed.expert_parallel.families.step3p7 import EPStep3p7MoELayer
-from tests.common.models import TINY_STEP3P7_CONFIG, TINY_STEP3P7_VISION_CONFIG
+from halo.models.moe.family_specs import MoEFamilySpec
+from tests.common.models import (
+    TINY_NEMOTRON_H_CONFIG,
+    TINY_RADIO_VISION_CONFIG,
+    TINY_STEP3P7_CONFIG,
+    TINY_STEP3P7_VISION_CONFIG,
+)
 from tests.common.rosters import ep_layer_class_by_model_type
 
 # The release's key spellings at the roster's geometry; ``test_the_source_config_parses_to_the_roster_geometry`` pins
@@ -68,6 +74,29 @@ TINY_STEP3P7_SOURCE_CONFIG = {
         "tie_word_embeddings": TINY_STEP3P7_CONFIG["tie_word_embeddings"],
     },
 }
+
+# A composite in the pinned transformers whose release spells its config in the legacy field names the class absorbs, and
+# an infinite ``time_step_limit`` through JSON's float tag.
+TINY_NEMOTRON_SOURCE_CONFIG = {
+    "architectures": ["NemotronH_Omni_Reasoning_V3"],
+    "auto_map": {
+        "AutoConfig": "configuration_nemotron_h_omni.NemotronH_Omni_Reasoning_V3_Config",
+        "AutoModelForCausalLM": "modeling_nemotron_h_omni.NemotronH_Omni_Reasoning_V3",
+    },
+    "model_type": "nemotron_h_omni",
+    "img_context_token_id": 18,
+    "vit_hidden_size": TINY_RADIO_VISION_CONFIG["hidden_size"],
+    "projector_hidden_size": TINY_NEMOTRON_H_CONFIG["hidden_size"],
+    "video_pruning_rate": 0.7,
+    "tie_word_embeddings": False,
+    "llm_config": {**TINY_NEMOTRON_H_CONFIG, "time_step_limit": [0.0, {"__float__": "Infinity"}]},
+    "vision_config": dict(TINY_RADIO_VISION_CONFIG),
+}
+_NEMOTRON_MODULES = {
+    "configuration_nemotron_h_omni.py": "class NemotronH_Omni_Reasoning_V3_Config: pass\n",
+    "modeling_nemotron_h_omni.py": "class NemotronH_Omni_Reasoning_V3: pass\n",
+}
+_NEMOTRON_SPEC = MoEFamilySpec(model_types=("nemotron_h", "nemotron_h_omni"), exports_source_config_schema=True)
 
 # The source's, which the pinned engines read, against the native-only ones they have no class for.
 _SOURCE_SPELLINGS = ("moe_num_experts", "moe_top_k", "moe_layers_enum", "attention_other_setting")
@@ -248,6 +277,56 @@ def test_only_an_unreadable_source_degrades_to_the_native_schema(cls, tmp_path, 
     monkeypatch.setattr(config_export, "cached_file", _bug)
     with pytest.raises(RuntimeError, match="not a read failure"):
         save_model_config(model, export)
+
+
+@pytest.fixture
+def nemotron_source(tmp_path, monkeypatch) -> str:
+    """The family's source on disk, its spec claimed for this test alone."""
+    monkeypatch.setattr(
+        config_export,
+        "find_moe_family_spec",
+        lambda model_type: _NEMOTRON_SPEC if model_type in _NEMOTRON_SPEC.model_types else None,
+    )
+    return _write_source(tmp_path / "source", TINY_NEMOTRON_SOURCE_CONFIG, _NEMOTRON_MODULES)
+
+
+def _carried(tmp_path, config, source: str) -> tuple[dict, str]:
+    export = str(tmp_path / "export")
+    config.save_pretrained(export)
+    export_source_config_schema(config, export, source=source)
+    with open(os.path.join(export, "config.json")) as handle:
+        return json.load(handle), export
+
+
+def test_an_unchanged_export_is_the_source_config(tmp_path, nemotron_source):
+    """Through the float tag ``from_dict`` needs decoded and the ``llm_config`` section ``text_config`` is spelled as."""
+    config = AutoConfig.from_pretrained(nemotron_source)
+    payload, export = _carried(tmp_path, config, nemotron_source)
+    assert payload == TINY_NEMOTRON_SOURCE_CONFIG
+    assert all(os.path.isfile(os.path.join(export, name)) for name in _NEMOTRON_MODULES)
+
+
+def test_a_run_change_lands_under_the_legacy_spelling(tmp_path, nemotron_source):
+    config = AutoConfig.from_pretrained(nemotron_source)
+    config.text_config.use_cache = False
+    config.video_pruning_rate = 0.0
+    config.vision_hidden_size = TINY_RADIO_VISION_CONFIG["hidden_size"] * 2
+    payload, export = _carried(tmp_path, config, nemotron_source)
+    assert "text_config" not in payload and payload["llm_config"]["use_cache"] is False
+    assert payload["video_pruning_rate"] == 0.0
+    assert "vision_hidden_size" not in payload and payload["vit_hidden_size"] == config.vision_hidden_size
+    assert payload["llm_config"]["time_step_limit"] == [0.0, {"__float__": "Infinity"}], "the tag must stay on disk"
+    assert AutoConfig.from_pretrained(export).to_diff_dict() == config.to_diff_dict()
+
+
+def test_a_text_only_export_of_a_composite_keeps_its_own_schema(tmp_path, nemotron_source):
+    """Carried, it would come out spelling the composite's ``model_type`` over the text tower's weights."""
+    config = AutoConfig.from_pretrained(nemotron_source).text_config
+    payload, export = _carried(tmp_path, config, nemotron_source)
+    assert payload["model_type"] == "nemotron_h" and "auto_map" not in payload
+    assert "llm_config" not in payload and "vision_config" not in payload
+    assert not [name for name in _NEMOTRON_MODULES if os.path.isfile(os.path.join(export, name))]
+    assert AutoConfig.from_pretrained(export).to_diff_dict() == config.to_diff_dict()
 
 
 if __name__ == "__main__":

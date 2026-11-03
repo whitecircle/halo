@@ -753,6 +753,104 @@ TINY_INKLING_VISION_CONFIG = {
     "text_hidden_size": TINY_INKLING_CONFIG["hidden_size"],
 }
 
+# Composites in the pinned transformers that no family spec claims. The heads stay at flash-kernel widths, Nemotron's
+# 2:1 and MiniMax's 16:1 GQA keep their release ratios, and MiniMax's T = index_block_size * index_topk_blocks stays
+# under a row's length so selection runs (a document within T attends densely).
+TINY_NEMOTRON_H_CONFIG = {
+    "model_type": "nemotron_h",
+    "vocab_size": 128,
+    "hidden_size": 64,
+    "intermediate_size": 32,
+    "max_position_embeddings": 1024,
+    "layers_block_type": ["mamba", "moe", "attention", "moe", "mamba", "moe"],
+    "mamba_num_heads": 8,
+    "mamba_head_dim": 8,
+    "ssm_state_size": 8,
+    "n_groups": 2,
+    "conv_kernel": 4,
+    "chunk_size": 8,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 64,
+    "n_routed_experts": 8,
+    "num_experts_per_tok": 3,
+    "moe_latent_size": 16,
+    "moe_intermediate_size": 32,
+    "moe_shared_expert_intermediate_size": 48,
+    "routed_scaling_factor": 5.0,
+    "norm_topk_prob": True,
+    "mlp_hidden_act": "relu2",
+    "num_nextn_predict_layers": 1,
+    "tie_word_embeddings": False,
+}
+TINY_RADIO_VISION_CONFIG = {
+    "model_type": "radio",
+    "hidden_size": 32,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 2,
+    "max_img_size": 64,
+    "video_temporal_patch_size": 2,
+    "summary_idxs": [0, 1],
+}
+TINY_MINIMAX_M3_CONFIG = {
+    "vocab_size": 128,
+    "hidden_size": 64,
+    "intermediate_size": 16,
+    "shared_intermediate_size": 16,
+    "dense_intermediate_size": 64,
+    "max_position_embeddings": 1024,
+    "num_hidden_layers": 5,
+    "num_attention_heads": 64,
+    "num_key_value_heads": 4,
+    "head_dim": 128,
+    "rotary_dim": 64,
+    "rope_parameters": {"rope_type": "default", "rope_theta": 1e7, "partial_rotary_factor": 0.5},
+    "layer_types": ["minimax_m3_sparse"] * 5,
+    "mlp_layer_types": ["dense"] + ["sparse"] * 4,
+    "num_local_experts": 8,
+    "num_experts_per_tok": 2,
+    "index_n_heads": 4,
+    "index_head_dim": 16,
+    "index_block_size": 8,
+    "index_topk_blocks": 3,
+    "index_local_blocks": 1,
+    "swiglu_alpha": 1.702,
+    "swiglu_limit": 0.5,
+}
+TINY_MINIMAX_M3_VISION_CONFIG = {
+    "hidden_size": 64,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "patch_size": 14,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2,
+}
+
+TINY_LLAMA4_TEXT_CONFIG = {
+    "vocab_size": 128,
+    "hidden_size": 64,
+    "intermediate_size": 128,
+    "intermediate_size_mlp": 128,
+    "num_hidden_layers": 2,
+    "num_attention_heads": 4,
+    "num_key_value_heads": 2,
+    "head_dim": 16,
+    "max_position_embeddings": 128,
+    "moe_layers": [],
+    "no_rope_layers": [1, 1],
+}
+TINY_LLAMA4_VISION_CONFIG = {
+    "hidden_size": 32,
+    "num_hidden_layers": 1,
+    "num_attention_heads": 2,
+    "intermediate_size": 64,
+    "vision_output_dim": 32,
+    "image_size": 28,
+    "patch_size": 14,
+    "projector_input_dim": 64,
+    "projector_output_dim": 64,
+}
+
 QWEN3_5_VLM_4B = "Qwen/Qwen3.5-4B"  # Natively multimodal
 PARAPHRASE_MINILM = "sentence-transformers/paraphrase-MiniLM-L3-v2"
 

@@ -6,12 +6,15 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+import torch.nn as nn
 
 from halo.callbacks import efficiency, factory
 from halo.callbacks.efficiency import EfficiencyCallback, MFUMetrics, StepTimeMetrics, ThroughputMetrics
 from halo.callbacks.model_flops import RankFlopsModel, _is_expert_param, estimate_rank_flops
+from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.distributed.parallelism_rules import SUPPORTED_AXIS_SETS
-from halo.hardware import GPU_PEAK_FLOPS, _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
+from halo.hardware import _classify_gpu_name, get_gpu_peak_flops, peak_precision_key
+from halo.kernels.lowp import deepgemm
 from halo.kernels.lowp.spec import LowpSpec
 from halo.models.moe.config_fields import resolve_expert_count, resolve_router_topk
 from tests.common.parallelism import make_parallelism_config
@@ -191,31 +194,73 @@ def test_the_fp32_peak_key_is_tf32_aware():
         torch.set_float32_matmul_precision(prev)
 
 
-@pytest.mark.parametrize(
-    ("lowp_precision", "expected"),
-    [("fp8", "fp8"), ("fp4", "fp4"), ("mxfp4", "fp4"), ("bf16", "bf16")],
-)
-def test_low_precision_compute_scores_against_its_own_peak(monkeypatch, lowp_precision, expected):
-    """A key from the parameter dtype charges an fp8 run against the bf16 peak, so utilization reads ~2x high (4x for
-    fp4). nvfp4 and mxfp4 share the 4-bit MMA, hence one peak."""
+def _lowp_ep_layer(quant_format: str | None, *, grouped: bool = True) -> EPQwen3MoELayer:
+    layer = EPQwen3MoELayer.__new__(EPQwen3MoELayer)
+    nn.Module.__init__(layer)
+    layer._lowp_quant_format, layer._use_grouped_mm = quant_format, grouped
+    return layer
+
+
+@pytest.fixture
+def native_opt_in(monkeypatch):
+    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", "1")
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: (object(), object()))
+
+
+@pytest.mark.parametrize("lowp_precision", ["fp8", "fp4", "mxfp4", "bf16"])
+def test_simulated_compute_scores_against_the_run_dtype(monkeypatch, lowp_precision):
+    """Its matmuls run in bf16 over fake-quantized operands, so a recipe peak would read MFU 2-4x low."""
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "B300")
     callback = efficiency.EfficiencyCallback(
         make_parallelism_config(world_size=1, gpus_per_node=1, lowp=LowpSpec(precision=lowp_precision))
     )
     callback.on_init_end(MockTrainingArgs(bf16=True), MockTrainerState(), None)
 
-    assert callback.precision == expected
-    assert callback.gpu_peak_flops == GPU_PEAK_FLOPS["B300"].flops[expected]
+    assert callback.precision == "bf16"
+    assert callback.gpu_peak_flops == 2250.0e12
 
 
-def test_a_detected_gpu_without_a_peak_for_the_precision_warns(monkeypatch, caplog):
+@pytest.mark.parametrize(
+    ("lowp_precision", "quant_format", "expected"), [("fp8", "mxfp8", "fp8"), ("mxfp4", "mxfp4", "fp4")]
+)
+def test_native_expert_gemms_score_against_the_recipe_peak(native_opt_in, lowp_precision, quant_format, expected):
+    """A bf16 peak would charge a kernel issuing at 2-4x that rate, reading MFU 2-4x high."""
+    model = nn.ModuleList([_lowp_ep_layer(quant_format)])
+    assert efficiency._detect_precision(model, MockTrainingArgs(bf16=True), lowp_precision) == expected
+
+
+@pytest.mark.parametrize(
+    ("lowp_precision", "model"),
+    [
+        ("fp4", nn.ModuleList([_lowp_ep_layer("nvfp4")])),
+        ("fp8", nn.ModuleList([nn.Linear(2, 2)])),
+        ("fp8", nn.ModuleList([_lowp_ep_layer("mxfp8", grouped=False)])),
+        ("fp8", nn.ModuleList([_lowp_ep_layer(None)])),
+        ("fp8", None),
+    ],
+    ids=["no-kernel-for-nvfp4", "dense-model", "per-expert-loop", "experts-opted-out", "model-not-yet-handed-over"],
+)
+def test_the_flag_alone_does_not_claim_the_native_peak(native_opt_in, lowp_precision, model):
+    assert efficiency._detect_precision(model, MockTrainingArgs(bf16=True), lowp_precision) == "bf16"
+
+
+def test_the_flag_without_the_package_does_not_claim_the_native_peak(monkeypatch):
+    monkeypatch.setenv("HALO_DEEPGEMM_NATIVE", "1")
+    monkeypatch.setattr(deepgemm, "_deep_gemm", lambda: None)
+    model = nn.ModuleList([_lowp_ep_layer("mxfp8")])
+    assert efficiency._detect_precision(model, MockTrainingArgs(bf16=True), "fp8") == "bf16"
+
+
+def test_a_detected_gpu_without_a_peak_for_the_precision_warns(native_opt_in, monkeypatch, caplog):
     """A missing table entry zeroes MFU, S-MFU and TFLOP/s for the whole run, so INFO can't be the only trace."""
     monkeypatch.setattr(efficiency, "detect_gpu_model", lambda: "A100")
     callback = efficiency.EfficiencyCallback(
         make_parallelism_config(world_size=1, gpus_per_node=1, lowp=LowpSpec(precision="fp8"))
     )
     with caplog.at_level(logging.WARNING, logger=efficiency.__name__):
-        callback.on_init_end(MockTrainingArgs(bf16=True), MockTrainerState(), None)
+        callback.on_init_end(
+            MockTrainingArgs(bf16=True), MockTrainerState(), None, model=nn.ModuleList([_lowp_ep_layer("mxfp8")])
+        )
 
     assert callback.gpu_peak_flops is None, "test premise: A100 has no fp8 peak"
     assert [r for r in caplog.records if "has no fp8 peak for A100" in r.getMessage()]

@@ -66,7 +66,7 @@ def _image_dataset(column: str = "images") -> DatasetDict:
     return DatasetDict({"train": split, "test": split})
 
 
-def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=None):
+def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=None, model_type: str = "gemma3"):
     """Run ``rewards.py:main()`` to trainer construction.
     The processor loader is a mock, so a test can assert the text branch never builds a processor."""
     module = load_script_module("scripts/training/reward/reward_model.py", "halo_test_rewards_dispatch")
@@ -81,7 +81,7 @@ def _run_rewards(tmp_path, dataset: DatasetDict, yaml_body: str = "", processor=
 
     tokenizer = StubTextTokenizer()
     processor = processor if processor is not None else StubProcessor(StubTokenizer())
-    model = SimpleNamespace(config=CONFIG_MAPPING["gemma3"]())
+    model = SimpleNamespace(config=CONFIG_MAPPING[model_type]())
     runtime = SimpleNamespace(
         parallelism_config=SimpleNamespace(
             cp_size=1,
@@ -155,6 +155,22 @@ def test_images_field_declares_the_run_and_aliases_the_column(tmp_path):
 
     assert captured["processing_class"] is processor
     assert "images" in captured["train_dataset"].column_names
+
+
+@pytest.mark.parametrize(
+    ("dataset", "yaml_body"),
+    [(_image_dataset(), ""), (_image_dataset("pictures"), "images_field: pictures\n")],
+    ids=["image_column", "images_field"],
+)
+def test_a_text_checkpoint_refuses_image_data_it_would_drop(tmp_path, dataset, yaml_body):
+    with pytest.raises(ValueError, match="is a text checkpoint, but this run declares image data"):
+        _run_rewards(tmp_path, dataset, yaml_body=yaml_body, model_type="qwen3")
+
+
+def test_a_text_checkpoint_on_text_pairs_stays_a_text_run(tmp_path):
+    captured, tokenizer, _processor, processor_loader = _run_rewards(tmp_path, _dataset(), model_type="qwen3")
+    assert captured["processing_class"] is tokenizer
+    processor_loader.assert_not_called()
 
 
 def test_mistyped_images_field_raises_before_training(tmp_path):

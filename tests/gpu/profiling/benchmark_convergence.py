@@ -16,11 +16,12 @@ from trl import SFTConfig, SFTTrainer
 
 from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.lowp.spec import LowpSpec
 from halo.log import configure_training_logging
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime.collectives import barrier
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.benchmark_args import create_benchmark_parser, resolve_benchmark_attn
+from tests.common.benchmark_args import add_lowp_precision_argument, create_benchmark_parser, resolve_benchmark_attn
 from tests.common.datasets import create_benchmark_dataset
 from tests.common.distributed import (
     cleanup_dirs,
@@ -44,7 +45,11 @@ def main() -> int:
     parser.add_argument("--ep", type=int, default=0, help="0=stock TRL, 1=Halo dense, N>1=Halo EP size N")
     parser.add_argument("--lr", type=float, default=2e-5)
     parser.add_argument("--seed", type=int, default=42)
+    add_lowp_precision_argument(parser)
     args = parser.parse_args()
+    lowp = LowpSpec(precision=args.lowp_precision)
+    if lowp.enabled and args.ep < 1:
+        parser.error("--lowp_precision needs a Halo arm (--ep >= 1); stock TRL has no low-precision path")
 
     rank, world_size, local_rank = init_distributed()
     PartialState()
@@ -54,6 +59,8 @@ def main() -> int:
     use_liger = not args.no_liger
     is_halo = args.ep >= 1
     tag = "TRL-stock" if not is_halo else (f"Halo-EP{args.ep}" if args.ep > 1 else "Halo-dense")
+    if lowp.enabled:
+        tag = f"{tag}-{lowp.precision}"
 
     log(f"\n{'=' * 70}\n  CONVERGENCE: {tag}  ({model_name})")
     log(f"  seq={args.seq} bs={args.batch_size} steps={args.steps} lr={args.lr} seed={args.seed} liger={use_liger}")
@@ -90,7 +97,7 @@ def main() -> int:
             "include_num_input_tokens_seen": True,
         }
         # The callback needs a config in both arms; the stock-TRL arm distributes nothing (args.ep == 0 => ep_size 1).
-        parallelism_config = ParallelismConfig(ep_size=max(args.ep, 1), use_grouped_gemm=True)
+        parallelism_config = ParallelismConfig(ep_size=max(args.ep, 1), use_grouped_gemm=True, lowp=lowp)
         efficiency_cb = EfficiencyCallback(
             parallelism_config,
             n_warmup_steps=args.warmup,

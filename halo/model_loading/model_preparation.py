@@ -35,8 +35,9 @@ from halo.models.attention.selection import (
     is_flash_attn_implementation,
     verify_live_sinks_carried,
 )
-from halo.models.config_access import drop_toolkit_stamps, model_type_matches
+from halo.models.config_access import drop_toolkit_stamps, model_type_matches, text_config
 from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
+from halo.models.moe.family_specs import find_moe_family_spec
 from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
 from halo.models.zaya import apply_zaya_patches
 from halo.runtime.ranks import is_global_main_process
@@ -54,11 +55,19 @@ def _auto_map_class_name(auto_map: dict, key: str) -> str | None:
     return str(target).rsplit(".", 1)[-1]
 
 
+def resolve_text_only_config(model_config):
+    """The config a ``text_only`` build takes: a family declaring ``text_only_layout`` reaches its CausalLM only through
+    its text sub-config's ``model_type``; any other stays composite, which the Auto factory narrows itself."""
+    spec = find_moe_family_spec(getattr(model_config, "model_type", None))
+    return text_config(model_config) if spec is not None and spec.text_only_layout is not None else model_config
+
+
 def resolve_auto_model_class(model_config, *, text_only: bool = False):
     """The widest Auto* class: ``AutoModelForImageTextToText`` for multimodal (else the vision tower drops), else
     ``AutoModelForCausalLM``. ``text_only=True`` forces CausalLM, raising for a family with no text-only sibling
     (glm5_next, gemma4, step3p7), which would load the VLM as the text-only model."""
     if text_only:
+        model_config = resolve_text_only_config(model_config)
         model_type = getattr(model_config, "model_type", None)
         auto_map = getattr(model_config, "auto_map", None) or {}
         remote_vision = {
@@ -130,7 +139,10 @@ def auto_load_model(
             config = AutoConfig.from_pretrained(
                 model_name_or_path, trust_remote_code=trust_remote_code, revision=kwargs.get("revision")
             )
+            drop_toolkit_stamps(config)
         model_class = resolve_auto_model_class(config, text_only=text_only)
+        if text_only and (sibling := resolve_text_only_config(config)) is not config:
+            kwargs["config"] = sibling
     return from_pretrained_verified(model_class, model_name_or_path, trust_remote_code=trust_remote_code, **kwargs)
 
 

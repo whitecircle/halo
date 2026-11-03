@@ -11,27 +11,10 @@ from torch import nn
 from torch.autograd.function import once_differentiable
 
 from halo.models.gradient_checkpointing import active_recompute_scope
-from halo.models.segment_markers import document_boundaries
+from halo.models.row_documents import RowDocument, row_documents
 
 QUERY_TILE = 128
 _SELECTION_SLOT = "qsa_selection"
-
-
-@dataclass(frozen=True)
-class QSADocument:
-    row: int
-    start: int
-    stop: int
-    key_start: int
-    key_stop: int
-
-    def visible_keys(self, lo: int, hi: int, device: torch.device) -> torch.Tensor:
-        """Per query of ``[lo, hi)``, how many of the document's keys it sees, those up to itself."""
-        return (torch.arange(lo, hi, device=device) - self.key_start + 1).clamp(0, self.key_stop - self.key_start)
-
-    def tile_keys(self, hi: int) -> int:
-        """The span every tile's K/V slice covers."""
-        return min(max(hi - self.key_start, 0), self.key_stop - self.key_start)
 
 
 @dataclass(frozen=True)
@@ -39,42 +22,9 @@ class QSASelection:
     """``blocks[row, query]`` holds block indices counted from the document's first key, ``-1`` in unused slots; the
     keys after the last complete block are always attended."""
 
-    documents: tuple[QSADocument, ...]
+    documents: tuple[RowDocument, ...]
     blocks: torch.Tensor
     compress_ratio: int
-
-
-def qsa_documents(
-    seq_idx: torch.Tensor | None, attention_mask: torch.Tensor | None, batch: int, length: int, device: torch.device
-) -> tuple[QSADocument, ...]:
-    """In row-major order. A document's unpadded tokens must be contiguous, as left or right padding leaves them."""
-    if attention_mask is not None and attention_mask.shape != (batch, length):
-        raise ValueError(
-            f"Tiled QSA takes a 2-D [batch, sequence] = {(batch, length)} padding mask, got "
-            f"{tuple(attention_mask.shape)}"
-        )
-    boundaries = document_boundaries(seq_idx, batch, length, device)
-    rows, starts = boundaries.nonzero(as_tuple=True)
-    document = boundaries.flatten().cumsum(0) - 1
-    last_of_row = torch.ones_like(rows, dtype=torch.bool)
-    last_of_row[:-1] = rows[1:] != rows[:-1]
-    stops = torch.where(last_of_row, length, starts.roll(-1))
-    valid = (
-        torch.ones(batch * length, dtype=torch.bool, device=device)
-        if attention_mask is None
-        else attention_mask.to(device=device, dtype=torch.bool).flatten()
-    )
-    positions = torch.arange(length, device=device).repeat(batch)
-    count = torch.zeros_like(starts).scatter_add_(0, document, valid.long())
-    first = starts.clone().scatter_reduce_(0, document[valid], positions[valid], "amin", include_self=False)
-    last = (starts - 1).scatter_reduce_(0, document[valid], positions[valid], "amax", include_self=False)
-    if bool(((last - first + 1) != count).any()):
-        raise ValueError(
-            "Tiled QSA needs each document's unpadded tokens to be contiguous (left or right padding); the padding "
-            "mask interleaves padding inside a document."
-        )
-    spans = torch.stack([rows, starts, stops, first, first + count]).T.tolist()
-    return tuple(QSADocument(*span) for span in spans)
 
 
 def _block_scores(queries: torch.Tensor, pooled: torch.Tensor) -> torch.Tensor:
@@ -125,7 +75,7 @@ def _compute_selection(
     queries = qwen4_exp_modeling.apply_rotary_pos_emb(queries, cos=cos, sin=sin, unsqueeze_dim=2)
     keys = keys.reshape(batch, length, -1, head_dim).squeeze(2)
 
-    documents = qsa_documents(seq_idx, attention_mask, batch, length, hidden_states.device)
+    documents = row_documents(seq_idx, attention_mask, batch, length, hidden_states.device)
     most_blocks = max((doc.key_stop - doc.key_start) // ratio for doc in documents)
     index_dtype = torch.int16 if most_blocks <= torch.iinfo(torch.int16).max else torch.int32
     blocks = torch.full((batch, length, block_topk), -1, dtype=index_dtype, device=hidden_states.device)

@@ -14,8 +14,9 @@ from halo.configs.preference import KTOScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.render_columns import alias_images_column, reject_missing_render_column
-from halo.data.vlm_detection import dataset_declares_images_across_ranks
+from halo.data.vlm_detection import dataset_declares_images_across_ranks, reject_unsupported_media_across_ranks
 from halo.entrypoints.data_setup import (
+    apply_vision_options,
     load_script_datasets,
     log_script_dataset_examples,
     resolve_preference_vlm_run,
@@ -104,8 +105,10 @@ def main():
         args, model_config, ds, text_only_model=args.text_only_model, method="KTO"
     )
     _reject_embedded_image_parts(ds, args.completion_field)
+    reject_unsupported_media_across_ranks(ds, ("prompt", args.completion_field), "KTO")
 
     models = load_preference_models(context, kto_config, model_config, args, vlm_run=is_vlm_data, method="KTO")
+    apply_vision_options(args, models.model, model_config, models.processing_class, is_vlm=is_vlm_data)
 
     train_dataset = _rename_kto_columns(ds["train"], args)
     eval_dataset = _rename_kto_columns(ds["test"], args) if "test" in ds else None

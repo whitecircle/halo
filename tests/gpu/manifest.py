@@ -305,6 +305,13 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_fa4_tree_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "gptoss", "qwen3"), timeout=900
     ),
+    # 900s: FA4 JIT-compiles forward and backward per form.
+    "kernels/test_fa4_gqa_ratio.py": TestSpec(
+        nproc=1,
+        markers=("gpu", "core", "1gpu"),
+        args_matrix=("--heads 32 --kv-heads 2", "--heads 64 --kv-heads 4", "--heads 16 --kv-heads 1"),
+        timeout=900,
+    ),
     "kernels/test_tree_sparse_attention.py": TestSpec(
         nproc=1, markers=("gpu", "core", "1gpu", "moe", "glm5"), timeout=900
     ),
@@ -348,7 +355,13 @@ MANIFEST: dict[str, TestSpec] = {
     "kernels/test_lowp_ep_trainer.py": TestSpec(
         nproc=2,
         markers=("gpu", "full", "2gpu", "ep", "moe", "qwen3"),
-        args_matrix=("--precision fp8", "--precision mxfp4"),
+        args_matrix=(
+            "--precision fp8",
+            "--precision fp4",
+            "--precision mxfp4",
+            "--precision fp8 --native",
+            "--precision mxfp4 --native",
+        ),
         timeout=900,
     ),
     "kernels/test_lowp_fsdp2_weight_cache.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu"), timeout=600),
@@ -1264,6 +1277,17 @@ MANIFEST: dict[str, TestSpec] = {
         ),
         timeout=1800,
     ),
+    "trainers/grpo/test_offline_grpo_row_positions.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "full", "2gpu", "ep", "moe"),
+        timeout=600,
+        args_matrix=(
+            "--family deepseek_v4 --gc off",
+            "--family deepseek_v4 --gc reentrant",
+            "--family mistral4 --gc off",
+            "--family mistral4 --gc reentrant",
+        ),
+    ),
     "trainers/grpo/test_offline_grpo_tp_resume.py": TestSpec(
         # 2400s: the FA4 backward JITs per shape on Blackwell, and this resume trains 6 steps across a reload.
         nproc=2,
@@ -2057,9 +2081,29 @@ MANIFEST: dict[str, TestSpec] = {
     "trainers/sft/test_sft_qwen3_modes.py": TestSpec(
         nproc=2, markers=("gpu", "core", "2gpu", "tp", "cp", "qwen3"), timeout=600
     ),
+    "trainers/sft/test_sft_vlm_images.py": TestSpec(
+        nproc=2,
+        markers=("gpu", "core", "2gpu", "vlm"),
+        timeout=900,
+        args_matrix=(
+            "--family qwen3_vl --data all",
+            "--family qwen3_5 --data all",
+            "--family qwen3_5_moe --data all",
+            "--family gemma4 --data all",
+            "--family qwen3_vl --data mixed --freeze-tower",
+            "--family qwen3_5 --data mixed --freeze-tower",
+            "--family qwen3_5_moe --data mixed --freeze-tower",
+            "--family gemma4 --data mixed --freeze-tower",
+            "--family qwen3_vl --data mixed",
+            "--family qwen3_5 --data mixed",
+            "--family qwen3_5_moe --data mixed",
+            "--family gemma4 --data mixed",
+            "--family qwen3_5 --data mixed --zero3",
+        ),
+    ),
     "trainers/sft/test_sft_vlm.py": TestSpec(nproc=2, markers=("gpu", "core", "2gpu", "vlm", "qwen3"), timeout=600),
-    "trainers/sft/test_sft_vlm_qwen3_5.py": TestSpec(
-        nproc=2, markers=("gpu", "full", "2gpu", "vlm", "qwen3"), timeout=1000
+    "trainers/sft/test_sft_composite_text_rows_qwen3_5.py": TestSpec(
+        nproc=2, markers=("gpu", "full", "2gpu", "qwen3"), timeout=1000
     ),
     "trainers/sft/test_zaya_fsdp.py": TestSpec(nproc=2, markers=("gpu", "full", "2gpu", "zaya"), timeout=1500),
     "trainers/sft/test_zaya_load_forward_backward.py": TestSpec(
@@ -2122,6 +2166,7 @@ _UNMANIFESTED_BENCHMARKS = {
     "profiling/benchmark_gemma4_attention.py",
     "profiling/benchmark_grouped_mm.py",
     "profiling/benchmark_head_logprobs.py",
+    "profiling/benchmark_lowp_kernels.py",
     "profiling/benchmark_moe_block.py",
     "profiling/benchmark_roofline.py",
     "profiling/benchmark_sft_dense.py",

@@ -112,14 +112,14 @@ The output holds two splits, `train` and `test`. A multi-split input must carry 
 `test`, an `unsupervised` split) is left out, with a warning that names it. To prepare one of those,
 point `--input` at it with an `@split` suffix.
 
-**VLM mode** (`--is_vlm`, e.g. Qwen2.5-VL / Qwen3-VL; packing not supported) stores `input_ids` with
+**VLM mode** (`--is_vlm`; packing not supported, and the Qwen and Gemma 4 processors take the runtime VLM path instead) stores `input_ids` with
 vision placeholders expanded, `attention_mask`, `labels` (image tokens masked to -100),
 `pixel_values` (float16 bytes), `pixel_values_shape`, and `image_grid_thw`.
 
 Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field` or
 `--interleaved_thinking` (the offline render would diverge from the runtime one), and a processor
 emitting a vision key outside this fixed schema on an image row (`mm_token_type_ids` and the like —
-the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5 and Gemma 4 processors all emit it, so
+the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5/3.6, Qwen3.8 and Gemma 4 processors all emit it, so
 their image rows train through the runtime VLM path and `--is_vlm` bakes only their text rows.
 
 VLM sequences are never truncated, since cutting expanded placeholders while `pixel_values` keeps
@@ -158,11 +158,12 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--model_supports_system_role` | `True` | `false` merges the system prompt into the first user message (models without a system role) |
 | `--train_on_completions_only` | `True` in `--mode chat`, `False` in `--mode text` | Mask user turns; train only on assistant responses. The chat default matches the training side and requires `--assistant_message_template`; asking for masking under `--mode text` is rejected (raw documents have no assistant turns) |
 | `--assistant_message_template` | `None` | Template marking start of assistant response |
-| `--pack_sequences` | `False` | Pack multiple sequences (text SFT only; refused for a model with compressed-KV layers, such as DeepSeek-V4) |
+| `--pack_sequences` | `False` | Pack multiple sequences (text SFT only). Refused where training would refuse the rows: compressed-KV layers (DeepSeek-V4), a family with no flash backend whose dense forward leaks (GLM-5 Next), and sequence mixers no boundary reaches (Ring, Ling 3.0, Inkling) unless `--allow_cross_document_linear_attention` |
+| `--allow_cross_document_linear_attention` | `False` | Needs `--pack_sequences`. Bakes rows for a model whose mixers receive no document boundary; training them takes the same opt-in |
 | `--packing_strategy` | `bfd` | Needs `--pack_sequences`. TRL strategy: `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk — emits no document boundaries, so a packed row attends across itself) |
 | `--is_vlm` | `False` | VLM mode (stores `pixel_values`, `image_grid_thw`; refuses an image row whose processor emits another vision key) |
 | `--images_field` | `None` | (`--is_vlm`) column holding the row's image(s) for datasets that keep them outside the conversation; merged into the messages like the runtime path. An image column named by nothing is refused |
-| `--min_pixels` / `--max_pixels` | `None` | VLM image pixel bounds; refused without `--is_vlm` |
+| `--min_pixels` / `--max_pixels` | `None` | VLM image pixel bounds; refused without `--is_vlm` and on a processor that does not resize by pixel count (Gemma 4) |
 | `--num_shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |
 | `--num_proc` | `HALO_DATASET_NUM_PROC` | Processes for dataset map. With neither set, every CPU the process may use but two, since the tool runs alone ([`HALO_DATASET_NUM_PROC`](../reference/configuration-reference.md#environment-variables)) |
 | `--tokenizer_backend` | `hf` | `hf` = the model's tokenizer; `gigatoken` = Rust bulk encoder (see above) |

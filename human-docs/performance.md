@@ -82,9 +82,9 @@ Step-3.7. Each lever's page carries its measurements:
 
 ## Levers that do not help here
 
-fp8 / fp4 compute (`lowp_precision`), native DeepGEMM and `torch.compile` on an
-EP MoE run were each measured and lose at these shapes, where fine-grained
-experts are bound by weight bandwidth, not FLOPs
+Halo's fp8/fp4 QAT path does extra quantization work, the opt-in DeepGEMM adapter
+measured slower in the forward GEMM on one B300, and `torch.compile` on an EP MoE
+run gained at most 1%
 ([Levers that do not help](../agent-docs/optimization/README.md#levers-that-do-not-help-at-these-shapes) ↗).
 
 ![Roofline for a B300 expert GEMM, showing small-M experts far below the compute ceiling](../agent-docs/assets/diagrams/roofline.png)

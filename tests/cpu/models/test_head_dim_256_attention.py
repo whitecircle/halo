@@ -91,8 +91,6 @@ _EXPECTED = {
     ("gemma", "hopper"): (FA3, SDPA),
     ("paligemma", "blackwell"): (SDPA, SDPA),
     ("paligemma", "hopper"): (SDPA, SDPA),
-    ("gptj", "blackwell"): (FA4, FA4),
-    ("gptj", "hopper"): (FA3, EAGER),
     ("qwen3", "blackwell"): (FA4, FA4),
     ("qwen3", "hopper"): (FA3, SDPA),
     ("llama", "blackwell"): (FA4, FA4),
@@ -117,6 +115,44 @@ _EXPECTED = {
 def test_the_resolved_backend_per_family_arch_and_collator(family, arch, collator):
     packed, padded = _EXPECTED[(family, arch)]
     assert _resolved(family, arch, collator) == (packed if collator == "packed" else padded)
+
+
+@pytest.mark.parametrize("family", ["gptj", "gpt_neo", "falcon"])
+@pytest.mark.parametrize(("arch", "request_label"), [("blackwell", None), ("blackwell", FA4), ("hopper", None)])
+def test_a_legacy_class_table_refuses_a_flash_label_it_does_not_list(family, arch, request_label):
+    """Without it the build fails on a bare ``KeyError``, once the checkpoint is fetched."""
+    with _on(arch), pytest.raises(ValueError, match="lists only .* Set attn_implementation: flash_attention_2"):
+        _resolve(_config(family), request_label)
+
+
+@pytest.mark.parametrize("family", ["gptj", "gpt_neo", "falcon"])
+def test_a_legacy_class_table_keeps_what_it_lists(family):
+    with _on("blackwell"):
+        assert _resolve(_config(family), FA2) == FA2
+        assert _resolve(_config(family), EAGER) == EAGER
+
+
+@pytest.mark.parametrize("label", [FA3, FA4])
+def test_a_config_attention_dropout_refuses_a_kernel_that_drops_it(label):
+    with _on("blackwell"), pytest.raises(ValueError, match="takes no attention dropout"):
+        _resolve(_config("llama", attention_dropout=0.1), label)
+
+
+def test_a_config_attention_dropout_refuses_an_unset_pick_of_such_a_kernel():
+    with _on("blackwell"), pytest.raises(ValueError, match="takes no attention dropout"):
+        _resolve(_config("llama", attention_dropout=0.1), None)
+
+
+@pytest.mark.parametrize("label", [FA2, SDPA, EAGER])
+def test_a_config_attention_dropout_stands_on_a_backend_applying_it(label):
+    with _on("blackwell"):
+        assert _resolve(_config("llama", attention_dropout=0.1), label) == label
+
+
+@pytest.mark.parametrize("label", [FA3, FA4])
+def test_a_zero_attention_dropout_is_no_refusal(label):
+    with _on("blackwell"):
+        assert _resolve(_config("llama", attention_dropout=0.0), label) == label
 
 
 _REQUESTS = [None, SDPA, FA2, FA3, FA4, "flex_attention", "eager"]

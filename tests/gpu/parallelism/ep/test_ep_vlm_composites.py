@@ -65,9 +65,11 @@ def _build(processor, image_token_id: int, device):
 
 
 def _vision_tower(model):
-    """``visual`` on the Qwen VL wrappers, ``vision_tower`` elsewhere."""
-    backbone = model.model
-    return backbone.visual if hasattr(backbone, "visual") else backbone.vision_tower
+    """Under ``.model`` where the wrapper keeps one, else on the wrapper itself, in the spelling it uses."""
+    backbone = getattr(model, "model", model)
+    return next(
+        getattr(backbone, attr) for attr in ("visual", "vision_tower", "vision_model") if hasattr(backbone, attr)
+    )
 
 
 def _vision_grads(model) -> dict[str, torch.Tensor]:

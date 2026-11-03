@@ -30,7 +30,7 @@ def test_the_kernel_tables_are_keyed_on_the_quant_formats():
 
 
 def test_every_peak_flops_key_is_a_peak_table_precision():
-    """A key no GPU entry spells leaves MFU unscored for every low-precision run."""
+    """A key no GPU entry spells leaves MFU unscored for every native run."""
     spelled = {precision for peak in GPU_PEAK_FLOPS.values() for precision in peak.flops}
     assert {recipe.peak_flops_key for recipe in LOWP_RECIPES.values()} <= spelled
 

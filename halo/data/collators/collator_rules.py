@@ -7,12 +7,14 @@ from halo.data.turn_markers import reject_unusable_response_marker
 from halo.models.attention.layout import has_mrope_rotary
 from halo.models.attention.selection import (
     VARLEN_ATTN_IMPLEMENTATIONS,
+    declares_flash_attention,
     effective_attn_implementation,
     fa4_varlen_refusal,
     is_flash_attn_implementation,
 )
 from halo.models.segment_markers import (
     has_dense_packing_leak,
+    packing_isolation_is_measured,
     reject_compressed_kv_rows,
     reject_pipeline_packed_rows,
     reject_unmarked_sequence_mixer_rows,
@@ -117,6 +119,20 @@ def _warn_dense_packed_rows(model_config, attn_impl: str | None, *, packing: boo
     )
 
 
+def _warn_unmeasured_multi_document_family(model_config, *, multi_document: bool) -> None:
+    """On every backend: a family outside the table can leak on flash too (GPT-Neo, Moshi), with nothing in the loss."""
+    if model_config is None or not multi_document or packing_isolation_is_measured(model_config):
+        return
+    if is_global_main_process():
+        logger.warning(
+            "Multi-document rows on model_type=%r: this family is outside the table in agent-docs/data/collators.md "
+            "(Document isolation under packing), so a document may reach the next one, and nothing in the loss shows "
+            "it. BERT- and BART-family decoders, OPT, BioGPT, GPT-Neo and Moshi do. Train without packing and "
+            "padding_free unless you have measured it.",
+            getattr(model_config, "model_type", None),
+        )
+
+
 def reject_mrope_padding_free(model_config, *, padding_free: bool) -> None:
     """On every backend: M-RoPE's flattened row faults the flash varlen kernels, and no dense kernel serves one."""
     if not padding_free or model_config is None or not has_mrope_rotary(model_config):
@@ -192,6 +208,17 @@ def reject_multi_document_rows(
         reject_pipeline_packed_rows(model_config)
 
 
+def reject_unpackable_family(model_config, *, allow_cross_document_linear_attention: bool, flag: str) -> None:
+    """The rules of :func:`reject_multi_document_rows` a bake can answer, for corpora training would then refuse. A bake
+    fixes no backend, so the family takes its best: flash where it has one. The kernel rule reads the training host."""
+    reject_compressed_kv_rows(model_config, flag)
+    attn_impl = "flash_attention_2" if declares_flash_attention(model_config) else "sdpa"
+    reject_dense_attention_rows(model_config, attn_impl, padding_free=False, packing=True)
+    reject_unmarked_sequence_mixer_rows(
+        model_config, flag, allow_cross_document_linear_attention=allow_cross_document_linear_attention
+    )
+
+
 def reject_unsupported_collator_options(
     tokenizer,
     *,
@@ -238,6 +265,7 @@ def reject_unsupported_collator_options(
         ),
     )
     _warn_dense_packed_rows(model_config, attn_impl, packing=packing)
+    _warn_unmeasured_multi_document_family(model_config, multi_document=packing or padding_free)
     reject_unusable_response_marker(
         tokenizer, assistant_message_template, train_on_completions_only, "select_data_collator"
     )

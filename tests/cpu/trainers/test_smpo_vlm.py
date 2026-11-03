@@ -81,17 +81,11 @@ class StubProcessor:
     def apply_chat_template(self, messages, tokenize=False, **kwargs):
         return self.tokenizer.apply_chat_template(messages, tokenize=tokenize, **kwargs)
 
-    def __call__(self, text, images=None, return_tensors="pt", add_special_tokens=True, **kwargs):
-        assert return_tensors == "pt"
-        assert add_special_tokens is False, "collator must disable special tokens (template carries them)"
-        ids = self.tokenizer(text)["input_ids"]
-        row_images = images or [[]]
-        assert len(row_images) == 1, "one image list for the one prompt text"
-        images = row_images[0]
+    def _expand(self, text, images):
         image_token_id = self.tokenizer.vocab[IMAGE_TOKEN]
         pad_id = self.tokenizer.vocab[IMAGE_PAD_TOKEN]
         expanded, placeholders = [], 0
-        for token_id in ids:
+        for token_id in self.tokenizer(text)["input_ids"]:
             if token_id == image_token_id:
                 expanded.extend([pad_id] * PATCHES_PER_IMAGE)
                 placeholders += 1
@@ -99,16 +93,35 @@ class StubProcessor:
                 expanded.append(token_id)
         if placeholders != len(images):
             raise ValueError(f"{placeholders} image placeholders but {len(images)} images")
-        out = {
-            "input_ids": torch.tensor([expanded], dtype=torch.long),
-            "attention_mask": torch.ones(1, len(expanded), dtype=torch.long),
-        }
-        if images:
-            # The fill value is the image width, so tests can check row-major patch order.
-            out["pixel_values"] = torch.cat(
+        return expanded
+
+    def _vision_features(self, images):
+        # The fill value is the image width, so tests can check row-major patch order.
+        return {
+            "pixel_values": torch.cat(
                 [torch.full((PATCHES_PER_IMAGE, PATCH_DIM), float(img.size[0])) for img in images], dim=0
-            )
-            out["image_grid_thw"] = torch.tensor([[1, 2, 2]] * len(images), dtype=torch.long)
+            ),
+            "image_grid_thw": torch.tensor([[1, 2, 2]] * len(images), dtype=torch.long),
+        }
+
+    def __call__(self, text, images=None, return_tensors="pt", add_special_tokens=True, padding=False, **kwargs):
+        assert return_tensors == "pt"
+        assert add_special_tokens is False, "collator must disable special tokens (template carries them)"
+        texts = [text] if isinstance(text, str) else text
+        row_images = images or [[] for _ in texts]
+        assert len(row_images) == len(texts), "one image list per text"
+        rows = [self._expand(row, row_image) for row, row_image in zip(texts, row_images, strict=True)]
+        width = max(len(row) for row in rows)
+        assert padding or len({len(row) for row in rows}) == 1, "rows of different lengths need padding"
+        out = {
+            "input_ids": torch.tensor([[0] * (width - len(row)) + row for row in rows], dtype=torch.long),
+            "attention_mask": torch.tensor(
+                [[0] * (width - len(row)) + [1] * len(row) for row in rows], dtype=torch.long
+            ),
+        }
+        flat_images = [image for row_image in row_images for image in row_image]
+        if flat_images:
+            out.update(self._vision_features(flat_images))
         return out
 
 
@@ -300,6 +313,41 @@ def test_collator_mixed_batch_with_textonly_row():
     assert batch["pixel_values"].shape == (PATCHES_PER_IMAGE, PATCH_DIM)
     assert batch["image_grid_thw"].shape == (1, 3)
     assert batch["prompt_input_ids"].shape[0] == 2
+
+
+class PaddedToBatchStubProcessor(StubProcessor):
+    """Pads every image to the call's largest (Pixtral), so per-row calls yield tensors that do not concatenate."""
+
+    def _vision_features(self, images):
+        height = max(image.size[1] for image in images)
+        width = max(image.size[0] for image in images)
+        return {"pixel_values": torch.zeros(len(images), 3, height, width)}
+
+
+def test_collator_takes_images_of_different_sizes_from_a_processor_padding_to_the_batch():
+    tokenizer = StubTokenizer()
+    processor = PaddedToBatchStubProcessor(tokenizer)
+    trainer = make_trainer()
+    small = make_features(width=7)
+    large = make_features(width=9)
+    large["images"] = [Image.new("RGB", (9, 11))]
+    batch = make_collator(processor)([prep_row(trainer, small, processor), prep_row(trainer, large, processor)])
+    assert batch["pixel_values"].shape == (2, 3, 11, 9)
+    assert (batch["prompt_input_ids"] == tokenizer.vocab[IMAGE_PAD_TOKEN]).sum() == 2 * PATCHES_PER_IMAGE
+
+
+def test_collator_keeps_each_row_to_its_own_tokens_when_the_processor_pads():
+    """A shorter row's pad columns are the processor's, and ``prompt_overlap`` counts real tokens only."""
+    tokenizer = StubTokenizer()
+    processor = TokenTypeStubProcessor(tokenizer)
+    trainer = make_trainer()
+    short = prep_row(trainer, make_features(prompt_text="Hi"), processor)
+    long = prep_row(trainer, make_features(prompt_text="A much longer prompt about the picture"), processor)
+    alone = make_collator(processor)([short])
+    together = make_collator(processor)([short, long])
+    real = together["prompt_attention_mask"][0].bool()
+    assert together["prompt_input_ids"][0][real].tolist() == alone["prompt_input_ids"][0].tolist()
+    assert together["mm_token_type_ids"][0][real].tolist() == alone["mm_token_type_ids"][0].tolist()
 
 
 def test_collator_overlength_prompt_raises():

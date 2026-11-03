@@ -64,6 +64,7 @@ from halo.trainers.grpo.objective.offline_loss import (
 from halo.trainers.grpo.offline.group_rows import tokenize_offline_splits
 from halo.trainers.grpo.offline.group_sampler import GroupedLoaderMixin
 from halo.trainers.grpo.offline.offline_rules import (
+    forwards_rows_alone,
     reject_encoder_decoder,
     reject_offline_cp_options,
     reject_offline_pp_options,
@@ -165,6 +166,9 @@ class OfflineGRPOTrainer(
         args.max_length = resolve_pp_max_length(args, parallelism_config)
         model = resolve_trainer_model(model, args, parallelism_config=parallelism_config)
         reject_encoder_decoder(model)
+        self._use_chunked_grpo_logprobs |= forwards_rows_alone(
+            args, parallelism_config, getattr(model, "config", None)
+        )
         model, self._peft_has_been_casted_to_bf16 = prepare_policy_model(
             model, peft_config, args, disable_dropout=args.disable_dropout
         )

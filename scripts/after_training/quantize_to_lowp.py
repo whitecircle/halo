@@ -1,8 +1,8 @@
 """Quantize a bf16/fp32 checkpoint to a block-scaled low-precision checkpoint (mxfp8 / mxfp4 / nvfp4).
 
 Pairs with QAT (``lowp_precision: fp8|fp4|mxfp4``): quantizing the master weights reproduces the training forward
-exactly (``relerr = 0``). Each quantized ``<name>.weight`` is stored in ``compressed-tensors``' block-scaled
-convention:
+exactly (``relerr = 0``). The manifest is Halo's own ``block_scaled``, which serving engines do not load as-is. Each
+quantized ``<name>.weight`` is stored as:
 
   - ``<name>.weight_packed``: ``float8_e4m3fn`` (mxfp8) or packed ``uint8`` with two ``e2m1`` nibbles per byte (nvfp4),
   - ``<name>.weight_scale``: one scale per block along the contraction axis: ``uint8`` e8m0 (mxfp8, block 32) or

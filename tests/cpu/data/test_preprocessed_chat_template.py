@@ -296,6 +296,13 @@ def test_a_vlm_run_is_held_to_the_template_its_processor_rendered_with(tmp_path)
     _verify(metadata, forced, _vlm_run(forced), QWEN3_5_9B)
 
 
+def test_a_vlm_bake_loads_its_processor_at_the_pixel_bounds_it_records():
+    load_cached_processor(QWEN3_5_9B)
+    config = PreprocessingConfig(model_name_or_path=QWEN3_5_9B, is_vlm=True, min_pixels=4096, max_pixels=8192)
+    size = load_vlm_processor(config).image_processor.size
+    assert (size.shortest_edge, size.longest_edge) == (4096, 8192)
+
+
 def test_a_vlm_stamp_predating_the_recorded_template_is_not_held_to_its_override(tmp_path):
     """Such a stamp's processor may have rendered with its own template despite the recorded override, so the
     override proves nothing about the rows and a run keeping the processor's template is not refused."""

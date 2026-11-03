@@ -62,14 +62,22 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
     def torch_call(self, examples: list[dict[str, Any]]) -> dict[str, Any]:
         tokenizer = self.processor.tokenizer
         enriched_examples = []
-        vision_features: dict[str, list[torch.Tensor]] = {}
         sequence_features: dict[str, list[torch.Tensor]] = {}
-        for example in examples:
-            encoded = run_vlm_processor(self.processor, example["prompt_text"], [example.get("images") or []])
-            prompt_length = encoded["input_ids"].size(1) - example[PROMPT_OVERLAP_COLUMN]
+        # One call for the batch: a processor padding images to the batch's largest (Pixtral) cannot be concatenated
+        # from per-row calls.
+        encoded = run_vlm_processor(
+            self.processor,
+            [example["prompt_text"] for example in examples],
+            [example.get("images") or [] for example in examples],
+            padding=True,
+        )
+        real_tokens = encoded["attention_mask"].bool()
+        for row, example in enumerate(examples):
+            row_ids = encoded["input_ids"][row][real_tokens[row]]
+            prompt_length = row_ids.size(0) - example[PROMPT_OVERLAP_COLUMN]
 
             # run_vlm_processor adds no specials, so the post-processor's BOS is restored here, as on the text path.
-            prompt_ids = encoded["input_ids"][0, :prompt_length].tolist()
+            prompt_ids = row_ids[:prompt_length].tolist()
             bos_prepended = lacks_emitted_bos(prompt_ids, tokenizer)
             if bos_prepended:
                 prompt_ids = [tokenizer.bos_token_id, *prompt_ids]
@@ -82,20 +90,17 @@ class DataCollatorForVLMSMPO(DataCollatorForSMPO):
                 )
             enriched_examples.append({**example, "prompt_input_ids": prompt_ids})
 
-            for key, value in encoded.items():
-                if key in ("input_ids", "attention_mask"):
-                    continue
+            for key in encoded:
                 if key in SEQUENCE_ALIGNED_VISION_KEYS:
-                    aligned = value[0, :prompt_length]
+                    aligned = encoded[key][row][real_tokens[row]][:prompt_length]
                     if bos_prepended:  # keep 1:1 with prompt_input_ids (BOS is a text position → 0)
                         aligned = torch.cat([aligned.new_zeros(1), aligned])
                     sequence_features.setdefault(key, []).append(aligned)
-                else:
-                    vision_features.setdefault(key, []).append(value)
 
         output = super().torch_call(enriched_examples)
-        for key, values in vision_features.items():
-            output[key] = torch.cat(values, dim=0)
+        for key, value in encoded.items():
+            if key not in ("input_ids", "attention_mask") and key not in SEQUENCE_ALIGNED_VISION_KEYS:
+                output[key] = value
         for key, values in sequence_features.items():
             output[key] = pad(values, padding_value=0, padding_side="left")
         return output

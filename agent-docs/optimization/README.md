@@ -17,7 +17,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 - **[PEFT (LoRA)](peft.md)** — Train a few percent of parameters at ~50% less memory, across EP and CP (attention-only under ETP; rejected under TP) — with merge-back to a standalone checkpoint.
 - **[BF16 optimizer](bf16-optimizer.md)** — AdamW with bf16 masters and stochastic rounding at 6 bytes/param. Auto-enabled with `bf16: true` on FSDP/EP/TP.
 - **[FlashAdamW](flash-adamw.md)** — Quantized 8-bit states + 24-bit masters (~5 bytes/param) with AdamW-matching convergence. Set `optim: flash_adamw`.
-- **[Low-precision compute (FP8/FP4)](low-precision-moe-kernels.md)** — FP8/FP4 matmul over bf16 masters and checkpoints — a QAT oracle plus inference-memory export (`scripts/after_training/quantize_to_lowp.py`).
+- **[Low-precision compute (FP8/FP4)](low-precision-moe-kernels.md)** — FP8/FP4 matmul over bf16 masters and checkpoints — a QAT oracle plus a block-scaled weight export (`scripts/after_training/quantize_to_lowp.py`).
 - **[Allocator](throughput-benchmarks.md#allocator-expandable-segments)** — `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` lowers peak reserved memory on dense runs at unchanged throughput; the dense SFT, DPO and SMPO examples launch with it, an EP run sets it only to fit.
 
 ---
@@ -38,11 +38,10 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 
 ## Levers that do not help at these shapes
 
-At fine-grained MoE shapes (EP8, a few hundred tokens per expert, expert width ≤ 4096) each of these was
-measured and loses; its page holds the result.
+Each of these ran on B300 and did not pay off; its page holds the shapes.
 
-- **Low-precision fp8/fp4 compute** — the per-expert GEMM sits at the bf16 roofline, and the simulated path runs several times a bf16 step: [Why bf16 wins](low-precision-moe-kernels.md#why-bf16-wins). The fp8/fp4 win is inference memory ([QAT → low-precision inference](low-precision-moe-kernels.md#qat--low-precision-inference)).
-- **Native DeepGEMM** — net-slower than bf16 at every training shape: [DeepGEMM](low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path).
+- **Halo's fp8/fp4 paths** — QAT, not a speedup: the simulated path adds quantization work and the DeepGEMM adapter measured slower: [Why bf16 is the default](low-precision-moe-kernels.md#why-bf16-is-the-default).
+- **DeepGEMM adapter** — forward slower than bf16 at every measured shape but one: [DeepGEMM](low-precision-moe-kernels.md#deepgemm-the-native-fp8fp4-path).
 - **torch.compile on EP MoE** — at most 1%, and `reduce-overhead` is slower: [Benchmark results](torch-compile.md#benchmark-results).
 - **Sub-bf16 master weights** — parameters, checkpoints and optimizer state never go below bf16; bf16 with stochastic rounding is the floor: [BF16 optimizer](bf16-optimizer.md).
 - **FA2 on Blackwell where FA4 runs the model** — the slow outlier against FA4 and SDPA at head_dim 128: [FA4 vs FA2 vs SDPA](flash-attention.md#fa4-vs-fa2-vs-sdpa-on-blackwell). The defaults land on FA2 on purpose for GLM-4.7-Flash, Gemma 2/3 at head_dim 256 and softcapped rows that reach FA4's varlen kernels; leave those on it. Packed head_dim-256 GatedDeltaNet rows (Qwen3.5/3.6, Qwen3-Next) default to FA2 as well, where FA4 gains under 5% ([Model-specific handling](flash-attention.md#model-specific-handling)).

@@ -103,8 +103,8 @@ class ParallelismArguments(ValidatedConfig):
         default=LowpSpec.precision,
         metadata={
             "help": "Low-precision GEMM operands for dense MLP and MoE expert matmuls over BF16/FP32 masters, "
-            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT only, "
-            "and every format runs slower than bf16. "
+            "parameters and checkpoints unchanged: 'bf16' (off), 'fp8' (mxfp8), 'fp4' (nvfp4) or 'mxfp4'. SFT only; "
+            "Halo's paths measured slower than bf16. "
             "See agent-docs/optimization/low-precision-moe-kernels.md#usage."
         },
     )
@@ -133,8 +133,8 @@ class ParallelismArguments(ValidatedConfig):
     lowp_keep_last_blocks: int = field(
         default=LowpSpec.keep_last_blocks,
         metadata={
-            "help": "Trailing transformer blocks kept in bf16 under lowp_precision (the NVFP4 recipe keeps the last "
-            "~8)."
+            "help": "Trailing transformer blocks kept in bf16 under lowp_precision (NVFP4 recipes keep about 15% of "
+            "the blocks, mostly the last ones)."
         },
     )
     max_concurrent_loading: int | None = field(

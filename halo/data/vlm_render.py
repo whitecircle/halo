@@ -2,14 +2,21 @@
 the placeholder token ids, shared by every VLM path so a runtime batch and an offline bake tokenize alike."""
 
 import base64
+import dataclasses
 import io
 import json
-from typing import Any
+from typing import Any, get_type_hints
 
 from datasets import Features, Sequence, Value
 from PIL import Image
 
-from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, fold_system_into_conversation
+from halo.data.conversation import (
+    IMAGE_PART_PAYLOAD_KEY,
+    IMAGE_PART_SOURCE_KEYS,
+    IMAGE_PART_TYPE,
+    fold_system_into_conversation,
+    reject_unsupported_media_parts,
+)
 
 # A preprocessed VLM dataset's schema, pinned on the bake (an all-None batch infers null columns).
 VLM_OUTPUT_FEATURES = Features(
@@ -37,6 +44,26 @@ def render_vlm_text(processor, history: list[dict[str, Any]], *, tools: list | N
     # ``is None``, not truthiness: a row declaring ``tools: []`` renders under ``tools is defined``.
     template_kwargs = {} if tools is None else {"tools": tools}
     return processor.apply_chat_template(history, tokenize=False, add_generation_prompt=False, **template_kwargs)
+
+
+def apply_image_pixel_bounds(processor, min_pixels: int | None, max_pixels: int | None) -> None:
+    """On the loaded processor, so every collator and the exported processor config read one geometry. A smart-resize
+    image processor keeps them as ``size``'s edges; anything else would ignore them in silence."""
+    if min_pixels is None and max_pixels is None:
+        return
+    image_processor = getattr(processor, "image_processor", None)
+    declared = get_type_hints(image_processor.valid_kwargs) if hasattr(image_processor, "valid_kwargs") else {}
+    size = getattr(image_processor, "size", None)
+    if not ({"min_pixels", "max_pixels"} <= declared.keys() and getattr(size, "longest_edge", None)):
+        raise ValueError(
+            f"min_pixels/max_pixels bound a smart-resize image processor's pixel count, and "
+            f"{type(image_processor).__name__} resizes no such way, so it would ignore them. Drop them for this model."
+        )
+    image_processor.size = dataclasses.replace(
+        size,
+        shortest_edge=size.shortest_edge if min_pixels is None else min_pixels,
+        longest_edge=size.longest_edge if max_pixels is None else max_pixels,
+    )
 
 
 def run_vlm_processor(processor, texts, row_images, **overrides):
@@ -89,6 +116,33 @@ def decode_image(image_data) -> Image.Image:
     return image
 
 
+def _decode_chat_format_source(key: str, source: str) -> Image.Image:
+    """The transformers chat format's ``path``, ``base64`` and ``url``. No fetch: a map worker downloading per row would
+    make a run depend on a remote host, and ranks on what each one got."""
+    if key == "base64":
+        return decode_image(source if source.startswith("data:image") else base64.b64decode(source))
+    if key == "url" and source.startswith(("http://", "https://")):
+        raise ValueError(
+            f"An image part points at the remote URL {source!r}, and training fetches nothing. Download the images "
+            f"and point 'path' at them, or embed them in '{IMAGE_PART_PAYLOAD_KEY}' or 'base64'."
+        )
+    return decode_image(source.removeprefix("file://"))
+
+
+def decode_image_part(part: dict[str, Any]) -> Image.Image:
+    """Presence, not truthiness, so an empty payload reaches the decoder and raises. By now the images column has filled
+    every placeholder, so a part with no source has no pixels anywhere."""
+    if part.get(IMAGE_PART_PAYLOAD_KEY) is not None:
+        return decode_image(part[IMAGE_PART_PAYLOAD_KEY])
+    for key in IMAGE_PART_SOURCE_KEYS:
+        if part.get(key) is not None:
+            return _decode_chat_format_source(key, part[key])
+    raise ValueError(
+        f"An image part carries no source ('{IMAGE_PART_PAYLOAD_KEY}' or one of {list(IMAGE_PART_SOURCE_KEYS)}) and no "
+        f"images column filled it, so its placeholder would train with no pixels. Name the column with images_field."
+    )
+
+
 def resolve_image_token_ids(tokenizer, processor=None) -> set:
     """Image/video placeholder token ids to mask out of labels, unioned over every source: a missed one
     raises nothing, its tokens just train as text."""
@@ -129,6 +183,7 @@ def extract_conversation_images(
     model_supports_system_role: bool = True,
 ) -> tuple[list[dict[str, Any]], list[Image.Image]]:
     """The conversation with each image replaced by a bare placeholder, and the decoded images."""
+    reject_unsupported_media_parts(conversation, "This row")
     # Without a system role the prompt is folded into the first turn, not emitted as one the template drops.
     conversation = fold_system_into_conversation(
         conversation, system_prompt, model_supports_system_role, demote_existing_system=False
@@ -149,11 +204,7 @@ def extract_conversation_images(
             new_content = []
             for item in content:
                 if item.get("type") == IMAGE_PART_TYPE:
-                    image_data = item.get(IMAGE_PART_PAYLOAD_KEY)
-                    # Presence, not truthiness: an empty payload must reach decode_image and raise.
-                    if image_data is not None:
-                        image = decode_image(image_data)
-                        images.append(image)
+                    images.append(decode_image_part(item))
                     new_content.append({"type": IMAGE_PART_TYPE})  # processor expects this placeholder
                 else:
                     # Arrow pads a text part with a null image key, which templates test for (Qwen-VL).

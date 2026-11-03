@@ -42,6 +42,19 @@ OFFLINE_QWEN3_MOE_CONFIG = TINY_QWEN3_MOE_CONFIG | {
     "pad_token_id": OFFLINE_VOCAB["<pad>"],
     "eos_token_id": OFFLINE_VOCAB["<eos>"],
 }
+# Mistral 4's query scale steps at this position; these rows cross it through their left pads alone.
+MISTRAL4_SCALE_STEP = 32
+MISTRAL4_STEPPED_ROPE = {
+    "rope_type": "yarn",
+    "rope_theta": 10000.0,
+    "factor": 128.0,
+    "original_max_position_embeddings": MISTRAL4_SCALE_STEP,
+    "beta_fast": 32.0,
+    "beta_slow": 1.0,
+    "mscale": 1.0,
+    "mscale_all_dim": 1.0,
+    "llama_4_scaling_beta": 0.1,
+}
 EP_LOADINGS = ("lazy", "eager")
 # An exported checkpoint must score this to finite logits after a stock reload.
 EXPORT_PROBE_WORDS = ("question", "alpha", "answer", "yes", "<eos>")

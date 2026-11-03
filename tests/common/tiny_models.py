@@ -48,14 +48,20 @@ from transformers import (
     Lfm2MoeForCausalLM,
     Lfm2VlConfig,
     Lfm2VlForConditionalGeneration,
+    Llama4Config,
+    Llama4ForConditionalGeneration,
     LlamaConfig,
     LlamaForCausalLM,
+    MiniMaxM3SparseForConditionalGeneration,
+    MiniMaxM3VLConfig,
     Mistral3Config,
     Mistral3ForConditionalGeneration,
     MistralConfig,
     MistralForCausalLM,
     MixtralConfig,
     MixtralForCausalLM,
+    NemotronH_Omni_Reasoning_V3,
+    NemotronH_Omni_Reasoning_V3_Config,
     Olmo3Config,
     Olmo3ForCausalLM,
     PretrainedConfig,
@@ -120,9 +126,14 @@ from tests.common.models import (
     TINY_LAGUNA_CONFIG,
     TINY_LAGUNA_PP_OVERRIDES,
     TINY_LFM2_MOE_CONFIG,
+    TINY_LLAMA4_TEXT_CONFIG,
+    TINY_LLAMA4_VISION_CONFIG,
+    TINY_MINIMAX_M3_CONFIG,
+    TINY_MINIMAX_M3_VISION_CONFIG,
     TINY_MISTRAL4_CONFIG,
     TINY_MISTRAL_SLIDING_CONFIG,
     TINY_MIXTRAL_CONFIG,
+    TINY_NEMOTRON_H_CONFIG,
     TINY_PIXTRAL_VISION_CONFIG,
     TINY_QWEN3_CONFIG,
     TINY_QWEN3_MOE_CONFIG,
@@ -134,6 +145,7 @@ from tests.common.models import (
     TINY_QWEN35_CONFIG,
     TINY_QWEN35_MOE_CONFIG,
     TINY_QWEN35_VISION_CONFIG,
+    TINY_RADIO_VISION_CONFIG,
     TINY_SIGLIP2_VISION_CONFIG,
     TINY_SIGLIP_VISION_CONFIG,
     TINY_STEP3P7_CONFIG,
@@ -149,6 +161,10 @@ TINY_SHARD_SIZE = "4MB"
 DSV4_TID2EID_SEED = 1234
 # Families whose transformers class pins parameters (not only buffers) in fp32 via ``_keep_in_fp32_modules_strict``.
 PINNED_FP32_FAMILIES = ("deepseek_v4", "glm5_next", "inkling_text")
+# A release's router bias: far from zero with a small spread, where bf16's spacing erases its differences. A bias near
+# zero survives the cast, so a lost fp32 pin would pass.
+RELEASE_BIAS_CENTER = 42.0
+RELEASE_BIAS_SPREAD = 0.1
 # Copied from a release so ``AutoTokenizer`` loads a synthetic checkpoint offline.
 TOKENIZER_FILE_PREFIXES = ("tokenizer", "special_tokens", "chat_template")
 CONTENT_ONLY_CHAT_TEMPLATE = "{% for message in messages %}{{ message['content'] }} {% endfor %}"
@@ -202,6 +218,33 @@ def randomize_tid2eid(model, seed: int = DSV4_TID2EID_SEED) -> None:
             table = layer.mlp.gate.tid2eid
             perm = torch.rand(table.shape[0], num_experts, generator=gen).argsort(dim=-1)
             table.copy_(perm[:, : table.shape[1]])
+
+
+def fill_release_scale_bias(model, slot: str = "e_score_correction_bias", seed: int = 0) -> dict[str, torch.Tensor]:
+    """Fill every ``slot`` tensor at a release's scale in fp32 and return the values by name. Raises where the model
+    holds none, or where the cast the fixture exists to catch would merge no two of them."""
+    gen = torch.Generator().manual_seed(seed)
+    filled: dict[str, torch.Tensor] = {}
+    for name, tensor in model.state_dict(keep_vars=True).items():
+        if not name.endswith(slot):
+            continue
+        values = RELEASE_BIAS_CENTER + RELEASE_BIAS_SPREAD * torch.rand(
+            tensor.shape, generator=gen, dtype=torch.float32
+        )
+        if values.to(torch.bfloat16).unique().numel() == values.unique().numel():
+            raise ValueError(
+                f"{name} keeps its values apart through a bf16 cast at this scale: it would test nothing."
+            )
+        owner, _, attr = name.rpartition(".")
+        module = model.get_submodule(owner)
+        if isinstance(tensor, torch.nn.Parameter):
+            tensor.data = values.clone()
+        else:
+            module.register_buffer(attr, values.clone(), persistent=attr not in module._non_persistent_buffers_set)
+        filled[name] = values
+    if not filled:
+        raise ValueError(f"{type(model).__name__} holds no {slot}.")
+    return filled
 
 
 def copy_release_tokenizer(repo_id: str, out_dir: Path) -> None:
@@ -518,6 +561,36 @@ TINY_BAILING_LING3_MLA_FAMILY = TinyFamily(
     _tiny_bailing(BAILING_LING_3_TINY, TINY_BAILING_LING3_MLA_CONFIG), trust_remote_code=True, ulysses_cp=False
 )
 TINY_UNWRAPPED_MOE_FAMILY = TinyFamily(_causal(MixtralConfig, MixtralForCausalLM, TINY_MIXTRAL_CONFIG))
+# Composites no family spec claims, so no EP layer wraps them, built on the classes the pinned transformers ships.
+TINY_UNWRAPPED_COMPOSITE_FAMILIES: dict[str, TinyFamily] = {
+    "minimax_m3_vl": TinyFamily(
+        _composite(
+            MiniMaxM3VLConfig,
+            MiniMaxM3SparseForConditionalGeneration,
+            TINY_MINIMAX_M3_CONFIG,
+            TINY_MINIMAX_M3_VISION_CONFIG,
+            projector_hidden_size=TINY_MINIMAX_M3_CONFIG["hidden_size"],
+        ),
+        load_class=AutoModelForImageTextToText,
+    ),
+    "nemotron_h_omni": TinyFamily(
+        _composite(
+            NemotronH_Omni_Reasoning_V3_Config,
+            NemotronH_Omni_Reasoning_V3,
+            TINY_NEMOTRON_H_CONFIG,
+            TINY_RADIO_VISION_CONFIG,
+            vision_hidden_size=TINY_RADIO_VISION_CONFIG["hidden_size"],
+            projector_hidden_size=TINY_NEMOTRON_H_CONFIG["hidden_size"],
+            image_token_id=18,
+        ),
+        load_class=AutoModelForImageTextToText,
+    ),
+}
+# A dense composite holding ``language_model`` at its root and embedding in its own forward.
+TINY_LLAMA4_FAMILY = TinyFamily(
+    _composite(Llama4Config, Llama4ForConditionalGeneration, TINY_LLAMA4_TEXT_CONFIG, TINY_LLAMA4_VISION_CONFIG),
+    load_class=AutoModelForImageTextToText,
+)
 # Its own text attention class behind a multimodal backbone.
 TINY_QWEN3_VL_FAMILY = TinyFamily(
     _composite(Qwen3VLConfig, Qwen3VLForConditionalGeneration, TINY_QWEN3_VL_TEXT_CONFIG, TINY_QWEN3_VL_VISION_CONFIG),

@@ -149,6 +149,13 @@ def test_sft_refuses_eval_packing_on_a_preprocessed_dataset(tmp_path):
         _run_sft_to_dataset(tmp_path, "packing: true\nmax_length: 64\neval_packing: false\n", preprocessed=True)
 
 
+@pytest.mark.parametrize("knob", ["min_pixels", "max_pixels"])
+def test_sft_refuses_pixel_bounds_on_a_preprocessed_dataset(knob, tmp_path):
+    """Its images keep the geometry they were baked at, so a bound here would apply to nothing."""
+    with pytest.raises(ValueError, match=rf"pre-processed dataset {_REFUSED}.*{knob}"):
+        _run_sft_to_dataset(tmp_path, f"max_length: 64\n{knob}: 4096\n", preprocessed=True)
+
+
 def test_sft_keeps_eval_packing_on_a_raw_dataset(tmp_path):
     with pytest.raises(_PastTheGuards):
         _run_sft_to_dataset(tmp_path, "packing: true\nmax_length: 64\neval_packing: false\n", preprocessed=False)

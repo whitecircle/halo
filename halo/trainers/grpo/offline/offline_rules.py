@@ -7,9 +7,11 @@ from datasets import Dataset
 from halo.data.collators.offline_grpo import REF_PER_TOKEN_LOGPS_COLUMN
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 from halo.models.context_window import is_bounded_length
+from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.runtime.consensus import reject_across_ranks
 from halo.trainers.grpo.offline.reference import ReferenceMode
 from halo.trainers.parallelism.pipeline_rules import reject_pp_compute_metrics, reject_pp_peft
+from halo.trainers.training_args_overrides import uses_evaluation
 
 
 def require_tokenizer(processing_class):
@@ -53,6 +55,25 @@ def reject_offline_pp_options(args, parallelism_config, peft_config, compute_met
             f"the first step): set both max_prompt_length (got {args.max_prompt_length!r}) and "
             f"max_completion_length (got {args.max_completion_length!r}) to positive values."
         )
+
+
+def forwards_rows_alone(args, parallelism_config, config) -> bool:
+    """Whether this run must score each row through the per-row path: a left-padded row's columns are not the positions
+    a family's attention reads (:func:`~halo.models.moe.family_specs.attention_reads_row_positions`). Under PP the
+    stages forward the collated batch whole, so such a family is refused above one row per batch."""
+    if not attention_reads_row_positions(config):
+        return False
+    if parallelism_config is None or not parallelism_config.is_pp_mode:
+        return True
+    rows = max(args.per_device_train_batch_size, args.per_device_eval_batch_size if uses_evaluation(args) else 0)
+    if rows > 1:
+        raise ValueError(
+            f"{config.model_type}'s attention reads a token's row index, and offline GRPO under pipeline parallelism "
+            f"left-pads a batch's prompts, so a batch of {rows} rows would score its shorter rows at the wrong "
+            f"positions. Set per_device_train_batch_size and per_device_eval_batch_size to 1, or drop "
+            f"pipeline_parallel_size to take the per-row scorer."
+        )
+    return False
 
 
 def resolve_pp_max_length(args, parallelism_config) -> int | None:

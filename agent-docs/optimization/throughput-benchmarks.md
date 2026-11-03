@@ -329,8 +329,8 @@ construction.
 The per-MoE-layer CUDA self-time at b1/s4096 (serialized attribution via `benchmark_sft_ep.py --comm_profile`) is **dispatch all-to-all 88%, expert GEMM 6.6%, combine all-to-all 5.5%** — communication is ~93% of the layer step.
 
 The dispatch all-to-all is a near-fixed per-step latency (~49 ms here), so it dominates at small `M`. The
-expert GEMM is a minority because the model is very sparse (per-expert GEMM stays small-`M` /
-weight-bandwidth-bound), which is also why utilization reads low.
+expert GEMM is a minority: at 4096 rows per expert it sits above the roofline ridge and finishes well inside that
+latency, which is also why utilization reads low.
 
 Raising batch or sequence grows the compute term against the fixed comm cost; throughput plateaus around b4
 (b8 only adds memory). At b1 ep8 runs 3% below the default sharded ep1 (10,905 vs 11,236 tok/s/GPU) at
@@ -344,14 +344,12 @@ Raising batch or sequence grows the compute term against the fixed comm cost; th
 | **GC off** | **17,018** | **1.29×** | when the batch fits (88.9 GiB here) |
 | grouped GEMM off (loop) | 9,869 | 0.75× | grouped wins at ep8-b4 |
 | flex attention | 1,784 | 0.13× | FA4 ~7.4× faster; flex runs the unfused math path |
-| fp8 / fp4 | net-slower | — | bf16 is the throughput path at these shapes ([low-precision](low-precision-moe-kernels.md)) |
 
 SDPA runs GptOss only with the sinks reset (the neutralized column contributes 0) and raises with live
 sinks ([Flash Attention](flash-attention.md#model-specific-handling)); use FA4.
 
-The roofline crossover (gpt-oss expert K=N=2880: weight-bandwidth-bound below ≈256–512 tokens/expert,
-compute-bound above; ridge AI ≈ 275 on B300) is why bf16 stays optimal: the small-`M` experts sit in the
-bandwidth-bound regime where fp8/fp4 quant overhead only loses.
+The roofline ridge (AI ≈ 275 on B300) sits near 256–512 rows per expert at K=N=2880. This point runs 16384 rows per
+expert, so its expert GEMM is compute-bound and the step is limited mostly by the all-to-all.
 
 `CUDA_DEVICE_MAX_CONNECTIONS=1` (baked into the image), the setting EP is validated with, costs no throughput:
 ep8 b1 reads +1.5% against `8` ([DeepEP](../infrastructure/deepep.md#environment-variables)).

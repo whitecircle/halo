@@ -3,7 +3,6 @@ ends with; a vendor class may drop ``model_type``, and a remote-code family may 
 
 from __future__ import annotations
 
-import copy
 import json
 import os
 import shutil
@@ -113,6 +112,15 @@ def _serialized_config(config, output_dir: str) -> dict:
     return payload
 
 
+def _reparsed_source_values(config, payload: dict, staging: str) -> dict:
+    """``payload`` through ``config``'s class and back, as a run would write it. The class reads floats JSON cannot
+    spell (``Infinity``) decoded, and raw they reach its validators as the ``{"__float__": ...}`` tag."""
+    values = _serialized_config(type(config).from_dict(type(config)._decode_special_floats(payload)), staging)
+    # Carried by construction, and the live config holds it only when loaded off the source.
+    values.pop("auto_map", None)
+    return values
+
+
 def _config_payload_diff(expected: dict, actual: dict, path: str = "") -> dict[str, tuple]:
     """``{dotted key: (expected, actual)}`` over two serialized configs, recursing into sub-configs."""
     diff: dict[str, tuple] = {}
@@ -127,14 +135,17 @@ def _config_payload_diff(expected: dict, actual: dict, path: str = "") -> dict[s
 
 def _apply_config_changes(source_section: dict, before: dict, after: dict, config, path: str = "") -> None:
     """Write this run's config changes into one source-schema section in place, under the spelling it already uses (the
-    key or its ``attribute_map`` alias), else the key's own name. The caller re-parses the result and compares."""
+    key or its ``attribute_map`` or ``_legacy_field_names`` alias), else the key's own name. The caller re-parses the
+    result and compares."""
     aliases: dict[str, list[str]] = {}
-    for alias, native in getattr(type(config), "attribute_map", {}).items():
-        aliases.setdefault(native, []).append(alias)
+    for table in ("attribute_map", "_legacy_field_names"):
+        for alias, native in getattr(type(config), table, {}).items():
+            aliases.setdefault(native, []).append(alias)
     for key in sorted(set(before) | set(after)):
         old, new = before.get(key, _CONFIG_KEY_ABSENT), after.get(key, _CONFIG_KEY_ABSENT)
+        spellings = [name for name in (key, *aliases.get(key, ())) if name in source_section]
         if isinstance(old, dict) and isinstance(new, dict) and "model_type" in new:
-            sub_section = source_section.get(key)
+            sub_section = source_section[spellings[0]] if spellings else None
             if not isinstance(sub_section, dict):
                 raise ValueError(
                     f"export_source_config_schema: the source config has no {path}{key!r} section to "
@@ -145,7 +156,6 @@ def _apply_config_changes(source_section: dict, before: dict, after: dict, confi
             continue
         if old == new:
             continue
-        spellings = [name for name in (key, *aliases.get(key, ())) if name in source_section]
         if new is _CONFIG_KEY_ABSENT:
             # The run left the key at its class default; the source's value must go with it.
             for name in spellings:
@@ -174,15 +184,19 @@ def export_source_config_schema(config, output_dir: str, *, source: str | None) 
     payload = _source_config_payload(source)
     if payload is None:
         return
+    source_type = payload.get("model_type")
+    if source_type and source_type != config.model_type:
+        logger.info(
+            f"export_source_config_schema: this {config.model_type!r} export reads a {source_type!r} source, a "
+            f"text-only load of a composite, so its config.json keeps transformers' schema for {config.model_type!r}."
+        )
+        return
     exported.pop("transformers_version", None)
-    # ``auto_map`` is carried by construction, and the live config holds it only when loaded off the source.
     exported.pop("auto_map", None)
     with tempfile.TemporaryDirectory() as staging:
-        source_values = _serialized_config(type(config).from_dict(copy.deepcopy(payload)), staging)
-        source_values.pop("auto_map", None)
+        source_values = _reparsed_source_values(config, payload, staging)
         _apply_config_changes(payload, source_values, exported, config)
-        carried = _serialized_config(type(config).from_dict(copy.deepcopy(payload)), staging)
-    carried.pop("auto_map", None)
+        carried = _reparsed_source_values(config, payload, staging)
     if carried != exported:
         raise ValueError(
             f"export_source_config_schema: the source schema cannot express this run's config. "

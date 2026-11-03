@@ -26,6 +26,7 @@ from halo.models.forward_capture import capturing_forward_outputs
 from halo.models.head_transform import HeadTransform, resolve_head_transform
 from halo.models.modality import config_declares_multimodality
 from halo.models.module_tree import embedding_module, find_module_path
+from halo.models.moe.family_specs import attention_reads_row_positions
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.consensus import rank_consensus
 from halo.runtime.dtensor import materialize_dtensor
@@ -104,9 +105,15 @@ def _completion_window(parts: Sequence[torch.Tensor], width: int) -> torch.Tenso
 
 
 def rows_forward_densely(model, batch_size: int) -> bool:
-    """Mandatory under FA4 (exact RoPE positions and rank-uniform collective counts); at ``batch_size == 1`` a padded
-    row otherwise costs its rank's widest prompt+completion in every layer."""
-    return effective_attn_implementation(getattr(model, "config", None)) == "flash_attention_4" or batch_size == 1
+    """Mandatory under FA4 (exact RoPE positions and rank-uniform collective counts) and where attention reads row
+    indices (:func:`attention_reads_row_positions`); at ``batch_size == 1`` a padded row otherwise costs its rank's
+    widest prompt+completion in every layer."""
+    config = getattr(model, "config", None)
+    return (
+        effective_attn_implementation(config) == "flash_attention_4"
+        or batch_size == 1
+        or attention_reads_row_positions(config)
+    )
 
 
 class LogprobScoringMixin:
@@ -259,8 +266,8 @@ class LogprobScoringMixin:
 
     def _dense_last_hidden_state(self, unwrapped_model, input_ids, attention_mask, logits_to_keep):
         """Each row's width is at least 1 so it stays autograd-connected (a pruned row drops its FSDP/EP backward
-        collectives). Trimming with ``attention_mask=None`` keeps FA4 on its dense kernel and restores RoPE positions
-        ``[0, len)``; every supported family's attention is relative, so log-probs match padded."""
+        collectives). Trimming with ``attention_mask=None`` keeps FA4 on its dense kernel and restores positions
+        ``[0, len)``, so a row scores as it does alone."""
         spans, n_comps = dense_row_spans(attention_mask, logits_to_keep)
         widths = [max(n_comp, 1) for n_comp in n_comps]
         rows = [

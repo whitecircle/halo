@@ -54,8 +54,8 @@ checkpoint:
   with packing available.
 
 To load a multimodal checkpoint as text-only, set `text_only_model: true`, as the
-Qwen3.8-Flash-Next recipes do. GLM-5 Next, Step-3.7 Flash and Gemma 4 have no
-text-only variant and refuse it.
+Qwen3.8-Flash-Next recipes do. Qwen3.5/3.6, Qwen3.8-Flash-Next and Llama 4 have a
+text-only variant; the others refuse it.
 
 Image data works for SFT, DPO, KTO, SMPO and both distillation trainers; PaliGemma takes it
 through SFT and distillation only. Reward modeling takes images only on checkpoints with a

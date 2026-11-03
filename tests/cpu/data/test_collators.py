@@ -542,6 +542,55 @@ def test_packing_completion_boundary_labels_masked():
     print("  PASS: test_packing_completion_boundary_labels_masked")
 
 
+def test_a_pad_valued_completion_token_trains_on_the_packed_route_as_on_the_padded_one():
+    tok = make_tokenizer()
+    conversation = [USER_A, RESP_1, RESP_2, ASST_A, PAD, ASST_B, EOS]
+    second = [USER_B, RESP_1, RESP_2, ASST_C, EOS]
+    packed = DataCollatorForCompletionOnlyLMWithPacking(
+        response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok, train_on_last_assistant_only=False
+    )
+    batch = packed.torch_call([{"input_ids": conversation + second, "seq_lengths": [len(conversation), len(second)]}])
+    labels = batch["labels"][0].tolist()
+
+    padded = DataCollatorForCompletionOnlyLM(
+        response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok, train_on_last_assistant_only=False
+    )
+    padded_labels = padded.torch_call([{"input_ids": conversation, "attention_mask": [1] * len(conversation)}])
+    padded_row = padded_labels["labels"][0].tolist()
+    assert padded_row[4] == PAD, "the premise: the padded route trains it"
+    assert labels[: len(conversation)] == padded_row
+    assert labels[len(conversation) :] == [IGNORE, RESP_1, RESP_2, ASST_C, EOS]
+
+
+def test_a_pad_valued_token_outside_a_span_stays_masked():
+    tok = make_tokenizer()
+    in_prompt = [USER_A, PAD, RESP_1, RESP_2, ASST_B, EOS]
+    collator = DataCollatorForCompletionOnlyLMWithPacking(
+        response_prompt_template=RESPONSE_TEMPLATE_IDS, tokenizer=tok, train_on_last_assistant_only=False
+    )
+    batch = collator.torch_call([{"input_ids": in_prompt, "seq_lengths": [len(in_prompt)]}])
+    assert batch["labels"][0].tolist()[:2] == [IGNORE, IGNORE]
+
+
+def test_a_pad_valued_token_opening_a_document_keeps_the_boundary_mask():
+    """A marker starting with the pad id puts position 0 inside the span, where the causal shift has nothing to read."""
+    tok = make_tokenizer(response_template_ids=[PAD, RESP_2])
+    ids = [PAD, RESP_2, ASST_A, EOS]
+    collator = DataCollatorForCompletionOnlyLMWithPacking(
+        response_prompt_template=[PAD, RESP_2], tokenizer=tok, train_on_last_assistant_only=False
+    )
+    batch = collator.torch_call([{"input_ids": ids, "seq_lengths": [len(ids)]}])
+    assert batch["labels"][0].tolist() == [IGNORE, RESP_2, ASST_A, EOS]
+
+
+def test_the_full_sequence_packed_route_keeps_masking_pad_valued_labels():
+    """The padded full-sequence route masks them too, as a pad there cannot be told from a real token."""
+    tok = make_tokenizer()
+    ids = [USER_A, ASST_A, PAD, ASST_B, EOS]
+    batch = DataCollatorWithPacking(tokenizer=tok).torch_call([{"input_ids": ids, "seq_lengths": [len(ids)]}])
+    assert batch["labels"][0].tolist() == [IGNORE, ASST_A, IGNORE, ASST_B, EOS]
+
+
 def test_flattening_boundary_labels_masked():
     tok = make_tokenizer()
     collator = DataCollatorWithFlattening(tokenizer=tok)

@@ -95,9 +95,9 @@ def test_each_scenario_reaches_the_path_it_names(roster):
     assert _scenario(roster, "lora")["steps"][-1]["step_mfu_percent"] < default["step_mfu_percent"]
     precisions = {
         scenario: _scenario(roster, scenario)["snapshot"]["diagnostics"]["precision"]
-        for scenario in ("fp8", "fp32", "tf32", "late_model")
+        for scenario in ("fp8", "fp8_native", "fp32", "tf32", "late_model")
     }
-    assert precisions == {"fp8": "fp8", "fp32": "fp32", "tf32": "tf32", "late_model": "fp32"}
+    assert precisions == {"fp8": "bf16", "fp8_native": "fp8", "fp32": "fp32", "tf32": "tf32", "late_model": "fp32"}
     # Before the model arrives the arguments alone decide, and fp32 arguments fall back to bf16.
     late = _messages(_scenario(roster, "late_model"), "INFO")
     assert "Precision: bf16" in late and "Precision: fp32" in late

@@ -93,4 +93,4 @@ The public `mistralai/Mistral-Small-4-*` repo serves only because vLLM detects i
 
 A vLLM thinking budget is refused too, by the trainer and by an eval reading a training config: vLLM serves the family with its `mistral_common` tokenizer, whose `[THINK]`/`[/THINK]` markers encode as plain text while the model writes control tokens, so the budget never counts.
 
-Online and async GRPO on Mistral4 raise at trainer build rather than sync into a server that cannot hold the model ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SFT, preference and offline methods are unaffected; they never touch a rollout engine.
+Online and async GRPO on Mistral4 raise at trainer build rather than sync into a server that cannot hold the model ([Rollout Servers](../infrastructure/rollout-servers.md#which-families-each-engine-serves)). SFT, preference and offline methods are unaffected; they never touch a rollout engine. Offline GRPO always scores through the per-row chunked path, since the query scale steps at a position a left pad would move ([Row positions](../training-methods/grpo/offline.md#row-positions)).

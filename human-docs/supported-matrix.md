@@ -23,7 +23,7 @@ truth; where a recipe disagrees with this page, this page wins.
 | Hardware | Image | Status |
 | --- | --- | --- |
 | NVIDIA B200 / B300 | `halo:blackwell` | supported, primary target |
-| NVIDIA H100 / H200 | `halo:hopper` | supported; no GPU test runs on Hopper ([Validation](#validation)) |
+| NVIDIA H100 / H200 | `halo:hopper` | supported |
 | NVIDIA GB200 / GB300 NVL72 | none | Grace hosts are aarch64; both images are x86_64-only |
 | NVIDIA A100, RTX 3090 / 4090 | `halo:blackwell` | single-GPU LoRA/QLoRA only (torch, FA2 and bitsandbytes carry sm_80–sm_89 kernels; DeepEP, FA3 and FA4 do not run); not validated |
 | RTX 50-series (SM 12.x) | `halo:blackwell` | set `attn_implementation: flash_attention_2` or `sdpa`, since the auto-selected FA4 does not run on SM 12.x; not validated |
@@ -180,7 +180,7 @@ What each mode writes, and which resumes are exact:
 ## Validation
 
 The GPU tests run on single 8× B300 nodes. Hopper gets the image build, the
-CPU tests inside it and an FA3 import check, with no GPU test. On two machines
+CPU tests inside it and an FA3 import check. On two machines
 (B300 over EFA) this release ran cross-node expert parallelism and the two
 pipeline-parallel recipes, the Qwen3-8B one through a per-node save, resume and
 merge; the rest of the multi-node coverage is a two-node simulation on one host.

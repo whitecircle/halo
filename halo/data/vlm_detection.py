@@ -3,9 +3,14 @@ carries, and the cross-rank verdicts and refusals read off them."""
 
 from datasets import Image as ImageFeature
 
-from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, conversation_carries_images
+from halo.data.conversation import (
+    IMAGE_PART_PAYLOAD_KEY,
+    IMAGE_PART_SOURCE_KEYS,
+    conversation_carries_images,
+    reject_unsupported_media_parts,
+)
 from halo.models.modality import is_vlm_model
-from halo.runtime.consensus import agree_probe_across_ranks
+from halo.runtime.consensus import agree_probe_across_ranks, reject_across_ranks
 
 # The raw spellings a dataset ships images in, ``images`` first: TRL's vision probe reads the same pair.
 VLM_RAW_IMAGE_COLUMNS = ("images", "image")
@@ -65,7 +70,7 @@ def _conversation_schema_declares_images(column_feature) -> bool:
     parts = _struct_fields(_list_element_feature(messages["content"]))
     if parts is None:
         return False
-    if IMAGE_PART_PAYLOAD_KEY in parts:
+    if IMAGE_PART_PAYLOAD_KEY in parts or not parts.keys().isdisjoint(IMAGE_PART_SOURCE_KEYS):
         return True
     return any(_feature_carries_image(field) for field in parts.values())
 
@@ -111,6 +116,21 @@ def dataset_declares_images_across_ranks(dataset, conversation_field: str | None
     rank while the two arms run different coordinated operations, so the verdict is agreed on every call."""
     local = _declares_images_locally(dataset, conversation_field)
     return agree_probe_across_ranks(local, "the loaded dataset", "dataset_declares_images_across_ranks")
+
+
+def reject_unsupported_media_across_ranks(dataset, columns: tuple[str, ...], method: str) -> None:
+    """COLLECTIVE, for rows TRL renders itself, so no renderer of ours refuses them row by row. A presharded corpus
+    answers per rank, so the refusal is agreed."""
+    reason = None
+    try:
+        for split in _splits(dataset):
+            for column in columns:
+                if column in split.column_names:
+                    for conversation in split[column]:
+                        reject_unsupported_media_parts(conversation, f"{method} column {column!r}")
+    except ValueError as refused:
+        reason = str(refused)
+    reject_across_ranks(reason, f"{method} media parts", ValueError)
 
 
 def is_vlm_run_across_ranks(

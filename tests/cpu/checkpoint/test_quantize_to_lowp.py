@@ -112,6 +112,7 @@ def test_quantize_to_lowp():
                 mani["format"] == fmt and mani["block_size"] == block and len(mani["quantized_weights"]) == 2,
                 "manifest records scheme + quantized weights",
             )
+            _check("compressed-tensors" not in mani["layout"], "manifest does not claim a layout engines would refuse")
 
 
 def _compressed_tensors_nvfp4_dequant(saved: dict, name: str) -> torch.Tensor:

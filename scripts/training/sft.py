@@ -31,6 +31,7 @@ from halo.data.preprocessed.metadata import (
 from halo.data.sources.loading import load_datasets_auto
 from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
 from halo.entrypoints.data_setup import (
+    apply_vision_options,
     disable_trl_dataset_prep,
     load_script_datasets,
     log_script_dataset_examples,
@@ -320,7 +321,10 @@ def main():
     if is_preprocessed:
         # Both splits are used as baked, so eval_packing has nothing to decide.
         reject_non_default_args("Halo SFT on a pre-processed dataset", sft_config, "eval_packing")
-        reject_non_default_args("Halo SFT on a pre-processed dataset", args, "tree_packing")
+        # Baked images keep the geometry they were baked at.
+        reject_non_default_args(
+            "Halo SFT on a pre-processed dataset", args, "tree_packing", "min_pixels", "max_pixels"
+        )
 
     # Before the model load, which needs the checkpoint's processor only for an image run: a multimodal checkpoint
     # carrying text-only rows is a text run, its model class unchanged.
@@ -329,6 +333,9 @@ def main():
     )
     if is_vlm:
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
+        # Ahead of the load; the wrapper would refuse only at the first image batch.
+        if parallelism_config.is_cp_mode:
+            raise ValueError("SFT on image data does not support Context Parallelism: drop context_parallel_size.")
     metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
     if not is_vlm:
         reject_context_parallel_packing(
@@ -356,6 +363,7 @@ def main():
     apply_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
+    apply_vision_options(args, model, model_config, processing_class, is_vlm=is_vlm)
     log_model_info(model, tokenizer)
     if args.tree_packing:
         install_tree_attention(model, args.tree_full_attention)

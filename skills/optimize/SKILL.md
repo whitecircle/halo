@@ -2,9 +2,9 @@
 name: optimize
 description: >-
   Recommend throughput/memory levers to raise tokens/s/GPU or cut peak memory for
-  a given Halo training config — and call out the levers that do NOT help
-  at fine-grained MoE shapes (low-precision fp8/fp4 compute, native
-  DeepGEMM, torch.compile on EP MoE, sub-bf16 master weights) so the user does not
+  a given Halo training config — and call out the levers that did not pay off on B300
+  (low-precision fp8/fp4 compute, the DeepGEMM adapter, torch.compile on EP MoE,
+  sub-bf16 master weights) so the user does not
   chase dead-ends. Use when the user asks how to speed up training, fit a longer
   seq / bigger batch, get more tok/s/GPU, lower peak memory / avoid OOM, raise MFU,
   or whether fp8/fp4/torch.compile/DeepGEMM are worth turning on. Every number is

@@ -123,15 +123,15 @@ Messages carry text and images:
 {"prompt": [{"role": "user", "content": [{"type": "image", "image": "<image_data>"}, {"type": "text", "text": "What's in this image?"}]}, {"role": "assistant", "content": "A sunset over the ocean."}]}
 ```
 
-The `image` field accepts: base64 data URI (`data:image/png;base64,...`), file path, PIL Image, or raw bytes. Text-only messages keep the plain `"content": str` form. A conversation stored as a JSON string parses the same as on the text path.
+The `image` field accepts: base64 data URI (`data:image/png;base64,...`), file path, PIL Image, or raw bytes. So do the transformers chat format's spellings of the part: `path`, `base64`, and `url` for a local path, `file://` or a `data:` URI. An `http(s)` URL is refused, since training fetches nothing. Text-only messages keep the plain `"content": str` form. A conversation stored as a JSON string parses the same as on the text path.
 
 Hub datasets that store images in a separate column instead train via `images_field` (the column is injected into the first user turn), and the paired `{user, assistant}` turn shape used by the HuggingFaceM4 `texts` column is normalized to role/content messages — see [SFT — Vision-language models](../training-methods/sft.md#vision-language-models).
 
 A run takes the VLM data path only when **both** halves agree (`is_vlm_run_across_ranks`, `halo/data/vlm_detection.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
 
-A run declares images three ways, any one of which is enough: `images_field` names the column; the dataset carries an `images`, `image` or `pixel_values` column; or the `conversation_field` column embeds `{"type": "image"}` content parts. The preference scripts have no `conversation_field`, so DPO declares by column only.
+A run declares images three ways, any one of which is enough: `images_field` names the column; the dataset carries an `images`, `image` or `pixel_values` column, which the map then reads as if named; or the `conversation_field` column embeds `{"type": "image"}` content parts. The preference scripts have no `conversation_field`, so DPO declares by column only.
 
-The embedded-parts declaration is read from the column's **Arrow schema**: the parts struct is typed over the whole split, so an image payload field — or a `datasets.Image` feature under any name — declares the run no matter which rows carry images. A conversation column stored as JSON strings has no struct to read and falls back to a probe of each split's first row.
+The embedded-parts declaration is read from the column's **Arrow schema**: the parts struct is typed over the whole split, so an image payload field (`image`, `path`, `base64` or `url`) — or a `datasets.Image` feature under any name — declares the run no matter which rows carry images. A conversation column stored as JSON strings has no struct to read and falls back to a probe of each split's first row.
 
 The verdict is **agreed across ranks** (all-reduce MAX — any image-declaring rank wins), because on a pre-sharded corpus every rank probes a disjoint slice: its own first row, and the Arrow schema `datasets` inferred for its own shard set. A split verdict would pair one arm's barrier against the other's store wait, so the probe spends one collective per call whatever the answer.
 
@@ -141,7 +141,7 @@ The name-substring heuristic (`-vl`, `vl-`, `vl2`, `llava`, `vision`, `pixtral`,
 
 For a JSON-string conversation column, the first-row fallback cannot see a mixed dataset whose probed rows are text-only: that run resolves to the text path and then **fails loud at the first image row**.
 
-Every text renderer — SFT, preference prep (DPO/SMPO), Bradley-Terry reward prep, the GRPO generation-prompt renderer, generation eval, offline GRPO's templater and classification — refuses a conversation carrying an image part (`reject_image_content`) rather than expanding it into placeholder tokens with no pixels behind them, which would train vision placeholders as text in silence. The escape is an image column on the dataset, or offline `--is_vlm` preprocessing.
+Every text renderer — SFT, preference prep (DPO/SMPO), Bradley-Terry reward prep, the GRPO generation-prompt renderer, generation eval, offline GRPO's templater and classification — refuses a conversation carrying an image part (`reject_image_content`) rather than expanding it into placeholder tokens with no pixels behind them, which would train vision placeholders as text in silence. The escape is an image column on the dataset, or offline `--is_vlm` preprocessing. The VLM path refuses an image part with no payload, and every path refuses video, audio and `image_url` parts, which no collator hands a processor. A text checkpoint refuses image data of any declaration rather than drop it.
 
 Limitations: packing and padding-free training are **NOT supported** on the VLM path (images cannot be packed). Offline pre-processing uses `--is_vlm`, which the Qwen and Gemma 4 processors' image rows do not fit, so those train through this runtime path; see [SFT pre-processing](dataset-preparation.md).
 

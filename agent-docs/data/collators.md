@@ -166,7 +166,7 @@ non-attention mixer carries state along the sequence regardless of any mask.
 
 | Family | Attention layers | Other layers |
 |---|---|---|
-| Qwen3 (dense + MoE), GLM-4 MoE Lite, Laguna, Gemma 4 | isolated on their supported backends | — |
+| Qwen3 (dense + MoE), GLM-4 MoE Lite, Laguna, Gemma 4, and dense Llama, Qwen2, Mistral, Mixtral, OLMo3, Cohere2, Gemma 1, 2 and 3, and PaliGemma | isolated on their supported backends | — |
 | Inkling | isolated | four depthwise causal convs per layer **cross by construction** — the modeling reads `seq_idx` but its call sites never forward kwargs, so no emission can reach them; `packing` and `padding_free` are **refused** unless `allow_cross_document_linear_attention` |
 | Mistral4 | isolated — flash needs `patch_mistral4_flash_packed_position_ids` (upstream drops `position_ids` before the attention interface); dense clean to grouped-GEMM reduction noise | — |
 | GPT-OSS | isolated on flash only; eager/SDPA/flex **leak** — the model's mask kwargs omit `position_ids`, so the packed row runs as one dense causal sequence | — |
@@ -218,7 +218,7 @@ satisfy them).
 
 "Crosses by construction" applies where the mixer has no per-document boundary parameter at
 all (Inkling's convs). Such a family's rows are refused as unmarked linear attention's are, below, and
-the same opt-in admits them where a small amount of cross-document mixing is acceptable.
+the same opt-in admits them: their short convs carry each document into the next, so packed rows train on mixed context.
 
 A linear-attention layer no segment marker reaches is refused unless the run opts in:
 `find_unmarked_sequence_mixer` (`halo/models/segment_markers.py`) reads hybrid layer groups
@@ -237,8 +237,10 @@ collator factory refuse its flat packing before the opt-in is read, and its `pad
 kernel it does not have. Tree packing skips this check and refuses the opt-in: its plan segments the
 linear-attention layers of every family it admits ([Tree Packing](../optimization/tree-packing.md)).
 
-Under distillation the teacher and the frozen reference forward with `use_cache=False` explicitly, so
-they score packed rows under the same masks the student does.
+Distillation takes no packed rows: the teacher script passes `packing=False` and self-distillation refuses
+`packing` and `padding_free`.
+
+A family outside the table above and the family specs gets a warning on every backend (`packing_isolation_is_measured`, `halo/models/segment_markers.py`): BERT- and BART-family decoders, OPT and BioGPT leak on dense backends, and GPT-Neo and Moshi on flash too.
 
 ## Constraints
 

@@ -155,6 +155,31 @@ def test_image_column_dataset_reaches_the_trainer(tmp_path):
         _run_kto(tmp_path, _dataset(prompt=_PLACEHOLDER_PROMPT, extra_columns={"images": [[]]}))
 
 
+@pytest.mark.parametrize(
+    ("column", "extra_columns"),
+    [("prompt", {}), ("completion", {}), ("prompt", {"images": [[], []]})],
+    ids=["text_path_prompt", "text_path_completion", "vision_path_prompt"],
+)
+@pytest.mark.parametrize(
+    "part",
+    [{"type": "video", "video": "a.mp4"}, {"type": "image_url", "image_url": {"url": "a.png"}}],
+    ids=["video", "image_url"],
+)
+def test_a_media_part_on_any_row_is_refused_ahead_of_trls_render(tmp_path, column, extra_columns, part):
+    """TRL templates these rows itself, into placeholders with no pixels. The first row carries none, so only a read of
+    every row sees it."""
+    role = "user" if column == "prompt" else "assistant"
+    media = [{"role": role, "content": [part, {"type": "text", "text": "this?"}]}]
+    text = _TEXT_PROMPT if column == "prompt" else _COMPLETION
+    other_column, other = ("completion", _COMPLETION) if column == "prompt" else ("prompt", _TEXT_PROMPT)
+    data = {column: [text, media], other_column: [other, other], "label": [True, False], **extra_columns}
+    dataset = DatasetDict(
+        {"train": Dataset.from_list([dict(zip(data, row, strict=True)) for row in zip(*data.values(), strict=True)])}
+    )
+    with pytest.raises(ValueError, match="no Halo collator feeds"):
+        _run_kto(tmp_path, dataset)
+
+
 def test_images_field_renames_the_column_to_the_spelling_trl_reads(tmp_path):
     """TRL matches the column by name, so anything else must arrive renamed or the run trains as text with its
     images dropped."""

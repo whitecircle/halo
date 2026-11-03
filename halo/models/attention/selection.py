@@ -7,6 +7,7 @@ import importlib
 import inspect
 import logging
 import os
+import sys
 
 import torch
 from transformers import AutoModel, AutoModelForCausalLM, AutoModelForImageTextToText
@@ -58,6 +59,8 @@ FLASH_MAX_HEAD_DIM = 256
 FA4_DEDICATED_HEAD_DIM = 256
 # transformers' switch for its flash kernels' ``deterministic`` argument; ``full_determinism`` sets it.
 FLASH_ATTENTION_DETERMINISTIC_ENV = "FLASH_ATTENTION_DETERMINISTIC"
+_KERNELS_DROPPING_ATTENTION_DROPOUT = ("flash_attention_3", "flash_attention_4")
+_ATTENTION_CLASS_TABLE_SUFFIX = "_ATTENTION_CLASSES"
 
 
 def is_flash_attn_implementation(attn_impl: str | None) -> bool:
@@ -329,20 +332,52 @@ def select_supported_attn_implementation(
 
 
 def verify_live_sinks_carried(model) -> None:
-    """Read off the built model, so it holds for a backend no validator chose. Neutralized sinks (``None``,
-    ``dtype.min``) carry no softmax mass and pass."""
+    """Read off the built model, so it holds for a backend no validator chose and a family no spec names. Neutralized
+    sinks (``None``, ``dtype.min``) carry no softmax mass and pass."""
     config = getattr(model, "config", None)
-    if config is None or not uses_gpt_oss_sinks(config):
+    if config is None or not holds_unneutralized_sinks(model):
         return
     attn_impl = effective_attn_implementation(config)
-    if _attn_impl_handles_sinks(attn_impl) or not holds_unneutralized_sinks(model):
+    if _attn_impl_handles_sinks(attn_impl):
+        return
+    neutralize = ", or neutralize the sinks first (reset_sinks: true for a training run)"
+    raise ValueError(
+        f"This {type(model).__name__} runs attn_implementation={attn_impl!r}, which drops its attention sinks, while "
+        f"the sinks are live: every logprob would shift by nats against the served model. Use a sink-carrying "
+        f"implementation ({SINK_CARRYING_ATTN_HINT}){neutralize if uses_gpt_oss_sinks(config) else ''}."
+    )
+
+
+def _attention_class_table(model_config) -> dict | None:
+    """A legacy modeling file's per-backend attention classes (GPT-J, GPT-Neo, Falcon, Bark), on which a label it does
+    not list fails the build with a bare ``KeyError``. ``None`` for every other class."""
+    model_class = declared_model_class(model_config)
+    if model_class is None:
+        return None
+    attributes = vars(sys.modules[model_class.__module__])
+    return next((value for name, value in attributes.items() if name.endswith(_ATTENTION_CLASS_TABLE_SUFFIX)), None)
+
+
+def _reject_unbuildable_attention(model_config, attn_implementation: str) -> None:
+    """Refused here rather than at the build, after the checkpoint is fetched, naming the label the file does list."""
+    table = _attention_class_table(model_config)
+    if table is None or attn_implementation in table or not is_flash_attn_implementation(attn_implementation):
         return
     raise ValueError(
-        f"This GptOss model runs attn_implementation={attn_impl!r}, which drops its attention sinks, while the "
-        f"sinks are live: every logprob would shift by nats against the served model. Use a sink-carrying "
-        f"implementation ({SINK_CARRYING_ATTN_HINT}), or neutralize the sinks first (reset_sinks: true for a "
-        f"training run)."
+        f"attn_implementation='{attn_implementation}' cannot build {type(model_config).__name__}: its modeling file "
+        f"lists only {sorted(table)}. Set attn_implementation: flash_attention_2."
     )
+
+
+def _reject_dropped_attention_dropout(model_config, attn_implementation: str) -> None:
+    """transformers hands only FA2 ``dropout_p``, so the others would train without the dropout the config asks for."""
+    attention_dropout = getattr(text_config(model_config), "attention_dropout", 0.0)
+    if attention_dropout and attn_implementation in _KERNELS_DROPPING_ATTENTION_DROPOUT:
+        raise ValueError(
+            f"attn_implementation='{attn_implementation}' takes no attention dropout, but this model's config sets "
+            f"attention_dropout={attention_dropout}. Set it to 0 (model_init_kwargs), or set attn_implementation: "
+            f"flash_attention_2 or sdpa, which apply it."
+        )
 
 
 def resolve_attn_implementation(
@@ -421,4 +456,7 @@ def resolve_attn_implementation(
             )
         attn_implementation = "sdpa"
 
-    return select_supported_attn_implementation(model_config, attn_implementation, sinks_policy, dtype=dtype)
+    selected = select_supported_attn_implementation(model_config, attn_implementation, sinks_policy, dtype=dtype)
+    _reject_unbuildable_attention(model_config, selected)
+    _reject_dropped_attention_dropout(model_config, selected)
+    return selected

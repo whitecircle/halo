@@ -165,10 +165,109 @@ def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm
     monkeypatch.setattr(data_setup, "probe_checkpoint", lambda *a, **k: pytest.fail("the checkpoint was probed again"))
     model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
 
-    verdict = resolve_vlm_run(
-        _args(images_field="images"), model_config, None, text_only_model=False, vlm_checkpoint=vlm_checkpoint
+    verdict = resolve_vlm_run(_args(), model_config, None, text_only_model=False, vlm_checkpoint=vlm_checkpoint)
+    assert verdict is False
+
+
+@pytest.mark.parametrize(
+    ("args", "dataset"),
+    [
+        (_args(images_field="images"), None),
+        (_args(), _dataset([TEXT_TURNS], {"images": [[]]})),
+        (_args(conversation_field="prompt"), _dataset([IMAGE_TURNS])),
+    ],
+    ids=["images_field", "image_column", "embedded_parts"],
+)
+def test_a_text_checkpoint_refuses_image_data_it_would_drop(args, dataset):
+    model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
+    with pytest.raises(ValueError, match="is a text checkpoint, but this run declares image data"):
+        resolve_vlm_run(args, model_config, dataset, text_only_model=False, vlm_checkpoint=False)
+
+
+def test_a_text_checkpoint_on_text_rows_stays_a_text_run():
+    model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
+    dataset = _dataset([TEXT_TURNS])
+    assert not resolve_vlm_run(
+        _args(conversation_field="prompt"), model_config, dataset, text_only_model=False, vlm_checkpoint=False
     )
-    assert verdict is vlm_checkpoint
+
+
+def test_a_multimodal_checkpoint_keeps_its_verdict_on_image_data():
+    model_config = SimpleNamespace(model_name_or_path="org/ckpt", model_revision=None, trust_remote_code=False)
+    assert resolve_vlm_run(
+        _args(images_field="images"), model_config, None, text_only_model=False, vlm_checkpoint=True
+    )
+
+
+@pytest.mark.parametrize("key", ["path", "url", "base64"])
+def test_a_chat_format_source_key_in_the_parts_schema_declares_images(key):
+    """A mixed dataset whose first row is text declares them only through the schema's union of part keys."""
+    text_row = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    image_row = [{"role": "user", "content": [{"type": "image", key: "x"}, {"type": "text", "text": "hi"}]}]
+    dataset = DatasetDict({"train": Dataset.from_list([{"prompt": text_row}, {"prompt": image_row}])})
+    assert not conversation_carries_images(dataset["train"][0]["prompt"]), "the premise: the first row reads as text"
+    assert dataset_declares_images_across_ranks(dataset, "prompt")
+
+
+def test_sft_refuses_an_image_run_under_context_parallelism_before_the_load(tmp_path, monkeypatch):
+    """The wrapper refuses only at the first image batch, once every weight is loaded."""
+    module = _script_module("sft.py")
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        f"model_name_or_path: stub/model\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
+        f"bf16: false\nuse_cpu: true\nmax_length: 512\nimages_field: images\n"
+    )
+    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=True))
+    monkeypatch.setattr(module, "probe_checkpoint", lambda *a, **k: (CONFIG_MAPPING["qwen3_vl"](), True))
+    monkeypatch.setattr(module, "plan_row_attention", lambda *a, **k: SimpleNamespace(attn_default=None))
+    monkeypatch.setattr(module, "init_training_script", lambda *a, **k: runtime)
+    monkeypatch.setattr(module, "load_script_datasets", lambda *a, **k: ((_dataset([TEXT_TURNS]), False), False))
+    monkeypatch.setattr(module, "load_policy_model", lambda *a, **k: pytest.fail("the model load was reached"))
+    monkeypatch.setattr("halo.entrypoints.script.install_log_tee", lambda *a, **k: None)
+    monkeypatch.setattr("sys.argv", ["prog", str(config)])
+    with pytest.raises(ValueError, match="does not support Context Parallelism"):
+        module.main()
+
+
+@pytest.mark.parametrize(
+    ("image_run", "multimodal_student", "multimodal_teacher", "takes_image_class"),
+    [
+        (False, True, False, False),
+        (False, True, True, True),
+        (False, False, True, False),
+        (True, True, True, True),
+    ],
+    ids=["text_teacher_multimodal_student", "both_multimodal", "multimodal_teacher_text_student", "image_run"],
+)
+def test_the_teacher_takes_the_image_class_only_where_both_models_are_multimodal(
+    monkeypatch, image_run, multimodal_student, multimodal_teacher, takes_image_class
+):
+    module = _script_module("distillation/teacher_distill.py")
+    probed = []
+    monkeypatch.setattr(
+        module,
+        "probe_checkpoint",
+        lambda name, **kw: probed.append((name, kw["revision"])) or (None, multimodal_teacher),
+    )
+    args = _args(teacher_model="org/teacher", teacher_model_revision="abc")
+    model_config = SimpleNamespace(trust_remote_code=False)
+    assert (
+        module._teacher_takes_image_class(
+            args, model_config, image_run=image_run, multimodal_student=multimodal_student
+        )
+        is takes_image_class
+    )
+    assert probed == [("org/teacher", "abc")], "the teacher's own checkpoint, at its own pin"
+
+
+def test_an_image_run_refuses_a_text_teacher_by_name(monkeypatch):
+    module = _script_module("distillation/teacher_distill.py")
+    monkeypatch.setattr(module, "probe_checkpoint", lambda *a, **k: (None, False))
+    args = _args(teacher_model="org/teacher", teacher_model_revision=None)
+    with pytest.raises(ValueError, match="'org/teacher' is a text model"):
+        module._teacher_takes_image_class(
+            args, SimpleNamespace(trust_remote_code=False), image_run=True, multimodal_student=True
+        )
 
 
 def test_dataset_declares_images_across_ranks_accepts_a_single_split():

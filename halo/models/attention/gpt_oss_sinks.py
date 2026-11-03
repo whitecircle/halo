@@ -287,10 +287,13 @@ def has_live_attention_sinks(model) -> bool:
 
 
 def holds_unneutralized_sinks(model) -> bool:
-    """Read off the tensors, so a model loaded without a policy answers with the sinks its checkpoint carries."""
-    for _, attn in _gpt_oss_sink_attentions(model):
-        sinks = getattr(attn, "sinks", None)
-        if sinks is not None and bool((sinks.detach() > _NEUTRALIZED_SINK_FLOOR * torch.finfo(sinks.dtype).min).any()):
+    """Read off every module's tensors, so a model loaded without a policy answers with the sinks its checkpoint
+    carries, and so does a family no spec names (Granite SWA)."""
+    for module in model.modules():
+        sinks = getattr(module, "sinks", None)
+        if not isinstance(sinks, torch.Tensor):
+            continue
+        if bool((sinks.detach() > _NEUTRALIZED_SINK_FLOOR * torch.finfo(sinks.dtype).min).any()):
             return True
     return False
 

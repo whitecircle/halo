@@ -4,6 +4,7 @@ TRL's dataset preparation."""
 
 import ast
 import importlib
+import pkgutil
 import sys
 from pathlib import Path
 from unittest import mock
@@ -11,7 +12,9 @@ from unittest import mock
 import pytest
 from trl import SFTTrainer
 
+import halo.configs
 from halo.cli import training_methods
+from halo.configs.script_arguments import VisionTrainingArguments
 from halo.data.collators import padded
 from halo.data.preprocessed.metadata import PreprocessedDatasetMetadata, verify_preprocessed_dataset
 from tests.common.repo import REPO_ROOT, load_script_module
@@ -124,6 +127,23 @@ def _vlm_probe_calls(path: Path) -> list[ast.Call]:
     return sum(
         (_named_calls(tree, name) for name in ("is_vlm_model", "is_vlm_run_across_ranks", "probe_checkpoint")), []
     )
+
+
+@pytest.mark.parametrize("script", ["online", "environmental", "offline"])
+def test_a_grpo_script_hands_its_exports_the_processor(script):
+    """Its ``processing_class`` stays the tokenizer, so nothing else would save what an engine reads to serve a
+    composite's export."""
+    path = REPO_ROOT / "scripts" / "training" / "grpo" / f"{script}.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    assert _named_calls(tree, "load_export_processor"), f"{path}: exports carry no processor"
+    assigned = [
+        target.attr
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Attribute)
+    ]
+    assert "export_processing_class" in assigned, f"{path}: the loaded processor never reaches the trainer"
 
 
 def test_vlm_probe_contract_is_not_vacuous():
@@ -455,6 +475,52 @@ def test_prompt_dataset_scripts_declare_the_prompt_column_to_the_loader(rel_path
     assert [(call.get("conversation_field"), call.get("conversation_knob")) for call in declared] == [
         ("args.prompt_field", "'prompt_field'")
     ], f"{rel_path}: load_script_datasets declares {declared}"
+
+
+def _vision_argument_classes() -> set[str]:
+    return {
+        name
+        for module_info in pkgutil.iter_modules(halo.configs.__path__)
+        for name, obj in vars(importlib.import_module(f"halo.configs.{module_info.name}")).items()
+        if isinstance(obj, type) and issubclass(obj, VisionTrainingArguments) and obj is not VisionTrainingArguments
+    }
+
+
+def _parses_vision_arguments(tree: ast.AST) -> bool:
+    return any(
+        isinstance(arg, ast.Name) and arg.id in _vision_argument_classes()
+        for call in _named_calls(tree, "parse_script_args")
+        for arg in call.args
+    )
+
+
+@pytest.mark.parametrize("script", _TRAINING_SCRIPTS, ids=lambda path: path.name)
+def test_a_script_taking_the_vision_arguments_applies_them(script: Path):
+    """They would otherwise parse and do nothing: a tower the run asked to freeze keeps training."""
+    tree = ast.parse(script.read_text(encoding="utf-8"))
+    if _parses_vision_arguments(tree):
+        assert _named_calls(tree, "apply_vision_options"), f"{script}: its vision arguments reach nothing"
+
+
+def test_the_vision_arguments_contract_is_not_vacuous():
+    parsing = [script.name for script in _TRAINING_SCRIPTS if _parses_vision_arguments(ast.parse(script.read_text()))]
+    assert {
+        "sft.py",
+        "dpo.py",
+        "kto.py",
+        "smpo.py",
+        "reward_model.py",
+        "self_distill.py",
+        "teacher_distill.py",
+    } == set(parsing)
+
+
+def test_the_teacher_load_takes_the_verdict_on_its_own_checkpoint():
+    """The student's modality pins the image class, which refuses a text teacher's config."""
+    tree = ast.parse((_TRAINING_DIR / "distillation/teacher_distill.py").read_text(encoding="utf-8"))
+    (load,) = _named_calls(tree, "_load_distill_teacher")
+    (is_vlm,) = (keyword.value for keyword in load.keywords if keyword.arg == "is_vlm")
+    assert isinstance(is_vlm, ast.Call) and is_vlm.func.id == "_teacher_takes_image_class"
 
 
 _INSTALLS_PROCESSING_CLASS = (

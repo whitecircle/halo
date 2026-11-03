@@ -255,17 +255,17 @@ FP8/FP4 doubles or quadruples tensor-core throughput and raises the compute ceil
 - **Compute-bound (AI above ridge):** the ceiling is what you are hitting, so raising it makes the step faster. This is the large-M / wide-matmul regime (dense MLPs at long seq, very wide experts).
 - **Memory-bound (AI below ridge):** you're on the diagonal, nowhere near the ceiling, so raising it does nothing. Most schemes also add a per-step quantization pass (read operand, compute scales, write quantized copy), so on a bandwidth-bound kernel the net result is slower.
 
-Fine-grained MoE experts live in the second regime: small per-expert M, weight-bandwidth-bound (§2 table). That is the measured reason bf16 is the toolkit default for MoE expert compute. Low precision earns its keep as a *memory* lever (smaller weights, activations, optimizer states, EP-dispatch payloads) and for inference, not as a compute lever at fine-grained MoE shapes.
+An expert GEMM is memory-bound below roughly 256–512 rows per expert and compute-bound above. Most EP8 configurations sit above it, but the all-to-all dominates their step. bf16 is the default because Halo's low-precision paths are slower in what ran.
 
-A frontier-scale result therefore doesn't transfer down. DeepSeek-V3 (671B total, 37B active) trained its core GEMMs in FP8 and roughly doubled their throughput. At 671B with an enormous global batch, those matmuls sit above the ridge. Even there it kept embeddings, output head, router gating, norms, and attention in higher precision.
+A frontier-scale result does not transfer on its own. DeepSeek-V3 (671B total, 37B active) trained its core GEMMs in FP8 and roughly doubled their throughput. At 671B with an enormous global batch, those matmuls sit above the ridge. Even there it kept embeddings, output head, router gating, norms, and attention in higher precision.
 
-At the toolkit's model sizes and per-expert M the same GEMMs fall below the ridge, where FP8 buys nothing. Check which regime *your* shape lands in.
+Compute rows per expert for your shape ([Grouped GEMM](../optimization/grouped-gemm.md)) and compare it with the ridge.
 
 ### Why a faster kernel doesn't change the verdict
 
 An isolated block-scaled nvfp4 grouped kernel does beat bf16 — but only with the group layout known ahead of time. MoE routing is dynamic, so each group's size and offset change every step and the fixed-layout CuTe grouped API has to rebuild its per-expert pointer arrays and swizzle metadata on the CPU every call, leaving the GPU idle behind a host wall.
 
-DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel) and still loses: the per-token activation-quant pass it exposes never amortizes at these per-expert M. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1` plus a shape gate) and net-slower than bf16 in a real step. Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
+DeepGEMM removes that wall (expert per token-row resolved on-device from an int32 `m_indices` array, one compiled kernel). Halo's adapter around it measured slower than bf16 on one B300; it casts with Python utilities and copies rows in Python loops. It stays opt-in (`HALO_DEEPGEMM_NATIVE=1`). Measurements: [Low-Precision MoE Kernels](../optimization/low-precision-moe-kernels.md).
 
 ### bf16 numerics (what stays fp32)
 
@@ -468,7 +468,7 @@ The most common wrong choice starts "fp8 made inference 2× faster, so it'll spe
 
 Inference compute splits into prefill (all prompt tokens, large M, compute-bound, like a training forward) and decode (one token at a time, M=1 per sequence). Decode is the §2 small-M regime at its extreme — weight-bandwidth-bound, its speed set by how fast weights stream rather than by FLOPs.
 
-That is why low precision pays there: quantizing weights halves (fp8) or quarters (fp4/int4) the bytes per token and shrinks the KV cache. None of it transfers to training, where weights stay in training precision, the streamed bytes don't shrink, and §7's quant-pass overhead is all that remains.
+That is why low precision pays there: quantizing weights halves (fp8) or quarters (fp4/int4) the bytes per token and shrinks the KV cache. In training, weights are quantized once per step from a higher-precision master and the backward adds two more GEMMs, so published training gains are smaller (1.1–1.2× on MoE) and MXFP8 often raises memory.
 
 | | Training | Inference (decode) |
 |---|---|---|
@@ -476,10 +476,10 @@ That is why low precision pays there: quantizing weights halves (fp8) or quarter
 | Dominant memory | activations (∝ seq×batch) + optimizer state | weights + KV cache |
 | Per-matmul M | batch×seq (large, packed) | 1 per sequence (tiny) |
 | Typical regime | compute-bound at good M; comm-bound when sharded | weight-bandwidth-bound |
-| Low precision | mostly a *memory* lever; bf16 compute at these MoE shapes | a real *speed* lever |
+| Low precision | bf16 here | a real *speed* lever |
 | Optimize | bigger M, fusion, GC trade-off, comm overlap | weight quant, KV compression, batching |
 
-Hence `scripts/after_training/quantize_to_lowp.py`, which converts a trained bf16 checkpoint to mxfp8/mxfp4/nvfp4: fp8/fp4 is an inference and memory capability here, and training stays bf16.
+Hence `scripts/after_training/quantize_to_lowp.py`, which converts a trained bf16 checkpoint to mxfp8/mxfp4/nvfp4: fp8/fp4 here is a QAT path plus a weight export, and training stays bf16.
 
 ### RL is both at once
 
@@ -550,7 +550,7 @@ For a full training step, enable the profiler and efficiency callback to get the
 - **Watch power, not util %.** 100% utilization at 50–70% of the board limit is memory- or launch-bound (§11).
 - **Pad tokens cost full GEMM FLOPs.** Pack the batch before reaching for a faster kernel (§2).
 - **Gradient checkpointing is a memory lever with a compute price.** Leave it off whenever the batch fits without it (§8).
-- **Low precision is a memory lever at these MoE shapes, not a speed one.** Train in bf16; export to fp8/fp4 (§7, §10).
+- **Train in bf16.** Halo's low-precision paths are for QAT, not speed (§7).
 - **N× GPUs is not N× throughput.** Grow the batch with the world, or per-GPU `M` slides down the ramp (§9).
 - **Keep TP inside an NVLink domain and let EP cross nodes; PP is the axis a cross-node link would be spent on** (§9).
 - **Compare runs in tokens/s per GPU.** It survives a change of config and chip; MFU compares only within one chip (§11).

@@ -8,6 +8,7 @@ from halo.configs.script_arguments import (
     CommonScriptArguments,
     CrossDocumentLinearAttentionArguments,
     GenerationEvalArguments,
+    VisionTrainingArguments,
 )
 from halo.models.attention.tree_plan import FullAttentionForm
 
@@ -113,6 +114,7 @@ TREE_PACKING_FIELDS = tuple(f.name for f in fields(_TreePackingArguments))
 class SFTScriptArguments(
     _TreePackingArguments,
     CrossDocumentLinearAttentionArguments,
+    VisionTrainingArguments,
     ConversationRenderArguments,
     GenerationEvalArguments,
     CommonScriptArguments,

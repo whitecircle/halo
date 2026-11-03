@@ -49,6 +49,22 @@ def test_matching_images_field_passes_the_guard(monkeypatch):
         prepare_vlm_dataset(_dataset(), _args(images_field="images"), None, None, 128, 1)
 
 
+@pytest.mark.parametrize("column", ["images", "image"])
+def test_the_map_reads_the_image_column_the_dispatch_keyed_on_without_images_field(monkeypatch, column):
+    """The dispatch routes a run with such a column to the VLM path, so a map reading only images_field drops it."""
+    seen = {}
+
+    def _capture(ds, row_processor, **kwargs):
+        seen.update(kwargs["cache_key_extras"])
+        return ds
+
+    monkeypatch.setattr(vlm_rows, "coordinated_map", _capture)
+    monkeypatch.setattr(vlm_rows, "_filter_vlm_over_length", lambda ds, *args: ds)
+    ds = Dataset.from_list([{"prompt": [{"role": "user", "content": "hi"}], column: "x"}])
+    prepare_vlm_dataset(DatasetDict({"train": ds, "test": ds}), _args(), None, None, 32, 1)
+    assert seen["images_field"] == column
+
+
 def test_completion_masking_without_a_marker_is_refused_before_the_map():
     """The VLM collators refuse the pair too, but only after this map has paid the whole tokenization."""
     args = _args(train_on_completions_only=True, assistant_message_template=None)

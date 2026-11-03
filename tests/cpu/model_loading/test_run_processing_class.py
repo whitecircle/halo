@@ -13,23 +13,30 @@ from transformers import (
     AutoModelForImageTextToText,
     AutoProcessor,
     PreTrainedTokenizerBase,
+    Qwen3Config,
     Step3p7Config,
     Step3p7ForConditionalGeneration,
     Step3p7ImageProcessor,
     Step3p7Processor,
 )
 
+from halo.checkpoint.parallel.save import save_checkpoint
 from halo.entrypoints import model_setup
 from halo.entrypoints.model_setup import install_resolved_tokenizer
 from halo.model_loading.model_preparation import resolve_auto_model_class
+from halo.trainers import checkpointing
+from halo.trainers.checkpointing import CheckpointingMixin
+from tests.common.checkpoint_io import save_context
 from tests.common.models import (
     PINNED_REVISIONS,
+    QWEN3_5_9B,
     STEP3P7_FLASH,
+    TINY_QWEN3_CONFIG,
     TINY_STEP3P7_CONFIG,
     TINY_STEP3P7_VISION_CONFIG,
 )
 from tests.common.tiny_models import word_level_tokenizer
-from tests.common.tokenizers import load_cached_config, load_cached_tokenizer
+from tests.common.tokenizers import load_cached_config, load_cached_processor, load_cached_tokenizer
 
 # Step3p7Processor reads its image placeholder's id off the tokenizer.
 _TOKENIZER_WORDS = ("<im_patch>", "hello")
@@ -155,6 +162,105 @@ def test_the_resolved_tokenizer_lands_on_whichever_class_the_run_loaded(tmp_path
     processor = Step3p7Processor(image_processor=Step3p7ImageProcessor(), tokenizer=loaded)
     assert install_resolved_tokenizer(processor, resolved) is processor
     assert processor.tokenizer is resolved
+
+
+def _export_args(path: str, *, text_only_model: bool = False):
+    model_config = SimpleNamespace(model_name_or_path=path, model_revision=None, trust_remote_code=False)
+    return model_config, SimpleNamespace(text_only_model=text_only_model)
+
+
+def test_a_composite_export_carries_the_processor_beside_the_runs_tokenizer(tmp_path):
+    path = _step3p7_checkpoint(tmp_path, with_processor=True)
+    tokenizer = word_level_tokenizer(_TOKENIZER_WORDS)
+    processor = model_setup.load_export_processor(*_export_args(path), tokenizer)
+    assert isinstance(processor, Step3p7Processor)
+    assert processor.tokenizer is tokenizer, "the window pins live on the run's tokenizer"
+
+
+@pytest.mark.parametrize(
+    ("with_processor", "text_only_model"), [(False, False), (True, True)], ids=["ships_none", "text_only_model"]
+)
+def test_an_export_with_no_processor_to_carry_stays_on_the_tokenizer(tmp_path, with_processor, text_only_model):
+    path = _step3p7_checkpoint(tmp_path, with_processor=with_processor)
+    model_config, args = _export_args(path, text_only_model=text_only_model)
+    assert model_setup.load_export_processor(model_config, args, word_level_tokenizer(_TOKENIZER_WORDS)) is None
+
+
+def test_a_text_checkpoint_export_never_builds_a_processor(tmp_path, monkeypatch):
+    Qwen3Config(**TINY_QWEN3_CONFIG).save_pretrained(tmp_path)
+    monkeypatch.setattr(model_setup, "load_vlm_processor", lambda *a, **k: pytest.fail("a processor was loaded"))
+    model_config, args = _export_args(str(tmp_path))
+    assert model_setup.load_export_processor(model_config, args, word_level_tokenizer(_TOKENIZER_WORDS)) is None
+
+
+class _BaseSave:
+    def __init__(self):
+        self.saved_by_base = False
+
+    def save_model(self, output_dir, _internal_call=False):
+        self.saved_by_base = True
+
+
+class _Exporter(CheckpointingMixin, _BaseSave):
+    """The two seams of the mixin an export runs through, on a trainer with nothing else."""
+
+    parallelism_config = None
+    args = SimpleNamespace(should_save=True)
+
+
+def _exporter(processing_class, export_processing_class) -> _Exporter:
+    exporter = _Exporter()
+    exporter.processing_class = processing_class
+    exporter.export_processing_class = export_processing_class
+    return exporter
+
+
+def test_the_export_prefers_what_the_run_carries_for_it():
+    assert _exporter("tokenizer", "processor")._exported_processing_class() == "processor"
+    assert _exporter("tokenizer", None)._exported_processing_class() == "tokenizer"
+
+
+@pytest.mark.parametrize("carried", [True, False], ids=["carried", "tokenizer_only"])
+def test_the_base_save_writes_the_processor_a_grpo_run_carries(tmp_path, monkeypatch, carried):
+    """The path of a run with no toolkit saver: one GPU, or DDP."""
+    saved = []
+    processor = SimpleNamespace(save_pretrained=saved.append) if carried else None
+    exporter = _exporter("tokenizer", processor)
+    monkeypatch.setattr(checkpointing, "save_checkpoint", lambda *a: False)
+    monkeypatch.setattr(checkpointing, "finalize_exported_config", lambda *a, **k: None)
+    monkeypatch.setattr(checkpointing, "config_schema_source", lambda *a: None)
+    monkeypatch.setattr(checkpointing, "apply_umask_mode", lambda *a: None)
+    context = SimpleNamespace(model=torch.nn.Linear(1, 1))
+    context.model.config = None
+    exporter._write_model_payload(context, str(tmp_path), False)
+    assert exporter.saved_by_base
+    assert saved == ([str(tmp_path)] if carried else [])
+
+
+@pytest.mark.parametrize("carried", [True, False], ids=["carried", "tokenizer_only"])
+def test_a_hub_push_uploads_the_processor_the_base_push_leaves_out(tmp_path, monkeypatch, carried):
+    """The base push copies the weights into ``output_dir``, resaves ``processing_class`` and uploads the directory."""
+    order = []
+    processor = SimpleNamespace(save_pretrained=lambda path: order.append(("processor", path))) if carried else None
+    exporter = _exporter("tokenizer", processor)
+    exporter.args = SimpleNamespace(
+        should_save=True, push_to_hub=True, output_dir=str(tmp_path), save_total_limit=None
+    )
+    monkeypatch.setattr(checkpointing, "commit_trainer_state", lambda *a: None)
+    monkeypatch.setattr(checkpointing, "rotate_checkpoints", lambda **k: None)
+    exporter._get_output_dir = lambda trial=None: str(tmp_path)
+    exporter.state = SimpleNamespace(best_model_checkpoint=None)
+    exporter._push_from_checkpoint = lambda folder: order.append(("push", folder))
+    exporter._publish_checkpoint("checkpoint-1", None)
+    assert order == ([("processor", str(tmp_path))] if carried else []) + [("push", "checkpoint-1")]
+
+
+def test_the_toolkit_saver_writes_files_an_engine_builds_a_processor_from(tmp_path):
+    processor = load_cached_processor(QWEN3_5_9B)
+    save_checkpoint(save_context(torch.nn.Linear(4, 4), toolkit_fsdp2=True, tokenizer=processor), str(tmp_path))
+    assert any((tmp_path / name).is_file() for name in model_setup.PROCESSOR_FILES), sorted(
+        path.name for path in tmp_path.iterdir()
+    )
 
 
 def test_a_text_run_resolves_the_step3p7_hub_release_natively():

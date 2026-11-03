@@ -53,6 +53,7 @@ from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset
 from halo.entrypoints.model_setup import (
     apply_tokenizer_window,
     default_padded_attn_implementation,
+    load_export_processor,
     load_model_and_tokenizer,
     log_model_info,
 )
@@ -351,6 +352,7 @@ def main():
         # A trajectory accumulates every turn, so MFU would be reported against a length batches routinely exceed.
         max_seq_len=full_trajectory_tokens,
     )
+    export_processor = load_export_processor(model_config, args, tokenizer)
     trainer = DistributedAsyncEnvironmentalGRPOTrainer(
         model=model,
         args=grpo_config,
@@ -365,6 +367,7 @@ def main():
         save_completions=args.save_completions,
         **distributed_trainer_kwargs(args, parallelism_config, dataset_presharded=dataset_presharded),
     )
+    trainer.export_processing_class = export_processor
     run_trainer(
         trainer,
         context,

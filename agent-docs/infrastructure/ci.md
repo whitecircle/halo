@@ -108,7 +108,7 @@ The scope Halo 1.2.0 is validated on:
 - **GPU:** single 8× B300 nodes: the core and pipeline tiers, both rollout-server tiers (vLLM 0.32.0,
   SGLang 0.5.22), the EP and CP bit-for-bit equivalence gates (`make verify-ep` / `make verify-cp`) and
   the throughput band (`make bench BAND=1`; [gates](../contributing/README.md#dev-loop)).
-- **Hopper:** the image build, the CPU tier inside it and an FA3 import check; no GPU test runs on Hopper.
+- **Hopper:** the image build, the CPU tier inside it and an FA3 import check.
 - **Multi-node:** two B300 nodes over EFA for the two PP recipes (training; the Qwen3-8B one also a
   per-node save, resume, merge and load) and cross-node `ep16`; the rest is a two-node simulation on one
   host ([Verified topologies](../parallelism/multi-node.md#verified-topologies)).

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""VLM SFT on Qwen3.5-4B, natively multimodal with a hybrid of GatedDeltaNet and attention layers and a double-width
-q_proj.
+"""SFT on text rows through the Qwen3.5-4B composite class, natively multimodal with a hybrid of GatedDeltaNet and
+attention layers and a double-width q_proj. No image reaches it: `test_sft_prefix_lm.py` is the image row.
 
 FA2 is incompatible with its M-RoPE varlen path (cudaErrorIllegalAddress), so this runs sdpa.
 """
@@ -32,7 +32,7 @@ LEARNING_RATE = 2e-5
 SEED = 42
 
 
-@gpu_test_main(min_world_size=1, prefix="test_sft_vlm_qwen3_5")
+@gpu_test_main(min_world_size=1, prefix="test_sft_composite_text_rows_qwen3_5")
 def run(ctx):
     log(f"\n{'=' * 70}")
     log("VLM SFT Training Test: Qwen3.5-4B (natively multimodal)")
@@ -57,7 +57,7 @@ def run(ctx):
     log(f"Processor type: {type(processor).__name__}")
     log(f"Tokenizer: vocab_size={tokenizer.vocab_size}")
 
-    # Text-only samples still exercise the VLM code path.
+    # A text run through the composite class: no row here reaches the vision tower or the VLM collator.
     log("\n--- Creating datasets ---")
     train_dataset = create_sft_dataset(NUM_TRAIN_SAMPLES, tokenizer, seed=SEED)
     eval_dataset = create_sft_dataset(NUM_EVAL_SAMPLES, tokenizer, seed=SEED + 100)

@@ -6,7 +6,7 @@ from __future__ import annotations
 import torch
 
 from halo.kernels.grouped_mm import grouped_mm
-from halo.kernels.lowp.deepgemm import DEEPGEMM_FORMATS, deepgemm_grouped_gemm, use_deepgemm
+from halo.kernels.lowp.deepgemm import deepgemm_grouped_gemm, use_deepgemm
 from halo.kernels.lowp.quantization import cached_fake_quant, fake_quant
 from halo.kernels.lowp.spec import QuantFormat
 
@@ -24,11 +24,7 @@ def expert_gemm(
     would serve the step-0 quantization forever."""
     if quant_format is None:
         return grouped_mm(mat_a, mat_b, offs=offs)
-    if (
-        quant_format in DEEPGEMM_FORMATS
-        and offs is not None
-        and use_deepgemm(mat_a.shape[0] / max(mat_b.shape[0], 1), mat_b.shape[2])
-    ):
+    if use_deepgemm(quant_format):
         return deepgemm_grouped_gemm(
             mat_a, mat_b, offs=offs, quant_format=quant_format, weight_cacheable=weight_cacheable
         )

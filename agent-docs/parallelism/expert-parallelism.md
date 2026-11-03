@@ -476,8 +476,9 @@ rather than falling back, since `from_pretrained` inside a meta context still st
 checkpoint into host RAM.
 
 State the checkpoint does not carry (`score` for reward / classification on top of a base LM
-checkpoint) is random-initialized through the family's own `_init_weights`, exactly as
-`from_pretrained` does; the run's identical seeding makes every rank draw the same values.
+checkpoint) is random-initialized through the `_init_weights` of the nearest `PreTrainedModel` above it, exactly as
+`from_pretrained` dispatches them, so a composite's tower draws its own parameters; the run's identical seeding makes
+every rank draw the same values.
 
 A module only *partially* absent raises rather than overwrite the tensors that did load, and a tied
 shadow (`lm_head.weight`) is left to the post-load `tie_weights()`. A parameter **or buffer** that

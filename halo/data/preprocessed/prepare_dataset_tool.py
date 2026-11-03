@@ -17,6 +17,7 @@ from huggingface_hub.errors import EntryNotFoundError, RepositoryNotFoundError
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer, PreTrainedTokenizer
 
 from halo.checkpoint.atomic import DISPLACED_SUFFIX, clear_staging_path
+from halo.data.collators.collator_rules import reject_unpackable_family
 from halo.data.pipeline.coordinated_map import dataset_num_proc_override, ensure_cache_dir, scratch_dataset_maps
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.preparation import preprocess_dataset
@@ -24,9 +25,9 @@ from halo.data.render_columns import reject_missing_render_column
 from halo.data.sources.loading import load_dataset_from_source
 from halo.data.sources.paths import EVAL_SPLIT_NAMES, METADATA_FILE, parse_dataset_destination, parse_s3_uri
 from halo.data.sources.s3_client import S3Client
+from halo.data.vlm_render import apply_image_pixel_bounds
 from halo.hardware import available_cpu_count
 from halo.model_loading.tokenizer_setup import adopt_tokenizer_chat_template, resolve_tokenizer, set_run_chat_template
-from halo.models.segment_markers import reject_compressed_kv_rows
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +51,14 @@ class PrepareDatasetArguments:
     overwrite: bool = field(default=False, metadata={"help": "Replace an existing output."})
     dry_run: bool = field(default=False, metadata={"help": "Show what would be done without processing."})
     verbose: bool = field(default=False, metadata={"help": "Log at DEBUG."})
+    allow_cross_document_linear_attention: bool = field(
+        default=False,
+        metadata={
+            "help": "Bake --pack_sequences rows for a model whose linear-attention layers or other sequence mixers "
+            "receive no document boundary. Training them takes the same opt-in; off, the bake is refused as training "
+            "would refuse its rows."
+        },
+    )
 
 
 def bake_num_proc() -> int:
@@ -88,12 +97,8 @@ def load_tokenizer(config: PreprocessingConfig) -> PreTrainedTokenizer:
 
 def load_vlm_processor(config: PreprocessingConfig):
     logger.info(f"Loading VLM processor from {config.model_name_or_path}")
-    processor_kwargs = {"trust_remote_code": config.trust_remote_code}
-    if config.min_pixels is not None:
-        processor_kwargs["min_pixels"] = config.min_pixels
-    if config.max_pixels is not None:
-        processor_kwargs["max_pixels"] = config.max_pixels
-    processor = AutoProcessor.from_pretrained(config.model_name_or_path, **processor_kwargs)
+    processor = AutoProcessor.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
+    apply_image_pixel_bounds(processor, config.min_pixels, config.max_pixels)
     tokenizer = resolve_tokenizer(processor)
     apply_tokenizer_overrides(tokenizer, config)
     adopt_tokenizer_chat_template(processor)
@@ -274,9 +279,15 @@ def run_dataset_preparation(args: PrepareDatasetArguments, config: Preprocessing
     # Output-side classification: a bare "org/name" stays local; only an explicit hf:// uploads.
     output_type, _, output_key = parse_dataset_destination(args.output)
 
+    if args.allow_cross_document_linear_attention and not config.pack_sequences:
+        raise ValueError("--allow_cross_document_linear_attention needs --pack_sequences: only packed rows cross.")
     if config.pack_sequences:
         hf_config = AutoConfig.from_pretrained(config.model_name_or_path, trust_remote_code=config.trust_remote_code)
-        reject_compressed_kv_rows(hf_config, "--pack_sequences")
+        reject_unpackable_family(
+            hf_config,
+            allow_cross_document_linear_attention=args.allow_cross_document_linear_attention,
+            flag="--pack_sequences",
+        )
 
     logger.info("=" * 60)
     logger.info(f"Dataset Preprocessing ({'VLM' if config.is_vlm else 'Text SFT'})")

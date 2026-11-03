@@ -14,6 +14,7 @@ import torch.nn as nn
 from transformers import PreTrainedModel
 from transformers.utils import CONFIG_NAME
 
+import halo.models.conversion_overrides  # noqa: F401  registers the family overrides before any load reads the mapping
 from halo.checkpoint.format import ADAPTER_CONFIG_FILE
 from halo.env import env_flag
 from halo.model_loading.remote_code import reject_untieable_list_ties
@@ -30,7 +31,7 @@ _FSDP_CPU_RAM_EFFICIENT_LOADING = "FSDP_CPU_RAM_EFFICIENT_LOADING"
 def unexpected_missing_keys(
     model: nn.Module, missing_keys: Iterable[str], *, excuse_task_head: bool = True
 ) -> list[str]:
-    """The ``missing_keys`` that cannot be legitimate. Excused, off the model class: a tie, a task head outside
+    """The ``missing_keys`` that cannot be legitimate. Excused, off the model: a tie, a task head outside
     ``base_model_prefix`` (unless ``excuse_task_head=False``, for a caller consuming a head it cannot train), and
     ``_keys_to_ignore_on_load_missing``."""
     missing = set(missing_keys)
@@ -43,7 +44,8 @@ def unexpected_missing_keys(
     loaded_tensor_ids = {id(tensor) for key, tensor in state.items() if key not in missing}
     prefix = getattr(model, "base_model_prefix", "")
     backbone_prefix = f"{prefix}." if prefix and hasattr(model, prefix) else ""
-    declared_ignores = tuple(getattr(type(model), "_keys_to_ignore_on_load_missing", None) or ())
+    # The instance attribute: ``post_init`` unions the children's into it, which a composite's own class never lists.
+    declared_ignores = tuple(getattr(model, "_keys_to_ignore_on_load_missing", None) or ())
 
     unexpected: list[str] = []
     for key in sorted(missing):

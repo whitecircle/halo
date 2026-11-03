@@ -1,10 +1,12 @@
 """Shared argparse setup and baseline-key spelling for the profiling benchmarks."""
 
 import argparse
+from typing import get_args
 
 import torch
 from transformers import AutoConfig
 
+from halo.kernels.lowp.spec import LowpPrecision
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import resolve_attn_implementation
 from tests.common.models import DEFAULT_MODEL, MODEL_CONFIGS
@@ -104,6 +106,17 @@ def create_benchmark_parser(
         help="Number of dummy samples",
     )
     return parser
+
+
+def add_lowp_precision_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--lowp_precision",
+        type=str,
+        default="bf16",
+        choices=get_args(LowpPrecision),
+        help="Low-precision GEMM compute for the dense MLP and MoE experts; master weights and "
+        "checkpoints stay bf16. 'bf16' = off, 'fp8' = mxfp8, 'fp4' = nvfp4, 'mxfp4' = fast fp4.",
+    )
 
 
 def axis_tags(**sizes: int) -> list[str]:

@@ -107,8 +107,8 @@ def _trained_tokens(
     assistant_message_template: str,
     train_on_last_assistant_only: bool,
 ) -> list[bool]:
-    """Which tokens of a flat example the packing completion collator trains: each span through its closing token,
-    minus pad-valued tokens where pad is not the EOS, never the document's first token."""
+    """Which tokens of a flat example the packing completion collator trains: each span through its closing token, never
+    the document's first token."""
     spans = resolve_spans_or_warn(
         input_ids,
         response_token_ids,
@@ -119,10 +119,7 @@ def _trained_tokens(
         tokenizer=tokenizer,
         row_label="tree row",
     )
-    untrained_pad = None if tokenizer.pad_token_id == tokenizer.eos_token_id else tokenizer.pad_token_id
-    values = [LABEL_IGNORE_INDEX if token == untrained_pad else token for token in input_ids]
-    labels = build_span_labels(values, input_ids, spans, restore_end=True)
-    trained = [label != LABEL_IGNORE_INDEX for label in labels]
+    trained = [label != LABEL_IGNORE_INDEX for label in build_span_labels(input_ids, input_ids, spans)]
     if trained:
         trained[0] = False
     return trained

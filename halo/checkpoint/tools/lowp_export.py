@@ -1,5 +1,5 @@
-"""Quantize a bf16/fp32 checkpoint to a block-scaled low-precision checkpoint (mxfp8 / mxfp4 / nvfp4) in the
-compressed-tensors layout, scoped to exactly the weights the QAT forward quantized, with its manifest."""
+"""Quantize a bf16/fp32 checkpoint to a block-scaled low-precision checkpoint (mxfp8 / mxfp4 / nvfp4), scoped to
+exactly the weights the QAT forward quantized, with its ``block_scaled`` manifest."""
 
 from __future__ import annotations
 
@@ -199,7 +199,7 @@ def _contraction_axis(name: str, tensor: torch.Tensor, fused_expert_axis: int | 
 
 
 def _block_scaled_tensors(name: str, tensor: torch.Tensor, quantized: BlockScaledTensor) -> dict[str, torch.Tensor]:
-    """The compressed-tensors entries for ``name``: packed data, block scales, shape and, for nvfp4, global scale."""
+    """The block-scaled entries for ``name``: packed data, block scales, shape and, for nvfp4, global scale."""
     base = name[: -len(".weight")] if name.endswith(".weight") else name
     entries = {
         f"{base}.weight_packed": quantized.data.cpu().contiguous(),
@@ -349,7 +349,7 @@ def _write_manifest(
         "contraction_axis": DENSE_CONTRACTION_AXIS,
         # 3-D fused experts differ by family, so a loader reads the axis per weight, falling back to contraction_axis.
         "weight_axes": weight_axes,
-        "layout": "compressed-tensors block-scaled (weight_packed / weight_scale / weight_shape)",
+        "layout": "block-scaled (weight_packed / weight_scale / weight_shape)",
         # nvfp4 is two-level: the e4m3 block scale is relative to a per-tensor fp32 global scale.
         "global_scale_key_suffix": ".weight_global_scale" if fmt == "nvfp4" else None,
         # Not derivable from the weights; a re-export or a comparison against the run needs these ``lowp_*`` values.

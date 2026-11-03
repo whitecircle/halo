@@ -90,7 +90,7 @@ Two verdicts decide a vision-language run. The **model class follows the checkpo
 
 The **data path follows the run** (`is_vlm_run_across_ranks`, `halo/data/vlm_detection.py`): the VLM path only when the checkpoint is multimodal **and** the run declares image data. A natively-multimodal checkpoint (Gemma 4, Qwen3.5/3.6, Inkling) on text-only rows is a text run, so packing, padding-free and `train_on_last_assistant_only` stay available.
 
-The processing class is the checkpoint's processor wherever it ships a processor config (`processor_config.json`, `preprocessor_config.json` or `video_preprocessor_config.json`), text runs included: the export saves it, and vLLM builds the multimodal class's processor from it at startup. A multimodal checkpoint shipping none ([Step-3.7 Flash](../models/step3p7.md#model-loading)) trains text runs through its tokenizer and refuses an image run at the processor load (`halo/entrypoints/model_setup.py`).
+The processing class is the checkpoint's processor wherever it ships a processor config (`processor_config.json`, `preprocessor_config.json` or `video_preprocessor_config.json`), text runs included: the export saves it, and vLLM builds the multimodal class's processor from it at startup. GRPO keeps the tokenizer as its processing class, since TRL reads a processor as a vision run, and its exports carry the processor beside it (`load_export_processor`). A multimodal checkpoint shipping none ([Step-3.7 Flash](../models/step3p7.md#model-loading)) trains text runs through its tokenizer and refuses an image run at the processor load (`halo/entrypoints/model_setup.py`).
 
 Images ride embedded in message content, or in a column named by `images_field`, pairing with any image placeholders, else the first user turn — so hub datasets that keep images outside the conversation (FineVision, the_cauldron, Docmatix) need only field mappings. Either shape declares the run VLM, as does an `images` / `image` / `pixel_values` column ([rules](../data/dataset-formats.md#sft-vlm)):
 
@@ -102,6 +102,8 @@ images_field: images
 ```
 
 Shipped configs: `examples/sft/qwen3_5/qwen3.5-9b-vl-ocr-olmocr.yaml`, `qwen3.5-9b-vl-docvqa.yaml`.
+
+Three options apply to every script with a vision path. `freeze_vision_tower: true` freezes the vision and audio towers and their projectors (`media_module_names`, `halo/models/module_tree.py`), training the text tower on image data; adapters freeze the base already and refuse it, as does a checkpoint with no tower. `min_pixels` and `max_pixels` bound the pixels per image, and so the tokens each one costs, on a processor that resizes by pixel count (the Qwen family; others refuse them, and a pre-processed dataset keeps what it baked). They land on the processor, so the export carries them.
 
 VLM limits are fail-loud and bind the image-declaring **run**, not the multimodal checkpoint: `packing` / `padding_free` (images cannot be packed), `train_on_last_assistant_only` (all assistant turns train), `interleaved_thinking` (no VLM template renders `clear_thinking`), CP (patch features do not slice by token chunk), and `generate_eval_examples` (skipped). `init_from_scratch` is the exception, refused on the **checkpoint** at the model load.
 

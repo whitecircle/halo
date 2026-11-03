@@ -17,10 +17,14 @@ from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_k
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
 from halo.data.sources.loading import is_presharded_dataset_load_across_ranks, load_datasets, share_s3_control_files
 from halo.data.vlm_detection import dataset_declares_images_across_ranks, is_vlm_run_across_ranks, reject_image_columns
+from halo.data.vlm_render import apply_image_pixel_bounds
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import RUN_LOG_DIR_NAME
+from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_patterns
 from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.models.attention.prefix_lm import has_prefix_lm_attention
+from halo.models.module_tree import media_module_names
+from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.filesystem import is_fs_save_rank
 from halo.runtime.ranks import is_global_main_process
 
@@ -100,6 +104,18 @@ def _reject_images_under_text_only_model(args, datasets, *, text_only_model: boo
         )
 
 
+def reject_image_data_on_text_checkpoint(args, model_name_or_path: str, datasets) -> None:
+    """COLLECTIVE: the VLM dispatch reads a text checkpoint as a text run whatever the data declares, and the text
+    pipeline then drops the images. ``images_field`` is rank-uniform, so every rank takes the same branch."""
+    images_field = getattr(args, "images_field", None)
+    if images_field or dataset_declares_images_across_ranks(datasets, getattr(args, "conversation_field", None)):
+        declared = f"images_field={images_field!r}" if images_field else "an image column or image content parts"
+        raise ValueError(
+            f"{model_name_or_path!r} is a text checkpoint, but this run declares image data ({declared}), which the "
+            f"text pipeline would drop. Train a multimodal checkpoint, or remove the image data."
+        )
+
+
 def resolve_vlm_run(
     args, model_config, datasets, *, text_only_model: bool, vlm_checkpoint: bool | None = None
 ) -> bool:
@@ -112,6 +128,8 @@ def resolve_vlm_run(
             revision=model_config.model_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
+    if not vlm_checkpoint:
+        reject_image_data_on_text_checkpoint(args, model_config.model_name_or_path, datasets)
     return is_vlm_run_across_ranks(args, model_config.model_name_or_path, datasets, vlm_checkpoint=vlm_checkpoint)
 
 
@@ -143,6 +161,23 @@ def resolve_preference_vlm_run(args, model_config, datasets, *, text_only_model:
     if is_vlm:
         reject_prefix_lm_image_preference(checkpoint_config, model_config.model_name_or_path, method)
     return is_vlm
+
+
+def apply_vision_options(args, model, model_config, processing_class, *, is_vlm: bool) -> None:
+    """COLLECTIVE under ``freeze_vision_tower``, after :func:`configure_adapter_training`, so the freeze outlasts its
+    unfreeze patterns. A tower no text row reaches also stops being a parameter FSDP2 reduces on only some ranks."""
+    if args.min_pixels is not None or args.max_pixels is not None:
+        if not is_vlm:
+            raise ValueError("min_pixels / max_pixels bound images, and this run takes the text data path.")
+        apply_image_pixel_bounds(processing_class, args.min_pixels, args.max_pixels)
+    if not args.freeze_vision_tower:
+        return
+    if model_config.use_peft:
+        raise ValueError("freeze_vision_tower has nothing to do with adapters: they freeze the whole base already.")
+    towers = media_module_names(model)
+    reason = None if towers else f"freeze_vision_tower: {type(model).__name__} holds no vision or audio tower here."
+    reject_across_ranks(reason, "freeze_vision_tower", ValueError)
+    freeze_parameters_by_patterns(model, [f"{tower}.*" for tower in towers])
 
 
 def _write_decoded_samples(

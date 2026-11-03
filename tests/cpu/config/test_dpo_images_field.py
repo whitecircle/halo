@@ -106,6 +106,16 @@ def _trl_sees_a_vision_dataset(dataset: Dataset) -> bool:
     return "image" in sample or "images" in sample
 
 
+def test_a_vision_run_refuses_a_media_part_ahead_of_trls_collator(tmp_path):
+    """TRL's collator renders a video placeholder with no pixels: its render never reads this row's part."""
+    video = [{"role": "user", "content": [{"type": "video", "video": "a.mp4"}, {"type": "text", "text": "hi"}]}]
+    text = [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+    rows = [{"prompt": prompt, "chosen": _TURNS, "rejected": _TURNS, "images": []} for prompt in (text, video)]
+    dataset = DatasetDict({"train": Dataset.from_list(rows), "test": Dataset.from_list(rows)})
+    with pytest.raises(ValueError, match="no Halo collator feeds"):
+        _run_dpo(tmp_path, dataset)
+
+
 def test_the_dispatch_and_trls_probe_agree_on_the_declared_column(tmp_path):
     """``is_vlm_run_across_ranks`` and TRL's probe must agree on the one dataset the trainer receives; without the
     alias TRL reads the rows as text and prunes the images."""

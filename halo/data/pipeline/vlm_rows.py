@@ -8,11 +8,12 @@ import datasets
 from datasets.features import Json
 from PIL import Image
 
-from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, resolve_json_value
+from halo.data.conversation import IMAGE_PART_PAYLOAD_KEY, IMAGE_PART_TYPE, is_image_placeholder, resolve_json_value
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.rejected_rows import dataset_total_size, report_rejected_rows
 from halo.data.render_columns import reject_missing_render_column
 from halo.data.turn_markers import reject_missing_response_marker
+from halo.data.vlm_detection import VLM_RAW_IMAGE_COLUMNS
 from halo.data.vlm_render import extract_conversation_images, render_vlm_text, vlm_row_tools
 from halo.runtime.consensus import agree_probe_across_ranks
 
@@ -49,7 +50,7 @@ def normalize_vlm_conversation(conversation: list[dict[str, Any]], images: Any =
         for message in messages
         if isinstance(message["content"], list)
         for part in message["content"]
-        if part.get("type") == IMAGE_PART_TYPE and not part.get(IMAGE_PART_PAYLOAD_KEY)
+        if is_image_placeholder(part)
     ]
     if placeholders:
         if len(placeholders) != len(image_list):
@@ -205,7 +206,9 @@ def prepare_vlm_dataset(
         "system_prompt": args.system_prompt,
         "model_supports_system_role": args.model_supports_system_role,
         "tools_field": args.tools_field,
-        "images_field": args.images_field,
+        # The run dispatch takes such a column as image data without images_field, so the map has to read it too.
+        "images_field": args.images_field
+        or next((column for column in VLM_RAW_IMAGE_COLUMNS if column in ds["train"].column_names), None),
     }
     ds = coordinated_map(
         ds,

@@ -21,6 +21,7 @@ from halo.model_loading.model_preparation import (
     apply_run_model_policies,
     resolve_auto_model_class,
     resolve_build_config,
+    resolve_text_only_config,
 )
 from halo.model_loading.parallel.cp import load_cp_model, load_ep_cp_model
 from halo.model_loading.parallel.ep import load_ep_model
@@ -314,6 +315,8 @@ def _resolve_run_config(
     # text_only_model opts into that drop deliberately (and restores config-honored aux loss).
     if model_class is None:
         model_class = resolve_auto_model_class(model_config, text_only=text_only_model)
+        if text_only_model:
+            model_config = resolve_text_only_config(model_config)
     elif text_only_model and is_global_main_process():
         logger.warning(
             f"text_only_model=True is ignored: the caller pinned model_class={model_class} "

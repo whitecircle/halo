@@ -20,17 +20,20 @@ from halo.checkpoint.tools.offline_export import (
     resolve_checkpoint_source,
 )
 from halo.checkpoint.writing import StreamingShardWriter
+from halo.models.moe.family_specs import CompositeTextLayout, find_moe_family_spec
 
 logger = logging.getLogger(__name__)
 
-TEXT_PREFIX = "model."
-WRAPPER_TEXT_PREFIX = "model.language_model."
-HEAD_PREFIX = "lm_head."
+
+def _declared_text_layout(model_type: str | None) -> CompositeTextLayout | None:
+    spec = find_moe_family_spec(model_type)
+    return None if spec is None else spec.text_only_layout
 
 
 def _require_text_only_export(input_dir: str, trust_remote_code: bool) -> AutoConfig:
     config = AutoConfig.from_pretrained(input_dir, trust_remote_code=trust_remote_code)
-    if getattr(config, "vision_config", None) is not None or not str(config.model_type).endswith("_text"):
+    text_only_type = str(config.model_type).endswith("_text") or _declared_text_layout(config.model_type) is not None
+    if getattr(config, "vision_config", None) is not None or not text_only_type:
         raise ValueError(
             f"{input_dir} is not a text-only export (model_type={config.model_type!r}): it already "
             f"carries the multimodal layout and needs no re-attachment."
@@ -38,28 +41,30 @@ def _require_text_only_export(input_dir: str, trust_remote_code: bool) -> AutoCo
     return config
 
 
-def _require_text_tower_keys(input_dir: str, model_type: str, base_text_children: set[str]) -> None:
+def _require_text_tower_keys(
+    input_dir: str, model_type: str, base_text_children: set[str], layout: CompositeTextLayout
+) -> None:
     """Refuse an export whose keys are not the text-only layout its config declares; a key naming no module of the
     base's text tower lands on no wrapper slot and reloads random-initialized. Header-only."""
     misplaced = [
         key
         for _shard, _reader, key in iter_checkpoint_shard_entries(input_dir)
-        if not key.startswith(HEAD_PREFIX)
-        and not (key.startswith(TEXT_PREFIX) and key[len(TEXT_PREFIX) :].split(".", 1)[0] in base_text_children)
+        if not key.startswith(layout.head)
+        and not (key.startswith(layout.tower) and key[len(layout.tower) :].split(".", 1)[0] in base_text_children)
     ]
     if not misplaced:
         return
-    if any(key.startswith(WRAPPER_TEXT_PREFIX) for key in misplaced):
+    if any(key.startswith(layout.composite_tower) for key in misplaced):
         raise ValueError(
             f"{input_dir} declares the text-only model_type {model_type!r} but stores its text tower under "
-            f"{WRAPPER_TEXT_PREFIX}* (e.g. {misplaced[0]!r}), the multimodal wrapper's layout, so its keys "
+            f"{layout.composite_tower}* (e.g. {misplaced[0]!r}), the multimodal wrapper's layout, so its keys "
             f"do not match its config and re-prefixing them would nest the wrapper prefix. Re-export it "
             f"in the text-only layout: scripts/after_training/convert_to_bf16.py for a full checkpoint, "
             f"merge_peft_adapters.py for an adapter."
         )
     raise ValueError(
         f"{len(misplaced)} key(s) of {input_dir} address no module of the base's text tower "
-        f"({WRAPPER_TEXT_PREFIX}{{{', '.join(sorted(base_text_children))}}}; e.g. {misplaced[0]!r}): it is not "
+        f"({layout.composite_tower}{{{', '.join(sorted(base_text_children))}}}; e.g. {misplaced[0]!r}): it is not "
         f"a text-only export of this base."
     )
 
@@ -79,7 +84,9 @@ def _grafted_composite_config(base_dir: str, text_config: AutoConfig, trust_remo
             f"the base checkpoint ({base_dir}) wraps a {base_text_type!r} text tower, but the export is "
             f"{text_config.model_type!r} — not the multimodal checkpoint this export trained from."
         )
-    composite.text_config = text_config
+    # The attribute holding it, as a release's remote config keeps it under its own name and reads ``text_config`` off it.
+    held = composite.get_text_config()
+    setattr(composite, next(name for name, value in vars(composite).items() if value is held), text_config)
     return composite
 
 
@@ -98,6 +105,7 @@ def reattach_vision_tower(
     # The writer's close removes every model*.safetensors it did not write, so an output at the base would replace it.
     reject_in_place_conversion(base_dir, output_dir)
     composite = _grafted_composite_config(base_dir, text_config, trust_remote_code)
+    layout = _declared_text_layout(composite.model_type) or CompositeTextLayout()
 
     input_shards = checkpoint_shard_files(input_dir)
     base_shards = checkpoint_shard_files(base_dir)
@@ -106,13 +114,15 @@ def reattach_vision_tower(
     # prefix; a base keeping a vendor namespace would be carried whole beside the trained tower, two towers colliding
     # on load.
     base_keys = [key for _shard, _reader, key in iter_checkpoint_shard_entries(base_dir)]
-    superseded = {key for key in base_keys if key.startswith((WRAPPER_TEXT_PREFIX, HEAD_PREFIX))}
+    superseded = {key for key in base_keys if key.startswith((layout.composite_tower, layout.composite_head))}
     base_text_children = {
-        key[len(WRAPPER_TEXT_PREFIX) :].split(".", 1)[0] for key in superseded if key.startswith(WRAPPER_TEXT_PREFIX)
+        key[len(layout.composite_tower) :].split(".", 1)[0]
+        for key in superseded
+        if key.startswith(layout.composite_tower)
     }
     if not base_text_children:
         raise ValueError(
-            f"the base checkpoint ({base_dir}) stores no text tower under {WRAPPER_TEXT_PREFIX}*, so the "
+            f"the base checkpoint ({base_dir}) stores no text tower under {layout.composite_tower}*, so the "
             f"trained export cannot supersede it — its text keys would be carried over beside the "
             f"trained ones. Re-attach onto a base saved in the wrapper layout."
         )
@@ -121,7 +131,7 @@ def reattach_vision_tower(
             f"the base checkpoint ({base_dir}) contributes no non-text tensors — nothing to "
             f"re-attach. Its weight layout does not match the expected multimodal wrapper."
         )
-    _require_text_tower_keys(input_dir, text_config.model_type, base_text_children)
+    _require_text_tower_keys(input_dir, text_config.model_type, base_text_children, layout)
 
     with StreamingShardWriter(output_dir, max_shard_size, enabled=True) as writer:
         preflight_resource_warning(
@@ -134,9 +144,7 @@ def reattach_vision_tower(
 
         trained = 0
         for key, tensor in iter_checkpoint_tensors(input_dir):
-            if key.startswith(TEXT_PREFIX):
-                key = WRAPPER_TEXT_PREFIX + key[len(TEXT_PREFIX) :]
-            writer.add(key, tensor)  # lm_head.* passes through verbatim
+            writer.add(layout.to_composite_key(key), tensor)
             trained += 1
 
         carried = 0

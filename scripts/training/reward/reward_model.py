@@ -15,7 +15,12 @@ from halo.configs.reward import RewardScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.render_columns import alias_images_column, alias_tools_column
 from halo.data.vlm_detection import is_vlm_run_across_ranks
-from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset_examples
+from halo.entrypoints.data_setup import (
+    apply_vision_options,
+    load_script_datasets,
+    log_script_dataset_examples,
+    reject_image_data_on_text_checkpoint,
+)
 from halo.entrypoints.model_setup import (
     apply_max_length,
     default_padded_attn_implementation,
@@ -34,6 +39,7 @@ from halo.entrypoints.script import (
     with_distributed_teardown,
 )
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
+from halo.models.modality import is_vlm_model
 from halo.runtime.collectives import barrier
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 
@@ -88,6 +94,8 @@ def main():
 
     log_model_info(model, tokenizer)
 
+    if not is_vlm_model(model_config.model_name_or_path, config=model.config):
+        reject_image_data_on_text_checkpoint(args, model_config.model_name_or_path, ds)
     # Off the loaded config: a multimodal checkpoint on text-only pairs is a text run, class unchanged.
     is_vlm = is_vlm_run_across_ranks(args, model_config.model_name_or_path, ds, config=model.config)
     if is_vlm:
@@ -99,6 +107,7 @@ def main():
     processing_class = tokenizer
     if is_vlm:
         processing_class = install_resolved_tokenizer(load_vlm_processor(model_config), tokenizer)
+    apply_vision_options(args, model, model_config, processing_class, is_vlm=is_vlm)
 
     # No pre-tokenization on either branch: TRL tokenizes the raw columns and filters over-length rows, and the VLM
     # branch renders pairs in its own map.

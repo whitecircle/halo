@@ -321,16 +321,14 @@ def test_a_quantized_glm5_tree_run_is_refused_before_the_load(
         _run_sft_main(tmp_path, lora + run_quantization)
 
 
-def test_a_pad_valued_token_inside_an_answer_stays_untrained_as_the_packing_collator_leaves_it(tokenizer):
-    """The LM collator masks every pad-valued label, the one inside a completion included; the span's
-    closing token is the only one the packing collator restores."""
+def test_a_pad_valued_token_inside_an_answer_trains_on_flat_and_tree_rows(tokenizer):
+    """A document holds real tokens only, so the routes agree with the padded one, whatever the token's value."""
     pad = tokenizer.pad_token
     rows = [_question_row(f'{{\n  "1": "Question {p}."\n}}', f'{{"1": "no{pad}{p}"}}') for p in range(2)]
     flat = _flat_examples(tokenizer, rows)
     for tokens, labels in flat:
         inside = [i for i, token in enumerate(tokens) if token == tokenizer.pad_token_id]
-        assert inside and all(labels[i] == LABEL_IGNORE_INDEX for i in inside), "the premise: flat leaves it untrained"
-        assert labels[inside[0] - 1] != LABEL_IGNORE_INDEX and labels[inside[0] + 1] != LABEL_IGNORE_INDEX
+        assert inside and all(labels[i] == tokens[i] for i in inside), "the premise: flat trains it"
     assert sorted(_tree_examples(_collate(tokenizer, _process(tokenizer, rows)))) == sorted(flat)
 
 

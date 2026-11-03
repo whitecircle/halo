@@ -75,9 +75,13 @@ All three weight each example by `1/group_size`, so every group counts equally.
 - `grpo`: per-sequence average, then a weighted mean across groups. Use when completion length varies.
 - `dr_grpo`: divides by effective group count × `max_completion_length`, a constant that removes length bias; a `null` cap raises at init.
 
+### Row positions
+
+DeepSeek-V4 and Mistral 4 read a token's row index in attention: DeepSeek-V4's compressors cut KV windows at fixed indices, and Mistral 4's query scale steps at a position. A left-padded row would score as another row, so these families always take the chunked scorer, which forwards each row alone, trimmed to its real tokens (`attention_reads_row_positions` on the family spec). At `per_device_train_batch_size` above 1 that is one forward per row before each backward. PP's stages forward the collated batch whole, so DeepSeek-V4 under PP is refused above one row per batch.
+
 ### Memory: chunked log-probs
 
-The default path materializes `[B, T_completion, vocab]` logits, the memory peak on wide vocabularies with long completions (twice per micro-batch where the reference is scored live). `use_chunked_grpo_logprobs: true` computes the same log-probs from `last_hidden_state` with a vocab-chunked softmax. CP always takes this path. Limits: [Chunked log-probs](../async-grpo/performance.md#chunked-log-probs).
+The default path materializes `[B, T_completion, vocab]` logits, the memory peak on wide vocabularies with long completions (twice per micro-batch where the reference is scored live). `use_chunked_grpo_logprobs: true` computes the same log-probs from `last_hidden_state` with a vocab-chunked softmax. CP always takes this path, as do the [row-position families](#row-positions). Limits: [Chunked log-probs](../async-grpo/performance.md#chunked-log-probs).
 
 ### MoE balancing
 

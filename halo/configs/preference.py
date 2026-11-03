@@ -10,11 +10,12 @@ from halo.configs.script_arguments import (
     DatasetNumProcArguments,
     GenerationEvalArguments,
     ModelInitKwargsArguments,
+    VisionTrainingArguments,
 )
 
 
 @dataclass
-class DPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
+class DPOScriptArguments(VisionTrainingArguments, GenerationEvalArguments, CommonScriptArguments):
     PROJECT_NAME: ClassVar[str] = "dpo-tuning"
 
     images_field: str | None = field(
@@ -45,7 +46,7 @@ class DPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
 
 
 @dataclass
-class KTOScriptArguments(CommonScriptArguments):
+class KTOScriptArguments(VisionTrainingArguments, CommonScriptArguments):
     """KTO expects an *unpaired* dataset: each row is ``{prompt, completion, label}``, ``label`` a bool marking the
     completion desirable. TRL's KTOTrainer auto-templates conversational rows via ``processing_class``."""
 
@@ -69,7 +70,7 @@ class KTOScriptArguments(CommonScriptArguments):
 
 
 @dataclass
-class SMPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
+class SMPOScriptArguments(VisionTrainingArguments, GenerationEvalArguments, CommonScriptArguments):
     PROJECT_NAME: ClassVar[str] = "smpo-tuning"
 
 

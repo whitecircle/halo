@@ -45,6 +45,9 @@ Leaf modules keep those imports one-way, each holding a contract several layers 
 | `halo/models/peft_adapters.py` | PEFT adapter parameters and the out-of-place LoRA fold, the value PEFT's merge would write |
 | `halo/models/gradient_checkpointing.py` | the recompute scope both passes of one checkpoint invocation share, expert-load counting off it, and the scoped gradient-checkpointing enable |
 | `halo/models/modality.py` | the multimodal verdict off a config in hand or a name; no hub read, no collective (the collective probe is `probe_checkpoint` in `halo/model_loading/parallel/model_source.py`) |
+| `halo/models/conversion_overrides.py` | family corrections to transformers' conversion mapping, registered at import behind one guard |
+| `halo/models/row_documents.py` | the documents of a training row as spans: where each sits and which of its tokens padding leaves real |
+| `halo/models/upstream_guard.py` | the guard on a toolkit forward written against one transformers release, which raises at load on a release that moved it |
 | `halo/models/segment_markers.py` | which families' conv / linear-attention mixers read per-document segment markers, the linear-attention kernel refusal, and the markers built from a row's `position_ids` |
 | `halo/models/attention/layout.py` | per-layer attention cost rules off `layer_types` and head geometry — the MFU attention term; `attention_call`, the per-module kernel-call geometry (heads, KV heads, width, window, softcap) both load-time warm-ups and the FlexAttention call check read |
 | `halo/models/attention/tree_plan.py` | the tree-attention plan of a tree-packed row: node recovery from the per-token columns, the index tensors each sequence mixer reads and their batch key |

@@ -291,8 +291,8 @@ Enabled by default where supported:
 
 - **Precision and optimizers.** `AdamWBF16` with stochastic rounding keeps weights and optimizer
   state in 6 bytes/parameter instead of 12 with FP32 master weights. Muon and FlashAdamW are also
-  supported. FP8/FP4 MoE training is available through fake-quant QAT and DeepGEMM, with
-  mxfp8/mxfp4/nvfp4 export.
+  supported. FP8/FP4 QAT runs on MoE experts and dense MLPs through a fake-quant path, with an opt-in
+  DeepGEMM forward; `quantize-to-lowp` writes block-scaled mxfp8/mxfp4/nvfp4 weights.
 
 - **Memory and PEFT.** Padding-free, boundary-aware packing with `cu_seq_lens`, SFT tree packing that
   stores a prefix several rows share once, plus LoRA and QLoRA.

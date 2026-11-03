@@ -12,6 +12,7 @@ from halo.data.collators.collator_rules import evaluation_batch_size, rows_reach
 from halo.data.collators.factory import select_data_collator
 from halo.data.collators.padded import DataCollatorForCausalLMWithPadding
 from halo.entrypoints.data_setup import (
+    apply_vision_options,
     load_script_datasets,
     log_script_dataset_examples,
     prepare_chat_text_split,
@@ -37,6 +38,7 @@ from halo.entrypoints.script import (
 )
 from halo.model_loading.dtype import resolve_training_dtype
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
+from halo.model_loading.parallel.model_source import probe_checkpoint
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
 from halo.models.attention.gpt_oss_sinks import (
     NEUTRALIZED_TEACHER_SINKS_COST,
@@ -72,6 +74,22 @@ def _load_distill_teacher(
         device_map={"": local_rank} if is_vlm else None,
         download_tag="teacher_model",
     )
+
+
+def _teacher_takes_image_class(args, model_config, *, image_run: bool, multimodal_student: bool) -> bool:
+    """COLLECTIVE: the image class refuses a text teacher's config, on a text run over a multimodal student too, while
+    an image run has rows a text teacher cannot score."""
+    _, teacher_is_multimodal = probe_checkpoint(
+        args.teacher_model,
+        revision=args.teacher_model_revision or None,
+        trust_remote_code=model_config.trust_remote_code,
+    )
+    if image_run and not teacher_is_multimodal:
+        raise ValueError(
+            f"teacher_model={args.teacher_model!r} is a text model, and this run's rows carry images it cannot score. "
+            f"Use a multimodal teacher, or drop the image data."
+        )
+    return multimodal_student and teacher_is_multimodal
 
 
 def _reject_neutralized_teacher_sinks(teacher_config: PretrainedConfig, *, reset_sinks: bool) -> None:
@@ -158,6 +176,7 @@ def main():
     apply_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = configure_adapter_training(args, student_model, model_config, "CAUSAL_LM")
+    apply_vision_options(args, student_model, model_config, processing_class, is_vlm=is_vlm)
 
     # Before any teacher weight loads (the trainer checks again).
     resolve_shared_vocab_width(student_model.config, teacher_config, tokenizer, teacher_tokenizer)
@@ -166,7 +185,7 @@ def main():
         model_config=model_config,
         training_config=training_config,
         requested_attn=attn_default,
-        is_vlm=policy.is_vlm,
+        is_vlm=_teacher_takes_image_class(args, model_config, image_run=is_vlm, multimodal_student=policy.is_vlm),
         local_rank=context.local_rank,
     )
 

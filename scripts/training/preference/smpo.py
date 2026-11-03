@@ -10,6 +10,7 @@ from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import SMPOConfig, SMPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.entrypoints.data_setup import (
+    apply_vision_options,
     load_script_datasets,
     prepare_script_preference_data,
     resolve_preference_vlm_run,
@@ -78,6 +79,7 @@ def main():
     apply_text_path_padding_side(tokenizer, is_vlm)
 
     peft_config = configure_adapter_training(args, model, model_config, "CAUSAL_LM")
+    apply_vision_options(args, model, model_config, processing_class, is_vlm=is_vlm)
 
     log_model_info(model, tokenizer)
 

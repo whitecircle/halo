@@ -19,6 +19,7 @@ from halo.entrypoints.data_setup import load_script_datasets, log_script_dataset
 from halo.entrypoints.model_setup import (
     apply_prompt_completion_window,
     default_padded_attn_implementation,
+    load_export_processor,
     load_model_and_tokenizer,
     log_model_info,
 )
@@ -221,6 +222,7 @@ def main():
     barrier()
 
     callbacks = configure_balancing_and_build_callbacks(args, grpo_config, model, context)
+    export_processor = load_export_processor(model_config, args, tokenizer)
     trainer = trainer_cls(
         model=model,
         reward_funcs=reward_funcs,
@@ -241,6 +243,7 @@ def main():
         save_completions=args.save_completions,
         **args.build_sdpg_kwargs(),
     )
+    trainer.export_processing_class = export_processor
     run_trainer(
         trainer,
         context,

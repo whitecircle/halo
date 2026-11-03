@@ -16,12 +16,14 @@ from trl import SFTConfig
 
 from halo.callbacks.efficiency import EfficiencyCallback
 from halo.distributed.parallelism_config import ParallelismConfig
+from halo.kernels.lowp.spec import LowpSpec
 from halo.log import configure_training_logging
 from halo.model_loading.liger.dispatch import apply_liger_kernel, finalize_liger_after_direct_load
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime.collectives import barrier
 from halo.trainers.sft import DistributedSFTTrainer
 from tests.common.benchmark_args import (
+    add_lowp_precision_argument,
     axis_tags,
     create_benchmark_parser,
     pp_topology_kwargs,
@@ -62,7 +64,11 @@ def main() -> int:
         "--lora_all_linear", action="store_true", help="Target all linear layers (default: attention only)"
     )
     parser.add_argument("--qlora", action="store_true", help="Enable 4-bit QLoRA (requires --lora_r > 0)")
+    add_lowp_precision_argument(parser)
     args = parser.parse_args()
+    lowp = LowpSpec(precision=args.lowp_precision)
+    if lowp.enabled and args.qlora:
+        parser.error("--lowp_precision cannot run on --qlora: the 4-bit weights are not plain nn.Linear")
 
     rank, world_size, local_rank = init_distributed()
     PartialState()
@@ -79,6 +85,8 @@ def main() -> int:
     qlora = args.qlora
 
     layout = "_".join(axis_tags(cp=cp_size, tp=tp_size, pp=pp_size)) or "fsdp"
+    if lowp.enabled:
+        layout = f"{layout}_{lowp.precision}"
     if lora_r > 0:
         targets_str = "all_linear" if lora_all_linear else "attn_only"
         peft_str = f"QLoRA r={lora_r} {targets_str}" if qlora else f"LoRA r={lora_r} {targets_str}"
@@ -167,8 +175,9 @@ def main() -> int:
             "pp_microbatches": args.pp_microbatches,
             **pp_topology_kwargs(pp_size, world_size),
         }
-        if tp_size > 1 or cp_size > 1:
-            parallelism_config = ParallelismConfig(tp_size=tp_size, cp_size=cp_size, **pp_kwargs)
+        # Low precision converts the model at load, which only the distributed loader does.
+        if tp_size > 1 or cp_size > 1 or lowp.enabled:
+            parallelism_config = ParallelismConfig(tp_size=tp_size, cp_size=cp_size, lowp=lowp, **pp_kwargs)
             model, _ = load_distributed_model(
                 model_name_or_path=model_name,
                 parallelism_config=parallelism_config,
