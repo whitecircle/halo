@@ -15,7 +15,7 @@ from halo.models.segment_markers import (
     has_dense_packing_leak,
     reject_compressed_kv_rows,
     reject_pipeline_packed_rows,
-    reject_unmarked_linear_attention_rows,
+    reject_unmarked_sequence_mixer_rows,
     require_segment_aware_kernels,
     segment_markers_for,
 )
@@ -175,7 +175,7 @@ def reject_multi_document_rows(
     if mode is None:
         return
     require_segment_aware_kernels(model_config, mode)
-    reject_unmarked_linear_attention_rows(
+    reject_unmarked_sequence_mixer_rows(
         model_config, mode, allow_cross_document_linear_attention=allow_cross_document_linear_attention
     )
     if packing and keeps_packed_rows:

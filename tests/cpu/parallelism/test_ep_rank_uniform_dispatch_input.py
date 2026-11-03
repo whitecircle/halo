@@ -70,7 +70,7 @@ class _Layer(StubEPLayerBase):
         self.experts_per_rank = LOCAL_EXPERTS
         self.fp32_experts = False
         self._use_grouped_mm = False
-        self._activation_warmed = True
+        self._expert_kernels_warmed = True
         self._capture_routing = False
         self._expert_adapters_enabled = True
         self._perf = lambda _label: contextlib.nullcontext()

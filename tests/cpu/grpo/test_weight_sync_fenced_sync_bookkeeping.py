@@ -78,7 +78,7 @@ def test_cleanup_closes_the_score_only_clients_sessions():
 
     trainer._cleanup_async_components()
 
-    assert all(client.close_session.call_count == 1 for client in clients)
+    assert all(client.close_http_session.call_count == 1 for client in clients)
     assert trainer._engine_rescore_clients is None
 
 

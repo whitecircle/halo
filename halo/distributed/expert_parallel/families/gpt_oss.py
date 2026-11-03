@@ -148,12 +148,12 @@ class EPGptOssMoELayer(EPMoELayerBase):
     ) -> torch.Tensor:
         """Three grouped GEMM calls (gate, up, down) with de-interleaved weights, each plus its expert bias."""
         gate_attr, up_attr = self._deinterleaved_gate_up_attrs()
-        gate = self._gmm_proj_with_bias(sorted_tokens, gate_attr, offs, output_dtype, sorted_expert_ids)
-        up = self._gmm_proj_with_bias(sorted_tokens, up_attr, offs, output_dtype, sorted_expert_ids)
+        gate = self._grouped_proj_with_bias(sorted_tokens, gate_attr, offs, output_dtype, sorted_expert_ids)
+        up = self._grouped_proj_with_bias(sorted_tokens, up_attr, offs, output_dtype, sorted_expert_ids)
         gated = self._gptoss_glu(gate, up)
-        return self._gmm_proj_with_bias(gated.to(output_dtype), "down_proj", offs, output_dtype, sorted_expert_ids)
+        return self._grouped_proj_with_bias(gated.to(output_dtype), "down_proj", offs, output_dtype, sorted_expert_ids)
 
-    def _gmm_proj_with_bias(
+    def _grouped_proj_with_bias(
         self, x: torch.Tensor, weight_attr: str, offs: torch.Tensor, out_dtype: torch.dtype, eids: torch.Tensor
     ) -> torch.Tensor:
         out = self._expert_proj(x, weight_attr, offs, out_dtype)

@@ -6,7 +6,7 @@ from scripts.cli_arguments import HUB_SOURCE_HELP, add_dtype_arg, add_openai_end
 from scripts.inference.inference_arguments import add_generation_args, add_prompt_field_args
 
 
-def build_generation_parser(description: str, *, temperature_default: float) -> argparse.ArgumentParser:
+def build_reward_model_parser(description: str, *, temperature_default: float) -> argparse.ArgumentParser:
     """API, data, generation and RM arguments; scripts add their extras on the returned parser."""
     parser = argparse.ArgumentParser(description=description)
     add_openai_endpoint_args(parser, model_help="Model name for API requests")

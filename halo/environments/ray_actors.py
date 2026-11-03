@@ -283,7 +283,7 @@ class EnvironmentActor:
             total_reward=traj.total_reward if traj else 0.0,
             metrics=episode_metrics,
             # Natural terminal state, not a max_turns truncation; both set done=True.
-            success=bool(traj and traj.done and not traj.truncated),
+            terminated_naturally=bool(traj and traj.done and not traj.truncated),
             latency=time.time() - start,
             generation_tokens=played.generated,
             requests_expired_in_sync=sync_expiries.count,

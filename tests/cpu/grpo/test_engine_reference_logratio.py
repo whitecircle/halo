@@ -358,7 +358,7 @@ class _NoisyLowProbabilityEngine:
     def __init__(self, *, noise: float, shift: float = 0.0, poison: dict[tuple[bool, int], float] | None = None):
         self.noise, self.shift, self.poison = noise, shift, poison or {}
 
-    def close_session(self) -> None:
+    def close_http_session(self) -> None:
         pass
 
     def score_completion_logprobs(self, prompt_ids, completion_ids, timeout):

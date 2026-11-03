@@ -25,7 +25,7 @@ def has_grad_sync_peers(ep_config: EPConfig) -> bool:
     return has_process_group() and ep_config.stage_world_size > 1
 
 
-def build_router_grad_hook(ep_config: EPConfig) -> Callable[[torch.Tensor], None]:
+def build_dp_average_grad_hook(ep_config: EPConfig) -> Callable[[torch.Tensor], None]:
     """Router-param hook: ``all_reduce(SUM)`` over the DP-scope group (under PP this stage's rank block),
     divided by its size ``stage_world_size``."""
     if not has_grad_sync_peers(ep_config):
@@ -45,7 +45,7 @@ class EPGradSyncMixin:
     ep_config: EPConfig
     _grad_sync_hooks: list
 
-    def reattach_router_grad_sync(self) -> int:
+    def reattach_dp_average_grad_hooks(self) -> int:
         """Hook the trainable router/replicated params again for PEFT ``modules_to_save``, which trains a copy the
         construction hooks never saw; returns how many."""
         if not self.ep_config.uses_backward_grad_hooks:
@@ -73,7 +73,7 @@ class EPGradSyncMixin:
             self._hook_dp_averaged_params()
 
     def _hook_dp_averaged_params(self) -> int:
-        dp_hook = build_router_grad_hook(self.ep_config)
+        dp_hook = build_dp_average_grad_hook(self.ep_config)
         trainable = [param for _, param in self._dp_averaged_named_params() if param.requires_grad]
         for param in trainable:
             self._grad_sync_hooks.append(param.register_post_accumulate_grad_hook(dp_hook))

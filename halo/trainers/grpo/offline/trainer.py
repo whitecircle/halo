@@ -70,7 +70,7 @@ from halo.trainers.grpo.offline.offline_rules import (
     reject_offline_cp_options,
     reject_offline_pp_options,
     reject_unsupported_reference_input,
-    require_processing_class,
+    require_tokenizer,
     resolve_pp_max_length,
 )
 from halo.trainers.grpo.offline.pipeline_loss import OfflineGRPOPipelineMixin
@@ -146,7 +146,7 @@ class OfflineGRPOTrainer(
         self._metrics = {"train": defaultdict(list), "eval": defaultdict(list)}
         self._sign_metrics = {"train": WorldMetrics(), "eval": WorldMetrics()}
 
-        self._configure_objective(args, require_processing_class(processing_class))
+        self._configure_objective(args, require_tokenizer(processing_class))
         self._precompute_reference = self.sweeps_run_start_reference(
             model, self.beta, parallelism_config, peft=peft_config is not None
         )
@@ -284,7 +284,7 @@ class OfflineGRPOTrainer(
                 self.ref_model = self.accelerator.prepare_model(self.ref_model, evaluation_mode=True)
         self._cache_group_ids(train_dataset, eval_dataset)
         self._configure_distributed_modes()
-        self._resolve_chunked_head_transform()
+        self._reject_unreproducible_chunked_head()
         self._verify_full_logits_fit(self._loss_logits_width())
         if self._precompute_reference:
             self.train_dataset = self._precompute_reference_logps(self.train_dataset, "training")

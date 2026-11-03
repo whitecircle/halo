@@ -173,7 +173,7 @@ non-attention mixer carries state along the sequence regardless of any mask.
 | DeepSeek-V4 (eager-only) | isolated on the training path (`use_cache=False`; a live cache suppresses the packed mask) | the CSA/HCA compressors cut KV windows at row indices and judge their causality by position, so every document after the first attends the row's first windows — `packing` and `padding_free` are **refused** |
 | Qwen3.5 / 3.6, Qwen3-Next | isolated | GatedDeltaNet reads `seq_idx` (conv) + `cu_seq_lens_q` (delta rule): the collators and SMPO's padding-free forward emit both for the family, so its boundaries reach the kernels — but only the `fla` / `causal-conv1d` fast paths consume them (both installed in the images). The torch fallbacks take neither, so a multi-document row would cross in the conv *and* the scan — the factory refuses `packing` / `padding_free`, and SMPO its `padding_free`, unless transformers' own fast-path predicates hold |
 | Qwen3.8-Flash-Next | isolated — its sparse (QSA) layers run Halo's tiled kernel per `seq_idx` document, and a packed row without `seq_idx` is refused ([Qwen3.8-Flash-Next](../models/qwen4_exp.md#attention-and-rows)) | GatedDeltaNet as Qwen3.5; the per-layer embedding's n-gram history and dilated conv restart at every `seq_idx` document start |
-| Bailing / Ling | Ling 2.0, Ring: isolated on flash only (`patch_v4_flash_attention_template`); eager/SDPA **leak** — the remote file builds its mask from `attention_mask` alone ([Bailing/Ling](../models/bailing.md#attention-and-packing)). Ling 3.0: flash refused, MLA on SDPA leaks the same way, so Ling 3.0 cannot pack | Ling 3.0 KDA and Ring's Lightning-Attention-2 linear layers — **cross**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
+| Bailing / Ling | Ling 2.0, Ring: isolated on flash only (`patch_remote_llama_flash_template`); eager/SDPA **leak** — the remote file builds its mask from `attention_mask` alone ([Bailing/Ling](../models/bailing.md#attention-and-packing)). Ling 3.0: flash refused, MLA on SDPA leaks the same way, so Ling 3.0 cannot pack | Ling 3.0 KDA and Ring's Lightning-Attention-2 linear layers — **cross**. The KDA op accepts a `cu_seqlens` kwarg, but the model forward never threads kwargs down to it, so there is no reachable boundary parameter — the same class of crossing as Inkling's convs |
 | GLM-5 Next | both layer types receive the 2D padding mask `create_recurrent_attention_mask` builds, so no packed-boundary parameter reaches the DSA attention either — flat packing **crosses**, so it is refused; [tree packing](../optimization/tree-packing.md) isolates it (the DSA forward reads the plan's path links) | KDA linear attention — **crosses** under flat packing, the same unreachable-boundary class as Bailing/Ling; isolated under tree packing (conv and scan segmented by the plan) |
 | LFM-2 | isolated | ShortConv is isolated exactly: the collators and SMPO's padding-free forward emit `seq_idx` for this family and both conv paths honor it |
 | Zaya | isolated — flash needs `patch_zaya_packed_document_isolation` | CCA convolution + delayed-value recurrence — isolated exactly by the same patch, which restarts both at every document start ([Zaya](../models/zaya.md#document-isolation-under-packing)) |
@@ -226,7 +226,7 @@ A linear-attention layer no segment marker reaches is refused unless the run opt
 types (GLM-5 Next's KDA) outside the families that read `cu_seq_lens`, and the sequence mixer a family spec
 names in `unmarked_sequence_mixer` (Inkling's short convolutions). SFT's `packing` / `padding_free`
 (before the model load and again at collator selection) and SMPO's `padding_free` raise on every backend
-through `reject_unmarked_linear_attention_rows`, flash included, where the softmax layers isolate and the
+through `reject_unmarked_sequence_mixer_rows`, flash included, where the softmax layers isolate and the
 loss shows nothing. So does the SFT trainer for a packing / padding-free collator handed to it directly
 (`reject_multi_document_collator`), under the opt-in the factory records on the collators it
 builds; a tree collator is left to its plan. `allow_cross_document_linear_attention: true` (`SFTScriptArguments`, `SMPOConfig`)
@@ -309,7 +309,7 @@ a padded row the last position is pad, so a terminator-less turn is masked out e
 
 **One span resolver, three named policies.** Every completion mask locates its spans with
 `resolve_completion_spans` in `halo/data/completion_spans.py`, under one of three declared policies:
-`COLLATOR_SPAN_POLICY` (the padded route, described above), `PACKED_SPAN_POLICY` (the same plus the
+`PADDED_SPAN_POLICY` (the padded route, described above), `PACKED_SPAN_POLICY` (the same plus the
 global end-of-sequence fallback the packed and padding-free routes take) and
 `SELF_DISTILL_SPAN_POLICY` (the span starts after the marker and runs to the first terminator
 anywhere after it, falling back per span to the row end).
@@ -321,7 +321,7 @@ and returns the no-span verdict, a fully-masked row. One label rule then refills
 optionally restores each span's closing token from `input_ids` (the packed route's EOS rescue).
 
 The padded collator, the offline label bake (`prepare_dataset.py`) and the self-distill / VLM label
-builder (`build_completion_only_labels`) share one batch masker on top of it,
+builder (`build_training_labels`) share one batch masker on top of it,
 `mask_batch_to_completion_spans`. It additionally takes an optional `attention_mask` confining the
 span search to a row's real tokens.
 

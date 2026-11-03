@@ -135,7 +135,7 @@ class WeightSyncClientBase(ABC):
         # The close or the exit hook must lift a quiesced engine.
         self._paused = False
         # An update session opened server-side (its reply possibly lost), which only the session close ends.
-        self._session_open = False
+        self._update_session_open = False
         self._transport: Any = None
         self._reset_buffer_state()
         self._reset_transport_state()
@@ -383,7 +383,7 @@ class WeightSyncClientBase(ABC):
         # Left registered, the hook pins every retired client and its resume POST until interpreter exit.
         atexit.unregister(self.close_communicator)
 
-    def close_session(self) -> None:
+    def close_http_session(self) -> None:
         self._session.close()
 
     def _reset_buffer_state(self) -> None:
@@ -422,22 +422,22 @@ class WeightSyncClientBase(ABC):
         self._paused = True
         self.request("POST", self.PAUSE_ENDPOINT, retry=True, timeout=POST_TIMEOUT_S, **self.PAUSE_REQUEST)
 
-    def _open_session(self) -> None:
+    def _open_update_session(self) -> None:
         """Open the engine's update session; flagged first, as the pause is. Single-shot, as a session retry would
         issue the collective RPC twice."""
-        self._session_open = True
+        self._update_session_open = True
         self.request("POST", self.SESSION_OPEN_ENDPOINT, retry=False, timeout=POST_TIMEOUT_S, **self.SESSION_REQUEST)
 
-    def _end_session(self) -> None:
+    def _end_update_session(self) -> None:
         """Close the session once the update landed; raises, as the update is then not complete."""
         self.request(
             "POST", self.SESSION_CLOSE_ENDPOINT, retry=False, timeout=SESSION_CLOSE_TIMEOUT_S, **self.SESSION_REQUEST
         )
-        self._session_open = False
+        self._update_session_open = False
 
-    def _close_session(self) -> None:
+    def _abandon_update_session(self) -> None:
         """Close a session left open; never raises, as the caller is already failing."""
-        if not self._session_open:
+        if not self._update_session_open:
             return
         try:
             self.request(
@@ -445,7 +445,7 @@ class WeightSyncClientBase(ABC):
             )
         except Exception as e:
             logger.warning(f"Failed to close the interrupted weight-update session on {self.base_url}: {e}")
-        self._session_open = False
+        self._update_session_open = False
 
     def _lift_pause(self, timeout: float, context: str) -> None:
         """Resume a quiesced engine unless it was left partly written. Never raises on a server failure, which must

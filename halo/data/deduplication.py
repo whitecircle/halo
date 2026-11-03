@@ -1,5 +1,5 @@
 """Semantic deduplication of a corpus (mean-pooled sentence embeddings + FAISS similarity search), behind
-``scripts/inference/deduplicate_dataset.py``."""
+``scripts/before_training/deduplicate_dataset.py``."""
 
 import argparse
 import logging
@@ -169,7 +169,7 @@ def resolve_device(device_arg: str) -> torch.device:
     return device
 
 
-def load_dataset_from_path(
+def load_dedup_input(
     input_path: str,
     text_field: str,
     dataset_config: str | None,
@@ -289,26 +289,26 @@ def save_deduplicated_dataset(
     unique_indices: np.ndarray,
     output_path: str,
     output_format: str = "jsonl",
-    additional_fields: list[str] | None = None,
+    keep_fields: list[str] | None = None,
 ) -> None:
     logger.info(f"Saving deduplicated dataset to: {output_path}")
 
     deduplicated_dataset = dataset.select(unique_indices.tolist())
 
-    if additional_fields is not None:
-        columns_to_keep = set(additional_fields)
+    if keep_fields is not None:
+        columns_to_keep = set(keep_fields)
         # A name matching no column is a typo; dropping it would silently lose a column the caller asked to keep.
         unknown = sorted(columns_to_keep - set(deduplicated_dataset.column_names))
         if unknown:
             raise ValueError(
-                f"--additional_fields names {unknown}, which the dataset does not carry (available "
+                f"--keep_fields names {unknown}, which the dataset does not carry (available "
                 f"columns: {sorted(deduplicated_dataset.column_names)}). Fix the names, or drop them "
                 f"— keeping a column that does not exist silently writes an output without it."
             )
         columns_to_remove = set(deduplicated_dataset.column_names) - columns_to_keep
         if columns_to_remove:
             deduplicated_dataset = deduplicated_dataset.remove_columns(list(columns_to_remove))
-            logger.info(f"Keeping only specified fields: {additional_fields}")
+            logger.info(f"Keeping only specified fields: {keep_fields}")
 
     output_dir = Path(output_path).parent
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -326,7 +326,7 @@ def run_deduplication(args: argparse.Namespace) -> int:
     try:
         device = resolve_device(args.device)
 
-        dataset = load_dataset_from_path(
+        dataset = load_dedup_input(
             input_path=args.dataset,
             text_field=args.text_field,
             dataset_config=args.config,
@@ -374,7 +374,7 @@ def run_deduplication(args: argparse.Namespace) -> int:
                 unique_indices=unique_indices,
                 output_path=args.output_path,
                 output_format=args.output_format,
-                additional_fields=args.additional_fields,
+                keep_fields=args.keep_fields,
             )
     except Exception:
         # One handler for the pipeline: every stage logs before it can fail, so the preceding line names the stage.

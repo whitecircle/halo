@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``gather_expert_grads`` returns every expert's gradient in its family's hub layout. Rank ``r`` contributes the
+"""``hub_layout_expert_grads`` returns every expert's gradient in its family's hub layout. Rank ``r`` contributes the
 local tensor plus ``r`` times a group offset, so a wrong axis or rank order shows."""
 
 from types import SimpleNamespace
@@ -12,7 +12,7 @@ from halo.distributed.expert_parallel.families.glm4 import EPGlm4MoELayer
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.distributed.expert_parallel.families.qwen3 import EPQwen3MoELayer
 from halo.runtime import collectives
-from tests.common.pp_equivalence import gather_expert_grads
+from tests.common.pp_equivalence import hub_layout_expert_grads
 
 EP_SIZE = 2
 LOCAL_EXPERTS, HIDDEN, INTER = 2, 6, 4
@@ -91,7 +91,7 @@ def test_separately_stored_glu_grads_gather_into_the_per_expert_layout(expert_tp
     up = _tp_assembled(layer.up_proj.grad, 2, expert_tp_size)
     down = _tp_assembled(layer.down_proj.grad, 1, expert_tp_size)
 
-    gathered = gather_expert_grads(layer)
+    gathered = hub_layout_expert_grads(layer)
 
     experts = EP_SIZE * LOCAL_EXPERTS
     assert set(gathered) == {f"experts.{e}.{p}_proj.weight" for e in range(experts) for p in ("gate", "up", "down")}
@@ -108,7 +108,7 @@ def test_fused_glu_grads_gather_into_the_split_per_expert_layout():
         down_proj=(LOCAL_EXPERTS, INTER, HIDDEN),
     )
 
-    gathered = gather_expert_grads(layer)
+    gathered = hub_layout_expert_grads(layer)
 
     assert len(gathered) == 3 * EP_SIZE * LOCAL_EXPERTS
     _assert_split_per_expert(gathered, ("gate_proj", "up_proj"), layer.gate_up_proj.grad.transpose(1, 2))
@@ -140,7 +140,7 @@ def test_gptoss_grads_keep_the_interleaved_matmul_layout_with_biases(grouped_gem
         )
         gate_up, gate_up_bias = layer.gate_up_proj.grad, layer.gate_up_proj_bias.grad
 
-    gathered = gather_expert_grads(layer)
+    gathered = hub_layout_expert_grads(layer)
 
     assert set(gathered) == {
         "experts.gate_up_proj",
@@ -165,7 +165,7 @@ def test_a_missing_expert_gradient_raises():
     layer.up_proj.grad = None
 
     with pytest.raises(RuntimeError, match=r"up_proj has no gradient"):
-        gather_expert_grads(layer)
+        hub_layout_expert_grads(layer)
 
 
 if __name__ == "__main__":

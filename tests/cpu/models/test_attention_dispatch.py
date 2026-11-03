@@ -361,7 +361,7 @@ def test_unmapped_config_never_opens_the_sdpa_sinks_escape_hatch():
     assert attention_mod.AutoModelForCausalLM._model_mapping.get(UnmappedSinksConfig, None) is None
     # sinks_policy=None is the re-validation context, where nothing has recorded a reset.
     with patch.object(attention_mod.logger, "info"), patch.object(attention_mod.logger, "warning"):
-        resolved = attention_mod.validate_attn_implementation(config, "sdpa", sinks_policy=None)
+        resolved = attention_mod.select_supported_attn_implementation(config, "sdpa", sinks_policy=None)
     assert resolved != "sdpa", "unmapped sinks config must not resolve to the sink-dropping sdpa"
 
 
@@ -467,7 +467,7 @@ def test_a_config_rejecting_every_candidate_raises():
             raise ValueError(f"{value} rejected")
 
     with pytest.raises(ValueError, match="accepts none of the attention implementations"):
-        attention_mod.validate_attn_implementation(_RejectingConfig(), "sdpa")
+        attention_mod.select_supported_attn_implementation(_RejectingConfig(), "sdpa")
 
 
 def test_fa4_demote_reads_the_multimodal_text_tower_head_widths(monkeypatch):
@@ -499,7 +499,7 @@ def test_a_config_without_a_causal_lm_class_is_judged_by_its_image_text_class(mo
         SimpleNamespace(_model_mapping={ImageTextOnlyConfig: ImageTextOnlyModel}),
     )
     with patch.object(attention_mod.logger, "warning"):
-        assert attention_mod.validate_attn_implementation(ImageTextOnlyConfig(), "flash_attention_2") == "sdpa"
+        assert attention_mod.select_supported_attn_implementation(ImageTextOnlyConfig(), "flash_attention_2") == "sdpa"
 
 
 if __name__ == "__main__":

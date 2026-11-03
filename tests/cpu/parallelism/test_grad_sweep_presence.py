@@ -78,7 +78,7 @@ def _deferred_ep(model: _Model, *, experts: bool, replica_group, dp_scope_group=
         _top_level_model=lambda: model,
     )
     host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
 
 
 SWEEPS = {
@@ -168,7 +168,7 @@ def _replica_leg(rank: int, ep_group, replica_group) -> list[float] | None:
         _top_level_model=lambda: model,
     )
     host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
     return None if model.shard.grad is None else model.shard.grad.to_local().tolist()
 
 

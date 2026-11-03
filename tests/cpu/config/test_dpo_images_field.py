@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-"""DPO's ``images_field`` reaches TRL's vision route under the spelling TRL probes for. ``is_vlm_run`` calls a run
-multimodal off the field alone while TRL 1.14 probes for an ``image``/``images`` key, so the alias must land
-before the dispatch, or the column is pruned to text."""
+"""DPO's ``images_field`` reaches TRL's vision route under the spelling TRL probes for. ``is_vlm_run_across_ranks``
+calls a run multimodal off the field alone while TRL 1.14 probes for an ``image``/``images`` key, so the alias must
+land before the dispatch, or the column is pruned to text."""
 
 import sys
 import types
@@ -107,8 +107,8 @@ def _trl_sees_a_vision_dataset(dataset: Dataset) -> bool:
 
 
 def test_the_dispatch_and_trls_probe_agree_on_the_declared_column(tmp_path):
-    """``is_vlm_run`` and TRL's probe must agree on the one dataset the trainer receives; without the alias TRL
-    reads the rows as text and prunes the images."""
+    """``is_vlm_run_across_ranks`` and TRL's probe must agree on the one dataset the trainer receives; without the
+    alias TRL reads the rows as text and prunes the images."""
     reached = _run_dpo(tmp_path, _dataset("image_bytes"), "images_field: image_bytes\n")
 
     # The shared data_setup helper logs every non-None split, generate included.

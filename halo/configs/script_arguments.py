@@ -253,7 +253,7 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
             "SFT rows only; refused under PP, torch_compile, auto_find_batch_size, RL rollouts, multimodal rows, "
             "activation offload, an explicit every_n_layers, model-level checkpointing or gradient_checkpointing "
             "off. "
-            "See agent-docs/training-methods/callbacks.md#checkpointingplancallback."
+            "See agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback."
         },
     )
     enable_efficiency_metrics: bool = field(

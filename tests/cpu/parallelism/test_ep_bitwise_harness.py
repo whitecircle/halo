@@ -213,7 +213,7 @@ def _local_average_hook(ep_config):
 def test_a_router_hook_without_its_all_reduce_is_an_order_delta(monkeypatch, tmp_path):
     """The same hook count, a different hook."""
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["in_backward_grad_sync"])
-    monkeypatch.setattr(grad_sync, "build_router_grad_hook", _local_average_hook)
+    monkeypatch.setattr(grad_sync, "build_dp_average_grad_hook", _local_average_hook)
 
     entries = _differences(
         baseline,
@@ -250,7 +250,7 @@ def test_a_hook_under_a_deferred_sync_is_a_delta(monkeypatch, tmp_path):
 
 def test_a_saved_router_left_unhooked_is_an_order_delta(monkeypatch, tmp_path):
     baseline = _produced(tmp_path / "baseline", ["qwen3_moe"], ["modules_to_save"])
-    monkeypatch.setattr(EPMoELayerBase, "reattach_router_grad_sync", lambda self: 0)
+    monkeypatch.setattr(EPMoELayerBase, "reattach_dp_average_grad_hooks", lambda self: 0)
 
     entries = _differences(
         baseline, _produced(tmp_path / "mutated", ["qwen3_moe"], ["modules_to_save"]), "qwen3_moe", "modules_to_save"

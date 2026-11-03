@@ -173,9 +173,9 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
             torch.cuda.set_device(self.sync_device)
         try:
             self._quiesce()
-            self._open_session()
+            self._open_update_session()
         except Exception:
-            self._close_session()
+            self._abandon_update_session()
             self._lift_pause(CLEANUP_TIMEOUT_S, context="after a failed pause")
             raise
 
@@ -250,9 +250,9 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 # With no chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
                 self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
             self._release_arena()
-            self._end_session()
+            self._end_update_session()
         finally:
-            self._close_session()
+            self._abandon_update_session()
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S

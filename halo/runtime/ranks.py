@@ -12,7 +12,7 @@ from halo.log import warn_once
 logger = logging.getLogger(__name__)
 
 # The fallback resolves alike on every call, so warn once per process.
-_lws_fallback_announced: set[str] = set()
+_local_world_size_fallback_warned: set[str] = set()
 
 
 def has_process_group() -> bool:
@@ -67,7 +67,7 @@ def get_local_world_size() -> int:
     if world > 1:
         warn_once(
             logger,
-            _lws_fallback_announced,
+            _local_world_size_fallback_warned,
             "local_world_size",
             "Could not determine local world size from LOCAL_WORLD_SIZE / "
             "SLURM_NTASKS_PER_NODE / CUDA device count; falling back to global "

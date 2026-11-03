@@ -529,7 +529,7 @@ def test_trainer_tags_every_unproductive_turn_row_negative_only():
     rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
     assert [r.completion_ids.tolist() for r in rows] == [[1, 2, 3], [6], [7, 8], [4, 5]]
     assert [r.negative_only for r in rows] == [True, True, True, False]
-    assert all(r.completion_mask.all() for r in rows)
+    assert all(r.loss_mask.all() for r in rows)
 
 
 def _flat_render(msgs, add_generation_prompt, _include_thinking):
@@ -656,7 +656,7 @@ def test_all_unproductive_turns_without_ids_train_a_zero_weight_row():
     rows = trainer._tokenize_trajectory_turns(type("R", (), {"trajectory": traj})())
 
     assert len(rows) == 1 and not rows[0].negative_only
-    assert rows[0].completion_mask.sum().item() == 0
+    assert rows[0].loss_mask.sum().item() == 0
     assert trainer._batch_errors.reason is None
 
 

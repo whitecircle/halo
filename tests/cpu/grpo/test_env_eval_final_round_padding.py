@@ -16,7 +16,7 @@ from torch.utils.data import DataLoader
 from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import SOLVE_RATE_KEY
 from halo.environments.messages import Message, Trajectory
-from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, TrajectoryRowMap
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from tests.common.env_grpo_batch import batch_host, row
 
@@ -188,7 +188,7 @@ def test_the_batch_keeps_the_padding_inert_and_scores_the_episodes():
 def test_padding_rows_belong_to_no_rollout(per_turn):
     """A padding row read as a trajectory of its own would sit in every IS mask stage's denominator."""
     turns = [2, 1, 1, 1] if per_turn else [1, 1, 1, 1]
-    rows = BatchRows([_episode("p0", 1.0), _episode("p1", 0.0)], turns, 1, per_turn)
+    rows = TrajectoryRowMap([_episode("p0", 1.0), _episode("p1", 0.0)], turns, 1, per_turn)
     expected = [0, 0, 1, -1, -1, -1] if per_turn else [0, 1, -1, -1, -1]
     assert rows.traj_row_ids(torch.device("cpu")).tolist() == expected
 

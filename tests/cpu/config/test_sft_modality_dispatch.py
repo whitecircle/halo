@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The training scripts route their data path on the run, not the checkpoint class. ``is_vlm_model`` says yes for
 every natively multimodal family, and the VLM data path refuses ``packing``, so keying on the checkpoint breaks
-the text-only recipes; ``is_vlm_run`` adds the run's declaration of image data."""
+the text-only recipes; ``is_vlm_run_across_ranks`` adds the run's declaration of image data."""
 
 import ast
 import sys

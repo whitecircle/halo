@@ -168,7 +168,7 @@ class OnPolicyGRPOInitMixin:
         placed; the sync gate refuses a model the engine cannot update here rather than at the first push."""
         self._configure_distributed_modes()
         self._validate_held_reference_model()
-        self._resolve_chunked_head_transform()
+        self._reject_unreproducible_chunked_head()
         self._verify_full_logits_fit(self._loss_logits_width())
         reject_unsyncable_model(self.model, self._rollout_backend)
         self._install_weight_sync()

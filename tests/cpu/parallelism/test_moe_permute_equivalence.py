@@ -180,7 +180,7 @@ def test_the_grouped_path_permutes_atomic_free_at_every_top_k_and_ep_size(monkey
 
     local_ids = experts[(experts >= 0) & (experts < 3)]
     recv_counts = tuple(torch.bincount(local_ids, minlength=3).tolist())
-    out = layer._compute_experts_with_grouped_mm(
+    out = layer._run_grouped_mm_compute(
         tokens,
         experts,
         weights,

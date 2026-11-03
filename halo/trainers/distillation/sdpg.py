@@ -8,7 +8,7 @@ import torch
 from halo.data.collators.self_distill import format_field_names, privileged_hint
 from halo.log import warn_once
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.trainers.distillation.divergences import global_token_mean, token_divergence
+from halo.trainers.distillation.divergences import pooled_token_mean, token_divergence
 from halo.trainers.distillation.opd_term import OPDTermMixin, privileged_teacher_pass
 from halo.trainers.evaluation import split_rows_head
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
@@ -155,7 +155,7 @@ class DistributedSDPGTrainer(OPDTermMixin, StoredMetricsMixin, DistributedOnline
         )
         # Rows padding an eval split's final round repeat its first rows, so the OPD mean reads the split's own.
         real_rows = self.eval_split_rows(gate.size(0))
-        opd = global_token_mean(split_rows_head(opd_per_token, real_rows), split_rows_head(gate, real_rows))
+        opd = pooled_token_mean(split_rows_head(opd_per_token, real_rows), split_rows_head(gate, real_rows))
 
         beta = self._opd_beta()
         self.store_batch_metrics(self._opd_metrics(opd, beta), "train" if model.training else "eval", real_rows)

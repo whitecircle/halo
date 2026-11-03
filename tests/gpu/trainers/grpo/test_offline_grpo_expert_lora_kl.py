@@ -15,13 +15,13 @@ from transformers import AutoModelForCausalLM
 from halo.checkpoint.format import RESUME_ADAPTER_DIR, RESUME_ADAPTER_MARKER_FILE
 from halo.checkpoint.parallel.resume_source import resolve_resume_weights_source
 from halo.configs.grpo_offline import OfflineGRPOScriptArguments
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints.script import ScriptContext
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from scripts.training.grpo.offline import _load_kl_reference
 from tests.common.adapters import (
-    assert_only_adapters_trainable,
-    is_expert_lora_active,
+    check_only_adapters_trainable,
     load_peft_model_from_config,
     peft_model_config,
     snapshot_adapters,
@@ -146,9 +146,9 @@ def run(ctx):
     dist.barrier()
     train, evaluation = offline_grpo_dataset(24), offline_grpo_dataset(8, 4)
     trainer = _build(ctx, base, output, train, evaluation)
-    only_adapters, reason = assert_only_adapters_trainable(trainer.model)
+    only_adapters, reason = check_only_adapters_trainable(trainer.model)
     checks = {
-        "native_expert_only_no_peft_wrapper": is_expert_lora_active(trainer.model)
+        "native_expert_only_no_peft_wrapper": model_has_expert_lora(trainer.model)
         and not isinstance(trainer.model, PeftModel),
         "only_native_adapters_train": only_adapters,
         "native_lora_keeps_live_frozen_reference": trainer.ref_model is not None and not trainer._precompute_reference,

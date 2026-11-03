@@ -38,12 +38,12 @@ def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
         "--text_field", type=str, required=True, help="Name of the field containing text to deduplicate on"
     )
     parser.add_argument(
-        "--additional_fields",
+        "--keep_fields",
         type=str,
         nargs="+",
         default=None,
         help="Keep only these fields in the output (whitelist; if not specified, all fields are kept). "
-        "nargs=+ so a bare --additional_fields is rejected rather than whitelisting nothing and "
+        "nargs=+ so a bare --keep_fields is rejected rather than whitelisting nothing and "
         "stripping every column.",
     )
     parser.add_argument("--config", type=str, default=None, help="Hub dataset config name (default: none).")

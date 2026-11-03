@@ -53,7 +53,7 @@ def arena_bytes(model):
             continue
         counted.add(id(backend.buffer))
         total += deep_ep.ElasticBuffer.get_buffer_size_hint(
-            layer.dispatcher.ep_group, backend._arena.capacity, backend._padded_hidden, backend._num_topk
+            layer.dispatcher.dispatch_group, backend._arena.capacity, backend._padded_hidden, backend._num_topk
         )
     return total
 

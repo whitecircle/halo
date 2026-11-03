@@ -18,11 +18,12 @@ from halo.checkpoint.atomic import staged_file
 from halo.checkpoint.format import RUN_PLAN_FILE
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import detect_gpu_model
-from halo.models.checkpointing_plan import (
+from halo.models.gradient_checkpointing import in_backward_pass
+from halo.models.gradient_checkpointing_plan import (
     PLAN_OFF_REMEDY,
     RUN_PLAN_VERSION,
+    GradientCheckpointingPlan,
     PlanContext,
-    RunPlan,
     StepMemory,
     apply_checkpointing_policy,
     candidate_policies,
@@ -33,7 +34,6 @@ from halo.models.checkpointing_plan import (
     reject_unplannable_run,
     resolve_policy,
 )
-from halo.models.gradient_checkpointing import in_backward_pass
 from halo.runtime.consensus import (
     DeferredRankFailure,
     barrier_on_exit,
@@ -81,9 +81,10 @@ CUDA_MEMORY = MemoryReader(
 
 
 class StepMemoryProbe:
-    """One step's :class:`~halo.models.checkpointing_plan.StepMemory`, from hooks on every plan layer: the peak at each
-    micro-step's first backward recompute, each recompute's allocation delta, a checkpoint's input size and the peak
-    before the optimizer step. Early stop is off for the step, so a non-reentrant recompute runs to its layer's end."""
+    """One step's :class:`~halo.models.gradient_checkpointing_plan.StepMemory`, from hooks on every plan layer: the
+    peak at each micro-step's first backward recompute, each recompute's allocation delta, a checkpoint's input size
+    and the peak before the optimizer step. Early stop is off for the step, so a non-reentrant recompute runs to its
+    layer's end."""
 
     def __init__(self, model, reader: MemoryReader):
         self._reader = reader
@@ -160,7 +161,7 @@ def step_memory_across_ranks(local: StepMemory) -> StepMemory:
     return StepMemory(peak, head, backward, recompute, -neg_input, reserved, non_torch)
 
 
-def agree_plan(plan: RunPlan) -> None:
+def agree_plan(plan: GradientCheckpointingPlan) -> None:
     """COLLECTIVE: raise on every rank when any rank resolved a different plan: inputs are world-reduced, so it is a
     resolver bug, and under FSDP it would hang, as checkpointed and plain layers gather at different times."""
     reject_divergent_settings(
@@ -168,7 +169,7 @@ def agree_plan(plan: RunPlan) -> None:
     )
 
 
-def save_run_plan(directory: str, plan: RunPlan) -> None:
+def save_run_plan(directory: str, plan: GradientCheckpointingPlan) -> None:
     """COLLECTIVE: publish ``plan`` as ``directory/RUN_PLAN_FILE`` from the FS-aware save rank(s); a write failure
     raises on every rank."""
     with barrier_on_exit(f"Writing {RUN_PLAN_FILE} to {directory}"):
@@ -178,7 +179,7 @@ def save_run_plan(directory: str, plan: RunPlan) -> None:
                 staged.write_text(json.dumps(asdict(plan), indent=1, sort_keys=True))
 
 
-def _read_run_plan(path: str) -> RunPlan | None:
+def _read_run_plan(path: str) -> GradientCheckpointingPlan | None:
     """The record at ``path``, or None when there is none or another record version wrote it (no floor)."""
     if not os.path.isfile(path):
         return None
@@ -190,7 +191,7 @@ def _read_run_plan(path: str) -> RunPlan | None:
                 f"{path} has record version {raw.get('version')!r}, not {RUN_PLAN_VERSION}: it sets no floor here."
             )
         return None
-    return RunPlan(**raw)
+    return GradientCheckpointingPlan(**raw)
 
 
 def restore_recompute_floor(output_dir: str, fingerprint: dict, num_layers: int) -> int:
@@ -270,7 +271,7 @@ def build_plan_fingerprint(
     }
 
 
-class CheckpointingPlanCallback(TrainerCallback):
+class GradientCheckpointingPlanCallback(TrainerCallback):
     """Measure this process's step :data:`MEASURE_STEP` fully checkpointed and checkpoint only what the budget needs
     from the next step on, never below ``floor_index``. The record is written unfinished and train end marks it
     finished, so the next run knows whether this one survived its plan."""
@@ -287,7 +288,7 @@ class CheckpointingPlanCallback(TrainerCallback):
         self.total_device_bytes = total_device_bytes
         self.floor_index = floor_index
         self.reader = reader
-        self.plan: RunPlan | None = None
+        self.plan: GradientCheckpointingPlan | None = None
         self._steps_begun = 0
         self._probe: StepMemoryProbe | None = None
 
@@ -312,7 +313,7 @@ class CheckpointingPlanCallback(TrainerCallback):
         world = step_memory_across_ranks(reading)
         budget = plan_budget_bytes(world, self.total_device_bytes, self.context.ep_group_size)
         every_n, predicted = resolve_policy(world, self.context.num_layers, budget, self.floor_index)
-        self.plan = RunPlan(every_n_layers=every_n, fingerprint=self.context.fingerprint)
+        self.plan = GradientCheckpointingPlan(every_n_layers=every_n, fingerprint=self.context.fingerprint)
         agree_plan(self.plan)
         apply_checkpointing_policy(model, every_n)
         save_run_plan(args.output_dir, self.plan)
@@ -335,7 +336,7 @@ class CheckpointingPlanCallback(TrainerCallback):
             save_run_plan(args.output_dir, replace(self.plan, finished=True))
 
 
-def build_checkpointing_plan_callback(
+def build_gradient_checkpointing_plan_callback(
     training_config,
     model,
     parallelism_config: ParallelismConfig,
@@ -343,7 +344,7 @@ def build_checkpointing_plan_callback(
     *,
     packed_rows: bool,
     multimodal_rows: bool,
-) -> CheckpointingPlanCallback:
+) -> GradientCheckpointingPlanCallback:
     """COLLECTIVE: the callback, floored by the record in ``output_dir`` and budgeted on the world's smallest device.
     Raises ``ValueError`` with every reason the run cannot take a plan, and on every rank when fingerprints differ."""
     if not torch.cuda.is_available():
@@ -373,4 +374,4 @@ def build_checkpointing_plan_callback(
         "gradient_checkpointing_plan: auto plans one policy for every rank; set it to off on a mixed cluster.",
     )
     floor_index = restore_recompute_floor(training_config.output_dir, fingerprint, context.num_layers)
-    return CheckpointingPlanCallback(context, total_device_bytes=total_device_bytes, floor_index=floor_index)
+    return GradientCheckpointingPlanCallback(context, total_device_bytes=total_device_bytes, floor_index=floor_index)

@@ -13,7 +13,7 @@ from triton.runtime.interpreter import InterpretedFunction
 
 from halo.kernels import moe_route_sort
 from halo.kernels.moe_route_sort import (
-    NONLOCAL_EXPERT_ID,
+    NONLOCAL_EXPERT_ID_MESSAGE,
     RECEIVE_COUNTS_DISAGREE,
     _argsort_routing,
     _counting_sort,
@@ -178,7 +178,7 @@ def control_findings() -> list[str]:
         for sort in (_counting_sort, _argsort_routing)
     ]
     for name, sort, experts, local_experts, counts in refused:
-        message = NONLOCAL_EXPERT_ID if counts is None else RECEIVE_COUNTS_DISAGREE
+        message = NONLOCAL_EXPERT_ID_MESSAGE if counts is None else RECEIVE_COUNTS_DISAGREE
         try:
             sort(experts, torch.zeros(experts.shape), local_experts, counts)
             findings.append(f"{name} was not refused")

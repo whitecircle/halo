@@ -14,8 +14,8 @@ from transformers import AutoConfig, AutoModelForCausalLM
 
 from halo.checkpoint.parallel.adapters import (
     _load_peft_adapter_state,
+    live_adapter_tensors,
     remap_cp_adapter_keys_to_live,
-    saved_adapter_tensors,
 )
 from halo.distributed.context_parallel.config import CPConfig
 from halo.distributed.context_parallel.model_rules import SUPPORTED_ATTN_IMPLEMENTATIONS
@@ -111,7 +111,7 @@ def test_resume_remap_recovers_live_keys():
     saved = _plain_keys(get_peft_model_state_dict(peft_model))
     assert saved, "no adapter tensors to save"
 
-    remapped = remap_cp_adapter_keys_to_live(saved, saved_adapter_tensors(peft_model))
+    remapped = remap_cp_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
 
     expected_live = {name.replace(".default.", ".") for name in _live_lora_keys(peft_model)}
     assert set(remapped) == expected_live, "remap did not recover the exact live key set"
@@ -135,11 +135,11 @@ def test_resume_roundtrip_loads_every_saved_tensor():
         "fresh adapters already equal trained — the restore below would be unfalsifiable"
     )
 
-    saved_tensors = saved_adapter_tensors(fresh)
-    remapped = remap_cp_adapter_keys_to_live(saved, saved_tensors)
-    unplaced = sorted(set(remapped) - set(saved_tensors))
+    live_tensors = live_adapter_tensors(fresh)
+    remapped = remap_cp_adapter_keys_to_live(saved, live_tensors)
+    unplaced = sorted(set(remapped) - set(live_tensors))
     assert not unplaced, f"{len(unplaced)}/{len(remapped)} adapter keys name no live tensor, e.g. {unplaced[:3]}"
-    _load_peft_adapter_state(saved_tensors, remapped)
+    _load_peft_adapter_state(live_tensors, remapped)
 
     not_restored = [n for n in trained_lora if not torch.equal(fresh_lora[n], trained_lora[n])]
     assert not not_restored, (
@@ -159,7 +159,7 @@ def test_resume_remap_covers_modules_to_save_buffers():
         "modules_to_save clone did not serialize its persistent buffer — the remap case is vacuous"
     )
 
-    remapped = remap_cp_adapter_keys_to_live(saved, saved_adapter_tensors(peft_model))
+    remapped = remap_cp_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
     live = {
         name.replace(".modules_to_save.default.", ".").replace(".default.", ".")
         for name, _ in itertools.chain(peft_model.named_parameters(), persistent_buffers(peft_model))
@@ -179,7 +179,7 @@ def test_resume_remap_covers_embedding_adapters():
     assert live_embedding, "no ParameterDict embedding adapter was injected — the case is vacuous"
 
     saved = _plain_keys(get_peft_model_state_dict(peft_model))
-    remapped = remap_cp_adapter_keys_to_live(saved, saved_adapter_tensors(peft_model))
+    remapped = remap_cp_adapter_keys_to_live(saved, live_adapter_tensors(peft_model))
 
     expected = {name.removesuffix(".default") for name in live_embedding}
     assert expected <= set(remapped), (
@@ -196,15 +196,15 @@ def test_resume_remap_covers_dora_magnitudes():
     magnitudes = [key for key in saved if key.endswith("lora_magnitude_vector")]
     assert magnitudes, "no DoRA magnitude was saved — the case is vacuous"
 
-    saved_tensors = saved_adapter_tensors(peft_model)
-    remapped = remap_cp_adapter_keys_to_live(saved, saved_tensors)
-    assert set(remapped) == set(saved_tensors), sorted(set(remapped) ^ set(saved_tensors))[:4]
+    live_tensors = live_adapter_tensors(peft_model)
+    remapped = remap_cp_adapter_keys_to_live(saved, live_tensors)
+    assert set(remapped) == set(live_tensors), sorted(set(remapped) ^ set(live_tensors))[:4]
 
 
 def test_resume_remap_passes_through_unmatched_saved_key():
     """The restore's layout check names and refuses it (``tests/cpu/peft/test_adapter_restore_strict.py``)."""
     orphan = "base_model.model.model.layers.99.self_attn.q_proj.lora_A.weight"
-    assert remap_cp_adapter_keys_to_live({orphan: 123}, saved_adapter_tensors(_cp_peft_model())) == {orphan: 123}
+    assert remap_cp_adapter_keys_to_live({orphan: 123}, live_adapter_tensors(_cp_peft_model())) == {orphan: 123}
 
 
 if __name__ == "__main__":

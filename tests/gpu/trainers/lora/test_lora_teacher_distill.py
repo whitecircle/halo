@@ -11,16 +11,16 @@ from datasets import Dataset
 from transformers import AutoModelForCausalLM, DataCollatorForLanguageModeling
 
 from halo.configs.distillation import TeacherDistillationConfig
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.runtime.collectives import barrier
 from halo.trainers.distillation.teacher_distillation import DistributedTeacherDistillationTrainer
 from tests.common.adapters import (
-    assert_adapter_checkpoint,
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
-    is_expert_lora_active,
+    check_adapters_moved,
+    check_only_adapters_trainable,
     load_peft_model,
     model_name_for,
+    save_and_check_adapter_checkpoint,
     snapshot_adapters,
     unwrap,
 )
@@ -64,7 +64,7 @@ def run(ctx) -> dict:
     attn = "flex_attention" if parallelism_config.has_ep_group else "sdpa"
     # The trainer wraps it, as the script has it do.
     student, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
-    expert_lora = is_expert_lora_active(student)
+    expert_lora = model_has_expert_lora(student)
     log(f"  expert_lora_active={expert_lora}, peft_config={'set' if peft_config else 'None'}")
 
     # Same architecture, unparallelized: a full copy per rank.
@@ -113,7 +113,7 @@ def run(ctx) -> dict:
     ctx.on_teardown(trainer.cleanup_ep)
 
     wrapped = unwrap(trainer.model)
-    ok, detail = assert_only_adapters_trainable(wrapped)
+    ok, detail = check_only_adapters_trainable(wrapped)
     checks["only_adapters_trainable"] = ok
     log(f"  [trainable] {detail}")
     adapters_before = snapshot_adapters(wrapped, expert_lora=expert_lora)
@@ -125,11 +125,11 @@ def run(ctx) -> dict:
     log(f"  training_loss={result.training_loss:.5f}, steps={result.global_step}")
 
     adapters_after = snapshot_adapters(unwrap(trainer.model), expert_lora=expert_lora)
-    ok, detail = assert_adapters_moved(adapters_before, adapters_after)
+    ok, detail = check_adapters_moved(adapters_before, adapters_after)
     checks["adapters_moved"] = ok
     log(f"  [moved] {detail}")
 
-    ok, detail = assert_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=expert_lora)
+    ok, detail = save_and_check_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=expert_lora)
     checks["adapter_checkpoint"] = ok
     log(f"  [checkpoint] {detail}")
 

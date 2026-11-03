@@ -12,13 +12,13 @@ import pytest
 import halo.model_loading.parallel.model_source as model_source
 import halo.runtime.consensus as consensus
 from halo.checkpoint.format import SAFETENSORS_INDEX_FILE
-from halo.model_loading.parallel.model_source import ModelSource, reject_ep_sharded_checkpoint, resolve_lazy_checkpoint
+from halo.model_loading.parallel.model_source import ModelSource, agree_lazy_load, reject_ep_sharded_checkpoint
 from tests.common.repo import REPO_ROOT
 from tests.common.source_sweep import imports_name
 
 # Each could hold a probe of its own, with the call through which it reaches the shared gate.
 LOADER_MODULES = {
-    "load_pp_stage_model": (REPO_ROOT / "halo/model_loading/parallel/pp.py", "resolve_lazy_checkpoint"),
+    "load_pp_stage_model": (REPO_ROOT / "halo/model_loading/parallel/pp.py", "agree_lazy_load"),
     "load_ep_tp_model": (REPO_ROOT / "halo/model_loading/parallel/tp.py", "load_ep_model"),
 }
 
@@ -71,7 +71,7 @@ def test_a_torn_index_on_rank0_is_deferred_past_the_collective(tmp_path, monkeyp
 
 def test_the_lazy_checkpoint_verdict_refuses_a_sharded_checkpoint(tmp_path):
     with pytest.raises(ValueError, match="merge_ep_shards.py"):
-        resolve_lazy_checkpoint(_checkpoint(tmp_path, "ep_sharded"), lazy_requested=True, layout_supported=bool)
+        agree_lazy_load(_checkpoint(tmp_path, "ep_sharded"), lazy_requested=True, layout_supported=bool)
 
 
 @pytest.mark.parametrize("loader", sorted(LOADER_MODULES))

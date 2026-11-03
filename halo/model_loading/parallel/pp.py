@@ -34,7 +34,7 @@ from halo.model_loading.parallel.lazy_plan import (
     is_lazy_loadable,
     lazy_load_prologue,
 )
-from halo.model_loading.parallel.model_source import ModelSource, resolve_lazy_checkpoint
+from halo.model_loading.parallel.model_source import ModelSource, agree_lazy_load
 from halo.models.config_access import TIE_WORD_EMBEDDINGS_FLAG, tie_flag_configs
 from halo.models.module_tree import split_layer_path
 from halo.runtime.consensus import reject_across_ranks
@@ -334,7 +334,7 @@ def load_pp_stage_model(
     already EP- or grouped-GEMM-wrapped (``wraps_experts``); ``build_pipeline_stage`` finishes the split."""
     # Before the lazy gate: ep_config() issues new_group on every rank, which no per-rank file probe may precede.
     ep_config = pc.ep_config() if wraps_experts else None
-    if not resolve_lazy_checkpoint(source, lazy_requested=True, layout_supported=is_lazy_loadable):
+    if not agree_lazy_load(source, lazy_requested=True, layout_supported=is_lazy_loadable):
         raise ValueError(
             f"Pipeline parallelism needs a safetensors checkpoint the stage-aware loader can read, "
             f"but {source.name!r} has none. Falling back to a whole-model load would make "

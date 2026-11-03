@@ -95,11 +95,11 @@ EP/long-context throughput tables live in [Throughput Benchmarks](throughput-ben
 
     Per-rank forward counts are all-reduced to a max and padded with tied dummy forwards, and every row — the padding included — stays connected to the loss, so the forward **and** backward collective sequences stay in lockstep. A disconnected row would let autograd prune its backbone backward and desync the FSDP/EP grad collectives across ranks.
 
-Fallback chain for sinks models: requested → `flash_attention_4` (added as a candidate when the sinks are live) → `flash_attention_3` (Hopper, where its build imports) → `flash_attention_2` → `flex_attention` → SDPA (only when sinks are reset) → `eager` (`validate_attn_implementation`); under live sinks every sink-dropping candidate is filtered out.
+Fallback chain for sinks models: requested → `flash_attention_4` (added as a candidate when the sinks are live) → `flash_attention_3` (Hopper, where its build imports) → `flash_attention_2` → `flex_attention` → SDPA (only when sinks are reset) → `eager` (`select_supported_attn_implementation`); under live sinks every sink-dropping candidate is filtered out.
 
 With sinks reset for SFT (the default), an explicit `attn_implementation='sdpa'` is kept — `install_sdpa_for_reset_sinks` flips `_supports_sdpa` because the dropped sink column is `exp(dtype.min)=0`.
 
-With **live** sinks `validate_attn_implementation` admits only the sink-carrying impls — FA4 (`learnable_sink`), FA3 with `s_aux` (Hopper), `flex_attention`, `eager` — and **raises** on `flash_attention_2` and `sdpa` ([why](../models/gpt-oss.md#attention-sinks)). The Docker Hopper FA3 build exposes no `s_aux`, so live-sinks runs on Hopper use `flex_attention` or `eager`.
+With **live** sinks `select_supported_attn_implementation` admits only the sink-carrying impls — FA4 (`learnable_sink`), FA3 with `s_aux` (Hopper), `flex_attention`, `eager` — and **raises** on `flash_attention_2` and `sdpa` ([why](../models/gpt-oss.md#attention-sinks)). The Docker Hopper FA3 build exposes no `s_aux`, so live-sinks runs on Hopper use `flex_attention` or `eager`.
 
 Capability is read from the installed kernel's signature (`_attn_impl_handles_sinks`), probing the module transformers actually dispatches (FA3 via `flash_attn_interface` first, then `flash_attn_3`), so a flash-attn upgrade that adds sink support is picked up automatically.
 
@@ -125,7 +125,7 @@ Qwen3.5's partial-rotary `torch.cat` leaves q/k head-major before the flash tran
 
 **Attention logit softcapping (Gemma 2)**: SDPA is refused for any config setting `attn_logit_softcapping`, requested or defaulted, because transformers' SDPA path never reads the softcap and would train a different model without a word. The validator falls back to FA3 on Hopper, then FA2, then `flex_attention` (which applies the softcap as a score modifier), then `eager`; in fp32 it skips both flash kernels. FA3, the arch's own kernel, comes first on Hopper; a requested FA3 carries the softcap and stays.
 
-**Ling 2.0 and Ring (`bailing_moe`, `bailing_moe_linear`)**: remote code on transformers v4's Llama flash template, whose table, support flag (`_supports_flash_attn_2`, which v5 ignores) and kernel call know only `flash_attention_2`. `patch_v4_flash_attention_template` (`halo/models/attention/remote_flash_attention.py`), run on every remote modeling module the remote-class funnel loads, makes the auto-selected FA4/FA3 build and run varlen over packed documents; the file's own SDPA and eager masks ignore `position_ids`, so packing is refused there ([Bailing → Attention and packing](../models/bailing.md#attention-and-packing)).
+**Ling 2.0 and Ring (`bailing_moe`, `bailing_moe_linear`)**: remote code on transformers v4's Llama flash template, whose table, support flag (`_supports_flash_attn_2`, which v5 ignores) and kernel call know only `flash_attention_2`. `patch_remote_llama_flash_template` (`halo/models/attention/remote_flash_attention.py`), run on every remote modeling module the remote-class funnel loads, makes the auto-selected FA4/FA3 build and run varlen over packed documents; the file's own SDPA and eager masks ignore `position_ids`, so packing is refused there ([Bailing → Attention and packing](../models/bailing.md#attention-and-packing)).
 
 **Ling 3.0 (`bailing_hybrid`)**: the file has no flash attention class, only the v4 support flag, so every flash label, and an unset one outside the padded scripts' default (below), is refused at model build; set `attn_implementation: sdpa`. Its MLA mask ignores `position_ids` as Ling 2.0's SDPA path does, so packing is refused and Ling 3.0 trains on padded batches.
 
@@ -236,7 +236,7 @@ Every row is what the loader picks on its own; the reason for each redirect is i
 | Gemma 2 27B (head_dim 128) | FA4 at one unpadded row per batch, training and evaluation; → FA2 on packed, padding-free or padded rows (a softcap stays off FA4's varlen kernels) |
 | Padded scripts (DPO, SMPO, KTO, RM, classification, distillation, GRPO), unpinned | the loader's pick on Blackwell (FA2 for a softcapped policy; SDPA for remote code and for a softcapped teacher, which lands on FA2); SDPA elsewhere, which a softcap turns into FA3 on Hopper |
 | Gemma4 | → `sdpa_flex_sliding` on CUDA: FlexAttention on the sliding layers, matmul attention on the head_dim-512 global layers, past a score-memory budget mem-efficient attention per packed document ([Gemma 4](../models/gemma4.md)) |
-| Ling 2.0 · Ring | FA4 on Blackwell, FA3 on Hopper (`patch_v4_flash_attention_template`) |
+| Ling 2.0 · Ring | FA4 on Blackwell, FA3 on Hopper (`patch_remote_llama_flash_template`) |
 | Ling 3.0 | no fallback: the flash label fails the model build — set `attn_implementation: sdpa` |
 | DeepSeek-V4 | → eager |
 | GLM-5 Next · Inkling | → SDPA (upstream declares no flash support) |

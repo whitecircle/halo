@@ -230,7 +230,7 @@ def declares_flash_attention(model_config) -> bool:
     return getattr(declared_model_class(model_config), "_supports_flash_attn", True)
 
 
-def validate_attn_implementation(
+def select_supported_attn_implementation(
     model_config, attn_impl: str, sinks_policy: SinksPolicy | None = None, *, dtype: torch.dtype | None = None
 ) -> str:
     """``attn_impl`` or the first fallback the class's flags and the sink matrix accept. A neutralized ``sinks_policy``
@@ -318,11 +318,11 @@ def validate_attn_implementation(
     )
 
 
-def revalidate_attn_kwarg(model_kwargs: dict, model_config) -> None:
+def reselect_attn_kwarg(model_kwargs: dict, model_config) -> None:
     """So a family whose ``_supports_*`` flags refuse the policy's choice fails before the load."""
     attn_impl = model_kwargs.pop("attn_implementation", None)
     if attn_impl is not None:
-        model_kwargs["attn_implementation"] = validate_attn_implementation(model_config, attn_impl)
+        model_kwargs["attn_implementation"] = select_supported_attn_implementation(model_config, attn_impl)
 
 
 def verify_live_sinks_carried(model) -> None:
@@ -402,4 +402,4 @@ def resolve_attn_implementation(
             )
         attn_implementation = "sdpa"
 
-    return validate_attn_implementation(model_config, attn_implementation, sinks_policy, dtype=dtype)
+    return select_supported_attn_implementation(model_config, attn_implementation, sinks_policy, dtype=dtype)

@@ -11,7 +11,7 @@ from trl.trainer.utils import pad
 
 from halo.data.chat_render import render_conversation, tokenize_rendered
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.completion_spans import build_completion_only_labels
+from halo.data.completion_spans import build_training_labels
 from halo.data.turn_markers import reject_unusable_response_marker, resolve_eos_token_ids
 from halo.data.vlm_render import SEQUENCE_ALIGNED_VISION_KEYS
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
@@ -318,7 +318,7 @@ def _encode_branch(
             f"alignment). Raise max_length (the teacher needs headroom for the privileged hint) or "
             f"drop over-length rows before training."
         )
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         input_ids,
         collator.tokenizer,
         collator.response_prompt_template,

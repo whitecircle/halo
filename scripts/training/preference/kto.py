@@ -14,7 +14,7 @@ from halo.configs.preference import KTOScriptArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.pipeline.map_cache_key import carry_cache_key
 from halo.data.render_columns import alias_images_column, reject_missing_render_column
-from halo.data.vlm_detection import dataset_declares_images
+from halo.data.vlm_detection import dataset_declares_images_across_ranks
 from halo.entrypoints.data_setup import (
     load_script_datasets,
     log_script_dataset_examples,
@@ -39,10 +39,12 @@ def _reject_embedded_image_parts(dataset, completion_field: str) -> None:
     """Raise on image parts in a dataset TRL would read as text-only: TRL decides from the first row's columns alone,
     so embedded parts with no image column become placeholder tokens with no pixels. KTO renders nothing itself, so the
     per-row ``reject_image_content`` backstop does not run here."""
-    if dataset_declares_images(dataset):  # an image column, which TRL's own probe sees
+    if dataset_declares_images_across_ranks(dataset):  # an image column, which TRL's own probe sees
         return
     # TRL hard-codes the prompt column; the completion column is the configured one.
-    embedded = [column for column in ("prompt", completion_field) if dataset_declares_images(dataset, column)]
+    embedded = [
+        column for column in ("prompt", completion_field) if dataset_declares_images_across_ranks(dataset, column)
+    ]
     if not embedded:
         return
     raise ValueError(
@@ -92,7 +94,7 @@ def main():
     parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
+    # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while TRL's vision probe reads the column
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
     # Vision routing keys on the dataset: a natively-multimodal model trains text-only data through TRL's text path.

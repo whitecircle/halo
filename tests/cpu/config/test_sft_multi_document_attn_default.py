@@ -18,7 +18,7 @@ from trl import SFTConfig
 from halo.configs.script_arguments import ModelArguments
 from halo.data.collators.collator_rules import reject_unsupported_collator_options
 from halo.entrypoints import model_setup, run_setup
-from halo.entrypoints.model_setup import default_training_rows_attn_implementation, plan_training_rows
+from halo.entrypoints.model_setup import default_training_rows_attn_implementation, plan_row_attention
 from halo.model_loading.parallel.loader import resolve_policy_attn_implementation
 from halo.models import segment_markers
 from halo.models.attention import selection
@@ -420,7 +420,7 @@ def _run_sft_main(
         return runtime
 
     def plan_rows(model_config, training_args, **kwargs):
-        plan = model_setup.plan_training_rows(model_config, training_args, **kwargs)
+        plan = model_setup.plan_row_attention(model_config, training_args, **kwargs)
         captured["planned_attn"] = resolve_policy_attn_implementation(
             copy.deepcopy(checkpoint_config),
             plan.attn_default,
@@ -460,7 +460,7 @@ def _run_sft_main(
             return_value=(checkpoint_config, is_vlm_model("stub/model", checkpoint_config)),
         ),
         mock.patch.object(segment_markers, "GDN_SEGMENT_AWARE_BACKENDS", _SEGMENT_AWARE_KERNELS_PRESENT),
-        mock.patch.object(module, "plan_training_rows", side_effect=plan_rows),
+        mock.patch.object(module, "plan_row_attention", side_effect=plan_rows),
         mock.patch.object(module, "init_training_script", side_effect=init_training_script),
         *_run_setup_stubs(tmp_path),
         mock.patch.object(module, "resolve_training_dtype", return_value=torch.bfloat16),
@@ -648,7 +648,7 @@ def test_a_row_plan_refuses_a_full_determinism_config_the_switch_has_not_reached
     on_arch, capability = _on_arch("b300")
 
     def plan():
-        return plan_training_rows(
+        return plan_row_attention(
             ModelArguments(model_name_or_path="stub/model", attn_implementation="flash_attention_4"),
             sft_config,
             sinks_policy=SinksPolicy.NEUTRALIZED,

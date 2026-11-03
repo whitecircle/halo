@@ -302,7 +302,7 @@ class _ElasticBackend(DeepEPBackend):
             self._arena = None
         if self._arena is None:
             self._arena = _ElasticArena.acquire(
-                d.ep_group, self._padded_hidden, num_topk, DEEPEP_NUM_QPS, deterministic
+                d.dispatch_group, self._padded_hidden, num_topk, DEEPEP_NUM_QPS, deterministic
             )
         built = self._arena.ensure(needed)
         self._num_topk = num_topk
@@ -313,7 +313,7 @@ class _ElasticBackend(DeepEPBackend):
     def _resolve_capacity(self, num_tokens: int, num_topk: int) -> int:
         """The arena capacity this forward needs: the first MoE layer all-reduces it, the rest reuse it."""
         d = self._d
-        gid = id(d.ep_group)
+        gid = id(d.dispatch_group)
         cached = capacity_scope.lookup(gid, num_topk) if EP_CAPACITY_DEDUP else None
         if cached is not None:
             # Judged against the group capacity, as per-layer counts are data-dependent per rank: the rank
@@ -328,10 +328,10 @@ class _ElasticBackend(DeepEPBackend):
                 )
             return cached
         cap = torch.tensor([num_tokens], device="cuda", dtype=torch.int64)
-        dist.all_reduce(cap, op=dist.ReduceOp.MAX, group=d.ep_group)
+        dist.all_reduce(cap, op=dist.ReduceOp.MAX, group=d.dispatch_group)
         needed = ep_dispatch_capacity(int(cap.item()))
         if EP_CAPACITY_DEDUP:
-            capacity_scope.store(d.ep_group, gid, num_topk, needed)
+            capacity_scope.store(d.dispatch_group, gid, num_topk, needed)
         return needed
 
     def _resolve_num_sms(self, num_topk: int) -> int:
@@ -465,7 +465,7 @@ class _LegacyBackend(DeepEPBackend):
         for cfg in (buffer_cls.get_dispatch_config(d.ep_size), buffer_cls.get_combine_config(d.ep_size)):
             num_nvl_bytes = max(num_nvl_bytes, cfg.get_nvl_buffer_size_hint(hidden_bytes, d.ep_size))
         # The byte size is the whole shape: it already folds in hidden, ep_size and the SM pin.
-        self._arena = _LegacyArena.acquire(d.ep_group, num_nvl_bytes)
+        self._arena = _LegacyArena.acquire(d.dispatch_group, num_nvl_bytes)
         if self._arena.ensure():
             logger.info(
                 f"DeepEP legacy Buffer (intranode CUDA-IPC, shared by every MoE layer): "

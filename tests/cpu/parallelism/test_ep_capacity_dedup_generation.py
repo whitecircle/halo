@@ -53,7 +53,7 @@ def _mid_pipeline_stage() -> PipelineStageModule:
 
 class _StubDispatcher:
     def __init__(self, group: object, hidden_dim: int):
-        self.ep_group = group
+        self.dispatch_group = group
         self.hidden_dim = hidden_dim
         self.spans_domains = False
 

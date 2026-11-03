@@ -30,7 +30,7 @@ Memory reduction, throughput, and hardware utilization during training. The [GPU
 - **[Grouped GEMM](grouped-gemm.md)** — Batched MoE expert matmul via `torch.nn.functional.grouped_mm`, default on SM90+. Home to the atomic-free permute and MoE throughput playbook.
 - **[Liger kernels](liger-kernels.md)** — Triton kernels for fused cross-entropy, RMS normalization, and SwiGLU (Qwen3 MoE, GLM-4.7-Flash, GPT-OSS and Gemma 4 run their norms on torch's fused `F.rms_norm`). On by default — set `use_liger_kernel: false` to disable.
 - **[torch.compile](torch-compile.md)** — Inductor compilation of the spans between MoE/attention graph breaks (`torch_compile: true`) — at most 1% on EP MoE, and slower in `reduce-overhead` mode.
-- **[Checkpointing plan](../training-methods/callbacks.md#checkpointingplancallback)** — `gradient_checkpointing_plan: auto` measures one fully checkpointed step and checkpoints only the decoder layers the memory budget needs (opt-in, packed SFT rows).
+- **[Checkpointing plan](../training-methods/callbacks.md#gradientcheckpointingplancallback)** — `gradient_checkpointing_plan: auto` measures one fully checkpointed step and checkpoints only the decoder layers the memory budget needs (opt-in, packed SFT rows).
 - **[Muon optimizer](muon-optimizer.md)** — Newton-Schulz orthogonalization for matrix params, fused Triton (~5× over upstream's Python-loop step). Set `optim: muon`.
 - **[NUMA binding](throughput-benchmarks.md#numa-binding)** — `torchrun --numa-binding node` runs each rank on its GPU's NUMA node, which helps host-bound rows on a multi-socket host. `torchrun` launches only.
 

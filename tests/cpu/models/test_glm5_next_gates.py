@@ -28,7 +28,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.selection import (
     declares_flash_attention,
     resolve_attn_implementation,
-    validate_attn_implementation,
+    select_supported_attn_implementation,
 )
 from halo.models.moe.config_fields import resolve_expert_count, resolve_expert_ffn_width, resolve_router_topk
 from tests.common.distributed import fake_process_group_mesh
@@ -142,8 +142,8 @@ def test_attention_resolution_lands_on_sdpa():
 
 def test_attention_flash_gate_reads_the_class_flag_not_a_family_list():
     """DeepSeek-V4 has no sdpa either, so it lands on eager."""
-    assert validate_attn_implementation(DeepseekV4Config(), "flash_attention_2") == "eager"
-    assert validate_attn_implementation(Qwen3Config(), "flash_attention_2") == "flash_attention_2"
+    assert select_supported_attn_implementation(DeepseekV4Config(), "flash_attention_2") == "eager"
+    assert select_supported_attn_implementation(Qwen3Config(), "flash_attention_2") == "flash_attention_2"
 
 
 def _tokenizer() -> MagicMock:

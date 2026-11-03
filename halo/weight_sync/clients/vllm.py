@@ -133,9 +133,9 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         self._require_communicator()
         try:
             self._quiesce()
-            self._open_session()
+            self._open_update_session()
         except Exception:
-            self._close_session()
+            self._abandon_update_session()
             self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
             raise
 
@@ -175,9 +175,9 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
     def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
         try:
             self._transmit_chunk(tail, final=True)
-            self._end_session()
+            self._end_update_session()
         finally:
-            self._close_session()
+            self._abandon_update_session()
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S

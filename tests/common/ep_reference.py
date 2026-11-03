@@ -118,7 +118,7 @@ def sweep_ep_grads(model: torch.nn.Module) -> None:
         _top_level_model=lambda: model,
     )
     host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
 
 
 @contextmanager
@@ -302,7 +302,7 @@ def full_grad(param: torch.nn.Parameter) -> torch.Tensor:
     return grad.detach().float().clone()
 
 
-def gathered_expert_grads(layer) -> dict[str, torch.Tensor]:
+def zero_filled_expert_banks(layer) -> dict[str, torch.Tensor]:
     """COLLECTIVE over the layer's expert-TP and EP groups and an FSDP2 bank's mesh: expert gradients as the stock
     container's full banks. A rank whose experts no token reached contributes zeros."""
     local = {
@@ -677,7 +677,7 @@ def where_expert_loop(layer, tokens: torch.Tensor, experts: torch.Tensor, weight
     ep_size = layer.ep_size
     layer.ep_size = 1
     try:
-        return layer._compute_experts_weighted(
+        return layer._compute_experts_loop(
             tokens, experts, weights, output_dtype, layer._expert_forward, recv_counts=None
         )
     finally:

@@ -529,7 +529,7 @@ def reject_invalid_composition(pc: ParallelismConfig) -> None:
     _reject_fsdp_settings(pc)
 
 
-def reject_accelerate_launch(pc: ParallelismConfig) -> None:
+def reject_custom_parallelism_under_accelerate(pc: ParallelismConfig) -> None:
     """Refuse the custom meshes under ``accelerate launch``, which owns the wrapping for every ``distributed_type``."""
     if not pc.has_custom_parallelism or not is_accelerate_launch():
         return

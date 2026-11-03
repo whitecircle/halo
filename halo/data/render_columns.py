@@ -76,7 +76,8 @@ def _alias_render_column(
 
 def alias_images_column(dataset: DatasetDict, images_field: str | None, path: str) -> DatasetDict:
     """Rename a declared image column to ``images``: TRL's preference trainers route on an ``image``/``images``
-    key and prune every other column, while :func:`~halo.data.vlm_detection.is_vlm_run` reads ``images_field``."""
+    key and prune every other column, while :func:`~halo.data.vlm_detection.is_vlm_run_across_ranks` reads
+    ``images_field``."""
     return _alias_render_column(
         dataset, "images_field", images_field, VLM_RAW_IMAGE_COLUMNS[0], VLM_RAW_IMAGE_COLUMNS, path
     )
@@ -88,7 +89,7 @@ def alias_tools_column(dataset: DatasetDict, tools_field: str | None, path: str)
     return _alias_render_column(dataset, "tools_field", tools_field, "tools", ("tools",), path)
 
 
-def apply_conversation_field(
+def drop_empty_conversation_rows(
     dataset: DatasetDict, path: str, conversation_field: str | None, *, required: bool, knob: str
 ) -> None:
     """Drop rows with an empty conversation, in place. ``required`` makes a missing column fatal, naming ``knob``."""

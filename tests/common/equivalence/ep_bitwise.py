@@ -279,7 +279,7 @@ def _save_router(model: torch.nn.Module) -> torch.nn.Module:
     torch.manual_seed(ADAPTER_SEED)
     model = get_peft_model(model, LoraConfig(r=LORA_RANK, target_modules=targets, modules_to_save=routers))
     for _, layer in named_ep_layers(model):
-        layer.reattach_router_grad_sync()
+        layer.reattach_dp_average_grad_hooks()
     return model
 
 

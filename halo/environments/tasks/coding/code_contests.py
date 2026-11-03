@@ -336,7 +336,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
     ) -> tuple[list[NativeToolResult], float]:
         # What a failed submission in the turn is judged by.
         info = trajectory.info
-        info[TURN_RUNS_LEFT_KEY] = self._tool_budget_exhausted(trajectory, self.test_tool_name) is None
+        info[TURN_RUNS_LEFT_KEY] = self._exhausted_tool_cap(trajectory, self.test_tool_name) is None
         info[TURN_RUN_PROGRAMS_KEY] = len(info.get(RUN_PROGRAMS_KEY, []))
         return super()._execute_tool_calls(tool_calls, trajectory)
 
@@ -487,7 +487,7 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
         outcome = super()._step_single(trajectory, action, context)
         info = outcome.trajectory.info
         # A turn that also booked a sandbox fault ends on it, uncompleted, whatever it submitted.
-        spent = self._tool_budget_exhausted(outcome.trajectory, SUBMIT_TOOL) is not None
+        spent = self._exhausted_tool_cap(outcome.trajectory, SUBMIT_TOOL) is not None
         if not outcome.done and (spent or is_accepted(info)) and SANDBOX_FAULT_KEY not in info:
             info["completed"] = True
             return outcome._replace(done=True)

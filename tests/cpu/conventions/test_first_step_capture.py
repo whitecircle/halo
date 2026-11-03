@@ -86,7 +86,7 @@ def _sweep_tp_grads(model) -> None:
     )
     for name in ("_memoized_param_ids", "_tp_sharded_plain_param_ids", "_tp_per_head_norm_param_ids"):
         setattr(host, name, MethodType(getattr(DistributedTrainerMixin, name), host))
-    params = DistributedTrainerMixin._tp_replicated_params(host, model.parameters())
+    params = DistributedTrainerMixin._non_expert_params(host, model.parameters())
     DistributedTrainerMixin._sync_tp_replicated_grads(host, params)
 
 

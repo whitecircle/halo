@@ -46,8 +46,8 @@ from halo.models.attention.selection import (
     is_flash_attn_implementation,
     preferred_flash_impl,
     resolve_attn_implementation,
+    select_supported_attn_implementation,
     supports_fa4_backward,
-    validate_attn_implementation,
 )
 from halo.models.config_access import apply_config_overrides, drop_toolkit_stamps, text_config
 from halo.models.moe.config_fields import has_routed_experts
@@ -121,7 +121,7 @@ def _resolve_run_attention(
             )
         # Re-validated, not assigned: the substitute must clear the same sink-capability matrix, or a
         # run keeping live sinks (reset_sinks=false) silently moves to a sink-dropping kernel.
-        attn_implementation = validate_attn_implementation(
+        attn_implementation = select_supported_attn_implementation(
             model_config, cp_flash, _backend_sinks_policy(sinks_policy, init_from_scratch)
         )
         if not is_flash_attn_implementation(attn_implementation):

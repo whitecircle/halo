@@ -28,7 +28,7 @@ from halo.checkpoint.format import ADAPTER_CONFIG_FILE, ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.reading import read_checkpoint_index
 from halo.checkpoint.writing import cast_to_save_dtype
 from halo.configs.script_arguments import ModelArguments
-from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters, model_has_expert_lora
+from halo.distributed.expert_parallel.moe_layer.expert_lora import gather_expert_lora_adapters
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.finalization import finalize_loaded_model
 from halo.model_loading.parallel.loader import load_distributed_model
@@ -242,7 +242,7 @@ def randomize_adapters(
                 param.copy_(torch.empty_like(param, dtype=dtype).normal_(std=std))
 
 
-def assert_only_adapters_trainable(model) -> tuple[bool, str]:
+def check_only_adapters_trainable(model) -> tuple[bool, str]:
     """Every trainable param is an adapter or modules_to_save copy (a SEQ_CLS head must train), and at least one
     ``lora_*`` is trainable."""
     trainable_non_adapter = [
@@ -264,7 +264,7 @@ def snapshot_adapters(model, *, expert_lora: bool) -> dict[str, torch.Tensor]:
     return {n: _materialize(p) for n, p in adapter_param_items(model) if p.requires_grad}
 
 
-def assert_adapters_moved(before: dict, after: dict, *, require_all: bool = False) -> tuple[bool, str]:
+def check_adapters_moved(before: dict, after: dict, *, require_all: bool = False) -> tuple[bool, str]:
     """Every adapter is finite, at least one changed (all with ``require_all``, which a partly wired adapter fails),
     and a B moved."""
     nonfinite = [k for k, t in after.items() if not torch.isfinite(t).all()]
@@ -282,7 +282,7 @@ def assert_adapters_moved(before: dict, after: dict, *, require_all: bool = Fals
     return True, f"{len(moved)}/{len(before)} adapters changed (lora_B moved: {len(b_moved)})"
 
 
-def assert_adapter_checkpoint(trainer, output_dir: str, rank: int, *, expert_lora: bool) -> tuple[bool, str]:
+def save_and_check_adapter_checkpoint(trainer, output_dir: str, rank: int, *, expert_lora: bool) -> tuple[bool, str]:
     """Save an adapter-only checkpoint and check it on disk: LoRA keys, all finite, one non-zero B.
     ``trainer.save_model`` is collective; only rank 0 reads the file back."""
     adapter_dir = os.path.join(output_dir, "adapter_ckpt")
@@ -442,10 +442,6 @@ def verify_adapter_reload(
 def unwrap(trainer_model):
     """Unwrap FSDP/DDP/compile wrappers, keeping the (possibly PEFT) model for adapter access."""
     return extract_model_from_parallel(trainer_model, recursive=True)
-
-
-def is_expert_lora_active(model) -> bool:
-    return model_has_expert_lora(model)
 
 
 def merged_lora_targets(model: torch.nn.Module) -> dict[str, torch.Tensor]:

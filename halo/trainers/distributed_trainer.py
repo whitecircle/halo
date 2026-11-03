@@ -19,7 +19,10 @@ from halo.distributed.fsdp import (
     install_fsdp2_safe_disable_adapter,
     reshard_fsdp2_modules,
 )
-from halo.distributed.parallelism_rules import reject_accelerate_launch, reject_cross_domain_determinism
+from halo.distributed.parallelism_rules import (
+    reject_cross_domain_determinism,
+    reject_custom_parallelism_under_accelerate,
+)
 from halo.distributed.rank_uniform_env import agree_rank_uniform_env
 from halo.model_loading.liger.dispatch import (
     sanitize_liger_config,
@@ -275,7 +278,7 @@ class DistributedTrainerMixin(
 
         type(self).reject_undeclared_axes(cp_size=parallelism_config.cp_size, pp_size=parallelism_config.pp_size)
         reject_pp_named_optimizer(training_args, parallelism_config)
-        reject_accelerate_launch(parallelism_config)
+        reject_custom_parallelism_under_accelerate(parallelism_config)
         full_determinism = getattr(training_args, "full_determinism", False)
         # Before HF's Trainer.__init__ turns on the deterministic mode the warmed graphs were compiled without.
         reject_full_determinism_after_warmup(full_determinism)
@@ -472,7 +475,7 @@ class DistributedTrainerMixin(
             register_forward_generation_hook(self.model)
         # modules_to_save swaps in a router copy the ctor-time DP-sync hook never saw.
         if find_peft_model(self.model) is not None:
-            attached = sum(module.reattach_router_grad_sync() for module in self._ep_layers())
+            attached = sum(module.reattach_dp_average_grad_hooks() for module in self._ep_layers())
             if attached and is_global_main_process():
                 logger.info(f"  Re-attached EP router DP-sync hook to {attached} trainable modules_to_save params")
 

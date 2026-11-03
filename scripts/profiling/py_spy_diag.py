@@ -31,8 +31,8 @@ import sys
 from halo.diagnostics.py_spy import (
     FLAMEGRAPH_DIR,
     STACK_DUMP_DIR,
-    dump_distributed_stacks,
-    record_distributed_flamegraph,
+    dump_node_stacks,
+    record_flamegraphs,
     torchrun_python_pids,
 )
 from halo.log import configure_cli_logging
@@ -75,10 +75,10 @@ def main() -> None:
         parser.error("no torchrun training processes found on this node — pass --pid explicitly")
 
     if args.command == "dump":
-        capture = dump_distributed_stacks(args.output_dir, pids=pids)
+        capture = dump_node_stacks(args.output_dir, pids=pids)
     else:
         logger.info(f"Sampling {len(pids)} process(es) for {args.duration}s…")
-        capture = record_distributed_flamegraph(
+        capture = record_flamegraphs(
             args.output_dir, duration=args.duration, rate=args.rate, native=args.native, pids=pids
         )
 

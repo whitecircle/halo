@@ -19,13 +19,12 @@ from transformers import AutoTokenizer, TrainerCallback
 import halo.checkpoint.parallel.optimizer as optimizer_store_mod
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from halo.configs.grpo_offline import OfflineGRPOConfig
-from halo.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters
+from halo.distributed.expert_parallel.moe_layer.expert_lora import disable_expert_adapters, model_has_expert_lora
 from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.unwrapping import find_peft_model
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.adapters import (
-    is_expert_lora_active,
     is_lora_b_key,
     load_peft_model,
     model_name_for,
@@ -327,7 +326,7 @@ def run(ctx) -> dict:
     pc = parallelism_config_for(mode, ctx.world_size)
     trainer = _make_trainer(mode, pc, tokenizer, dataset, _config(train_out, TOTAL_STEPS, SAVE_AT_STEP, pc, mode))
     live["trainer"] = trainer
-    expert_lora = is_expert_lora_active(trainer.accelerator.unwrap_model(trainer.model))
+    expert_lora = model_has_expert_lora(trainer.accelerator.unwrap_model(trainer.model))
     checks["adapter_kind_as_declared"] = expert_lora == (mode == "expert_lora")
 
     # At zero-init lora_B the adapted model is the frozen base, so the reading needs no disable_adapter() before a

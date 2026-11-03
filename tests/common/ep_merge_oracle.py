@@ -2,7 +2,7 @@
 byte for byte. Test-only: a second in-tool path holding the whole model would defeat the streaming the tool exists
 for."""
 
-from halo.checkpoint.tools.ep_shard_merge import group_expert_weights, resolve_merge_transform
+from halo.checkpoint.tools.ep_shard_merge import group_expert_weights, resolve_merge_family_spec
 from halo.models.moe.expert_layout import to_hub_expert_tensors
 
 
@@ -16,7 +16,7 @@ def post_process_merged_weights(
     pass-through into an error."""
     expert_groups, result = group_expert_weights(merged_weights)
 
-    spec = resolve_merge_transform(model_type, bool(expert_groups), had_expert_shards, len(merged_weights), verbose)
+    spec = resolve_merge_family_spec(model_type, bool(expert_groups), had_expert_shards, len(merged_weights), verbose)
     if spec is None:
         return merged_weights
 

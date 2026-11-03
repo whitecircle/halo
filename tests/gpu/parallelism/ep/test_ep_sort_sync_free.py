@@ -351,7 +351,7 @@ def profiled_gemm_region(device, case: int, order: str) -> tuple[str, list[tuple
     layer = gemm_layer(family, layout, variant, device=device)
     swept = SWEPT_ROWS_PER_EXPERT if order == "ascending" else SWEPT_ROWS_PER_EXPERT[::-1]
     receives = [routed_receive(layer, rows_per_expert) for rows_per_expert in swept]
-    layer._warm_activation_graphs(device, torch.bfloat16, layer.hidden_dim, layer.top_k)
+    layer._warm_expert_kernels(device, torch.bfloat16, layer.hidden_dim, layer.top_k)
     upstream = [torch.ones(tokens.shape, device=device, dtype=torch.bfloat16) for tokens, *_ in receives]
 
     def compute_every_receive():

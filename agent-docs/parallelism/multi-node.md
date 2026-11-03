@@ -79,7 +79,7 @@ experts is already the sole sync and deferring on top would double-sync it.
 It carries no node-count term: single-domain `ep2` (four groups on 8 GPUs) and `ep2+tp2` defer
 exactly as node-local `ep8×2` does. Under a deferred topology **no in-backward EP grad hook registers
 at all**, expert and router alike, and every average runs in one post-backward sweep
-(`DistributedTrainerMixin._sync_deferred_expert_grads`).
+(`DistributedTrainerMixin._run_deferred_grad_sweep`).
 
 Two things keep the hooks out of it. A post-accumulate hook fires only where a grad accumulated, so a
 rank whose dispatch delivered no tokens for a layer never enters the collective its replicas are

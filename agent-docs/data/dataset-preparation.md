@@ -69,7 +69,7 @@ The same two values are also a **training** config field, `tokenizer_backend` (d
 
 With `--train_on_completions_only` the completion-only `labels` are baked into the saved dataset under **the span policy the artifact's own runtime collator applies** (`mask_batch_to_completion_spans`): marker tokens trained, each turn's terminator bounded by the next marker start.
 
-That is `COLLATOR_SPAN_POLICY` (no end-of-sequence fallback), and `PACKED_SPAN_POLICY` under `--pack_sequences`, where a turn with no terminator anywhere ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
+That is `PADDED_SPAN_POLICY` (no end-of-sequence fallback), and `PACKED_SPAN_POLICY` under `--pack_sequences`, where a turn with no terminator anywhere ends at the sequence end. Preprocessed and runtime training therefore see identical loss masks, image tokens included (masked after the span refill on both paths).
 
 Baked labels are authoritative at training time. The SFT script disables runtime completion re-masking for preprocessed data: a re-mask would overwrite them, e.g. re-masking a packed chunk whose response marker landed in the previous chunk drops its trained tokens.
 

@@ -24,7 +24,7 @@ class _EPTrainer(GradientClippingMixin):
         self._ep_config = SimpleNamespace()
         self._install_ep_clip()
 
-    def _sync_deferred_expert_grads(self) -> None:
+    def _run_deferred_grad_sweep(self) -> None:
         pass
 
     def _compute_global_grad_norm(self, params) -> torch.Tensor:

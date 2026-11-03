@@ -132,7 +132,7 @@ def _guard_stub():
 
 
 def _check(stub, results):
-    DistributedAsyncEnvironmentalGRPOTrainer._verify_step_has_valid_episodes(
+    DistributedAsyncEnvironmentalGRPOTrainer._track_empty_rollout_step(
         stub, results, rollout_valid_mask(results, _DEVICE)
     )
 

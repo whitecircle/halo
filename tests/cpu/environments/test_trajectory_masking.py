@@ -224,7 +224,7 @@ def test_episode_generation_tokens_mean_max_p90():
             requests_expired_in_sync=0,
             generation_tokens=v,
             episode_length=1,
-            success=True,
+            terminated_naturally=True,
             trajectory=None,
             error=None,
             total_reward=0.0,

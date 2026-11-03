@@ -58,7 +58,7 @@ def _assemble(monkeypatch, tmp_path, checkpoint: str, config, loads: list, **emb
 
     monkeypatch.setattr(embedding_script, "load_model_and_tokenizer", load)
     monkeypatch.setattr(
-        embedding_script, "plan_training_rows", lambda *args, **kwargs: SimpleNamespace(attn_default=None)
+        embedding_script, "plan_row_attention", lambda *args, **kwargs: SimpleNamespace(attn_default=None)
     )
     context = ScriptContext(make_parallelism_config(), 0, None, checkpoint, EmbeddingTrainer)
     return embedding_script._assemble_preloaded_pipeline(

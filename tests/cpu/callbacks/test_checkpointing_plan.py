@@ -20,13 +20,13 @@ from transformers import Qwen3Config, Qwen3ForCausalLM, Qwen3MoeConfig, Qwen3Moe
 from transformers.modeling_layers import GradientCheckpointingLayer
 from trl import SFTConfig
 
-from halo.callbacks import checkpointing_plan as plan_callback
-from halo.callbacks.checkpointing_plan import (
-    CheckpointingPlanCallback,
+from halo.callbacks import gradient_checkpointing_plan as plan_callback
+from halo.callbacks.gradient_checkpointing_plan import (
+    GradientCheckpointingPlanCallback,
     MemoryReader,
     StepMemoryProbe,
     agree_plan,
-    build_checkpointing_plan_callback,
+    build_gradient_checkpointing_plan_callback,
     build_plan_context,
     build_plan_fingerprint,
     restore_recompute_floor,
@@ -37,11 +37,12 @@ from halo.checkpoint.format import RUN_PLAN_FILE
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.entrypoints import script as script_entry
 from halo.entrypoints.script import ScriptContext, configure_balancing_and_build_callbacks
-from halo.models.checkpointing_plan import (
+from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
+from halo.models.gradient_checkpointing_plan import (
     CHECKPOINTING_OFF,
     DENSE_BUDGET_FRACTION,
+    GradientCheckpointingPlan,
     PlanContext,
-    RunPlan,
     StepMemory,
     apply_checkpointing_policy,
     candidate_policies,
@@ -54,7 +55,6 @@ from halo.models.checkpointing_plan import (
     reject_unplannable_run,
     resolve_policy,
 )
-from halo.models.gradient_checkpointing import enable_scoped_gradient_checkpointing
 from halo.models.moe.router_aux_gradient import install_router_aux_gradient
 from tests.common.gloo import run_gloo_ranks
 from tests.common.repo import load_script_module
@@ -427,7 +427,7 @@ def _consensus_worker(rank: int, out_dir: str):
     naive = resolve_policy(local, LAYERS, plan_budget_bytes(local, 4800, 8))[0]
     world = step_memory_across_ranks(local)
     every_n = resolve_policy(world, LAYERS, plan_budget_bytes(world, 4800, 8))[0]
-    plan = RunPlan(every_n_layers=every_n, fingerprint=FINGERPRINT)
+    plan = GradientCheckpointingPlan(every_n_layers=every_n, fingerprint=FINGERPRINT)
     agree_plan(plan)  # passes: the inputs were world-reduced first
     try:
         agree_plan(dataclasses.replace(plan, every_n_layers=1) if rank == 3 else plan)
@@ -479,13 +479,15 @@ def test_an_unfinished_plan_floors_the_next_launch_one_step_tighter_and_a_finish
     policies = candidate_policies(LAYERS)
     assert recompute_floor_index(None, FINGERPRINT, LAYERS) == 0
     for index, every_n in enumerate(policies):
-        unfinished = RunPlan(every_n_layers=every_n, fingerprint=FINGERPRINT)
+        unfinished = GradientCheckpointingPlan(every_n_layers=every_n, fingerprint=FINGERPRINT)
         assert recompute_floor_index(unfinished, FINGERPRINT, LAYERS) == min(index + 1, len(policies) - 1)
         # A finished plan is no OOM evidence, and a record made for other inputs prices another footprint.
         assert recompute_floor_index(dataclasses.replace(unfinished, finished=True), FINGERPRINT, LAYERS) == 0
         assert recompute_floor_index(unfinished, {**FINGERPRINT, "max_length": 4096}, LAYERS) == 0
     with pytest.raises(ValueError, match="every_n_layers=5"):
-        recompute_floor_index(RunPlan(every_n_layers=5, fingerprint=FINGERPRINT), FINGERPRINT, LAYERS)
+        recompute_floor_index(
+            GradientCheckpointingPlan(every_n_layers=5, fingerprint=FINGERPRINT), FINGERPRINT, LAYERS
+        )
 
 
 class _Args:
@@ -521,7 +523,7 @@ def _drive(callback, kind: str, tracker, output_dir: str, steps: int, *, state=N
 
 
 def _launch(tracker, output_dir: str, *, finish: bool, total_device_bytes: int = 2**40, steps: int = 3) -> int:
-    callback = CheckpointingPlanCallback(
+    callback = GradientCheckpointingPlanCallback(
         _CLEAN,
         total_device_bytes=total_device_bytes,
         floor_index=restore_recompute_floor(output_dir, FINGERPRINT, LAYERS),
@@ -557,7 +559,7 @@ def test_a_floor_never_relaxes_the_plan_the_launch_measures(tmp_path):
     target = (predict_peak(reading, LAYERS, 4) + predict_peak(reading, LAYERS, 8)) // 2
     tight = int(target / DENSE_BUDGET_FRACTION)
     tracker, out = _LiveBytes(), str(tmp_path)
-    save_run_plan(out, RunPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT))
+    save_run_plan(out, GradientCheckpointingPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT))
     assert _launch(tracker, out, finish=False, total_device_bytes=tight) == 4  # not the floor's every 8
     assert _launch(tracker, out, finish=False, total_device_bytes=tight) == 3  # every 4 did not finish
     # The same budget with no record measures every 4.
@@ -575,7 +577,7 @@ def _record_worker(rank: int, out_dir: str):
         return staged_file(*args, **kwargs)
 
     shared = os.path.join(out_dir, "shared")
-    unfinished = RunPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT)
+    unfinished = GradientCheckpointingPlan(every_n_layers=CHECKPOINTING_OFF, fingerprint=FINGERPRINT)
     with mock.patch.object(plan_callback, "staged_file", counting_staged_file):
         save_run_plan(shared, unfinished)
     outcome["writes"] = len(writers)
@@ -598,7 +600,7 @@ def _record_worker(rank: int, out_dir: str):
     os.makedirs(node, exist_ok=True)
     if rank == 0:
         with open(os.path.join(node, RUN_PLAN_FILE), "w") as f:
-            json.dump(dataclasses.asdict(RunPlan(every_n_layers=4, fingerprint=FINGERPRINT)), f)
+            json.dump(dataclasses.asdict(GradientCheckpointingPlan(every_n_layers=4, fingerprint=FINGERPRINT)), f)
     outcome["torn"] = restore_recompute_floor(node, FINGERPRINT, LAYERS)
     # A copy unreadable on one node raises on every rank instead of stranding the others in the reduce.
     if rank == 2:
@@ -693,7 +695,7 @@ def _callback_worker(rank: int, out_dir: str, budget_case: str):
     tracker = _LiveBytes()
 
     def callback(floor_index=0):
-        return CheckpointingPlanCallback(
+        return GradientCheckpointingPlanCallback(
             context, total_device_bytes=total_device_bytes, floor_index=floor_index, reader=_reader(tracker)
         )
 
@@ -751,7 +753,7 @@ def test_the_callback_prices_the_backward_phase_at_its_own_pre_optimizer_mark(tm
     unmarked = predict_peak(dataclasses.replace(reading, backward_peak=reading.peak), LAYERS, CHECKPOINTING_OFF)
     assert unmarked > 1.02 * marked
     tracker = _LiveBytes()
-    callback = CheckpointingPlanCallback(
+    callback = GradientCheckpointingPlanCallback(
         _CLEAN, total_device_bytes=int((marked + unmarked) / 2 / DENSE_BUDGET_FRACTION), reader=_reader(tracker)
     )
     _drive(callback, "dense", tracker, str(tmp_path), 3, seq=seq)
@@ -775,7 +777,7 @@ def _builder_worker(rank: int, out_dir: str, case: str):
     total = 2**34 - (2**30 if case == "mixed_memory" and rank == 1 else 0)
     gpu_model = "H100" if case == "mixed_model" and rank == 1 else "B300"
     build = functools.partial(
-        build_checkpointing_plan_callback,
+        build_gradient_checkpointing_plan_callback,
         config,
         model,
         ParallelismConfig(),
@@ -798,9 +800,12 @@ def _builder_worker(rank: int, out_dir: str, case: str):
             outcome["floor"] = fresh.floor_index
             outcome["layers"] = fresh.context.num_layers
             outcome["total_device_bytes"] = [fresh.total_device_bytes, fresh.context.fingerprint["total_device_bytes"]]
-            save_run_plan(out_dir, RunPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint))
+            save_run_plan(out_dir, GradientCheckpointingPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint))
             outcome["after_unfinished"] = build().floor_index
-            save_run_plan(out_dir, RunPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint, finished=True))
+            save_run_plan(
+                out_dir,
+                GradientCheckpointingPlan(every_n_layers=4, fingerprint=fresh.context.fingerprint, finished=True),
+            )
             outcome["after_finished"] = build().floor_index
     with open(os.path.join(out_dir, f"rank{rank}.json"), "w") as f:
         json.dump(outcome, f)
@@ -828,7 +833,7 @@ def test_the_builder_agrees_one_plan_input_across_ranks_and_floors_on_an_unfinis
 def test_the_builder_needs_a_gpu(tmp_path):
     config = SFTConfig(output_dir=str(tmp_path), bf16=False, use_cpu=True, gradient_checkpointing=True)
     with mock.patch.object(torch.cuda, "is_available", return_value=False), pytest.raises(ValueError, match="GPU"):
-        build_checkpointing_plan_callback(
+        build_gradient_checkpointing_plan_callback(
             config,
             _enabled("dense"),
             ParallelismConfig(),
@@ -849,7 +854,7 @@ def test_the_script_hands_the_plan_the_rows_its_caller_names():
     with (
         mock.patch.object(script_entry, "configure_moe_balancing", return_value="none"),
         mock.patch.object(script_entry, "build_run_callbacks", side_effect=lambda *_args, **_kwargs: []),
-        mock.patch.object(script_entry, "build_checkpointing_plan_callback", return_value="plan") as build,
+        mock.patch.object(script_entry, "build_gradient_checkpointing_plan_callback", return_value="plan") as build,
     ):
         args = SimpleNamespace(gradient_checkpointing_plan="auto")
         assert configure_balancing_and_build_callbacks(
@@ -919,7 +924,7 @@ def _sft_main_rows(tmp_path, yaml_body: str, *, preprocessed_packed: bool | None
         mock.patch.object(
             module, "load_preprocessed_metadata", return_value=SimpleNamespace(packed=preprocessed_packed, is_vlm=vlm)
         ),
-        mock.patch.object(module, "plan_training_rows", return_value=SimpleNamespace(attn_default=None)),
+        mock.patch.object(module, "plan_row_attention", return_value=SimpleNamespace(attn_default=None)),
         mock.patch.object(module, "load_policy_model", return_value=policy),
         mock.patch.object(module, "apply_max_length", return_value=policy.tokenizer),
         mock.patch.object(module, "configure_adapter_training", return_value=None),

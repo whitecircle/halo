@@ -63,7 +63,7 @@ shared with TP — the scatter half `SumGradAcrossGroup`, the gather half `SumAc
   expert outputs; identity backward, correct because `SumGradAcrossGroup` owns the input-gradient
   reduction and each shard's weight gradient is independently correct.
 
-Gradient divisors (the trainer's expert sweep, `_sync_deferred_expert_grads` in `halo/trainers/parallelism/grad_sync.py`, and `build_router_grad_hook` in `halo/distributed/expert_parallel/moe_layer/grad_sync.py`):
+Gradient divisors (the trainer's expert sweep, `_run_deferred_grad_sweep` in `halo/trainers/parallelism/grad_sync.py`, and `build_dp_average_grad_hook` in `halo/distributed/expert_parallel/moe_layer/grad_sync.py`):
 
 | Parameter | Divisor | Rationale |
 |---|---|---|

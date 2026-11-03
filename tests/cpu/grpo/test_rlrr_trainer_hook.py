@@ -10,7 +10,7 @@ import torch
 
 from halo.configs.grpo import RLRRConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
-from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
+from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 
@@ -82,7 +82,7 @@ def test_unscorable_member_does_not_shift_its_siblings():
     adv = result["advantages"]
 
     # The three real completions must get exactly what a group of three alone gets.
-    expected = relative_advantages_grouped(np.array([1.0, 1.0, 0.0]), group_size=3, config=config)
+    expected = rlrr_advantages_grouped(np.array([1.0, 1.0, 0.0]), group_size=3, config=config)
     assert adv[:3].tolist() == pytest.approx(expected.tolist(), rel=1e-6), (
         f"the unscorable placeholder shifted its siblings: {adv[:3].tolist()} vs {expected.tolist()}"
     )

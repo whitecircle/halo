@@ -101,7 +101,7 @@ def _counters_worker(rank: int, tmp_dir: str) -> None:
         layer._replay_flip_counts = torch.tensor([3.0, 12.0])
     injector = RoutingReplayInjector([layer], engine_layers=1, layer_indices=[0])
     with open(os.path.join(tmp_dir, f"{rank}.json"), "w") as fh:
-        json.dump({"prefetch": host.prefetch_metrics(), "flip": injector.flip_rate()}, fh)
+        json.dump({"prefetch": host.prefetch_metrics(), "flip": injector.drain_flip_rate()}, fh)
 
 
 def test_the_counter_metrics_are_world_totals(tmp_path):
@@ -121,7 +121,7 @@ def test_the_counter_metrics_are_world_totals(tmp_path):
 def test_a_single_process_reads_its_own_counters():
     assert _PrefetchHost(hits=0, misses=0, skips=0).prefetch_metrics() == {}
     injector = RoutingReplayInjector([BareEPLayer(top_k=2, num_experts=4)], engine_layers=1, layer_indices=[0])
-    assert injector.flip_rate() is None, "nothing forced reads as no rate, not 0"
+    assert injector.drain_flip_rate() is None, "nothing forced reads as no rate, not 0"
 
 
 if __name__ == "__main__":

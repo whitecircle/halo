@@ -28,7 +28,11 @@ from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
 from halo.model_loading.tokenizer_setup import load_processing_class, resolve_tokenizer
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
-from halo.models.attention.selection import flash_kernel, is_flash_attn_implementation, validate_attn_implementation
+from halo.models.attention.selection import (
+    flash_kernel,
+    is_flash_attn_implementation,
+    select_supported_attn_implementation,
+)
 from halo.models.config_access import text_config
 from halo.models.context_window import bounded_row_length, is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
@@ -555,8 +559,8 @@ _VLM_REFUSED_KNOBS = ("packing", "padding_free", "train_on_last_assistant_only",
 
 @pytest.mark.parametrize("config", _EXAMPLES, **_ID)
 def test_image_declaring_example_asks_for_nothing_the_vlm_path_refuses(config):
-    """Modality follows the run (``is_vlm_run``), so a multimodal checkpoint on text-only rows may pack; an images
-    column plus a knob the VLM path refuses cannot run."""
+    """Modality follows the run (``is_vlm_run_across_ranks``), so a multimodal checkpoint on text-only rows may pack;
+    an images column plus a knob the VLM path refuses cannot run."""
     raw = raw_config(config)
     if not raw.get("images_field"):
         pytest.skip("example declares no image column")
@@ -581,7 +585,7 @@ def test_example_attention_carries_the_sinks_it_keeps_live(config):
             flash_kernel(attn_implementation)
         except ImportError:
             pytest.skip(f"{attn_implementation} is not built into this image (the recipe targets another GPU)")
-    validate_attn_implementation(
+    select_supported_attn_implementation(
         model_config, attn_implementation, SinksPolicy.from_flags(reset_sinks=parsed_field(parsed, "reset_sinks"))
     )
 

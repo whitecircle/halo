@@ -14,7 +14,7 @@ def test_four_gpu_node_still_throttles_when_unset():
     """A flat default of 4 would admit the whole node at once."""
     resolved = resolve_load_concurrency(None, local_world_size=4)
     assert resolved == 2, f"a 4-GPU tray must keep a throttle, got {resolved}"
-    assert resolved < 4, "a value at or above the node width disarms sequential_load_within_node"
+    assert resolved < 4, "a value at or above the node width disarms throttled_load_within_node"
 
 
 def test_eight_gpu_node_keeps_the_documented_width():
@@ -57,7 +57,7 @@ def test_the_throttle_actually_uses_the_resolved_width(monkeypatch):
 
     # FakeStore.wait raises instead of blocking, so a blocked wait is observable.
     with pytest.raises(RuntimeError, match="seq_load/model"):
-        with load_coordination.sequential_load_within_node(max_concurrent=None):
+        with load_coordination.throttled_load_within_node(max_concurrent=None):
             pass
 
 

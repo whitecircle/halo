@@ -111,7 +111,7 @@ the others never reach.
 - Per-rank skew: capture `profiler_ranks: "all"` traces and run the TraceLens collective report
   (per-collective latency/bandwidth/skew): `python scripts/profiling/trace_report.py`.
 - CPU stalls (dataloader/tokenize): `python scripts/profiling/py_spy_diag.py record --duration 30`
-  → per-rank flame SVGs (in-script equivalent: `record_distributed_flamegraph`).
+  → per-rank flame SVGs (in-script equivalent: `record_flamegraphs`).
 - Operator/kernel picture: `enable_torch_profiler: true` (`TorchProfilerCallback`) → Chrome trace;
   the EP phases are labeled ranges (`ep.dispatch` / `ep.expert_compute` / `ep.combine`, plus
   `grad_sync.reduce_bucketed`), so the comm fraction reads directly off the Perfetto timeline.

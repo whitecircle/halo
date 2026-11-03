@@ -18,8 +18,8 @@ from halo.runtime.collectives import barrier
 from tests.common.adapters import (
     adapter_param_items,
     adapter_save_checks,
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
+    check_adapters_moved,
+    check_only_adapters_trainable,
     load_peft_model,
     portable_adapter_key,
     snapshot_adapters,
@@ -169,14 +169,14 @@ def _adapter_checks(
 ) -> TrainerChecks:
     """Read the built run's adapters and return the checks to run after training."""
     peft_model = unwrap(trainer.model)
-    trainable, why = assert_only_adapters_trainable(peft_model)
+    trainable, why = check_only_adapters_trainable(peft_model)
     log(f"  Only adapters trainable: {'PASS' if trainable else 'FAIL'} ({why})")
     before = snapshot_adapters(peft_model, expert_lora=False)
 
     def after_train(trainer) -> dict[str, bool]:
         reshard_fsdp2_modules(peft_model)
         trained = snapshot_adapters(peft_model, expert_lora=False)
-        moved, why = assert_adapters_moved(before, trained, require_all=True)
+        moved, why = check_adapters_moved(before, trained, require_all=True)
         log(f"  Every adapter moved: {'PASS' if moved else 'FAIL'} ({why})")
         checks = {"only_adapters_trainable": trainable, "every_adapter_moved": moved}
         if qlora:

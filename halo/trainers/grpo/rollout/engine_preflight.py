@@ -12,7 +12,7 @@ from urllib3.util.retry import Retry
 
 from halo.environments.rollout_config import SAMPLER_FILTERS_OFF
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
-from halo.runtime.consensus import raise_rank0_failure, refusal_text
+from halo.runtime.consensus import refusal_text, run_on_rank0_raising_everywhere
 from halo.weight_sync.clients.base import WeightSyncClientBase
 from halo.weight_sync.registry import resolve_weight_sync_client
 
@@ -114,7 +114,7 @@ def _probe_server(
         return default
     finally:
         if client is not None:
-            client.close_session()
+            client.close_http_session()
 
 
 def _verify_context_window_on_rank0(
@@ -273,7 +273,7 @@ def _on_rank0(check: Callable[..., None], backend: str, *args) -> None:
     """COLLECTIVE. The backend is resolved on every rank, since a rank-0-only raise there would strand the peers in the
     verdict broadcast."""
     client_cls = resolve_weight_sync_client(backend)
-    raise_rank0_failure(partial(check, client_cls, *args), refusal_text, ValueError)
+    run_on_rank0_raising_everywhere(partial(check, client_cls, *args), refusal_text, ValueError)
 
 
 def verify_context_window(

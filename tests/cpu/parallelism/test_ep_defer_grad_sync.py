@@ -12,7 +12,7 @@ import torch
 import torch.nn as nn
 
 from halo.distributed.expert_parallel.config import EPConfig
-from halo.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook
+from halo.distributed.expert_parallel.moe_layer.grad_sync import build_dp_average_grad_hook
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.distributed_trainer import DistributedTrainerMixin
 from tests.common.parallelism import built_ep_config, make_parallelism_config, stubbed_process_groups
@@ -199,7 +199,7 @@ def _router_hook_from(**ep_attrs):
     }
     ep = SimpleNamespace(**{**defaults, **ep_attrs})
     with patch(f"{_GS_MOD}.has_process_group", return_value=True):
-        return build_router_grad_hook(ep)
+        return build_dp_average_grad_hook(ep)
 
 
 def test_router_hook_reduces_over_dp_scope_group():
@@ -273,7 +273,7 @@ def test_deferred_replica_average_refuses_the_world_group_fallback():
         patch(f"{_MIXIN_MOD}.DTensor", _FakeDTensor),
         pytest.raises(RuntimeError, match="no expert replica group"),
     ):
-        DistributedTrainerMixin._sync_deferred_expert_grads(host)
+        DistributedTrainerMixin._run_deferred_grad_sweep(host)
 
 
 def test_the_sweep_refuses_a_missing_ep_config():
@@ -281,7 +281,7 @@ def test_the_sweep_refuses_a_missing_ep_config():
     host = _deferred_sweep_host()
     host._ep_config = None
     with pytest.raises(RuntimeError, match="no EPConfig was captured"):
-        DistributedTrainerMixin._sync_deferred_expert_grads(host)
+        DistributedTrainerMixin._run_deferred_grad_sweep(host)
 
 
 def test_the_etp_generation_broadcast_refuses_a_missing_ep_config():
@@ -306,7 +306,7 @@ def test_deferred_replica_average_uses_the_replica_group_when_there_is_one():
             lambda grads, **kwargs: reduced.append((len(grads), kwargs.get("group"))),
         ),
     ):
-        DistributedTrainerMixin._sync_deferred_expert_grads(host)
+        DistributedTrainerMixin._run_deferred_grad_sweep(host)
     assert (1, replica_group) in reduced, f"the sharded non-expert grad must average over the replicas: {reduced}"
 
 
@@ -356,12 +356,12 @@ def test_each_run_sweeps_its_own_first_step():
     )
     host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
     expert.grad = torch.full((2,), 8.0)
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
     with pytest.raises(RuntimeError, match="ran twice"):
-        DistributedTrainerMixin._sync_deferred_expert_grads(host)
+        DistributedTrainerMixin._run_deferred_grad_sweep(host)
     host.state = SimpleNamespace(global_step=0)
     expert.grad = torch.full((2,), 8.0)
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
     assert torch.equal(expert.grad, torch.full((2,), 2.0))
 
 
@@ -375,7 +375,7 @@ def test_restore_time_zero_lr_step_does_not_run_the_sweep():
         _ep_config=SimpleNamespace(sweep_reduces_across_replicas=True, runs_post_backward_sweep=True),
         state=SimpleNamespace(global_step=4),
         _deferred_sweep_last_step=None,
-        _sync_deferred_expert_grads=lambda: calls.append(1),
+        _run_deferred_grad_sweep=lambda: calls.append(1),
         parallelism_config=SimpleNamespace(is_tp_mode=False),
         _sync_qlora_grads=lambda: None,
     )

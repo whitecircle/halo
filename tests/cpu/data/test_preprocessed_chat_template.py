@@ -17,7 +17,7 @@ from halo.data.preprocessed.metadata import (
     verify_preprocessed_dataset,
 )
 from halo.data.preprocessed.preparation import preprocess_dataset
-from halo.data.preprocessed.publishing import apply_tokenizer_overrides, load_vlm_processor
+from halo.data.preprocessed.prepare_dataset_tool import apply_tokenizer_overrides, load_vlm_processor
 from halo.data.sources.paths import METADATA_FILE
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.entrypoints.model_setup import install_resolved_tokenizer

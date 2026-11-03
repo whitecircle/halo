@@ -17,7 +17,7 @@ from halo.model_loading.liger.cross_entropy import (
     liger_cross_entropy,
     patch_loss_utils_cross_entropy,
 )
-from halo.model_loading.liger.dispatch import _apply_liger_for_standard_models
+from halo.model_loading.liger.dispatch import _run_resolved_applier
 from tests.common.repo import probe_findings
 
 
@@ -192,7 +192,7 @@ def test_an_applier_that_rebinds_the_layer_norm_is_refused(monkeypatch):
     monkeypatch.setattr(torch.nn, "LayerNorm", torch.nn.LayerNorm)  # Restored after the test.
     monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, "halo_test_layer_norm_swap", rebinding_applier)
     with pytest.raises(RuntimeError, match="rebound torch.nn.LayerNorm to _SwappedLayerNorm"):
-        _apply_liger_for_standard_models("halo_test_layer_norm_swap", {})
+        _run_resolved_applier("halo_test_layer_norm_swap", {})
 
 
 def test_hf_loss_path_numerics_unchanged_on_cpu(patched):

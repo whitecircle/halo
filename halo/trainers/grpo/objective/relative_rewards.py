@@ -63,7 +63,7 @@ def shape_rewards(ranks: np.ndarray, rule_scores: np.ndarray, config: RLRRConfig
     return (r_max - r) / (r_max - 1.0)
 
 
-def relative_advantages(
+def rlrr_advantages(
     rewards: ArrayLike,
     config: RLRRConfig,
     *,
@@ -80,7 +80,7 @@ def relative_advantages(
         keep = np.asarray(valid, dtype=bool)
         out = np.zeros(n, dtype=np.float64)
         if keep.any():
-            out[keep] = relative_advantages(
+            out[keep] = rlrr_advantages(
                 rewards_arr[keep], config, lengths=None if lengths is None else np.asarray(lengths)[keep]
             )
         return out
@@ -106,7 +106,7 @@ def relative_advantages(
     return advantages
 
 
-def relative_advantages_grouped(
+def rlrr_advantages_grouped(
     rewards: ArrayLike,
     group_size: int,
     config: RLRRConfig,
@@ -124,7 +124,7 @@ def relative_advantages_grouped(
     out = np.empty(total, dtype=np.float64)
     for start in range(0, total, group_size):
         end = start + group_size
-        out[start:end] = relative_advantages(
+        out[start:end] = rlrr_advantages(
             rewards_arr[start:end],
             config,
             lengths=None if lengths is None else lengths[start:end],

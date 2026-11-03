@@ -80,7 +80,7 @@ def _route_mask_switch_by_flash_family(model_cls) -> None:
     model_cls.__init__ = __init__
 
 
-def patch_v4_flash_attention_template(module) -> bool:
+def patch_remote_llama_flash_template(module) -> bool:
     """Packed-document isolation on every flash label; ``False`` when ``module`` is not a v4 template, or is already
     patched. The flash class keeps its name and weights, as the CP wrapper claims it by name."""
     flash_cls = _template_flash_class(module)

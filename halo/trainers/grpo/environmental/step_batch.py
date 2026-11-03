@@ -41,7 +41,7 @@ EMPTY_ROLLOUT_STEP_LIMIT = 2
 
 
 @dataclasses.dataclass(frozen=True)
-class BatchRows:
+class TrajectoryRowMap:
     """``turns_per_traj`` runs past ``rollout_results`` by an eval round's padding trajectories."""
 
     rollout_results: list[RolloutResult]
@@ -113,7 +113,7 @@ def _row_on_device(row: TurnRow, device: torch.device) -> TurnRow:
     return row._replace(
         prompt_ids=row.prompt_ids.to(device),
         completion_ids=row.completion_ids.to(device),
-        completion_mask=row.completion_mask.to(device=device, dtype=torch.bool),
+        loss_mask=row.loss_mask.to(device=device, dtype=torch.bool),
         sampling_logps=None if row.sampling_logps is None else row.sampling_logps.to(device),
     )
 
@@ -149,7 +149,7 @@ class StepBatchMixin:
         if self._is_correction and self.async_config.isr_engine_reference and mode == "train":
             engine_logps = self._rescore_rows_on_engine(rows, turns_per_traj)
         num_dummy_rows = self._pad_rows_across_ranks(rows, engine_logps, device)
-        batch_rows = BatchRows(
+        batch_rows = TrajectoryRowMap(
             rollout_results, turns_per_traj, num_dummy_rows, self.async_config.train_on_sampled_tokens
         )
         step = self._stack_rows(rows, device)
@@ -165,7 +165,7 @@ class StepBatchMixin:
         scores = self._apply_opsm_stage(scores, local_advantages)
         gathered_rewards, gathered_state = gather(rewards), gather(episode_state)
         if mode == "train":
-            self._verify_step_has_valid_episodes(rollout_results, gathered_state == 1)
+            self._track_empty_rollout_step(rollout_results, gathered_state == 1)
         completion_mask, tool_mask, loss_mask, num_items_in_batch = self._narrow_masks_and_normalizer(
             batch_rows, step, episode_state == 1, num_generations, local_advantages, mode
         )
@@ -175,7 +175,7 @@ class StepBatchMixin:
             local_advantages, traj_advantages = self._apply_token_mass_balance(
                 local_advantages, traj_advantages, loss_mask, scores.ratio, step.negative_only
             )
-        local_advantages = self._record_step_metrics(
+        local_advantages = self._apply_breaker_and_record_metrics(
             rewards,
             gathered_rewards,
             gathered_state,
@@ -243,8 +243,8 @@ class StepBatchMixin:
         )
         # ``completion_mask`` is attention-valid (env/tool tokens conditioned sampling), ``tool_mask`` the loss
         # mask: conflating them hides tool output from attention. A fully masked row stays invisible to both.
-        tool_mask = pad([row.completion_mask for row in rows], padding_value=0, padding_side="right")
-        real = pad([torch.ones_like(row.completion_mask) for row in rows], padding_value=0, padding_side="right")
+        tool_mask = pad([row.loss_mask for row in rows], padding_value=0, padding_side="right")
+        real = pad([torch.ones_like(row.loss_mask) for row in rows], padding_value=0, padding_side="right")
         completion_mask = real & tool_mask.any(dim=1, keepdim=True)
         sampling_logps = has_sampling = None
         if self._is_correction:
@@ -277,7 +277,7 @@ class StepBatchMixin:
     def _score_step(
         self,
         step: StepRows,
-        rows: BatchRows,
+        rows: TrajectoryRowMap,
         rollout_routing_masks: torch.Tensor | None,
         engine_logps: list[torch.Tensor | None] | None,
         mode: str,
@@ -389,7 +389,7 @@ class StepBatchMixin:
         return logps if order is None else logps[torch.argsort(order)]
 
     def _step_advantages(
-        self, rewards: torch.Tensor, rows: BatchRows, num_padding: int, num_generations: int
+        self, rewards: torch.Tensor, rows: TrajectoryRowMap, num_padding: int, num_generations: int
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """The state is 1 valid, 0 invalid, -1 an eval round's padding."""
         episode_state = F.pad(
@@ -404,9 +404,7 @@ class StepBatchMixin:
         )
         return episode_state, traj_advantages, rows.to_rows(traj_advantages)
 
-    def _verify_step_has_valid_episodes(
-        self, rollout_results: list[RolloutResult], gathered_valid: torch.Tensor
-    ) -> None:
+    def _track_empty_rollout_step(self, rollout_results: list[RolloutResult], gathered_valid: torch.Tensor) -> None:
         """Warn on a step where no episode in the world survived, and raise on the :data:`EMPTY_ROLLOUT_STEP_LIMIT`-th
         in a row: it trains a zero gradient while logging ``loss=0``."""
         if gathered_valid.any():
@@ -442,7 +440,7 @@ class StepBatchMixin:
 
     def _narrow_masks_and_normalizer(
         self,
-        rows: BatchRows,
+        rows: TrajectoryRowMap,
         step: StepRows,
         valid_mask: torch.Tensor,
         num_generations: int,
@@ -508,12 +506,12 @@ class StepBatchMixin:
             traj_advantages = balance.apply(traj_advantages)
         return local_advantages, traj_advantages
 
-    def _record_step_metrics(
+    def _apply_breaker_and_record_metrics(
         self,
         rewards: torch.Tensor,
         gathered_rewards: torch.Tensor,
         gathered_state: torch.Tensor,
-        rows: BatchRows,
+        rows: TrajectoryRowMap,
         scores: StepScores,
         loss_mask: torch.Tensor,
         local_advantages: torch.Tensor,
@@ -528,7 +526,7 @@ class StepBatchMixin:
         self._log_headline_rewards(gathered_rewards[episodes], gathered_state[episodes] == 1, num_generations, mode)
         self._metrics[mode]["sampling/is_correction_active"].append(float(self._is_correction))
         if scores.corrected_mask is not None:
-            eff_corrected = self._score_is_correction(scores.ratio, scores.corrected_mask, loss_mask)
+            eff_corrected = self._narrow_corrected_mask_and_record(scores.ratio, scores.corrected_mask, loss_mask)
             if self._update_breaker_tripped(
                 scores.ratio, eff_corrected, scores.traj_row_ids, len(rollout_results), mode
             ):

@@ -69,7 +69,7 @@ def _balance(positive: float, negative: float) -> TokenMassBalance:
 def record_token_mass(
     advantages: torch.Tensor,
     loss_mask: torch.Tensor,
-    is_ratio: torch.Tensor | None,
+    importance_ratio: torch.Tensor | None,
     gather_fn: Callable[[torch.Tensor], torch.Tensor],
     metrics: MutableMapping[str, list[float]],
     enabled: bool,
@@ -78,7 +78,7 @@ def record_token_mass(
     """COLLECTIVE. A group's advantages sum to zero but their token-weighted sum does not: longer failures push down
     the tokens the policy sampled (entropy rises), longer solves sharpen it. ``negative_only`` rows are neither weighed
     nor scaled; pass them to :meth:`TokenMassBalance.apply` too."""
-    weights = (loss_mask if is_ratio is None else loss_mask * is_ratio).sum(dim=1)
+    weights = (loss_mask if importance_ratio is None else loss_mask * importance_ratio).sum(dim=1)
     if negative_only is None:
         local = _signed_masses(advantages, weights)
     else:

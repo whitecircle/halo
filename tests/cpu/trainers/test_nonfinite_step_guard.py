@@ -68,21 +68,21 @@ def _same_moments(a: list[dict], b: list[dict]) -> bool:
 def test_a_nonfinite_step_leaves_weights_and_moments_untouched(bad, optimizer_cls):
     me = guarded(optimizer_cls=optimizer_cls)
     guarded_step(me, 0.5)
-    me._read_device_verdict()
+    me._settle_device_verdict()
     weights, moments, tensors = _weights(me), _moments(me), _moment_tensors(me)
 
     guarded_step(me, bad)
 
     assert _same(weights, _weights(me)), "a non-finite step reached the weights"
     assert _same(tensors, _moment_tensors(me)), "a non-finite step reached the optimizer moments"
-    me._read_device_verdict()
+    me._settle_device_verdict()
     assert _same_moments(moments, _moments(me)), "the skipped step left the optimizer state changed"
     if optimizer_cls is torch.optim.AdamW:
         assert all(param.grad is None for param in me.model.parameters()), "the skipped step's gradients survived"
     assert me._nonfinite_steps_skipped == 1 and me._nonfinite_streak == 1
 
     guarded_step(me, 0.5)
-    me._read_device_verdict()
+    me._settle_device_verdict()
     assert not _same(weights, _weights(me)), "the step after a skipped one was not applied"
     assert me._nonfinite_streak == 0
 
@@ -113,7 +113,7 @@ def test_a_finite_late_read_lets_go_of_the_optimizer_state():
     me = guarded(optimizer_cls=AdamWBF16)
     guarded_step(me, 0.5)
     guarded_step(me, 0.5)
-    me._read_device_verdict()
+    me._settle_device_verdict()
     old = weakref.ref(me.optimizer.state[next(me.model.parameters())]["exp_avg"])
 
     me.optimizer.state.clear()
@@ -153,7 +153,7 @@ def test_the_skip_drops_a_deferred_clip_scale():
     me.optimizer.defer_grad_scale(torch.tensor(0.25))
 
     guarded_step(me, float("nan"))
-    me._read_device_verdict()
+    me._settle_device_verdict()
 
     assert _same(weights, _weights(me)), "the step was not skipped"
     assert me.optimizer._grad_scale is None, "the discarded step's clip scale would reach the next step"
@@ -170,7 +170,7 @@ def test_consecutive_nonfinite_steps_raise_past_the_limit(optimizer_cls):
 
     with pytest.raises(RuntimeError, match=r"steps 2-4: 3 consecutive steps .* weights are those after step 1"):
         guarded_step(me, float("nan"))
-        me._read_device_verdict()
+        me._settle_device_verdict()
     assert _same(weights, _weights(me))
 
 
@@ -179,7 +179,7 @@ def test_a_finite_step_resets_the_streak(optimizer_cls):
     me = guarded(limit=1, optimizer_cls=optimizer_cls)
     for grad in (float("nan"), 0.5, float("nan"), 0.5, float("nan")):
         guarded_step(me, grad)
-    me._read_device_verdict()
+    me._settle_device_verdict()
 
     assert me._nonfinite_steps_skipped == 3 and me._nonfinite_streak == 1
 
@@ -190,7 +190,7 @@ def test_limit_zero_raises_at_the_first_nonfinite_step(optimizer_cls):
 
     with pytest.raises(RuntimeError, match="1 consecutive steps"):
         guarded_step(me, float("nan"))
-        me._read_device_verdict()
+        me._settle_device_verdict()
 
 
 @PATHS
@@ -202,7 +202,7 @@ def test_nonfinite_weights_raise_at_once_naming_the_parameter(optimizer_cls):
 
     with pytest.raises(RuntimeError, match=r"1 parameter\(s\) already hold NaN/inf before the update: bias\."):
         guarded_step(me, float("nan"))
-        me._read_device_verdict()
+        me._settle_device_verdict()
 
 
 def _scheduler_warnings(caught) -> list[str]:
@@ -255,7 +255,7 @@ def test_a_loss_scaler_stepping_the_optimizer_owns_overflow_steps(optimizer_cls)
     me.optimizer = wrapper
 
     me._get_grad_norm(me.model, grad_norm=torch.tensor(float("inf")))
-    me._read_device_verdict()
+    me._settle_device_verdict()
 
     assert not me._skip_next_optimizer_step and me._device_skip is None and me._nonfinite_steps_skipped == 0
 
@@ -268,7 +268,7 @@ def test_a_scaler_that_never_steps_the_optimizer_does_not_disarm_the_guard(optim
     weights = _weights(me)
 
     guarded_step(me, float("inf"))
-    me._read_device_verdict()
+    me._settle_device_verdict()
 
     assert _same(weights, _weights(me)) and me._nonfinite_steps_skipped == 1
 
@@ -283,7 +283,7 @@ def test_a_pending_skip_never_swallows_the_restore_step(optimizer_cls):
     """The zero-LR step that materializes state during a restore always steps, leaving the verdict to its own step."""
     me = guarded(optimizer_cls=optimizer_cls)
     guarded_step(me, 0.5)
-    me._read_device_verdict()
+    me._settle_device_verdict()
     for param in me.model.parameters():
         param.grad = torch.full_like(param, float("nan"))
     me._get_grad_norm(me.model, grad_norm=None)

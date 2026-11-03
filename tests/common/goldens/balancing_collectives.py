@@ -17,7 +17,7 @@ from transformers import TrainerCallback
 import halo.models.moe.balancing as moe_balancing
 from halo.callbacks.balancing import configure_moe_balancing
 from halo.callbacks.factory import build_run_callbacks
-from halo.callbacks.moe_metrics import MoELoadMetricsCallback
+from halo.callbacks.moe_metrics import MoELoadMetricsBase
 from halo.models.moe.family_specs import MoEFamilySpec, NativeBalancingSlot
 from halo.models.moe.router_logits import router_logits_forced_off
 from tests.common.collective_recorder import CollectiveTrace, recording_rank
@@ -162,7 +162,7 @@ def _script_args(mode: str) -> SimpleNamespace:
 def _roster_entry(callback) -> str:
     if isinstance(callback, type):
         return callback.__name__
-    if not isinstance(callback, MoELoadMetricsCallback):
+    if not isinstance(callback, MoELoadMetricsBase):
         return type(callback).__name__
     settings = {name: getattr(callback, name) for name in _CALLBACK_SETTINGS if hasattr(callback, name)}
     return f"{type(callback).__name__} {settings}"

@@ -32,7 +32,7 @@ from halo.trainers.grpo.objective.loss_inputs import (
     narrow_loss_masks,
     record_token_mass,
 )
-from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
+from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
 from halo.trainers.grpo.on_policy import GenerationRoundMixin, OnPolicyGRPOInitMixin
 from halo.trainers.grpo.rollout.completions_logging import DecoupledCompletionsLogMixin
 from halo.trainers.grpo.rollout.trl_vllm_client import TrlVLLMClient
@@ -227,7 +227,7 @@ class DistributedOnlineGRPOTrainer(
         # ``valid`` both keeps the unscorable placeholders out of their group's ranking and returns
         # their own advantage as 0, which is TRL's unscorable handling.
         advantages_full = torch.from_numpy(
-            relative_advantages_grouped(
+            rlrr_advantages_grouped(
                 rewards.float().cpu().numpy(),
                 group_size=self.num_generations,
                 config=self._rlrr_config,

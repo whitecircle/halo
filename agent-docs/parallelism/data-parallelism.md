@@ -18,7 +18,7 @@ copy, and averages its trainable gradients in one bucketed all-reduce sweep per 
 FSDP2 with parallelism-specific gradient hooks ([How the mixin manages FSDP](#how-the-mixin-manages-fsdp)).
 
 `accelerate launch` reads an accelerate config YAML (FSDP or DDP) and is for standard multi-GPU
-without EP/CP/TP/ETP/PP; those modes raise under it (`reject_accelerate_launch`). Both paths produce
+without EP/CP/TP/ETP/PP; those modes raise under it (`reject_custom_parallelism_under_accelerate`). Both paths produce
 equivalent results there. Dense models run under `accelerate launch` (FSDP or DDP) even
 at the default `use_grouped_gemm: true`: the grouped-GEMM EP layers only activate for MoE
 models.

@@ -18,7 +18,7 @@ def pre_init(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(ranks.dist, "is_initialized", lambda: False)
-    monkeypatch.setattr(ranks, "_lws_fallback_announced", set())
+    monkeypatch.setattr(ranks, "_local_world_size_fallback_warned", set())
 
 
 def test_rank_only_launch_does_not_collapse_every_rank_to_zero(pre_init, monkeypatch):

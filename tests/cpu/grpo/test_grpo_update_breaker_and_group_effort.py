@@ -204,7 +204,7 @@ def _vetoed_round(threshold: float):
         policy,
         training=True,
         is_correction=True,
-        is_mask_config=ISMaskConfig(veto_min=0.5),
+        isr_mask_config=ISMaskConfig(veto_min=0.5),
         skip_update_masked_frac=threshold,
         save_completions=True,
     )
@@ -353,10 +353,10 @@ _PHASE_HELPERS = (
     "_apply_opsm_stage",
     "_narrow_masks_and_normalizer",
     "_apply_token_mass_balance",
-    "_record_step_metrics",
+    "_apply_breaker_and_record_metrics",
 )
 # The helpers those phases call in turn, each holding or gating a collective of its own.
-_NESTED_HELPERS = ("_recompute_logps_and_routing_masks", "_apply_is_correction", "_score_is_correction")
+_NESTED_HELPERS = ("_recompute_logps_and_routing_masks", "_apply_is_correction", "_narrow_corrected_mask_and_record")
 _RECORDING = ("fraction", "maximum", "effective_sample_frac", "covariance", "_record_step_diagnostics")
 
 
@@ -365,7 +365,7 @@ def test_build_training_tensors_routes_through_every_phase_helper():
     fn = _build_training_tensors_ast()
     missing = [name for name in _PHASE_HELPERS if not _calls(fn, name)]
     assert not missing, f"phase helpers no longer called: {missing}"
-    nested = [_method_ast("_score_step"), _method_ast("_record_step_metrics")]
+    nested = [_method_ast("_score_step"), _method_ast("_apply_breaker_and_record_metrics")]
     missing = [name for name in _NESTED_HELPERS if not any(_calls(phase, name) for phase in nested)]
     assert not missing, f"nested helpers no longer called: {missing}"
 
@@ -385,11 +385,11 @@ def test_world_metrics_flush_once_after_every_recording_site_with_no_return_betw
     flush or a return before it strands the peers, and a site recording after it logs its count a step late."""
     parent = _build_training_tensors_ast()
     assert not _calls(parent, "flush"), "the batch build flushes outside its metrics phase"
-    phase_at = [i for i, stmt in enumerate(parent.body) if _calls(stmt, "_record_step_metrics")]
+    phase_at = [i for i, stmt in enumerate(parent.body) if _calls(stmt, "_apply_breaker_and_record_metrics")]
     recorded_at = [i for i, stmt in enumerate(parent.body) if any(_calls(stmt, name) for name in _RECORDING)]
     assert len(phase_at) == 1 and max(recorded_at) < phase_at[0], "a count recorded after the metrics phase"
     assert not any(isinstance(node, ast.Return) for stmt in parent.body[: phase_at[0]] for node in ast.walk(stmt))
-    fn = _method_ast("_record_step_metrics")
+    fn = _method_ast("_apply_breaker_and_record_metrics")
     flush_at = [i for i, stmt in enumerate(fn.body) if _calls(stmt, "flush")]
     assert len(flush_at) == 1, f"the metrics phase flushes the world metrics {len(flush_at)} times"
     recorded_at = [i for i, stmt in enumerate(fn.body) if any(_calls(stmt, name) for name in _RECORDING)]

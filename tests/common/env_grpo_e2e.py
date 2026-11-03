@@ -25,7 +25,7 @@ from halo.environments.tools.definitions import NativeTool, NativeToolRegistry
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import SAMPLED_IDS_MISSING_WARNING
 from halo.trainers.grpo.objective.logratio import LOGRATIO_MEAN_KEY
-from tests.common.adapters import assert_only_adapters_trainable, snapshot_adapters, unwrap
+from tests.common.adapters import check_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import ep_layers
@@ -292,7 +292,7 @@ def replayed_flip_rate(trainer, ids: torch.Tensor, mask: torch.Tensor, *, pertur
     finally:
         injector.disarm()
     reshard_fsdp2_modules(unwrap(trainer.model))
-    rate = injector.flip_rate()
+    rate = injector.drain_flip_rate()
     return math.nan if rate is None else rate
 
 
@@ -555,7 +555,7 @@ def run_env_grpo_e2e(
     adapters_before: dict[str, torch.Tensor] = {}
     if peft is not None:
         # TRL's get_peft_model applies attention LoRA, so the adapters only exist after construction.
-        ok, detail = assert_only_adapters_trainable(unwrap(trainer.model))
+        ok, detail = check_only_adapters_trainable(unwrap(trainer.model))
         checks["only_adapters_trainable"] = ok
         log(f"  [trainable] {detail}")
         adapters_before = snapshot_adapters(unwrap(trainer.model), expert_lora=expert_lora)

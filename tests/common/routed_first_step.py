@@ -20,9 +20,9 @@ from tests.common.ep_reference import (
     armed_routing_capture,
     duplicate_pick_tokens,
     full_grad,
-    gathered_expert_grads,
     score_ep_grad_pairs,
     top_k_shortfall,
+    zero_filled_expert_banks,
 )
 from tests.common.first_step import ROUTING_DEPENDENT_PARAM
 from tests.common.numerics import max_or_nan, min_or_nan, worst_relative_l2
@@ -94,7 +94,7 @@ def gather_routed_grads(model: torch.nn.Module, routed: RoutedStep) -> None:
     for path, layer in named_ep_layers(model):
         for name, param in layer._live_router_module().named_parameters():
             routed.router_grads[f"{path}.{layer._ROUTER_ATTR}.{name}"] = full_grad(param).cpu()
-        routed.expert_grads[path] = {key: bank.float().cpu() for key, bank in gathered_expert_grads(layer).items()}
+        routed.expert_grads[path] = {key: bank.float().cpu() for key, bank in zero_filled_expert_banks(layer).items()}
 
 
 class _RoutedGradRecorder(TrainerCallback):
@@ -182,7 +182,7 @@ def pinned_reference_routing(model: torch.nn.Module, routed: RoutedStep):
     try:
         for path, layer_cls in routed.layer_classes.items():
             block = model.get_submodule(path)
-            router = layer_cls._find_gate_or_router(block)
+            router = layer_cls._declared_router(block)
             gate_weights = _gate_weights_for(path, router)
             experts = layer_cls._find_experts_container(block)
             pinned.expert_paths[path] = next(f"{path}.{name}" for name, mod in block.named_modules() if mod is experts)

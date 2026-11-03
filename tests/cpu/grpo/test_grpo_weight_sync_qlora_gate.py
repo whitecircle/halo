@@ -70,7 +70,7 @@ def test_online_install_weight_sync_raises_without_vllm_generation():
 _SPINE_STEPS = (
     "_configure_distributed_modes",
     "_validate_held_reference_model",
-    "_resolve_chunked_head_transform",
+    "_reject_unreproducible_chunked_head",
     "_install_weight_sync",
     "_disable_dropout_for_onpolicy",
 )
@@ -104,7 +104,7 @@ def test_both_trainers_reach_the_gate_through_the_shared_init_spine():
     assert ran == [
         "_configure_distributed_modes",
         "_validate_held_reference_model",
-        "_resolve_chunked_head_transform",
+        "_reject_unreproducible_chunked_head",
         "_verify_full_logits_fit(7)",
         "_install_weight_sync",
         "_disable_dropout_for_onpolicy",

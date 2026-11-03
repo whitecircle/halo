@@ -107,7 +107,7 @@ python scripts/profiling/py_spy_diag.py record --duration 30
 
 One SVG per torchrun rank, every rank sampled over the same window, spots a single straggler; `--pid`
 narrows the target, `--rate` sets the sampling rate (default 100/s), `--native` adds C/CUDA-runtime
-frames. In-script, `record_distributed_flamegraph` defaults to `this_rank_only=True` — one SVG for the
+frames. In-script, `record_flamegraphs` defaults to `this_rank_only=True` — one SVG for the
 calling process; pass `this_rank_only=False` for the per-rank sweep. Without py-spy on `PATH` the CLI
 exits 2. A pid either subcommand cannot attach to is named with its reason (also in
 `pid<pid>.error`) and the CLI exits 1.
@@ -231,7 +231,7 @@ python scripts/profiling/py_spy_diag.py dump   # → $HALO_DATA_ROOT/profiling/p
 
 It attaches to every training process on the node, so it needs ptrace access to each ([§1c](#1c-py-spy--cpu-flame-graph-dataloader--python-stalls)).
 The rank *not* in a collective (still in the dataloader, or a different `if` branch) is the culprit.
-In-script, `dump_distributed_stacks` (`halo/diagnostics/py_spy.py`) takes the same snapshot.
+In-script, `dump_node_stacks` (`halo/diagnostics/py_spy.py`) takes the same snapshot.
 
 ### Catch divergence before it deadlocks
 

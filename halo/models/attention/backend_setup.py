@@ -90,7 +90,7 @@ def patch_transformers_flash_unpad_memo() -> None:
     flash_utils._get_unpad_data = memoized
 
 
-def fa4_varlen_softcap_refusal(fn, varlen: bool):
+def _with_varlen_softcap_refusal(fn, varlen: bool):
     """The dense entry point, which trains a softcap, is returned as is."""
     if not varlen:
         return fn
@@ -111,7 +111,7 @@ def fa4_varlen_softcap_refusal(fn, varlen: bool):
 
 def install_fa4_varlen_softcap_refusal() -> bool:
     return install_fa4_entry_point_wrapper(
-        _FA4_VARLEN_SOFTCAP_ATTR, fa4_varlen_softcap_refusal, "the softcap refusal on the varlen kernel"
+        _FA4_VARLEN_SOFTCAP_ATTR, _with_varlen_softcap_refusal, "the softcap refusal on the varlen kernel"
     )
 
 

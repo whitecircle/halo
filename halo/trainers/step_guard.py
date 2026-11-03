@@ -105,7 +105,7 @@ class NonFiniteStepGuardMixin:
         """HF's pre-step gradient norm, plus the verdict the step reads. A loss scaler on accelerate's wrapper (fp16)
         owns overflow steps, skipping them and lowering its scale, so no verdict is taken."""
         grad_norm = super()._get_grad_norm(model, grad_norm=grad_norm)
-        self._read_device_verdict()
+        self._settle_device_verdict()
         if isinstance(self.optimizer, AcceleratedOptimizer) and self.optimizer.scaler is not None:
             return grad_norm
         step = self.state.global_step + 1
@@ -127,7 +127,7 @@ class NonFiniteStepGuardMixin:
             self._verdict_copied.record(torch.cuda.current_stream(norm.device))
         return torch.isfinite(norm).logical_not_()
 
-    def _read_device_verdict(self) -> None:
+    def _settle_device_verdict(self) -> None:
         """COLLECTIVE on a non-finite norm. The optimizer rolls back its bookkeeping where the flag skipped the step,
         then the guard counts, warns or raises."""
         if self._unread_verdict is None:
@@ -188,7 +188,7 @@ class NonFiniteStepGuardMixin:
     def _init_training_state(self, *args, **kwargs):
         """Settle a verdict an earlier run left when it raised, ahead of any optimizer-state load, and count skipped
         steps from zero, as transformers restarts its accumulators."""
-        self._read_device_verdict()
+        self._settle_device_verdict()
         self._run_steps_skipped = self._window_steps_skipped = 0
         return super()._init_training_state(*args, **kwargs)
 
@@ -202,7 +202,7 @@ class NonFiniteStepGuardMixin:
         only. A window's loss is over its applied steps, NaN at none."""
         control = self.control
         if control.should_log or control.should_evaluate or control.should_save:
-            self._read_device_verdict()
+            self._settle_device_verdict()
         window = self.state.global_step - self._globalstep_last_logged
         applied = window - self._window_steps_skipped
         self._window_loss_scale = window / applied if applied else math.nan
@@ -221,7 +221,7 @@ class NonFiniteStepGuardMixin:
     def _finalize_training(self, *args, **kwargs):
         """Read the last step's verdict, so a final non-finite step is reported; ``train_loss`` is over applied steps,
         NaN at none."""
-        self._read_device_verdict()
+        self._settle_device_verdict()
         if self._run_steps_skipped:
             steps = self.state.global_step - self._initial_global_step
             applied = steps - self._run_steps_skipped

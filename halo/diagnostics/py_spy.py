@@ -110,7 +110,7 @@ def _run_py_spy_per_pid(
     return _PySpyCapture(target, dict(sorted(failures.items())))
 
 
-def dump_distributed_stacks(
+def dump_node_stacks(
     output_dir: str | Path = STACK_DUMP_DIR,
     *,
     pids: Iterable[int] | None = None,
@@ -129,7 +129,7 @@ def dump_distributed_stacks(
     )
 
 
-def record_distributed_flamegraph(
+def record_flamegraphs(
     output_dir: str | Path = FLAMEGRAPH_DIR,
     *,
     duration: int = 30,
@@ -139,7 +139,7 @@ def record_distributed_flamegraph(
     pids: Iterable[int] | None = None,
 ) -> _PySpyCapture | None:
     """Record a CPU flame graph (SVG) over ``duration`` seconds, for dataloader or tokenization stalls, where
-    :func:`dump_distributed_stacks` snapshots a hang. ``this_rank_only=False`` profiles every torchrun child; explicit
+    :func:`dump_node_stacks` snapshots a hang. ``this_rank_only=False`` profiles every torchrun child; explicit
     ``pids`` override discovery. ``None`` without py-spy."""
     if not shutil.which("py-spy"):
         return None

@@ -85,7 +85,7 @@ def test_custom_age_threshold(tmp_path):
 
 
 def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
-    """``s3_dataset_store.load_dataset`` removes a crashed writer's stale temp sibling even on a cache hit."""
+    """``s3_dataset_store.load_s3_dataset`` removes a crashed writer's stale temp sibling even on a cache hit."""
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
     client.exists = MagicMock(return_value=True)
@@ -101,7 +101,7 @@ def test_s3_load_dataset_reclaims_stale_temp(tmp_path):
 
     with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)):
         with patch("halo.data.sources.s3_dataset_store.load_from_disk", return_value=ds):
-            s3_dataset_store.load_dataset(client, "my/dataset")
+            s3_dataset_store.load_s3_dataset(client, "my/dataset")
 
     assert not os.path.exists(stale)
     assert os.path.exists(fresh)

@@ -265,10 +265,10 @@ def _recover_from_pending_push(
         f"left a sealed staged copy at s3://{client.bucket}/{push_key}; serving the staged copy. "
         f"The next successful push_dataset to this destination heals it."
     )
-    return load_dataset(client, push_key, subfolder=None, keep_in_memory=keep_in_memory, use_cache=use_cache)
+    return load_s3_dataset(client, push_key, subfolder=None, keep_in_memory=keep_in_memory, use_cache=use_cache)
 
 
-def load_dataset(
+def load_s3_dataset(
     client: S3Client,
     key: str,
     subfolder: str | None = None,
@@ -330,7 +330,7 @@ def load_dataset_from_s3_uri(
     s3_uri: str, keep_in_memory: bool | None = None, use_cache: bool = True
 ) -> Dataset | DatasetDict:
     bucket, key = parse_s3_uri(s3_uri)
-    return load_dataset(S3Client(bucket=bucket), key, keep_in_memory=keep_in_memory, use_cache=use_cache)
+    return load_s3_dataset(S3Client(bucket=bucket), key, keep_in_memory=keep_in_memory, use_cache=use_cache)
 
 
 def push_dataset_to_s3_uri(dataset: Dataset | DatasetDict, s3_uri: str, overwrite: bool = True) -> str:

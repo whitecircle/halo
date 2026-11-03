@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""``_apply_liger_for_standard_models`` must not swallow the appliers' deliberate failures, or a run asking for
+"""``_run_resolved_applier`` must not swallow the appliers' deliberate failures, or a run asking for
 Liger trains unpatched."""
 
 import inspect
@@ -7,7 +7,7 @@ import inspect
 import pytest
 
 from halo.model_loading.liger import dispatch
-from halo.model_loading.liger.dispatch import _apply_liger_for_standard_models
+from halo.model_loading.liger.dispatch import _run_resolved_applier
 from tests.common.repo import probe_findings
 
 # Each must reach the caller.
@@ -30,11 +30,11 @@ def test_applier_failure_reaches_the_caller(registry, exc_type):
 
     registry["probe_family"] = _raising_applier
     with pytest.raises(exc_type, match="applier refused"):
-        _apply_liger_for_standard_models("probe_family", {})
+        _run_resolved_applier("probe_family", {})
 
 
 def test_unknown_model_type_still_returns_none(registry):
-    assert _apply_liger_for_standard_models("no_such_model_type_at_all", {}) is None
+    assert _run_resolved_applier("no_such_model_type_at_all", {}) is None
 
 
 def test_successful_applier_returns_the_filtered_config(registry):
@@ -46,7 +46,7 @@ def test_successful_applier_returns_the_filtered_config(registry):
         return ["RMSNorm"]
 
     registry["probe_family"] = _applier
-    applied = _apply_liger_for_standard_models("probe_family", {"rope": False})
+    applied = _run_resolved_applier("probe_family", {"rope": False})
     assert applied == {"rope": False, "cross_entropy": True, "rms_norm": True}
     assert seen == applied, "the applier was not called with the reported config"
 
@@ -58,13 +58,13 @@ def test_every_registered_model_type_applies_without_raising():
 import sys
 from liger_kernel.transformers.auto_model import MODEL_TYPE_TO_APPLY_LIGER_FN
 from transformers.models.auto.configuration_auto import CONFIG_MAPPING
-from halo.model_loading.liger.dispatch import _TOOLKIT_LIGER_APPLIERS, _apply_liger_for_standard_models, _liger_model_types
+from halo.model_loading.liger.dispatch import _TOOLKIT_LIGER_APPLIERS, _run_resolved_applier, _liger_model_types
 
 failures = []
 for model_type in sorted({**MODEL_TYPE_TO_APPLY_LIGER_FN, **_TOOLKIT_LIGER_APPLIERS}):
     fallback = _liger_model_types(CONFIG_MAPPING[model_type]())[1] if model_type in CONFIG_MAPPING else None
     try:
-        if _apply_liger_for_standard_models(model_type, {}, fallback) is None:
+        if _run_resolved_applier(model_type, {}, fallback) is None:
             failures.append(f"{model_type}: resolved an applier but reported nothing applied")
     except Exception as exc:
         failures.append(f"{model_type}: {type(exc).__name__}: {exc}")
@@ -85,7 +85,7 @@ def test_real_toolkit_applier_rejections_reach_the_caller(model_type):
         pytest.skip(f"{model_type} applier does not accept both loss options")
 
     with pytest.raises((ValueError, NotImplementedError)):
-        _apply_liger_for_standard_models(model_type, {"cross_entropy": True, "fused_linear_cross_entropy": True})
+        _run_resolved_applier(model_type, {"cross_entropy": True, "fused_linear_cross_entropy": True})
 
 
 @pytest.mark.parametrize("model_type", sorted(dispatch._TOOLKIT_LIGER_APPLIERS))
@@ -98,7 +98,7 @@ def test_rope_false_appliers_refuse_an_explicit_rope_override(model_type):
         pytest.skip(f"{model_type} applier does not declare rope=False")
 
     with pytest.raises(NotImplementedError, match="rope"):
-        _apply_liger_for_standard_models(model_type, {"rope": True})
+        _run_resolved_applier(model_type, {"rope": True})
 
 
 if __name__ == "__main__":

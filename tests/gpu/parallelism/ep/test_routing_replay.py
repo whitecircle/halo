@@ -88,7 +88,7 @@ def run(ctx) -> dict:
     injector.arm(masks)
     loss_forced = _forward_loss(model, batch).item()
     injector.disarm()
-    flip = injector.flip_rate()
+    flip = injector.drain_flip_rate()
     tol = max(noise * 4, 5e-2)  # DeepEP repeat-forward accumulation noise, measured in-run.
     eq_ok = abs(loss_forced - loss_a) <= tol and flip is not None and flip < 0.01
     log_all(
@@ -104,7 +104,7 @@ def run(ctx) -> dict:
     loss = _forward_loss(model, batch, grad=True)
     loss.backward()
     injector.disarm()
-    flip = injector.flip_rate()
+    flip = injector.drain_flip_rate()
     loss_shuffled = loss.item()
     norms = _router_grad_norms(model)
     grads_ok = (
@@ -126,7 +126,7 @@ def run(ctx) -> dict:
     loss_gc = _forward_loss(model, batch, grad=True)
     loss_gc.backward()
     injector.disarm()
-    injector.flip_rate()  # Drain.
+    injector.drain_flip_rate()  # Drain.
     norms_gc = _router_grad_norms(model)
     gc_ok = (
         torch.isfinite(loss_gc).item()
@@ -143,7 +143,7 @@ def run(ctx) -> dict:
     loss_gc_shuffled = _forward_loss(model, batch, grad=True)
     loss_gc_shuffled.backward()
     injector.disarm()
-    flip = injector.flip_rate()
+    flip = injector.drain_flip_rate()
     norms_gc_shuffled = _router_grad_norms(model)
     gc_shuffled_ok = (
         torch.isfinite(loss_gc_shuffled).item()

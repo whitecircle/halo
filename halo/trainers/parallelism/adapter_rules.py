@@ -2,7 +2,7 @@
 
 from peft import PeftModel
 
-from halo.checkpoint.parallel.adapters import saved_adapter_tensors
+from halo.checkpoint.parallel.adapters import live_adapter_tensors
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.log import KEY_PREVIEW_COUNT
@@ -80,7 +80,7 @@ def reject_unsaved_grown_vocabulary(model, *, accelerate_manages_fsdp: bool) -> 
             "left out. Launch with torchrun (toolkit FSDP2), or grow the vocabulary before the run with "
             "scripts/before_training/patch_vocab.py."
         )
-    selected = {id(tensor) for tensor in saved_adapter_tensors(peft_model).values()}
+    selected = {id(tensor) for tensor in live_adapter_tensors(peft_model).values()}
     layers = {"input embedding": peft_model.get_input_embeddings(), "output head": peft_model.get_output_embeddings()}
     unsaved = [role for role, layer in layers.items() if layer is not None and id(layer.weight) not in selected]
     if unsaved:

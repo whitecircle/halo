@@ -17,7 +17,7 @@ from halo.trainers.grpo.environmental.environmental_rules import (
     reject_unneutralized_forced_closes,
     reject_unsupported_engine_reference,
 )
-from halo.trainers.grpo.environmental.step_batch import BatchRows, StepRows, StepScores
+from halo.trainers.grpo.environmental.step_batch import StepRows, StepScores, TrajectoryRowMap
 from halo.trainers.grpo.environmental.trajectory_tokenize import TurnRow
 from halo.trainers.grpo.objective.logratio import (
     LOGRATIO_MEAN_KEY,
@@ -102,7 +102,7 @@ class ImportanceSamplingMixin:
                 "--return-tokens-as-token-ids), or set the correction to false deliberately."
             )
         reject_unneutralized_forced_closes(self._forced_close_ids, self._is_correction)
-        reject_inert_is_stages(self._is_mask_config, self._is_correction, cfg.skip_update_masked_frac)
+        reject_inert_is_stages(self._isr_mask_config, self._is_correction, cfg.skip_update_masked_frac)
         early_stop = build_early_stop_callback(
             cfg.build_early_stop_config(), gap_key=LOGRATIO_MEAN_KEY, gap_logged=self._is_correction
         )
@@ -171,7 +171,7 @@ class ImportanceSamplingMixin:
         self,
         recompute_logps: torch.Tensor | None,
         step: StepRows,
-        rows: BatchRows,
+        rows: TrajectoryRowMap,
         engine_logps: list[torch.Tensor | None] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
         """All-ones with the rest ``None`` when the correction is off. ``logps_diff`` is what the mask stages read, the
@@ -205,9 +205,9 @@ class ImportanceSamplingMixin:
                 logps_diff = self._engine_mask_logratio(
                     logps_diff, recompute_logps, step, corrected_mask, engine_logps
                 )
-            if self._is_mask_config.any_mask_active:
+            if self._isr_mask_config.any_mask_active:
                 importance_sampling_ratio, mask_stats = apply_is_masks(
-                    importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids, self._is_mask_config
+                    importance_sampling_ratio, logps_diff, corrected_mask, traj_row_ids, self._isr_mask_config
                 )
                 for key, (masked, total) in mask_stats.items():
                     self._world_metrics.fraction(key, masked, total)
@@ -250,7 +250,7 @@ class ImportanceSamplingMixin:
 
     def _apply_opsm_stage(self, scores: StepScores, advantages: torch.Tensor) -> StepScores:
         """OPSM masks negative-advantage trajectories only, so it runs once the per-row ``advantages`` exist."""
-        delta = self._is_mask_config.opsm_delta
+        delta = self._isr_mask_config.opsm_delta
         if delta is not None and scores.corrected_mask is not None:
             ratio, opsm_masked = apply_opsm(
                 scores.ratio, scores.logps_diff, scores.corrected_mask, scores.traj_row_ids, advantages, delta
@@ -259,7 +259,7 @@ class ImportanceSamplingMixin:
             scores = dataclasses.replace(scores, ratio=ratio)
         return scores
 
-    def _score_is_correction(
+    def _narrow_corrected_mask_and_record(
         self,
         importance_sampling_ratio: torch.Tensor,
         corrected_mask: torch.Tensor,

@@ -37,7 +37,7 @@ def _result(effort, slices, solve, test_calls, reward=1.0, tokens=100):
         trajectory=traj,
         episode_length=2,
         total_reward=reward,
-        success=True,
+        terminated_naturally=True,
         latency=1.0,
         generation_tokens=tokens,
         metrics={"outcome/solve_rate": solve, "episode/test_calls": test_calls},

@@ -45,7 +45,7 @@ from halo.entrypoints.model_setup import (
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
-    plan_training_rows,
+    plan_row_attention,
 )
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -326,7 +326,7 @@ def main():
     is_vlm = resolve_vlm_run(args, model_config, ds, text_only_model=args.text_only_model)
 
     # One padded row per conversation in each branch: more than one per batch reaches the varlen kernel.
-    attn_default = plan_training_rows(
+    attn_default = plan_row_attention(
         model_config,
         sft_config,
         sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),

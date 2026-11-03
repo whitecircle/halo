@@ -172,14 +172,14 @@ def reject_unneutralized_forced_closes(forced_close_ids: tuple[int, ...] | None,
         )
 
 
-def reject_inert_is_stages(is_mask_config, is_correction: bool, skip_update_masked_frac: float | None) -> None:
-    if is_mask_config.any_stage_active and not is_correction:
+def reject_inert_is_stages(isr_mask_config, is_correction: bool, skip_update_masked_frac: float | None) -> None:
+    if isr_mask_config.any_stage_active and not is_correction:
         raise ValueError(
             "isr_geo_band/isr_veto/isr_opsm knobs require the importance-sampling "
             "correction (train_on_sampled_tokens + vllm_importance_sampling_correction) — "
             "without it they would silently do nothing."
         )
-    if skip_update_masked_frac is not None and not (is_correction and is_mask_config.any_stage_active):
+    if skip_update_masked_frac is not None and not (is_correction and isr_mask_config.any_stage_active):
         raise ValueError(
             "skip_update_masked_frac requires the importance-sampling correction AND at "
             "least one IS mask stage (isr_geo_band/isr_veto/isr_opsm) — without them no "

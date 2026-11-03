@@ -140,7 +140,7 @@ def _embedding_and_head_param_ids(model: torch.nn.Module) -> set[int]:
     return {id(p) for module in targets for p in module.parameters(recurse=True)}
 
 
-def _collect_params_with_sr_seeds(state: dict, params: list, names: list[str]) -> tuple[list, list[int]]:
+def _advance_steps_and_collect_grads(state: dict, params: list, names: list[str]) -> tuple[list, list[int]]:
     """Count a step for every param and return those with grads, each with its SR seed. A param with no grad counts
     too, so replicas whose grad presence differs agree on its seed's step."""
     with_grad, seeds = [], []
@@ -195,7 +195,9 @@ class Muon(DeviceStepSkipMixin, UpstreamMuon):
                     "The fused Muon step orthogonalizes whole matrices in place: a param group's "
                     "param_split_fn / param_recombine_fn is not supported."
                 )
-            group_params, sr_seeds = _collect_params_with_sr_seeds(self.state, group["params"], group["param_names"])
+            group_params, sr_seeds = _advance_steps_and_collect_grads(
+                self.state, group["params"], group["param_names"]
+            )
             if not group_params:
                 continue
             updates = self._nesterov_updates(group_params, group["momentum"], group["nesterov"], skip)

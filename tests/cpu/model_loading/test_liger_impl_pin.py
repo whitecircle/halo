@@ -42,7 +42,7 @@ def test_sanitize_pins_rope_to_triton(rope_unset):
 
 
 def test_load_site_pins_rope(rope_unset, monkeypatch):
-    monkeypatch.setattr(dispatch, "_apply_liger_for_standard_models", lambda *args, **kwargs: {})
+    monkeypatch.setattr(dispatch, "_run_resolved_applier", lambda *args, **kwargs: {})
     apply_liger_kernel(CONFIG_MAPPING["qwen3"]())
     assert os.environ[ROPE_VAR] == "nvidia-triton"
 

@@ -16,7 +16,7 @@ from halo.environments.episode import RolloutResult
 from halo.environments.episode_keys import SOLVE_RATE_KEY
 from halo.environments.messages import Trajectory
 from halo.trainers.grpo.environmental.rollout_metrics import group_solve_counts
-from halo.trainers.grpo.environmental.step_batch import BatchRows
+from halo.trainers.grpo.environmental.step_batch import TrajectoryRowMap
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.world_metrics import WorldMetrics
 from tests.common.world_metrics import attach_world_metrics, fake_world, flushed_metrics
@@ -123,7 +123,7 @@ def _is_host(clip_max: float):
         types.SimpleNamespace(
             vllm_importance_sampling_clip_max=clip_max,
             _is_correction=True,
-            _is_mask_config=types.SimpleNamespace(any_mask_active=False),
+            _isr_mask_config=types.SimpleNamespace(any_mask_active=False),
             _metrics={"train": defaultdict(list)},
         )
     )
@@ -141,7 +141,7 @@ def _two_rows():
     # Sampled at log-prob -1 everywhere; the trainer's ratios are 1, 4, 1/4 and 2, 1, 1.
     sampling = torch.full((2, 3), -1.0)
     recompute = torch.tensor([[0.0, math.log(4), -math.log(4)], [math.log(2), 0.0, 0.0]]) - 1.0
-    rows = BatchRows([_episode(None), _episode(None)], [1, 1], 0, True)
+    rows = TrajectoryRowMap([_episode(None), _episode(None)], [1, 1], 0, True)
     return sampling, recompute, rows
 
 
@@ -149,7 +149,7 @@ def test_extreme_ratios_are_those_past_the_truncation_point_either_way():
     host = _is_host(clip_max=3.0)
     sampling, recompute, rows = _two_rows()
     ratio, _, corrected, _ = _Trainer._apply_is_correction(host, recompute, _step(sampling), rows)
-    _Trainer._score_is_correction(host, ratio, corrected, torch.ones(2, 3, dtype=torch.bool))
+    _Trainer._narrow_corrected_mask_and_record(host, ratio, corrected, torch.ones(2, 3, dtype=torch.bool))
     logged = flushed_metrics(host)
 
     assert logged["sampling/is_ratio_extreme_frac"] == [pytest.approx(2 / 6)], "4 and 1/4 are past 3 and 1/3"
@@ -180,7 +180,7 @@ def _round(truncated: int, total: int = 4):
             generation_tokens=1,
             requests_expired_in_sync=0,
             episode_length=1,
-            success=i >= truncated,
+            terminated_naturally=i >= truncated,
             trajectory=Trajectory(done=True, truncated=i < truncated),
             error=None,
             total_reward=0.0,

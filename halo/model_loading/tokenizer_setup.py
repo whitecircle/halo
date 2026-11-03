@@ -76,18 +76,18 @@ def resolve_tokenizer(processing_class):
     return getattr(processing_class, "tokenizer", processing_class)
 
 
-def resolve_peft_processing_class(adapter_pc, base_pc, *, text_only: bool):
+def resolve_peft_processing_class(adapter_processor, base_processor, *, text_only: bool):
     """The processing class a merged or converted PEFT checkpoint ships. ``text_only`` ships the run's tokenizer, else
     the base's; otherwise the base's full processor wins over an adapter with only a tokenizer, as a tokenizer-only
     save of a multimodal checkpoint is unloadable, and an adapter's own full processor is kept."""
     if text_only:
-        chosen = adapter_pc or base_pc
+        chosen = adapter_processor or base_processor
         return None if chosen is None else resolve_tokenizer(chosen)
-    base_is_full = base_pc is not None and not isinstance(base_pc, PreTrainedTokenizerBase)
-    adapter_is_full = adapter_pc is not None and not isinstance(adapter_pc, PreTrainedTokenizerBase)
+    base_is_full = base_processor is not None and not isinstance(base_processor, PreTrainedTokenizerBase)
+    adapter_is_full = adapter_processor is not None and not isinstance(adapter_processor, PreTrainedTokenizerBase)
     if base_is_full and not adapter_is_full:
-        return base_pc
-    return adapter_pc or base_pc
+        return base_processor
+    return adapter_processor or base_processor
 
 
 def load_chat_template(chat_template: str | None) -> str | None:

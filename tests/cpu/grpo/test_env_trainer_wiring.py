@@ -75,7 +75,7 @@ def test_the_rollout_state_follows_the_async_config(tmp_path):
     assert trainer._reasoning_end_ids is None and trainer._forced_close_ids is None, (
         "an unbudgeted run forces no close"
     )
-    assert trainer._is_mask_config == ISMaskConfig(veto_min=0.1)
+    assert trainer._isr_mask_config == ISMaskConfig(veto_min=0.1)
     assert len(_callbacks(trainer, _BreakerOptimizerSkipCallback)) == 1, "the breaker's optimizer-skip hook"
     assert trainer._breaker_tripped_this_step is False
 
@@ -86,7 +86,7 @@ def test_the_default_config_arms_no_breaker_and_no_stage(tmp_path):
 
     assert trainer._rollout_backend == "vllm"
     assert trainer._rollout_stop_token_ids is None
-    assert not trainer._is_mask_config.any_stage_active
+    assert not trainer._isr_mask_config.any_stage_active
     assert _callbacks(trainer, _BreakerOptimizerSkipCallback) == []
 
 

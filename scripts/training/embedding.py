@@ -24,7 +24,7 @@ from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
 from halo.data.vlm_detection import reject_image_columns
 from halo.entrypoints.data_setup import load_script_datasets
-from halo.entrypoints.model_setup import load_model_and_tokenizer, plan_training_rows
+from halo.entrypoints.model_setup import load_model_and_tokenizer, plan_row_attention
 from halo.entrypoints.script import (
     ScriptContext,
     configure_balancing_and_build_callbacks,
@@ -200,7 +200,7 @@ def _assemble_preloaded_pipeline(
         modules.append(Normalize())
 
     # sentence-transformers pads each text column's batch: more than one row per batch reaches the varlen call.
-    plan = plan_training_rows(
+    plan = plan_row_attention(
         model_config,
         embedding_config,
         sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),

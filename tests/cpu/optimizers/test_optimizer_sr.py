@@ -274,20 +274,20 @@ def test_muon_seeds_are_keyed_by_step_and_name():
     all_grads = params([True, True, True])
     state_all: dict = {p: {} for p in all_grads}
     names = ["w0", "w1", "w2"]
-    with_grad_all, seeds_all = muon_mod._collect_params_with_sr_seeds(state_all, all_grads, names)
+    with_grad_all, seeds_all = muon_mod._advance_steps_and_collect_grads(state_all, all_grads, names)
     assert len(with_grad_all) == 3 and len(seeds_all) == 3
 
     skipped = params([True, False, True])
     state_skip: dict = {p: {} for p in skipped}
-    with_grad_skip, seeds_skip = muon_mod._collect_params_with_sr_seeds(state_skip, skipped, names)
+    with_grad_skip, seeds_skip = muon_mod._advance_steps_and_collect_grads(state_skip, skipped, names)
     assert len(with_grad_skip) == 2
     assert seeds_skip == [seeds_all[0], seeds_all[2]], "a grad-None param shifted its neighbours' seeds"
     assert [state_skip[p]["step"] for p in skipped] == [1, 1, 1], "the grad-None param did not count the step"
     assert "momentum" not in state_skip[skipped[1]], "a param with no grad was given a momentum buffer"
 
-    _, seeds_next = muon_mod._collect_params_with_sr_seeds(state_all, all_grads, names)
+    _, seeds_next = muon_mod._advance_steps_and_collect_grads(state_all, all_grads, names)
     assert not set(seeds_next) & set(seeds_all), "the next step replayed a seed"
-    _, seeds_reordered = muon_mod._collect_params_with_sr_seeds({p: {} for p in all_grads}, all_grads, names[::-1])
+    _, seeds_reordered = muon_mod._advance_steps_and_collect_grads({p: {} for p in all_grads}, all_grads, names[::-1])
     assert seeds_reordered == seeds_all[::-1]
 
 

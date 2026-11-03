@@ -43,7 +43,7 @@ def test_lazy_fallback_level_separates_a_family_property_from_an_environment_fai
 
     def _run(*, has_safetensors: bool):
         with (
-            patch(f"{_EP_LOADING}.resolve_lazy_checkpoint", lambda *a, **k: False),
+            patch(f"{_EP_LOADING}.agree_lazy_load", lambda *a, **k: False),
             patch(f"{_EP_LOADING}.has_whole_model_weight_file", lambda *a, **k: has_safetensors),
             patch(f"{_EP_LOADING}._load_ep_model_huggingface", lambda *a, **k: nn.Linear(2, 2)),
             patch(f"{_EP_LOADING}.logger") as log,
@@ -68,7 +68,7 @@ def test_load_ep_model_threads_revision():
         return nn.Linear(2, 2)
 
     with (
-        patch(f"{_EP_LOADING}.resolve_lazy_checkpoint", return_value=False),
+        patch(f"{_EP_LOADING}.agree_lazy_load", return_value=False),
         patch(f"{_EP_LOADING}._load_ep_model_huggingface", fake_hf_load),
     ):
         load_ep_model(_SOURCE, _ep_pc(), None, _KWARGS, preserve_checkpoint_precision=False)
@@ -85,7 +85,7 @@ def test_load_ep_model_lazy_path_reads_pinned_snapshot():
 
     with (
         # The rank-0 verdict, since this test's subject is the revision pin.
-        patch(f"{_EP_LOADING}.resolve_lazy_checkpoint", return_value=True),
+        patch(f"{_EP_LOADING}.agree_lazy_load", return_value=True),
         patch(f"{_EP_LOADING}.load_ep_model_lazy", fake_lazy),
     ):
         load_ep_model(_SOURCE, _ep_pc(), None, _KWARGS, preserve_checkpoint_precision=False)

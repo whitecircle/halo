@@ -20,8 +20,8 @@ from halo.configs.embedding import EmbeddingConfig
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.trainers.embedding.trainer import EmbeddingTrainer
 from tests.common.adapters import (
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
+    check_adapters_moved,
+    check_only_adapters_trainable,
     snapshot_adapters,
     unwrap,
 )
@@ -151,7 +151,7 @@ def check_training_lora(ctx) -> bool:
     log("Check: training with LoRA adapters")
 
     model = lora_model()
-    ok, detail = assert_only_adapters_trainable(model)
+    ok, detail = check_only_adapters_trainable(model)
     log(f"  [trainable] {detail}")
     if not ok:
         return False
@@ -168,7 +168,7 @@ def check_training_lora(ctx) -> bool:
     assert torch.isfinite(torch.tensor(result.training_loss)), f"non-finite loss {result.training_loss}"
 
     after = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
-    ok, detail = assert_adapters_moved(before, after)
+    ok, detail = check_adapters_moved(before, after)
     log(f"  [moved] {detail}")
     cleanup_memory()
     return ok

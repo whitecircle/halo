@@ -287,13 +287,13 @@ def _block(router_cls: type) -> tuple[nn.Module, type, torch.Tensor]:
     container.mlp = build().to(torch.bfloat16)
     for param in container.mlp.parameters():
         nn.init.normal_(param, std=0.02)
-    router = layer_cls._find_gate_or_router(container.mlp)
+    router = layer_cls._declared_router(container.mlp)
     assert isinstance(router, router_cls)
     return container, layer_cls, torch.randn(2, 16, router.weight.shape[1], dtype=torch.bfloat16)
 
 
 def _router_call(container: nn.Module, layer_cls: type, hidden: torch.Tensor):
-    return layer_cls._find_gate_or_router(container.mlp)(hidden.reshape(-1, hidden.shape[-1]))
+    return layer_cls._declared_router(container.mlp)(hidden.reshape(-1, hidden.shape[-1]))
 
 
 def _block_output(container: nn.Module, hidden: torch.Tensor) -> torch.Tensor:

@@ -9,7 +9,7 @@ from halo.data.pipeline.coordinated_map import run_load_rank_first
 from halo.data.pipeline.map_cache_key import stamp_cache_key
 from halo.data.preprocessed.metadata import is_preprocessed_dataset
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE
-from halo.data.render_columns import apply_conversation_field, reject_missing_render_column
+from halo.data.render_columns import drop_empty_conversation_rows, reject_missing_render_column
 from halo.data.sources.corpus import build_corpus, placeholder_test_split, resolve_dataset_ratios, subset_dataset_dict
 from halo.data.sources.paths import (
     DATA_FILE_BUILDERS,
@@ -284,7 +284,7 @@ def _load_single(
     # Only a raw sharded load can return a partial DatasetDict (missing splits are skipped).
     reject_partial_splits(ds, path)
     content_sig = _content_signature(ds)
-    apply_conversation_field(ds, path, conversation_field, required=conversation_declared, knob=conversation_knob)
+    drop_empty_conversation_rows(ds, path, conversation_field, required=conversation_declared, knob=conversation_knob)
     if tools_field:
         # An optional knob's typo never surfaces downstream: rows just render without tools.
         reject_missing_render_column(ds, path, "tools_field", tools_field)
@@ -381,7 +381,7 @@ def share_s3_control_files(path: str | list) -> None:
             share_control_files(bucket, control_keys)
 
 
-def is_presharded_dataset_load(path, data_parallel_size: int) -> bool:
+def is_presharded_dataset_load_across_ranks(path, data_parallel_size: int) -> bool:
     """COLLECTIVE: whether ``path`` gives each of several DP ranks a disjoint slice, which trainers pass as
     ``dataset_presharded`` so the DataLoader does not re-shard."""
     return data_parallel_size > 1 and isinstance(path, str) and is_sharded_dataset_across_ranks(path)

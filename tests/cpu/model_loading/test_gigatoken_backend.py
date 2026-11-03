@@ -16,7 +16,7 @@ from halo.model_loading import tokenizer_backend as tb
 from halo.model_loading.tokenizer_backend import (
     TOKENIZER_BACKENDS,
     GigatokenTokenizerProxy,
-    resolve_processor_backend,
+    install_processor_backend,
     resolve_tokenizer_backend,
 )
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
@@ -73,7 +73,7 @@ def test_vlm_processor_backend_parity():
     text = processor.apply_chat_template(conv, tokenize=False)
     base = processor(text=[text], images=[img], return_tensors="pt")
 
-    resolve_processor_backend(processor, "gigatoken")
+    install_processor_backend(processor, "gigatoken")
     swapped = processor(text=[text], images=[img], return_tensors="pt")
 
     assert swapped["input_ids"].tolist() == base["input_ids"].tolist()

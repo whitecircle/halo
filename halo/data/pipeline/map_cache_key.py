@@ -289,7 +289,7 @@ def carry_cache_key(source: Dataset, derived: Dataset, step: str) -> Dataset:
     return derived
 
 
-def dataset_content_fingerprint(dataset: Dataset | DatasetDict) -> str:
+def dataset_identity_key(dataset: Dataset | DatasetDict) -> str:
     if isinstance(dataset, DatasetDict):
         parts = [
             f"{name}:{len(dataset[name])}:{rank_stable_dataset_id(dataset[name])}" for name in sorted(dataset.keys())
@@ -313,7 +313,7 @@ def map_cache_file_name(
     op_kwargs = {k: v for k, v in kwargs.items() if k != "fn_kwargs"}
     op_kwargs_fp = kwargs_fingerprint(op_kwargs)
     extras_fp = kwargs_fingerprint(cache_key_extras or {})
-    ds_fingerprint = dataset_content_fingerprint(dataset)
+    ds_fingerprint = dataset_identity_key(dataset)
     cache_key = (
         f"{operation}_{desc or 'default'}_{func_id}_{closure_fp}_{fn_kwargs_fp}_{op_kwargs_fp}"
         f"_{extras_fp}_{ds_fingerprint}_{_RENDER_LIBRARY_VERSIONS}"
@@ -326,7 +326,7 @@ def transform_cache_name(operation_name: str, dataset: Dataset, cache_key_extras
     paths name neither content nor an in-memory selection, so no later run may trust a match."""
     scope = "" if getattr(dataset, CACHE_KEY_ATTR, None) else f"_run{run_token}"
     key = (
-        f"{operation_name}_{dataset_content_fingerprint(dataset)}_{kwargs_fingerprint(cache_key_extras)}"
+        f"{operation_name}_{dataset_identity_key(dataset)}_{kwargs_fingerprint(cache_key_extras)}"
         f"_{_RENDER_LIBRARY_VERSIONS}{scope}"
     )
     return f"transform-{hashlib.md5(key.encode()).hexdigest()}"

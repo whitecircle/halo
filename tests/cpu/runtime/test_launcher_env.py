@@ -27,7 +27,7 @@ def pre_init(monkeypatch):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(ranks.dist, "is_initialized", lambda: False)
-    monkeypatch.setattr(ranks, "_lws_fallback_announced", set())
+    monkeypatch.setattr(ranks, "_local_world_size_fallback_warned", set())
 
 
 def _bare_srun(monkeypatch, *, procid: int, ntasks: int, per_node: int) -> None:

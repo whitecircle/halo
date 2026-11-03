@@ -26,7 +26,7 @@ from halo.models.attention import gpt_oss_sinks
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, install_sdpa_for_reset_sinks
 from halo.models.attention.selection import (
     _attn_impl_handles_sinks,
-    validate_attn_implementation,
+    select_supported_attn_implementation,
     verify_live_sinks_carried,
 )
 from halo.models.config_access import (
@@ -61,7 +61,7 @@ def _llama():
 
 
 def test_sdpa_kept_for_gptoss_when_sinks_reset():
-    assert validate_attn_implementation(_gptoss(), "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
+    assert select_supported_attn_implementation(_gptoss(), "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
     # The class guard was flipped so transformers' _sdpa_can_dispatch will accept it at model build.
     assert AutoModelForCausalLM._model_mapping[GptOssConfig]._supports_sdpa is True
 
@@ -70,11 +70,11 @@ def test_sink_dropping_impls_rejected_for_gptoss_without_reset():
     """sdpa and FA2 drop the real sink column, measured ~-3 nats of logprob shift on gpt-oss-20b.
     Must raise: a fallback to FA2 drops the sinks just the same."""
     with pytest.raises(ValueError, match="sink"):
-        validate_attn_implementation(_gptoss(), "sdpa", SinksPolicy.LIVE)
+        select_supported_attn_implementation(_gptoss(), "sdpa", SinksPolicy.LIVE)
     with pytest.raises(ValueError, match="sink"):
-        validate_attn_implementation(_gptoss(), "flash_attention_2", SinksPolicy.LIVE)
-    assert validate_attn_implementation(_gptoss(), "eager", SinksPolicy.LIVE) == "eager"
-    assert validate_attn_implementation(_gptoss(), "flex_attention", SinksPolicy.LIVE) == "flex_attention"
+        select_supported_attn_implementation(_gptoss(), "flash_attention_2", SinksPolicy.LIVE)
+    assert select_supported_attn_implementation(_gptoss(), "eager", SinksPolicy.LIVE) == "eager"
+    assert select_supported_attn_implementation(_gptoss(), "flex_attention", SinksPolicy.LIVE) == "flex_attention"
 
 
 # A tiny GptOss built in a fresh interpreter after importing ``module`` (empty: transformers alone), then the label
@@ -214,16 +214,16 @@ def test_install_sdpa_for_reset_sinks_is_idempotent():
 
 
 def test_non_sinks_model_sdpa_passthrough():
-    assert validate_attn_implementation(_llama(), "sdpa", SinksPolicy.LIVE) == "sdpa"
+    assert select_supported_attn_implementation(_llama(), "sdpa", SinksPolicy.LIVE) == "sdpa"
 
 
 def test_sinks_reset_state_is_per_config_instance():
     """Class-level state leaks across loads: a reset-sinks reference would disarm the policy's live-sinks guard."""
     live = _gptoss()
     with pytest.raises(ValueError, match="sink"):
-        validate_attn_implementation(live, "sdpa", SinksPolicy.LIVE)
+        select_supported_attn_implementation(live, "sdpa", SinksPolicy.LIVE)
     reset = _gptoss()
-    assert validate_attn_implementation(reset, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
+    assert select_supported_attn_implementation(reset, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
 
     assert "_halo_sinks_reset" not in type(live).__dict__
     assert live._halo_sinks_reset is False
@@ -231,18 +231,18 @@ def test_sinks_reset_state_is_per_config_instance():
 
     # EP/CP/lazy loaders pass no sinks_policy: the live config still raises after a reset config validated.
     with pytest.raises(ValueError, match="sink"):
-        validate_attn_implementation(live, "sdpa")
-    assert validate_attn_implementation(reset, "sdpa") == "sdpa"
+        select_supported_attn_implementation(live, "sdpa")
+    assert select_supported_attn_implementation(reset, "sdpa") == "sdpa"
 
 
 def test_a_fresh_config_inherits_no_sdpa_approval():
     """A class-level flag flipped by one reset-sinks load would let a later re-validation (EP/CP/lazy loaders pass no
     ``sinks_policy``) accept sdpa for a model whose sinks were never reset, silently dropping the sink column."""
     approved = _gptoss()
-    assert validate_attn_implementation(approved, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
+    assert select_supported_attn_implementation(approved, "sdpa", SinksPolicy.NEUTRALIZED) == "sdpa"
 
     fresh = _gptoss()
-    assert validate_attn_implementation(fresh, "sdpa") != "sdpa"
+    assert select_supported_attn_implementation(fresh, "sdpa") != "sdpa"
     assert not hasattr(fresh, "_halo_sinks_reset"), "a re-validation must record nothing of its own"
 
     model_cls = AutoModelForCausalLM._model_mapping[GptOssConfig]
@@ -294,14 +294,14 @@ def test_a_live_sinks_request_for_an_uninstalled_flash_build_says_it_is_not_inst
     monkeypatch.setitem(sys.modules, "flash_attn_interface", None)
     monkeypatch.setitem(sys.modules, "flash_attn_3", None)
     with pytest.raises(ValueError, match="'flash_attention_3' is not installed") as refusal:
-        validate_attn_implementation(_gptoss(), "flash_attention_3", SinksPolicy.LIVE)
+        select_supported_attn_implementation(_gptoss(), "flash_attention_3", SinksPolicy.LIVE)
     assert "drops" not in str(refusal.value)
 
     monkeypatch.setitem(
         sys.modules, "flash_attn_interface", _fake_fa3_module("flash_attn_interface", with_s_aux=False)
     )
     with pytest.raises(ValueError, match="silently drops the learnable attention sinks"):
-        validate_attn_implementation(_gptoss(), "flash_attention_3", SinksPolicy.LIVE)
+        select_supported_attn_implementation(_gptoss(), "flash_attention_3", SinksPolicy.LIVE)
 
 
 def test_the_sdpa_flip_stops_at_pretrained_model(monkeypatch):
@@ -433,7 +433,7 @@ def test_reference_model_load_freezes_live_sinks(tiny_gptoss_checkpoint):
 def test_toolkit_run_state_never_reaches_the_exported_config():
     """``_halo_*`` stamps describe the run, but transformers writes every instance attribute to ``config.json``."""
     cfg = _gptoss()
-    validate_attn_implementation(cfg, "sdpa", SinksPolicy.NEUTRALIZED)
+    select_supported_attn_implementation(cfg, "sdpa", SinksPolicy.NEUTRALIZED)
     set_config_field_run_scoped(cfg, LIGER_APPLIED_CONFIG_ATTR, {"rope": True})
     assert cfg._halo_sinks_reset is True and getattr(cfg, LIGER_APPLIED_CONFIG_ATTR) == {"rope": True}
 
@@ -444,7 +444,7 @@ def test_toolkit_run_state_never_reaches_the_exported_config():
 
     # The run still decides on its own state after the export window closes.
     assert cfg._halo_sinks_reset is True
-    assert validate_attn_implementation(cfg, "sdpa") == "sdpa"
+    assert select_supported_attn_implementation(cfg, "sdpa") == "sdpa"
 
 
 if __name__ == "__main__":

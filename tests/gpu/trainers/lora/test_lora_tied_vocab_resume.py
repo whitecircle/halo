@@ -16,7 +16,7 @@ from transformers import AutoModelForCausalLM, TrainerCallback
 from trl import SFTConfig
 
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
-from halo.checkpoint.parallel.adapters import saved_adapter_tensors
+from halo.checkpoint.parallel.adapters import live_adapter_tensors
 from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
 from halo.configs.script_arguments import CommonScriptArguments
 from halo.distributed.fsdp import reshard_fsdp2_modules
@@ -69,7 +69,7 @@ class _LiveEmbedding(TrainerCallback):
     def on_train_begin(self, args, state, control, **kwargs):
         model = unwrap(self.trainer.model)
         reshard_fsdp2_modules(model)
-        live = {plain_adapter_key(key): tensor for key, tensor in saved_adapter_tensors(model).items()}
+        live = {plain_adapter_key(key): tensor for key, tensor in live_adapter_tensors(model).items()}
         present = [key for key in (EMBED_KEY, HEAD_KEY) if key in live]
         self.captured = {
             "tensors": {key: materialize_dtensor(live[key]).detach().float().cpu() for key in present},

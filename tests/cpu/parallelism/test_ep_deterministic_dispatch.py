@@ -40,7 +40,7 @@ class _RecordingBuffer:
 
 
 class _DispatcherShell:
-    ep_group = object()
+    dispatch_group = object()
     hidden_dim = HIDDEN
     num_experts = NUM_EXPERTS
     ep_size = 2

@@ -250,7 +250,7 @@ def test_the_non_completions_vlm_bake_routes_through_the_shared_label_builder(mo
     def _sentinel_labels(input_ids, *_args, **_kwargs):
         return torch.full_like(input_ids, -7)
 
-    monkeypatch.setattr(tokenization, "build_completion_only_labels", _sentinel_labels)
+    monkeypatch.setattr(tokenization, "build_training_labels", _sentinel_labels)
     config = PreprocessingConfig(
         model_name_or_path="fake/vlm",
         max_length=64,

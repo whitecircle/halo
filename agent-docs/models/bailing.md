@@ -39,7 +39,7 @@ Four consequences for a training config:
 
 Ling 2.0's and Ring's modeling files are built on transformers v4's Llama flash template: an `ATTENTION_CLASSES` table keyed by label, a flash class that calls its own mask-only `_flash_attention_forward`, the v4 support flag, and a model that hands the layers a 2D padding mask only when its label is `flash_attention_2`. Unpatched, every v5 flash label is refused at build, and the one the file knows runs a packed row as a single causal sequence.
 
-`patch_v4_flash_attention_template` (`halo/models/attention/remote_flash_attention.py`) runs on every remote modeling module the [remote-class funnel](#remote-code-compatibility) loads and patches any file whose flash call has the template's exact signature:
+`patch_remote_llama_flash_template` (`halo/models/attention/remote_flash_attention.py`) runs on every remote modeling module the [remote-class funnel](#remote-code-compatibility) loads and patches any file whose flash call has the template's exact signature:
 
 - the table maps `flash_attention_2/3/4` to the flash class, which keeps its name (the [CP wrapper](#cp-wrapper) claims it by name) and its weights;
 - the classes declaring `_supports_flash_attn_2` declare `_supports_flash_attn`, and the model's mask switch holds for every flash label;

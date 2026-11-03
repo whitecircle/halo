@@ -19,7 +19,7 @@ from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
 
 from halo.checkpoint.atomic import create_staged_file, publish_staged_file
 from halo.model_loading.buffer_repair import default_rope_parameters
-from halo.models.attention.remote_flash_attention import patch_v4_flash_attention_template
+from halo.models.attention.remote_flash_attention import patch_remote_llama_flash_template
 from halo.models.config_access import ties_word_embeddings
 
 # Names a published modeling file calls but never imports (Ring-mini-linear-2.0's cached forward builds a
@@ -87,7 +87,7 @@ def _repair_remote_module(module) -> None:
         if not hasattr(module, name):
             setattr(module, name, symbol)
     _shim_dispatchless_eager_attention(module)
-    patch_v4_flash_attention_template(module)
+    patch_remote_llama_flash_template(module)
     _fix_legacy_tied_weights_keys(module)
 
 

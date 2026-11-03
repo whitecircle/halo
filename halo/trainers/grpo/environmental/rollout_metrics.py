@@ -132,7 +132,7 @@ class RolloutMetricsMixin:
         metrics.maximum("episode/generation_tokens_max", result.generation_tokens)
         metrics.percentile("episode/generation_tokens_p90", result.generation_tokens, 90.0)
         metrics.mean("episode/turns", result.episode_length)
-        metrics.mean("episode/natural_termination_rate", float(bool(result.success)))
+        metrics.mean("episode/natural_termination_rate", float(bool(result.terminated_naturally)))
         metrics.mean("episode/truncation_rate", truncated)
         metrics.mean("episode/error_rate", float(bool(result.error)))
         for key, value in result.metrics.items():

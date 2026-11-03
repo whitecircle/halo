@@ -393,8 +393,8 @@ def test_injector_flip_rate_drains_counters():
     injector = _injector(layers)
     layers[0]._replay_flip_counts = torch.tensor([2.0, 10.0])
     layers[1]._replay_flip_counts = torch.tensor([3.0, 10.0])
-    assert injector.flip_rate() == pytest.approx(0.25)
-    assert injector.flip_rate() is None
+    assert injector.drain_flip_rate() == pytest.approx(0.25)
+    assert injector.drain_flip_rate() is None
 
 
 def test_injector_rejects_unsupported_family_and_empty():

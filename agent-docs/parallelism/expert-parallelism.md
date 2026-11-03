@@ -281,7 +281,7 @@ Hybrid sync, with one EP group:
   recomputed K times pays K all-reduces of its router and shared-expert gradients.
 - **Expert params**: the DeepEP backward already aggregates within the EP group, so their sync is a
   divide by `world_size / expert_tp_size`, with no collective. It runs once per optimizer step in the
-  trainer's post-backward sweep (`_sync_deferred_expert_grads`, from the clip or, with clipping off,
+  trainer's post-backward sweep (`_run_deferred_grad_sweep`, from the clip or, with clipping off,
   the optimizer's step pre-hook), never on a hook: a reentrant recompute re-enters the backward once
   per segment, and a divide repeated per firing would leave the earlier segments divided K times.
   The sweep divides every accumulated expert gradient, so a bank that idles in the sync microbatch
@@ -404,7 +404,7 @@ and Step-3.7) runs as a fused Triton kernel on every expert path (`halo/kernels/
 measurable on top of it on EP MoE ([torch.compile](../optimization/torch-compile.md)).
 
 Whichever kernel a family resolves, a layer with a real dispatch group (`ep_size > 1`) traces it on
-its **first forward, before that forward's dispatch** (`_warm_activation_graphs`): one grad-enabled
+its **first forward, before that forward's dispatch** (`_warm_expert_kernels`): one grad-enabled
 pass with a backward and one under `no_grad`, outside inference mode, so a first forward under
 `torch.inference_mode()` still warms the backward kernels a later training forward runs. Every grouped-GEMM path,
 at any `ep_size`, also runs the routing sort, forward and backward, at the layer's `top_k` and local expert count
@@ -611,10 +611,10 @@ the training scripts seed it. A Python-API run that seeds ranks differently trai
 | `bf16_optimizer: false` with a stock AdamW `optim` | rejected at optimizer build ([why](../optimization/bf16-optimizer.md#usage)); `fp32_non_ep_params: true`, `muon` and `flash_adamw` build | `reject_stock_adamw_on_mixed_params` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
-| `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `reject_accelerate_launch` |
+| `accelerate launch` | rejected — EP requires `torchrun`; the same rejection covers a grouped-GEMM MoE at `ep_size == 1` | `load_rules.py`, `reject_custom_parallelism_under_accelerate` |
 | `save_sharded_ep` | needs a single EP group spanning the world; every rejection is listed under [Checkpointing](#checkpointing) | `reject_unmergeable_ep_sharded_save` |
 | `gradient_checkpointing` | supported; `use_reentrant` is forced to `True`, non-reentrant under PP ([rule](../optimization/flash-attention.md#usage)). `gradient_checkpointing_kwargs.every_n_layers` selects the checkpointed decoder layers exactly as on the plain path (lifted out of the kwargs at the EP enable seam and at every re-enable). Rejected for a family whose spec declares `supports_gradient_checkpointing=False` | `_install_ep_gradient_checkpointing` |
-| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP); PP+EP always loads stage by stage from safetensors. Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `resolve_lazy_checkpoint`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
+| `ep_lazy_loading` | honored on every EP path (EP, EP+CP, EP+TP, pure ETP); PP+EP always loads stage by stage from safetensors. Falls back to `from_pretrained` + patch when no local safetensors snapshot resolves, the checkpoint is natively quantized, or its expert layout is one the lazy loader cannot read (`supports_lazy_loading=False` on its spec); that fallback is the only EP path `max_concurrent_loading` throttles | `agree_lazy_load`, `load_ep_model` (`halo/model_loading/parallel/ep.py`) |
 | `use_liger_kernel` | supported. `swiglu`/`geglu` default off only for an **upstream** applier, whose expert-FFN swap the EP layers replace (an explicit `liger_kernel_config` request is honored but inert there). A toolkit spec patches the dense and shared-expert MLPs, which the EP layers adopt unchanged, so its fused GLU stays on. RMSNorm, RoPE and CE/FLCE are unaffected by EP | `halo/model_loading/liger/dispatch.py` |
 | `moe_balancing` | `aux_loss` is inert on families whose EP layer severs the aux path (warned); `bias_update` raises where nothing carries the bias, and also where the family has no checkpoint slot to export it (Qwen3, Qwen3.5/3.6, Qwen3-Next, Qwen3.8-Flash-Next, Mistral4, Cohere2 MoE — `bias_update_transient` is the trainer-only opt-in there, and its bias reaches no export); both bias modes are downgraded to `none` under on-policy weight-sync RL | `callbacks/balancing.py` |
 | `full_determinism` | supported within one NVLink domain ([Determinism](#determinism)); rejected for an EP group spanning domains | `parallelism_rules.py` |

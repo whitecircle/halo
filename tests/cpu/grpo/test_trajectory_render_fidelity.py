@@ -115,7 +115,7 @@ def _stub(tok):
         model=types.SimpleNamespace(config=types.SimpleNamespace(max_position_embeddings=131072)),
     )
     stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
-    stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
+    stub._invalidate_unrenderable_episode = types.MethodType(Trainer._invalidate_unrenderable_episode, stub)
     stub._render_messages_to_ids = types.MethodType(Trainer._render_messages_to_ids, stub)
     stub._context_limit = types.MethodType(Trainer._context_limit, stub)
     stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
@@ -414,7 +414,7 @@ def test_sampled_token_path_falls_back_to_the_identical_render_row():
     assert len(rows) == 1, "no sampled ids → one re-tokenized row, not one row per turn"
     assert rows[0].prompt_ids.tolist() == prompt
     assert rows[0].completion_ids.tolist() == completion
-    assert rows[0].completion_mask.tolist() == mask
+    assert rows[0].loss_mask.tolist() == mask
     assert prompt + completion == full
 
 

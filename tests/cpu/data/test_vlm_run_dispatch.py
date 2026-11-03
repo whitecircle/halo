@@ -30,7 +30,12 @@ from halo.data.pipeline.preferences import render_preference_row
 from halo.data.pipeline.text_rows import prepare_generative_row, render_row_conversation
 from halo.data.pipeline.vlm_rows import normalize_vlm_conversation
 from halo.data.preprocessed import tokenization as tokenization_module
-from halo.data.vlm_detection import VLM_IMAGE_COLUMNS, dataset_declares_images, dataset_image_evidence, is_vlm_run
+from halo.data.vlm_detection import (
+    VLM_IMAGE_COLUMNS,
+    dataset_declares_images_across_ranks,
+    dataset_image_evidence,
+    is_vlm_run_across_ranks,
+)
 from halo.data.vlm_render import extract_conversation_images
 from halo.entrypoints import data_setup
 from halo.entrypoints.data_setup import resolve_vlm_run
@@ -89,47 +94,53 @@ class _UnreachableTokenizer:
 def test_multimodal_checkpoint_with_text_data_is_a_text_run():
     """Keying on the checkpoint alone would send every Gemma 4 / Qwen3.5 text recipe down the VLM path, which
     refuses packing."""
-    assert not is_vlm_run(_args(), "google/gemma-4-26B-A4B-it", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
+    assert not is_vlm_run_across_ranks(_args(), "google/gemma-4-26B-A4B-it", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
 
 
 def test_images_field_declares_a_vlm_run():
     args = _args(images_field="images")
-    assert is_vlm_run(args, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS], {"images": [[]]}), config=VLM_CONFIG)
+    assert is_vlm_run_across_ranks(
+        args, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS], {"images": [[]]}), config=VLM_CONFIG
+    )
 
 
 def test_images_field_is_a_declaration_even_before_the_dataset_is_known():
     """``prepare_vlm_dataset``'s column guard owns a mistyped ``images_field``, so the dispatch must not demote it
     to a text run."""
-    assert is_vlm_run(_args(images_field="pictures"), "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
+    assert is_vlm_run_across_ranks(
+        _args(images_field="pictures"), "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG
+    )
 
 
 @pytest.mark.parametrize("column", VLM_IMAGE_COLUMNS)
 def test_each_image_column_declares_a_vlm_run(column):
     """The raw ``images``/``image`` spellings and the preprocessed artifact's ``pixel_values``."""
     dataset = _dataset([TEXT_TURNS], {column: [[]]})
-    assert is_vlm_run(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
+    assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
 
 
 def test_embedded_image_content_declares_a_vlm_run():
-    assert is_vlm_run(_args(), "Qwen/Qwen3.5-9B", _dataset([IMAGE_TURNS]), config=VLM_CONFIG)
+    assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", _dataset([IMAGE_TURNS]), config=VLM_CONFIG)
 
 
 def test_text_checkpoint_never_becomes_a_vlm_run():
     """A text-only architecture has no processor, so image data fails at the VLM loader and does not switch the data
     path."""
     dataset = _dataset([IMAGE_TURNS], {"images": [[]]})
-    assert not is_vlm_run(_args(images_field="images"), "Qwen/Qwen3-8B", dataset, config=TEXT_CONFIG)
+    assert not is_vlm_run_across_ranks(_args(images_field="images"), "Qwen/Qwen3-8B", dataset, config=TEXT_CONFIG)
 
 
 def test_no_dataset_yet_is_not_a_declaration():
-    assert not is_vlm_run(_args(), "Qwen/Qwen3.5-9B", None, config=VLM_CONFIG)
+    assert not is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", None, config=VLM_CONFIG)
 
 
 def test_args_without_the_modality_knobs_still_resolve():
     """DPO's script args declare neither knob."""
     bare = SimpleNamespace()
-    assert not is_vlm_run(bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
-    assert is_vlm_run(bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS], {"image": [None]}), config=VLM_CONFIG)
+    assert not is_vlm_run_across_ranks(bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
+    assert is_vlm_run_across_ranks(
+        bare, "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS], {"image": [None]}), config=VLM_CONFIG
+    )
 
 
 def test_the_script_seam_probes_the_checkpoint_the_run_loads(monkeypatch):
@@ -146,7 +157,7 @@ def test_the_script_seam_probes_the_checkpoint_the_run_loads(monkeypatch):
 
 def test_a_run_verdict_needs_the_checkpoint_config_or_its_probe_verdict():
     with pytest.raises(ValueError, match="needs the checkpoint's config or its probe_checkpoint verdict"):
-        is_vlm_run(_args(images_field="images"), "org/ckpt", None)
+        is_vlm_run_across_ranks(_args(images_field="images"), "org/ckpt", None)
 
 
 @pytest.mark.parametrize("vlm_checkpoint", [True, False])
@@ -161,20 +172,20 @@ def test_a_checkpoint_verdict_already_taken_is_not_probed_again(monkeypatch, vlm
 
 
 def test_dataset_declares_images_accepts_a_single_split():
-    assert dataset_declares_images(Dataset.from_dict({"images": [[]], "prompt": [TEXT_TURNS]}))
-    assert not dataset_declares_images(Dataset.from_dict({"prompt": [TEXT_TURNS]}), "prompt")
+    assert dataset_declares_images_across_ranks(Dataset.from_dict({"images": [[]], "prompt": [TEXT_TURNS]}))
+    assert not dataset_declares_images_across_ranks(Dataset.from_dict({"prompt": [TEXT_TURNS]}), "prompt")
 
 
 def test_dataset_declares_images_needs_the_conversation_field_to_see_embedded_images():
     """Without the field name there is no column to probe."""
     dataset = _dataset([IMAGE_TURNS])
-    assert not dataset_declares_images(dataset)
-    assert dataset_declares_images(dataset, "prompt")
+    assert not dataset_declares_images_across_ranks(dataset)
+    assert dataset_declares_images_across_ranks(dataset, "prompt")
 
 
 def test_empty_split_does_not_crash_the_probe():
     empty = DatasetDict({"train": Dataset.from_dict({"prompt": []})})
-    assert not dataset_declares_images(empty, "prompt")
+    assert not dataset_declares_images_across_ranks(empty, "prompt")
     assert dataset_image_evidence(empty) is None
 
 
@@ -192,29 +203,29 @@ def test_dataset_image_evidence_probes_every_column_and_names_the_declaration():
 
 def test_json_string_conversations_are_probed_too():
     dataset = DatasetDict({"train": Dataset.from_dict({"prompt": [json.dumps(IMAGE_TURNS)]})})
-    assert dataset_declares_images(dataset, "prompt")
+    assert dataset_declares_images_across_ranks(dataset, "prompt")
 
 
 def test_mixed_dataset_whose_first_rows_are_text_is_still_a_vlm_run():
     """On a 10%-image dataset a first-row probe misses ~81% of the time (0.9**16 for TRL's window), crashing
     mid-map. Arrow types the parts struct over the whole split, so the image field is in every row's schema."""
-    assert dataset_declares_images(_mixed_dataset(), "prompt")
-    assert is_vlm_run(_args(), "Qwen/Qwen3.5-9B", _mixed_dataset(), config=VLM_CONFIG)
+    assert dataset_declares_images_across_ranks(_mixed_dataset(), "prompt")
+    assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", _mixed_dataset(), config=VLM_CONFIG)
 
 
 def test_one_image_row_in_a_thousand_still_declares_the_run():
-    assert dataset_declares_images(_mixed_dataset(image_rows=1, text_rows=999), "prompt")
+    assert dataset_declares_images_across_ranks(_mixed_dataset(image_rows=1, text_rows=999), "prompt")
 
 
 def test_parts_form_text_schema_is_not_a_declaration():
     """Flipping this would route every parts-form text dataset to the VLM path, which refuses packing."""
     dataset = _dataset([TEXT_PARTS_TURNS, TEXT_PARTS_TURNS])
-    assert not dataset_declares_images(dataset, "prompt")
-    assert not is_vlm_run(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
+    assert not dataset_declares_images_across_ranks(dataset, "prompt")
+    assert not is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", dataset, config=VLM_CONFIG)
 
 
 def test_string_content_schema_is_not_a_declaration():
-    assert not dataset_declares_images(_dataset([TEXT_TURNS]), "prompt")
+    assert not dataset_declares_images_across_ranks(_dataset([TEXT_TURNS]), "prompt")
 
 
 def test_cast_image_feature_declares_images_under_any_name():
@@ -236,7 +247,7 @@ def test_cast_image_feature_declares_images_under_any_name():
         {"prompt": [{"role": "user", "content": [{"type": "image", "picture": image, "text": ""}]}]},
     ]
     dataset = DatasetDict({"train": Dataset.from_list(rows, features=features)})
-    assert dataset_declares_images(dataset, "prompt")
+    assert dataset_declares_images_across_ranks(dataset, "prompt")
 
 
 def test_empty_split_with_an_image_schema_declares_images():
@@ -252,7 +263,7 @@ def test_empty_split_with_an_image_schema_declares_images():
         }
     )
     empty = DatasetDict({"train": Dataset.from_dict({"prompt": []}, features=features)})
-    assert dataset_declares_images(empty, "prompt")
+    assert dataset_declares_images_across_ranks(empty, "prompt")
 
 
 def test_conversation_carries_images_predicate():
@@ -369,11 +380,11 @@ def test_every_image_part_site_reads_the_shared_constants(monkeypatch):
     assert merged[0]["content"][0][alt_key] is image, "the images-column merge ignored the constants"
 
     schema_split = Dataset.from_list([{"prompt": [{"role": "user", "content": [{"type": alt_type, alt_key: "b64"}]}]}])
-    assert dataset_declares_images(DatasetDict({"train": schema_split}), "prompt"), (
+    assert dataset_declares_images_across_ranks(DatasetDict({"train": schema_split}), "prompt"), (
         "the Arrow-schema probe ignored the constants"
     )
     old_split = Dataset.from_list([{"prompt": TEXT_PARTS_TURNS}, {"prompt": IMAGE_TURNS}])
-    assert not dataset_declares_images(DatasetDict({"train": old_split}), "prompt"), (
+    assert not dataset_declares_images_across_ranks(DatasetDict({"train": old_split}), "prompt"), (
         "the Arrow-schema probe hardcodes the old spelling"
     )
 

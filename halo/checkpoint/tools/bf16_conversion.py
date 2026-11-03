@@ -74,8 +74,8 @@ def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
     return apply_adapter(
         adapter_dir,
         base.model,
-        adapter_pc=load_processing_class(adapter_dir, trust_remote_code=trust_remote_code),
-        base_pc=load_processing_class(peft_config.base_model_name_or_path, trust_remote_code=trust_remote_code),
+        adapter_processor=load_processing_class(adapter_dir, trust_remote_code=trust_remote_code),
+        base_processor=load_processing_class(peft_config.base_model_name_or_path, trust_remote_code=trust_remote_code),
         log=logger.info,
     )
 

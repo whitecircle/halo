@@ -4,11 +4,11 @@
 
 from halo.entrypoints.rejection_sampling import OUTPUT_FORMATS, run_rejection_sampling
 from halo.entrypoints.resumable_generation import run_async_cli
-from scripts.inference.reward_model.reward_model_arguments import build_generation_parser
+from scripts.inference.reward_model.reward_model_arguments import build_reward_model_parser
 
 
 def parse_args():
-    parser = build_generation_parser("Async generation with RM rejection sampling", temperature_default=0.8)
+    parser = build_reward_model_parser("Async generation with RM rejection sampling", temperature_default=0.8)
     parser.add_argument("--n_hypos", type=int, default=5, help="Hypotheses per prompt (default: 5, at least 2)")
     parser.add_argument(
         "--output_format",

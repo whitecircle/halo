@@ -52,7 +52,7 @@ def _scorer_cls(fail: bool):
             if fail:
                 raise ConnectionError(f"rollout server {base_url} unreachable from this node")
 
-        def close_session(self) -> None:
+        def close_http_session(self) -> None:
             pass
 
     return _Scorer

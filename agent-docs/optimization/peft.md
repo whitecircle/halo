@@ -187,7 +187,7 @@ the wrapper never owns. EP modules are FSDP-ignored, so their gradients are DP-a
 layer registers at construction on the *original* router param, one that never sees the trainable copy
 `modules_to_save` creates.
 
-`EPMoELayerBase.reattach_router_grad_sync` re-attaches it to the live copy automatically, so `router` in
+`EPMoELayerBase.reattach_dp_average_grad_hooks` re-attaches it to the live copy automatically, so `router` in
 `lora_modules_to_save` stays DP-consistent in every EP mode; the ep1 FSDP-sharded path
 (`fsdp_shard_ep1_experts`) and the multi-node deferred sweep already cover it.
 

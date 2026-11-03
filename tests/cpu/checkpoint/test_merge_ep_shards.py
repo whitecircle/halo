@@ -21,7 +21,7 @@ from halo.checkpoint.format import (
     ROUTER_BALANCING_BIASES_FILE,
     SCHEDULER_STATE_FILE,
     ep_shard_filename,
-    is_ep_shard,
+    is_numbered_shard_file,
     optimizer_shard_filename,
 )
 from halo.checkpoint.parallel.resume_source import classify_resume_weights
@@ -845,7 +845,7 @@ def test_merge_renames_module_spellings_to_hub_spellings():
 def _reference_merge(input_dir, model_type):
     """The semantics the streamed script must reproduce byte for byte."""
     all_weights = {}
-    for fname in sorted(f for f in os.listdir(input_dir) if is_ep_shard(f)):
+    for fname in sorted(f for f in os.listdir(input_dir) if is_numbered_shard_file(f)):
         all_weights.update(load_file(os.path.join(input_dir, fname)))
     shard_groups = defaultdict(dict)
     reference = {}
@@ -1069,9 +1069,9 @@ def test_the_reader_accepts_exactly_what_the_writer_names():
     or stale gathered save."""
     for rank, world in ((0, 1), (0, 8), (7, 8), (3, 16), (63, 64)):
         name = ep_shard_filename(rank, world)
-        assert is_ep_shard(name), f"the reader rejects the writer's rank-{rank} filename {name}"
+        assert is_numbered_shard_file(name), f"the reader rejects the writer's rank-{rank} filename {name}"
     for other in ("adapter_model.safetensors", "model.safetensors", "model-tp00000-of-00002.safetensors"):
-        assert not is_ep_shard(other), f"{other} must stay out of the merge"
+        assert not is_numbered_shard_file(other), f"{other} must stay out of the merge"
 
 
 if __name__ == "__main__":

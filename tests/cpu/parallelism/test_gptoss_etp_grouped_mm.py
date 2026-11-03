@@ -90,14 +90,16 @@ def _forward_backward(layer, tokens, experts, weights, *, grouped: bool, cotange
     tokens = tokens.clone().requires_grad_(True)
     weights = weights.clone().requires_grad_(True)
     grouped_calls = []
-    grouped_compute = layer._compute_experts_gmm
-    layer._compute_experts_gmm = lambda *args, **kwargs: grouped_calls.append(1) or grouped_compute(*args, **kwargs)
+    grouped_compute = layer._compute_experts_grouped
+    layer._compute_experts_grouped = lambda *args, **kwargs: grouped_calls.append(1) or grouped_compute(
+        *args, **kwargs
+    )
     try:
         out = layer._compute_experts(
             tokens, experts, weights, torch.float32, recv_counts=dispatched_receive_counts(layer, experts)
         )
     finally:
-        del layer._compute_experts_gmm
+        del layer._compute_experts_grouped
     assert bool(grouped_calls) is grouped, "the arm did not run the compute path it is named for"
     out.backward(cotangent)
     grads = {name: param.grad.clone() for name, param in _expert_params(layer).items()}

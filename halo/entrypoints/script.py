@@ -14,9 +14,9 @@ from huggingface_hub import constants as hub_constants
 from transformers import TrainingArguments
 
 from halo.callbacks.balancing import configure_moe_balancing
-from halo.callbacks.checkpointing_plan import build_checkpointing_plan_callback
 from halo.callbacks.early_stop import StopsTrainingEarly
 from halo.callbacks.factory import build_run_callbacks, reorder_integration_callbacks_last
+from halo.callbacks.gradient_checkpointing_plan import build_gradient_checkpointing_plan_callback
 from halo.config_validation import differs_from_default
 from halo.configs.parallelism_arguments import parallelism_config_from_args
 from halo.configs.parser import HaloArgumentParser, expand_strftime_directives
@@ -31,7 +31,7 @@ from halo.model_loading.parallel.peft_setup import split_expert_lora_targets
 from halo.models.attention.selection import effective_attn_implementation, enable_flash_attention_deterministic
 from halo.models.unwrapping import base_transformers_model
 from halo.runtime.collectives import broadcast_from_rank0
-from halo.runtime.consensus import raise_rank0_failure
+from halo.runtime.consensus import run_on_rank0_raising_everywhere
 from halo.runtime.filesystem import verify_input_filesystem_sharing, verify_output_filesystem_sharing
 from halo.runtime.process_group import init_distributed
 from halo.runtime.ranks import get_local_rank, has_process_group, is_global_main_process
@@ -73,7 +73,7 @@ def _reject_ddp_timeout(parsed: Sequence[Any]) -> None:
             )
 
 
-def _set_flash_switch_from_config(parsed: Sequence[Any]) -> None:
+def _enable_flash_determinism_from_args(parsed: Sequence[Any]) -> None:
     """Every attention choice reads the switch (a script's row plan, the loader's resolver, the kernels), and HF's
     Trainer sets it only in ``__init__``, after the load."""
     if any(isinstance(args, TrainingArguments) and args.full_determinism for args in parsed):
@@ -98,7 +98,7 @@ def parse_script_args(*dataclass_types: type) -> Any:
         values["output_dir"] = broadcast_from_rank0(expand_strftime_directives(values["output_dir"]))
     output = parser.parse_dict(values)
     _reject_ddp_timeout(output)
-    _set_flash_switch_from_config(output)
+    _enable_flash_determinism_from_args(output)
     install_log_tee(
         next((obj.output_dir for obj in output if isinstance(getattr(obj, "output_dir", None), str)), None)
     )
@@ -214,7 +214,7 @@ def configure_balancing_and_build_callbacks(
     )
     if args.gradient_checkpointing_plan == "auto":
         callbacks.append(
-            build_checkpointing_plan_callback(
+            build_gradient_checkpointing_plan_callback(
                 training_config,
                 model,
                 context.parallelism_config,
@@ -312,4 +312,4 @@ def verify_backend_on_rank0(probe: Callable[[], object], what: str) -> None:
         if inspect.iscoroutine(outcome):
             asyncio.run(outcome)
 
-    raise_rank0_failure(run_probe, lambda e: f"{what} probe failed: {e}")
+    run_on_rank0_raising_everywhere(run_probe, lambda e: f"{what} probe failed: {e}")

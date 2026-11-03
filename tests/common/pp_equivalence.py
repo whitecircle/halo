@@ -61,14 +61,14 @@ CLIP_NORM_REL_TOL = 5e-2  # vs fp32: the flipped tokens' grads genuinely differ 
 class UnsplitReference:
     """One unsplit model's full-batch backward, packaged for the equivalence checks. ``slice_losses[r]`` is ``S_r / (G
     / dp)``: ragged prefixes make replica token counts unequal, and the trainer normalizes by ``G/dp``. Expert
-    parameters have no sharding-independent name, so they compare through :func:`gather_expert_grads`."""
+    parameters have no sharding-independent name, so they compare through :func:`hub_layout_expert_grads`."""
 
     grads: dict[str, torch.Tensor]
     param_names: set[str]
     slice_losses: list[float]
     total_norm: float
     total_tokens: int
-    expert_grads: dict[str, dict[str, torch.Tensor]]  # {EP module: gather_expert_grads()}
+    expert_grads: dict[str, dict[str, torch.Tensor]]  # {EP module: hub_layout_expert_grads()}
     router_grads: dict[str, torch.Tensor]  # {EP module: cat of sorted router param grads, fp32}
     expert_param_names: set[str]
 
@@ -270,7 +270,7 @@ def check_loss_vs_baseline(loss, baseline_loss, config: ParallelismConfig, group
     return {"loss_matches_baseline": err.item() < tol}, {"loss_rel_err": err.item()}
 
 
-def gather_expert_grads(layer: EPMoELayerBase, device="cpu") -> dict[str, torch.Tensor]:
+def hub_layout_expert_grads(layer: EPMoELayerBase, device="cpu") -> dict[str, torch.Tensor]:
     """COLLECTIVE (the layer's expert gather). ``layer``'s expert gradients in its family's hub layout. Raises on a
     missing gradient: gathering zeros for an expert the backward never reached makes the comparison vacuous."""
     grads = {}
@@ -326,7 +326,7 @@ def run_unsplit_reference(
     total_norm = float(torch.sqrt(sum(g.float().norm() ** 2 for g in grads.values())))
 
     ep_modules = named_ep_layers(model)
-    expert_grads = {name: gather_expert_grads(m, device=device) for name, m in ep_modules}
+    expert_grads = {name: hub_layout_expert_grads(m, device=device) for name, m in ep_modules}
     # Under the GPT-OSS spelling only; another family's router compares by name.
     router_grads = {
         name: torch.cat(
@@ -486,7 +486,7 @@ def score_stage_grads_vs_reference(ctx, stage, reference: UnsplitReference, chec
             compared.add(name)
     for local, module in ep_modules:
         name = stage.global_parameter_name(local)
-        for key, grad in gather_expert_grads(module, device=ctx.device).items():
+        for key, grad in hub_layout_expert_grads(module, device=ctx.device).items():
             pairs[f"{name}.{key}"] = (grad.float(), reference.expert_grads[name][key].float())
             compared.add(f"{name}.{key}")
 
@@ -574,15 +574,16 @@ def check_expert_grads_vs_reference(
     *,
     tol: float = EXPERT_GRAD_REL_TOL,
 ) -> tuple[dict, dict]:
-    """Compare per expert via both sides' ``gather_expert_grads``; a hardcoded attribute list compares nothing under
-    ETP. ``down_proj_bias`` lives on expert-TP rank 0 only, so coverage is pinned world-wide rather than per rank."""
+    """Compare per expert via both sides' ``hub_layout_expert_grads``; a hardcoded attribute list compares nothing
+    under ETP. ``down_proj_bias`` lives on expert-TP rank 0 only, so coverage is pinned world-wide rather than per
+    rank."""
     num_experts = TINY_GPTOSS_CONFIG["num_local_experts"]
     expert_ok, compared_tensors, experts_covered = True, 0, 0
     errs, failures, compared_keys = [], [], set()
     for local_name, module in ep_modules:
         global_name = stage.global_parameter_name(local_name)
         ref_grads = reference.expert_grads[global_name]
-        for key, full_grad in gather_expert_grads(module, device=ctx.device).items():
+        for key, full_grad in hub_layout_expert_grads(module, device=ctx.device).items():
             ref = ref_grads[key]
             if full_grad.shape != ref.shape:
                 log(f"[rank {ctx.rank}] shape mismatch {global_name}.{key}: {full_grad.shape} vs {ref.shape}")

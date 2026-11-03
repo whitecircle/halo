@@ -15,8 +15,8 @@ from halo.data.pipeline.coordinated_map import coordinated_map_and_filter, resol
 from halo.data.pipeline.preferences import prepare_generative_dataset, prepare_preference_datasets
 from halo.data.pipeline.text_rows import build_chat_row_processor, text_render_kwargs
 from halo.data.pipeline.vlm_rows import prepare_vlm_dataset
-from halo.data.sources.loading import is_presharded_dataset_load, load_datasets, share_s3_control_files
-from halo.data.vlm_detection import dataset_declares_images, is_vlm_run, reject_image_columns
+from halo.data.sources.loading import is_presharded_dataset_load_across_ranks, load_datasets, share_s3_control_files
+from halo.data.vlm_detection import dataset_declares_images_across_ranks, is_vlm_run_across_ranks, reject_image_columns
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.log import RUN_LOG_DIR_NAME
 from halo.model_loading.parallel.model_source import probe_checkpoint
@@ -63,7 +63,7 @@ def load_script_datasets(
     data_parallel_rank = parallelism_config.get_data_parallel_rank()
     data_parallel_size = parallelism_config.data_parallel_size
     share_s3_control_files(args.dataset)
-    dataset_presharded = is_presharded_dataset_load(args.dataset, data_parallel_size)
+    dataset_presharded = is_presharded_dataset_load_across_ranks(args.dataset, data_parallel_size)
     # For every script, so a typo'd tools column fails the load; the scripts that cannot render it (KTO, environmental
     # GRPO) refuse the knob first.
     loader_kwargs.setdefault("tools_field", args.tools_field)
@@ -79,8 +79,8 @@ def load_script_datasets(
 
 
 def _reject_images_under_text_only_model(args, datasets, *, text_only_model: bool) -> None:
-    """Refuse image data on a multimodal checkpoint loaded through its text-only class: ``is_vlm_run`` reads the
-    still-multimodal config and would route the run to a VLM data path with no vision model."""
+    """Refuse image data on a multimodal checkpoint loaded through its text-only class: ``is_vlm_run_across_ranks``
+    reads the still-multimodal config and would route the run to a VLM data path with no vision model."""
     if not text_only_model:
         return
     images_field = getattr(args, "images_field", None)
@@ -92,7 +92,7 @@ def _reject_images_under_text_only_model(args, datasets, *, text_only_model: boo
         )
     reject_image_columns(datasets, "text_only_model=True (text-only CausalLM load)")
     conversation_field = getattr(args, "conversation_field", None)
-    if conversation_field and dataset_declares_images(datasets, conversation_field):
+    if conversation_field and dataset_declares_images_across_ranks(datasets, conversation_field):
         raise ValueError(
             f"The {conversation_field!r} column embeds image content parts, but text_only_model=True "
             f"loads the text-only CausalLM class, which has no vision path. Drop text_only_model to "
@@ -112,7 +112,7 @@ def resolve_vlm_run(
             revision=model_config.model_revision,
             trust_remote_code=model_config.trust_remote_code,
         )
-    return is_vlm_run(args, model_config.model_name_or_path, datasets, vlm_checkpoint=vlm_checkpoint)
+    return is_vlm_run_across_ranks(args, model_config.model_name_or_path, datasets, vlm_checkpoint=vlm_checkpoint)
 
 
 def reject_prefix_lm_image_preference(checkpoint_config, model_name_or_path: str, method: str) -> None:

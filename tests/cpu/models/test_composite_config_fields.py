@@ -226,7 +226,7 @@ def test_zero_bias_routing_matches_the_stock_qwen3_5_router():
         balancing_biases = torch.zeros(config.num_experts)
         _deepseek_biased_route = EPMoELayerBase._deepseek_biased_route
         _biased_topk = EPMoELayerBase._biased_topk
-        _balancing_bias = EPMoELayerBase._balancing_bias
+        _transient_balancing_bias = EPMoELayerBase._transient_balancing_bias
 
         def _apply_routing_replay(self, indices):
             return indices

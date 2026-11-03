@@ -232,7 +232,7 @@ def test_every_turn_over_the_cap_trains_as_one_masked_row():
     stub.pad_token_id = 0
     stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
     rows = stub._tokenize_trajectory_turns(RolloutResult(prompt="q", trajectory=traj))
-    assert len(rows) == 1 and rows[0].completion_mask.tolist() == [0]
+    assert len(rows) == 1 and rows[0].loss_mask.tolist() == [0]
     assert stub._rows_over_cap == 1
 
 
@@ -317,7 +317,7 @@ def _render_stub(render):
     stub._render_messages_to_ids = render
     stub._context_limit = lambda: 10**9
     stub._masked_trajectory_tensors = types.MethodType(Trainer._masked_trajectory_tensors, stub)
-    stub._invalidate_untrainable_episode = types.MethodType(Trainer._invalidate_untrainable_episode, stub)
+    stub._invalidate_unrenderable_episode = types.MethodType(Trainer._invalidate_unrenderable_episode, stub)
     stub._tokenize_trajectory = types.MethodType(Trainer._tokenize_trajectory, stub)
     stub._tokenize_trajectory_turns = types.MethodType(Trainer._tokenize_trajectory_turns, stub)
     for name in ("_template_kwargs", "_admit_row", "_sampled_turn_row"):

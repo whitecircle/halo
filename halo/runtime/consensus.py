@@ -31,7 +31,7 @@ _FAILURE_RECORD_SEP = "\n"
 _T = TypeVar("_T")
 
 
-def raise_rank0_failure(
+def run_on_rank0_raising_everywhere(
     step: Callable[[], Any], describe: Callable[[Exception], str], exc_type: type[Exception] = RuntimeError
 ) -> None:
     """COLLECTIVE: run ``step`` on global rank 0 and raise its failure on every rank as ``exc_type``."""

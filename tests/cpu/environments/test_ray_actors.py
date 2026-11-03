@@ -232,7 +232,7 @@ class _RecordingActor:
                 await asyncio.sleep(0.02)
                 if self.fail:
                     raise RuntimeError("no rollout server")
-                return RolloutResult(prompt=prompt, trajectory=Trajectory(done=True), success=True)
+                return RolloutResult(prompt=prompt, trajectory=Trajectory(done=True), terminated_naturally=True)
             finally:
                 self.inflight -= 1
 
@@ -260,7 +260,7 @@ async def test_collect_rollouts_yields_one_result_per_prompt_when_every_episode_
     results = await manager.collect_rollouts(prompts)
 
     assert [r.prompt for r in results] == prompts
-    assert all(isinstance(r, RolloutResult) and not r.success for r in results)
+    assert all(isinstance(r, RolloutResult) and not r.terminated_naturally for r in results)
     assert all("no rollout server" in (r.error or "") for r in results)
 
 
@@ -397,7 +397,7 @@ CONSUMED_ROLLOUT_RESULT_FIELDS = {
     "trajectory",
     "episode_length",
     "total_reward",
-    "success",
+    "terminated_naturally",
     "latency",
     "error",
     "generation_tokens",

@@ -97,7 +97,7 @@ from tests.common.ep_reference import (
 )
 from tests.common.harness import gpu_test_main
 from tests.common.models import QWEN3_0_6B
-from tests.common.pp_equivalence import gather_expert_grads
+from tests.common.pp_equivalence import hub_layout_expert_grads
 from tests.common.rank_log import log, log_all
 from tests.common.tiny_models import TINY_MOE_FAMILIES, shared_tiny_family_checkpoint
 from tests.common.tolerances import TOL
@@ -197,7 +197,7 @@ def etp_expert_grads(model, layer_names: list[str], device) -> dict[str, torch.T
     return {
         f"{name}.{key}": grad.float()
         for name in layer_names
-        for key, grad in gather_expert_grads(layers[name], device=device).items()
+        for key, grad in hub_layout_expert_grads(layers[name], device=device).items()
     }
 
 

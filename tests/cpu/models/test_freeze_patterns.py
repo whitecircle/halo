@@ -6,7 +6,7 @@ from __future__ import annotations
 import pytest
 import torch.nn as nn
 
-from halo.model_loading.parallel.freeze_patterns import freeze_modules_by_patterns, unfreeze_modules_by_patterns
+from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_patterns, unfreeze_modules_by_patterns
 
 
 def _model() -> nn.Module:
@@ -33,7 +33,7 @@ def test_a_parameter_name_instead_of_a_module_name_raises():
 
 def test_a_matching_freeze_pattern_freezes_only_those_parameters():
     model = _model()
-    freeze_modules_by_patterns(model, ["0.weight"])
+    freeze_parameters_by_patterns(model, ["0.weight"])
     assert model[0].weight.requires_grad is False
     assert model[0].bias.requires_grad is True
     assert all(param.requires_grad for param in model[1].parameters())
@@ -41,25 +41,25 @@ def test_a_matching_freeze_pattern_freezes_only_those_parameters():
 
 def test_a_freeze_pattern_matching_nothing_raises():
     with pytest.raises(ValueError, match="matched no parameter"):
-        freeze_modules_by_patterns(_model(), ["nothing.matches.this"])
+        freeze_parameters_by_patterns(_model(), ["nothing.matches.this"])
 
 
 def test_one_typo_among_working_patterns_is_named():
     with pytest.raises(ValueError, match=r"0\.bais"):
-        freeze_modules_by_patterns(_model(), ["0.weight", "0.bais"])
+        freeze_parameters_by_patterns(_model(), ["0.weight", "0.bais"])
 
 
 def test_a_module_name_instead_of_a_parameter_name_raises():
     """This side matches parameter names, so a bare module name matches nothing."""
     with pytest.raises(ValueError, match="full PARAMETER names"):
-        freeze_modules_by_patterns(_model(), ["0"])
+        freeze_parameters_by_patterns(_model(), ["0"])
 
 
 def test_overlapping_patterns_are_all_credited():
     """Both match only ``0.weight``, so stopping at the first hit leaves ``0.we*`` unmatched and raises.
     A broad partner like ``0.*`` cannot show this: it picks up ``0.bias`` on its own and is credited anyway."""
     model = _model()
-    freeze_modules_by_patterns(model, ["0.weight", "0.we*"])
+    freeze_parameters_by_patterns(model, ["0.weight", "0.we*"])
     assert model[0].weight.requires_grad is False
     assert model[0].bias.requires_grad is True, "neither pattern names the bias"
 

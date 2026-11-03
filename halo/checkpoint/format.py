@@ -25,7 +25,7 @@ EP_SHARD_KEY_RE = re.compile(rf"(.+)\{EP_SHARD_KEY_INFIX}(\d+)$")
 SAFETENSORS_SHARD_PATTERN = "model{suffix}.safetensors"
 SAFETENSORS_WEIGHTS_FILE = SAFETENSORS_SHARD_PATTERN.format(suffix="")
 SAFETENSORS_FAMILY_GLOB = SAFETENSORS_SHARD_PATTERN.format(suffix="*")
-_EP_SHARD_FILE_RE = re.compile(
+_NUMBERED_SHARD_FILE_RE = re.compile(
     "^" + re.escape(SAFETENSORS_SHARD_PATTERN).replace(re.escape("{suffix}"), r"-\d+-of-\d+") + "$"
 )
 # A renaming writer's in-flight parts: outside HF's final pattern, inside the sweep's glob.
@@ -128,9 +128,9 @@ def is_per_rank_resume_file(name: str) -> bool:
     return fnmatch(name, OPTIMIZER_SHARD_GLOB) or name.startswith(RESUME_SIDECAR_PREFIXES)
 
 
-def is_ep_shard(name: str) -> bool:
+def is_numbered_shard_file(name: str) -> bool:
     """Whether ``name`` is a per-rank EP save slice (never a sibling adapter or a stale single file)."""
-    return _EP_SHARD_FILE_RE.match(name) is not None
+    return _NUMBERED_SHARD_FILE_RE.match(name) is not None
 
 
 def hf_shard_filename(part: int, total_parts: int, *, indexed: bool = False) -> str:

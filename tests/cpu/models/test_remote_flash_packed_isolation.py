@@ -13,7 +13,7 @@ from transformers import modeling_flash_attention_utils as flash_utils
 
 from halo.data.collators.factory import select_data_collator
 from halo.models.attention import remote_flash_attention
-from halo.models.attention.remote_flash_attention import patch_v4_flash_attention_template
+from halo.models.attention.remote_flash_attention import patch_remote_llama_flash_template
 from halo.models.attention.selection import VARLEN_ATTN_IMPLEMENTATIONS
 from halo.models.attention.tensor_memo import TensorMemo
 from halo.models.segment_markers import packed_row_varlen_kwargs
@@ -291,7 +291,7 @@ def test_patch_marks_only_the_template_and_is_idempotent(reference_varlen):
     flash_cls = module.ATTENTION_CLASSES["flash_attention_2"]
     assert all(module.ATTENTION_CLASSES[label] is flash_cls for label in VARLEN_ATTN_IMPLEMENTATIONS)
     assert type(model)._supports_flash_attn is True
-    assert patch_v4_flash_attention_template(module) is False
+    assert patch_remote_llama_flash_template(module) is False
 
     class _SlidingFlash:
         def _flash_attention_forward(self, q, k, v, attention_mask, query_length, dropout=0.0, use_sliding=False):
@@ -299,7 +299,7 @@ def test_patch_marks_only_the_template_and_is_idempotent(reference_varlen):
 
     other = types.ModuleType("other_remote_modeling")
     other.ATTENTION_CLASSES = {"flash_attention_2": _SlidingFlash}
-    assert patch_v4_flash_attention_template(other) is False
+    assert patch_remote_llama_flash_template(other) is False
     assert other.ATTENTION_CLASSES.keys() == {"flash_attention_2"}
 
 

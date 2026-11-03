@@ -7,10 +7,10 @@ import json
 import pytest
 import yaml
 
-from tests.common.hub_seed import GATED_REPOS, example_repos, is_hub_repo, roster_repos, seed
+from tests.common.hub_seed import GATED_REPOS, example_repos, is_hub_repo, roster_repos, seed_repos
 from tests.common.models import GEMMA3_4B_IT, GEMMA4_26B_A4B, GPT_OSS_20B_PATCHED, PINNED_REVISIONS, QWEN3_0_6B
 from tests.common.repo import REPO_ROOT
-from tests.common.tokenizers import REQUIRE_HUB_CACHE, require_cached, try_cached_config, try_cached_tokenizer
+from tests.common.tokenizers import REQUIRE_HUB_CACHE, fail_if_cache_required, try_cached_config, try_cached_tokenizer
 
 _UNSEEDED = "halo-tests/no-such-repo"
 
@@ -39,7 +39,7 @@ def _example_references() -> set[str]:
 
 def test_the_seed_holds_every_example_hub_id_and_no_local_checkpoint():
     references = _example_references()
-    fetched = {repo for repo, revision in seed() if revision is None}
+    fetched = {repo for repo, revision in seed_repos() if revision is None}
     local = {ref for ref in references if ref.startswith(("/", "checkpoints/"))}
     assert GEMMA4_26B_A4B in references and local, "precondition: the examples train a Hub id and a local path"
     assert GEMMA4_26B_A4B in fetched, f"the seed misses {GEMMA4_26B_A4B}, which an example trains"
@@ -50,10 +50,10 @@ def test_the_seed_holds_every_example_hub_id_and_no_local_checkpoint():
 def test_the_seed_holds_the_roster_and_the_pins_but_no_gated_repo():
     assert example_repos() and roster_repos(), "a seed source parsed to nothing"
     assert QWEN3_0_6B in roster_repos()
-    fetched = {repo for repo, revision in seed() if revision is None}
+    fetched = {repo for repo, revision in seed_repos() if revision is None}
     assert roster_repos() - GATED_REPOS <= fetched
     assert not fetched & GATED_REPOS, f"the seed fetches gated repos: {fetched & GATED_REPOS}"
-    assert set(PINNED_REVISIONS.items()) <= set(seed())
+    assert set(PINNED_REVISIONS.items()) <= set(seed_repos())
 
 
 def test_a_miss_skips_by_default(monkeypatch):
@@ -81,14 +81,14 @@ def test_the_failure_names_the_step_that_fills_the_cache(monkeypatch, reference,
     """A repo the seed already holds needs a re-seed, not a roster edit, and the reverse."""
     monkeypatch.setenv(REQUIRE_HUB_CACHE, "1")
     with pytest.raises(pytest.fail.Exception) as failure:
-        require_cached(reference, "tokenizer", revision)
+        fail_if_cache_required(reference, "tokenizer", revision)
     assert remedy in str(failure.value), str(failure.value)
 
 
 @pytest.mark.parametrize("reference", [GEMMA3_4B_IT, GPT_OSS_20B_PATCHED])
 def test_gated_repos_and_local_paths_may_miss_where_the_cache_must_be_complete(monkeypatch, reference):
     monkeypatch.setenv(REQUIRE_HUB_CACHE, "1")
-    assert require_cached(reference, "tokenizer") is None
+    assert fail_if_cache_required(reference, "tokenizer") is None
 
 
 def test_a_broken_config_raises_instead_of_reading_as_not_cached(tmp_path):

@@ -286,7 +286,7 @@ class RoutingReplayInjector:
                 f"multiple of the armed size)."
             )
 
-    def flip_rate(self) -> float | None:
+    def drain_flip_rate(self) -> float | None:
         """COLLECTIVE. The share of forced (token, layer) selections whose live top-k differed since the last call,
         ``None`` when none was forced; one host sync, once per log step."""
         totals = [layer._replay_flip_counts for layer in self._layers if layer._replay_flip_counts is not None]

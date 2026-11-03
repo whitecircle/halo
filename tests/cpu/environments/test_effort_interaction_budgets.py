@@ -223,10 +223,10 @@ def test_thinking_only_profiles_keep_the_class_caps():
 
 def test_reset_effort_level_contract():
     env = _make_env(reasoning_effort="medium")
-    assert env.reset_effort_level({"reasoning_effort": "high"}) == "high"
-    assert env.reset_effort_level(None) == "medium"
-    assert env.reset_effort_level({"reasoning_effort": "random"}) is None
-    assert _make_env(reasoning_effort="random").reset_effort_level(None) is None
+    assert env.effort_level_at_reset({"reasoning_effort": "high"}) == "high"
+    assert env.effort_level_at_reset(None) == "medium"
+    assert env.effort_level_at_reset({"reasoning_effort": "random"}) is None
+    assert _make_env(reasoning_effort="random").effort_level_at_reset(None) is None
 
 
 def test_context_level_overrides_env_level():

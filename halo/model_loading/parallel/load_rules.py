@@ -14,7 +14,7 @@ from halo.distributed.expert_parallel.deepep.capacity import (
     reject_oversized_dispatch,
 )
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.distributed.parallelism_rules import reject_accelerate_launch
+from halo.distributed.parallelism_rules import reject_custom_parallelism_under_accelerate
 from halo.distributed.tensor_parallel.parallelize_attention import (
     reject_unshardable_tp_model,
     validate_tp_head_divisibility,
@@ -90,7 +90,7 @@ def _reject_undispatchable_token_budget(pc: ParallelismConfig, model_config) -> 
 def reject_unsupported_run(pc: ParallelismConfig, dtype: torch.dtype) -> None:
     """Refuse EP/CP/TP/PP under ``accelerate launch`` (the trainer's own axis set, reached first so the
     message can name the launcher), and fp32 training under Expert Parallelism."""
-    reject_accelerate_launch(pc)
+    reject_custom_parallelism_under_accelerate(pc)
     # DeepEP's dispatch buffer is sized for 2-byte tokens, so fp32 trips a raw C++ assert naming neither fp32 nor the
     # config. Keyed on ep_size, as pure ETP folds into has_ep_group but never reaches the transport.
     if dtype == torch.float32 and pc.ep_size > 1:

@@ -175,7 +175,7 @@ changes.
 | `halo/` area | Owning doc page(s) |
 |---|---|
 | `halo/callbacks/` | `agent-docs/training-methods/callbacks.md` |
-| `halo/callbacks/checkpointing_plan.py`, `halo/models/checkpointing_plan.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/configuration-reference.md` |
+| `halo/callbacks/gradient_checkpointing_plan.py`, `halo/models/gradient_checkpointing_plan.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/data/filesystem-handling.md`, `agent-docs/reference/configuration-reference.md` |
 | `halo/callbacks/factory.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/optimization/throughput-benchmarks.md` |
 | `halo/callbacks/torch_profiler.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/reference/debugging.md` |
 | `halo/models/moe/{balancing,config_fields,router_logits,router_aux_gradient}.py`, `halo/callbacks/balancing.py` | `agent-docs/training-methods/callbacks.md`, `agent-docs/models/README.md` |

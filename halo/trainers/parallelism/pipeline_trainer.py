@@ -9,7 +9,7 @@ from dataclasses import replace
 import torch
 import torch.distributed as dist
 
-from halo.callbacks.moe_metrics import MoELoadMetricsCallback
+from halo.callbacks.moe_metrics import MoELoadMetricsBase
 from halo.checkpoint.writing import save_dtype_caster
 from halo.data.collators.fixed_shape import FixedShapeCollator
 from halo.data.collators.packing import DataCollatorWithPacking, pad_tail_positions
@@ -177,7 +177,7 @@ class PipelineTrainerMixin:
         # Each stage holds different routers, so the callback's expert-load reduce must stay inside
         # this stage's rank block; a world reduce is a shape mismatch or a cross-stage blend.
         for callback in self.callback_handler.callbacks:
-            if isinstance(callback, MoELoadMetricsCallback):
+            if isinstance(callback, MoELoadMetricsBase):
                 callback.reduce_group = self._pp_stage_group
         self._pp_adapter = adapter = self._pp_hoist_metrics_reduction(adapter)
         self._pp_pin_metric_keys()

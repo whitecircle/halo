@@ -13,7 +13,7 @@ from datasets import DatasetDict
 from halo import hardware
 from halo.checkpoint import atomic
 from halo.data.pipeline import coordinated_map
-from halo.data.preprocessed import publishing
+from halo.data.preprocessed import prepare_dataset_tool
 from halo.model_loading import tokenizer_setup
 from scripts.before_training import prepare_dataset
 
@@ -34,7 +34,9 @@ def _staged(tmp_path, name="staged"):
 
 
 def _publish(dest, overwrite: bool) -> None:
-    publishing.publish_local_output(_fill(publishing.stage_local_output(str(dest), overwrite)), str(dest))
+    prepare_dataset_tool.publish_local_output(
+        _fill(prepare_dataset_tool.stage_local_output(str(dest), overwrite)), str(dest)
+    )
 
 
 def test_local_publish_replaces_an_existing_dataset_on_success(tmp_path):
@@ -60,12 +62,14 @@ def _stub_main(monkeypatch, tmp_path, output: str, preprocess) -> None:
     )
     monkeypatch.setenv("HF_DATASETS_CACHE", str(tmp_path / "datasets_cache"))
     monkeypatch.setattr(prepare_dataset, "parse_args", lambda: (args, config))
-    monkeypatch.setattr(publishing, "PartialState", lambda: types.SimpleNamespace(num_processes=1))
-    monkeypatch.setattr(publishing, "load_tokenizer", lambda config: object())
-    monkeypatch.setattr(publishing, "load_input_dataset", lambda args: DatasetDict())
-    monkeypatch.setattr(publishing, "require_declared_columns", lambda *a: None)
-    monkeypatch.setattr(publishing, "preprocess_dataset", preprocess)
-    monkeypatch.setattr(publishing.shutil, "copytree", lambda *a, **k: pytest.fail("the baked output was copied"))
+    monkeypatch.setattr(prepare_dataset_tool, "PartialState", lambda: types.SimpleNamespace(num_processes=1))
+    monkeypatch.setattr(prepare_dataset_tool, "load_tokenizer", lambda config: object())
+    monkeypatch.setattr(prepare_dataset_tool, "load_input_dataset", lambda args: DatasetDict())
+    monkeypatch.setattr(prepare_dataset_tool, "require_declared_columns", lambda *a: None)
+    monkeypatch.setattr(prepare_dataset_tool, "preprocess_dataset", preprocess)
+    monkeypatch.setattr(
+        prepare_dataset_tool.shutil, "copytree", lambda *a, **k: pytest.fail("the baked output was copied")
+    )
 
 
 def test_a_local_output_is_baked_beside_its_destination_and_written_once(tmp_path, monkeypatch):
@@ -158,7 +162,7 @@ def test_local_publish_restores_the_old_dataset_if_the_swap_fails(tmp_path, monk
             raise OSError("rename failed")
         real_rename(src, dst)
 
-    monkeypatch.setattr(publishing.os, "rename", _fail_second_rename)
+    monkeypatch.setattr(prepare_dataset_tool.os, "rename", _fail_second_rename)
 
     with pytest.raises(OSError, match="rename failed"):
         _publish(dest, overwrite=True)
@@ -170,7 +174,7 @@ def test_local_publish_refuses_an_existing_destination_without_overwrite(tmp_pat
     dest = tmp_path / "out"
     dest.mkdir()
     with pytest.raises(FileExistsError, match="--overwrite"):
-        publishing.stage_local_output(str(dest), overwrite=False)
+        prepare_dataset_tool.stage_local_output(str(dest), overwrite=False)
 
 
 def test_local_publish_creates_a_fresh_destination(tmp_path):
@@ -202,15 +206,17 @@ def test_hub_publish_clears_then_uploads_the_completion_marker_last(tmp_path, mo
     def _fake_upload_folder(folder_path=None, repo_id=None, repo_type=None, token=None, ignore_patterns=None):
         calls.append(("upload_folder", tuple(ignore_patterns or ())))
 
-    monkeypatch.setattr(publishing, "HfApi", _FakeApi)
-    monkeypatch.setattr(publishing, "upload_folder", _fake_upload_folder)
+    monkeypatch.setattr(prepare_dataset_tool, "HfApi", _FakeApi)
+    monkeypatch.setattr(prepare_dataset_tool, "upload_folder", _fake_upload_folder)
 
-    publishing.save_to_hf_hub(str(_staged(tmp_path)), "org/name", overwrite=True)
+    prepare_dataset_tool.save_to_hf_hub(str(_staged(tmp_path)), "org/name", overwrite=True)
 
     ordered = [c[0] for c in calls]
     assert ordered.index("delete_metadata") < ordered.index("upload_folder") < ordered.index("upload_metadata"), calls
     folder_call = next(c for c in calls if c[0] == "upload_folder")
-    assert publishing.METADATA_FILE in folder_call[1], "the payload upload must exclude the completion marker"
+    assert prepare_dataset_tool.METADATA_FILE in folder_call[1], (
+        "the payload upload must exclude the completion marker"
+    )
 
 
 def _parse(argv_extra):
@@ -240,7 +246,7 @@ def test_the_bake_takes_every_usable_cpu_but_a_reserve_unless_told_otherwise(mon
     monkeypatch.delenv("HALO_DATASET_NUM_PROC", raising=False)
     monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(192)))
     monkeypatch.setattr(hardware, "_CGROUP_ROOT", str(tmp_path))  # no CPU quota
-    assert _parse(["--mode", "text"]).num_proc == 192 - publishing._BAKE_RESERVED_CPUS
+    assert _parse(["--mode", "text"]).num_proc == 192 - prepare_dataset_tool._BAKE_RESERVED_CPUS
     assert _parse(["--mode", "text", "--num_proc", "3"]).num_proc == 3
     monkeypatch.setenv("HALO_DATASET_NUM_PROC", "7")
     assert _parse(["--mode", "text"]).num_proc == 7
@@ -254,7 +260,7 @@ def test_bos_token_override_exists():
 def test_apply_tokenizer_overrides_sets_every_recorded_knob():
     tokenizer = types.SimpleNamespace(pad_token=None, eos_token="</s>", bos_token=None, chat_template=None)
     args = types.SimpleNamespace(pad_token="<pad>", eos_token="<eos>", bos_token="<s>", chat_template=None)
-    publishing.apply_tokenizer_overrides(tokenizer, args)
+    prepare_dataset_tool.apply_tokenizer_overrides(tokenizer, args)
     assert (tokenizer.pad_token, tokenizer.eos_token, tokenizer.bos_token) == ("<pad>", "<eos>", "<s>")
 
 

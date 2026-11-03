@@ -97,10 +97,10 @@ class GradientClippingMixin:
 
         def sync(params: list) -> None:
             # Before the norm, so the clip runs on fully-synced grads and matches on every rank.
-            self._sync_deferred_expert_grads()
+            self._run_deferred_grad_sweep()
             # EP+TP: TP-average replicated grads first, else norms / the shared expert drift across the TP axis.
             if self.parallelism_config.is_tp_mode:
-                self._sync_tp_replicated_grads(self._tp_replicated_params(params))
+                self._sync_tp_replicated_grads(self._non_expert_params(params))
 
         self.accelerator.clip_grad_norm_ = self._global_norm_clip("Expert-parallel", sync, defer_to_optimizer=True)
 

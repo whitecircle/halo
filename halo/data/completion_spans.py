@@ -19,13 +19,13 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 _WARN_DECODE_TOKENS = 128
 _WARN_DECODE_CHARS = 400
 
-COLLATOR_SPAN_POLICY: dict[str, bool] = {
+PADDED_SPAN_POLICY: dict[str, bool] = {
     "include_marker": True,
     "bound_by_next_start": True,
     "eos_fallback_to_end": False,
 }
 # Packed rows carry no trailing pad, so only there may a terminator-less turn end at the last position.
-PACKED_SPAN_POLICY: dict[str, bool] = {**COLLATOR_SPAN_POLICY, "eos_fallback_to_end": True}
+PACKED_SPAN_POLICY: dict[str, bool] = {**PADDED_SPAN_POLICY, "eos_fallback_to_end": True}
 SELF_DISTILL_SPAN_POLICY: dict[str, bool] = {
     "include_marker": False,
     "bound_by_next_start": False,
@@ -246,11 +246,11 @@ def mask_batch_to_completion_spans(
     extra_ignore_token_ids: tuple[int, ...] = (),
 ) -> dict[str, Any]:
     """Completion-only mask every row, training each span's tokens from ``input_ids`` so the turn-ending EOS trains
-    even where pad == eos masked it. ``span_policy`` defaults to :data:`COLLATOR_SPAN_POLICY` (no end-of-sequence
+    even where pad == eos masked it. ``span_policy`` defaults to :data:`PADDED_SPAN_POLICY` (no end-of-sequence
     fallback, which would train pad on padded rows). ``attention_mask`` confines the search to real tokens, so the
     self-distill fallback cannot run into padding. ``extra_ignore_token_ids`` (image tokens) are masked after the
     refill, which would restore them."""
-    policy = COLLATOR_SPAN_POLICY if span_policy is None else span_policy
+    policy = PADDED_SPAN_POLICY if span_policy is None else span_policy
     for i in range(batch["labels"].shape[0]):
         input_ids = batch["input_ids"][i]
         lo, hi = _real_token_bounds(input_ids, None if attention_mask is None else attention_mask[i])
@@ -276,7 +276,7 @@ def mask_batch_to_completion_spans(
     return batch
 
 
-def build_completion_only_labels(
+def build_training_labels(
     input_ids: torch.Tensor,
     tokenizer,
     response_prompt_template: str | None,

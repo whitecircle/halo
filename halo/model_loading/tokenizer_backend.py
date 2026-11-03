@@ -132,7 +132,7 @@ def resolve_tokenizer_backend(tokenizer: PreTrainedTokenizer, backend: str) -> P
     return proxy
 
 
-def resolve_processor_backend(processor: Any, backend: str) -> Any:
+def install_processor_backend(processor: Any, backend: str) -> Any:
     """Install the ``backend`` tokenizer as ``processor.tokenizer`` on a VLM processor, which tokenizes internally."""
     if backend == "hf":
         return processor

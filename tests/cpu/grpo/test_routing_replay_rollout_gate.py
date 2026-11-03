@@ -89,7 +89,7 @@ def _host():
 
 def _gate(host, rows):
     """Run the gate over ``rows`` exactly as ``_build_training_tensors`` assembles its inputs."""
-    rows = [r._replace(completion_mask=r.completion_mask.to(torch.bool)) for r in rows]
+    rows = [r._replace(loss_mask=r.loss_mask.to(torch.bool)) for r in rows]
     step = host._stack_rows(rows, torch.device("cpu"))
     return host._assemble_rollout_routing(rows, step, torch.device("cpu"), "train")
 
@@ -98,7 +98,7 @@ def test_an_engine_cut_turn_keeps_its_routing_on_a_negative_only_row():
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=True, routing=True))
     assert len(rows) == 1 and rows[0].negative_only
-    assert rows[0].completion_mask.tolist() == [1] * len(SAMPLED)
+    assert rows[0].loss_mask.tolist() == [1] * len(SAMPLED)
     assert rows[0].turn_routing is not None
     assert host._batch_errors.reason is None
 
@@ -126,14 +126,14 @@ def test_gate_skips_a_batch_that_trains_nothing():
         for _ in range(2)
         for row in host._tokenize_trajectory_turns(_rollout(truncated=True, routing=False, captured=False))
     ]
-    assert not any(r.completion_mask.any() for r in rows)
+    assert not any(r.loss_mask.any() for r in rows)
     assert _gate(host, rows) is None
 
 
 def test_gate_raises_when_a_trainable_row_carries_no_routing():
     host = _host()
     rows = host._tokenize_trajectory_turns(_rollout(truncated=False, routing=False))
-    assert rows[0].completion_mask.tolist() == [1] * len(SAMPLED)
+    assert rows[0].loss_mask.tolist() == [1] * len(SAMPLED)
     with pytest.raises(ValueError, match="no rollout in this batch returned routed_experts"):
         _gate(host, rows)
 

@@ -36,7 +36,7 @@ class EPRoutingMixin:
     _TOPK_WEIGHT_NORM_EPS: float = 1e-20
 
     @classmethod
-    def _find_gate_or_router(cls, layer: nn.Module) -> nn.Module | None:
+    def _declared_router(cls, layer: nn.Module) -> nn.Module | None:
         """The block's router under the declared :attr:`_ROUTER_ATTR`, None for an external router; never a
         name probe, which would pick whichever of two present names it tried first."""
         if cls._ROUTER_ATTR is None:
@@ -137,7 +137,7 @@ class EPRoutingMixin:
     def _biased_topk(self, logits: torch.Tensor) -> torch.Tensor:
         """Top-k indices on the softmax probs plus the transient balancing bias: selection only, so a zero
         bias reproduces the unbalanced route."""
-        bias = self._balancing_bias(logits)
+        bias = self._transient_balancing_bias(logits)
         if bias is None:
             # Native-adoption mode (GptOss ``router.bias``): the bias is inside the logits, so select on raw logits as
             # the served router does. A large logit gap underflows the losing softmax probs to exact 0.0, and top-k
@@ -162,7 +162,7 @@ class EPRoutingMixin:
             )
         if target is not None:
             scores = scores + getattr(*target)
-        bias = self._balancing_bias(scores)
+        bias = self._transient_balancing_bias(scores)
         if bias is not None:
             scores = scores + bias
         return scores

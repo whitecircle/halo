@@ -28,7 +28,7 @@ def _trainer(max_grad_norm: float = 0.0):
         _sync_tp_replicated_grads=Mock(),
         _sync_qlora_grads=Mock(),
     )
-    trainer._tp_replicated_params = MethodType(DistributedTrainerMixin._tp_replicated_params, trainer)
+    trainer._non_expert_params = MethodType(DistributedTrainerMixin._non_expert_params, trainer)
     return trainer
 
 

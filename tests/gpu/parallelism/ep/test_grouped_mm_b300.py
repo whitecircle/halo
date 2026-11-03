@@ -99,7 +99,7 @@ def test_jagged_backward_correctness():
 
 
 def test_swiglu_moe_forward_backward():
-    """Matching the compute path of EPMoELayerBase._compute_experts_gmm."""
+    """Matching the compute path of EPMoELayerBase._compute_experts_grouped."""
     G = N_ROUTED_EXPERTS
     M = 16
     # Matmul convention [E, K, N], as the EP MoE layers store them.

@@ -84,7 +84,7 @@ def _resolve(root, path: str):
 
 
 def _block_sources(block: nn.Module, wrapper) -> tuple:
-    router = wrapper._find_gate_or_router(block)
+    router = wrapper._declared_router(block)
     experts = wrapper._find_experts_container(block)
     return (block, router, experts, getattr(block, "config", None))
 
@@ -176,7 +176,7 @@ def test_the_hidden_dim_and_expert_count_come_from_the_block(family, wrapper, fa
     mis-assigns the ranges."""
     block, layer = _build(factory, wrapper)
     experts = wrapper._find_experts_container(block)
-    router = wrapper._find_gate_or_router(block)
+    router = wrapper._declared_router(block)
 
     expected_hidden = router.weight.shape[1] if router is not None and hasattr(router, "weight") else None
     if expected_hidden is None:

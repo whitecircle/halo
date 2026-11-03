@@ -10,7 +10,7 @@ from halo.data.collators.packing import (
     DataCollatorWithFlatteningAndCompletionMask,
 )
 from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
-from halo.data.completion_spans import build_completion_only_labels
+from halo.data.completion_spans import build_training_labels
 from halo.data.turn_markers import resolve_eos_token_ids
 from tests.common.models import GEMMA3_4B_IT, GLM4_FLASH, QWEN3_0_6B, QWEN3_5_2B
 from tests.common.repo import REPO_ROOT
@@ -77,7 +77,7 @@ def _unmasked_text(tok, ids, labels):
 def _check_masking(tok, cfg, model_id):
     ids, marker = _render_ids(tok, model_id)
     eos_set = resolve_eos_token_ids(tok, cfg)
-    labels = build_completion_only_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=eos_set)
+    labels = build_training_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=eos_set)
     n_unmasked = int((labels != -100).sum())
     assert n_unmasked > 0, f"{model_id}: completion masking masked the WHOLE instance"
     decoded = _unmasked_text(tok, ids, labels)
@@ -100,9 +100,9 @@ def test_single_eos_search_would_be_wrong(model_id):
     tok, cfg = _load(model_id)
     ids, marker = _render_ids(tok, model_id)
     old_set = frozenset({tok.eos_token_id})
-    old_labels = build_completion_only_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=old_set)
+    old_labels = build_training_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=old_set)
     new_set = resolve_eos_token_ids(tok, cfg)
-    new_labels = build_completion_only_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=new_set)
+    new_labels = build_training_labels(ids, tok, marker, train_on_completions_only=True, eos_token_ids=new_set)
     old_n = int((old_labels != -100).sum())
     new_n = int((new_labels != -100).sum())
     assert new_n > 0, f"{model_id}: resolved-set masking unexpectedly empty"

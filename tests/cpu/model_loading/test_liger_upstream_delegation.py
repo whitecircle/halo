@@ -229,7 +229,7 @@ def test_a_delegating_probe_is_called_with_cross_entropy_withheld(monkeypatch):
     monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, "qwen3_next", probe)
     original = loss_utils.nn
     try:
-        applied = dispatch._apply_liger_for_standard_models("qwen3_next", {})
+        applied = dispatch._run_resolved_applier("qwen3_next", {})
     finally:
         loss_utils.nn = original
     assert applied["cross_entropy"] is True

@@ -22,7 +22,7 @@ from tests.common.adapters import (
     LORA_ALPHA,
     LORA_R,
     adapter_param_items,
-    assert_adapters_moved,
+    check_adapters_moved,
     load_peft_model,
     snapshot_adapters,
     unwrap,
@@ -400,7 +400,7 @@ def record_adapter_training(
     live_adapters = adapter_param_items(model)
     owned = sum(1 for _, param in live_adapters if id(param) in optimizer_params)
     checks["optimizer_owns_the_live_adapters"] = bool(live_adapters) and owned == len(live_adapters)
-    ok, detail = assert_adapters_moved(before, snapshot_adapters(model, expert_lora=expert_lora))
+    ok, detail = check_adapters_moved(before, snapshot_adapters(model, expert_lora=expert_lora))
     checks["adapters_moved_when_the_run_had_a_gradient"] = ok or not trained
     log(f"  adapters: {detail} (run had a gradient: {trained}); optimizer owns {owned}/{len(live_adapters)}")
 

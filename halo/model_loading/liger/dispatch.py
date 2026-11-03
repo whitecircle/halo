@@ -320,7 +320,7 @@ def _build_liger_config(
     return {k: v for k, v in config.items() if k in valid_params}
 
 
-def _apply_liger_for_standard_models(
+def _run_resolved_applier(
     model_type: str,
     user_overrides: dict,
     fallback_model_type: str | None = None,
@@ -426,7 +426,7 @@ def apply_liger_kernel(
 
     # The raw dict: the fold writes `swiglu: False` under EP, a toolkit decision that must not read as a user request.
     requested = frozenset(key for key, value in (liger_kernel_config or {}).items() if value)
-    applied_config = _apply_liger_for_standard_models(model_type, user_overrides, fallback_type, requested)
+    applied_config = _run_resolved_applier(model_type, user_overrides, fallback_type, requested)
     set_config_field_run_scoped(model_config, LIGER_APPLIED_CONFIG_ATTR, applied_config)
     return applied_config
 

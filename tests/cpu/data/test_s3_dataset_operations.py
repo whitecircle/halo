@@ -144,7 +144,7 @@ def test_push_dataset_no_overwrite_raises_on_existing():
 
 
 def test_load_dataset_cache_hit():
-    print("Testing load_dataset (cache hit)...")
+    print("Testing load_s3_dataset (cache hit)...")
 
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
@@ -169,16 +169,16 @@ def test_load_dataset_cache_hit():
 
             with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = ds
-                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
+                s3_dataset_store.load_s3_dataset(client, "my/dataset", use_cache=True)
 
                 call_args = mock_load.call_args[0][0]
                 assert call_args == cache_path, f"Expected load from cache {cache_path}, got {call_args}"
 
-    print("  load_dataset cache hit: PASSED")
+    print("  load_s3_dataset cache hit: PASSED")
 
 
 def test_load_dataset_cache_miss():
-    print("Testing load_dataset (cache miss)...")
+    print("Testing load_s3_dataset (cache miss)...")
 
     with patch.object(S3Client, "__post_init__"):
         client = S3Client(bucket="test-bucket")
@@ -192,7 +192,7 @@ def test_load_dataset_cache_miss():
                 "halo.data.sources.s3_dataset_store.download_dataset_tree", side_effect=_fake_download(["a", "b"])
             ) as download,
         ):
-            loaded = s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
+            loaded = s3_dataset_store.load_s3_dataset(client, "my/dataset", use_cache=True)
 
         (call,) = download.call_args_list
         fetched_client, fetched_key, tmp_path = call.args
@@ -202,7 +202,7 @@ def test_load_dataset_cache_miss():
         assert os.path.exists(os.path.join(cache_path, ".download_complete"))
         assert loaded["text"] == ["a", "b"]
 
-    print("  load_dataset cache miss: PASSED")
+    print("  load_s3_dataset cache miss: PASSED")
 
 
 def _make_cached_dataset(cache_root: str, fingerprint: str | None) -> tuple[str, str]:
@@ -278,7 +278,7 @@ def test_load_dataset_stale_cache_redownloads():
                 "halo.data.sources.s3_dataset_store.download_dataset_tree", side_effect=_fake_download(["new"])
             ) as download,
         ):
-            loaded = s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
+            loaded = s3_dataset_store.load_s3_dataset(client, "my/dataset", use_cache=True)
 
         assert download.call_count == 1, "stale cache was served instead of re-downloaded"
         assert loaded["text"] == ["new"]
@@ -295,7 +295,7 @@ def test_load_dataset_offline_serves_cache():
         with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
             with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = Dataset.from_dict({"text": ["hello", "world"]})
-                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
+                s3_dataset_store.load_s3_dataset(client, "my/dataset", use_cache=True)
 
                 mock_load.assert_called_once()
                 assert mock_load.call_args[0][0] == cache_path, "offline load must come from the local cache"
@@ -311,7 +311,7 @@ def test_load_dataset_matching_fingerprint_serves_cache():
         with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
             with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = Dataset.from_dict({"text": ["hello", "world"]})
-                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
+                s3_dataset_store.load_s3_dataset(client, "my/dataset", use_cache=True)
 
                 mock_load.assert_called_once()
                 assert mock_load.call_args[0][0] == cache_path
@@ -328,7 +328,7 @@ def test_load_dataset_legacy_marker_served_and_upgraded():
         with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", cache_root):
             with patch("halo.data.sources.s3_dataset_store.load_from_disk") as mock_load:
                 mock_load.return_value = Dataset.from_dict({"text": ["hello", "world"]})
-                s3_dataset_store.load_dataset(client, "my/dataset", use_cache=True)
+                s3_dataset_store.load_s3_dataset(client, "my/dataset", use_cache=True)
 
                 mock_load.assert_called_once()
                 assert mock_load.call_args[0][0] == cache_path, "legacy marker must still serve the cache"

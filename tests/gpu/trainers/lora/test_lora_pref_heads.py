@@ -30,9 +30,9 @@ from halo.trainers.preference.smpo import SMPOTrainer
 from halo.trainers.reward.bradley_terry import DistributedRewardTrainer
 from halo.trainers.reward.classification import ClassificationTrainer
 from tests.common.adapters import (
-    assert_adapter_checkpoint,
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
+    check_adapters_moved,
+    check_only_adapters_trainable,
+    save_and_check_adapter_checkpoint,
     snapshot_adapters,
     unwrap,
 )
@@ -262,7 +262,7 @@ def run(ctx) -> dict:
     )
 
     wrapped = unwrap(trainer.model)
-    ok, detail = assert_only_adapters_trainable(wrapped)
+    ok, detail = check_only_adapters_trainable(wrapped)
     checks["only_adapters_trainable"] = ok
     log(f"  [trainable] {detail}")
     before = snapshot_adapters(wrapped, expert_lora=False)
@@ -274,11 +274,11 @@ def run(ctx) -> dict:
     log(f"  training_loss={result.training_loss:.5f}, steps={result.global_step}")
 
     after = snapshot_adapters(unwrap(trainer.model), expert_lora=False)
-    ok, detail = assert_adapters_moved(before, after)
+    ok, detail = check_adapters_moved(before, after)
     checks["adapters_moved"] = ok
     log(f"  [moved] {detail}")
 
-    ok, detail = assert_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=False)
+    ok, detail = save_and_check_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=False)
     checks["adapter_checkpoint"] = ok
     log(f"  [checkpoint] {detail}")
 

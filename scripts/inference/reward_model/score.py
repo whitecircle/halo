@@ -2,11 +2,11 @@
 
 from halo.entrypoints.resumable_generation import run_async_cli
 from halo.entrypoints.reward_scoring import run_reward_scoring
-from scripts.inference.reward_model.reward_model_arguments import build_generation_parser
+from scripts.inference.reward_model.reward_model_arguments import build_reward_model_parser
 
 
 def parse_args():
-    parser = build_generation_parser("Async generation with RM scoring", temperature_default=0.0)
+    parser = build_reward_model_parser("Async generation with RM scoring", temperature_default=0.0)
     return parser.parse_args()
 
 

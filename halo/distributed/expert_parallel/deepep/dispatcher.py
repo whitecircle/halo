@@ -157,7 +157,7 @@ class DeepEPDispatcher:
         self.num_experts = num_experts
         self.hidden_dim = hidden_dim
         # Under expert TP each ETP group dispatches within its own sub-EP group; without it this is the EP group.
-        self.ep_group = ep_config.dispatch_ep_group
+        self.dispatch_group = ep_config.dispatch_ep_group
         self.ep_size = ep_config.ep_size
         self.spans_domains = ep_config.spans_domains
         self._noop = self.ep_size <= 1

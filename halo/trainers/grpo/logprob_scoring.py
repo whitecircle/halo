@@ -135,7 +135,7 @@ class LogprobScoringMixin:
             self.accelerator.unwrap_model(self.model), self.args.per_device_train_batch_size
         )
 
-    def _resolve_chunked_head_transform(self) -> None:
+    def _reject_unreproducible_chunked_head(self) -> None:
         """Refuse a family the chunked sweep cannot reproduce before the first rollout. Pure local computation, so
         every rank reaches the same verdict."""
         if self._use_chunked_grpo_logprobs:

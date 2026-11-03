@@ -104,7 +104,7 @@ c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) a
     happened yet, since these reads can precede `init_distributed()` and a split scope would put the
     tag's participants where they never see each other's keys.
 
-- `sequential_load_within_node(max_concurrent)` — store-coordinated throttle that admits at most
+- `throttled_load_within_node(max_concurrent)` — store-coordinated throttle that admits at most
   `max_concurrent` ranks per node at a time. `joined_node_load(what, max_concurrent)` wraps it with an
   exit joined over the store, and backs `max_concurrent_loading` at model load
   ([Multi-Node → Model loading](../parallelism/multi-node.md#model-loading)). Same
@@ -147,7 +147,7 @@ c10d-store phase, the store and collective rejection joins, `barrier_on_exit`) a
   `gathered_failure_summary(reasons, what)` turns them into the message `reject_across_ranks` raises.
   The optimizer-shard resume decides raise vs warm restart from it.
 
-- `raise_rank0_failure(step, describe, exc_type=RuntimeError)` — the same join for work one rank does
+- `run_on_rank0_raising_everywhere(step, describe, exc_type=RuntimeError)` — the same join for work one rank does
   for the world (an external-backend probe, a rollout-server preflight): `step` runs on global rank 0
   alone and its failure is broadcast, so every rank raises `exc_type(describe(error))` together; on rank 0
   it chains the original exception.
@@ -219,7 +219,7 @@ joins go permanently off-by-one on the equal-entry invariant.
 | Trainer sidecars | output | `halo/trainers/reference_logps.py`, `halo/trainers/grpo/environmental/async_rollouts.py` | `reference_logps.pt` from the save rank(s), `prefetch_pending-<rank>-of-<world>.pt` from every rank. Each read is rank-joined (`consensus_read`), so a node without its copy fails the resume everywhere |
 | Offline GRPO reference scratch | output | `halo/trainers/grpo/offline/reference_cache.py` | `_reference_cache/<launch>/` under `output_dir`: the save rank(s) append and merge the scores, and every rank memory-maps the merged file from its own node's copy. Needs an output filesystem that appends and memory-maps; lifetime and cleanup: [Offline GRPO → Reference model](../training-methods/grpo/offline.md#reference-model) |
 | `run.log` tee | output | `halo/entrypoints/run_setup.py` | Same `is_fs_save_rank()` predicate as the checkpoint writers, so two nodes can never both hold one `run.log` |
-| Checkpointing-plan record | output | `halo/callbacks/checkpointing_plan.py` | `_halo_run_plan.json` in `output_dir` from the save rank(s); each rank reads its own node's copy and the world takes the highest recompute floor any copy sets ([CheckpointingPlanCallback](../training-methods/callbacks.md#checkpointingplancallback)) |
+| Checkpointing-plan record | output | `halo/callbacks/gradient_checkpointing_plan.py` | `_halo_run_plan.json` in `output_dir` from the save rank(s); each rank reads its own node's copy and the world takes the highest recompute floor any copy sets ([GradientCheckpointingPlanCallback](../training-methods/callbacks.md#gradientcheckpointingplancallback)) |
 | Directory creation | either | `fs_aware_makedirs()` | Output dirs by default; read-side cache dirs pass `writer_rank=is_fs_load_rank` |
 
 ## Storage layout

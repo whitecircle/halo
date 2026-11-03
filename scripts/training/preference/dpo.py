@@ -47,7 +47,7 @@ def main():
     parallelism_config = context.parallelism_config
 
     ds, dataset_presharded = load_script_datasets(args, parallelism_config)
-    # Ahead of the dispatch: is_vlm_run reads images_field while TRL's vision probe reads the column
+    # Ahead of the dispatch: is_vlm_run_across_ranks reads images_field while TRL's vision probe reads the column
     # name, so a declared column has to carry TRL's spelling before either verdict is taken.
     ds = alias_images_column(ds, args.images_field, str(args.dataset))
 

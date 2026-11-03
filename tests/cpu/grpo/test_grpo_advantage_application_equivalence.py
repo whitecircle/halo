@@ -8,7 +8,7 @@ from collections import defaultdict
 import pytest
 import torch
 
-from halo.trainers.grpo.environmental.step_batch import BatchRows, rollout_valid_mask
+from halo.trainers.grpo.environmental.step_batch import TrajectoryRowMap, rollout_valid_mask
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.objective.loss_inputs import expand_traj_to_rows
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
@@ -143,7 +143,7 @@ def _env_application(
     """Drive the real ``_narrow_masks_and_normalizer`` on a fake self; returns ``(local_advantages, completion_mask,
     tool_mask, num_items_in_batch, degenerate_frac, metrics)``."""
     rollout_results = _rollouts(truncated.tolist(), rewards.tolist(), valid)
-    rows = BatchRows(rollout_results, turns_per_traj, num_dummy_rows, train_on_sampled_tokens)
+    rows = TrajectoryRowMap(rollout_results, turns_per_traj, num_dummy_rows, train_on_sampled_tokens)
     me = attach_world_metrics(
         types.SimpleNamespace(
             async_config=types.SimpleNamespace(drop_degenerate_groups=drop_degenerate_groups),
@@ -184,7 +184,7 @@ def _env_compute_advantages(rewards, num_generations, valid=None):
         args=types.SimpleNamespace(scale_rewards="none"),
         async_config=types.SimpleNamespace(scale_rewards_std_floor=0.0),
     )
-    rows = BatchRows(_rollouts([False] * len(rewards), rewards.tolist(), valid), [1] * len(rewards), 0, False)
+    rows = TrajectoryRowMap(_rollouts([False] * len(rewards), rewards.tolist(), valid), [1] * len(rewards), 0, False)
     _state, traj_advantages, _rows = DistributedAsyncEnvironmentalGRPOTrainer._step_advantages(
         me, rewards, rows, 0, num_generations
     )

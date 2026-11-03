@@ -231,7 +231,7 @@ def read_adapter_across_ranks(
     return state, path
 
 
-def saved_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
+def live_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
     """The live tensor behind every key a PEFT save writes (a tie under each of its names); an FSDP2 DTensor stays as
     it is, so its ``shape`` is the saved full one."""
     live = dict(itertools.chain(peft_model.named_parameters(remove_duplicate=False), persistent_buffers(peft_model)))
@@ -240,30 +240,30 @@ def saved_adapter_tensors(peft_model: PeftModel) -> dict[str, torch.Tensor]:
     )
 
 
-def _with_tied_aliases(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> dict:
+def _with_tied_aliases(live_tensors: dict[str, torch.Tensor], attn_state: dict) -> dict:
     """``attn_state`` with each live key it lacks taken from a key it holds for the same tensor, since a gathered save
     writes one name per tied tensor (a resized tied embedding's ``lm_head``)."""
     held: dict[int, str] = {}
     for key in sorted(attn_state):
-        if key in saved_tensors:
-            held.setdefault(id(saved_tensors[key]), key)
+        if key in live_tensors:
+            held.setdefault(id(live_tensors[key]), key)
     aliases = {
         key: attn_state[held[id(tensor)]]
-        for key, tensor in saved_tensors.items()
+        for key, tensor in live_tensors.items()
         if key not in attn_state and id(tensor) in held
     }
     return {**attn_state, **aliases}
 
 
 def _without_unsaved_grown_rows(
-    peft_model: PeftModel, saved_tensors: dict[str, torch.Tensor], attn_state: dict, checkpoint: str
+    peft_model: PeftModel, live_tensors: dict[str, torch.Tensor], attn_state: dict, checkpoint: str
 ) -> dict[str, torch.Tensor]:
-    """COLLECTIVE when the run grew its vocabulary. ``saved_tensors`` without the frozen embedding and head tensors no
+    """COLLECTIVE when the run grew its vocabulary. ``live_tensors`` without the frozen embedding and head tensors no
     key of ``attn_state`` holds, from an adapter saved before saves carried them; their live values stand, with a
     warning. The keys left out are agreed across ranks, since each kept key is a copy and a DTensor copy a mesh
     collective."""
     if not vocabulary_grown(peft_model):
-        return saved_tensors
+        return live_tensors
     model = base_transformers_model(peft_model)
     frozen = {
         id(param)
@@ -272,10 +272,10 @@ def _without_unsaved_grown_rows(
         for param in module.parameters()
         if not param.requires_grad
     }
-    held = {id(saved_tensors[key]) for key in attn_state if key in saved_tensors}
+    held = {id(live_tensors[key]) for key in attn_state if key in live_tensors}
     unsaved = sorted(
         key
-        for key, tensor in saved_tensors.items()
+        for key, tensor in live_tensors.items()
         if key not in attn_state and id(tensor) in frozen and id(tensor) not in held
     )
     if not agree_across_ranks(unsaved):
@@ -290,25 +290,25 @@ def _without_unsaved_grown_rows(
             f"this run's grow initialized; the saved run kept its own frozen at that mean-resize init, so they differ "
             f"only by its random draw. Later saves carry them."
         )
-    return {key: tensor for key, tensor in saved_tensors.items() if key not in unsaved}
+    return {key: tensor for key, tensor in live_tensors.items() if key not in unsaved}
 
 
-def _load_peft_adapter_state(saved_tensors: dict[str, torch.Tensor], attn_state: dict) -> None:
+def _load_peft_adapter_state(live_tensors: dict[str, torch.Tensor], attn_state: dict) -> None:
     """Copy each saved attention tensor into its live tensor, a tied tensor once. Sorted, because a DTensor target's
     ``distribute_tensor`` is a mesh collective and the file's own order can differ per rank on a non-shared
     filesystem."""
     copied: set[int] = set()
     with torch.no_grad():
         for key, value in sorted(attn_state.items()):
-            target = saved_tensors[key]
+            target = live_tensors[key]
             if id(target) not in copied:
                 copied.add(id(target))
                 copy_full_tensor(target, value)
 
 
-def _attention_adapter_mismatch(saved_tensors: dict | None, attn_state: dict, checkpoint: str) -> str | None:
-    """Why ``attn_state`` does not restore ``saved_tensors`` (None without a PeftModel) one for one, or None."""
-    if saved_tensors is None:
+def _attention_adapter_mismatch(live_tensors: dict | None, attn_state: dict, checkpoint: str) -> str | None:
+    """Why ``attn_state`` does not restore ``live_tensors`` (None without a PeftModel) one for one, or None."""
+    if live_tensors is None:
         if not attn_state:
             return None
         return (
@@ -317,7 +317,7 @@ def _attention_adapter_mismatch(saved_tensors: dict | None, attn_state: dict, ch
             f"the same lora_target_modules as at save) or resume from a full checkpoint. First few: "
             f"{sorted(attn_state)[:KEY_PREVIEW_COUNT]}"
         )
-    mismatch = adapter_layout_mismatch(attn_state, {key: tuple(tensor.shape) for key, tensor in saved_tensors.items()})
+    mismatch = adapter_layout_mismatch(attn_state, {key: tuple(tensor.shape) for key, tensor in live_tensors.items()})
     return mismatch and (
         f"The PEFT adapter at {checkpoint} does not match the adapters this model builds: {mismatch}. Resume with "
         f"the lora_target_modules, lora_r, modules_to_save and added_special_tokens it was saved with, from a "
@@ -353,22 +353,22 @@ def restore_adapters(checkpoint: str, model, *, is_cp_mode: bool) -> str | None:
 
     expert_state = {k: v for k, v in state.items() if is_expert_lora_key(k)}
     attn_state = {k: v for k, v in state.items() if k not in expert_state}
-    saved_tensors = saved_adapter_tensors(peft_model) if peft_model is not None else None
+    live_tensors = live_adapter_tensors(peft_model) if peft_model is not None else None
     # Saver wrote CP-normalized keys; remap to live CP-wrapped names or all keys miss.
-    if is_cp_mode and saved_tensors is not None:
-        attn_state = remap_cp_adapter_keys_to_live(attn_state, saved_tensors)
-    if saved_tensors is not None:
-        attn_state = _with_tied_aliases(saved_tensors, attn_state)
-        saved_tensors = _without_unsaved_grown_rows(peft_model, saved_tensors, attn_state, checkpoint)
+    if is_cp_mode and live_tensors is not None:
+        attn_state = remap_cp_adapter_keys_to_live(attn_state, live_tensors)
+    if live_tensors is not None:
+        attn_state = _with_tied_aliases(live_tensors, attn_state)
+        live_tensors = _without_unsaved_grown_rows(peft_model, live_tensors, attn_state, checkpoint)
     # Joined before the expert load, whose own join precedes its first copy, so neither population writes until both
     # have matched on every rank.
     reject_across_ranks(
-        _attention_adapter_mismatch(saved_tensors, attn_state, checkpoint), f"PEFT adapter resume from {checkpoint}"
+        _attention_adapter_mismatch(live_tensors, attn_state, checkpoint), f"PEFT adapter resume from {checkpoint}"
     )
     # Inner model, matching the saver: the CP wrapper's extra 'model.' level makes keys miss.
     load_expert_lora_adapters(unwrap_toolkit_wrappers(unwrapped), expert_state)
     if attn_state:
-        _load_peft_adapter_state(saved_tensors, attn_state)
+        _load_peft_adapter_state(live_tensors, attn_state)
 
     if is_global_main_process():
         logger.info(

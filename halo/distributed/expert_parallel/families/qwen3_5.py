@@ -47,7 +47,7 @@ class EPQwen3_5MoELayer(EPSharedExpertsMoELayerBase):
                 f"logits/scores/indices) — transformers changed the router contract; update {type(self).__name__}."
             )
         router_logits, topk_weights, topk_indices = router_output
-        if self._balancing_bias(router_logits) is None:
+        if self._transient_balancing_bias(router_logits) is None:
             return self._replay_router_choice(router_logits, topk_indices, topk_weights)
         topk_indices, topk_weights = self._biased_route(router_logits)
         self._record_expert_load(topk_indices)

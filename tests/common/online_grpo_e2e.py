@@ -18,7 +18,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.model_loading.parallel.frozen_models import load_frozen_auxiliary_model
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
-from tests.common.adapters import assert_only_adapters_trainable, snapshot_adapters, unwrap
+from tests.common.adapters import check_only_adapters_trainable, snapshot_adapters, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.distributed import ensure_model_downloaded, shared_output_dir
 from tests.common.ep_reference import ep_layers
@@ -510,7 +510,7 @@ def run_online_grpo_e2e(
     if spec.adapter:
         adapters_before = snapshot_adapters(unwrap(trainer.model), expert_lora=spec.expert_lora)
         base_before = frozen_base_weights(unwrap(trainer.model))
-        ok, detail = assert_only_adapters_trainable(unwrap(trainer.model))
+        ok, detail = check_only_adapters_trainable(unwrap(trainer.model))
         checks["only_adapters_trainable"] = ok
         log(f"  frozen base: {detail}")
 

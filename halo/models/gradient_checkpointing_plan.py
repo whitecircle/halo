@@ -57,7 +57,7 @@ class PlanContext:
 
 
 @dataclass(frozen=True)
-class RunPlan:
+class GradientCheckpointingPlan:
     every_n_layers: int
     fingerprint: dict[str, Any]
     finished: bool = False
@@ -166,7 +166,9 @@ def fingerprint_mismatches(saved: dict[str, Any], live: dict[str, Any]) -> list[
     ]
 
 
-def recompute_floor_index(record: RunPlan | None, fingerprint: dict[str, Any], num_layers: int) -> int:
+def recompute_floor_index(
+    record: GradientCheckpointingPlan | None, fingerprint: dict[str, Any], num_layers: int
+) -> int:
     """One step more recompute than a plan the previous run ended before finishing on (an OOM, a crash or a
     preemption), so a plan never replays into the same OOM. 0 without a record for these inputs or a finished run."""
     if record is None or record.finished or fingerprint_mismatches(record.fingerprint, fingerprint):

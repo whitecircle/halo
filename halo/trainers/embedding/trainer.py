@@ -237,7 +237,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
         self._configure_distributed_modes()
         backbone = self._backbone_model()
         reject_modules_outside_backbone(
-            self._top_level_model(), backbone, saves_rank_locally=self._saves_rank_locally()
+            self._top_level_model(), backbone, saves_rank_locally=self._saves_through_distributed_ladder()
         )
         reject_injected_lora_parallelism(
             self.parallelism_config,
@@ -452,7 +452,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
     def _write_model_payload(self, ctx: CheckpointContext, output_dir: str, _internal_call: bool) -> None:
         """ST's writer cannot take EP/TP and FSDP2 DTensors (written un-gathered), EP experts (only the ladder's EP
         saver writes the hub layout), or injected-LoRA adapter keys, which reload as random base weights."""
-        if self._saves_rank_locally() or has_injected_lora(self._backbone_model()):
+        if self._saves_through_distributed_ladder() or has_injected_lora(self._backbone_model()):
             self._save_distributed_embedding_model(ctx, output_dir, _internal_call=_internal_call)
         else:
             super()._write_model_payload(ctx, output_dir, _internal_call)
@@ -465,7 +465,7 @@ class EmbeddingTrainer(DistributedTrainerMixin, SentenceTransformerTrainer):
             for module in json.load(f):
                 _apply_umask_mode_to_module(output_dir, module["path"])
 
-    def _saves_rank_locally(self) -> bool:
+    def _saves_through_distributed_ladder(self) -> bool:
         """Whether the backbone saves through the distributed ladder, which writes the other modules rank-locally."""
         config = self.parallelism_config
         return self._fsdp_wrapped or config.is_tp_mode or config.has_ep_group or bool(self._ep_layers())

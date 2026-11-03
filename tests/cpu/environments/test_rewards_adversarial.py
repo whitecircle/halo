@@ -17,7 +17,7 @@ from halo.rewards.graders.matching import (
     normalize_text,
     numeric_match,
 )
-from halo.trainers.grpo.objective.relative_rewards import relative_advantages
+from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages
 
 
 def test_boxed_extraction_survives_nested_braces():
@@ -327,7 +327,7 @@ def test_rlrr_all_tied_group_std_normalize_no_nan():
     """Zero shaped-reward variance with std_normalize=True: the eps guard keeps advantages finite and ~0."""
     cfg = RLRRConfig(mode="hrr", std_normalize=True, correctness_clip=False, length_rerank=False)
     rewards = [1.0, 1.0, 1.0, 1.0]
-    adv = relative_advantages(rewards, cfg)  # all above correctness_threshold -> all correct
+    adv = rlrr_advantages(rewards, cfg)  # all above correctness_threshold -> all correct
     assert adv.shape == (4,)
     assert np.all(np.isfinite(adv)), f"non-finite advantages: {adv}"
     assert np.allclose(adv, 0.0, atol=1e-3), f"tied group should give ~0 advantage, got {adv}"
@@ -336,7 +336,7 @@ def test_rlrr_all_tied_group_std_normalize_no_nan():
 def test_rlrr_single_element_group_zero_advantage():
     """A group of one is its own mean -> advantage 0 (no relative signal)."""
     cfg = RLRRConfig(mode="prr", correctness_clip=False)
-    adv = relative_advantages([0.7], cfg)
+    adv = rlrr_advantages([0.7], cfg)
     assert adv.shape == (1,)
     assert np.all(np.isfinite(adv))
     assert float(adv[0]) == 0.0
@@ -344,7 +344,7 @@ def test_rlrr_single_element_group_zero_advantage():
 
 def test_rlrr_empty_group_returns_empty():
     cfg = RLRRConfig()
-    adv = relative_advantages([], cfg)
+    adv = rlrr_advantages([], cfg)
     assert adv.shape == (0,)
 
 
@@ -352,7 +352,7 @@ def test_rlrr_distinguishes_within_correct_group_by_length():
     """HRR keeps signal alive when every response is correct: with length re-rank,
     the SHORTER correct response gets the higher advantage (conciseness preference)."""
     cfg = RLRRConfig(mode="hrr", tau=0.1, lam=10.0, correctness_clip=False, length_rerank=True)
-    adv = relative_advantages([1.0, 1.0], cfg, lengths=[5, 500])
+    adv = rlrr_advantages([1.0, 1.0], cfg, lengths=[5, 500])
     assert np.all(np.isfinite(adv))
     assert adv[0] > adv[1], f"shorter correct response should rank higher: {adv}"
     assert not np.allclose(adv, 0.0), "length re-rank must produce a non-zero relative signal"

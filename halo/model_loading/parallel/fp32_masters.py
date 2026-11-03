@@ -42,7 +42,7 @@ def fp32_master_param_keys(
     for _path, block in blocks:
         layer_cls = MOE_LAYER_MAP[type(block).__name__]
         if ep_config.fp32_router:
-            router = layer_cls._find_gate_or_router(block)
+            router = layer_cls._declared_router(block)
             if isinstance(router, nn.Parameter):
                 masters.add(id(router))
             elif router is not None:

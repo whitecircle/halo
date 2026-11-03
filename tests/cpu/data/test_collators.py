@@ -13,7 +13,7 @@ from halo.data.collators.packing import (
 )
 from halo.data.collators.padded import DataCollatorForCompletionOnlyLM
 from halo.data.completion_spans import (
-    build_completion_only_labels,
+    build_training_labels,
     filter_eos_after_responses,
     find_terminator_positions,
 )
@@ -1448,7 +1448,7 @@ def test_build_completion_only_labels_preserves_eos_when_pad_equals_eos():
     input_ids = torch.tensor([[5, 6, 1, 1, 1]])
     attention_mask = torch.tensor([[1, 1, 1, 0, 0]])
 
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         input_ids, tok, response_prompt_template=None, train_on_completions_only=False, attention_mask=attention_mask
     )
     assert labels[0, 2].item() == 1, "real EOS was erased despite attention_mask=1"
@@ -1456,7 +1456,7 @@ def test_build_completion_only_labels_preserves_eos_when_pad_equals_eos():
 
     # Without an attention_mask the value-based fallback erases the real eos; that path is reachable only for unpadded
     # single examples.
-    labels_fallback = build_completion_only_labels(
+    labels_fallback = build_training_labels(
         input_ids, tok, response_prompt_template=None, train_on_completions_only=False
     )
     assert labels_fallback[0, 2].item() == IGNORE
@@ -1669,7 +1669,7 @@ def test_build_completion_only_labels_stops_at_config_eos_markers():
     tok = make_tokenizer(pad_token_id=0, eos_token_id=GLM_ENDOFTEXT)
     tok.encode.return_value = RESPONSE_TEMPLATE_IDS
     ids = torch.tensor([_glm_agent_trace()])
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         ids,
         tok,
         response_prompt_template="<|assistant|>",

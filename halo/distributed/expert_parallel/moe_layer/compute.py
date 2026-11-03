@@ -38,7 +38,7 @@ class EPExpertComputeMixin:
     fp32_experts: bool
     act_fn: Callable[[torch.Tensor], torch.Tensor]
     _use_grouped_mm: bool
-    _activation_warmed: bool
+    _expert_kernels_warmed: bool
     _lowp_quant_format: QuantFormat | None
     _lowp_weight_cacheable: bool
     _expert_lora_attrs: frozenset[str]
@@ -148,15 +148,15 @@ class EPExpertComputeMixin:
         if is_global_main_process():
             logger.info(f"{type(self).__name__}: FP32 experts (compute stays BF16)")
 
-    def _warm_activation_graphs(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
+    def _warm_expert_kernels(self, device: torch.device, dtype: torch.dtype, hidden: int, top_k: int) -> None:
         """Launch this layer's expert kernels, forward and backward, before its first dispatch: a kernel's first launch
         compiles (Triton) and loads (CUDA lazy loading) it, and inside the span either stalls every peer in DeepEP's
         barrier. The grouped path warms at every ``ep_size``: its GEMM tile and ``index_select`` kernel follow the
         receive, and a rank first needing one later still holds up the expert-TP reduce or FSDP's next collective."""
         grouped, dispatched = self._use_grouped_mm, self.ep_size > 1
-        if self._activation_warmed or not (grouped or dispatched):
+        if self._expert_kernels_warmed or not (grouped or dispatched):
             return
-        self._activation_warmed = True
+        self._expert_kernels_warmed = True
         width = 2 * self.down_proj.shape[1]  # down_proj is [E, M, H] on every layout, ETP included
         # Zeros, not a draw: the recompute restores the RNG to region entry and this latched warmup does not
         # rerun, so a draw would shift expert-LoRA dropout's sample. Grad on and inference mode off, since a
@@ -218,12 +218,12 @@ class EPExpertComputeMixin:
         """Grouped GEMM when enabled and non-empty, else the per-expert loop. ``experts``/``weights`` are
         ``[T, top_k]`` local ids and gate weights; ``recv_counts`` counts per local expert, None at ``ep_size`` 1."""
         if self._use_grouped_mm and tokens.shape[0] > 0:
-            return self._compute_experts_gmm(tokens, experts, weights, output_dtype, recv_counts=recv_counts)
-        return self._compute_experts_weighted(
+            return self._compute_experts_grouped(tokens, experts, weights, output_dtype, recv_counts=recv_counts)
+        return self._compute_experts_loop(
             tokens, experts, weights, output_dtype, self._expert_forward, recv_counts=recv_counts
         )
 
-    def _compute_experts_gmm(
+    def _compute_experts_grouped(
         self,
         tokens: torch.Tensor,
         experts: torch.Tensor,
@@ -235,9 +235,7 @@ class EPExpertComputeMixin:
         def compute(sorted_tokens, offs, eids):
             return self._grouped_expert_ffn(sorted_tokens, offs, eids, output_dtype)
 
-        return self._compute_experts_with_grouped_mm(
-            tokens, experts, weights, output_dtype, compute, recv_counts=recv_counts
-        )
+        return self._run_grouped_mm_compute(tokens, experts, weights, output_dtype, compute, recv_counts=recv_counts)
 
     def _grouped_expert_ffn(
         self,
@@ -249,7 +247,7 @@ class EPExpertComputeMixin:
         """The expert FFN over tokens sorted by expert; ``offs`` are their int32 group ends."""
         return self._glu_ffn(sorted_tokens, lambda x, attr: self._expert_proj(x, attr, offs, output_dtype))
 
-    def _compute_experts_with_grouped_mm(
+    def _run_grouped_mm_compute(
         self,
         tokens: torch.Tensor,
         experts: torch.Tensor,
@@ -335,7 +333,7 @@ class EPExpertComputeMixin:
             weight_cacheable=self._lowp_weight_cacheable,
         )
 
-    def _compute_experts_weighted(
+    def _compute_experts_loop(
         self,
         tokens: torch.Tensor,
         experts: torch.Tensor,

@@ -17,7 +17,7 @@ from halo.data.collators.self_distill import (
     require_aligned_responses,
     teacher_history,
 )
-from halo.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, build_completion_only_labels
+from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, build_training_labels
 from halo.data.pipeline import map_cache_key
 from halo.data.pipeline.coordinated_map import coordinated_filter, coordinated_map
 from halo.data.pipeline.map_cache_key import (
@@ -589,10 +589,8 @@ def test_the_two_completion_span_policies_key_different_caches():
     """The two policies differ in a single flag, and a shared file has a packed bake load the unpacked bake's
     labels."""
     ds = _make_dataset(4)
-    assert COLLATOR_SPAN_POLICY != PACKED_SPAN_POLICY, "the two policies must actually differ"
-    unpacked = map_cache_file_name(
-        "map", _add_one, ds, "d", {}, cache_key_extras={"span_policy": COLLATOR_SPAN_POLICY}
-    )
+    assert PADDED_SPAN_POLICY != PACKED_SPAN_POLICY, "the two policies must actually differ"
+    unpacked = map_cache_file_name("map", _add_one, ds, "d", {}, cache_key_extras={"span_policy": PADDED_SPAN_POLICY})
     packed = map_cache_file_name("map", _add_one, ds, "d", {}, cache_key_extras={"span_policy": PACKED_SPAN_POLICY})
     assert unpacked != packed, "the two span policies must key different cache files"
 
@@ -701,7 +699,7 @@ def test_the_self_distill_audit_map_threads_the_collator_signature_into_its_cach
     [
         render_conversation,
         tokenize_rendered,
-        build_completion_only_labels,
+        build_training_labels,
         teacher_history,
         privileged_hint,
         require_aligned_responses,

@@ -14,7 +14,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.ep import load_ep_model
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.whole_model import load_whole_model
-from halo.models.attention.selection import revalidate_attn_kwarg
+from halo.models.attention.selection import reselect_attn_kwarg
 from halo.runtime.ranks import get_global_rank
 
 logger = logging.getLogger(__name__)
@@ -38,7 +38,7 @@ def load_cp_model(
     logger.info(f"[Rank {rank}] Loading model for Ulysses CP: cp={cp_config.cp_size}")
 
     kwargs = dict(from_pretrained_kwargs)
-    revalidate_attn_kwarg(kwargs, kwargs["config"])
+    reselect_attn_kwarg(kwargs, kwargs["config"])
     # Finalized before the CP wrap, as the wrapper carries no tie_weights.
     model = load_whole_model(
         model_class,

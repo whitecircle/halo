@@ -182,7 +182,7 @@ and aux-loss MoE balancing are rejected later, at the model split
 ## Modality support
 
 Modality routing differs by method. SFT, SMPO, DPO, reward modeling and the distillation scripts key
-on the **run** (`is_vlm_run`): the VLM data path needs a multimodal checkpoint *and* declared image
+on the **run** (`is_vlm_run_across_ranks`): the VLM data path needs a multimodal checkpoint *and* declared image
 data, so text-only rows on a natively-multimodal model (Qwen3.5/3.6, Gemma 4, Inkling) train through
 the text pipeline with packing available ([declaration rules](../data/dataset-formats.md#sft-vlm)).
 
@@ -236,7 +236,7 @@ Its `_apply_training_args_overrides` step sets `fsdp = ""` on the training args 
 and, under EP, `ddp_find_unused_parameters = True`, hands TRL its router aux-loss coefficient, and
 reconciles `save_on_each_node`, the Liger config and the GC `use_reentrant` kwarg with the requested
 mode and the model ([reentrant rule](../optimization/flash-attention.md#usage)). It then runs the construction refusals
-(`reject_undeclared_axes`, `reject_pp_named_optimizer`, `reject_accelerate_launch`, the determinism
+(`reject_undeclared_axes`, `reject_pp_named_optimizer`, `reject_custom_parallelism_under_accelerate`, the determinism
 gates) and the PP split.
 `distributed_trainer_kwargs` (`halo/entrypoints/script.py`) is the bundle every entry script
 passes.
@@ -310,7 +310,7 @@ each rank clips by its own coefficient) and backstopped by a step-pre-hook for a
 
 | Mode | DP effect | Gradient sync | Model loader |
 |------|-----------|---------------|--------------|
-| EP | none (orthogonal) | non-expert via FSDP2 (`ignored_params`); router via in-backward hooks, expert via the DeepEP combine within the EP group and one post-backward divide (`runs_post_backward_sweep`), except at `ep_group_size == 1` where FSDP2 shards the experts too. **Any multi-EP-group topology** (`sweep_reduces_across_replicas`, single-domain included) drops the router hooks too and averages everything in one post-backward sweep (`_sync_deferred_expert_grads`); **across nodes** (`is_deferred_dp`) the non-expert FSDP shards over the EP group as well | `load_ep_model()` / `load_distributed_model()` |
+| EP | none (orthogonal) | non-expert via FSDP2 (`ignored_params`); router via in-backward hooks, expert via the DeepEP combine within the EP group and one post-backward divide (`runs_post_backward_sweep`), except at `ep_group_size == 1` where FSDP2 shards the experts too. **Any multi-EP-group topology** (`sweep_reduces_across_replicas`, single-domain included) drops the router hooks too and averages everything in one post-backward sweep (`_run_deferred_grad_sweep`); **across nodes** (`is_deferred_dp`) the non-expert FSDP shards over the EP group as well | `load_ep_model()` / `load_distributed_model()` |
 | CP | `world / cp_size` | FSDP2 across all ranks (each holds a partial gradient from its chunk) | `load_cp_model()` |
 | TP | `world / tp_size` | FSDP2 `fully_shard` on the DP dimension (DTensor weights) | dense: `from_pretrained(distributed_config=DistributedConfig(tp_plan="auto"))`; MoE: `load_tp_moe_model` (attention-only TP — the auto plan mis-shards expert biases) |
 | EP+CP | `world / cp_size` | EP sync for routers and experts (as EP) + FSDP2 for non-experts | `load_ep_cp_model()` |
@@ -514,8 +514,8 @@ the eval loss and `compute_metrics` values it logs are then rank 0's shard, not 
 
 HuggingFace's `_inner_training_loop` calls `accelerator.prepare(model)`, which normally wraps in
 DDP. `AcceleratorMixin` replaces `prepare()` with `no_wrap_prepare` for model/optimizer/scheduler when
-`_fsdp_wrapped or _mixin_manages_gmm or is_tp_mode or is_expert_tp_mode or is_pp_mode`.
-`_mixin_manages_gmm` is `needs_ep_layers and not accelerate-managed`; `needs_ep_layers` alone
+`_fsdp_wrapped or _mixin_manages_ep_layers or is_tp_mode or is_expert_tp_mode or is_pp_mode`.
+`_mixin_manages_ep_layers` is `needs_ep_layers and not accelerate-managed`; `needs_ep_layers` alone
 defaults True even for dense models, so this guards against hijacking an accelerate-managed DDP/FSDP
 launch.
 
@@ -583,7 +583,7 @@ frozen-reference scores).
 `environmental/` holds the async GRPO trainer, one concern per module: `trainer.py`
 (`DistributedAsyncEnvironmentalGRPOTrainer`: construction, the round entry, `compute_loss`, `log`),
 `environmental_rules.py` (the pure `reject_*` construction refusals), `step_batch.py` (`StepBatchMixin`:
-`_build_training_tensors` as named phases in their collective order, `BatchRows`, `StepRows`, `StepScores`, the
+`_build_training_tensors` as named phases in their collective order, `TrajectoryRowMap`, `StepRows`, `StepScores`, the
 `BatchBuildFence`), `importance_sampling.py` (`ImportanceSamplingMixin`: the engine-to-trainer ratio, its mask
 stages, the engine re-score and the trust-region breaker), `reasoning.py` (`ReasoningBudgetMixin`: the per-level
 thinking contract and the rollout rewards with the reasoning length terms charged), `routing_replay.py` (the

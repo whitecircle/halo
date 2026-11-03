@@ -507,7 +507,7 @@ class AsyncRolloutMixin:
 
         if self._engine_rescore_clients is not None:
             for client in self._engine_rescore_clients:
-                client.close_session()
+                client.close_http_session()
             self._engine_rescore_clients = None
 
         self._loop = None

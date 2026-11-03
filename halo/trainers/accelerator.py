@@ -67,7 +67,7 @@ class AcceleratorMixin:
         return self._accelerate_manages_fsdp or self._accelerate_manages_ddp
 
     @property
-    def _mixin_manages_gmm(self) -> bool:
+    def _mixin_manages_ep_layers(self) -> bool:
         """``needs_ep_layers`` holds by default even for dense models, and an accelerate launch keeps its own DDP/FSDP
         choice."""
         return self.parallelism_config.needs_ep_layers and not self._accelerate_manages_wrap
@@ -97,7 +97,9 @@ class AcceleratorMixin:
 
     def _needs_custom_accelerator(self) -> bool:
         config = self.parallelism_config
-        has_parallelism = config.has_ep_group or config.is_cp_mode or config.is_tp_mode or self._mixin_manages_gmm
+        has_parallelism = (
+            config.has_ep_group or config.is_cp_mode or config.is_tp_mode or self._mixin_manages_ep_layers
+        )
         return has_parallelism or (get_global_world_size() > 1 and not self._accelerate_manages_wrap)
 
     def _warn_knobs_unapplied_under_accelerate(self) -> None:
@@ -136,7 +138,7 @@ class AcceleratorMixin:
         config = self.parallelism_config
         if not (
             self._fsdp_wrapped
-            or self._mixin_manages_gmm
+            or self._mixin_manages_ep_layers
             or config.is_tp_mode
             or config.is_expert_tp_mode
             or config.is_pp_mode

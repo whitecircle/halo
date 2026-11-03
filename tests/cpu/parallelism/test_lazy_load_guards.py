@@ -372,7 +372,7 @@ def test_the_lazy_gate_is_decided_by_rank_zero_alone(monkeypatch):
     monkeypatch.setattr(model_source, "broadcast_from_rank0", lambda _value: "rank0-verdict")
 
     for layout_supported in (False, True):
-        verdict = model_source.resolve_lazy_checkpoint(
+        verdict = model_source.agree_lazy_load(
             _SOURCE, lazy_requested=True, layout_supported=lambda _dir, supported=layout_supported: supported
         )
         assert verdict == "rank0-verdict"
@@ -399,10 +399,7 @@ def test_the_lazy_gate_needs_the_request_safetensors_and_a_supported_layout(
         asked.append(path)
         return layout_supported
 
-    assert (
-        model_source.resolve_lazy_checkpoint(_SOURCE, lazy_requested=lazy_requested, layout_supported=_layout)
-        is expected
-    )
+    assert model_source.agree_lazy_load(_SOURCE, lazy_requested=lazy_requested, layout_supported=_layout) is expected
     if not (lazy_requested and has_safetensors):
         assert asked == [], "the layout probe was handed a directory that does not hold a checkpoint"
 
@@ -411,11 +408,11 @@ def test_the_lazy_gate_needs_the_request_safetensors_and_a_supported_layout(
 def test_a_lazy_loader_call_site_goes_through_the_one_gate(call_site):
     """Read from the source, since a re-inlined copy is how the rule drifts."""
     source = call_site.read_text(encoding="utf-8")
-    assert "resolve_lazy_checkpoint" in source, f"{call_site.name} no longer routes its lazy gate through the helper"
+    assert "agree_lazy_load" in source, f"{call_site.name} no longer routes its lazy gate through the helper"
     # The inlined shape, in every wrapping: the layout probe ANDed into the caller's own expression.
     assert "and is_lazy_loadable(" not in " ".join(source.split()), (
         f"{call_site.name} re-inlined the layout probe into its own gate expression instead of "
-        f"handing it to resolve_lazy_checkpoint"
+        f"handing it to agree_lazy_load"
     )
 
 

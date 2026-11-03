@@ -15,8 +15,8 @@ from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE
 from halo.checkpoint.parallel.adapters import (
     _attention_adapter_mismatch,
     gather_adapter_state,
+    live_adapter_tensors,
     restore_adapters,
-    saved_adapter_tensors,
 )
 
 VOCAB, GROWN_VOCAB = 128, 136
@@ -59,7 +59,7 @@ def _resized_peft_model(base_dir: str, *, seed: int):
     peft_model = get_peft_model(model, LoraConfig(r=4, target_modules=["q_proj", "v_proj"]))
     generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
-        for tensor in saved_adapter_tensors(peft_model).values():
+        for tensor in live_adapter_tensors(peft_model).values():
             tensor.copy_(torch.randn(tensor.shape, generator=generator))
     return peft_model
 
@@ -76,14 +76,14 @@ def test_a_tied_resized_embedding_restores_under_both_names(tied_dir, tmp_path):
     saved = _gathered_save(trained, str(tmp_path))
     assert EMBED_KEY in saved and HEAD_KEY not in saved, "premise: the gathered save names the tied tensor once"
     fresh = _resized_peft_model(tied_dir, seed=2)
-    live = saved_adapter_tensors(fresh)
+    live = live_adapter_tensors(fresh)
     assert live[HEAD_KEY] is live[EMBED_KEY], "premise: the live selection names the tied tensor twice"
     assert _attention_adapter_mismatch(live, saved, "ckpt"), "premise: the alias-blind check refuses the file"
 
     assert restore_adapters(str(tmp_path), fresh, is_cp_mode=False) is not None
 
-    expected = saved_adapter_tensors(trained)
-    restored = saved_adapter_tensors(fresh)
+    expected = live_adapter_tensors(trained)
+    restored = live_adapter_tensors(fresh)
     assert sorted(restored) == sorted(expected)
     for key, tensor in restored.items():
         assert torch.equal(tensor, expected[key]), key

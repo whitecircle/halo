@@ -38,7 +38,7 @@ class TurnRow(NamedTuple):
 
     prompt_ids: torch.Tensor
     completion_ids: torch.Tensor
-    completion_mask: torch.Tensor
+    loss_mask: torch.Tensor
     sampling_logps: torch.Tensor | None
     turn_routing: TurnRouting | None
     negative_only: bool = False
@@ -131,7 +131,7 @@ class TrajectoryTokenizeMixin:
             UNTRAINABLE_TURNS_ROWLESS_FRAC_KEY, untrainable_turns - tagged_rows, untrainable_turns
         )
         if self.async_config.max_train_row_tokens is not None:
-            trainable_rows = sum(bool(row.completion_mask.any()) for rows in per_trajectory for row in rows)
+            trainable_rows = sum(bool(row.loss_mask.any()) for rows in per_trajectory for row in rows)
             self._world_metrics.fraction(
                 "sampling/rows_over_cap_frac", self._rows_over_cap, self._rows_over_cap + trainable_rows
             )
@@ -182,7 +182,7 @@ class TrajectoryTokenizeMixin:
                 except Exception as e:
                     if m.untrainable:  # its row only ever adds a penalty; losing it costs no other turn
                         continue
-                    self._invalidate_untrainable_episode(
+                    self._invalidate_unrenderable_episode(
                         result,
                         f"per-turn re-render of the prompt prefix failed ({type(e).__name__}: {e}); the engine "
                         f"returned no prompt_token_ids for this turn and the template rejects this prefix",
@@ -216,7 +216,7 @@ class TrajectoryTokenizeMixin:
         return TurnRow(
             prompt_ids=torch.tensor(prompt_ids, dtype=torch.long),
             completion_ids=torch.tensor(completion, dtype=torch.long),
-            completion_mask=torch.ones(len(completion), dtype=torch.long),
+            loss_mask=torch.ones(len(completion), dtype=torch.long),
             sampling_logps=(
                 torch.tensor(logprobs, dtype=torch.float32) if logprobs and len(logprobs) == len(completion) else None
             ),
@@ -242,7 +242,7 @@ class TrajectoryTokenizeMixin:
         except (TemplateSpanError, ValueError) as e:
             # Never raised per rank, and not fatal: independently rendered per-turn prefixes would splice in tokens the
             # serving template never emits, so the episode is dropped rather than trained on a guessed render.
-            self._invalidate_untrainable_episode(
+            self._invalidate_unrenderable_episode(
                 result,
                 f"cannot locate the trained turn spans of {self._tokenizer.name_or_path} inside its own "
                 f"chat-template render ({e}); serve with --return-tokens-as-token-ids and "
@@ -252,21 +252,21 @@ class TrajectoryTokenizeMixin:
 
         prompt_token_ids = spans.full_ids[: spans.prompt_len]
         completion_ids = spans.full_ids[spans.prompt_len :]
-        completion_mask = [0] * len(completion_ids)
+        loss_mask = [0] * len(completion_ids)
         for turn, (start, end) in turn_spans:
             if not turn.untrainable:
-                completion_mask[start - spans.prompt_len : end - spans.prompt_len] = [1] * (end - start)
+                loss_mask[start - spans.prompt_len : end - spans.prompt_len] = [1] * (end - start)
         admitted = self._admit_row(
             "Trajectory", len(prompt_token_ids), "completion", len(completion_ids), "the prompt length"
         )
         # Nothing trainable left (an empty completion, or every assistant turn excluded): the one-token masked
         # row keeps the rank-uniform row count without padding the round's batch to this trajectory's width.
-        if not admitted or not any(completion_mask):
+        if not admitted or not any(loss_mask):
             return self._masked_trajectory_tensors()
         return (
             torch.tensor(prompt_token_ids, dtype=torch.long),
             torch.tensor(completion_ids, dtype=torch.long),
-            torch.tensor(completion_mask, dtype=torch.long),
+            torch.tensor(loss_mask, dtype=torch.long),
         )
 
     def _template_kwargs(self, trajectory) -> dict:
@@ -319,7 +319,7 @@ class TrajectoryTokenizeMixin:
             return False
         return True
 
-    def _invalidate_untrainable_episode(self, result: RolloutResult, reason: str) -> None:
+    def _invalidate_unrenderable_episode(self, result: RolloutResult, reason: str) -> None:
         """It leaves the group baseline instead of failing the run; a systematic cause still surfaces through the
         all-invalid step halt."""
         logger.warning("Dropping an episode the chat template cannot re-render for training: %s", reason)

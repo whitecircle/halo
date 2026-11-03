@@ -68,7 +68,7 @@ class PolicyLoad(NamedTuple):
     is_vlm: bool
 
 
-class TrainingRows(NamedTuple):
+class RowAttentionPlan(NamedTuple):
     """The attention request the policy loads with when the YAML pins none, and whether training or evaluation rows
     reach FlashAttention's varlen call."""
 
@@ -221,7 +221,7 @@ def reject_fa4_varlen_request(
     reject_fa4_varlen_training(checkpoint_config, varlen_rows=varlen_rows, attn_impl=resolved)
 
 
-def plan_training_rows(
+def plan_row_attention(
     model_config: ModelArguments,
     training_args,
     *,
@@ -230,7 +230,7 @@ def plan_training_rows(
     padding_free: bool = False,
     checkpoint_config=None,
     init_from_scratch: bool = False,
-) -> TrainingRows:
+) -> RowAttentionPlan:
     """For a script shaping its own rows: the request :func:`default_training_rows_attn_implementation` makes and
     whether rows reach the varlen call, evaluation batches included, refusing a pinned FA4 there before any weight
     loads. COLLECTIVE where ``checkpoint_config`` is omitted and a check needs it. Raises on a ``full_determinism``
@@ -248,7 +248,7 @@ def plan_training_rows(
         "per_device_eval_batch_size": evaluation_batch_size(training_args),
     }
     dtype = resolve_training_dtype(training_args)
-    plan = TrainingRows(
+    plan = RowAttentionPlan(
         attn_default=default_training_rows_attn_implementation(
             model_config, **rows, dtype=dtype, checkpoint_config=checkpoint_config
         ),

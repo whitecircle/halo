@@ -139,7 +139,7 @@ def test_lfm2_without_native_slot_materializes_it():
     assert layer.balancing_biases.dtype == torch.float32
     assert torch.equal(layer.expert_bias, torch.zeros(NUM_EXPERTS)), "materialization must not shift routing"
     assert "expert_bias" in layer.state_dict(), "the materialized slot IS the export path"
-    assert layer._balancing_bias(torch.zeros(1)) is None, "native mode — the route adds expert_bias itself"
+    assert layer._transient_balancing_bias(torch.zeros(1)) is None, "native mode — the route adds expert_bias itself"
     assert not is_transient_balancing_router(layer)
 
 
@@ -157,7 +157,7 @@ def test_gptoss_adopts_the_trainable_router_logit_bias():
     assert layer.balancing_biases.dtype == torch.float32
     assert "bias" in layer.router.state_dict(), "the hub router key IS the export path"
     assert "bias" not in dict(layer.router.named_parameters()), "adoption freezes gradient training"
-    assert layer._balancing_bias(torch.zeros(1)) is None, "the bias already sits inside the logits"
+    assert layer._transient_balancing_bias(torch.zeros(1)) is None, "the bias already sits inside the logits"
     assert not is_transient_balancing_router(layer)
 
     layer.balancing_biases.add_(torch.arange(NUM_EXPERTS, dtype=torch.float32))
@@ -177,7 +177,7 @@ def test_native_mode_balancing_bias_returns_none():
     layer = _bare_layer(EPGlm4MoELayer, _Gate("e_score_correction_bias"))
     layer.enable_bias_balancing()
     layer.balancing_biases.fill_(5.0)
-    assert layer._balancing_bias(torch.zeros(NUM_EXPERTS)) is None
+    assert layer._transient_balancing_bias(torch.zeros(NUM_EXPERTS)) is None
 
 
 def test_meta_native_slot_fails_loud():
@@ -245,7 +245,7 @@ def test_absent_native_slot_falls_back_to_side_buffer():
     layer = _bare_layer(EPGlm4MoELayer, _Gate(None))  # Hand-built gate without the slot.
     assert layer.enable_bias_balancing() is True
     assert "balancing_biases" not in layer.state_dict()
-    assert layer._balancing_bias(torch.zeros(1)) is not None
+    assert layer._transient_balancing_bias(torch.zeros(1)) is not None
 
 
 @pytest.mark.parametrize("cls,attr,as_parameter", FAMILIES, ids=lambda v: getattr(v, "__name__", str(v)))

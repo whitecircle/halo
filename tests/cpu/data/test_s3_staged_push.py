@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """The staged-push protocol, crash point by crash point on an in-memory fake S3: a complete copy exists at the
 destination or in a sealed staging tree at every instant, an interrupted promote leaves the destination loudly
-unreadable, and ``load_dataset`` recovers from the newest sealed tree."""
+unreadable, and ``load_s3_dataset`` recovers from the newest sealed tree."""
 
 import uuid
 from pathlib import Path
@@ -386,7 +386,7 @@ def test_recover_from_pending_push_loads_the_sealed_tree_and_guards_recursion(mo
         loaded_keys.append(key)
         return recovered
 
-    monkeypatch.setattr(s3_dataset_store, "load_dataset", _spy_load)
+    monkeypatch.setattr(s3_dataset_store, "load_s3_dataset", _spy_load)
     cause = FileNotFoundError("no state.json")
     assert s3_dataset_store._recover_from_pending_push(client, KEY, None, True, cause=cause) is recovered
     assert loaded_keys == [sealed], "recovery must load exactly the sealed staging tree"
@@ -407,7 +407,7 @@ def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
         patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path)),
         patch("halo.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
     ):
-        assert s3_dataset_store.load_dataset(client, KEY) is recovered
+        assert s3_dataset_store.load_s3_dataset(client, KEY) is recovered
 
     with (
         patch("halo.data.sources.s3_dataset_store._recover_from_pending_push", return_value=None),
@@ -415,7 +415,7 @@ def test_load_dataset_falls_back_to_staging_on_a_torn_destination(tmp_path):
         patch("halo.data.sources.dataset_cache.publish_cached_download", side_effect=torn),
     ):
         with pytest.raises(FileNotFoundError, match="state.json"):
-            s3_dataset_store.load_dataset(client, KEY)
+            s3_dataset_store.load_s3_dataset(client, KEY)
 
 
 def test_load_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
@@ -425,7 +425,7 @@ def test_load_dataset_downloads_the_tree_straight_into_the_cache(tmp_path):
     _upload_tree(fake, _saved_dataset_dict(tmp_path / "source", train=[1, 2, 3]), KEY)
     cache_root = tmp_path / "cache"
     with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
-        loaded = s3_dataset_store.load_dataset(client, KEY)
+        loaded = s3_dataset_store.load_s3_dataset(client, KEY)
 
     assert loaded["train"]["x"] == [1, 2, 3]
     assert sorted(key for op, key in fake.ops if op == "download") == sorted(fake.objects)
@@ -441,7 +441,7 @@ def test_folder_marker_objects_are_not_downloaded_as_files(tmp_path):
     for marker in (f"{KEY}/", f"{KEY}/train/"):
         fake._write(marker, b"")
     with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(tmp_path / "cache")):
-        assert s3_dataset_store.load_dataset(client, KEY)["train"]["x"] == [4]
+        assert s3_dataset_store.load_s3_dataset(client, KEY)["train"]["x"] == [4]
 
 
 def test_a_torn_destination_is_never_published_and_recovers_from_the_sealed_push(tmp_path):
@@ -455,14 +455,14 @@ def test_a_torn_destination_is_never_published_and_recovers_from_the_sealed_push
 
     with patch("halo.data.sources.s3_dataset_store.HALO_S3_DATASET_CACHE_DIR", str(cache_root)):
         with pytest.raises(FileNotFoundError):
-            s3_dataset_store.load_dataset(client, KEY)
+            s3_dataset_store.load_s3_dataset(client, KEY)
         assert _published_markers(cache_root) == []
         assert [p for p in cache_root.rglob("*") if ".tmp-" in p.name] == [], "a failed fetch left its partial tree"
 
         sealed = _new_push_key(KEY)
         _upload_tree(fake, source, sealed)
         fake.put_object(Bucket=BUCKET, Key=f"{sealed}/{_PUSH_COMPLETE_MARKER}", Body=KEY.encode())
-        recovered = s3_dataset_store.load_dataset(client, KEY)
+        recovered = s3_dataset_store.load_s3_dataset(client, KEY)
 
     assert recovered["train"]["x"] == [7, 8]
 

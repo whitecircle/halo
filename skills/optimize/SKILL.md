@@ -54,7 +54,7 @@ Mention these only to confirm, not as new advice:
   feature A/B, at a much larger activation footprint
   ([the A/B](../../agent-docs/optimization/throughput-benchmarks.md#where-the-ep-steps-time-goes-gpt-oss-20b-ep8-b1s4096-8-b300-fa4)).
   On packed SFT rows `gradient_checkpointing_plan: auto` measures whether it fits and checkpoints only the
-  layers the memory needs ([CheckpointingPlanCallback](../../agent-docs/training-methods/callbacks.md#checkpointingplancallback)).
+  layers the memory needs ([GradientCheckpointingPlanCallback](../../agent-docs/training-methods/callbacks.md#gradientcheckpointingplancallback)).
 - **MoE, small model fits in FSDP →** prefer **FSDP (ep1) over EP** (no all-to-all); use EP only when
   FSDP OOMs ([Maximizing achieved TFLOPS](../../agent-docs/optimization/throughput-benchmarks.md#maximizing-achieved-tflops)).
 - **Pure EP on 8 GPUs →** **ep2 (throughput) or ep8 (memory)**; ep4 there is rejected at config time

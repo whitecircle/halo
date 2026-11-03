@@ -106,14 +106,14 @@ def dataset_image_evidence(dataset) -> str | None:
     return None
 
 
-def dataset_declares_images(dataset, conversation_field: str | None = None) -> bool:
+def dataset_declares_images_across_ranks(dataset, conversation_field: str | None = None) -> bool:
     """COLLECTIVE: whether a loaded dataset carries image data for the VLM path. A sharded load answers per
     rank while the two arms run different coordinated operations, so the verdict is agreed on every call."""
     local = _declares_images_locally(dataset, conversation_field)
-    return agree_probe_across_ranks(local, "the loaded dataset", "dataset_declares_images")
+    return agree_probe_across_ranks(local, "the loaded dataset", "dataset_declares_images_across_ranks")
 
 
-def is_vlm_run(
+def is_vlm_run_across_ranks(
     args,
     model_name_or_path: str,
     dataset=None,
@@ -127,12 +127,12 @@ def is_vlm_run(
     if vlm_checkpoint is None:
         if config is None:
             raise ValueError(
-                f"is_vlm_run({model_name_or_path!r}) needs the checkpoint's config or its probe_checkpoint "
-                f"verdict (vlm_checkpoint)."
+                f"is_vlm_run_across_ranks({model_name_or_path!r}) needs the checkpoint's config or its "
+                f"probe_checkpoint verdict (vlm_checkpoint)."
             )
         vlm_checkpoint = is_vlm_model(model_name_or_path, config)
     local = vlm_checkpoint and bool(
         getattr(args, "images_field", None)
         or _declares_images_locally(dataset, getattr(args, "conversation_field", None))
     )
-    return agree_probe_across_ranks(local, model_name_or_path, "is_vlm_run")
+    return agree_probe_across_ranks(local, model_name_or_path, "is_vlm_run_across_ranks")

@@ -15,6 +15,7 @@ from transformers import AutoModelForCausalLM
 from trl import SFTConfig
 
 from halo.data.collators.self_distill import SelfDistillTextCollator
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.runtime.collectives import barrier
@@ -23,12 +24,11 @@ from tests.common.adapters import (
     DENSE_MODEL,
     MOE_MODEL,
     adapter_param_items,
-    assert_adapter_checkpoint,
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
-    is_expert_lora_active,
+    check_adapters_moved,
+    check_only_adapters_trainable,
     load_peft_model,
     randomize_adapters,
+    save_and_check_adapter_checkpoint,
     snapshot_adapters,
     unwrap,
 )
@@ -179,7 +179,7 @@ def run(ctx) -> dict:
     }
     log(f"\n{'=' * 70}\n  Self-distill (SDPG) — mode={ARGS.mode}, world={ctx.world_size}, {fields}\n{'=' * 70}")
     (model, tokenizer, peft_config), parallelism_config = _load(fields)
-    expert_lora = is_expert_lora_active(model)
+    expert_lora = model_has_expert_lora(model)
     adapters_apart = None
     if ARGS.per_rank_adapters:
         torch.manual_seed(SEED + ctx.rank)
@@ -240,7 +240,7 @@ def run(ctx) -> dict:
     if adapters_apart is not None:
         checks["premise_adapters_apart_before_the_wrap"] = adapters_apart > 0
     if ADAPTER is not None:
-        ok, detail = assert_only_adapters_trainable(wrapped)
+        ok, detail = check_only_adapters_trainable(wrapped)
         checks["only_adapters_trainable"] = ok
         log(f"  [trainable] {detail}")
         before = snapshot_adapters(wrapped, expert_lora=expert_lora)
@@ -264,10 +264,10 @@ def run(ctx) -> dict:
     )
 
     if ADAPTER is not None:
-        ok, detail = assert_adapters_moved(before, snapshot_adapters(unwrap(trainer.model), expert_lora=expert_lora))
+        ok, detail = check_adapters_moved(before, snapshot_adapters(unwrap(trainer.model), expert_lora=expert_lora))
         checks["adapters_moved"] = ok
         log(f"  [moved] {detail}")
-        ok, detail = assert_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=expert_lora)
+        ok, detail = save_and_check_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=expert_lora)
         checks["adapter_checkpoint"] = ok
         log(f"  [checkpoint] {detail}")
     else:

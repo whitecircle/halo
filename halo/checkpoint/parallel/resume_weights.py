@@ -39,7 +39,7 @@ from halo.log import KEY_PREVIEW_COUNT
 from halo.models.param_roles import persistent_buffers
 from halo.models.unwrapping import find_peft_model, unwrap_framework_wrappers, unwrap_toolkit_wrappers
 from halo.runtime.collectives import barrier, broadcast_from_rank0
-from halo.runtime.consensus import DeferredRankFailure, raise_rank0_failure, rank0_verdict, rank_consensus
+from halo.runtime.consensus import DeferredRankFailure, rank0_verdict, rank_consensus, run_on_rank0_raising_everywhere
 from halo.runtime.dtensor import copy_full_tensor
 from halo.runtime.ranks import is_global_main_process
 
@@ -166,7 +166,7 @@ def _resume_onto_constructed_model(
 def _rank0_module_layout(model, state_dict: dict, checkpoint: str) -> dict:
     """COLLECTIVE. Rank 0's checkpoint dict under live names, consumed as it converts; a failure raises everywhere."""
     converted: dict = {}
-    raise_rank0_failure(
+    run_on_rank0_raising_everywhere(
         lambda: converted.update(
             ModuleLayoutView(unwrap_framework_wrappers(model), list(state_dict)).items(state_dict.pop)
         ),

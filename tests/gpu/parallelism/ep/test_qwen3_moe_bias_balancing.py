@@ -29,7 +29,7 @@ def routed(model, hidden):
             flat = hidden.view(-1, hidden.shape[-1])
             with torch.amp.autocast("cuda", enabled=False):
                 logits, weights, experts = layer.gate(flat)
-            if layer._balancing_bias(logits) is not None:
+            if layer._transient_balancing_bias(logits) is not None:
                 experts = layer._biased_topk(logits)
                 weights = layer._gate_weights_at(logits, experts)
             out.append((experts.clone(), weights.float().clone()))

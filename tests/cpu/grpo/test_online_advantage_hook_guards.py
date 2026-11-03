@@ -13,7 +13,7 @@ from trl import GRPOTrainer
 from halo.configs.grpo import RLRRConfig
 from halo.trainers.grpo.grpo_rules import reject_conflicting_advantage_hooks
 from halo.trainers.grpo.objective.advantages import degenerate_group_mask
-from halo.trainers.grpo.objective.relative_rewards import relative_advantages_grouped
+from halo.trainers.grpo.objective.relative_rewards import rlrr_advantages_grouped
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 
 SUM_THEN_NORMALIZE = types.SimpleNamespace(multi_objective_aggregation="sum_then_normalize", scale_rewards="group")
@@ -156,7 +156,7 @@ def test_local_slice_takes_this_ranks_rows_of_a_group_that_spans_ranks():
 
 def test_rlrr_hook_on_a_spanning_group_trains_each_rank_on_its_half_of_the_group_result():
     config = RLRRConfig(mode="hrr", lam=4.0)
-    expected = relative_advantages_grouped(
+    expected = rlrr_advantages_grouped(
         FULL_REWARDS.flatten().numpy(), group_size=G, config=config, lengths=FULL_LENGTHS.float().numpy()
     )
     assert np.std(expected[[0, 1, 2, 4]]) > 0, "fixture: the correct members must be length-ranked apart"

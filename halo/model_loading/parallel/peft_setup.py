@@ -19,7 +19,7 @@ from trl.trainer.utils import disable_dropout_in_model
 from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.expert_parallel.moe_layer.layer import named_ep_layers
 from halo.model_loading.dtype import is_kbit_quantized
-from halo.model_loading.parallel.freeze_patterns import freeze_modules_by_patterns, unfreeze_modules_by_patterns
+from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_patterns, unfreeze_modules_by_patterns
 from halo.model_loading.parallel.model_source import fetch_checkpoint_config
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, stamped_sinks_policy
 from halo.models.moe.config_fields import has_routed_experts
@@ -271,7 +271,7 @@ def configure_adapter_training(
         if args.unfreeze_layers_patterns:
             unfreeze_modules_by_patterns(model, args.unfreeze_layers_patterns)
         if args.freeze_layers_patterns:
-            freeze_modules_by_patterns(model, args.freeze_layers_patterns)
+            freeze_parameters_by_patterns(model, args.freeze_layers_patterns)
         return None
 
     set_patterns = [

@@ -58,7 +58,7 @@ def _resolve_environment_spec(environment_config, environment_cls, environment_k
     )
 
 
-def env_reward_func(prompts, _completions, **_kwargs) -> list[float]:
+def placeholder_reward_func(prompts, _completions, **_kwargs) -> list[float]:
     """``GRPOTrainer``'s required reward function; the environment's rewards go straight into the batch."""
     return [0.0] * len(prompts)
 
@@ -104,7 +104,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         # Read off the env instance, not the config dict: the class owns its defaults and validation.
         self._group_random_effort = self._rollout_env.reasoning_effort == RANDOM_REASONING_EFFORT
         reject_unverified_carried_reasoning(self._rollout_env, self.async_config.rollout_backend)
-        kwargs.setdefault("reward_funcs", env_reward_func)
+        kwargs.setdefault("reward_funcs", placeholder_reward_func)
         with self._supplying_kl_reference():
             super().__init__(*args, **kwargs)
 
@@ -162,7 +162,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
             reject_unbalanceable_token_mass(self.args)
         self._arm_update_breaker()
         self._warned_once: set[str] = set()
-        self._is_mask_config = cfg.build_is_mask_config()
+        self._isr_mask_config = cfg.build_is_mask_config()
 
     def train(self, *args, **kwargs):
         try:
@@ -288,7 +288,7 @@ class DistributedAsyncEnvironmentalGRPOTrainer(
         mode = "eval" if not self.model.training else "train"
         # World reductions, gated on the config and the mode alone.
         if self._routing_injector is not None and mode == "train":
-            flip = self._routing_injector.flip_rate()
+            flip = self._routing_injector.drain_flip_rate()
             if flip is not None:
                 logs["routing/replay_flip_rate"] = flip
         if self._rollout_manager:

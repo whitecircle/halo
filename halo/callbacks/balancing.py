@@ -5,7 +5,7 @@ import logging
 import torch
 import torch.distributed as dist
 
-from halo.callbacks.moe_metrics import MoELoadMetricsCallback, compute_moe_load_metrics
+from halo.callbacks.moe_metrics import MoELoadMetricsBase, compute_moe_load_metrics
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.config_access import (
     config_model_types,
@@ -328,7 +328,7 @@ def _expert_load_counter(router) -> torch.Tensor:
     return counter
 
 
-class BalancingBiasCallback(MoELoadMetricsCallback):
+class BalancingBiasCallback(MoELoadMetricsBase):
     """DeepSeek-V3 bias update after every optimizer step: ``b_i <- b_i + update_rate * sign(mean - count_i)``. The
     bias adds to detached top-k scores, so gradients flow through the unbiased gate. ``expert_load_counter`` is a plain
     attribute, unseen by ``state_dict()`` and the PP lazy loader. The ``moe/*`` summary is a periodic host sync."""

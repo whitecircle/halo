@@ -100,7 +100,7 @@ def _selected_experts(router_output, logits_index: int) -> torch.Tensor | None:
     return None
 
 
-class MoELoadMetricsCallback(TrainerCallback):
+class MoELoadMetricsBase(TrainerCallback):
     """Base for callbacks deriving ``moe/*`` from per-expert load counters; a summary waits in ``_pending`` until the
     next ``on_log``. ``reduce_group`` (``None`` = world) narrows to the stage under PP, where a world reduce would
     blend stages holding different routers."""
@@ -120,7 +120,7 @@ class MoELoadMetricsCallback(TrainerCallback):
             self._pending = {}
 
 
-class MoEMetricsCallback(MoELoadMetricsCallback):
+class MoEMetricsCallback(MoELoadMetricsBase):
     """Expert-load metrics off the routers' forward hooks. ``topk`` is used only where a router exposes no selection
     and its logits must be re-ranked. Pass ``enable_router_logits`` only from a balancing mode that requires them: it
     costs a ``[B*S, num_experts]`` tensor per layer per forward and couples the aux loss into the loss."""

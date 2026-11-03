@@ -127,7 +127,7 @@ The `image` field accepts: base64 data URI (`data:image/png;base64,...`), file p
 
 Hub datasets that store images in a separate column instead train via `images_field` (the column is injected into the first user turn), and the paired `{user, assistant}` turn shape used by the HuggingFaceM4 `texts` column is normalized to role/content messages — see [SFT — Vision-language models](../training-methods/sft.md#vision-language-models).
 
-A run takes the VLM data path only when **both** halves agree (`is_vlm_run`, `halo/data/vlm_detection.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
+A run takes the VLM data path only when **both** halves agree (`is_vlm_run_across_ranks`, `halo/data/vlm_detection.py`): the checkpoint is multimodal, and the run declares image data. The model class follows the checkpoint alone, so a natively-multimodal checkpoint carrying text-only rows loads its multimodal class but trains through the text pipeline, packing included.
 
 A run declares images three ways, any one of which is enough: `images_field` names the column; the dataset carries an `images`, `image` or `pixel_values` column; or the `conversation_field` column embeds `{"type": "image"}` content parts. The preference scripts have no `conversation_field`, so DPO declares by column only.
 

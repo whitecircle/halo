@@ -23,7 +23,7 @@ from halo.distributed.parallelism_config import ParallelismConfig
 from halo.models.moe.balancing import resolve_balancing_mode
 from halo.models.moe.expert_layout import SEPARATE_GLU_PROJECTIONS
 from tests.common.distributed import world_spread
-from tests.common.ep_reference import gathered_expert_grads, random_token_batch, score_ep_grad_pairs, sweep_ep_grads
+from tests.common.ep_reference import random_token_batch, score_ep_grad_pairs, sweep_ep_grads, zero_filled_expert_banks
 from tests.common.fla_autotune import pin_fla_autotune_first_fit
 from tests.common.harness import gpu_test_main
 from tests.common.models import (
@@ -126,7 +126,7 @@ def _compare_blocks(model, reference, ep_cls: type, ep_size: int, metrics: dict,
             etp_unsharded_on_rank0.append(
                 all(name in layer.EXPERT_TP_SHARD_DIMS for name, _ in layer.expert_named_params())
             )
-        gathered = gathered_expert_grads(layer)
+        gathered = zero_filled_expert_banks(layer)
         for key, grad in _stock_expert_grads(experts).items():
             if grad is not None and (key in gathered or layer.expert_tp_rank == 0):
                 pairs[".".join(filter(None, (path, prefix, key)))] = (gathered.get(key), grad)

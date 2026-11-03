@@ -15,7 +15,7 @@ def _row(prompt: list[int], loss_mask: list[int]) -> TurnRow:
     return TurnRow(
         prompt_ids=torch.tensor(prompt),
         completion_ids=torch.arange(10, 10 + len(loss_mask)),
-        completion_mask=torch.tensor(loss_mask, dtype=torch.bool),
+        loss_mask=torch.tensor(loss_mask, dtype=torch.bool),
         sampling_logps=None,
         turn_routing=None,
     )

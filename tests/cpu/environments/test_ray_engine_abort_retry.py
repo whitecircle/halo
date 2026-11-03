@@ -59,7 +59,7 @@ async def test_aborts_past_max_retries_error_the_episode():
 
     assert len(served) == 2, "max_retries bounds the re-issues"
     assert result.error and "aborted the same turn 2 times" in result.error
-    assert result.total_reward == 0.0 and not result.success
+    assert result.total_reward == 0.0 and not result.terminated_naturally
 
 
 async def test_max_retries_zero_tolerates_no_abort():

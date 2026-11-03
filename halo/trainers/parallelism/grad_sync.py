@@ -117,13 +117,13 @@ class GradientSyncMixin:
             if is_clipping_enabled(self.args.max_grad_norm):
                 return  # the installed TP / EP clip already synced
             # Over model.parameters(), since Muon nests its optimizer.
-            self._sync_tp_replicated_grads(self._tp_replicated_params(self.model.parameters()))
+            self._sync_tp_replicated_grads(self._non_expert_params(self.model.parameters()))
 
         def sweep_deferred_experts() -> None:
             # Gated on whether the sweep ran this step, never on max_grad_norm: at max_grad_norm == 0
             # transformers still calls _get_grad_norm -> the clip, which already swept.
             if not same_optimizer_step(getattr(self, "_deferred_sweep_last_step", None), self.state):
-                self._sync_deferred_expert_grads()
+                self._run_deferred_grad_sweep()
 
         register_grad_sync_step_hook(
             self, "_tp_grad_sync_hook_registered", lambda: self.parallelism_config.is_tp_mode, sync_tp_replicated
@@ -153,7 +153,7 @@ class GradientSyncMixin:
         grads = [p.grad for p in agree_grad_presence(params)]
         reduce_grads_bucketed(grads, op=dist.ReduceOp.AVG, fp32=self.parallelism_config.fp32_grad_reduce)
 
-    def _sync_deferred_expert_grads(self) -> None:
+    def _run_deferred_grad_sweep(self) -> None:
         """COLLECTIVE, once per optimizer step. Deferred because in-backward hooks would race the EP group's DeepEP
         combine, re-fire per microbatch (PP), or re-fire per nested backward of a reentrant recompute, which the expert
         divide cannot absorb."""
@@ -163,7 +163,7 @@ class GradientSyncMixin:
         # The expert leg (SUM/world_size) is not idempotent: a second pass halves every expert grad.
         if not claim_optimizer_step(self, "_deferred_sweep_last_step"):
             raise RuntimeError(
-                f"_sync_deferred_expert_grads ran twice at global_step={self.state.global_step}: the expert "
+                f"_run_deferred_grad_sweep ran twice at global_step={self.state.global_step}: the expert "
                 f"SUM/world_size leg is not idempotent — a second pass halves every expert gradient."
             )
         expert_params, world_params, replica_params = self._classify_deferred_params(ep_cfg)
@@ -234,7 +234,7 @@ class GradientSyncMixin:
                 replica_params.append(param)
         return expert_params, world_params, replica_params
 
-    def _tp_replicated_params(self, params) -> list[nn.Parameter]:
+    def _non_expert_params(self, params) -> list[nn.Parameter]:
         """``params`` minus the rank-owned EP/ETP expert shards; selected structurally, never by rank-local grad
         presence."""
         expert_ids = self._get_sharded_expert_param_ids()

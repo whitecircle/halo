@@ -121,7 +121,7 @@ async def test_an_episode_spanning_an_open_pause_is_not_cancelled():
     def _remote(*, prompt, context, server_url, config):
         async def _episode():
             await asyncio.sleep(_EPISODE_S)
-            return RolloutResult(prompt=prompt, trajectory=Trajectory(done=True), success=True)
+            return RolloutResult(prompt=prompt, trajectory=Trajectory(done=True), terminated_naturally=True)
 
         return _episode()
 
@@ -133,7 +133,7 @@ async def test_an_episode_spanning_an_open_pause_is_not_cancelled():
     manager.end_engine_pause(_EPISODE_S)
 
     assert result.error is None, result.error
-    assert result.success
+    assert result.terminated_naturally
 
 
 class _FrozenSession:

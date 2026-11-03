@@ -18,7 +18,9 @@ _LANE_BITS = (_BLOCK_SLOTS - 1).bit_length()
 _SCAN_TILE = 2048
 RECEIVE_COUNTS_DISAGREE = "DeepEP receive counts disagree with the received expert ids"
 # At ep_size 1 no dispatch pads, so an id outside the local range came from the routing itself.
-NONLOCAL_EXPERT_ID = "An expert id outside the local experts at ep_size 1, where the routing hands over only local ids"
+NONLOCAL_EXPERT_ID_MESSAGE = (
+    "An expert id outside the local experts at ep_size 1, where the routing hands over only local ids"
+)
 
 
 @triton.jit
@@ -153,7 +155,7 @@ class _CountingSort(torch.autograd.Function):
             hist, offs, shift, ok, n_blocks, num_local_experts, n_valid, E_PAD=e_pad, CHUNK=max(1, _SCAN_TILE // e_pad)
         )
         # Before the placement, as a wrong total would write past the outputs the counts sized or leave them short.
-        torch._assert_async(ok, NONLOCAL_EXPERT_ID if counts is None else RECEIVE_COUNTS_DISAGREE)
+        torch._assert_async(ok, NONLOCAL_EXPERT_ID_MESSAGE if counts is None else RECEIVE_COUNTS_DISAGREE)
         _place_kernel[(n_blocks,)](
             experts,
             weights,
@@ -207,7 +209,7 @@ def _argsort_routing(
     valid = (flat_experts >= 0) & (flat_experts < num_local_experts)
     if counts is None:
         # An id outside the range would be sorted in as an expert of its own, misaligning the groups.
-        torch._assert_async(valid.all(), NONLOCAL_EXPERT_ID)
+        torch._assert_async(valid.all(), NONLOCAL_EXPERT_ID_MESSAGE)
     else:
         num_valid = sum(counts)
         # A count that disagrees with the received ids would silently truncate or -1-pad the compaction.

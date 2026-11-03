@@ -403,6 +403,7 @@ class ParallelismConfig:
         return self.stage_local_rank // max(self.tp_size, self.cp_size)
 
     def ep_config(self) -> "EPConfig":
+        """COLLECTIVE on first call, which builds every EP process group."""
         if self._ep_config is None:
             self._ep_config = EPConfig(
                 ep_size=self.ep_size,
@@ -426,6 +427,7 @@ class ParallelismConfig:
         return self._ep_config
 
     def cp_config(self) -> "CPConfig":
+        """COLLECTIVE on first call, which builds every CP process group."""
         if self._cp_config is None:
             self._cp_config = CPConfig(
                 self.cp_size,

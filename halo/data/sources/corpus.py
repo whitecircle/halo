@@ -4,7 +4,7 @@ import numpy as np
 from datasets import Dataset, DatasetDict, concatenate_datasets
 
 from halo.data.render_columns import (
-    apply_conversation_field,
+    drop_empty_conversation_rows,
     missing_render_column_splits,
     reject_missing_render_column,
 )
@@ -213,7 +213,7 @@ def build_corpus(
     for entry_path, (entry_ds, entry_sharded) in zip(paths, loaded, strict=True):
         if entry_sharded:
             reject_partial_splits(entry_ds, entry_path)
-        apply_conversation_field(
+        drop_empty_conversation_rows(
             entry_ds, entry_path, conversation_field, required=conversation_declared, knob=conversation_knob
         )
     datasets = [entry_ds for entry_ds, _ in loaded]

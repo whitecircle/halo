@@ -53,7 +53,7 @@ def batch_host(
     beta: float = 0.0,
     reference: torch.Tensor | None = None,
     forced_close_ids: tuple[int, ...] | None = None,
-    is_mask_config: ISMaskConfig | None = None,
+    isr_mask_config: ISMaskConfig | None = None,
     skip_update_masked_frac: float | None = None,
     balance_token_mass: bool = False,
     save_completions: bool = False,
@@ -78,7 +78,7 @@ def batch_host(
     host._carry_reasoning = False
     host._is_correction = is_correction
     host._forced_close_ids = forced_close_ids
-    host._is_mask_config = is_mask_config or ISMaskConfig()
+    host._isr_mask_config = isr_mask_config or ISMaskConfig()
     host._breaker_tripped_this_step = False
     host._empty_rollout_steps = 0
     host._routing_injector = None

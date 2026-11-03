@@ -9,8 +9,8 @@ import torch
 
 from halo.data.collators.packing import DataCollatorWithFlatteningAndCompletionMask
 from halo.data.completion_spans import (
-    COLLATOR_SPAN_POLICY,
-    build_completion_only_labels,
+    PADDED_SPAN_POLICY,
+    build_training_labels,
     mask_batch_to_completion_spans,
 )
 from halo.data.preprocessed.tokenization import _completion_only_labels
@@ -143,14 +143,14 @@ def test_offline_baked_labels_extra_ignore_ids_masked():
 def test_runtime_label_builder_matches_offline_bake_with_extras(input_ids):
     """Both apply ``extra_ignore_token_ids`` after the span refill; applying them first re-trains every extra id
     inside a completion span."""
-    runtime = build_completion_only_labels(
+    runtime = build_training_labels(
         torch.tensor([input_ids]),
         make_tokenizer(),
         response_prompt_template="<resp>",
         train_on_completions_only=True,
         extra_ignore_token_ids=(IMAGE_TOK,),
         eos_token_ids=frozenset({EOS}),
-        span_policy=COLLATOR_SPAN_POLICY,
+        span_policy=PADDED_SPAN_POLICY,
     )[0].tolist()
     baked = _completion_only_labels(
         input_ids,

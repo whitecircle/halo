@@ -14,7 +14,7 @@ from halo.environments.engine_wire import capture_generation_tokens
 from halo.environments.episode import RolloutResult, TurnGeneration, step_context_from_generation
 from halo.environments.messages import Message, Trajectory
 from halo.trainers.grpo.environmental.routing_replay import RoutingReplayInjector
-from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, BatchRows, rollout_valid_mask
+from halo.trainers.grpo.environmental.step_batch import BatchBuildFence, TrajectoryRowMap, rollout_valid_mask
 from halo.trainers.grpo.environmental.trainer import DistributedAsyncEnvironmentalGRPOTrainer
 from halo.trainers.grpo.environmental.trajectory_tokenize import (
     SAMPLED_IDS_MISSING_WARNING,
@@ -80,7 +80,7 @@ def test_a_per_turn_row_over_the_context_is_recorded_even_when_the_cap_is_lower(
     trainer = _trainer(cap=3, context_limit=4)
     rows = trainer._tokenize_trajectory_turns(_result(_turn([1, 2, 3, 4, 5], prompt_len=3)))  # 8 tokens
     assert trainer._batch_errors.reason is not None and "context window" in trainer._batch_errors.reason
-    assert trainer._rows_over_cap == 1 and [r.completion_mask.tolist() for r in rows] == [[0]]
+    assert trainer._rows_over_cap == 1 and [r.loss_mask.tolist() for r in rows] == [[0]]
 
 
 def test_a_per_turn_row_under_the_context_but_over_the_cap_is_only_over_cap():
@@ -138,7 +138,7 @@ def test_eight_all_over_cap_trajectories_read_one():
     trainer = _trainer(cap=3, per_turn=False)
     results = [_result(Message.assistant("aaaa")) for _ in range(8)]  # every render > 3 tokens
     per_trajectory = trainer._tokenize_step_rows(results)
-    assert all(len(rows) == 1 and rows[0].completion_mask.tolist() == [0] for rows in per_trajectory)
+    assert all(len(rows) == 1 and rows[0].loss_mask.tolist() == [0] for rows in per_trajectory)
     assert flushed_metrics(trainer)["sampling/rows_over_cap_frac"] == [1.0]
 
 
@@ -152,7 +152,7 @@ def test_a_mixed_step_reads_rows_left_out_over_rows_left_out_plus_rows_that_trai
     ]
     per_trajectory = trainer._tokenize_step_rows(results)
     assert [len(rows) for rows in per_trajectory] == [1, 1, 1]
-    assert per_trajectory[0][0].completion_mask.tolist() == [0]
+    assert per_trajectory[0][0].loss_mask.tolist() == [0]
     assert flushed_metrics(trainer)["sampling/rows_over_cap_frac"] == [pytest.approx(0.6)]
 
 
@@ -190,7 +190,7 @@ def test_an_all_excluded_trajectory_is_one_masked_row_without_a_re_render(turns)
     trainer._tokenize_trajectory = lambda result: pytest.fail("nothing to render: the row is the placeholder")
     result = _result(*turns)
     rows = trainer._tokenize_trajectory_turns(result)
-    assert len(rows) == 1 and rows[0].completion_mask.tolist() == [0]
+    assert len(rows) == 1 and rows[0].loss_mask.tolist() == [0]
     assert not result.trajectory.episode_invalid, "an excluded turn leaves its episode in the group baseline"
     assert trainer._batch_errors.reason is None
 
@@ -242,7 +242,7 @@ def _cut_episode_batch(trainer, advantage: float, flag: dict):
     rows = trainer._tokenize_trajectory_turns(result)
     sampling = pad([r.sampling_logps for r in rows], padding_value=0, padding_side="right")
     completion_ids = pad([r.completion_ids for r in rows], padding_value=0, padding_side="right")
-    completion_mask = pad([r.completion_mask.bool() for r in rows], padding_value=0, padding_side="right")
+    completion_mask = pad([r.loss_mask.bool() for r in rows], padding_value=0, padding_side="right")
     ratio, _forced = zero_engine_forced_closes(
         torch.ones_like(sampling),
         sampling,
@@ -251,7 +251,7 @@ def _cut_episode_batch(trainer, advantage: float, flag: dict):
         completion_ids,
         (_REASONING_CLOSE,),
     )
-    batch = BatchRows([result], [len(rows)], 0, True)
+    batch = TrajectoryRowMap([result], [len(rows)], 0, True)
     step = types.SimpleNamespace(
         completion_mask=completion_mask,
         tool_mask=completion_mask.clone(),

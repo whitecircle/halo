@@ -14,7 +14,7 @@ from halo.models import segment_markers
 from halo.models.config_access import config_model_types, model_type_matches
 from halo.models.segment_markers import (
     SegmentMarkers,
-    reject_unmarked_linear_attention_rows,
+    reject_unmarked_sequence_mixer_rows,
     require_segment_aware_kernels,
     segment_markers_for,
 )
@@ -154,7 +154,7 @@ def test_the_linear_attention_gate_reads_the_same_verdict(fields, refused, monke
     config = UnknownHybridConfig(layer_types=["linear_attention", "full_attention"], **fields)
     expectation = pytest.raises(ValueError, match="'halo_unknown_hybrid': its linear-attention layers")
     with expectation if refused else contextlib.nullcontext():
-        reject_unmarked_linear_attention_rows(config, "packing", allow_cross_document_linear_attention=False)
+        reject_unmarked_sequence_mixer_rows(config, "packing", allow_cross_document_linear_attention=False)
 
 
 @pytest.mark.parametrize(

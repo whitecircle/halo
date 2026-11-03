@@ -20,7 +20,7 @@ from halo.data.collators.self_distill import (
     privileged_hint,
     teacher_history,
 )
-from halo.data.completion_spans import build_completion_only_labels
+from halo.data.completion_spans import build_training_labels
 from halo.data.pipeline.vlm_rows import _filter_vlm_over_length
 from tests.common.models import QWEN3_0_6B
 from tests.common.repo import load_script_module
@@ -143,7 +143,7 @@ def _whole_batch_collation(collator, rows):
             [tokenize_rendered(collator.tokenizer, text) for text in texts], padding=True, return_tensors="pt"
         )
         batch[f"{prefix}input_ids"], batch[f"{prefix}attention_mask"] = encoded["input_ids"], encoded["attention_mask"]
-        batch[f"{prefix}labels"] = build_completion_only_labels(
+        batch[f"{prefix}labels"] = build_training_labels(
             encoded["input_ids"],
             collator.tokenizer,
             MARKER,

@@ -14,7 +14,7 @@ from torch import nn
 from transformers import Qwen3Config, Qwen3ForCausalLM
 
 from halo.configs.distillation import SDPGArguments
-from halo.trainers.distillation.divergences import global_token_mean, reverse_kl_loss
+from halo.trainers.distillation.divergences import pooled_token_mean, reverse_kl_loss
 from halo.trainers.distillation.sdpg import DistributedSDPGTrainer, positive_advantage_gate
 from halo.trainers.grpo.online import DistributedOnlineGRPOTrainer
 from tests.common.models import QWEN3_0_6B, TINY_QWEN3_CONFIG
@@ -364,7 +364,7 @@ def test_the_student_runs_once_and_the_loss_matches_two_forwards(chunked, batch_
         )
     model.train()
     gate = positive_advantage_gate(inputs["completion_mask"].float(), inputs["advantages"], True)
-    opd = global_token_mean(reverse_kl_loss(student, teacher, 1.0).sum(-1), gate)
+    opd = pooled_token_mean(reverse_kl_loss(student, teacher, 1.0).sum(-1), gate)
     expected = grpo + 0.5 * opd / _GRAD_ACCUM
     torch.testing.assert_close(loss.detach(), expected.detach(), atol=1e-5, rtol=1e-4)
     expected.backward()

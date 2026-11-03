@@ -35,7 +35,7 @@ class RolloutResult:
     trajectory: Trajectory | None = None
     episode_length: int = 0
     total_reward: float = 0.0
-    success: bool = False
+    terminated_naturally: bool = False
     latency: float = 0.0
     error: str | None = None
     generation_tokens: int = 0

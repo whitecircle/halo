@@ -97,26 +97,26 @@ def _embedding_weights(model: torch.nn.Module) -> dict[str, torch.Tensor]:
     return weights
 
 
-def _grown_vocabulary(model: PreTrainedModel, adapter_pc, base_pc) -> int | None:
+def _grown_vocabulary(model: PreTrainedModel, adapter_processor, base_processor) -> int | None:
     """The adapter tokenizer's length where the run grew ``model``'s vocabulary to it, else None: more ids than
     ``model`` has rows, over a base whose own tokenizer fits them."""
-    if adapter_pc is None:
+    if adapter_processor is None:
         return None
-    num_tokens = len(resolve_tokenizer(adapter_pc))
+    num_tokens = len(resolve_tokenizer(adapter_processor))
     rows = model.get_input_embeddings().weight.shape[0]
     if num_tokens <= rows:
         return None
-    if base_pc is not None and len(resolve_tokenizer(base_pc)) > rows:
+    if base_processor is not None and len(resolve_tokenizer(base_processor)) > rows:
         return None
     return num_tokens
 
 
-def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_pc, base_pc, log) -> PeftModel:
+def apply_adapter(adapter_dir: str, model: PreTrainedModel, *, adapter_processor, base_processor, log) -> PeftModel:
     """The saved adapter loaded onto ``model``, first grown to a vocabulary the run grew. The added rows start as NaN,
     so an unset row is never served from uninitialized memory. An adapter lacking them has them rebuilt, with a
     warning, as the checkpoint rows' mean, matching the run's frozen mean-resize draw (that mean plus 1e-9 of the rows'
     covariance)."""
-    num_tokens = _grown_vocabulary(model, adapter_pc, base_pc)
+    num_tokens = _grown_vocabulary(model, adapter_processor, base_processor)
     if num_tokens is None:
         return PeftModel.from_pretrained(model, adapter_dir)
     rows = model.get_input_embeddings().weight.shape[0]
@@ -188,14 +188,14 @@ def merge_adapter_into_base(
         excuse_task_head=bool(getattr(peft_config, "modules_to_save", None)),
         log=log,
     )
-    adapter_pc = load_processing_class(adapter_dir, trust_remote_code=trust_remote_code)
-    base_pc = load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
+    adapter_processor = load_processing_class(adapter_dir, trust_remote_code=trust_remote_code)
+    base_processor = load_processing_class(base_model_path, trust_remote_code=trust_remote_code)
     # A text-only merge writes what a text_only_model run exports: no multimodal processor files.
-    processing_class = resolve_peft_processing_class(adapter_pc, base_pc, text_only=base.text_only)
+    processing_class = resolve_peft_processing_class(adapter_processor, base_processor, text_only=base.text_only)
     if processing_class is None:
         raise OSError(f"Could not load a processor or tokenizer from {adapter_dir} or {base_model_path}")
     merged_model = apply_adapter(
-        adapter_dir, base.model, adapter_pc=adapter_pc, base_pc=base_pc, log=log
+        adapter_dir, base.model, adapter_processor=adapter_processor, base_processor=base_processor, log=log
     ).merge_and_unload()
 
     for action in apply_training_sidecars(merged_model, adapter_dir):

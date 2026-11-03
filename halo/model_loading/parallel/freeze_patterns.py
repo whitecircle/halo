@@ -32,7 +32,7 @@ def _reject_layer_indexed_patterns_under_pp(model, patterns, flag: str) -> None:
         )
 
 
-def freeze_modules_by_patterns(model, patterns):
+def freeze_parameters_by_patterns(model, patterns):
     """COLLECTIVE: freeze parameters whose full names match an fnmatch pattern. Raises on every rank when a pattern
     matches nothing, as a typo would leave what it meant to hold still training with no other symptom."""
     _reject_layer_indexed_patterns_under_pp(model, patterns, "freeze_layers_patterns")

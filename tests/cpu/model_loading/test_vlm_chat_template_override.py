@@ -12,7 +12,7 @@ from transformers import AutoProcessor, Qwen3_5Config, Qwen3_5ForConditionalGene
 
 from halo.checkpoint.parallel.save import save_checkpoint
 from halo.configs.script_arguments import CommonScriptArguments
-from halo.data.preprocessed import publishing
+from halo.data.preprocessed import prepare_dataset_tool
 from halo.distributed.tensor_parallel.hf_plan import is_input_embedding_tp_sharded
 from halo.entrypoints.model_setup import install_resolved_tokenizer
 from halo.model_loading.tokenizer_setup import configure_run_tokenizer
@@ -81,7 +81,7 @@ def test_prepare_dataset_renders_vlm_rows_with_the_override():
         chat_template=OVERRIDE,
     )
 
-    assert _render(publishing.load_vlm_processor(args)) == OVERRIDE_RENDER
+    assert _render(prepare_dataset_tool.load_vlm_processor(args)) == OVERRIDE_RENDER
 
 
 def test_patch_vocab_exports_the_override(tmp_path, monkeypatch):

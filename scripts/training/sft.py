@@ -44,7 +44,7 @@ from halo.entrypoints.model_setup import (
     install_resolved_tokenizer,
     load_policy_model,
     log_model_info,
-    plan_training_rows,
+    plan_row_attention,
 )
 from halo.entrypoints.script import (
     configure_balancing_and_build_callbacks,
@@ -265,7 +265,7 @@ def main():
         "checkpoint_config": checkpoint_config,
         "init_from_scratch": dist_args.init_from_scratch,
     }
-    attn_default = plan_training_rows(model_config, sft_config, packing=sft_config.packing, **rows_plan).attn_default
+    attn_default = plan_row_attention(model_config, sft_config, packing=sft_config.packing, **rows_plan).attn_default
     mode = resolve_multi_document_mode(packing=sft_config.packing, padding_free=sft_config.padding_free)
     # The backend the policy load resolves for rows as the packing flags shape them, read before the dataset and the
     # weights load; a config the probe could not read leaves the row checks to the collator factory after the load.
@@ -284,7 +284,7 @@ def main():
             )
         if not args.tree_packing:
             # The collator factory refuses the same rows, but only after the model load and the packing pass; the
-            # FA4 varlen rule ran in plan_training_rows, on the backend the load keeps.
+            # FA4 varlen rule ran in plan_row_attention, on the backend the load keeps.
             reject_multi_document_rows(
                 checkpoint_config,
                 mode,
@@ -330,7 +330,7 @@ def main():
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
     metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
     if metadata is not None:
-        attn_default = plan_training_rows(
+        attn_default = plan_row_attention(
             model_config, sft_config, packing=_packs_rows(sft_config, metadata), **rows_plan
         ).attn_default
 

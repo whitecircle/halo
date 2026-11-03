@@ -378,7 +378,7 @@ async def test_an_output_budget_ends_the_episode_truncated_when_less_than_a_turn
     traj = result.trajectory
     assert len(seen) == result.episode_length == 3 < _PlainEnv().max_turns, "the budget, not max_turns, ended it"
     assert traj.done and traj.truncated and not traj.info.get("completed")
-    assert result.success is False
+    assert result.terminated_naturally is False
     assert traj.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is True
     assert result.metrics["episode/output_budget_exhausted"] == 1.0
     assert result.generation_tokens == sum(sampled) == 49000
@@ -510,7 +510,7 @@ async def test_an_episode_inside_its_budget_records_false_and_one_without_a_budg
     budget = ray_actors.RolloutConfig(max_tokens=_MAX_TOKENS, max_episode_tokens=50000)
     _, result = await _drive_actor(_PlainEnv, None, budget, generations=[_actor_text_turn(tokens=19000)])
     assert result.error is None, result.error
-    assert result.success and not result.trajectory.truncated
+    assert result.terminated_naturally and not result.trajectory.truncated
     assert result.trajectory.info[OUTPUT_BUDGET_EXHAUSTED_KEY] is False
     assert result.metrics["episode/output_budget_exhausted"] == 0.0
     assert result.generation_tokens == 19000

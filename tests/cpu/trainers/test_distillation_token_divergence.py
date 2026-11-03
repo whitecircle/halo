@@ -12,9 +12,9 @@ from halo.kernels.logprobs import LABEL_IGNORE_INDEX, selective_logprobs
 from halo.trainers.distillation.divergences import (
     DIVERGENCES,
     call_divergence,
-    global_token_mean,
     gold_token_probs,
     hard_labels_coefficient,
+    pooled_token_mean,
     shifted_token_cross_entropy,
     token_divergence,
     token_divergence_and_cross_entropy,
@@ -200,8 +200,8 @@ def _peak_gradient_planes(one_pass: bool) -> float:
     else:
         divergence = token_divergence(loss_fn, student[:, :-1], teacher[:, :-1], 1.0, labels)
         cross_entropy = shifted_token_cross_entropy(student[:, :-1], labels)
-    loss = DISTILL_ALPHA * global_token_mean(divergence, supervised)
-    loss = loss + (1 - DISTILL_ALPHA) * global_token_mean(cross_entropy, supervised)
+    loss = DISTILL_ALPHA * pooled_token_mean(divergence, supervised)
+    loss = loss + (1 - DISTILL_ALPHA) * pooled_token_mean(cross_entropy, supervised)
     loss.backward()
     plane_gib = batch * seq * vocab * student.element_size() / 1024**3
     return (host_peak_rss_gib() - baseline) / plane_gib

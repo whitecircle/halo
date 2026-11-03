@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from halo.distributed.context_parallel.sequence_chunks import cp_chunk_bounds
-from halo.distributed.parallelism_rules import reject_accelerate_launch
+from halo.distributed.parallelism_rules import reject_custom_parallelism_under_accelerate
 from halo.distributed.tensor_parallel.parallelize_attention import validate_tp_head_divisibility
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
 from halo.models.attention.gpt_oss_sinks import SinksPolicy
@@ -205,7 +205,7 @@ def test_accelerate_refusal_launch_lines_pass_the_config(monkeypatch):
     """The entry scripts take the YAML config as their positional."""
     monkeypatch.setenv("ACCELERATE_MIXED_PRECISION", "bf16")
     with pytest.raises(ValueError) as err:
-        reject_accelerate_launch(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))
+        reject_custom_parallelism_under_accelerate(make_parallelism_config(ep_size=2, world_size=2, gpus_per_node=2))
     message = str(err.value)
     script_lines = [line for line in message.splitlines() if "scripts/training/" in line]
     assert len(script_lines) == 3, message

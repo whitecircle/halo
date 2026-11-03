@@ -29,10 +29,10 @@ from halo.models.attention.gpt_oss_sinks import (
 )
 from halo.runtime.ranks import is_global_main_process
 from halo.trainers.distillation.divergences import (
-    global_token_mean,
     hard_labels_coefficient,
     logits_forward_inputs,
     place_frozen_scorer,
+    pooled_token_mean,
     require_divergence,
     shifted_token_cross_entropy,
     token_divergence,
@@ -199,10 +199,10 @@ class DistributedTeacherDistillationTrainer(StoredMetricsMixin, DistributedTrain
         if self.args.apply_hard_labels:
             gate = hard_labels_coefficient(student_logits, teacher_logits, hard_labels)
             distillation_loss = gate * distillation_loss
-            metrics["distillation_coef"] = global_token_mean(gate, supervised)
+            metrics["distillation_coef"] = pooled_token_mean(gate, supervised)
 
-        distillation_loss = global_token_mean(distillation_loss, supervised)
-        sft_loss = global_token_mean(token_cross_entropy, supervised)
+        distillation_loss = pooled_token_mean(distillation_loss, supervised)
+        sft_loss = pooled_token_mean(token_cross_entropy, supervised)
 
         loss = self.args.distill_alpha * distillation_loss
         if clm_in_loss:

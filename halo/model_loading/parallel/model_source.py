@@ -198,9 +198,7 @@ def reject_ep_sharded_checkpoint(source: ModelSource) -> None:
         raise ValueError(ep_sharded_checkpoint_reason(source.local_dir))
 
 
-def resolve_lazy_checkpoint(
-    source: ModelSource, *, lazy_requested: bool, layout_supported: Callable[[str], bool]
-) -> bool:
+def agree_lazy_load(source: ModelSource, *, lazy_requested: bool, layout_supported: Callable[[str], bool]) -> bool:
     """COLLECTIVE: refuse an EP-sharded ``source``, then return whether every rank streams it lazily. Rank 0 decides,
     as the branches enter different collectives and a per-rank probe of a partially populated cache would split
     them."""

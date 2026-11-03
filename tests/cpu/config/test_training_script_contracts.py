@@ -118,10 +118,12 @@ _VLM_PROBE_CALL_SITES = [
 
 def _vlm_probe_calls(path: Path) -> list[ast.Call]:
     """Every entry point into the modality verdict: ``probe_checkpoint`` reads the config, and
-    ``is_vlm_model`` / ``is_vlm_run`` take one already loaded or the probe's verdict, so an unpinned
+    ``is_vlm_model`` / ``is_vlm_run_across_ranks`` take one already loaded or the probe's verdict, so an unpinned
     probe loads hub main's config."""
     tree = ast.parse(path.read_text(encoding="utf-8"))
-    return sum((_named_calls(tree, name) for name in ("is_vlm_model", "is_vlm_run", "probe_checkpoint")), [])
+    return sum(
+        (_named_calls(tree, name) for name in ("is_vlm_model", "is_vlm_run_across_ranks", "probe_checkpoint")), []
+    )
 
 
 def test_vlm_probe_contract_is_not_vacuous():

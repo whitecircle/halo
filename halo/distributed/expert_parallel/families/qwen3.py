@@ -41,7 +41,7 @@ class EPQwen3MoELayer(EPSharedExpertsMoELayerBase):
         """The router's own choice, or with a balancing bias the biased top-k gated by :meth:`_gate_weights_at`."""
         with torch.amp.autocast("cuda", enabled=False):
             router_logits, weights, experts = self.gate(self._router_input(flat))
-        if self._balancing_bias(router_logits) is None:
+        if self._transient_balancing_bias(router_logits) is None:
             return self._replay_router_choice(router_logits, experts, weights)
         # Balancing shifts selection only. Weights come from _gate_weights_at so they honour the configurable
         # norm_topk_prob, which the unconditional renormalization in _deepseek_biased_route would not: a zero bias must

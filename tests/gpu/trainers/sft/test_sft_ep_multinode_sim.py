@@ -15,11 +15,12 @@ from transformers import AutoTokenizer, set_seed
 from trl import SFTConfig
 
 import halo.checkpoint.parallel.optimizer as optimizer_store
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.hardware import supports_grouped_mm
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.adapters import assert_only_adapters_trainable, is_expert_lora_active, load_peft_model, unwrap
+from tests.common.adapters import check_only_adapters_trainable, load_peft_model, unwrap
 from tests.common.checkpoint_io import RestorePointSnapshot
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import (
@@ -82,7 +83,7 @@ def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
     """The sweep lands expert grads at the DP average (agent-docs/parallelism/multi-node.md): replica SUM over
     ``world_size / expert_tp_size``. Wrapping exposes the pre-image, since the sweep isn't idempotent and ``train()``
     drops the grads."""
-    original = trainer._sync_deferred_expert_grads
+    original = trainer._run_deferred_grad_sweep
     expert_ids = trainer._get_sharded_expert_param_ids()
     divisor = ep_config.stage_world_size // ep_config.expert_tp_size
 
@@ -108,7 +109,7 @@ def _install_sweep_divisor_probe(trainer, ep_config, verdict: dict) -> None:
         verdict["sweep_divisor"] = scale > 0.0 and worst <= SWEEP_DIVISOR_REL_TOL * scale
         log(f"  Sweep divisor (/{divisor}): worst|Δ|={worst:.3e} vs scale={scale:.3e}")
 
-    trainer._sync_deferred_expert_grads = probed
+    trainer._run_deferred_grad_sweep = probed
 
 
 def _check_replica_consistency(model, ep_config) -> bool:
@@ -200,8 +201,8 @@ def _run_expert_lora_resume(ctx) -> dict:
     trainer, config = make_trainer(save=True)
     ep_config = config.ep_config()
     checks["two_ep_groups_with_deferred_replica_sync"] = config.num_ep_groups == 2 and ep_config.is_deferred_dp
-    checks["expert_lora_active"] = is_expert_lora_active(unwrap(trainer.model))
-    adapters_only, detail = assert_only_adapters_trainable(unwrap(trainer.model))
+    checks["expert_lora_active"] = model_has_expert_lora(unwrap(trainer.model))
+    adapters_only, detail = check_only_adapters_trainable(unwrap(trainer.model))
     log(f"  {detail}")
     checks["only_adapters_trainable"] = adapters_only
     build_diff = _replica_adapter_max_diff(trainer.model, ep_config.expert_replica_group)

@@ -12,7 +12,7 @@ import tempfile
 import pytest
 from datasets import Dataset, DatasetDict
 
-from halo.data.preprocessed import publishing
+from halo.data.preprocessed import prepare_dataset_tool
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.sources.loading import load_preprocessed_dataset
 from tests.common.repo import REPO_ROOT
@@ -28,7 +28,7 @@ _WORDS = ("doc", *(str(i) for i in range(32)))
 _DRIVER = """
 import sys, traceback, types
 
-from halo.data.preprocessed import publishing
+from halo.data.preprocessed import prepare_dataset_tool
 from tests.common.repo import load_script_module
 
 mod = load_script_module("scripts/before_training/prepare_dataset.py")
@@ -38,12 +38,12 @@ class _ReachedPreprocess(Exception):
     pass
 
 
-publishing.load_tokenizer = lambda args: object()  # never used (preprocess is stubbed) — avoids any download
-publishing.AutoConfig = types.SimpleNamespace(
+prepare_dataset_tool.load_tokenizer = lambda args: object()  # never used (preprocess is stubbed) — avoids any download
+prepare_dataset_tool.AutoConfig = types.SimpleNamespace(
     from_pretrained=lambda *args, **kwargs: types.SimpleNamespace(model_type="qwen3")
 )
 
-real_load = publishing.load_input_dataset
+real_load = prepare_dataset_tool.load_input_dataset
 
 
 def _load(args):
@@ -55,8 +55,8 @@ def _boom(**kwargs):
     raise _ReachedPreprocess()
 
 
-publishing.load_input_dataset = _load
-publishing.preprocess_dataset = _boom
+prepare_dataset_tool.load_input_dataset = _load
+prepare_dataset_tool.preprocess_dataset = _boom
 {prelude}
 sys.argv = ["prepare_dataset.py"] + {argv!r}
 try:
@@ -190,15 +190,17 @@ def test_the_held_out_split_the_artifact_bakes_is_checked(splits, refused):
     config = PreprocessingConfig(model_name_or_path="m")
 
     if not refused:
-        publishing.require_declared_columns(dataset, config, "src")
+        prepare_dataset_tool.require_declared_columns(dataset, config, "src")
         return
     with pytest.raises(ValueError, match=r"conversation_field='prompt' .*\['validation'\]"):
-        publishing.require_declared_columns(dataset, config, "src")
+        prepare_dataset_tool.require_declared_columns(dataset, config, "src")
 
 
 def test_a_multi_process_launch_is_refused_before_the_input_is_fetched():
     """Every rank would run the publish against the same destination."""
-    output = _run(_DOC_TEXT_ARGV, prelude="publishing.PartialState = lambda: types.SimpleNamespace(num_processes=2)")
+    output = _run(
+        _DOC_TEXT_ARGV, prelude="prepare_dataset_tool.PartialState = lambda: types.SimpleNamespace(num_processes=2)"
+    )
 
     assert "EXIT:1" in output, output
     assert "single-process tool" in output, output
@@ -211,7 +213,7 @@ def test_packing_a_compressed_kv_model_is_refused_before_the_input_is_fetched():
     prelude = (
         "from transformers.models.deepseek_v4 import DeepseekV4Config\n"
         "from tests.common.models import TINY_DSV4_CONFIG\n"
-        "publishing.AutoConfig = types.SimpleNamespace(\n"
+        "prepare_dataset_tool.AutoConfig = types.SimpleNamespace(\n"
         "    from_pretrained=lambda *a, **k: DeepseekV4Config(**TINY_DSV4_CONFIG)\n"
         ")"
     )

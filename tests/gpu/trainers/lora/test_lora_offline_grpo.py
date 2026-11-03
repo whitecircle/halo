@@ -6,15 +6,15 @@ import argparse
 import math
 
 from halo.configs.grpo_offline import OfflineGRPOConfig
+from halo.distributed.expert_parallel.moe_layer.expert_lora import model_has_expert_lora
 from halo.runtime.collectives import barrier
 from halo.trainers.grpo.offline.trainer import OfflineGRPOTrainer
 from tests.common.adapters import (
-    assert_adapter_checkpoint,
-    assert_adapters_moved,
-    assert_only_adapters_trainable,
-    is_expert_lora_active,
+    check_adapters_moved,
+    check_only_adapters_trainable,
     load_peft_model,
     parallelism_config_for,
+    save_and_check_adapter_checkpoint,
     snapshot_adapters,
     unwrap,
 )
@@ -41,7 +41,7 @@ def run(ctx) -> dict:
     # gpt-oss needs flex_attention under EP; dense qwen uses the auto default.
     attn = "flex_attention" if parallelism_config.has_ep_group else None
     model, tokenizer, peft_config = load_peft_model(mode, parallelism_config, attn_implementation=attn)
-    expert_lora = is_expert_lora_active(model)
+    expert_lora = model_has_expert_lora(model)
     log(f"  expert_lora_active={expert_lora}, peft_config={'set' if peft_config else 'None'}")
 
     config = OfflineGRPOConfig(
@@ -74,7 +74,7 @@ def run(ctx) -> dict:
     ctx.on_teardown(trainer.cleanup_ep)
     # The trainer's get_peft_model applies attention LoRA, so the adapters only exist after construction.
     wrapped = unwrap(trainer.model)
-    ok, detail = assert_only_adapters_trainable(wrapped)
+    ok, detail = check_only_adapters_trainable(wrapped)
     checks["only_adapters_trainable"] = ok
     log(f"  [trainable] {detail}")
     adapters_before = snapshot_adapters(wrapped, expert_lora=expert_lora)
@@ -87,11 +87,11 @@ def run(ctx) -> dict:
 
     after_model = unwrap(trainer.model)
     adapters_after = snapshot_adapters(after_model, expert_lora=expert_lora)
-    ok, detail = assert_adapters_moved(adapters_before, adapters_after)
+    ok, detail = check_adapters_moved(adapters_before, adapters_after)
     checks["adapters_moved"] = ok
     log(f"  [moved] {detail}")
 
-    ok, detail = assert_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=expert_lora)
+    ok, detail = save_and_check_adapter_checkpoint(trainer, ctx.output_dir, ctx.rank, expert_lora=expert_lora)
     checks["adapter_checkpoint"] = ok
     log(f"  [checkpoint] {detail}")
 

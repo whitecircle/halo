@@ -152,7 +152,10 @@ def test_a_softcapped_fallback_past_the_flash_head_cap_skips_flash_attention_2()
     """FA2 caps at head_dim 256 and would raise at the model build; flex carries the softcap."""
     config = _config("gemma2", head_dim=512)
     with _on("hopper"):
-        assert attention_mod.validate_attn_implementation(config, SDPA, SinksPolicy.NEUTRALIZED) == "flex_attention"
+        assert (
+            attention_mod.select_supported_attn_implementation(config, SDPA, SinksPolicy.NEUTRALIZED)
+            == "flex_attention"
+        )
         assert _resolve(config, SDPA) == "flex_attention"
 
 

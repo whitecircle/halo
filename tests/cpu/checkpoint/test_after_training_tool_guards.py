@@ -176,7 +176,7 @@ def test_an_unknown_additional_field_raises(tmp_path):
             dataset,
             np.array([0, 1]),
             str(tmp_path / "out.jsonl"),
-            additional_fields=["text", "sorce"],
+            keep_fields=["text", "sorce"],
         )
 
     assert "'sorce'" in str(excinfo.value) or "sorce" in str(excinfo.value)
@@ -186,7 +186,7 @@ def test_known_additional_fields_still_narrow_the_output(tmp_path):
     dataset = Dataset.from_dict({"text": ["a", "b"], "id": [1, 2]})
     output = tmp_path / "out.jsonl"
 
-    deduplication.save_deduplicated_dataset(dataset, np.array([0]), str(output), additional_fields=["text"])
+    deduplication.save_deduplicated_dataset(dataset, np.array([0]), str(output), keep_fields=["text"])
 
     written = json.loads(output.read_text().splitlines()[0])
     assert written == {"text": "a"}

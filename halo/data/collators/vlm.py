@@ -9,8 +9,8 @@ import numpy as np
 import torch
 
 from halo.data.completion_spans import (
-    COLLATOR_SPAN_POLICY,
-    build_completion_only_labels,
+    PADDED_SPAN_POLICY,
+    build_training_labels,
     reject_untrainable_completions,
 )
 from halo.data.turn_markers import reject_missing_response_marker, resolve_eos_token_ids
@@ -49,7 +49,7 @@ def _reject_rendered_bos(processor, tokenizer) -> None:
 
 class VLMDataCollator:
     # Same span policy as the text runtime collators; the SDPG subclass overrides it.
-    _COMPLETION_SPAN_POLICY: dict[str, bool] | None = COLLATOR_SPAN_POLICY
+    _COMPLETION_SPAN_POLICY: dict[str, bool] | None = PADDED_SPAN_POLICY
 
     def __init__(
         self,
@@ -128,7 +128,7 @@ class VLMDataCollator:
 
     def _build_labels(self, input_ids: torch.Tensor, attention_mask: torch.Tensor | None) -> torch.Tensor:
         """Pad and image tokens masked, and with ``train_on_completions_only`` everything outside the completions."""
-        return build_completion_only_labels(
+        return build_training_labels(
             input_ids,
             self.tokenizer,
             self.response_prompt_template,

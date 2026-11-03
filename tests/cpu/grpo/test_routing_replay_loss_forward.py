@@ -142,7 +142,7 @@ def _loss_forward(*, replay: str, dense: bool, corrupt: tuple[int, int] | None =
     host.compute_loss(host.model, batch)
     injector.disarm()
     forced = sum(int(layer._replay_flip_counts[1]) for layer in injector._layers)
-    return _LossForward(injector.flip_rate(), forced, batch, routed)
+    return _LossForward(injector.drain_flip_rate(), forced, batch, routed)
 
 
 def _recorded_positions(batch: dict) -> tuple[int, int]:

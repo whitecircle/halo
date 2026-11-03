@@ -40,7 +40,7 @@ def tokenize_response_template(
 
     if not token_ids:
         raise ValueError(
-            f"response_prompt_template produced empty token IDs. "
+            f"assistant_message_template produced empty token IDs. "
             f"Template: {response_prompt_template!r}. "
             f"An empty template would match every position, training on all tokens."
         )

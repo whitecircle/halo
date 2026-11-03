@@ -49,7 +49,8 @@ class EPBalancingBiasMixin:
     @property
     def _native_balancing_attr(self) -> str | None:
         """The live path of ``FAMILY.balancing_slot``, a checkpoint-persistent bias the family's selection already
-        applies, so ``_balancing_bias`` returns None once adopted (a second application would double-bias)."""
+        applies, so ``_transient_balancing_bias`` returns None once adopted (a second application would
+        double-bias)."""
         slot = self.FAMILY.balancing_slot
         return slot.attrs[0] if slot else None
 
@@ -182,7 +183,7 @@ class EPBalancingBiasMixin:
         else:
             self.__dict__[BALANCING_BIASES_ATTR] = value
 
-    def _balancing_bias(self, ref: torch.Tensor):
+    def _transient_balancing_bias(self, ref: torch.Tensor):
         """The side-buffer on ``ref``'s device (moved once: ``module.to()`` skips a plain attribute), None when
         disabled or in native mode, where the gate already applies the slot."""
         if self.__dict__.get(NATIVE_BALANCING_BIAS_ADOPTED_ATTR, False):

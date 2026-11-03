@@ -9,14 +9,14 @@ import pytest
 from transformers import AutoConfig, AutoProcessor, AutoTokenizer
 
 from halo.env import env_flag
-from tests.common.hub_seed import GATED_REPOS, is_hub_repo, seed
+from tests.common.hub_seed import GATED_REPOS, is_hub_repo, seed_repos
 
 REQUIRE_HUB_CACHE = "HALO_TEST_REQUIRE_HUB_CACHE"
 
 
 def _remedy(reference: str, revision: str | None) -> str:
     """How to get ``reference`` into the cache: re-seed, pin the revision, or add the repo to the roster."""
-    seeded = seed()
+    seeded = seed_repos()
     spelled = reference if revision is None else f"{reference}@{revision}"
     if (reference, revision) in seeded:
         return f"The seed holds {spelled}: run `make seed-hf-cache`."
@@ -25,7 +25,7 @@ def _remedy(reference: str, revision: str | None) -> str:
     return f"Name {reference} in tests/common/models.py so `make seed-hf-cache` fetches it."
 
 
-def require_cached(reference: str, what: str, revision: str | None = None) -> None:
+def fail_if_cache_required(reference: str, what: str, revision: str | None = None) -> None:
     if env_flag(REQUIRE_HUB_CACHE) and is_hub_repo(reference) and reference not in GATED_REPOS:
         pytest.fail(
             f"{what} {reference} is not in the local HF cache, which {REQUIRE_HUB_CACHE} requires. "
@@ -34,7 +34,7 @@ def require_cached(reference: str, what: str, revision: str | None = None) -> No
 
 
 def skip_uncached(reference: str, what: str, revision: str | None = None) -> NoReturn:
-    require_cached(reference, what, revision)
+    fail_if_cache_required(reference, what, revision)
     where = "in the local HF cache" if is_hub_repo(reference) else "on this host"
     pytest.skip(f"{what} {reference} is not {where}")
 
@@ -44,7 +44,7 @@ def try_cached_tokenizer(name: str, **kwargs):
     try:
         return AutoTokenizer.from_pretrained(name, local_files_only=True, **kwargs)
     except OSError:
-        require_cached(name, "tokenizer", kwargs.get("revision"))
+        fail_if_cache_required(name, "tokenizer", kwargs.get("revision"))
         return None
 
 
@@ -77,7 +77,7 @@ def try_cached_config(reference: str, **kwargs):
     try:
         return AutoConfig.from_pretrained(reference, local_files_only=True, **kwargs)
     except OSError:
-        require_cached(reference, "config", kwargs.get("revision"))
+        fail_if_cache_required(reference, "config", kwargs.get("revision"))
         return None
 
 

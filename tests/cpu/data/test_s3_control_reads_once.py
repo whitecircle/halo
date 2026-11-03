@@ -13,7 +13,11 @@ from datasets import Dataset, DatasetDict, load_from_disk
 
 from halo.data.preprocessed.metadata import load_preprocessed_metadata
 from halo.data.sources import s3_dataset_store
-from halo.data.sources.loading import is_presharded_dataset_load, load_datasets_auto, share_s3_control_files
+from halo.data.sources.loading import (
+    is_presharded_dataset_load_across_ranks,
+    load_datasets_auto,
+    share_s3_control_files,
+)
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
 from tests.common.datasets import write_prepared_text_dataset
 from tests.common.gloo import run_gloo_ranks
@@ -59,7 +63,7 @@ def _load_worker(rank: int, tmp_dir: str, rank0_first_read_fails: str | None) ->
     )
 
     share_s3_control_files(SOURCE)
-    presharded = is_presharded_dataset_load(SOURCE, WORLD_SIZE)
+    presharded = is_presharded_dataset_load_across_ranks(SOURCE, WORLD_SIZE)
     ds, preprocessed = load_datasets_auto(SOURCE, None, None, data_parallel_rank=rank, data_parallel_size=WORLD_SIZE)
     load_preprocessed_metadata(SOURCE)
     outcome = {

@@ -134,8 +134,8 @@ def test_the_row_sample_is_drawn_with_the_runs_fixed_seed(monkeypatch, tmp_path)
     data = tmp_path / "rows.jsonl"
     data.write_text("".join(json.dumps({"text": f"row {i}"}) + "\n" for i in range(64)))
     monkeypatch.setattr(deduplication, "DEDUP_SHUFFLE_SEED", 7)
-    sample = deduplication.load_dataset_from_path(str(data), "text", None, "train", sample_size=8)["text"]
-    whole = deduplication.load_dataset_from_path(str(data), "text", None, "train", sample_size=None)
+    sample = deduplication.load_dedup_input(str(data), "text", None, "train", sample_size=8)["text"]
+    whole = deduplication.load_dedup_input(str(data), "text", None, "train", sample_size=None)
     assert sample == whole.shuffle(seed=7).select(range(8))["text"]
     assert sample != whole.shuffle(seed=42).select(range(8))["text"]
 

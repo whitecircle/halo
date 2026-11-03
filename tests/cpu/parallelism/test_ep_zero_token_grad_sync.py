@@ -106,7 +106,7 @@ def _single_group_sweep(expert_grad: torch.Tensor | None) -> nn.Parameter:
         _top_level_model=lambda: model,
     )
     host._classify_deferred_params = MethodType(DistributedTrainerMixin._classify_deferred_params, host)
-    DistributedTrainerMixin._sync_deferred_expert_grads(host)
+    DistributedTrainerMixin._run_deferred_grad_sweep(host)
     return expert
 
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """PEFT ``modules_to_save`` on the MoE router under EP=2, on GptOss-20B.
 
-The EP layer's DP-average hook sits on the original router param, so ``reattach_router_grad_sync`` must re-attach it to
-the trained copy, or its grad silently drifts across DP ranks. Removing the hooks must make the same backward differ
-across ranks, proving the sync came from them.
+The EP layer's DP-average hook sits on the original router param, so ``reattach_dp_average_grad_hooks`` must re-attach
+it to the trained copy, or its grad silently drifts across DP ranks. Removing the hooks must make the same backward
+differ across ranks, proving the sync came from them.
 """
 
 from types import SimpleNamespace

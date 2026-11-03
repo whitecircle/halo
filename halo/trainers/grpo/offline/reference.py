@@ -89,7 +89,7 @@ def _scores_digest(lengths: torch.Tensor, values: torch.Tensor) -> str:
     return digest.hexdigest()
 
 
-def assert_replicated_reference_scores(split: str, lengths: torch.Tensor, values: torch.Tensor) -> str:
+def agreed_reference_scores_digest(split: str, lengths: torch.Tensor, values: torch.Tensor) -> str:
     """Require identical raw reference scores on every rank and return their content digest."""
     digest = _scores_digest(lengths, values)
     reject_divergent_settings(
@@ -328,7 +328,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
             f"Recording the '{split}' GRPO reference",
             exc_type=ValueError,
         )
-        digest = assert_replicated_reference_scores(split, rows.lengths, rows.values)
+        digest = agreed_reference_scores_digest(split, rows.lengths, rows.values)
         guard = DeferredRankFailure(f"Attaching the '{split}' GRPO reference", exc_type=ValueError)
         attached = guard.run(lambda: attach_reference_column(dataset, rows, digest))
         guard.reject()
@@ -368,7 +368,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
         return attach_reference_column(dataset, scores)
 
     def _validate_restored_reference_payload(self, name: str, entry: Mapping) -> None:
-        assert_replicated_reference_scores(name, entry["lengths"], entry["values"])
+        agreed_reference_scores_digest(name, entry["lengths"], entry["values"])
 
     def _remember_reference_split(self, name: str, identity: Mapping, payload: Mapping, dataset: Dataset) -> None:
         if payload:
@@ -548,7 +548,7 @@ class OfflineGRPOReferenceMixin(ReferenceLogpsMixin):
                 except Exception as cleanup_error:
                     exc.add_note(f"Evaluation reference cache cleanup also failed: {cleanup_error}")
                 raise
-        assert_replicated_reference_scores("evaluation", scores.lengths, scores.values)
+        agreed_reference_scores_digest("evaluation", scores.lengths, scores.values)
         return scores
 
     def _sweep_with_original_reference(self, dataset: Dataset, model) -> MappedReferenceScores:

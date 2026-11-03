@@ -57,7 +57,7 @@ class _RecordingLayer(StubEPLayerBase):
         self.experts_per_rank = LOCAL_EXPERTS
         self.expert_tp_size = 1
         self._capture_routing = False
-        self._activation_warmed = False
+        self._expert_kernels_warmed = False
         self._use_grouped_mm = True
         self._lowp_quant_format = None
         self._lowp_weight_cacheable = True
@@ -164,7 +164,7 @@ def test_the_warmup_draws_no_random_numbers():
     recompute, and downstream LoRA dropout diverges."""
     layer = _RecordingLayer()
     before = torch.random.get_rng_state()
-    layer._warm_activation_graphs(torch.device("cpu"), torch.float32, HIDDEN, top_k=2)
+    layer._warm_expert_kernels(torch.device("cpu"), torch.float32, HIDDEN, top_k=2)
 
     assert torch.equal(torch.random.get_rng_state(), before)
     assert [event[0] for event in layer.events].count("warm") == 2
@@ -299,7 +299,7 @@ def test_the_gather_check_fails_its_negative_control(monkeypatch, top_k):
 
 def _warm_up_launches(layer) -> KernelLaunches:
     with KernelLaunches() as launches:
-        layer._warm_activation_graphs(torch.device("cpu"), torch.bfloat16, layer.hidden_dim, layer.top_k)
+        layer._warm_expert_kernels(torch.device("cpu"), torch.bfloat16, layer.hidden_dim, layer.top_k)
     return launches
 
 

@@ -14,7 +14,7 @@ Scripts assemble them in `configure_balancing_and_build_callbacks(...)` (`halo/e
 | `MoEMetricsCallback` | `moe/*` per-expert load | `enable_moe_metrics: true` (default) |
 | `BalancingBiasCallback` | DeepSeek-V3 bias update, plus `moe/*` | a `bias_update` mode |
 | `TorchProfilerCallback` | Per-rank traces, memory timeline | `enable_torch_profiler: true` ([Debugging](../reference/debugging.md)) |
-| `CheckpointingPlanCallback` | Relaxes gradient checkpointing to what the memory budget needs | `gradient_checkpointing_plan: auto` |
+| `GradientCheckpointingPlanCallback` | Relaxes gradient checkpointing to what the memory budget needs | `gradient_checkpointing_plan: auto` |
 | `VariableSchedulerCallback` | Schedules a model attribute | Added by SMPO (`use_margin_schedule`) and offline GRPO (`initial_min_log_prob`) |
 
 ### ParameterStatsCallback
@@ -100,9 +100,9 @@ The contract is checked on the **enabled tree**, not the class declaration: a re
 
 **Requires EP patching** — `ep_group_size > 1 or use_grouped_gemm`, so `expert_parallel_size=1` still qualifies with grouped GEMM on. Without those EP layers, and on a dense model, an explicit `bias_update` raises rather than balancing nothing, except on routers with a native buffer (Zaya). `bias_update_transient` is refused under pipeline parallelism.
 
-### CheckpointingPlanCallback
+### GradientCheckpointingPlanCallback
 
-`gradient_checkpointing_plan: auto` (`halo/callbacks/checkpointing_plan.py`, policy math in `halo/models/checkpointing_plan.py`) starts every launch fully checkpointed and measures its step 2, the first at the steady-state footprint (step 1 allocates the optimizer moments and runs the JIT warm-ups). From that one step it predicts the peak of every lighter policy (no checkpointing, then `every_n_layers` 8, 4, 3 and 2, each checkpointing more layers than the last) and applies the lightest whose prediction fits 85% of device memory (75% under EP, whose dropless routing moves the hot rank's receive count between steps).
+`gradient_checkpointing_plan: auto` (`halo/callbacks/gradient_checkpointing_plan.py`, policy math in `halo/models/gradient_checkpointing_plan.py`) starts every launch fully checkpointed and measures its step 2, the first at the steady-state footprint (step 1 allocates the optimizer moments and runs the JIT warm-ups). From that one step it predicts the peak of every lighter policy (no checkpointing, then `every_n_layers` 8, 4, 3 and 2, each checkpointing more layers than the last) and applies the lightest whose prediction fits 85% of device memory (75% under EP, whose dropless routing moves the hot rank's receive count between steps).
 
 - **The layers** are the text decoder list. A multimodal checkpoint's vision blocks checkpoint too, but a text run never calls them, so they keep their flags and are not counted.
 - **The readings:** the peak before each micro-step's first backward recompute, the peak before the optimizer step, the step peak, the allocation one layer's recompute leaves (its uncheckpointed activations) and a checkpoint's input, all host-side allocator stats. Early stop is off for that step, so a non-reentrant recompute runs to its layer's end. The optimizer phase is the same under every policy, so only the forward and backward phases grow.

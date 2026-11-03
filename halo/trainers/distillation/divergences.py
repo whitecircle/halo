@@ -250,7 +250,7 @@ def masked_token_mean(
     return per_sample.mean() if per_sample.numel() else per_sample.sum()
 
 
-def global_token_mean(per_token_loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def pooled_token_mean(per_token_loss: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """One denominator for all tokens, as in a causal-LM loss; an all-masked micro-batch gives 0, not a NaN the
     gradient reduce spreads."""
     total = (per_token_loss * mask.to(per_token_loss.dtype)).sum().float()

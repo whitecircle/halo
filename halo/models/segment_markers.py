@@ -71,7 +71,7 @@ def find_unmarked_sequence_mixer(model_config) -> str | None:
     return "linear-attention layers" if declares and not segment_markers_for(model_config).cu_seq_lens else None
 
 
-def reject_unmarked_linear_attention_rows(
+def reject_unmarked_sequence_mixer_rows(
     model_config, mode: str, *, allow_cross_document_linear_attention: bool
 ) -> None:
     """Refused on every attention backend unless the run sets ``allow_cross_document_linear_attention``."""

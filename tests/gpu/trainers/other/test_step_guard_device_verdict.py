@@ -37,7 +37,7 @@ def _warm_up(me: Guarded) -> None:
     for _ in range(2):
         _step_and_pass(me, 0.5)
     torch.cuda.synchronize()
-    me._read_device_verdict()
+    me._settle_device_verdict()
 
 
 def _weights(me: Guarded) -> list[torch.Tensor]:
@@ -50,7 +50,7 @@ def _read_behind_a_busy_stream(me: Guarded) -> list[torch.Tensor]:
     torch.cuda._sleep(BUSY_CYCLES)
     _step_and_pass(me, float("nan"))
     assert not torch.cuda.current_stream().query(), "premise: the NaN step's copy is still queued at the read"
-    me._read_device_verdict()
+    me._settle_device_verdict()
     return weights
 
 
@@ -88,7 +88,7 @@ def check_device_path_adds_no_host_sync():
 
         assert me._verdict_norm.is_pinned(), "the verdict buffer is pageable: its non-blocking copy stalls the host"
         assert me._unread_verdict is not None, f"premise ({dtype}): the last step's verdict is left to a late read"
-        me._read_device_verdict()
+        me._settle_device_verdict()
         assert me._nonfinite_steps_skipped == 0 and me.state.global_step == 4, dtype
 
 

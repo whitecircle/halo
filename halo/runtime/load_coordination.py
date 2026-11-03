@@ -35,7 +35,7 @@ def resolve_load_concurrency(max_concurrent: int | None, local_world_size: int) 
 
 
 @contextmanager
-def sequential_load_within_node(max_concurrent: int | None = 1):
+def throttled_load_within_node(max_concurrent: int | None = 1):
     """Admit a node's local ranks in batches of ``max_concurrent`` (0 = all, ``None`` per
     :func:`resolve_load_concurrency`) to spare host RAM. Waits on the c10d store; a long load outlasts NCCL."""
     if not has_process_group():
@@ -68,7 +68,7 @@ def joined_node_load(what: str, max_concurrent: int | None):
     and a rank-local failure raises on every rank. COLLECTIVE-equivalent: every rank enters once per load."""
     failure: BaseException | None = None
     try:
-        with sequential_load_within_node(max_concurrent=max_concurrent):
+        with throttled_load_within_node(max_concurrent=max_concurrent):
             yield
     except BaseException as exc:  # a KeyboardInterrupt must reach the join too, or the peers wait it out
         failure = exc

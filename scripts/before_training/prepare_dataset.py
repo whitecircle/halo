@@ -5,7 +5,7 @@ works as first argument."""
 
 from halo.configs.parser import HaloArgumentParser
 from halo.data.preprocessed.metadata import PreprocessingConfig
-from halo.data.preprocessed.publishing import PrepareDatasetArguments, bake_num_proc, run_dataset_preparation
+from halo.data.preprocessed.prepare_dataset_tool import PrepareDatasetArguments, bake_num_proc, run_dataset_preparation
 from halo.log import configure_cli_logging
 from halo.model_loading.tokenizer_setup import load_chat_template
 from scripts.cli_arguments import add_trust_remote_code_arg

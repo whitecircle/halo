@@ -15,7 +15,7 @@ from halo.distributed.fsdp import reshard_fsdp2_modules
 from halo.distributed.parallelism_config import ParallelismConfig
 from halo.model_loading.parallel.loader import load_distributed_model
 from halo.trainers.sft import DistributedSFTTrainer
-from tests.common.adapters import assert_adapters_moved, snapshot_adapters
+from tests.common.adapters import check_adapters_moved, snapshot_adapters
 from tests.common.datasets import create_sft_dataset
 from tests.common.distributed import max_abs_diff_across
 from tests.common.dp_layout import hsdp_checks
@@ -122,7 +122,7 @@ def run(ctx) -> dict:
         reshard_fsdp2_modules(model)
         checks["premise_lora_adapters_trained"] = bool(adapters_before)
         checks["premise_adapters_apart_before_the_wrap"] = drawn_apart > 0
-        moved, why = assert_adapters_moved(
+        moved, why = check_adapters_moved(
             adapters_before, snapshot_adapters(model, expert_lora=False), require_all=True
         )
         checks["every_adapter_moved"] = moved

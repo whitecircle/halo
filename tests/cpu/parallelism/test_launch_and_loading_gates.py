@@ -24,7 +24,7 @@ from transformers.models.qwen3_vl import Qwen3VLConfig
 from halo.configs.script_arguments import ModelLoadArguments
 from halo.distributed.mesh import MeshDim
 from halo.distributed.parallelism_config import ParallelismConfig
-from halo.distributed.parallelism_rules import reject_accelerate_launch
+from halo.distributed.parallelism_rules import reject_custom_parallelism_under_accelerate
 from halo.distributed.tensor_parallel.hf_plan import plan_shards_param
 from halo.kernels.lowp.spec import LowpSpec
 from halo.model_loading.dtype import resolve_load_dtype
@@ -86,12 +86,12 @@ def test_loader_gate_passes_under_torchrun_and_for_plain_dp():
 def test_trainer_gate_rejects_ep_under_any_accelerate_launch(launch_env):
     with patch.dict(os.environ, _env(launch_env), clear=True):
         with pytest.raises(ValueError, match="accelerate launch"):
-            reject_accelerate_launch(_pc(ep_size=2))
+            reject_custom_parallelism_under_accelerate(_pc(ep_size=2))
 
 
 def test_trainer_gate_passes_under_torchrun():
     with patch.dict(os.environ, _env({}), clear=True):
-        reject_accelerate_launch(_pc(ep_size=2))
+        reject_custom_parallelism_under_accelerate(_pc(ep_size=2))
 
 
 @pytest.mark.parametrize("launch_env", [_MULTI_GPU_ENV, _FSDP_ENV])
@@ -525,7 +525,9 @@ def test_the_cp_loader_cannot_install_an_unvalidated_attention_implementation():
     with (
         patch(f"{_CP_LOADING}.load_whole_model", fake_load_whole_model),
         patch(f"{_CP_LOADING}.UlyssesModel", lambda model, cp_config: model),
-        patch("halo.models.attention.selection.validate_attn_implementation", return_value="sdpa") as validator,
+        patch(
+            "halo.models.attention.selection.select_supported_attn_implementation", return_value="sdpa"
+        ) as validator,
     ):
         with pytest.raises(KeyError, match="config"):
             load_cp_model(

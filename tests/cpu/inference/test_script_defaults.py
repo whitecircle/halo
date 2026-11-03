@@ -26,7 +26,7 @@ from scripts.cli_arguments import add_dtype_arg, add_openai_endpoint_args
 from scripts.inference import inference_arguments
 from scripts.inference.inference_arguments import add_prompt_field_args
 from scripts.inference.playground import gradio_environment_playground
-from scripts.inference.reward_model.reward_model_arguments import build_generation_parser
+from scripts.inference.reward_model.reward_model_arguments import build_reward_model_parser
 from tests.common.ports import free_port
 from tests.common.repo import REPO_ROOT, load_script_module
 
@@ -67,7 +67,7 @@ def _argparse_default(source: str, flag: str):
 
 
 def _rm_args(*extra: str):
-    parser = build_generation_parser("test", temperature_default=0.0)
+    parser = build_reward_model_parser("test", temperature_default=0.0)
     return parser.parse_args(["--model", "gen", "--dataset", "p.jsonl", "--rm_model_id", "org/rm", *extra])
 
 
@@ -394,7 +394,7 @@ def test_every_dtype_flag_comes_from_the_shared_helper():
     ]
     assert not redeclared, f"dtype flags declared outside scripts/cli_arguments.py's add_dtype_arg: {redeclared}"
 
-    scorer = _declared_action(build_generation_parser("test", temperature_default=0.0), "--rm_dtype")
+    scorer = _declared_action(build_reward_model_parser("test", temperature_default=0.0), "--rm_dtype")
     shared = _declared_action(add_dtype_arg(argparse.ArgumentParser()), "--dtype")
     assert (scorer.default, scorer.choices) == (shared.default, shared.choices)
 
@@ -408,7 +408,7 @@ def test_the_prompt_row_fields_come_from_the_shared_helper():
     }
     scorer = {
         spelling
-        for action in build_generation_parser("test", temperature_default=0.0)._actions
+        for action in build_reward_model_parser("test", temperature_default=0.0)._actions
         for spelling in action.option_strings
     }
     assert shared and shared <= scorer, f"the scorers do not carry the shared row fields {sorted(shared - scorer)}"

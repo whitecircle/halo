@@ -110,7 +110,7 @@ class ToolCallAccountingMixin:
         """Bind the arguments, then spend one of the episode's calls. A refusal counts nothing; it runs before any
         await, so concurrent calls in one turn cannot both pass a one-call cap."""
         bound = tool.bind(arguments, for_async=for_async)
-        cap = self._tool_budget_exhausted(trajectory, tool.name)
+        cap = self._exhausted_tool_cap(trajectory, tool.name)
         if cap is not None:
             raise (ToolDisabled if cap == 0 else ToolBudgetExhausted)(tool.budget_exhausted_message())
         self._count_tool_call(trajectory, tool.name)
@@ -121,7 +121,7 @@ class ToolCallAccountingMixin:
         return trajectory.info.get(TOOL_CALL_COUNTS_KEY, {}).get(name, 0)
 
     @classmethod
-    def _tool_budget_exhausted(cls, trajectory: Trajectory, name: str) -> int | None:
+    def _exhausted_tool_cap(cls, trajectory: Trajectory, name: str) -> int | None:
         """The episode cap another call would exceed, or ``None`` while within budget."""
         cap = trajectory.info.get(EPISODE_TOOL_BUDGETS_KEY, {}).get(name)
         if cap is not None and cls._tool_calls_made(trajectory, name) >= cap:

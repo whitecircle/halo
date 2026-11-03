@@ -12,7 +12,7 @@ from halo.trainers.grpo.offline.reference import ReferenceMode
 from halo.trainers.parallelism.pipeline_rules import reject_pp_compute_metrics, reject_pp_peft
 
 
-def require_processing_class(processing_class):
+def require_tokenizer(processing_class):
     """The tokenizer behind ``processing_class`` (a VLM ``ProcessorMixin`` keeps its token ids on an inner one)."""
     if processing_class is None:
         raise ValueError(

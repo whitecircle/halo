@@ -11,7 +11,7 @@ from halo.data.collators.packing import (
     DataCollatorForCompletionOnlyLMWithPacking,
     DataCollatorWithFlatteningAndCompletionMask,
 )
-from halo.data.completion_spans import COLLATOR_SPAN_POLICY, PACKED_SPAN_POLICY, mask_batch_to_completion_spans
+from halo.data.completion_spans import PACKED_SPAN_POLICY, PADDED_SPAN_POLICY, mask_batch_to_completion_spans
 from halo.data.preprocessed import tokenization as tokenization_mod
 from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.preprocessed.tokenization import _completion_only_labels, tokenize_dataset
@@ -108,7 +108,7 @@ def test_every_route_masks_a_terminated_row_identically(input_ids):
 
     assert _packed_collator_labels(input_ids) == expected
     assert _flattened_collator_labels(input_ids) == expected
-    assert _bake(input_ids, COLLATOR_SPAN_POLICY) == expected
+    assert _bake(input_ids, PADDED_SPAN_POLICY) == expected
     assert _bake(input_ids, PACKED_SPAN_POLICY) == expected
 
 
@@ -128,7 +128,7 @@ def test_the_padded_route_still_drops_a_terminator_less_turn():
     padded = _padded_route_labels(UNTERMINATED_ROW)
 
     assert padded == [IGNORE] * len(UNTERMINATED_ROW), padded
-    assert _bake(UNTERMINATED_ROW, COLLATOR_SPAN_POLICY) == padded
+    assert _bake(UNTERMINATED_ROW, PADDED_SPAN_POLICY) == padded
     assert _bake(UNTERMINATED_ROW, None) == padded, "the bake's default stays the padded policy"
 
 
@@ -170,7 +170,7 @@ def test_the_bake_selects_the_policy_its_artifact_will_be_collated_under(
 
     tokenize_dataset(dataset, tokenizer, config, split_name=f"pack_{pack_sequences}")
 
-    expected = PACKED_SPAN_POLICY if pack_sequences else COLLATOR_SPAN_POLICY
+    expected = PACKED_SPAN_POLICY if pack_sequences else PADDED_SPAN_POLICY
     assert seen and all(policy == expected for policy in seen), f"baked under {seen}, expected {expected}"
 
 

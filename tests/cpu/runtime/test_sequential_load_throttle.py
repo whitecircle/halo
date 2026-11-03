@@ -1,4 +1,4 @@
-"""``sequential_load_within_node`` (``halo/runtime/load_coordination.py``): repeated uses of a tag stay isolated, or
+"""``throttled_load_within_node`` (``halo/runtime/load_coordination.py``): repeated uses of a tag stay isolated, or
 the second runs unthrottled into the CPU-RAM OOM."""
 
 import pytest
@@ -22,7 +22,7 @@ def fake_node(monkeypatch):
 
 def _run_call(monkeypatch, local_rank):
     monkeypatch.setattr(load_coordination, "get_local_rank", lambda: local_rank)
-    with load_coordination.sequential_load_within_node(max_concurrent=1):
+    with load_coordination.throttled_load_within_node(max_concurrent=1):
         pass
 
 
@@ -91,10 +91,10 @@ def test_under_counted_participants_raises_instead_of_hanging_the_node(fake_node
 
 def test_unthrottled_shapes_touch_no_store(fake_node, monkeypatch):
     monkeypatch.setattr(load_coordination, "get_local_rank", lambda: 0)
-    with load_coordination.sequential_load_within_node(max_concurrent=0):
+    with load_coordination.throttled_load_within_node(max_concurrent=0):
         pass
     monkeypatch.setattr(load_coordination, "get_local_world_size", lambda: 1)
-    with load_coordination.sequential_load_within_node(max_concurrent=1):
+    with load_coordination.throttled_load_within_node(max_concurrent=1):
         pass
     assert fake_node.set_keys == [] and fake_node.kv == {}
 

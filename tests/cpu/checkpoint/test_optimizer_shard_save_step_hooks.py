@@ -43,7 +43,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
         self.sweeps: list[int] = []
         self._register_grad_sync_step_hooks()
 
-    def _sync_deferred_expert_grads(self) -> None:
+    def _run_deferred_grad_sweep(self) -> None:
         self.sweeps.append(self.state.global_step)
         if not claim_optimizer_step(self, "_deferred_sweep_last_step"):
             raise RuntimeError(f"the deferred sweep ran twice at global_step={self.state.global_step}")
@@ -51,7 +51,7 @@ class _Trainer(DistributedTrainerMixin, BaseTrainerSave):
     def train_step(self) -> None:
         for param in self.model.parameters():
             param.grad = torch.ones_like(param)
-        self._sync_deferred_expert_grads()
+        self._run_deferred_grad_sweep()
         self.optimizer.step()
         self.optimizer.zero_grad(set_to_none=True)
         self.state.global_step += 1

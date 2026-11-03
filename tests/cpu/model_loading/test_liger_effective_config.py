@@ -23,7 +23,7 @@ from halo.model_loading.liger.cross_entropy import _TORCH_CROSS_ENTROPY, liger_c
 from halo.model_loading.liger.dispatch import finalize_liger_after_direct_load
 from halo.model_loading.liger.family_specs import LIGER_FAMILY_SPECS
 from halo.models.attention.gpt_oss_sinks import RESOLVED_SINKS_RESET_ATTR, SinksPolicy
-from halo.models.attention.selection import validate_attn_implementation
+from halo.models.attention.selection import select_supported_attn_implementation
 from halo.models.config_access import TOOLKIT_STAMP_PREFIX, config_model_types, config_sources, get_config_field
 from halo.models.moe.family_specs import find_moe_family_spec_for_config
 from tests.common.liger_appliers import liger_applier
@@ -437,7 +437,7 @@ def test_an_export_carries_no_run_scoped_halo_keys(monkeypatch, tmp_path, family
     for model_type in config_model_types(config):
         monkeypatch.setitem(MODEL_TYPE_TO_APPLY_LIGER_FN, model_type, applier)
         monkeypatch.setitem(dispatch._TOOLKIT_LIGER_APPLIERS, model_type, applier)
-    validate_attn_implementation(config, "eager", SinksPolicy.NEUTRALIZED)
+    select_supported_attn_implementation(config, "eager", SinksPolicy.NEUTRALIZED)
     # ``use_grouped_gemm``'s default sets ``needs_ep_layers``, so a GPT-OSS run's experts are the EP layer's.
     applied = dispatch.apply_liger_kernel(
         config, {"fused_linear_cross_entropy": True}, needs_ep_layers=True, cp_size=2

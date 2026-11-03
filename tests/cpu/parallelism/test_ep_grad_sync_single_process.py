@@ -10,7 +10,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from halo.distributed.expert_parallel.families.lfm2 import EPLfm2MoELayer
-from halo.distributed.expert_parallel.moe_layer.grad_sync import build_router_grad_hook, has_grad_sync_peers
+from halo.distributed.expert_parallel.moe_layer.grad_sync import build_dp_average_grad_hook, has_grad_sync_peers
 from tests.common.parallelism import single_process_ep_config
 
 E, H, M, K = 4, 8, 16, 2  # experts, hidden, intermediate, top_k
@@ -28,7 +28,7 @@ def test_router_hook_noop_without_process_group():
 
     param = _param_with_grad()
     before = param.grad.clone()
-    build_router_grad_hook(ep_config)(param)  # A live collective: ValueError from all_reduce(group=None).
+    build_dp_average_grad_hook(ep_config)(param)  # A live collective: ValueError from all_reduce(group=None).
     assert torch.equal(param.grad, before), "single-process router hook must leave the grad untouched"
 
 

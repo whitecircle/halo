@@ -57,7 +57,7 @@ class EffortProfilesMixin:
     def thinking_budget_enforced(self, effort: str) -> bool:
         return self.reasoning_effort_profiles.get(effort, {}).get("enforce_thinking_cap", True)
 
-    def reset_effort_level(self, context: dict[str, Any] | None) -> str | None:
+    def effort_level_at_reset(self, context: dict[str, Any] | None) -> str | None:
         """The level when concrete at reset, else ``None``: a ``random`` draw resolves once, actor-side, later."""
         level = (context or {}).get("reasoning_effort") or self.reasoning_effort
         return level if level in VALID_REASONING_EFFORTS else None
@@ -101,7 +101,7 @@ class EffortProfilesMixin:
 
     def _bind_effort_profile(self, trajectory: Trajectory, context: dict[str, Any] | None) -> None:
         """Empty where the level is undetermined at reset, so the hook still runs and can state the class caps."""
-        level = self.reset_effort_level(context)
+        level = self.effort_level_at_reset(context)
         profile = self.reasoning_effort_profiles.get(level, {}) if level is not None else {}
         self._apply_effort_profile(trajectory, profile)
 

@@ -15,7 +15,7 @@ from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from halo.data.preprocessed.preparation import shard_dataset
 from halo.data.preprocessed.shard_index import SHARD_INDEX_FILE, write_stamped_sidecar
 from halo.data.sources.sharded_dataset import ShardedDatasetLoader
-from halo.data.vlm_detection import dataset_declares_images, is_vlm_run
+from halo.data.vlm_detection import dataset_declares_images_across_ranks, is_vlm_run_across_ranks
 from halo.runtime import consensus
 from halo.runtime.consensus import RankConsensus
 from tests.common.repo import load_script_module
@@ -54,7 +54,7 @@ def test_a_rank_whose_slice_shows_no_images_takes_the_peers_vlm_verdict(monkeypa
     the VLM one."""
     world = _FakeWorld(monkeypatch, peer=True)
 
-    assert is_vlm_run(_args(), "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
+    assert is_vlm_run_across_ranks(_args(), "Qwen/Qwen3.5-9B", _dataset([TEXT_TURNS]), config=VLM_CONFIG)
     assert world.calls == 1
 
 
@@ -63,7 +63,9 @@ def test_the_agreed_verdict_never_promotes_a_text_only_checkpoint(monkeypatch):
     images."""
     world = _FakeWorld(monkeypatch, peer=False)
 
-    assert not is_vlm_run(_args(images_field="images"), "Qwen/Qwen3-8B", _dataset([IMAGE_TURNS]), config=TEXT_CONFIG)
+    assert not is_vlm_run_across_ranks(
+        _args(images_field="images"), "Qwen/Qwen3-8B", _dataset([IMAGE_TURNS]), config=TEXT_CONFIG
+    )
     assert world.calls == 1
 
 
@@ -79,11 +81,11 @@ def test_the_agreed_verdict_never_promotes_a_text_only_checkpoint(monkeypatch):
     ],
 )
 def test_the_dispatch_costs_exactly_one_collective_on_every_branch(monkeypatch, args, model, config, dataset):
-    """``is_vlm_run`` short-circuits on a text config and on ``images_field``; a rank taking another branch would be
-    one collective behind."""
+    """``is_vlm_run_across_ranks`` short-circuits on a text config and on ``images_field``; a rank taking another
+    branch would be one collective behind."""
     world = _FakeWorld(monkeypatch, peer=False)
 
-    is_vlm_run(args, model, dataset, config=config)
+    is_vlm_run_across_ranks(args, model, dataset, config=config)
 
     assert world.calls == 1, f"expected exactly one agreement collective, got {world.calls}"
 
@@ -92,7 +94,7 @@ def test_the_image_column_guard_probe_is_agreed_too(monkeypatch):
     """Read directly by KTO's embedded-image guard, whose raise sits in front of the coordinated column renames."""
     world = _FakeWorld(monkeypatch, peer=True)
 
-    assert dataset_declares_images(_dataset([TEXT_TURNS]), "prompt")
+    assert dataset_declares_images_across_ranks(_dataset([TEXT_TURNS]), "prompt")
     assert world.calls == 1
 
 

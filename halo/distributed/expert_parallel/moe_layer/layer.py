@@ -73,7 +73,7 @@ class EPMoELayerBase(
     def __init__(self, original_layer: nn.Module, ep_config: EPConfig, weights_already_sharded: bool = False):
         """Wrap ``original_layer``'s MoE compute. Every family runs this order and overrides a step's hook, never the
         sequence. ``weights_already_sharded``: the lazy loader already sliced the experts to this rank's range."""
-        router = self._find_gate_or_router(original_layer)
+        router = self._declared_router(original_layer)
         experts = self._find_experts_container(original_layer)
         self._init_ep_state(ep_config, self._detect_hidden_dim(router, experts))
         if router is not None:
@@ -163,7 +163,7 @@ class EPMoELayerBase(
         self._use_grouped_mm = ep_config.grouped_gemm_enabled
 
         # Latched on the first forward: at init the eager loader may still hold this layer on CPU.
-        self._activation_warmed = False
+        self._expert_kernels_warmed = False
 
         # Not cacheable once experts are FSDP2-managed: the unsharded param's version counter is pinned,
         # so the per-step quant cache would serve step-0 weights forever.
@@ -315,7 +315,7 @@ class EPMoELayerBase(
         inside it, the strided ETP all-reduce couples DeepEP dispatch groups and times out their barrier."""
         # Before the dispatch, not inside the span: a first-call trace between dispatch and combine
         # stalls every peer in DeepEP's barrier.
-        self._warm_activation_graphs(flat.device, input_dtype, flat.shape[-1], experts.shape[1])
+        self._warm_expert_kernels(flat.device, input_dtype, flat.shape[-1], experts.shape[1])
 
         if self._capture_routing:
             # Capture the global expert ids before dispatch localizes them; int16 (num_experts < 32768).

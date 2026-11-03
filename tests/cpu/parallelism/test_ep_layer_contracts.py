@@ -275,14 +275,14 @@ def test_router_probe_reads_the_declared_attribute_not_a_name_ladder():
     forward reads."""
     both = SimpleNamespace(gate=nn.Linear(2, 2), router=nn.Linear(2, 2))
 
-    assert EPGptOssMoELayer._find_gate_or_router(both) is both.router
-    assert EPMoELayerBase._find_gate_or_router(both) is both.gate, "the default declaration is 'gate'"
+    assert EPGptOssMoELayer._declared_router(both) is both.router
+    assert EPMoELayerBase._declared_router(both) is both.gate, "the default declaration is 'gate'"
 
 
 def test_router_probe_fails_loud_and_names_the_declaration():
     """A renamed upstream router must say which declaration went stale."""
     with pytest.raises(AttributeError, match="_ROUTER_ATTR='router'"):
-        EPGptOssMoELayer._find_gate_or_router(SimpleNamespace(gate=nn.Linear(2, 2)))
+        EPGptOssMoELayer._declared_router(SimpleNamespace(gate=nn.Linear(2, 2)))
 
 
 def test_top_k_probe_reads_the_declared_router_not_a_name_ladder():

@@ -13,9 +13,9 @@ from PIL.Image import DecompressionBombError
 from transformers import AutoConfig, PreTrainedTokenizer
 
 from halo.data.completion_spans import (
-    COLLATOR_SPAN_POLICY,
     PACKED_SPAN_POLICY,
-    build_completion_only_labels,
+    PADDED_SPAN_POLICY,
+    build_training_labels,
     mask_batch_to_completion_spans,
 )
 from halo.data.conversation import resolve_json_value
@@ -27,7 +27,7 @@ from halo.data.preprocessed.metadata import PreprocessingConfig
 from halo.data.turn_markers import resolve_eos_token_ids, tokenize_response_template
 from halo.data.vlm_render import VLM_OUTPUT_FEATURES, render_vlm_text, resolve_image_token_ids, run_vlm_processor
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
-from halo.model_loading.tokenizer_backend import resolve_processor_backend, resolve_tokenizer_backend
+from halo.model_loading.tokenizer_backend import install_processor_backend, resolve_tokenizer_backend
 from halo.model_loading.tokenizer_setup import resolve_tokenizer
 
 logger = logging.getLogger(__name__)
@@ -166,7 +166,7 @@ def _bake_labels(
         return tokenized
     marker = config.assistant_message_template
     response_token_ids = tokenize_response_template(marker, tokenizer)
-    span_policy = PACKED_SPAN_POLICY if config.pack_sequences else COLLATOR_SPAN_POLICY
+    span_policy = PACKED_SPAN_POLICY if config.pack_sequences else PADDED_SPAN_POLICY
     return coordinated_map(
         tokenized,
         lambda x: {
@@ -267,7 +267,7 @@ def _vlm_labels(
             eos_token_ids=eos_token_ids,
         )
     # The runtime builder, given the row's all-ones mask so its pad-value fallback cannot erase a real EOS at pad==eos.
-    return build_completion_only_labels(
+    return build_training_labels(
         torch.tensor(input_ids, dtype=torch.long),
         tokenizer,
         None,
@@ -354,7 +354,7 @@ def tokenize_vlm_dataset(
         )
     logger.info(f"Tokenizing VLM {split_name} split ({len(dataset)} examples)...")
 
-    processor = resolve_processor_backend(processor, config.tokenizer_backend)
+    processor = install_processor_backend(processor, config.tokenizer_backend)
     tokenizer = resolve_tokenizer(processor)
     if config.train_on_completions_only and eos_token_ids is None:
         eos_token_ids = resolve_label_eos_token_ids(config, tokenizer)

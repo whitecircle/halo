@@ -6,7 +6,7 @@ Self-distill: starts after the marker, runs to the first terminator anywhere, fa
 import pytest
 import torch
 
-from halo.data.completion_spans import COLLATOR_SPAN_POLICY, build_completion_only_labels, resolve_completion_spans
+from halo.data.completion_spans import PADDED_SPAN_POLICY, build_training_labels, resolve_completion_spans
 
 EOS = 1
 M1, M2 = 10, 11
@@ -115,7 +115,7 @@ class _MarkerTokenizer:
 def test_build_completion_only_labels_matches_reference(row):
     """Fails if the self-distill policy drifts toward the collator policy."""
     input_ids = torch.tensor([row], dtype=torch.long)
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         input_ids,
         _MarkerTokenizer(),
         response_prompt_template="<marker>",
@@ -138,7 +138,7 @@ def test_padded_terminator_less_span_never_trains_padding(padding_side):
     else:
         row, mask = pads + real, [0] * pad_len + [1] * len(real)
 
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         torch.tensor([row], dtype=torch.long),
         _MarkerTokenizer(),
         response_prompt_template="<marker>",
@@ -157,7 +157,7 @@ def test_padded_terminated_span_is_unchanged_by_the_pad_guard():
     real = [U, M1, M2, A, A, EOS]
     row = real + [_MarkerTokenizer.pad_token_id] * 4
     mask = [1] * len(real) + [0] * 4
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         torch.tensor([row], dtype=torch.long),
         _MarkerTokenizer(),
         response_prompt_template="<marker>",
@@ -168,12 +168,12 @@ def test_padded_terminated_span_is_unchanged_by_the_pad_guard():
     assert labels.tolist() == [IGNORE, IGNORE, IGNORE, A, A, EOS] + [IGNORE] * 4, labels.tolist()
 
 
-@pytest.mark.parametrize("span_policy", [None, COLLATOR_SPAN_POLICY], ids=["self_distill", "collator"])
+@pytest.mark.parametrize("span_policy", [None, PADDED_SPAN_POLICY], ids=["self_distill", "collator"])
 def test_extra_ignore_ids_inside_a_span_stay_masked(span_policy):
     """The span refill copies from ``input_ids``, so extras masked before it come back as targets. The offline bake
     applies them after the refill, and both paths must agree."""
     row = [U, M1, M2, A, IMG, A, EOS]
-    labels = build_completion_only_labels(
+    labels = build_training_labels(
         torch.tensor([row], dtype=torch.long),
         _MarkerTokenizer(),
         response_prompt_template="<marker>",

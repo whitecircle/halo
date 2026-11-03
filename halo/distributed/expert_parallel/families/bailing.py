@@ -18,7 +18,7 @@ class EPBailingMoELayer(EPSharedExpertsMoELayerBase):
     FAMILY = BAILING
 
     SUPPORTS_BIAS_BALANCING = True
-    # Selection happens inside the gate (the forward never consults ``_balancing_bias``), so the
+    # Selection happens inside the gate (the forward never consults ``_transient_balancing_bias``), so the
     # base's transient fallback would register a buffer nothing reads.
     _supports_transient_balancing_bias = False
     # The EP layer returns a bare tensor where the V3 block returns ``(hidden, router_logits)``, so

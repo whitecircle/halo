@@ -19,7 +19,7 @@ from datasets import DatasetDict
 
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
 from halo.checkpoint.tools import adapter_merge, deepseek_v4_dequant, vocab_patch
-from halo.data.preprocessed import publishing, tokenization
+from halo.data.preprocessed import prepare_dataset_tool, tokenization
 from scripts.cli_arguments import (
     HUB_SOURCE_HELP,
     add_device_map_arg,
@@ -36,15 +36,17 @@ _TOOLS = (
     ("scripts/after_training/merge_peft_adapters.py", True),
     ("scripts/after_training/reattach_vision_tower.py", False),
     ("scripts/before_training/convert_deepseek_v4_bf16.py", False),
+    ("scripts/before_training/deduplicate_dataset.py", False),
     ("scripts/before_training/patch_vocab.py", False),
     ("scripts/before_training/prepare_dataset.py", False),
     ("scripts/inference/reward_model/score.py", False),
     ("scripts/inference/reward_model/rejection_sample.py", False),
-    ("scripts/inference/deduplicate_dataset.py", False),
 )
 
 # The helper's default is ``revision=True``: a tool must thread one until it is listed here.
-_NO_REVISION_TOOLS = frozenset({"scripts/before_training/patch_vocab.py"})
+_NO_REVISION_TOOLS = frozenset(
+    {"scripts/before_training/deduplicate_dataset.py", "scripts/before_training/patch_vocab.py"}
+)
 
 
 def _empty_source_dir(tmp_path: Path) -> str:
@@ -339,9 +341,9 @@ def test_prepare_dataset_threads_the_flag_into_the_label_bake_config_read(tmp_pa
         tokenization.resolve_label_eos_token_ids(config, tokenizer_or_processor)
 
     monkeypatch.setattr(tokenization.AutoConfig, "from_pretrained", _record)
-    monkeypatch.setattr(publishing, "load_tokenizer", lambda args: object())
-    monkeypatch.setattr(publishing, "load_input_dataset", lambda args: DatasetDict())
-    monkeypatch.setattr(publishing, "preprocess_dataset", _bake)
+    monkeypatch.setattr(prepare_dataset_tool, "load_tokenizer", lambda args: object())
+    monkeypatch.setattr(prepare_dataset_tool, "load_input_dataset", lambda args: DatasetDict())
+    monkeypatch.setattr(prepare_dataset_tool, "preprocess_dataset", _bake)
     argv = ["--input", "org/raw", "--output", str(tmp_path / "out"), "--model_name_or_path", "org/model"]
     argv += ["--assistant_message_template", "<|im_start|>assistant\n"]
 

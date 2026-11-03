@@ -306,7 +306,7 @@ reshape, after the whole checkpoint has been pulled and placed on every rank.
 | `fsdp_shard_ep1_experts: false` | rejected — the TP path shards `ep1` experts unconditionally | same |
 | `use_hsdp` | rejected — TP builds its own `(dp, tp)` mesh | `_reject_hsdp` |
 | `init_from_scratch` | rejected — no sharded random init | `model_loading/parallel/load_rules.py` |
-| `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `reject_accelerate_launch` |
+| `accelerate launch` | rejected — TP requires `torchrun` | `reject_unsupported_run`, `reject_custom_parallelism_under_accelerate` |
 | `ref_model` (explicit) | warned — the reference is never parallelized, so every rank holds a whole dense replica; its log-probs match the policy's up to kernel numerics | `warn_unparallelized_reference` |
 | `load_best_model_at_end` | supported under pure TP — the reload distributes each checkpoint tensor into the live placements; rejected as a full fine-tune under TP+DP and under a MoE carrying EP layers | `reject_unreloadable_best_model` |
 | `use_liger_kernel` | supported; `cross_entropy` and `fused_linear_cross_entropy` are forced off (warned when explicitly enabled) | `halo/model_loading/liger/dispatch.py` |

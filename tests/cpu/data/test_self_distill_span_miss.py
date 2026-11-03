@@ -9,7 +9,7 @@ import pytest
 import torch
 
 from halo.data.collators.vlm import VLMDataCollator
-from halo.data.completion_spans import build_completion_only_labels, resolve_completion_spans
+from halo.data.completion_spans import build_training_labels, resolve_completion_spans
 from halo.kernels.logprobs import LABEL_IGNORE_INDEX
 
 MARKER_IDS = [7, 7]
@@ -35,7 +35,7 @@ class _FakeTokenizer:
 
 def _labels(row: list[int], span_policy) -> torch.Tensor:
     input_ids = torch.tensor([row], dtype=torch.long)
-    return build_completion_only_labels(
+    return build_training_labels(
         input_ids,
         _FakeTokenizer(),
         RESPONSE_TEMPLATE,

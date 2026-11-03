@@ -11,7 +11,7 @@ import pytest
 import torch.distributed as dist
 from torch import nn
 
-from halo.model_loading.parallel.freeze_patterns import freeze_modules_by_patterns, unfreeze_modules_by_patterns
+from halo.model_loading.parallel.freeze_patterns import freeze_parameters_by_patterns, unfreeze_modules_by_patterns
 from tests.common.gloo import run_gloo_ranks
 
 WORLD_SIZE = 2
@@ -32,7 +32,7 @@ def _worker(rank: int, tmp_dir: str, which: str, pattern: str) -> None:
     reached_next_collective = False
     try:
         if which == "freeze":
-            freeze_modules_by_patterns(model, [pattern])
+            freeze_parameters_by_patterns(model, [pattern])
         else:
             unfreeze_modules_by_patterns(model, [pattern])
         # The rank that did not raise arrives here alone under a stage-local raise.
@@ -98,11 +98,11 @@ def test_a_pattern_every_stage_carries_raises_on_nobody(tmp_path):
 def test_the_local_verdict_is_unchanged_by_the_routing():
     """``ValueError`` is the type every caller and config gate matches on."""
     model = _Stage(0)
-    freeze_modules_by_patterns(model, ["block_0.*"])
+    freeze_parameters_by_patterns(model, ["block_0.*"])
     assert not any(p.requires_grad for p in model.parameters())
 
     with pytest.raises(ValueError, match="matched no parameter"):
-        freeze_modules_by_patterns(_Stage(0), ["block_9.*"])
+        freeze_parameters_by_patterns(_Stage(0), ["block_9.*"])
 
 
 if __name__ == "__main__":

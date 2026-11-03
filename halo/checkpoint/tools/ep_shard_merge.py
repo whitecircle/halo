@@ -12,7 +12,7 @@ import torch
 from safetensors import safe_open
 
 from halo.checkpoint.atomic import link_or_copy_file
-from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_ep_shard
+from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE, EP_SHARD_KEY_RE, ep_shard_filename, is_numbered_shard_file
 from halo.checkpoint.reading import detect_model_type, header_nbytes, is_ep_sharded_checkpoint, read_checkpoint_index
 from halo.checkpoint.tools.offline_export import (
     copy_checkpoint_aux_files,
@@ -62,7 +62,7 @@ def group_expert_weights(merged_weights: dict) -> tuple[dict, dict]:
     return dict(expert_groups), non_expert
 
 
-def resolve_merge_transform(
+def resolve_merge_family_spec(
     model_type: str, has_expert_groups: bool, had_expert_shards: bool, total_tensors: int, verbose: bool
 ) -> MoEFamilySpec | None:
     """The family spec whose ``expert_layout`` this checkpoint merges into, or ``None`` for pass-through; raises rather
@@ -117,7 +117,7 @@ def _ep_save_layout(input_dir: str, verbose: bool) -> tuple[str, int, list[str]]
         logger.info(f"  Format: {metadata.get('format', 'unknown')}")
 
     # EP shards only, since a bare glob would pull in adapter_model.safetensors or a stale model.safetensors.
-    shard_files = sorted(f for f in os.listdir(input_dir) if is_ep_shard(f))
+    shard_files = sorted(f for f in os.listdir(input_dir) if is_numbered_shard_file(f))
     if not shard_files:
         raise FileNotFoundError(f"No EP shards ({ep_shard_filename(0, ep_size)} and siblings) found in {input_dir}")
     if verbose:
@@ -255,7 +255,7 @@ def merge_ep_shards(
         shards = _open_rank_shards(stack, input_dir, shard_files, ep_size, verbose)
         logical = shards.logical_keys()
         expert_groups, non_expert = group_expert_weights(logical)
-        spec = resolve_merge_transform(
+        spec = resolve_merge_family_spec(
             model_type, bool(expert_groups), bool(shards.shard_groups), len(logical), verbose
         )
 
