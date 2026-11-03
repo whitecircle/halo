@@ -10,6 +10,12 @@ from datasets import Dataset
 from halo.entrypoints import generic_env_eval
 
 
+class _StopBuild(Exception):
+    @classmethod
+    def stop(cls):
+        raise cls
+
+
 def _args(dataset: str, **flags) -> argparse.Namespace:
     defaults = {
         "dataset": dataset,
@@ -54,6 +60,20 @@ def test_the_default_answer_and_id_columns_may_be_absent(saved):
     assert [example["id"] for example in examples] == [None, None]
     renamed = generic_env_eval.build_column_examples(_args(saved, answer_field="gold", id_field="qid"))
     assert [(example["context"]["answer"], example["id"]) for example in renamed] == [("a", "p1"), ("b", "p2")]
+
+
+def test_the_generic_eval_refuses_a_turn_cap_in_env_kwargs(monkeypatch):
+    """``--env_kwargs`` is laid over the flags, so it would silently beat ``--max_turns``."""
+    built = []
+    monkeypatch.setattr(generic_env_eval, "build_environment", lambda *args: built.append(args) or _StopBuild.stop())
+    args = argparse.Namespace(training_config=None, env_type="exam_qa", max_turns=None, env_kwargs='{"max_turns": 3}')
+    with pytest.raises(SystemExit, match="--max_turns, not --env_kwargs"):
+        generic_env_eval.run_generic_env_eval(args)
+    assert not built
+    args.env_kwargs = '{"open_book": true}'
+    with pytest.raises(_StopBuild):
+        generic_env_eval.run_generic_env_eval(args)
+    assert built == [("exam_qa", {"open_book": True})]
 
 
 if __name__ == "__main__":

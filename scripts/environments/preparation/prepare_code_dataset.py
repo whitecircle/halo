@@ -53,7 +53,7 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         "--min_rating",
         type=int,
         default=None,
-        help="Drop problems below this rating, and unrated ones with them. No-op on a dataset with no "
+        help="Drop problems below this rating, and unrated ones with them. Refused on a dataset with no "
         "'rating' column (deepcoder).",
     )
     p.add_argument("--max_rating", type=int, default=None, help="Drop problems above this rating (see --min_rating).")
@@ -74,7 +74,7 @@ def _add_filter_args(p: argparse.ArgumentParser) -> None:
         action="store_true",
         help="Keep problems whose only tests are the statement's examples (a codeforces row whose official tests "
         "are the statement's samples and that no --tests_table suite covers), which a program printing a "
-        "constant passes for many. Default: dropped and counted per split.",
+        "constant passes for many. Default: dropped and counted per split. Refused on an adapter with no such rows.",
     )
 
 
@@ -107,7 +107,8 @@ def _add_publish_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--config_name",
         default=None,
-        help="Hub config to push as (one repo can hold one config per rating band); default config otherwise.",
+        help="Hub config to push as (one repo can hold one config per rating band); default config otherwise. Needs "
+        "--push_to_hub, and refused with --push_bands.",
     )
     p.add_argument(
         "--push_bands",

@@ -18,7 +18,7 @@ environment_kwargs:
 
 | Knob | Default | Effect |
 |---|---|---|
-| `max_tool_calls_per_turn` | `5` | Calls executed per turn; extras are dropped from the stored message |
+| `max_tool_calls_per_turn` | `5` | Calls executed per turn, at least 1; extras are dropped from the stored message |
 | `no_tool_use_penalty` | `0` | Charged once on an episode that made no tool call |
 | `turn_overflow_penalty` | `0` | Charged once on a truncated episode |
 | `length_cutoff_penalty` | `0` | Charged per recovered unproductive turn (engine-cut, or neither a tool call nor visible content). The turn that exhausts the recovery cap, or lands on the last turn, pays `turn_overflow_penalty` instead |

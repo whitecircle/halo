@@ -418,7 +418,7 @@ Values that differ from it or are load-bearing at 397B:
 | `fp32_experts` / `fp32_non_ep_params` | **omit** | the 35B configs set them; fp32 masters would take the expert term to 16 B/param and OOM every cell |
 | `text_only_model` | `true` | loads `Qwen3_5MoeForCausalLM`, which drops the vision tower and MTP tail from the build and the export ([Qwen3.5 → EP layer](../models/qwen3_5.md#ep-layer)). `aux_loss` trains on either class |
 | `moe_balancing` | `aux_loss` | trains and exports by construction. Strict `bias_update` raises: Qwen3.5 has no checkpoint slot for a routing bias ([Callbacks](../training-methods/callbacks.md#moe-balancing-modes)) |
-| `router_balancing_rate` | well below `1e-3`, only under `bias_update_transient` (the 122B recipe's mode) | inert under `aux_loss`. The sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
+| `router_balancing_rate` | well below `1e-3`, only under `bias_update_transient` (the 122B recipe's mode) | refused under an explicit `aux_loss` or `none`. The sign step lands on softmax probabilities, whose uniform scale is `1/512` here — the default γ is ~50% of it |
 | `fp32_router` | `true` | +1 GB per rank (the 0.13 B router weights at 16 B/param, not in the matrix columns), and 512 experts at top-10 is where bf16 routing logits start to tie |
 | `fp32_grad_reduce` | `true` | bf16 sums lose precision at 16–64 ranks; no storage cost outside PP, where it doubles the held stage gradient |
 | `use_grouped_gemm` / `use_liger_kernel` | `true` / `true` (the defaults) | the fused `[512, 2048, 4096]` layout is what `grouped_mm` wants on SM100 |

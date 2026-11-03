@@ -37,8 +37,8 @@ HOLDOUT_SEED = 42
 
 
 def rating_in_bounds(row: dict, min_rating: int | None, max_rating: int | None) -> bool:
-    """A dataset with no ``rating`` column (deepcoder) ignores the bounds. Where it exists an unrated row is dropped,
-    so a rating-filtered pool carries no problems of unknown difficulty."""
+    """A row with no ``rating`` key has nothing to bound. Where it exists an unrated row is dropped, so a
+    rating-filtered pool carries no problems of unknown difficulty."""
     if "rating" not in row:
         return True
     rating = row["rating"]
@@ -286,11 +286,30 @@ def _publish(prepared: DatasetDict, args: argparse.Namespace) -> None:
             logger.info("Pushed to hub: %s config=%s (private=%s)", args.push_to_hub, name, args.private)
 
 
-def prepare_code_pool(args: argparse.Namespace) -> None:
+def _reject_unread_flags(args: argparse.Namespace, adapter) -> None:
+    """Before the source downloads: each of these would run to the end and publish without it."""
     if not args.output_dir and not args.push_to_hub:
         raise SystemExit("Provide --output_dir and/or --push_to_hub.")
+    for flag, value in (("--config_name", args.config_name), ("--push_bands", args.push_bands)):
+        if value and not args.push_to_hub:
+            raise SystemExit(f"{flag} names how --push_to_hub publishes, and this run pushes nothing")
+    if args.push_bands and args.config_name:
+        raise SystemExit("--push_bands names its own configs, one per rating band, so --config_name would be dropped")
+    if args.include_examples_only and adapter.examples_only is None:
+        raise SystemExit(f"--include_examples_only on --adapter {args.adapter}: it marks no problem examples-only")
 
+
+def _reject_unusable_rating_bounds(args: argparse.Namespace, staged: dict[str, Dataset]) -> None:
+    """On the staged rows, since an adapter's ``normalize`` may be what derives the rating."""
+    if args.min_rating is None and args.max_rating is None:
+        return
+    if not any("rating" in split.column_names for split in staged.values()):
+        raise SystemExit(f"--min_rating and --max_rating filter a 'rating' column, which {args.dataset} does not have")
+
+
+def prepare_code_pool(args: argparse.Namespace) -> None:
     adapter = CODE_DATASET_ADAPTERS[args.adapter]
+    _reject_unread_flags(args, adapter)
     ds = load_dataset(args.dataset, args.config)
     logger.info("Loaded %s (%s): %s", args.dataset, args.config, {k: len(v) for k, v in ds.items()})
 
@@ -298,8 +317,10 @@ def prepare_code_pool(args: argparse.Namespace) -> None:
     # outlive an adapter change.
     disable_caching()
     num_proc = resolve_map_num_proc(args.num_proc)
+    staged = _stage_splits(ds, adapter, args, num_proc)
+    _reject_unusable_rating_bounds(args, staged)
     prepared = {}
-    for split, split_ds in _stage_splits(ds, adapter, args, num_proc).items():
+    for split, split_ds in staged.items():
         prepared[split] = _prepare_split(split, split_ds, adapter, args, num_proc)
         logger.info("  %s: %d -> %d kept", split, len(ds[split]), len(prepared[split]))
     _publish(_settle_train_and_test(prepared, args, num_proc), args)

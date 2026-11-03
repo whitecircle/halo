@@ -271,6 +271,7 @@ def run(ctx):
         max_steps=2,
         loss_type="ipo",
         use_margin_schedule=False,
+        initial_margin=SMPOConfig.initial_margin,
         target_margin=IPO_MARGIN,
         min_log_prob=None,
     )
@@ -297,7 +298,12 @@ def run(ctx):
 
     metrics_trainer = SMPOTrainer(
         model=build_dense_model(),
-        args=build_args(ctx.output_dir + "/metrics", max_steps=1, use_margin_schedule=False),
+        args=build_args(
+            ctx.output_dir + "/metrics",
+            max_steps=1,
+            use_margin_schedule=False,
+            initial_margin=SMPOConfig.initial_margin,
+        ),
         train_dataset=dataset,
         # One full eval batch per DP shard, no partial tail.
         eval_dataset=build_pref_dataset(TINY_QWEN3_CONFIG["vocab_size"], n_rows=2 * PAIRS_PER_RANK, seed=31),

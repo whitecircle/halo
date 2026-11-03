@@ -33,7 +33,7 @@ gradient_checkpointing: true
 output_dir: checkpoints/clf-qwen3.5-9b-mage
 ```
 
-`loss_type` picks `cross_entropy`, `focal` or `label_smoothing_ce`; every field's type and default, and which apply to single- or multi-label heads, is in [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
+`loss_type` picks `cross_entropy`, `focal` or `label_smoothing_ce`, and refuses the other losses' knobs; every field's type and default, and which apply to single- or multi-label heads, is in [ClassificationConfig](../reference/configuration-reference.md#classificationconfig).
 
 `class_weights` and `derive_class_weights` are mutually exclusive — setting both raises, on the CLI as well as in YAML. Every objective, the default cross-entropy included, is the trainer's own `ClassificationLoss` (`halo/trainers/reward/classification_loss.py`), evaluated in fp32; the head's built-in loss would run in the logits' bf16. A single-label head needs `num_labels >= 2` — one logit is transformers' regression convention — and is refused at construction otherwise. HF's own `label_smoothing_factor` is rejected at construction: the trainer builds its own loss and never reaches HF's `label_smoother`.
 

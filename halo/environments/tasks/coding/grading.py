@@ -11,7 +11,7 @@ from dataclasses import dataclass, field, fields, replace
 from math import isfinite
 from typing import Any, NamedTuple
 
-from halo.config_validation import require_bool
+from halo.config_validation import require_bool, require_int
 from halo.environments.sandbox.base import SANDBOX_DEFAULT_TIMEOUT, SandboxExecutor
 from halo.environments.sandbox.factory import build_sandbox
 from halo.environments.sandbox.languages import find_language
@@ -332,6 +332,7 @@ class GradingSpec:
             raise ValueError(
                 f"max_grading_seconds must be a finite number > 0 or None, got {self.max_grading_seconds}"
             )
+        require_int(type(self).__name__, ge=1, max_output_size=self.max_output_size)
         require_comparator(self.comparison)
         require_verdict_detail(self.verdict_detail)
 

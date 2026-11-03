@@ -51,7 +51,8 @@ class ParallelismArguments(ValidatedConfig):
         metadata={
             "help": "Keep EP router weights as FP32 masters with an FP32 routing matmul, except where FSDP2 wraps an "
             "ep_group_size == 1 router under fsdp_shard_ep1_experts and its BF16 param policy owns the compute dtype. "
-            "fp32_non_ep_params implies it; Gemma 4 ignores it with a warning. "
+            "fp32_non_ep_params implies it; Gemma 4 ignores it with a warning, and a run building no EP layers refuses "
+            "it. "
             "See agent-docs/parallelism/expert-parallelism.md#precision-control."
         },
     )
@@ -60,7 +61,8 @@ class ParallelismArguments(ValidatedConfig):
         metadata={
             "help": "Keep EP expert weights as FP32 masters; compute stays BF16 under autocast. Skipped with a "
             "warning at ep_group_size == 1 under fsdp_shard_ep1_experts, where FSDP2's BF16 param policy casts the "
-            "replicated experts anyway: set fsdp_shard_ep1_experts: false for FP32 experts there. "
+            "replicated experts anyway: set fsdp_shard_ep1_experts: false for FP32 experts there. A run building no "
+            "EP layers refuses it. "
             "See agent-docs/parallelism/expert-parallelism.md#precision-control."
         },
     )
@@ -138,8 +140,9 @@ class ParallelismArguments(ValidatedConfig):
     max_concurrent_loading: int | None = field(
         default=ParallelismConfig.max_concurrent_loading,
         metadata={
-            "help": "Most ranks per node loading the model at once; unset derives half the node width, capped at 4. "
-            "An explicit value is used verbatim: 1 loads sequentially on CPU-RAM-constrained hosts, 0 all at once. "
+            "help": "Most ranks per node loading the model, or reading and writing optimizer shards, at once; unset "
+            "derives half the node width, capped at 4. An explicit value is used verbatim: 1 goes one at a time on "
+            "CPU-RAM-constrained hosts, 0 all at once. "
             "See agent-docs/parallelism/multi-node.md#model-loading."
         },
     )
@@ -164,7 +167,8 @@ class ParallelismArguments(ValidatedConfig):
         default=ParallelismConfig.cp_size,
         metadata={
             "help": "Context-parallel (Ulysses) size: each sequence is split across this many ranks of one NVLink "
-            "domain. Not compatible with tensor parallelism or the padding-free collator. "
+            "domain. Not compatible with tensor parallelism, expert-tensor parallelism, pipeline parallelism or the "
+            "padding-free collator, and refused by a trainer that does not declare it. "
             "See agent-docs/parallelism/context-parallelism.md#requirements."
         },
     )
@@ -172,7 +176,8 @@ class ParallelismArguments(ValidatedConfig):
         default=ParallelismConfig.tp_size,
         metadata={
             "help": "Tensor-parallel size for attention, embeddings and lm_head (> 1 enables TP); it must divide "
-            "world_size, and FSDP2 data-parallelizes across the TP groups. Not compatible with context parallelism."
+            "the NVLink domain, and FSDP2 data-parallelizes across the TP groups. Not compatible with context, "
+            "expert-tensor or pipeline parallelism, or with any LoRA."
         },
     )
     expert_tensor_parallel_size: int = field(
@@ -269,8 +274,8 @@ class ParallelismArguments(ValidatedConfig):
         metadata={
             "help": "Hybrid sharded data parallel on the pure DP/CP path: shard within each NVLink domain and "
             "replicate across domains, so only one gradient all-reduce crosses RDMA per step. Trades a per-domain "
-            "parameter replica for inter-node bandwidth; rejected with EP, TP or Expert-TP, and a no-op on one "
-            "domain. See agent-docs/parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel."
+            "parameter replica for inter-node bandwidth; rejected with EP, TP, Expert-TP, PP or QLoRA, and a no-op "
+            "on one domain. See agent-docs/parallelism/data-parallelism.md#hsdp-hybrid-sharded-data-parallel."
         },
     )
     init_from_scratch: bool = field(
@@ -301,6 +306,8 @@ class ParallelismArguments(ValidatedConfig):
                 max_concurrent_loading=self.max_concurrent_loading,
             ),
         )
+        for layers in self.pipeline_split or ():
+            require_int(type(self).__name__, pipeline_split=layers)
 
 
 def _reject_lowp_outside_sft(lowp: LowpSpec) -> None:

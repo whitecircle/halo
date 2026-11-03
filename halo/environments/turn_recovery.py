@@ -1,6 +1,7 @@
 """Recovery from an unproductive turn: one the engine cut short, or one the model ended on nothing, nudged and
 retried within the episode's turn and recovery budgets."""
 
+from halo.config_validation import present, require_int
 from halo.environments.messages import Message, StepOutcome, Trajectory
 
 # The trajectory-info counters of recovered turns; a turn cut inside a tool call counts under both cut keys.
@@ -17,8 +18,7 @@ class TurnRecoveryMixin:
     EMPTY_TURN_NUDGE: str | None = None
 
     def _init_turn_recovery(self, max_length_cutoff_recoveries: int | None) -> None:
-        if max_length_cutoff_recoveries is not None and max_length_cutoff_recoveries < 0:
-            raise ValueError(f"max_length_cutoff_recoveries must be >= 0 or None, got {max_length_cutoff_recoveries}")
+        require_int(type(self).__name__, ge=0, **present(max_length_cutoff_recoveries=max_length_cutoff_recoveries))
         self.max_length_cutoff_recoveries = max_length_cutoff_recoveries
 
     def _recover_length_cutoff(

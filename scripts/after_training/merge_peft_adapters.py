@@ -7,7 +7,7 @@ config. ``--fp32_norms`` writes normalization leaves in fp32, the layout ``conve
 
 import argparse
 
-from halo.checkpoint.tools.adapter_merge import merge_peft_adapter
+from halo.checkpoint.tools.adapter_merge import DEFAULT_NUM_LABELS, merge_peft_adapter
 from halo.checkpoint.tools.offline_export import ADAPTER_TASKS
 from halo.log import configure_cli_logging
 from halo.model_loading.dtype import DTYPE_BY_NAME
@@ -62,8 +62,9 @@ Examples:
     parser.add_argument(
         "--num_labels",
         type=int,
-        default=1,
-        help="Number of labels for classification models (default: 1)",
+        default=None,
+        help=f"Number of labels of a --task classification head (default: {DEFAULT_NUM_LABELS}); refused under any "
+        "other task",
     )
     add_max_shard_size_arg(parser)
     add_trust_remote_code_arg(parser, default=None)
@@ -78,6 +79,8 @@ Examples:
         help="Suppress verbose output",
     )
     args = parser.parse_args()
+    if args.num_labels is not None and args.task != "classification":
+        parser.error(f"--num_labels sizes a classification head, and --task {args.task} loads none")
 
     merge_peft_adapter(
         adapter_dir=args.adapter_dir,
@@ -85,7 +88,7 @@ Examples:
         task=args.task,
         dtype=DTYPE_BY_NAME[args.dtype],
         device_map=args.device_map,
-        num_labels=args.num_labels,
+        num_labels=DEFAULT_NUM_LABELS if args.num_labels is None else args.num_labels,
         max_shard_size=args.max_shard_size,
         trust_remote_code=args.trust_remote_code,
         fp32_norms=args.fp32_norms,

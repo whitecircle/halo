@@ -22,6 +22,7 @@ from halo.models.attention.tree import (
     _on_device,
     _tree_recurrence,
     install_tree_attention,
+    resolve_tree_full_form,
     resolve_tree_plan_options,
 )
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
@@ -520,6 +521,22 @@ def test_tree_attention_refuses_what_it_cannot_run(tiny_family, attn, form, matc
     with pytest.raises(ValueError, match=match):
         install_tree_attention(model, form)
     assert all(module.ALL_ATTENTION_FUNCTIONS is registry for module, registry in registries.items())
+
+
+@pytest.mark.parametrize(
+    ("attn", "head_dim", "requested", "expected"),
+    [
+        ("flash_attention_4", 128, None, "split"),
+        ("flash_attention_4", 256, None, "gather"),
+        ("flash_attention_2", 128, None, "gather"),
+        ("flash_attention_4", 128, "gather", "gather"),
+        ("flash_attention_2", 128, "split", "split"),
+    ],
+    ids=["fa4", "fa4_head_dim_256", "fa2", "explicit_gather", "explicit_split_reaches_the_refusal"],
+)
+def test_an_unset_form_takes_split_only_where_its_gradient_exists(attn, head_dim, requested, expected):
+    config = tiny_family_model(TINY_MOE_FAMILIES["gpt_oss"], overrides={"head_dim": head_dim}).config
+    assert resolve_tree_full_form(config, attn, requested) == expected
 
 
 @pytest.mark.parametrize("family", ["gpt_oss", "qwen3_5_moe_text"])

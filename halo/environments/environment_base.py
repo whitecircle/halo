@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from halo.config_validation import present, require_bool
+from halo.config_validation import present, require_bool, require_int
 from halo.environments.episode_keys import (
     COMPLETED_KEY,
     CONTEXT_KEY,
@@ -82,6 +82,7 @@ class EnvironmentBase(ToolCallAccountingMixin, TurnRecoveryMixin, EffortProfiles
             raise ValueError(f"max_turns must be >= 1, got {max_turns}")
         self.max_turns = max_turns
         self._init_turn_recovery(max_length_cutoff_recoveries)
+        require_int(type(self).__name__, ge=0, why=" (0 = no cap)", max_observation_chars=max_observation_chars)
         self.max_observation_chars = max_observation_chars
         require_bool(type(self).__name__, carry_reasoning=carry_reasoning, **present(requires_answer=requires_answer))
         self.carry_reasoning = carry_reasoning

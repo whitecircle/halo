@@ -9,6 +9,7 @@ import pytest
 
 import halo.configs.grpo_environmental as grpo_environmental
 from halo.configs.grpo_environmental import AsyncRolloutConfig, EnvironmentConfig
+from halo.configs.grpo_offline import OfflineGRPOConfig
 from halo.configs.grpo_online import OnlineGRPOScriptArguments
 from halo.configs.parser import HaloArgumentParser
 from halo.configs.preference import SMPOConfig
@@ -92,13 +93,34 @@ def test_smpo_margin_schedule_equal():
 
 
 def test_smpo_margin_schedule_disabled_ok():
-    cfg = SMPOConfig(
-        use_margin_schedule=False,
-        initial_margin=0.5,
-        target_margin=0.3,
-        **_CPU_OK,
-    )
-    assert cfg.initial_margin == 0.5
+    cfg = SMPOConfig(use_margin_schedule=False, target_margin=0.3, **_CPU_OK)
+    assert cfg.target_margin == 0.3
+
+
+def test_smpo_refuses_an_initial_margin_with_no_schedule_to_read_it():
+    with pytest.raises(ValueError, match="use_margin_schedule off does not support.*initial_margin"):
+        SMPOConfig(use_margin_schedule=False, initial_margin=0.2, **_CPU_OK)
+    assert SMPOConfig(initial_margin=0.2, **_CPU_OK).initial_margin == 0.2
+
+
+def test_smpo_refuses_the_crossing_opt_in_without_a_multi_document_row():
+    with pytest.raises(ValueError, match="padding_free off does not support.*allow_cross_document_linear_attention"):
+        SMPOConfig(allow_cross_document_linear_attention=True, **_CPU_OK)
+    assert SMPOConfig(allow_cross_document_linear_attention=True, padding_free=True, **_CPU_OK).padding_free
+
+
+@pytest.mark.parametrize("knob", ["min_log_prob", "initial_min_log_prob"])
+@pytest.mark.parametrize("value", [0.0, 0.5])
+def test_offline_grpo_refuses_a_log_prob_floor_no_log_prob_sits_under(knob, value):
+    with pytest.raises(ValueError, match=rf"{knob} must be < 0 \(log probabilities are <= 0\)"):
+        OfflineGRPOConfig(**{knob: value}, **_CPU_OK)
+
+
+def test_offline_grpo_refuses_a_schedule_toward_no_floor():
+    with pytest.raises(ValueError, match="initial_min_log_prob=-0.5 schedules min_log_prob, which is unset"):
+        OfflineGRPOConfig(min_log_prob=None, initial_min_log_prob=-0.5, **_CPU_OK)
+    assert OfflineGRPOConfig(min_log_prob=None, **_CPU_OK).initial_min_log_prob is None
+    assert OfflineGRPOConfig(initial_min_log_prob=-0.5, **_CPU_OK).min_log_prob == -3.0
 
 
 def test_smpo_lower_clip_percentile_zero():
@@ -255,6 +277,13 @@ def test_env_config_kwargs_may_not_shadow_a_top_level_field(key, owner):
     with pytest.raises(ValueError, match=f"must not carry \\['{key}'\\].*top-level fields .*{owner}"):
         EnvironmentConfig(environment_kwargs={key: 0})
     assert key in EnvironmentConfig(max_turns=3)._core_env_config(), "the refused keys are the ones the config writes"
+
+
+@pytest.mark.parametrize("value", [None, "search_backend", ["open_book"]])
+def test_env_config_kwargs_must_be_a_mapping(value):
+    """A bare ``environment_kwargs:`` header parses as null."""
+    with pytest.raises(ValueError, match="environment_kwargs must map option names to values"):
+        EnvironmentConfig(environment_kwargs=value)
 
 
 def test_env_config_rejects_non_positive_max_turns():

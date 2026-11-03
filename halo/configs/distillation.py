@@ -5,7 +5,7 @@ from typing import Any, ClassVar, Literal, get_args
 
 from transformers import TrainingArguments
 
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import ValidatedConfig, present, reject_non_default_args, require_finite, require_int
 from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD, CommonScriptArguments, DatasetNumProcArguments
 from halo.configs.sft import ConversationRenderArguments
 from halo.data.collators.self_distill import format_field_names
@@ -14,6 +14,8 @@ PRIVILEGED_HINT_TEMPLATE = "\n[Hint] The correct answer is: {answer}. Do NOT sta
 
 # Keys of the trainer-side divergence registry (``divergences.DIVERGENCES``), which a test pins this to.
 SelfDistillationLoss = Literal["reverse_kl", "forward_kl", "unnormalized_kl"]
+# The teacher-distillation divergences whose definition takes no temperature, pinned the same way.
+TEMPERATURE_FREE_DISTILL_LOSSES = frozenset({"mse", "cosine_similarity"})
 
 
 @dataclass
@@ -215,7 +217,7 @@ class TeacherDistillScriptArguments(ConversationRenderArguments, CommonScriptArg
         },
     )
     # Distillation datasets conventionally ship a "messages" column (SFT's default is "prompt").
-    conversation_field: str | None = field(
+    conversation_field: str = field(
         default="messages", metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."}
     )
 
@@ -241,7 +243,7 @@ class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, Traini
         default=1.0,
         metadata={
             "help": "Softmax temperature for the temperature-based distillation losses "
-            "(kl_divergence, soft_cross_entropy, jensen_shannon, slim). Ignored by mse and "
+            "(kl_divergence, soft_cross_entropy, jensen_shannon, slim). Refused off its default under mse and "
             "cosine_similarity, whose definitions take no temperature."
         },
     )
@@ -272,6 +274,10 @@ class TeacherDistillationConfig(DatasetNumProcArguments, ValidatedConfig, Traini
         super()._validate_fields()
         owner = type(self).__name__
         require_finite(owner, gt=0, distill_temperature=self.distill_temperature)
+        if self.distill_loss in TEMPERATURE_FREE_DISTILL_LOSSES:
+            reject_non_default_args(
+                f"Distillation under distill_loss={self.distill_loss}", self, "distill_temperature"
+            )
         require_finite(owner, ge=0, le=1, distill_alpha=self.distill_alpha)
         # A non-positive length is legal: it resolves to the student's context window at launch.
         require_int(owner, **present(max_length=self.max_length))

@@ -6,7 +6,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
-from halo.config_validation import require_finite
+from halo.config_validation import require_finite, require_int
 from halo.environments.environment_base import AsyncEnvironmentBase, EnvironmentBase
 from halo.environments.episode_keys import ANSWER_KEY, COMPLETED_KEY, CONTEXT_KEY, EPISODE_ERROR_KEY, LAST_TURN_KEY
 from halo.environments.episode_scoring import EpisodeGrade
@@ -82,6 +82,7 @@ class NativeToolUseEnvironment(EnvironmentBase):
             turn_overflow_penalty=turn_overflow_penalty,
             length_cutoff_penalty=length_cutoff_penalty,
         )
+        require_int(type(self).__name__, ge=1, max_tool_calls_per_turn=max_tool_calls_per_turn)
 
         self.registry = tool_registry
         self.tool_budgets = validate_tool_budgets(tool_budgets, tool_registry)

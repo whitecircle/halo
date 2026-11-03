@@ -3,7 +3,7 @@ from typing import ClassVar, Literal
 
 from transformers import TrainingArguments
 
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import ValidatedConfig, present, reject_non_default_args, require_finite, require_int
 from halo.configs.script_arguments import (
     CommonScriptArguments,
     CrossDocumentLinearAttentionArguments,
@@ -40,6 +40,8 @@ class DPOScriptArguments(GenerationEvalArguments, CommonScriptArguments):
         require_int(
             type(self).__name__, ge=1, **present(generation_max_prompt_length=self.generation_max_prompt_length)
         )
+        if not self.generate_eval_examples:
+            reject_non_default_args("A run with generate_eval_examples off", self, "generation_max_prompt_length")
 
 
 @dataclass
@@ -89,7 +91,7 @@ class SMPOConfig(
     bf16: bool | None = field(
         default=None, metadata={"help": "Use bf16 mixed precision. Defaults to True if fp16 is False."}
     )
-    beta: float = field(default=1.2, metadata={"help": "Temperature parameter for loss sensitivity."})
+    beta: float = field(default=1.2, metadata={"help": "Scale of the margin logit before the margin loss."})
     target_margin: float = field(
         default=0.35, metadata={"help": "Target margin for chosen vs rejected log prob ratio."}
     )
@@ -104,7 +106,10 @@ class SMPOConfig(
     )
     initial_margin: float = field(
         default=0.01,
-        metadata={"help": "Initial margin when using margin schedule (starts small for curriculum learning)."},
+        metadata={
+            "help": "Initial margin of the margin schedule (starts small for curriculum learning); refused off its "
+            "default with use_margin_schedule off."
+        },
     )
     lower_clip_percentile: float | None = field(
         default=0.02, metadata={"help": "Percentile for clipping low log probs in rejected (0.01-0.05 recommended)."}
@@ -120,7 +125,8 @@ class SMPOConfig(
         metadata={
             "help": "Flatten the batch into one varlen sequence instead of padding it. Needs a "
             "varlen Flash Attention kernel (FA2/FA3/FA4) and raises on any other implementation, "
-            "the sdpa the script defaults to under reset_sinks: true included."
+            "the sdpa the script defaults to under reset_sinks: true included. Incompatible with CP, PP and VLM runs, "
+            "and refused on an M-RoPE decoder (Qwen3.5/3.6)."
         },
     )
     max_length: int | None = field(
@@ -150,7 +156,8 @@ class SMPOConfig(
         default="keep_end",
         metadata={
             "help": "Which end of an over-long PROMPT to keep: 'keep_end' (default, the tokens "
-            "nearest the completion) or 'keep_start'. Completions always truncate from the end."
+            "nearest the completion) or 'keep_start'. Completions always truncate from the end. Refused off its "
+            "default on a VLM run, whose collator refuses an over-long prompt instead."
         },
     )
     disable_dropout: bool = field(default=True, metadata={"help": "Disable dropout for training stability."})
@@ -217,6 +224,11 @@ class SMPOConfig(
                 f"initial_margin ({self.initial_margin}) must be < target_margin ({self.target_margin}) "
                 "when using margin schedule"
             )
+        if not self.use_margin_schedule:
+            reject_non_default_args("SMPO with use_margin_schedule off", self, "initial_margin")
+        # SMPO's only multi-document row is the padding-free one.
+        if not self.padding_free:
+            reject_non_default_args("SMPO with padding_free off", self, "allow_cross_document_linear_attention")
         require_finite(owner, gt=0, le=0.5, **present(lower_clip_percentile=self.lower_clip_percentile))
         require_finite(owner, ge=0.5, lt=1, **present(upper_clip_percentile=self.upper_clip_percentile))
         require_finite(owner, lt=0, why=" (log probabilities are <= 0)", **present(min_log_prob=self.min_log_prob))

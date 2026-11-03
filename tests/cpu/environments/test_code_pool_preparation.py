@@ -462,6 +462,55 @@ def _prepare(monkeypatch, tmp_path, source: DatasetDict, name: str, *flags: str)
     return load_from_disk(str(out))
 
 
+def _no_download(monkeypatch) -> None:
+    def refused(*args, **kwargs):
+        raise AssertionError("the source was read")
+
+    monkeypatch.setattr(code_pool_preparation, "load_dataset", refused)
+
+
+@pytest.mark.parametrize(
+    ("flags", "refusal"),
+    [
+        (["--output_dir", "out", "--config_name", "easy"], "--config_name names how --push_to_hub publishes"),
+        (["--output_dir", "out", "--push_bands"], "--push_bands names how --push_to_hub publishes"),
+        (["--push_to_hub", "o/r", "--push_bands", "--config_name", "easy"], "so --config_name would be dropped"),
+        ([], "Provide --output_dir and/or --push_to_hub"),
+    ],
+    ids=["config_name_without_push", "push_bands_without_push", "bands_beside_config_name", "no_destination"],
+)
+def test_the_pool_refuses_a_publish_flag_it_would_drop_before_any_download(monkeypatch, flags, refusal):
+    _no_download(monkeypatch)
+    monkeypatch.setattr(sys, "argv", ["prepare_code_dataset.py", "--adapter", "codeforces", "--dataset", "s", *flags])
+    with pytest.raises(SystemExit, match=refusal):
+        prepare_code_dataset.main()
+
+
+def test_the_pool_refuses_keeping_examples_only_rows_an_adapter_never_marks(monkeypatch):
+    _no_download(monkeypatch)
+    argv = ["prepare_code_dataset.py", "--adapter", "deepcoder", "--dataset", "s", "--output_dir", "out"]
+    monkeypatch.setattr(sys, "argv", [*argv, "--include_examples_only"])
+    with pytest.raises(SystemExit, match="--include_examples_only on --adapter deepcoder"):
+        prepare_code_dataset.main()
+
+
+@pytest.mark.parametrize(("flag", "bound"), [("--min_rating", "1000"), ("--max_rating", "2000")])
+def test_the_pool_refuses_rating_bounds_a_source_cannot_apply(monkeypatch, tmp_path, flag, bound):
+    unrated = DatasetDict({"train": Dataset.from_list(_ROWS).remove_columns(["rating"])})
+    with pytest.raises(SystemExit, match="filter a 'rating' column, which src does not have"):
+        _prepare(monkeypatch, tmp_path, unrated, "unrated", flag, bound)
+    rated = DatasetDict({"train": Dataset.from_list(_ROWS)})
+    assert _prepare(monkeypatch, tmp_path, rated, "rated", flag, bound)["train"]["id"] == ["cf-2"]
+
+
+def test_the_pool_reads_a_rating_only_the_adapter_derives(monkeypatch, tmp_path):
+    """HardTests' raw rows hold ``difficulty_ratings``; its ``normalize`` makes the column the bounds filter."""
+    raw = DatasetDict({"train": Dataset.from_list(_ROWS).remove_columns(["rating"])})
+    adapter = dataclasses.replace(CODE_DATASET_ADAPTERS["codeforces"], normalize=lambda row: {"rating": 1200})
+    monkeypatch.setitem(CODE_DATASET_ADAPTERS, "codeforces", adapter)
+    assert _prepare(monkeypatch, tmp_path, raw, "derived", "--min_rating", "1000")["train"]["id"] == ["cf-2"]
+
+
 def test_the_pool_drops_examples_only_problems_unless_asked(monkeypatch, tmp_path):
     source = DatasetDict({"train": Dataset.from_list(_ROWS)})
     assert _prepare(monkeypatch, tmp_path, source, "default")["train"]["id"] == ["cf-2"]

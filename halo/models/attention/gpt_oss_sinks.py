@@ -210,6 +210,14 @@ def install_fa4_trainable_sink_rescale() -> bool:
     )
 
 
+def reject_trainable_sinks_without_sinks(model_config: AutoConfig, policy: SinksPolicy) -> None:
+    if policy is SinksPolicy.TRAINABLE and not uses_gpt_oss_sinks(model_config):
+        raise ValueError(
+            f"train_sinks: true trains GptOss attention sinks, but this model "
+            f"(model_type={getattr(model_config, 'model_type', '?')!r}) has none for it to train. Remove train_sinks."
+        )
+
+
 def apply_sinks_policy(
     model: PreTrainedModel,
     model_config: AutoConfig,
@@ -219,6 +227,7 @@ def apply_sinks_policy(
 ) -> None:
     """Every loader routes through here, as a neutralized policy is what approved a sink-dropping backend and skipping
     the reset would run sdpa over live sinks. A model without sinks stays unstamped."""
+    reject_trainable_sinks_without_sinks(model_config, policy)
     has_sinks = uses_gpt_oss_sinks(model_config)
     if (
         has_sinks

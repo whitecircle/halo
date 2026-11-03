@@ -242,7 +242,7 @@ def test_self_distill_refuses_trl_dataset_prep_knobs(config_body, knob, tmp_path
         "tree_packing: false",
         "tree_share_markers: []",
         "tree_share_requires: null",
-        "tree_full_attention: split",
+        "tree_full_attention: null",
     ],
 )
 def test_self_distill_has_no_key_for_what_its_data_path_cannot_do(line, tmp_path):
@@ -250,6 +250,73 @@ def test_self_distill_has_no_key_for_what_its_data_path_cannot_do(line, tmp_path
     is the SFT default, which an inherited field would accept."""
     with pytest.raises(ValueError, match=line.partition(":")[0]):
         _run_main("distillation/self_distill.py", f"{line}\n", tmp_path, init_training_script=_stop)
+
+
+_OPD_KNOBS = {
+    "sdpg_hint_template": "'Hint: {answer}'",
+    "sdpg_loss": "forward_kl",
+    "sdpg_temperature": 2.0,
+    "sdpg_beta_warmup_steps": 5,
+    "sdpg_beta_decay_steps": 5,
+    "sdpg_answer_field": "gold",
+    "privileged_solution_field": "reference",
+    "opd_exclude_eos": "false",
+}
+
+
+@pytest.mark.parametrize(("knob", "value"), _OPD_KNOBS.items())
+def test_self_distill_refuses_an_opd_knob_with_the_term_off(knob, value, tmp_path):
+    body = f"{knob}: {value}\n"
+    with pytest.raises(ValueError, match=rf"sdpg_beta_base: 0\) {_REFUSED}.*{knob}"):
+        _run_main("distillation/self_distill.py", f"sdpg_beta_base: 0\n{body}", tmp_path, init_training_script=_stop)
+    with pytest.raises(_PastTheGuards):
+        _run_main("distillation/self_distill.py", body, tmp_path, init_training_script=_stop)
+
+
+def test_self_distill_refuses_opd_confidence_weighting_with_the_term_off(tmp_path):
+    """The SFT term still takes the confidence weights, so this needs a confidence_field to reach its own refusal."""
+    body = "confidence_field: confidence\nconfidence_weight_opd: false\n"
+    with pytest.raises(ValueError, match=rf"sdpg_beta_base: 0\) {_REFUSED}.*confidence_weight_opd"):
+        _run_main("distillation/self_distill.py", f"sdpg_beta_base: 0\n{body}", tmp_path, init_training_script=_stop)
+    with pytest.raises(_PastTheGuards):
+        _run_main("distillation/self_distill.py", body, tmp_path, init_training_script=_stop)
+
+
+def test_self_distill_keeps_the_temperature_its_reference_anchor_reads_with_the_opd_term_off(tmp_path):
+    body = "sdpg_beta_base: 0\nreference_kl_coef: 0.1\nsdpg_temperature: 2.0\n"
+    with pytest.raises(_PastTheGuards):
+        _run_main("distillation/self_distill.py", body, tmp_path, init_training_script=_stop)
+    # The rest stay unread beside the anchor.
+    with pytest.raises(ValueError, match=rf"sdpg_beta_base: 0\) {_REFUSED}.*sdpg_loss"):
+        _run_main(
+            "distillation/self_distill.py", f"{body}sdpg_loss: forward_kl\n", tmp_path, init_training_script=_stop
+        )
+
+
+def test_self_distill_runs_with_the_opd_term_off(tmp_path):
+    with pytest.raises(_PastTheGuards):
+        _run_main("distillation/self_distill.py", "sdpg_beta_base: 0\n", tmp_path, init_training_script=_stop)
+
+
+def _smpo_truncation_run(tmp_path, *, is_vlm: bool) -> None:
+    runtime = SimpleNamespace(parallelism_config=SimpleNamespace(is_cp_mode=False))
+    _run_main(
+        "preference/smpo.py",
+        "truncation_mode: keep_start\n",
+        tmp_path,
+        init_training_script=lambda *a, **k: runtime,
+        load_script_datasets=lambda *a, **k: (None, False),
+        resolve_preference_vlm_run=lambda *a, **k: is_vlm,
+        load_policy_model=_stop,
+    )
+
+
+def test_smpo_refuses_a_truncation_mode_on_the_vlm_path(tmp_path):
+    """The VLM collator refuses an over-length prompt instead of cutting one."""
+    with pytest.raises(ValueError, match=rf"SMPO VLM mode {_REFUSED}.*truncation_mode"):
+        _smpo_truncation_run(tmp_path, is_vlm=True)
+    with pytest.raises(_PastTheGuards):
+        _smpo_truncation_run(tmp_path, is_vlm=False)
 
 
 def test_self_distill_accepts_the_defaults(tmp_path):

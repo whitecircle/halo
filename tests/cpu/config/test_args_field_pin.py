@@ -144,7 +144,7 @@ _EXPECTED = {
         "system_prompt": "None",
         "train_on_completions_only": "True",
         "train_on_last_assistant_only": "False",
-        "tree_full_attention": "'split'",
+        "tree_full_attention": "None",
         "tree_packing": "False",
         "tree_share_markers": "factory:[]",
         "tree_share_requires": "None",

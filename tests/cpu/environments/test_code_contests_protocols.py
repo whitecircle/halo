@@ -15,12 +15,11 @@ from halo.entrypoints.code_contests_eval import (
     SOLUTION_HEADROOM_TOKENS,
     contest_meta,
     default_max_tokens,
-    reject_flag_owned_env_kwargs,
     resolve_env_config,
     resolve_eval_protocol,
     run_trajectory_path,
 )
-from halo.entrypoints.eval_contract import rollout_config_from_args
+from halo.entrypoints.eval_contract import reject_flag_owned_env_kwargs, rollout_config_from_args
 from halo.environments.registry import build_environment
 from halo.environments.rollout_config import RolloutConfig
 from halo.environments.tasks.coding.code_contests import (
@@ -223,7 +222,7 @@ def test_a_contradiction_stated_for_this_run_is_refused():
 
 def test_the_eval_script_takes_the_protocol_from_its_flag_only():
     with pytest.raises(SystemExit, match="--eval_protocol, not --env_kwargs"):
-        reject_flag_owned_env_kwargs({"eval_protocol": "leaderboard"})
+        reject_flag_owned_env_kwargs({"eval_protocol": "leaderboard"}, FLAG_OWNED_ENV_KWARGS)
 
 
 def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
@@ -234,8 +233,8 @@ def test_every_env_option_a_flag_sets_is_refused_in_env_kwargs():
     assert flag_set <= set(FLAG_OWNED_ENV_KWARGS), sorted(flag_set - set(FLAG_OWNED_ENV_KWARGS))
     for key in sorted(flag_set):
         with pytest.raises(SystemExit, match=f"--{key}, not --env_kwargs"):
-            reject_flag_owned_env_kwargs({key: 3})
-    reject_flag_owned_env_kwargs({"timeout_per_test": 3})
+            reject_flag_owned_env_kwargs({key: 3}, FLAG_OWNED_ENV_KWARGS)
+    reject_flag_owned_env_kwargs({"timeout_per_test": 3}, FLAG_OWNED_ENV_KWARGS)
 
 
 def test_a_default_run_keeps_its_trajectory_file_name():

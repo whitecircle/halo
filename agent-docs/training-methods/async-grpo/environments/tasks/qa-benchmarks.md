@@ -23,7 +23,7 @@ environment_kwargs:
 |---|---|---|
 | `search_backend` | auto | `serper`, `brave`, `tavily`, `duckduckgo`; auto picks by which API key is set, keyless DuckDuckGo last. Validated at construction |
 | `include_python_tools` | `false` | `qa_search` only: adds the in-process restricted `python` REPL |
-| `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` closed-book raises |
+| `open_book` | `false` | `exam_qa` only: registers the search tool. Setting `search_backend` or a tool price (`tool_success_reward`, `tool_error_penalty`, `tool_reward_cap`) closed-book raises |
 | `system_prompt` | class prompt | Replaces the built-in instructions |
 
 A fifth backend, `mock`, returns fabricated snippets and is refused unless `HALO_ALLOW_MOCK_SEARCH=1`. Its results pay `tool_success_reward`, so training on it teaches the policy that invented evidence works.

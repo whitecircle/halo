@@ -58,7 +58,7 @@ The architecture has no bias slot (the gate is a bare weight), so the bias is tr
 
 **LoRA** on the experts works under EP through native grouped adapters (`_init_expert_lora`). It is rejected under TP and EP+TP, and at `expert_tp_size > 1` (the replicated adapter half would take partial gradients) — attention LoRA still runs there.
 
-**Tree packing** — dense and MoE Qwen3 take `tree_packing: true` ([Tree Packing](../optimization/tree-packing.md)); a run pinned to `flash_attention_2` needs `tree_full_attention: gather`.
+**Tree packing** — dense and MoE Qwen3 take `tree_packing: true` ([Tree Packing](../optimization/tree-packing.md)); a run pinned to `flash_attention_2` takes the `gather` form, unset `tree_full_attention` resolving to it.
 
 **Configs** — no Qwen3 MoE recipe ships; the EP benchmarks and GPU suites run `Qwen/Qwen3-30B-A3B-Instruct-2507`.
 

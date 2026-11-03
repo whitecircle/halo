@@ -249,9 +249,10 @@ def _run_sft_main(tmp_path, yaml_body: str) -> None:
     ("backend", "match"),
     [
         ("tree_full_attention: gather\n", "tree packing is verified on"),
+        ("", "tree packing is verified on"),
         ("attn_implementation: flash_attention_2\ntree_full_attention: split\n", "tree_full_attention='split'"),
     ],
-    ids=["auto-fa3", "split-on-fa2"],
+    ids=["auto-fa3", "unset-on-auto-fa3", "split-on-fa2"],
 )
 def test_an_unsupported_backend_is_refused_before_any_weight_loads(tmp_path, monkeypatch, backend, match):
     """Auto-selection picks FA3 on Hopper and the split form needs FA4, so the run stops at the backend the loader
@@ -268,6 +269,8 @@ def test_an_unsupported_backend_is_refused_before_any_weight_loads(tmp_path, mon
         _run_sft_main(tmp_path, backend)
     with pytest.raises(AssertionError, match="past the backend check"):
         _run_sft_main(tmp_path, "attn_implementation: flash_attention_2\ntree_full_attention: gather\n")
+    with pytest.raises(AssertionError, match="past the backend check"):
+        _run_sft_main(tmp_path, "attn_implementation: flash_attention_2\n")
 
 
 def _stop_a_glm5_run_at_the_datasets(monkeypatch, config) -> None:

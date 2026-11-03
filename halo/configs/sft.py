@@ -3,6 +3,7 @@
 from dataclasses import dataclass, field, fields
 from typing import ClassVar
 
+from halo.config_validation import ValidatedConfig, require_text
 from halo.configs.script_arguments import (
     CommonScriptArguments,
     CrossDocumentLinearAttentionArguments,
@@ -12,8 +13,8 @@ from halo.models.attention.tree_plan import FullAttentionForm
 
 
 @dataclass
-class ConversationRenderArguments:
-    conversation_field: str | None = field(
+class ConversationRenderArguments(ValidatedConfig):
+    conversation_field: str = field(
         default="prompt", metadata={"help": "Dataset column holding the conversation, a list of role/content dicts."}
     )
     images_field: str | None = field(
@@ -34,7 +35,8 @@ class ConversationRenderArguments:
         default=None,
         metadata={
             "help": "The rendered assistant-turn prefix of the model's chat template, like '<|im_start|>assistant\\n'. "
-            "Required when train_on_completions_only is on, since no default fits every template."
+            "Required when train_on_completions_only is on, since no default fits every template, and refused when "
+            "it is off."
         },
     )
     model_supports_system_role: bool = field(
@@ -52,6 +54,17 @@ class ConversationRenderArguments:
             "it."
         },
     )
+
+    def _validate_fields(self) -> None:
+        super()._validate_fields()
+        owner = type(self).__name__
+        # The rows are rendered from this column, and a null would reach the loader as no column to check.
+        require_text(owner, conversation_field=self.conversation_field)
+        if self.assistant_message_template is not None and not self.train_on_completions_only:
+            raise ValueError(
+                f"{owner}: assistant_message_template marks the completions train_on_completions_only trains on, and "
+                f"that is off, so nothing would read it. Remove it, or set train_on_completions_only: true."
+            )
 
 
 @dataclass
@@ -80,12 +93,14 @@ class _TreePackingArguments:
             "the long part, so rows that put it after the marker are left alone instead of sharing a short header."
         },
     )
-    tree_full_attention: FullAttentionForm = field(
-        default="split",
+    tree_full_attention: FullAttentionForm | None = field(
+        default=None,
         metadata={
             "help": "Tree packing, full-attention layers: 'split' adds a rectangular ancestor pass to the stock "
-            "packed call (flash_attention_4), 'gather' builds one key sequence per tree node (flash_attention_2 as "
-            "well; memory grows with fan-out x prefix length)."
+            "packed call (flash_attention_4, except its head_dim-256 kernel), 'gather' builds one key sequence per "
+            "tree node (flash_attention_2 as well; memory grows with fan-out x prefix length). Unset takes 'split' "
+            "where the model's backend runs it, else 'gather'. Refused on GLM-5 Next, whose layers attend in their "
+            "own forward."
         },
     )
 

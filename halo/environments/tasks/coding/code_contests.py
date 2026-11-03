@@ -172,6 +172,12 @@ class CodeContestsEnvironment(NativeToolUseEnvironment):
                 "reset, so tool_budgets would never apply. Set those instead, or per level in "
                 "reasoning_effort_profiles."
             )
+        if kwargs.get("requires_answer") is False:
+            raise ValueError(
+                f"{type(self).__name__} grades against the hidden tests in the dataset's answer column, so "
+                f"requires_answer cannot be false: without that gate an answerless dataset fails at its first "
+                f"submission. Remove it."
+            )
         knobs = self._resolve_eval_protocol_knobs(
             eval_protocol, max_submissions=max_submissions, max_test_calls=max_test_calls
         )

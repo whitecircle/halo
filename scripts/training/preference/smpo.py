@@ -5,7 +5,7 @@ checkpoint, the data path the run, so a multimodal checkpoint on text-only pairs
 A VLM run passes raw rows through: the trainer templates them and auto-selects ``DataCollatorForVLMSMPO``. It supports
 none of CP, PP or padding_free."""
 
-from halo.config_validation import reject_unsupported_args
+from halo.config_validation import reject_non_default_args, reject_unsupported_args
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.preference import SMPOConfig, SMPOScriptArguments
 from halo.configs.script_arguments import ModelArguments
@@ -58,6 +58,8 @@ def main():
         # The trainer's VLM row render (tokenize_vlm_preference_row) templates the prompt without
         # `tools=`, so a declared tools column would render toolless.
         reject_unsupported_args("SMPO VLM mode", tools_field=args.tools_field)
+        # The VLM collator refuses an over-length prompt instead of cutting one.
+        reject_non_default_args("SMPO VLM mode", smpo_config, "truncation_mode")
 
     # Padded preference takes the shared padded-workload request (dropped under live sinks and under CP).
     policy = load_policy_model(

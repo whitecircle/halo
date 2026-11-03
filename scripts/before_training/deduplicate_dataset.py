@@ -12,6 +12,9 @@ from halo.data.sources.paths import DATA_FILE_BUILDERS
 from halo.log import configure_cli_logging
 from scripts.cli_arguments import add_hub_source_args, add_trust_remote_code_arg
 
+# What a bare --save_embeddings parses to, resolved once --output_path is known.
+_BESIDE_THE_OUTPUT = ""
+
 
 def _add_dataset_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
@@ -101,15 +104,16 @@ def _add_search_args(parser: argparse.ArgumentParser) -> None:
 
 
 def _add_run_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument("--save_embeddings", action="store_true", help="Save computed embeddings to disk for reuse")
-    parser.add_argument("--load_embeddings", type=str, default=None, help="Path to precomputed embeddings file (.npy)")
     parser.add_argument(
-        "--embeddings_output_path",
-        type=str,
+        "--save_embeddings",
+        nargs="?",
+        const=_BESIDE_THE_OUTPUT,
         default=None,
-        help="Where to write the computed embeddings; only used together with --save_embeddings "
-        "(default: <output_path>.embeddings.npy)",
+        metavar="PATH",
+        help="Save the computed embeddings for reuse, at PATH (default: <output_path>.embeddings.npy). Refused with "
+        "--load_embeddings, which computes none.",
     )
+    parser.add_argument("--load_embeddings", type=str, default=None, help="Path to precomputed embeddings file (.npy)")
     parser.add_argument("--dry_run", action="store_true", help="Perform a dry run without saving the output")
     parser.add_argument(
         "--sample_size", type=int, default=None, help="Process a seeded random sample of N rows (default: all)."
@@ -123,7 +127,12 @@ def parse_arguments() -> argparse.Namespace:
     _add_embedding_args(parser)
     _add_search_args(parser)
     _add_run_args(parser)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.save_embeddings is not None and args.load_embeddings:
+        parser.error("--save_embeddings writes computed embeddings, and --load_embeddings computes none. Pass one.")
+    if args.save_embeddings == _BESIDE_THE_OUTPUT:
+        args.save_embeddings = f"{args.output_path}.embeddings.npy"
+    return args
 
 
 def main() -> int:

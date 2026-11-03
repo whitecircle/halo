@@ -98,13 +98,13 @@ the model changes. A flash softmax layer runs the stock packed path on a batch w
     position, tree start) comes with every batch, so plain documents in one packed row stay apart in
     these layers too.
 
-A model on `flash_attention_2` sets `tree_full_attention: gather`, and so does one whose heads run FA4's
-head_dim-256 kernel, which takes no log-sum-exp gradient. Qwen3.5/3.6 is such a model: on Blackwell an unset
-`attn_implementation` resolves to `flash_attention_2`, its packed-row default
+`tree_full_attention` left unset takes `split` where the model's backend runs it and `gather` elsewhere: on
+`flash_attention_2`, and on FA4's head_dim-256 kernel, which takes no log-sum-exp gradient. Qwen3.5/3.6 takes
+`gather`: on Blackwell an unset `attn_implementation` resolves to `flash_attention_2`, its packed-row default
 ([Qwen3.5](../models/qwen3_5.md#configs)), and its GatedDeltaNet layers need the `fla` and `causal_conv1d` kernels
 the images ship. On Hopper, pin `flash_attention_2`: auto-selection picks FA3, which tree packing refuses. The
 backend is checked before any weight loads, against the one the loader resolves for the config, dtype and GPU, and
-again on the loaded model. GLM-5 Next is held to none of these backends and does not read `tree_full_attention`:
+again on the loaded model. GLM-5 Next is held to none of these backends and refuses `tree_full_attention`:
 under a plan neither of its layer types reaches the attention interface. Its KDA layers need the same `fla` and
 `causal_conv1d` kernels.
 

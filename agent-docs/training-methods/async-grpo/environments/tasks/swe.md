@@ -19,7 +19,7 @@ environment_kwargs:
 | Knob | Default | Effect |
 |---|---|---|
 | `language` | `python` | What `run_code` runs; `cpp` and `c` need a compiling backend |
-| `code_timeout` | `15.0` s | Wall-clock cap per `run_code` / `run_bash_command` call |
+| `code_timeout` | `15.0` s | Wall-clock cap per `run_code` / `run_bash_command` call; finite, above 0 |
 | `sandbox_backend` / `sandbox_url` | unset | Else `HALO_SANDBOX_BACKEND` / `HALO_SANDBOX_URL`, then local |
 
 `max_turns` defaults to the class's own budget ([registry](../README.md#registry)). Reward knobs are the [native protocol's](../protocols/native-tool-use.md#configuration).

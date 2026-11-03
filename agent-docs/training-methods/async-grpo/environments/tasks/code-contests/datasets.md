@@ -4,7 +4,7 @@ A code-contests row carries the problem statement as `prompt` and its test set a
 
 ## Payload
 
-- `answer` is the grading payload, a JSON string or dict, and is required (`requires_answer`). A bare test list,
+- `answer` is the grading payload, a JSON string or dict, and is required (`requires_answer: false` raises). A bare test list,
   `{"test_cases": [...]}` and the full form below are accepted.
 - A payload that holds no tests or does not parse fails the episode at reset as a rollout error, which the trainer
   drops from the group baseline.
@@ -44,7 +44,7 @@ python scripts/environments/preparation/prepare_code_dataset.py \
 
 | Flag | Effect |
 |---|---|
-| `--min_rating` / `--max_rating` | Bound difficulty; unrated rows are dropped with them |
+| `--min_rating` / `--max_rating` | Bound difficulty; unrated rows are dropped with them. A source with no rating (`deepcoder`) refuses them |
 | `--exclude_keys` | Removes listed ids before the hold-out is carved (held-out and benchmark ids) |
 | `--drop_train_keys` | Removes listed ids from the train split after the hold-out is carved, so the test split stays the same: `scripts/environments/preparation/hardtests_train_exclusions.txt` lists the known defects of the HardTests extra-hard band |
 | `--holdout_per_band` | Carves a deterministic `test` split |
@@ -53,7 +53,7 @@ python scripts/environments/preparation/prepare_code_dataset.py \
 | `--verify_checkers` | On by default. Drops a problem whose checker rejects a test's own reference output, or accepts garbage. Needs a sandbox backend on the preparation host |
 | `--reject_constant_answers` | On by default. Drops a problem whose suite accepts one constant answer (`0`, `1`, `-1`, `YES`, `NO`, ...) on every test: a lax checker or a suite of identical answers pays its reward to a program that never reads the input |
 | `--tests_table` | Joins a compacted test corpus by problem id. A table may cover some splits only; one matching no row of any split exits before any split is filtered |
-| `--include_examples_only` | Keeps the [examples-only problems](#examples-only-problems), dropped and counted per split by default |
+| `--include_examples_only` | Keeps the [examples-only problems](#examples-only-problems), dropped and counted per split by default; an adapter marking none refuses it |
 
 A bulky test corpus goes through `scripts/environments/preparation/compact_code_tests.py` first. It reduces
 open-r1's generated tests or HardTests' encoded suites to one row per problem: at most 40 tests of up to 256 KB

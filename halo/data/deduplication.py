@@ -344,17 +344,13 @@ def run_deduplication(args: argparse.Namespace) -> int:
                 logger.error(f"Embeddings count ({len(embeddings)}) doesn't match texts count ({len(texts)})")
                 return 1
         else:
-            embeddings_path = None
-            if args.save_embeddings:
-                embeddings_path = args.embeddings_output_path or f"{args.output_path}.embeddings.npy"
-
             embeddings = compute_embeddings(
                 texts=texts,
                 model_name=args.model_id,
                 device=device,
                 batch_size=args.batch_size,
                 max_length=args.model_max_length,
-                save_path=embeddings_path,
+                save_path=args.save_embeddings,
                 trust_remote_code=args.trust_remote_code,
             )
 

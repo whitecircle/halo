@@ -22,6 +22,7 @@ from halo.models.attention.tree import (
     TreeAttentionRegistry,
     install_tree_attention,
     reject_unsupported_tree_attention,
+    resolve_tree_full_form,
     resolve_tree_plan_options,
 )
 from halo.models.attention.tree_plan import TREE_ATTENTION_KEY, build_node_table, build_tree_attention_plan
@@ -496,6 +497,15 @@ def test_a_sparse_plan_is_refused_at_a_flash_interface(tree):
         flash(torch.nn.Identity(), None, None, None, None, **{TREE_ATTENTION_KEY: plan})
     flash(torch.nn.Identity(), None, None, None, None)
     assert calls == [{}]
+
+
+@pytest.mark.parametrize("requested", ["split", "gather"])
+def test_a_sparse_family_refuses_a_form_it_would_not_read(requested):
+    """Its plan carries no full-attention part, whichever form is named."""
+    config = tiny_family_model(SPARSE_FAMILIES["glm5_next_text"][0]).config
+    assert resolve_tree_full_form(config, "sdpa", None) == "gather"
+    with pytest.raises(ValueError, match=rf"tree_full_attention='{requested}' picks how.*attend in their own forward"):
+        resolve_tree_full_form(config, "sdpa", requested)
 
 
 def test_the_backend_and_full_form_checks_do_not_apply_to_a_sparse_family(monkeypatch):

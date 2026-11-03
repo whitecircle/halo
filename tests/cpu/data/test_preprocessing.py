@@ -174,6 +174,20 @@ def test_never_matching_template_raises_at_preprocessing_time():
         tokenize_dataset(dataset, tokenizer, config)
 
 
+@pytest.mark.parametrize("knob", ["min_pixels", "max_pixels"])
+def test_a_pixel_bound_needs_the_vlm_bake(knob):
+    with pytest.raises(ValueError, match=rf"{knob}.*is_vlm=False"):
+        PreprocessingConfig(model_name_or_path="m", **{knob: 1024})
+    assert getattr(PreprocessingConfig(model_name_or_path="m", is_vlm=True, **{knob: 1024}), knob) == 1024
+
+
+def test_a_packing_strategy_needs_packing():
+    with pytest.raises(ValueError, match="packing_strategy='wrapped'.*pack_sequences=False"):
+        PreprocessingConfig(model_name_or_path="m", packing_strategy="wrapped")
+    config = PreprocessingConfig(model_name_or_path="m", pack_sequences=True, packing_strategy="wrapped")
+    assert config.packing_strategy == "wrapped"
+
+
 def test_completion_only_validation():
     """Both refusals live in ``PreprocessingConfig.__post_init__``, so they fire at config time, for every caller."""
     print("Testing completion-only validation...")

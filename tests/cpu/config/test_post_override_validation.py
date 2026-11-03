@@ -91,7 +91,7 @@ def test_cli_override_violating_a_range_raises(config_cls, flag, value, tmp_path
 @pytest.mark.parametrize(
     ("config_cls", "flag", "value"),
     [
-        (ClassificationConfig, "focal_gamma", "3.0"),
+        (ClassificationConfig, "multi_label_threshold", "0.7"),
         (SMPOConfig, "chosen_sft_ratio", "0.5"),
         (OfflineGRPOConfig, "best_completion_emphasis", "1.5"),
         (OfflineGRPOConfig, "best_completion_emphasis", "auto"),

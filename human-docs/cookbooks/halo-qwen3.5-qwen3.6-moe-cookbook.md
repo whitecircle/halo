@@ -113,7 +113,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3,4,5 DIST_NCCL_TIMEOUT_MINUTES=60 \
   ([Attention backends](../supported-matrix.md#attention-backends)).
 - **Packing, not padding-free.** Halo refuses `padding_free: true` on this family: its variable-length path
   crashes FA2 on the multimodal RoPE. Rows that share a long prefix can pack as trees on FA2
-  (`tree_packing: true` with `tree_full_attention: gather`;
+  (`tree_packing: true`;
   [Tree Packing](../../agent-docs/optimization/tree-packing.md) ↗).
 - **Router balancing.** The SFT recipes set `moe_balancing: bias_update_transient`, and the GRPO recipes
   set `none`. The router has no bias slot, so plain `bias_update` raises. In SFT, `aux_loss` (what `auto`

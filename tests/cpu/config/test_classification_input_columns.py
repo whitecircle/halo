@@ -11,8 +11,10 @@ from unittest import mock
 import pytest
 from datasets import Dataset, DatasetDict
 
+from halo.configs.classification import ClassificationConfig
 from tests.common.repo import load_script_module
 
+_CPU_OK = {"output_dir": "/tmp/test_classification_metric_knobs", "bf16": False, "use_cpu": True}
 _TURNS = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
 
 
@@ -68,6 +70,20 @@ def test_a_single_label_sentinel_in_an_unread_split_is_dropped_from_the_classes(
     assert classification.build_label_list(labels) == ["a", "b"]
 
 
+def test_a_multi_label_dataset_refuses_per_class_metrics_and_takes_a_threshold(classification):
+    per_class = ClassificationConfig(compute_per_class_metrics=True, **_CPU_OK)
+    with pytest.raises(ValueError, match="multi-label dataset does not support.*compute_per_class_metrics"):
+        classification.reject_unread_metric_knobs(per_class, is_multi_label=True)
+    classification.reject_unread_metric_knobs(per_class, is_multi_label=False)
+    classification.reject_unread_metric_knobs(ClassificationConfig(multi_label_threshold=0.7, **_CPU_OK), True)
+
+
+def test_a_single_label_dataset_refuses_a_threshold(classification):
+    with pytest.raises(ValueError, match="single-label dataset does not support.*multi_label_threshold"):
+        classification.reject_unread_metric_knobs(ClassificationConfig(multi_label_threshold=0.7, **_CPU_OK), False)
+    classification.reject_unread_metric_knobs(ClassificationConfig(**_CPU_OK), False)
+
+
 def test_an_eval_only_label_joins_the_classes(classification):
     assert classification.build_label_list({"train": {"a", "b"}, "test": {"c"}}) == ["a", "b", "c"]
 
@@ -89,12 +105,14 @@ def test_an_empty_presharded_train_shard_is_refused_before_its_label_type_is_rea
     assert classification.split_label_sets(ds, dataset_presharded=False) == {"train": set()}
 
 
-def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labels: list) -> list[str]:
+def _run_to_tokenization(
+    classification, tmp_path, eval_strategy: str, test_labels: list, extra: str = ""
+) -> list[str]:
     """Run ``main()`` over a single-label dataset to its tokenization map; returns the splits it maps."""
     config = tmp_path / "config.yaml"
     config.write_text(
         f"model_name_or_path: stub/qwen3-4b\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
-        f"bf16: false\nuse_cpu: true\nmax_length: 512\neval_strategy: {eval_strategy}\n"
+        f"bf16: false\nuse_cpu: true\nmax_length: 512\neval_strategy: {eval_strategy}\n{extra}"
     )
     train = Dataset.from_dict({"prompt": [_TURNS, _TURNS], "label": [0, 1]})
     test = Dataset.from_dict({"prompt": [_TURNS] * len(test_labels), "label": test_labels})
@@ -126,6 +144,17 @@ def _run_to_tokenization(classification, tmp_path, eval_strategy: str, test_labe
         except _ReachedTokenization as reached:
             return reached.args[0]
     raise AssertionError("main() returned without reaching the tokenization map")
+
+
+def test_main_refuses_a_metric_knob_the_dataset_kind_does_not_read(classification, tmp_path):
+    with pytest.raises(ValueError, match="single-label dataset does not support.*multi_label_threshold"):
+        _run_to_tokenization(classification, tmp_path, "no", [0, 1], extra="multi_label_threshold: 0.7\n")
+
+
+def test_main_refuses_a_class_weight_count_before_the_load(classification, tmp_path):
+    with pytest.raises(ValueError, match="class_weights has 3 entries.*num_labels=2"):
+        _run_to_tokenization(classification, tmp_path, "no", [0, 1], extra="class_weights: [1.0, 2.0, 3.0]\n")
+    assert _run_to_tokenization(classification, tmp_path, "no", [0, 1], extra="class_weights: [1.0, 2.0]\n")
 
 
 def test_an_unlabeled_test_split_is_left_untokenized_when_the_run_does_not_evaluate(classification, tmp_path):

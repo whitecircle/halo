@@ -159,10 +159,10 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--train_on_completions_only` | `True` in `--mode chat`, `False` in `--mode text` | Mask user turns; train only on assistant responses. The chat default matches the training side and requires `--assistant_message_template`; asking for masking under `--mode text` is rejected (raw documents have no assistant turns) |
 | `--assistant_message_template` | `None` | Template marking start of assistant response |
 | `--pack_sequences` | `False` | Pack multiple sequences (text SFT only; refused for a model with compressed-KV layers, such as DeepSeek-V4) |
-| `--packing_strategy` | `bfd` | TRL strategy: `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk — emits no document boundaries, so a packed row attends across itself) |
+| `--packing_strategy` | `bfd` | Needs `--pack_sequences`. TRL strategy: `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk — emits no document boundaries, so a packed row attends across itself) |
 | `--is_vlm` | `False` | VLM mode (stores `pixel_values`, `image_grid_thw`; refuses an image row whose processor emits another vision key) |
 | `--images_field` | `None` | (`--is_vlm`) column holding the row's image(s) for datasets that keep them outside the conversation; merged into the messages like the runtime path. An image column named by nothing is refused |
-| `--min_pixels` / `--max_pixels` | `None` | VLM image pixel bounds |
+| `--min_pixels` / `--max_pixels` | `None` | VLM image pixel bounds; refused without `--is_vlm` |
 | `--num_shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |
 | `--num_proc` | `HALO_DATASET_NUM_PROC` | Processes for dataset map. With neither set, every CPU the process may use but two, since the tool runs alone ([`HALO_DATASET_NUM_PROC`](../reference/configuration-reference.md#environment-variables)) |
 | `--tokenizer_backend` | `hf` | `hf` = the model's tokenizer; `gigatoken` = Rust bulk encoder (see above) |

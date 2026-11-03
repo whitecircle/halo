@@ -141,6 +141,23 @@ def _refuse_model_loads(monkeypatch):
     monkeypatch.setattr(offline_export, "from_pretrained_verified", _refused)
 
 
+@pytest.mark.parametrize(
+    ("task", "options", "refusal"),
+    [
+        ("base", {"check_inference": True}, "--check_inference has no inference path for --task base"),
+        ("base", {"is_peft": True}, "PEFT is only supported.*not 'base'"),
+        ("causal_lm", {"is_peft": True, "device_map": "auto"}, "--peft rewrites the adapter.*--device_map"),
+        ("classification", {"is_peft": True, "device_map": "cpu"}, "--peft rewrites the adapter.*--device_map"),
+    ],
+    ids=["base_inference", "peft_base", "peft_device_map", "peft_classification_device_map"],
+)
+def test_a_conversion_refuses_a_flag_it_would_not_read_before_any_work(task, options, refusal, tmp_path, monkeypatch):
+    _refuse_model_loads(monkeypatch)
+    with pytest.raises(ValueError, match=refusal):
+        convert_to_bf16(str(tmp_path / "missing"), str(tmp_path / "out"), task, **options)
+    assert not (tmp_path / "out").exists()
+
+
 def test_a_peft_conversion_writes_the_adapter_at_bf16_without_loading_the_base(tmp_path, monkeypatch):
     """Loading the base to re-save an adapter PEFT wrote back in fp32 left a bf16 input upcast."""
     adapter = _lora_adapter(tmp_path, _fp32_checkpoint(tmp_path / "base"))

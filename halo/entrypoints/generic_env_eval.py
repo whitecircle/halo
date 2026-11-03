@@ -11,6 +11,7 @@ from halo.configs.script_arguments import DEFAULT_ANSWER_FIELD
 from halo.data.sources.loading import load_dataset_split
 from halo.entrypoints.eval_contract import (
     load_training_contract,
+    reject_flag_owned_env_kwargs,
     resolve_setting,
     resolve_trajectory_path,
     rollout_config_from_args,
@@ -25,6 +26,7 @@ from halo.inference.openai_client import build_openai_client
 logger = logging.getLogger(__name__)
 
 DEFAULT_ID_FIELD = "id"
+_FLAG_OWNED_ENV_KWARGS = ("max_turns",)
 
 
 def require_field_columns(args: argparse.Namespace, columns: list[str]) -> None:
@@ -79,6 +81,7 @@ def run_generic_env_eval(args: argparse.Namespace) -> None:
     if env_type is None:
         raise SystemExit("--env_type is required unless --training_config names an environment_type")
     env_kwargs = json.loads(args.env_kwargs)
+    reject_flag_owned_env_kwargs(env_kwargs, _FLAG_OWNED_ENV_KWARGS)
     turns_override = {"max_turns": args.max_turns} if args.max_turns is not None else {}
     # The training run's env config first, the flags over it: an eval under a contract grades as the run did.
     env = build_environment(env_type, {**trained_env, **turns_override, **env_kwargs})

@@ -12,7 +12,7 @@ import torch.distributed as dist
 from datasets import DatasetDict
 from transformers import AutoModelForSequenceClassification
 
-from halo.config_validation import reject_unsupported_args
+from halo.config_validation import reject_non_default_args, reject_unsupported_args
 from halo.configs.classification import ClassificationConfig, ClassificationScriptArguments
 from halo.configs.parallelism_arguments import ParallelismArguments
 from halo.configs.script_arguments import ModelArguments
@@ -42,6 +42,7 @@ from halo.runtime.collectives import barrier
 from halo.runtime.consensus import reject_across_ranks
 from halo.runtime.ranks import get_global_world_size, is_global_main_process
 from halo.trainers.reward.classification import ClassificationTrainer
+from halo.trainers.reward.classification_loss import reject_mismatched_class_weights
 from halo.trainers.training_args_overrides import uses_evaluation
 
 logger = logging.getLogger(__name__)
@@ -170,6 +171,14 @@ def reject_unlabeled_rows(split_labels: dict[str, set[str]], used_splits, is_mul
         )
 
 
+def reject_unread_metric_knobs(config: ClassificationConfig, is_multi_label: bool) -> None:
+    """Each is read on one kind of head only, and the dataset decides the kind."""
+    if is_multi_label:
+        reject_non_default_args("Classification on a multi-label dataset", config, "compute_per_class_metrics")
+    else:
+        reject_non_default_args("Classification on a single-label dataset", config, "multi_label_threshold")
+
+
 def build_label_list(split_labels: dict[str, set[str]]) -> list[str]:
     """Every split's labels, sorted, less the ``-1`` no-label sentinel."""
     for split, labels in split_labels.items():
@@ -213,12 +222,14 @@ def main():
         if is_global_main_process():
             logger.info("Label type is list, doing multi-label classification")
 
+    reject_unread_metric_knobs(classification_config, is_multi_label)
     used_splits = run_splits(classification_config)
     reject_unlabeled_rows(split_labels, used_splits, is_multi_label)
     label_list = build_label_list(split_labels)
     num_labels = len(label_list)
     if num_labels <= 1:
         raise ValueError("You need more than one label to do classification.")
+    reject_mismatched_class_weights(classification_config.class_weights, num_labels)
 
     label_to_id = {v: i for i, v in enumerate(label_list)}
 

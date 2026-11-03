@@ -63,6 +63,7 @@ from halo.models.attention.gpt_oss_sinks import SinksPolicy
 from halo.models.attention.tree import (
     install_tree_attention,
     reject_unsupported_tree_attention,
+    resolve_tree_full_form,
     resolve_tree_plan_options,
 )
 from halo.runtime.collectives import barrier
@@ -304,6 +305,7 @@ def main():
     parallelism_config = context.parallelism_config
     if args.tree_packing:
         # Tree rows are packed text rows, never pre-processed, so the planned backend is the one the load makes.
+        args.tree_full_attention = resolve_tree_full_form(checkpoint_config, planned_attn, args.tree_full_attention)
         reject_unsupported_tree_attention(
             checkpoint_config,
             planned_attn,
@@ -328,6 +330,8 @@ def main():
     if is_vlm:
         reject_unsupported_vlm_sft_options(args, sft_config, preprocessed=is_preprocessed)
     metadata = load_preprocessed_metadata(args.dataset) if is_preprocessed else None
+    if not (_packs_rows(sft_config, metadata) or sft_config.padding_free):
+        reject_non_default_args("Halo SFT without multi-document rows", args, "allow_cross_document_linear_attention")
     if metadata is not None:
         attn_default = plan_row_attention(
             model_config, sft_config, packing=_packs_rows(sft_config, metadata), **rows_plan

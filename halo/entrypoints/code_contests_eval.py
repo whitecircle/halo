@@ -11,6 +11,7 @@ from halo.data.sources.loading import load_dataset_split
 from halo.entrypoints.eval_contract import (
     DEFAULT_SPLIT,
     load_training_contract,
+    reject_flag_owned_env_kwargs,
     resolve_setting,
     resolve_trajectory_path,
     rollout_config_from_args,
@@ -56,13 +57,6 @@ def parse_language_flag(value: str) -> str | list[str]:
     """One name, or the list a comma-separated value names."""
     languages = parse_list_flag("language", value)
     return languages if len(languages) > 1 else languages[0]
-
-
-def reject_flag_owned_env_kwargs(env_kwargs: dict) -> None:
-    """Such an option in ``--env_kwargs`` would silently override its flag, the JSON being laid over the flags."""
-    for key in FLAG_OWNED_ENV_KWARGS:
-        if key in env_kwargs:
-            raise SystemExit(f"set the {key} with --{key}, not --env_kwargs, which would override the flag")
 
 
 def resolve_selection(args: argparse.Namespace, adapter: CodeDatasetAdapter) -> ContestSelection:
@@ -209,7 +203,7 @@ def run_code_contests_eval(args: argparse.Namespace) -> None:
         raise SystemExit(f"--split on --adapter {args.adapter}: {exc}") from exc
     selection = resolve_selection(args, adapter)
     env_kwargs = json.loads(args.env_kwargs)
-    reject_flag_owned_env_kwargs(env_kwargs)
+    reject_flag_owned_env_kwargs(env_kwargs, FLAG_OWNED_ENV_KWARGS)
     contract = load_training_contract(args.training_config)
     trained_env = contract.env_config.to_env_config() if contract is not None else {}
     env_type = resolve_setting(

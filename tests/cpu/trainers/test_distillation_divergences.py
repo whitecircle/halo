@@ -4,11 +4,13 @@ fp32 is in ``test_distillation_loss_precision.py``, ``-inf`` in ``test_distillat
 
 import inspect
 import math
+from typing import get_args, get_type_hints
 
 import pytest
 import torch
 from torch.nn.functional import softmax
 
+from halo.configs.distillation import TEMPERATURE_FREE_DISTILL_LOSSES, TeacherDistillationConfig
 from halo.trainers.distillation.divergences import (
     DIVERGENCES,
     call_divergence,
@@ -225,6 +227,13 @@ def test_beta_is_the_constant_base_without_windows_or_a_total():
     assert beta_warmup_decay(7, 100, 0.3, 0, 0) == pytest.approx(0.3)
     assert beta_warmup_decay(7, 0, 0.3, 0, 10) == pytest.approx(0.3)
     assert beta_warmup_decay(50, 100, 0.0, 10, 10) == 0.0
+
+
+def test_the_temperature_free_losses_are_the_ones_whose_definition_takes_none():
+    losses = get_args(get_type_hints(TeacherDistillationConfig)["distill_loss"])
+    assert {
+        name for name in losses if "temperature" not in inspect.signature(DIVERGENCES[name]).parameters
+    } == TEMPERATURE_FREE_DISTILL_LOSSES
 
 
 if __name__ == "__main__":

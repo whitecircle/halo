@@ -23,7 +23,7 @@ from halo.env import is_accelerate_launch
 from halo.model_loading.lazy_safetensors.meta_shell import MetaShellBuildError, instantiate_on_meta
 from halo.model_loading.parallel.model_source import ModelSource
 from halo.model_loading.parallel.tp import uses_attention_only_tp
-from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, reject_trainable_sinks_without_sinks, uses_gpt_oss_sinks
 from halo.models.config_access import text_config
 from halo.models.context_window import context_window_from_config
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP
@@ -108,6 +108,16 @@ def reject_unsupported_model(
     pc: ParallelismConfig, model_config, *, sinks_policy: SinksPolicy, wraps_experts: bool
 ) -> None:
     """Refuse what this model's ``config.json`` cannot take under ``pc``, before the process groups."""
+    reject_trainable_sinks_without_sinks(model_config, sinks_policy)
+    # Read only by the EP layers; a model with none trains at the run dtype whatever these say.
+    if (pc.ep_fp32_router or pc.ep_fp32_experts) and not (
+        wraps_experts and find_moe_family_spec_for_config(model_config) is not None
+    ):
+        raise ValueError(
+            "fp32_router and fp32_experts are read by the EP layers, and this run builds none: the model has no "
+            "routed experts with an EP layer, or expert_parallel_size is 1 with use_grouped_gemm off. Remove them, or "
+            "use fp32_non_ep_params for FP32 masters on the rest of the model."
+        )
     if pc.ep_size > 1:
         num_experts = resolve_expert_count(model_config)
         if num_experts and num_experts % pc.ep_size != 0:

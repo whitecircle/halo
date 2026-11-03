@@ -772,7 +772,7 @@ def test_recovery_cap_of_zero_ends_the_episode_at_the_first_cut_and_negative_is_
     eid = _reset(env)
     step = env.step([eid], ["a fragment"], [{"finish_reason": "length"}])[0]
     assert step.done and step.truncated
-    with pytest.raises(ValueError, match="max_length_cutoff_recoveries must be >= 0"):
+    with pytest.raises(ValueError, match="max_length_cutoff_recoveries must be an integer >= 0"):
         _make_env(max_length_cutoff_recoveries=-1)
 
 

@@ -16,6 +16,7 @@ from halo.rewards.graders.matching import is_correct_answer
 # MMLU-Pro tops out at 10 options. ``ExamQAEnvironment``'s system prompt is built from this range, so the instruction
 # matches what the grader accepts.
 MULTIPLE_CHOICE_LETTERS = "ABCDEFGHIJ"
+_TOOL_PRICING_KNOBS = ("tool_success_reward", "tool_error_penalty", "tool_reward_cap")
 
 _CHOICE_LETTER = f"[{MULTIPLE_CHOICE_LETTERS}]"
 # A choice already led by its own letter ("B: Jupiter", "(B) Jupiter", "B. Jupiter") is shown as written.
@@ -138,6 +139,12 @@ class ExamQAEnvironment(NativeToolUseEnvironment):
                     f"search_backend={search_backend!r} is set on a closed-book exam_qa, which "
                     f"registers no search tool, so it would never be used. Set open_book=true to "
                     f"give the model search, or drop search_backend."
+                )
+            unpriced = sorted(knob for knob in _TOOL_PRICING_KNOBS if kwargs.get(knob) is not None)
+            if unpriced:
+                raise ValueError(
+                    f"{unpriced} price tool calls, and a closed-book exam_qa registers no tool. Set open_book=true "
+                    f"to give the model search, or drop them."
                 )
             registry = NativeToolRegistry()
             instruction = ""

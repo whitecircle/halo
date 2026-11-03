@@ -41,15 +41,16 @@ def add_eval_args(parser: argparse.ArgumentParser) -> None:
         f"episodes so long reasoning turns are not cut off.",
     )
     parser.add_argument("--output_path", default=None, help="Optional JSON file to dump per-example results to.")
-    parser.add_argument(
+    trajectories = parser.add_mutually_exclusive_group()
+    trajectories.add_argument(
         "--save_trajectories",
         default=None,
         help="Optional explicit JSONL path to record full trajectories (system prompt + tool schemas in "
         "a meta line, then one episode per line with its messages, tool calls/results, and reward).",
     )
-    parser.add_argument(
+    trajectories.add_argument(
         "--trajectory_dir",
         default=None,
         help="Optional output folder for trajectories; the file is auto-named per run from the model "
-        "and the dataset/split it ran on. Ignored when --save_trajectories is given.",
+        "and the dataset/split it ran on.",
     )

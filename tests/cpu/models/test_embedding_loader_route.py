@@ -4,10 +4,12 @@ A sentence-transformers load builds stock experts, so ``use_grouped_gemm`` would
 
 import ast
 import inspect
+import sys
 import textwrap
 from types import SimpleNamespace
 
 import pytest
+from datasets import Dataset, DatasetDict
 
 import scripts.training.embedding as embedding_script
 from halo.configs.embedding import EmbeddingConfig, EmbeddingScriptArguments
@@ -94,6 +96,47 @@ def test_lora_on_the_ep1_layers_is_refused_before_the_load(checkpoints, family):
         embedding_script.reject_lora_before_the_load(
             _context(checkpoints[family]), ModelArguments(model_name_or_path=checkpoints[family], use_peft=True)
         )
+
+
+def test_train_sinks_on_a_sinkless_backbone_is_refused_before_sentence_transformers_loads(
+    monkeypatch, tmp_path, checkpoints
+):
+    def refused(*args, **kwargs):
+        raise AssertionError("the backbone was loaded")
+
+    monkeypatch.setattr(embedding_script, "SentenceTransformer", refused)
+    with pytest.raises(ValueError, match="model_type='qwen3'.*Remove train_sinks"):
+        embedding_script._load_sentence_transformer(
+            _context(checkpoints["qwen3"]),
+            EmbeddingConfig(output_dir=str(tmp_path), bf16=False, use_cpu=True),
+            ModelArguments(model_name_or_path=checkpoints["qwen3"]),
+            EmbeddingScriptArguments(reset_sinks=False, train_sinks=True),
+        )
+
+
+@pytest.mark.parametrize("knob", ["fp32_router", "fp32_experts"])
+def test_main_refuses_an_fp32_ep_master_on_a_sentence_transformers_load(monkeypatch, tmp_path, checkpoints, knob):
+    """Past this gate the dense backbone would load and train at the run dtype whatever the knob says."""
+
+    def run(checkpoint: str, **parallelism) -> None:
+        config = tmp_path / "config.yaml"
+        config.write_text(
+            f"model_name_or_path: {checkpoint}\ndataset:\n- dummy/dataset\noutput_dir: {tmp_path / 'out'}\n"
+            f"bf16: false\nuse_cpu: true\nmax_length: 64\n{knob}: true\n"
+        )
+        rows = DatasetDict({"train": Dataset.from_dict({"text": ["a", "b"]})})
+        monkeypatch.setattr(
+            embedding_script, "init_training_script", lambda *a, **k: _context(checkpoint, **parallelism)
+        )
+        monkeypatch.setattr(embedding_script, "load_script_datasets", lambda *a, **k: (rows, False))
+        monkeypatch.setattr(embedding_script, "build_sentence_transformer", lambda *a: pytest.fail("past the gate"))
+        monkeypatch.setattr(sys, "argv", ["prog", str(config)])
+        embedding_script.main()
+
+    with pytest.raises(ValueError, match=rf"builds no EP layers does not support.*{knob}"):
+        run(checkpoints["qwen3"])
+    with pytest.raises(pytest.fail.Exception, match="past the gate"):
+        run(checkpoints["gpt_oss"])
 
 
 def test_lora_under_ep_is_refused_before_the_load(checkpoints):

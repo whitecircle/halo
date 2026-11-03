@@ -72,6 +72,7 @@ _UNCOMPARED_FIELDS = frozenset(
 
 _PreprocessingMode = Literal["chat", "text"]
 _PackingStrategy = Literal["bfd", "bfd_split", "wrapped"]
+_DEFAULT_PACKING_STRATEGY = "bfd"
 
 
 @dataclass
@@ -121,7 +122,7 @@ class PreprocessingConfig:
     )
     pack_sequences: bool = field(default=False, metadata={"help": "Pack rows to max_length (text only)."})
     packing_strategy: _PackingStrategy = field(
-        default="bfd",
+        default=_DEFAULT_PACKING_STRATEGY,
         metadata={
             "help": "'bfd' drops a document's overflow, 'bfd_split' carries it into later rows, 'wrapped' "
             "chunks across documents."
@@ -186,6 +187,18 @@ class PreprocessingConfig:
                 f"mode='{self.mode}' and would be silently ignored: a mode='text' run renders no chat "
                 f"template, and a mode='chat' run tokenizes no raw-text field. Drop the setting, or "
                 f"switch mode."
+            )
+
+        unread = [name for name in ("min_pixels", "max_pixels") if getattr(self, name) is not None and not self.is_vlm]
+        if unread:
+            raise ValueError(
+                f"{unread} set the image processor's bounds, but is_vlm=False: a text bake loads no image processor. "
+                f"Set is_vlm=True, or drop them."
+            )
+        if not self.pack_sequences and self.packing_strategy != _DEFAULT_PACKING_STRATEGY:
+            raise ValueError(
+                f"packing_strategy='{self.packing_strategy}' is set, but pack_sequences=False: no pack reads it. Set "
+                f"pack_sequences=True, or drop it."
             )
 
         if self.images_field and not self.is_vlm:

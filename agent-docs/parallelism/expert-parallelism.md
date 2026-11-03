@@ -206,6 +206,8 @@ lossy and the error grows with rank count — worth enabling for many-rank / mul
 | `fp32_experts` | Expert weights | FP32 master, BF16 compute. No effect when FSDP2 manages replicated experts (`fsdp_shard_ep1_experts` at `ep_group_size == 1`) — set `fsdp_shard_ep1_experts: false` for fp32 expert masters there |
 | `fp32_non_ep_params` | Attention, embed, norm | FP32 master, BF16 compute |
 
+`fp32_router` and `fp32_experts` are read only by the EP layers: a run that builds none (a dense model, a family with no EP layer, `use_grouped_gemm: false` at `expert_parallel_size: 1`) is refused at load.
+
 Training checkpoints keep these masters in fp32 and exports write them bf16
 ([What gets saved](../reference/checkpoints.md#what-gets-saved)).
 

@@ -55,5 +55,19 @@ def test_only_the_runner_that_refuses_a_foreign_split_says_it_does(monkeypatch, 
     assert eval_env.parse_args().split == DEFAULT_SPLIT
 
 
+@pytest.mark.parametrize("runner", [eval_code_contests, eval_env], ids=["eval_code_contests", "eval_env"])
+def test_a_trajectory_path_and_a_trajectory_dir_are_refused_together(runner, monkeypatch, capsys):
+    """One would silently beat the other."""
+    argv = ["eval.py", "--dataset", "d", "--model", "m", "--adapter", "codeforces"]
+    argv = argv if runner is eval_code_contests else argv[:-2]
+    monkeypatch.setattr(sys, "argv", [*argv, "--save_trajectories", "t.jsonl", "--trajectory_dir", "runs"])
+    with pytest.raises(SystemExit):
+        runner.parse_args()
+    assert "not allowed with argument" in capsys.readouterr().err
+    for flags in (["--save_trajectories", "t.jsonl"], ["--trajectory_dir", "runs"]):
+        monkeypatch.setattr(sys, "argv", [*argv, *flags])
+        assert runner.parse_args()
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-v"]))

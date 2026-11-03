@@ -94,6 +94,20 @@ def test_build_classification_loss_uses_global_counts():
     assert torch.allclose(loss.weight, GLOBAL_WEIGHTS, atol=1e-6), loss.weight
 
 
+@pytest.mark.parametrize("multi_label", [False, True])
+@pytest.mark.parametrize("weights", [[2.0], [1.0, 2.0, 3.0, 4.0]], ids=["short", "long"])
+def test_class_weights_must_give_one_weight_per_label(multi_label, weights):
+    """A one-entry list would broadcast as ``pos_weight`` over a multi-label head instead of failing the loss."""
+    args = SimpleNamespace(
+        loss_type="cross_entropy", class_weights=weights, derive_class_weights=False, label_smoothing=0.0
+    )
+    model = SimpleNamespace(config=SimpleNamespace(num_labels=3))
+    with pytest.raises(ValueError, match=f"class_weights has {len(weights)} entries.*num_labels=3"):
+        build_classification_loss(args, model, None, multi_label=multi_label)
+    args.class_weights = [1.0, 2.0, 3.0]
+    assert build_classification_loss(args, model, None, multi_label=multi_label).weight.tolist() == [1.0, 2.0, 3.0]
+
+
 def test_world_reduce_is_scale_invariant_for_tp_siblings():
     """TP siblings hold the same shard, so the world sum double-counts it uniformly and balanced weights don't move."""
     labels = [0, 0, 1, 2, 2, 2]

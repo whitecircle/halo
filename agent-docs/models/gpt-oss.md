@@ -42,7 +42,7 @@ GptOss attention adds a per-head learnable scalar to the attention logits before
 
     Live sinks admit only sink-carrying implementations (FA4, `flex_attention`, `eager`; FA3 with an `s_aux` build): a sink-dropping implementation shifts every logprob ~−3 nats against the served policy (gpt-oss-20b). The resolver refuses one before the load, and the model every loader builds is checked again (`verify_live_sinks_carried`), the builds no resolver picks a backend for included: a sentence-transformers backbone on a pinned label, and the reward-model scorer, whose checkpoint's own sinks decide. They are refused under Context Parallelism, whose kernels never see the column. On Hopper no fused kernel carries them: `flex_attention` under EP runs uncompiled ([Known issues](../optimization/flash-attention.md#known-issues)) and `eager` everywhere, both holding the full score matrix, so memory bounds the row length.
 
-- **Trainable** (`reset_sinks: false` + `train_sinks: true`): live with gradients on; full fine-tuning under FA4 or `eager` only.
+- **Trainable** (`reset_sinks: false` + `train_sinks: true`): live with gradients on; full fine-tuning under FA4 or `eager` only. Another family's load refuses `train_sinks`.
 
     The loader installs a rescale on both `flash_attn.cute` entry points (varlen and dense), so a sink trains without the kernel's own sink backward, which is not validated here. A grad-requiring sink runs the sink-less kernel with `return_lse=True` and applies `out * sigmoid(lse - sink)` outside it — algebraically the fused sink, with `d_sink` from the gate and complete `dq/dk/dv` through `dout` and the kernel's `dlse` path.
 

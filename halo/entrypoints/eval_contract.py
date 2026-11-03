@@ -128,8 +128,15 @@ def rollout_config_from_args(
     return replace(base, model_name=args.model, **explicit)
 
 
+def reject_flag_owned_env_kwargs(env_kwargs: dict, flag_owned: tuple[str, ...]) -> None:
+    """Such an option in ``--env_kwargs`` would silently override its flag, the JSON being laid over the flags."""
+    for key in flag_owned:
+        if key in env_kwargs:
+            raise SystemExit(f"set the {key} with --{key}, not --env_kwargs, which would override the flag")
+
+
 def resolve_trajectory_path(args: argparse.Namespace, *parts: str) -> str | None:
-    """An explicit ``--save_trajectories``, else a file under ``--trajectory_dir`` named from the model and parts."""
+    """``--save_trajectories``, or a file under ``--trajectory_dir`` named from the model and parts."""
     if args.save_trajectories is not None:
         return args.save_trajectories
     if args.trajectory_dir:

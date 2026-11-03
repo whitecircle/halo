@@ -61,7 +61,7 @@ class OfflineGRPOConfig(
     min_log_prob: float | None = field(
         default=-3.0,
         metadata={
-            "help": "Clip floor for completion tokens with negative advantages (-3.0 ≈ 5% probability); "
+            "help": "Clip floor for completion tokens with negative advantages (-3.0 ≈ 5% probability), below 0; "
             "prevents instability from extremely low-probability tokens. Unset = no clipping."
         },
     )
@@ -69,7 +69,7 @@ class OfflineGRPOConfig(
         default=None,
         metadata={
             "help": "When set, linearly schedules min_log_prob from this start value to its final value over "
-            "training; it needs min_log_prob. A start near the mean CE loss on the SFT data works."
+            "training; below 0, refused without min_log_prob. A start near minus the mean CE loss on the SFT data works."
         },
     )
     drop_degenerate_groups: bool = field(
@@ -116,9 +116,18 @@ class OfflineGRPOConfig(
                     f"and negative values are silent no-ops."
                 )
         require_finite(owner, ge=0, why=" (0 = no KL term)", kl_beta=self.kl_beta)
+        # A floor at or above 0 clamps every negative-advantage token to that constant, zeroing their gradient.
         require_finite(
-            owner, **present(min_log_prob=self.min_log_prob, initial_min_log_prob=self.initial_min_log_prob)
+            owner,
+            lt=0,
+            why=" (log probabilities are <= 0)",
+            **present(min_log_prob=self.min_log_prob, initial_min_log_prob=self.initial_min_log_prob),
         )
+        if self.initial_min_log_prob is not None and self.min_log_prob is None:
+            raise ValueError(
+                f"initial_min_log_prob={self.initial_min_log_prob} schedules min_log_prob, which is unset: there is "
+                f"no floor to schedule toward. Set min_log_prob, or drop initial_min_log_prob."
+            )
         require_int(
             owner,
             ge=1,

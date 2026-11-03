@@ -8,7 +8,14 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, ClassVar, Self
 
-from halo.config_validation import present, require_bool, require_finite, require_int, require_text
+from halo.config_validation import (
+    differs_from_default,
+    present,
+    require_bool,
+    require_finite,
+    require_int,
+    require_text,
+)
 from halo.inference.endpoints import DEFAULT_OPENROUTER_BASE_URL
 
 # ``reward/<name>``; the keys of one reward sum to the reward.
@@ -309,6 +316,11 @@ class JudgeTerm(ScoredTerm):
         if self.context is not None:
             require_text(owner, context=self.context)
         require_int(owner, ge=1, scale=self.scale, max_tokens=self.max_tokens, max_view_chars=self.max_view_chars)
+        if self.checks and differs_from_default(self, "scale"):
+            raise ValueError(
+                f"{owner}: scale={self.scale} is the range of a scoring judge's requirements, and a veto judge's "
+                f"checks fire or do not. Remove it."
+            )
         if self.reasoning_effort is not None:
             _coerce_enum(self, "reasoning_effort", JudgeReasoningEffort)
         require_finite(owner, ge=0, **present(temperature=self.temperature))

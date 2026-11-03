@@ -4,10 +4,18 @@ script-argument and trainer-config dataclasses mix in."""
 from dataclasses import dataclass, field
 from typing import Any, ClassVar, Literal
 
+from huggingface_hub.serialization._base import parse_size_to_int
 from trl import ModelConfig
 
 from halo.checkpoint.format import DEFAULT_MAX_SHARD_SIZE
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import (
+    ValidatedConfig,
+    differs_from_default,
+    present,
+    reject_non_default_args,
+    require_finite,
+    require_int,
+)
 from halo.configs.parser import is_null_string
 from halo.env import torch_trace_dir
 from halo.model_loading.tokenizer_backend import TokenizerBackend
@@ -86,7 +94,8 @@ class ModelLoadArguments:
         default=False,
         metadata={
             "help": "GptOss only: train the live sinks (requires reset_sinks: false) under full fine-tuning with "
-            "flash_attention_4 or eager. Refused with flex_attention, FA3, adapter runs and weight-sync RL. "
+            "flash_attention_4 or eager. Refused with flex_attention, FA3, adapter runs, weight-sync RL and a model "
+            "without sinks. "
             "See agent-docs/models/gpt-oss.md#attention-sinks."
         },
     )
@@ -164,6 +173,17 @@ class TorchProfilerArguments(ValidatedConfig):
         # torch.profiler.schedule's own bounds.
         require_int(owner, ge=0, profiler_wait=self.profiler_wait, profiler_warmup=self.profiler_warmup)
         require_int(owner, ge=1, profiler_active=self.profiler_active)
+        if not self.enable_torch_profiler:
+            reject_non_default_args(
+                "A run with enable_torch_profiler off",
+                self,
+                "profiler_output_dir",
+                "profiler_wait",
+                "profiler_warmup",
+                "profiler_active",
+                "profiler_ranks",
+                "profiler_record_memory_snapshot",
+            )
 
 
 @dataclass
@@ -282,16 +302,16 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
         default=None,
         metadata={
             "help": "Total parameter count across all EP/TP ranks; EfficiencyCallback then reports distributed "
-            "efficiency = params_ratio × MFU. Leave unset on data-parallel runs, whose local count is the whole "
-            "model."
+            "efficiency = params_ratio × MFU. Needs enable_efficiency_metrics. Leave unset on data-parallel runs, "
+            "whose local count is the whole model."
         },
     )
     report_mfu_diagnostics: bool = field(
         default=False,
         metadata={
-            "help": "Add MFU, S-MFU and achieved TFLOPS to the headline training log; they are computed every step "
-            "either way. Off by default: tokens/s/GPU is the reported throughput metric, and MFU is misleading "
-            "across GPUs, dtypes and MoE models. "
+            "help": "Add MFU, S-MFU and achieved TFLOPS to the headline training log. Needs "
+            "enable_efficiency_metrics, whose callback computes them every step either way. Off by default: "
+            "tokens/s/GPU is the reported throughput metric, and MFU is misleading across GPUs, dtypes and MoE models. "
             "See agent-docs/reference/configuration-reference.md#commonscriptarguments."
         },
     )
@@ -327,8 +347,8 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
         default=1.0e-3,
         metadata={
             "help": "Sign-step magnitude (gamma) of BalancingBiasCallback under a bias_update mode; the "
-            "DeepSeek-V3 paper used 1e-3. Ignored under every other resolved mode, so also on the weight-sync RL "
-            "scripts."
+            "DeepSeek-V3 paper used 1e-3. Refused with an explicit moe_balancing: none or aux_loss. Not read where "
+            "'auto' resolves to another mode, or on the weight-sync RL scripts."
         },
     )
     max_consecutive_nonfinite_steps: int = field(
@@ -371,16 +391,41 @@ class CommonScriptArguments(TorchProfilerArguments, CheckpointArguments, ModelLo
         require_int(owner, ge=0, max_consecutive_nonfinite_steps=self.max_consecutive_nonfinite_steps)
         if self.force_chat_template and not self.chat_template:
             raise ValueError(f"{owner}: force_chat_template: true has no chat_template to apply. Set one, or drop it.")
+        self._reject_unusable_shard_size()
+        if not self.enable_efficiency_metrics:
+            reject_non_default_args(
+                "A run with enable_efficiency_metrics off", self, "num_full_model_params", "report_mfu_diagnostics"
+            )
+        # Under 'auto' the rate stays legal: the mode it feeds is decided per model, at the load.
+        if self.moe_balancing in ("none", "aux_loss") and differs_from_default(self, "router_balancing_rate"):
+            raise ValueError(
+                f"router_balancing_rate={self.router_balancing_rate} has no effect under moe_balancing: "
+                f"{self.moe_balancing}: only the bias_update modes take a sign step. Remove it, or set a bias mode."
+            )
+
+    def _reject_unusable_shard_size(self) -> None:
+        """Otherwise the first save raises, after the run has trained up to it."""
+        size = self.save_max_shard_size
+        try:
+            usable = parse_size_to_int(size) > 0
+        except (AttributeError, ValueError):
+            usable = False
+        if not usable:
+            raise ValueError(f"save_max_shard_size must be a positive size like '5GB', got {size!r}")
 
 
 @dataclass
 class GenerationEvalArguments(ValidatedConfig):
     generate_eval_examples: bool = field(default=True, metadata={"help": "Generate text examples during evaluation."})
-    num_eval_examples: int = field(default=50, metadata={"help": "Examples to generate per evaluation."})
+    num_eval_examples: int = field(
+        default=50, metadata={"help": "Examples to generate per evaluation; needs generate_eval_examples."}
+    )
 
     def _validate_fields(self) -> None:
         super()._validate_fields()
         require_int(type(self).__name__, ge=1, num_eval_examples=self.num_eval_examples)
+        if not self.generate_eval_examples:
+            reject_non_default_args("A run with generate_eval_examples off", self, "num_eval_examples")
 
 
 @dataclass

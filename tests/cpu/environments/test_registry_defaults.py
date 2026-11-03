@@ -3,6 +3,8 @@
 config sets ``max_turns``. Since the shipped templates rely on ``max_turns: null``, the overview's registry table
 is held to the classes."""
 
+import math
+from operator import attrgetter
 from typing import get_type_hints
 
 import pytest
@@ -175,6 +177,60 @@ def test_an_explicit_requires_answer_overrides_the_class_declaration():
     other constructor knob."""
     assert not build_environment("exam_qa", {"requires_answer": False}).requires_answer
     assert build_environment("native_math", {"requires_answer": True}).requires_answer
+
+
+@pytest.mark.parametrize("env_type", ["code_contests", "codeforces"])
+def test_a_contest_cannot_drop_its_answer_gate(env_type):
+    """It grades only against the answer column's hidden tests, so an answerless dataset would pass the trainer's gate
+    and fail at the first submission."""
+    with pytest.raises(ValueError, match="requires_answer cannot be false"):
+        build_environment(env_type, {**_ENV_KWARGS[env_type], "requires_answer": False})
+    assert build_environment(env_type, {**_ENV_KWARGS[env_type], "requires_answer": True}).requires_answer
+
+
+@pytest.mark.parametrize("knob", ["tool_success_reward", "tool_error_penalty", "tool_reward_cap"])
+def test_a_closed_book_exam_refuses_tool_pricing(knob, monkeypatch):
+    with pytest.raises(ValueError, match=rf"\['{knob}'\] price tool calls.*registers no tool"):
+        build_environment("exam_qa", {knob: 0.5})
+    monkeypatch.setenv("HALO_ALLOW_MOCK_SEARCH", "1")
+    assert build_environment("exam_qa", {"open_book": True, "search_backend": "mock", knob: 0.5})
+
+
+_BAD_BOUNDS = [
+    ("native_math", "max_tool_calls_per_turn", [0, -1, 2.5, True, None]),
+    ("swe", "max_tool_calls_per_turn", [0, -1, 2.5, True, None]),
+    ("native_math", "max_observation_chars", [-1, 2.5, True, None]),
+    ("react_math", "max_observation_chars", [-1, 2.5, True, None]),
+    ("code_contests", "max_output_size", [0, -1, 2.5, True]),
+    ("swe", "code_timeout", [0, -1, math.nan, math.inf, True]),
+    ("native_math", "max_length_cutoff_recoveries", [-1, 2.5, True]),
+    ("react_math", "max_length_cutoff_recoveries", [-1, 2.5, True]),
+]
+
+
+@pytest.mark.parametrize(
+    ("env_type", "knob", "bad"),
+    [(env_type, knob, bad) for env_type, knob, values in _BAD_BOUNDS for bad in values],
+    ids=str,
+)
+def test_an_environment_refuses_an_out_of_bounds_knob(env_type, knob, bad):
+    with pytest.raises(ValueError, match=rf"{knob} must be"):
+        build_environment(env_type, {**_ENV_KWARGS[env_type], knob: bad})
+
+
+@pytest.mark.parametrize(
+    ("env_type", "knob", "good", "read"),
+    [
+        ("native_math", "max_tool_calls_per_turn", 1, "max_tool_calls_per_turn"),
+        ("native_math", "max_observation_chars", 0, "max_observation_chars"),
+        ("code_contests", "max_output_size", 1, "grading_spec.max_output_size"),
+        ("native_math", "max_length_cutoff_recoveries", 0, "max_length_cutoff_recoveries"),
+        ("native_math", "max_length_cutoff_recoveries", None, "max_length_cutoff_recoveries"),
+    ],
+    ids=str,
+)
+def test_an_environment_takes_a_knob_at_its_bound(env_type, knob, good, read):
+    assert attrgetter(read)(build_environment(env_type, {**_ENV_KWARGS[env_type], knob: good})) == good
 
 
 def test_explicit_max_turns_still_overrides():

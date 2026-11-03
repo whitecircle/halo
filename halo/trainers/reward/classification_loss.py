@@ -151,6 +151,15 @@ class ClassificationLoss:
         )
 
 
+def reject_mismatched_class_weights(class_weights: list[float] | None, num_labels: int) -> None:
+    # A one-entry list would broadcast as pos_weight over every label of a multi-label head.
+    if class_weights is not None and len(class_weights) != num_labels:
+        raise ValueError(
+            f"class_weights has {len(class_weights)} entries, but the model has num_labels={num_labels}: "
+            f"give one weight per label, ordered by label ID."
+        )
+
+
 def build_classification_loss(args, model: nn.Module, train_dataset, *, multi_label: bool) -> ClassificationLoss:
     """Refuses the options ``model``'s head cannot honor. COLLECTIVE under ``derive_class_weights``."""
     num_labels = model.config.num_labels
@@ -173,6 +182,7 @@ def build_classification_loss(args, model: nn.Module, train_dataset, *, multi_la
 
     weight = None
     if args.class_weights is not None:
+        reject_mismatched_class_weights(args.class_weights, num_labels)
         weight = torch.tensor(args.class_weights, dtype=torch.float32)
     elif args.derive_class_weights:
         weight = balanced_class_weights(train_dataset, model)

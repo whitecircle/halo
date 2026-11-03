@@ -39,7 +39,7 @@ python scripts/environments/inference/eval_env.py --env_type qa_search \
 | `--num_examples` / `--num_samples` | 100 (50 coding) / 1 | Rows scored; episodes per row |
 | `--success_threshold` | `1.0` | `eval_env.py` only: the reward that counts as solved without an environment solve verdict |
 | `--max_workers` | 32 (16 coding) | Concurrent episodes |
-| `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config |
+| `--max_turns` / `--env_kwargs` | the env's own; coding 15 / `{}` | Turn cap override; JSON merged into the env config, which may not carry an option a flag sets (`max_turns`) |
 | `--temperature` / `--top_p` / `--max_tokens` / `--request_timeout` | 0.7 (0.2 coding) / 0.95 / 32768 (coding: [Generation budget](environments/tasks/code-contests/evaluation.md#generation-budget)) / 180 s | Sampling, HTTP timeout |
 
 Every request also sends `top_k`, `min_p` and `repetition_penalty` (the run's `rollout_*` values under `--training_config`, else off), so a served model's `generation_config.json` never filters the eval.
@@ -90,7 +90,7 @@ A score left with no sample reads `nan`.
 
 `--output_path <path.json>` dumps per-example results: `group`, `id`, and per sample `reward`, `success`, `stats`, `error` or `generation_error` where set, plus any recorded trajectory.
 
-`--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>` auto-names one file per run: `<model>__<env_type>__<split>.jsonl`, or for the coding script `<model>__<adapter>__<split>__<language>.jsonl` plus `__<eval_protocol>` (other than `harness`) and any contest selection.
+`--save_trajectories <path.jsonl>` records the full run; `--trajectory_dir <folder>`, which it excludes, auto-names one file per run: `<model>__<env_type>__<split>.jsonl`, or for the coding script `<model>__<adapter>__<split>__<language>.jsonl` plus `__<eval_protocol>` (other than `harness`) and any contest selection.
 
 Line 1 is a `meta` record of the run's contract: model, env type, dataset/config/split, effective `max_turns`, `rollout`, `training_config`, `system_prompt`, tool schemas, and for coding the adapter, contest `selection`, language, `eval_protocol`, effort and `env_grading`.
 

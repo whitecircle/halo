@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
-from transformers import GptOssConfig, GptOssForCausalLM
+from transformers import CONFIG_MAPPING, GptOssConfig, GptOssForCausalLM
 
 from halo.distributed.expert_parallel.families.gpt_oss import EPGptOssMoELayer
 from halo.model_loading.parallel.peft_setup import configure_adapter_training
@@ -51,6 +51,14 @@ def test_from_flags_resolves_the_two_knobs():
     with pytest.raises(ValueError, match="contradicts"):
         SinksPolicy.from_flags(reset_sinks=True, train_sinks=True)
     assert not SinksPolicy.NEUTRALIZED.live and SinksPolicy.LIVE.live and SinksPolicy.TRAINABLE.live
+
+
+def test_train_sinks_is_refused_on_a_model_without_sinks():
+    config = CONFIG_MAPPING["qwen3"]()
+    with pytest.raises(ValueError, match="model_type='qwen3'.*Remove train_sinks"):
+        apply_sinks_policy(torch.nn.Linear(1, 1), config, policy=SinksPolicy.TRAINABLE, attn_implementation="eager")
+    for policy in (SinksPolicy.NEUTRALIZED, SinksPolicy.LIVE):
+        apply_sinks_policy(torch.nn.Linear(1, 1), config, policy=policy, attn_implementation="eager")
 
 
 def test_trainable_branch_keeps_values_and_grads():

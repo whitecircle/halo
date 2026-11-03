@@ -238,6 +238,13 @@ def test_the_setting_opens_the_prompt_and_a_task_heading_stays_inside_its_tags()
         _term(context="  ")
 
 
+def test_a_veto_judge_refuses_a_scale_only_requirements_read():
+    with pytest.raises(ValueError, match="scale=5 is the range of a scoring judge's requirements"):
+        _veto_term(scale=5)
+    assert _veto_term().scale == _term().scale
+    assert _term(scale=5).scale == 5
+
+
 def test_veto_prompt_lists_the_checks_with_the_evidence_instruction_and_reply_shape():
     prompt = grading_prompt(_veto_term(), EPISODE)
     assert (

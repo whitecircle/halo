@@ -3,8 +3,11 @@ from typing import ClassVar, Literal
 
 from sentence_transformers import SentenceTransformerTrainingArguments
 
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import ValidatedConfig, present, reject_non_default_args, require_finite, require_int
 from halo.configs.script_arguments import CommonScriptArguments
+
+# The losses whose constructor takes a ``scale``; a test pins this to the trainer's registry.
+SCALED_LOSSES = frozenset({"mnrl", "cached_mnrl", "cosent", "angle"})
 
 
 @dataclass
@@ -41,15 +44,16 @@ class EmbeddingConfig(ValidatedConfig, SentenceTransformerTrainingArguments):
     loss_scale: float = field(
         default=20.0,
         metadata={
-            "help": "Scale factor (inverse temperature) for loss functions that use it. "
-            "Used by MNRL, CachedMNRL, CoSENT, and AnglE."
+            "help": "Scale factor (inverse temperature) of MNRL, CachedMNRL, CoSENT and AnglE; refused off its "
+            "default under any other loss_type."
         },
     )
     cached_mnrl_mini_batch_size: int = field(
         default=32,
         metadata={
             "help": "Rows per gradient-cached sub-forward of loss_type='cached_mnrl': lower it to fit a larger "
-            "effective batch, raise it for throughput. The loss value is unaffected."
+            "effective batch, raise it for throughput. The loss value is unaffected. Refused off its default under "
+            "any other loss_type."
         },
     )
     matryoshka_dimensions: list[int] | None = field(
@@ -95,6 +99,11 @@ class EmbeddingConfig(ValidatedConfig, SentenceTransformerTrainingArguments):
         require_int(owner, ge=1, cached_mnrl_mini_batch_size=self.cached_mnrl_mini_batch_size)
         # A non-positive length is legal: it resolves to the backbone's context window.
         require_int(owner, **present(max_length=self.max_length))
+        context = f"Embedding training under loss_type={self.loss_type}"
+        if self.loss_type not in SCALED_LOSSES:
+            reject_non_default_args(context, self, "loss_scale")
+        if self.loss_type != "cached_mnrl":
+            reject_non_default_args(context, self, "cached_mnrl_mini_batch_size")
         if self.matryoshka_dimensions is None and self.matryoshka_weights is not None:
             raise ValueError(
                 f"matryoshka_weights={self.matryoshka_weights} is set without matryoshka_dimensions: "
@@ -102,9 +111,13 @@ class EmbeddingConfig(ValidatedConfig, SentenceTransformerTrainingArguments):
                 f"run would train the plain loss with the weights silently dropped. Set "
                 f"matryoshka_dimensions, or remove matryoshka_weights."
             )
+        for weight in self.matryoshka_weights or ():
+            require_finite(owner, ge=0, matryoshka_weights=weight)
         if self.matryoshka_dimensions is not None:
             if len(self.matryoshka_dimensions) == 0:
                 raise ValueError("matryoshka_dimensions must be non-empty if provided")
+            for dimension in self.matryoshka_dimensions:
+                require_int(owner, ge=1, matryoshka_dimensions=dimension)
             if self.matryoshka_weights is not None and len(self.matryoshka_weights) != len(self.matryoshka_dimensions):
                 raise ValueError(
                     f"matryoshka_weights length ({len(self.matryoshka_weights)}) must match "

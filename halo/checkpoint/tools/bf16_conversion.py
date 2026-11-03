@@ -139,10 +139,6 @@ def verify_adapter_conversion(adapter_path):
 
 def run_test_inference(model_path, task, is_peft=False, trust_remote_code=False) -> None:
     """Log what the converted model produces; diagnostic only, as ``--verify`` is the gate that raises."""
-    if task == "base":
-        logger.warning("Test inference not implemented for base model type — skipping the inference check")
-        return
-
     # An adapter directory need not carry a tokenizer; its base does.
     sources = (
         (model_path, PeftConfig.from_pretrained(model_path).base_model_name_or_path) if is_peft else (model_path,)
@@ -257,8 +253,12 @@ def convert_to_bf16(
 ):
     """An unset ``trust_remote_code`` trusts a full checkpoint, which must be a local directory, and follows an
     adapter's base (:func:`adapter_base_trust`)."""
+    if task == "base" and check_inference:
+        raise ValueError("--check_inference has no inference path for --task base: drop it, or name the head's task.")
     if is_peft:
         _reject_adapter_task(task)
+        if device_map is not None:
+            raise ValueError("--peft rewrites the adapter file and loads no model, so --device_map places nothing.")
         trust_remote_code = adapter_base_trust(model_path, trust_remote_code)
     else:
         # A Hub repo here would run a third-party repo's code under this tool's local default.

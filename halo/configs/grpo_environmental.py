@@ -687,6 +687,11 @@ class EnvironmentConfig(ValidatedConfig):
         # ``EnvironmentBase`` re-checks both, but only inside a Ray actor after the cluster and vLLM servers are up.
         require_int(type(self).__name__, ge=1, **present(max_turns=self.max_turns))
         self.reward_terms  # noqa: B018  parse at config time so a bad or empty list fails here
+        if not isinstance(self.environment_kwargs, Mapping):
+            raise ValueError(
+                f"environment_kwargs must map option names to values, got {self.environment_kwargs!r}. A bare "
+                f"`environment_kwargs:` header reads as null: comment it out, or list its options."
+            )
         # Merged last in to_env_config, a key it writes from a top-level field would override it past the check above.
         shadowing = sorted(set(self.environment_kwargs) & set(self._core_env_config()))
         if shadowing:

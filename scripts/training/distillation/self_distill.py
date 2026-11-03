@@ -260,6 +260,19 @@ def main():
         reject_non_default_args(
             "Self-distillation without a confidence_field", args, "confidence_power", "confidence_weight_opd"
         )
+    # All of them shape the OPD term, which is not computed at this coefficient; the reference anchor shares the
+    # temperature.
+    if args.sdpg_beta_base == 0:
+        still_read = {"sdpg_beta_base", "sdpg_temperature"} if args.reference_kl_coef > 0 else {"sdpg_beta_base"}
+        reject_non_default_args(
+            "Self-distillation with the OPD term off (sdpg_beta_base: 0)",
+            args,
+            *args.sdpg_field_names(exclude=frozenset(still_read)),
+            "sdpg_answer_field",
+            "privileged_solution_field",
+            "confidence_weight_opd",
+            "opd_exclude_eos",
+        )
     # The trainer builds its own token-mean cross-entropy, so TRL's loss_type reaches no loss: only the
     # two spellings of that same nll may stand.
     if sft_config.loss_type not in ("nll", "chunked_nll"):
@@ -269,13 +282,6 @@ def main():
             f"Remove loss_type from the YAML."
         )
 
-    # The loader refuses a declared column the dataset lacks; an undeclared one would reach the
-    # collators, which render every branch from it.
-    if args.conversation_field is None:
-        raise ValueError(
-            "self-distillation renders each row's raw conversation, so conversation_field must name its "
-            "column. Set conversation_field in the YAML."
-        )
     if sft_config.packing or sft_config.padding_free:
         raise ValueError(
             "packing / padding_free are not supported for self-distillation: the SelfDistill "

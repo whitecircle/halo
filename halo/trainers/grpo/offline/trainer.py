@@ -263,9 +263,6 @@ class OfflineGRPOTrainer(
             callbacks.append(min_log_prob_scheduler)
             if is_global_main_process():
                 logger.info(f"Added min_log_prob scheduler: {args.initial_min_log_prob} → {args.min_log_prob}")
-        elif args.initial_min_log_prob is not None and args.min_log_prob is None:
-            if is_global_main_process():
-                logger.warning("initial_min_log_prob is set but min_log_prob is None. Scheduler will not be added.")
         elif args.initial_min_log_prob is None and args.min_log_prob is not None:
             if is_global_main_process():
                 logger.info(f"Using constant min_log_prob = {args.min_log_prob} (no scheduling)")

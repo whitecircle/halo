@@ -51,7 +51,7 @@ Each term is one mean over the micro-batch's supervised tokens, so a short row's
 
 `slim` takes the weighting [SLIM](https://openreview.net/forum?id=2fc5GOPYip)'s text describes — larger where the teacher is more confident in the gold token than the student — not the paper's loss: its Eq. 4 prints the inverse ratio, `1 − exp(−s/t)`, and adds the weighted soft cross-entropy over a top-5% teacher to a unit-weight CE term, while here the full teacher distribution is used and CLM keeps its `1 − distill_alpha` weight.
 
-`distill_temperature` reaches `kl_divergence`, `soft_cross_entropy`, `jensen_shannon` and `slim`; `mse` and `cosine_similarity` take no temperature, so setting it there changes nothing. Every softened divergence is scaled by `distill_temperature²` (Hinton's convention), which holds the distillation term's pull — and its weight against CLM — fixed as the temperature moves.
+`distill_temperature` reaches `kl_divergence`, `soft_cross_entropy`, `jensen_shannon` and `slim`; `mse` and `cosine_similarity` take no temperature, so setting it there raises. Every softened divergence is scaled by `distill_temperature²` (Hinton's convention), which holds the distillation term's pull — and its weight against CLM — fixed as the temperature moves.
 
 ## Launch
 

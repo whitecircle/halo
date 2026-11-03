@@ -210,7 +210,7 @@ The PEFT merge (`merge_peft_adapters.py`) applies the sidecar into the model's n
 
 ```yaml
 generate_eval_examples: true      # + num_eval_examples: 50
-enable_efficiency_metrics: false  # + report_mfu_diagnostics, num_full_model_params
+enable_efficiency_metrics: false  # report_mfu_diagnostics and num_full_model_params need it on
 enable_moe_metrics: true
 moe_balancing: auto
 router_balancing_rate: 1.0e-3     # gamma, bias-update modes only

@@ -51,6 +51,39 @@ def test_expert_count_not_divisible_by_ep_size_is_rejected():
         _reject_unsupported_model(config, _Cfg(num_experts=512))
 
 
+@pytest.mark.parametrize("flag", ["ep_fp32_router", "ep_fp32_experts"])
+@pytest.mark.parametrize(
+    ("model_type", "wraps_experts"),
+    [("qwen3", False), ("gpt_oss", False), ("mixtral", True)],
+    ids=["dense", "ep_layers_off", "family_without_an_ep_layer"],
+)
+def test_an_fp32_ep_master_needs_an_ep_layer(flag, model_type, wraps_experts):
+    """Only the EP layers read them, so a run building none would train at the run dtype whatever they say."""
+    config = _config(8, use_grouped_gemm=False, **{flag: True})
+    with pytest.raises(ValueError, match="this run builds none"):
+        reject_unsupported_model(
+            config, CONFIG_MAPPING[model_type](), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=wraps_experts
+        )
+
+
+@pytest.mark.parametrize("flag", ["ep_fp32_router", "ep_fp32_experts"])
+def test_an_fp32_ep_master_passes_where_the_ep_layers_are_built(flag):
+    config = _config(8, **{flag: True})
+    reject_unsupported_model(
+        config, CONFIG_MAPPING["gpt_oss"](), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True
+    )
+
+
+def test_train_sinks_on_a_model_without_sinks_is_refused_before_the_load():
+    with pytest.raises(ValueError, match="model_type='qwen3'.*Remove train_sinks"):
+        reject_unsupported_model(
+            _config(8), CONFIG_MAPPING["qwen3"](), sinks_policy=SinksPolicy.TRAINABLE, wraps_experts=False
+        )
+    reject_unsupported_model(
+        _config(8), CONFIG_MAPPING["gpt_oss"](), sinks_policy=SinksPolicy.TRAINABLE, wraps_experts=True
+    )
+
+
 def test_divisible_expert_count_passes():
     _reject_unsupported_model(_config(8, ep_size=8), _Cfg(num_experts=512))
 

@@ -71,7 +71,7 @@ Upstream declares `_supports_flash_attn = False`; SDPA is the only fast backend 
 
 ## Tree packing
 
-`tree_packing: true` ([Tree Packing](../optimization/tree-packing.md)) leaves the resolved backend (SDPA) in place for plan-less forwards; under a plan neither layer type reaches the attention interface, so `tree_full_attention` is not read.
+`tree_packing: true` ([Tree Packing](../optimization/tree-packing.md)) leaves the resolved backend (SDPA) in place for plan-less forwards; under a plan neither layer type reaches the attention interface, so `tree_full_attention` is refused.
 
 - **KDA layers** take the GatedDeltaNet treatment: the conv runs each node behind the last 3 tokens of its path, and the KDA scan (fla `chunk_kda`) runs one tree depth at a time from the parent's final state.
 - **DSA layers** select along each token's own path: the indexer's 4-token pools are a token and its path predecessors, and a query's candidates are the pools whose last token precedes it on its path, plus its incomplete tail pool. Attention over the selected keys runs on the 512-wide MLA latent with `kv_b_proj` folded in, not on a dense `[T, T]` mask; under autocast it reads the folded query and the latent in the autocast dtype. An adapter on `kv_b_proj`, a quantized load (`load_in_4bit`/`load_in_8bit`, or the fp8 release before [conversion](#checkpoint-conversion)) and a training-time `attention_dropout` are refused before the model loads (a regex target at the first tree batch): drop `kv_b_proj` from the [LoRA example](#configs)'s `lora_target_modules`.

@@ -303,7 +303,7 @@ def _run_main_with_yaml(module, yaml_body: str, tmp_path: Path):
 def test_self_distill_requires_a_conversation_column(tmp_path):
     """The loader only checks a declared column; an unset one would reach the collators."""
     module = _load_script_module("distillation/self_distill.py")
-    with pytest.raises(ValueError, match="conversation_field must name its column"):
+    with pytest.raises(ValueError, match="conversation_field must be a non-blank string"):
         _run_main_with_yaml(module, "conversation_field: null\n", tmp_path)
 
 

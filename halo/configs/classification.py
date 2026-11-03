@@ -3,7 +3,7 @@ from typing import ClassVar, Literal
 
 from transformers import TrainingArguments
 
-from halo.config_validation import ValidatedConfig, present, require_finite, require_int
+from halo.config_validation import ValidatedConfig, present, reject_non_default_args, require_finite, require_int
 from halo.configs.script_arguments import CommonScriptArguments, DatasetNumProcArguments
 
 
@@ -33,8 +33,8 @@ class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArg
     remove_unused_columns: bool = field(
         default=False,
         metadata={
-            "help": "Whether to remove the columns that are not used by the model's forward pass. Can be `True` only "
-            "if the dataset is pretokenized."
+            "help": "Prune the dataset columns the model's forward does not take, at the dataloader. The trainer "
+            "tokenizes a raw text/label dataset before that, so a dataset need not be pretokenized."
         },
     )
     loss_type: Literal["cross_entropy", "focal", "label_smoothing_ce"] = field(
@@ -48,22 +48,22 @@ class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArg
         default=2.0,
         metadata={
             "help": "Focusing parameter (gamma) of the focal loss: higher values down-weight easy examples more. "
-            "Ignored unless loss_type='focal'."
+            "Refused unless loss_type='focal'."
         },
     )
     focal_alpha: float | None = field(
         default=None,
         metadata={
             "help": "Alpha (balancing factor) of the focal loss on a multi-label (sigmoid) head; unset = no alpha "
-            "weighting. Rejected on a single-label head, where a scalar alpha only rescales the loss, and ignored "
-            "unless loss_type='focal'."
+            "weighting. Refused on a single-label head, where a scalar alpha only rescales the loss, and unless "
+            "loss_type='focal'."
         },
     )
     label_smoothing: float = field(
         default=0.0,
         metadata={
-            "help": "Label-smoothing epsilon of label_smoothing_ce, typically 0.05-0.1. Ignored unless "
-            "loss_type='label_smoothing_ce'."
+            "help": "Label-smoothing epsilon of label_smoothing_ce, typically 0.05-0.1, which needs a non-zero one. "
+            "Refused unless loss_type='label_smoothing_ce'."
         },
     )
     class_weights: list[float] | None = field(
@@ -83,15 +83,15 @@ class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArg
     multi_label_threshold: float = field(
         default=0.5,
         metadata={
-            "help": "Sigmoid threshold for multi-label classification predictions. "
-            "Predictions with sigmoid(logit) >= threshold are considered positive."
+            "help": "Sigmoid threshold for multi-label classification predictions: sigmoid(logit) >= threshold is "
+            "positive. Refused off its default on a single-label dataset."
         },
     )
     compute_per_class_metrics: bool = field(
         default=False,
         metadata={
             "help": "Log per-class precision, recall and F1 during evaluation, many metrics with many classes. "
-            "Single-label only; ignored on a multi-label dataset."
+            "Single-label only; refused on a multi-label dataset."
         },
     )
     compute_auc_roc: bool = field(
@@ -116,9 +116,24 @@ class ClassificationConfig(DatasetNumProcArguments, ValidatedConfig, TrainingArg
         require_int(owner, **present(max_length=self.max_length))
         require_finite(owner, ge=0, lt=1, label_smoothing=self.label_smoothing)
         require_finite(owner, gt=0, lt=1, multi_label_threshold=self.multi_label_threshold)
+        for weight in self.class_weights or ():
+            require_finite(owner, ge=0, class_weights=weight)
         if self.class_weights is not None and self.derive_class_weights:
             raise ValueError(
                 "class_weights and derive_class_weights are mutually exclusive: class_weights sets the "
                 "per-class weights explicitly, derive_class_weights derives them from the training-set "
                 "frequencies. Set exactly one."
+            )
+        self._reject_unread_loss_knobs()
+
+    def _reject_unread_loss_knobs(self) -> None:
+        context = f"Classification under loss_type={self.loss_type}"
+        if self.loss_type != "focal":
+            reject_non_default_args(context, self, "focal_gamma", "focal_alpha")
+        if self.loss_type != "label_smoothing_ce":
+            reject_non_default_args(context, self, "label_smoothing")
+        elif self.label_smoothing == 0:
+            raise ValueError(
+                "loss_type='label_smoothing_ce' at label_smoothing=0 is plain cross-entropy. Set label_smoothing "
+                "(typically 0.05-0.1), or use loss_type: cross_entropy."
             )

@@ -385,6 +385,25 @@ def _decoder_layer_modules(model, attr: str, of_class: type | None = None) -> li
     return [module for module in modules if of_class is None or isinstance(module, of_class)]
 
 
+def resolve_tree_full_form(
+    model_config, attn_implementation: str | None, requested: FullAttentionForm | None
+) -> FullAttentionForm:
+    """``requested``, else ``split`` where its log-sum-exp takes a gradient on this backend, else ``gather``. A sparse
+    family's plan has no full-attention part, so it refuses a request, and the ``gather`` it returns goes unread."""
+    if _require_tree_family(model_config).sparse is not None:
+        if requested is not None:
+            raise ValueError(
+                f"tree_full_attention={requested!r} picks how full-attention layers read a tree plan, and "
+                f"{getattr(text_config(model_config), 'model_type', None)}'s layers attend in their own forward "
+                f"instead. Remove it."
+            )
+        return "gather"
+    if requested is not None:
+        return requested
+    runs_split = attn_implementation == _SPLIT_FORM_IMPLEMENTATION and not uses_fa4_dedicated_head_dim(model_config)
+    return "split" if runs_split else "gather"
+
+
 def reject_unsupported_tree_attention(
     model_config,
     attn_implementation: str | None,

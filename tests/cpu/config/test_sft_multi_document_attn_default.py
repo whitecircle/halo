@@ -441,8 +441,9 @@ def _run_sft_main(
         )
         raise _Stop
 
-    def check_tree_attention(_config, attn_implementation, _full_attention, **_tree_options):
+    def check_tree_attention(_config, attn_implementation, full_attention, **_tree_options):
         captured["tree_attn"] = attn_implementation
+        captured["tree_form"] = full_attention
         raise _Stop
 
     metadata = types.SimpleNamespace(packed=preprocessed_packed, is_vlm=False)
@@ -572,6 +573,47 @@ def test_the_tree_packing_pre_check_sees_the_backend_the_load_takes(tmp_path, ya
     """On an unpinned Qwen3.5 run the check sees the FA2 default, which it accepts, not the SDPA a deterministic
     demotion picks without it, which tree packing refuses."""
     assert _run_sft_main(tmp_path, "qwen3_5_moe", yaml_body)["tree_attn"] == expected
+
+
+_UNSET_FORM = "packing: true\ntree_packing: true\ntree_share_markers: ['x']\n"
+
+
+@pytest.mark.usefixtures("determinism")
+@pytest.mark.parametrize(
+    ("model_type", "yaml_body", "attn", "form"),
+    [
+        ("qwen3", "", "flash_attention_4", "split"),
+        ("qwen3", "attn_implementation: flash_attention_2\n", "flash_attention_2", "gather"),
+        ("qwen3_5_moe", "", "flash_attention_2", "gather"),
+        ("qwen3_5_moe", "tree_full_attention: split\n", "flash_attention_2", "split"),
+    ],
+    ids=["fa4", "pinned_fa2", "qwen3_5_default_fa2", "explicit_stays"],
+)
+def test_an_unset_tree_form_resolves_off_the_backend_the_load_takes(tmp_path, model_type, yaml_body, attn, form):
+    """Resolved once before the load; what is explicit reaches the refusal the backend owes it."""
+    captured = _run_sft_main(tmp_path, model_type, _UNSET_FORM + yaml_body)
+    assert (captured["tree_attn"], captured["tree_form"]) == (attn, form)
+
+
+_CROSSING_OPT_IN = "allow_cross_document_linear_attention: true\n"
+
+
+@pytest.mark.usefixtures("determinism")
+def test_the_crossing_opt_in_needs_a_multi_document_row(tmp_path):
+    with pytest.raises(ValueError, match=r"without multi-document rows does not support.*allow_cross_document"):
+        _run_sft_main(tmp_path, "qwen3", _CROSSING_OPT_IN)
+
+
+@pytest.mark.usefixtures("determinism")
+@pytest.mark.parametrize(
+    ("yaml_body", "preprocessed_packed"),
+    [("packing: true\n", None), ("padding_free: true\n", None), ("", True)],
+    ids=["packing", "padding_free", "baked_packed"],
+)
+def test_the_crossing_opt_in_stands_on_multi_document_rows(tmp_path, yaml_body, preprocessed_packed):
+    """A baked corpus decides by how it was baked, whatever the ``packing`` flag says."""
+    captured = _run_sft_main(tmp_path, "qwen3", _CROSSING_OPT_IN + yaml_body, preprocessed_packed=preprocessed_packed)
+    assert "load_attn" in captured, "the run stopped short of the model load"
 
 
 # A checkpoint per attention rule both the row plan and the loader apply: the kernel classes above, a softcap FA4's

@@ -46,7 +46,7 @@ expert_parallel_size: 8
 learning_rate: 5.0e-06
 ```
 
-Per token the default `policy_gradient_formulation: prob_weighted` trains `-(π·A)`, and `reinforce` trains `-(log π·A)`. `min_log_prob` floors the log-probs of negative-advantage rows only, ramped linearly from `initial_min_log_prob` when that is set; `kl_beta` is the k3 KL coefficient (Schulman's KL estimator, [Reference model](#reference-model)). Types and defaults: [OfflineGRPOConfig](../../reference/configuration-reference.md#offlinegrpoconfig).
+Per token the default `policy_gradient_formulation: prob_weighted` trains `-(π·A)`, and `reinforce` trains `-(log π·A)`. `min_log_prob` floors the log-probs of negative-advantage rows only, below 0, ramped linearly from `initial_min_log_prob` when that is set (refused with no floor to ramp toward); `kl_beta` is the k3 KL coefficient (Schulman's KL estimator, [Reference model](#reference-model)). Types and defaults: [OfflineGRPOConfig](../../reference/configuration-reference.md#offlinegrpoconfig).
 
 - The shipped recipes run `learning_rate: 5.0e-06`, the top of the SFT full-FT band; a wider batch helps ([sizing](../sft.md#learning-rate-and-global-batch-size)).
 - Both length knobs truncate, and the tokenizer's window is pinned only when both are bounded. A completion cut at its cap gets no EOS, so it is never taught to stop there.

@@ -439,7 +439,7 @@ def test_a_train_batch_past_the_dispatch_budget_is_refused():
     parsed, parallelism = build_parallelism_config(config, train_batch=4)
     with pytest.raises(ValueError, match="32-bit wire-index"):
         reject_unsupported_model(
-            parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False
+            parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=True
         )
 
 
@@ -548,8 +548,12 @@ def test_example_parallelism_fits_the_model_shape(config):
     """Model-dependent, so the production path defers it to the load, after a multi-GPU job is booked and every rank
     has begun materializing weights."""
     parsed, parallelism = build_parallelism_config(config)
+    model_config = model_config_for(config, parsed)
     reject_unsupported_model(
-        parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False
+        parallelism,
+        model_config,
+        sinks_policy=SinksPolicy.NEUTRALIZED,
+        wraps_experts=parallelism.needs_ep_layers and has_routed_experts(model_config),
     )
 
 

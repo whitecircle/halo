@@ -41,7 +41,7 @@ from halo.model_loading.model_preparation import apply_family_patches, apply_run
 from halo.model_loading.parallel.model_source import fetch_checkpoint_config, resolve_model_source
 from halo.model_loading.parallel.peft_setup import build_peft_config
 from halo.model_loading.parallel.whole_model import warm_attention_kernels
-from halo.models.attention.gpt_oss_sinks import SinksPolicy
+from halo.models.attention.gpt_oss_sinks import SinksPolicy, reject_trainable_sinks_without_sinks
 from halo.models.config_access import drop_toolkit_stamps
 from halo.models.context_window import resolve_length_to_context
 from halo.models.external_tables import EXTERNAL_TABLES_STAMP
@@ -249,6 +249,8 @@ def _load_sentence_transformer(
     backbone_config = resolve_build_config(
         context.model_source, revision=revision, trust_remote_code=model_config.trust_remote_code
     )
+    sinks_policy = SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks)
+    reject_trainable_sinks_without_sinks(backbone_config, sinks_policy)
     if attn_implementation := apply_family_patches(backbone_config, model_config.attn_implementation):
         model_kwargs["attn_implementation"] = attn_implementation
     # sentence-transformers reads the backbone's config.json itself, so the stamp would never reach its build.
@@ -282,7 +284,7 @@ def _load_sentence_transformer(
     apply_run_model_policies(
         backbone,
         backbone.config,
-        sinks_policy=SinksPolicy.from_flags(reset_sinks=args.reset_sinks, train_sinks=args.train_sinks),
+        sinks_policy=sinks_policy,
         attn_implementation=model_kwargs.get("attn_implementation"),
     )
     # Every rank builds the pipeline here, so the FA4 and flex-sliding compiles run fenced, not at a first forward.
@@ -320,6 +322,19 @@ def reject_lora_before_the_load(context: ScriptContext, model_config: ModelArgum
         has_injected_lora=model_config.use_peft,
         has_ep_layers=model_config.use_peft and _ep1_layers_requested(context, model_config),
     )
+
+
+def reject_fp32_masters_without_ep_layers(
+    context: ScriptContext, model_config: ModelArguments, dist_args: ParallelismArguments
+) -> None:
+    """A sentence-transformers load builds no EP layer, the one reader of these two; the parallel loader refuses them
+    itself on a run building none. COLLECTIVE as :func:`_ep1_layers_requested`, once either is set."""
+    if (dist_args.fp32_router or dist_args.fp32_experts) and not _loads_through_parallel_loader(context, model_config):
+        reject_unsupported_args(
+            "Embedding training on a sentence-transformers load, which builds no EP layers",
+            fp32_router=dist_args.fp32_router,
+            fp32_experts=dist_args.fp32_experts,
+        )
 
 
 def build_sentence_transformer(
@@ -431,6 +446,7 @@ def main():
         embedding_config, train_dataset, toolkit_loader=uses_dp_sharded_loader(parallelism_config, dataset_presharded)
     )
     reject_lora_before_the_load(context, model_config)
+    reject_fp32_masters_without_ep_layers(context, model_config, dist_args)
 
     if is_global_main_process():
         logger.info(f"Train dataset: {len(train_dataset)} examples")

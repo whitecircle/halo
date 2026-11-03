@@ -33,6 +33,9 @@ from halo.model_loading.tokenizer_setup import (
 
 logger = logging.getLogger(__name__)
 
+# A sequence-classification head's size where a merge names none.
+DEFAULT_NUM_LABELS = 1
+
 
 class _AdapterBaseModel(NamedTuple):
     """The base an adapter applies to, and whether it is a multimodal checkpoint's text-only class."""
@@ -269,7 +272,7 @@ def merge_peft_adapter(
     task: str = "causal_lm",
     dtype: torch.dtype = torch.bfloat16,
     device_map: str | None = None,
-    num_labels: int = 1,
+    num_labels: int = DEFAULT_NUM_LABELS,
     max_shard_size: str = DEFAULT_MAX_SHARD_SIZE,
     trust_remote_code: bool | None = None,
     fp32_norms: bool = False,

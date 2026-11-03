@@ -36,7 +36,8 @@ def add_generation_args(parser: argparse.ArgumentParser, *, temperature_default:
         "--max_tokens",
         type=int,
         default=DEFAULT_MAX_TOKENS,
-        help="Generation cap per request; a reply cut at it is dropped, never scored (default: %(default)s).",
+        help="Generation cap per request. The reward-model scorers drop and count a reply cut at it; batched "
+        "generation keeps it and records its finish_reason (default: %(default)s).",
     )
     return parser
 
