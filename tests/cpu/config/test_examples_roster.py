@@ -4,6 +4,7 @@ timeouts against the documented watchdog, the allocator setting, and against the
 export, context-window and shape contracts. Checks run through the production seam."""
 
 import ast
+import math
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +16,12 @@ from transformers import Trainer
 from transformers.trainer_pt_utils import BatchRebalanceSampler
 
 from halo.configs.parallelism_arguments import parallelism_config_from_args
+from halo.data.collators.collator_rules import evaluation_batch_size
+from halo.distributed.expert_parallel.deepep.capacity import (
+    ep_dispatch_capacity,
+    padded_wire_hidden,
+    reject_oversized_dispatch,
+)
 from halo.distributed.expert_parallel.families.roster import ep_layer_classes_for_config
 from halo.environments.rollout_config import resolve_reasoning_end_ids
 from halo.model_loading.parallel.load_rules import reject_unsupported_model
@@ -23,9 +30,9 @@ from halo.model_loading.tokenizer_setup import load_processing_class, resolve_to
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, uses_gpt_oss_sinks
 from halo.models.attention.selection import flash_kernel, is_flash_attn_implementation, validate_attn_implementation
 from halo.models.config_access import text_config
-from halo.models.context_window import is_bounded_length
+from halo.models.context_window import bounded_row_length, is_bounded_length
 from halo.models.moe.balancing import BIAS_UPDATE_MODES
-from halo.models.moe.config_fields import has_routed_experts
+from halo.models.moe.config_fields import has_routed_experts, resolve_router_topk
 from halo.trainers.dataloaders import uses_dp_sharded_loader
 from tests.common.hub_seed import is_hub_repo
 from tests.common.parallelism import make_parallelism_config
@@ -52,6 +59,8 @@ DEFAULT_GPUS_PER_NODE = 8
 
 _NPROC = re.compile(r"--nproc[-_]per[-_]node[= ](\d+)")
 _NNODES = re.compile(r"--nnodes[= ](\d+)")
+_VISIBLE_DEVICES = re.compile(r"CUDA_VISIBLE_DEVICES=([\d,]+)")
+_ACCELERATE_CONFIG = re.compile(r"--config_file\s+(\S+)")
 _NCCL_MINUTES = re.compile(r"DIST_NCCL_TIMEOUT_MINUTES=(\d+)")
 _EXPANDABLE_SEGMENTS = re.compile(r"PYTORCH_(?:CUDA_)?ALLOC_CONF=\S*expandable_segments:True")
 # The setting as the launcher's env prefix (other assignments may sit between them); placed after the
@@ -162,12 +171,18 @@ def script_trainer_classes(script: str) -> tuple[type, ...]:
     return classes
 
 
-def build_parallelism_config(config: Path):
+def training_arguments(parsed: tuple):
+    return next(obj for obj in parsed if hasattr(obj, "per_device_train_batch_size"))
+
+
+def build_parallelism_config(config: Path, *, train_batch: int | None = None):
     """The ``ParallelismConfig`` this example builds on its declared topology, through
-    ``parallelism_config_from_args``. The world-size seams are the three ``halo.runtime.ranks`` readers, since a
-    CPU tier has no launcher."""
+    ``parallelism_config_from_args``, its training arguments declaring the token budget. The world-size seams are the
+    three ``halo.runtime.ranks`` readers, since a CPU tier has no launcher. ``train_batch`` overrides the batch."""
     script = script_for(config)
     parsed = parser_for(script).parse_yaml_file(str(config))
+    if train_batch is not None:
+        training_arguments(parsed).per_device_train_batch_size = train_batch
     dist_args = next(obj for obj in parsed if type(obj).__name__ == "ParallelismArguments")
     model_config = next(obj for obj in parsed if type(obj).__name__ == "ModelArguments")
     flags = script_call_kwargs(script, "init_training_script", ("supports_init_from_scratch",))
@@ -187,7 +202,13 @@ def build_parallelism_config(config: Path):
         ):
             patcher.setattr(f"halo.distributed.parallelism_config.{name}", lambda _value=value: _value)
         built = [
-            parallelism_config_from_args(dist_args, trainer_cls=trainer_cls, expert_lora=expert_lora, **flags)
+            parallelism_config_from_args(
+                dist_args,
+                trainer_cls=trainer_cls,
+                training_config=training_arguments(parsed),
+                expert_lora=expert_lora,
+                **flags,
+            )
             for trainer_cls in script_trainer_classes(script)
         ]
         return parsed, built[0]
@@ -357,6 +378,73 @@ def test_moe_example_declares_the_reentrant_checkpointing_it_runs(config):
         "a MoE force-promotes use_reentrant to True (halo/trainers/distributed_trainer.py), so this config's "
         "use_reentrant: false is silently overridden — write true, or drop the kwarg"
     )
+
+
+@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
+def test_example_launch_lines_fit_the_config(config):
+    """The header is the run's only launch instruction, so each line names this config's script, under a launcher and
+    at a width its axes take. Accelerate's FSDP2 wrap cannot flatten a 4-bit base."""
+    raw = raw_config(config)
+    commands = launch_commands(config)
+    assert commands, "no comment line launches this config"
+    for line in commands:
+        assert f"scripts/training/{script_for(config)}" in line, f"names another entry script: {line}"
+        nproc = _NPROC.search(line)
+        if uses_expert_parallelism(raw):
+            assert nproc, f"expert parallelism needs torchrun's width: {line}"
+        devices = _VISIBLE_DEVICES.search(line)
+        if devices and nproc:
+            assert len(devices[1].split(",")) == int(nproc[1]), f"exposes another GPU count than it launches: {line}"
+        if accelerate_config := _ACCELERATE_CONFIG.search(line):
+            distributed_type = yaml.safe_load((REPO_ROOT / accelerate_config[1]).read_text())["distributed_type"]
+            assert not (raw.get("load_in_4bit") and distributed_type == "FSDP"), line
+
+
+def eval_forward_rows(parsed: tuple, parallelism, trainer_cls: type) -> int:
+    """Rows one evaluation forward presents to a rank: the eval batch of ``trainer_cls``'s rows, one microbatch's under
+    pipeline parallelism."""
+    training = training_arguments(parsed)
+    rows = trainer_cls.FORWARD_ROWS_PER_EXAMPLE * evaluation_batch_size(training)
+    if parallelism.pp_size > 1:
+        rows /= parallelism.pp_microbatch_count(training.gradient_accumulation_steps)
+    return math.ceil(rows)
+
+
+@pytest.mark.parametrize("config", _EXAMPLES, **_ID)
+def test_example_eval_batch_fits_the_dispatch_budget(config):
+    """The load gate sizes a forward off the training batch, and an evaluation forward dispatches through the same
+    wire index and, across NVLink domains, the same Gin ceiling. An eval batch past either fails at the first eval."""
+    parsed, parallelism = build_parallelism_config(config)
+    row_length = bounded_row_length(*parsed)
+    if parallelism.ep_size <= 1 or row_length is None:
+        pytest.skip("no expert dispatch, or a run that declares no row length")
+    decoder = text_config(model_config_for(config, parsed))
+    for trainer_cls in script_trainer_classes(script_for(config)):
+        tokens = eval_forward_rows(parsed, parallelism, trainer_cls) * row_length // parallelism.cp_size
+        reject_oversized_dispatch(
+            ep_dispatch_capacity(tokens),
+            num_topk=resolve_router_topk(decoder),
+            padded_hidden=padded_wire_hidden(decoder.hidden_size),
+            spans_domains=parallelism.requires_rdma,
+        )
+
+
+def test_a_train_batch_past_the_dispatch_budget_is_refused():
+    """Against the load gate the shape checks reach: without a declared budget it would pass any batch."""
+    config = EXAMPLES_ROOT / "sft/gemma4/gemma4-26b-a4b-ultrachat-ep.yaml"
+    parsed, parallelism = build_parallelism_config(config, train_batch=4)
+    with pytest.raises(ValueError, match="32-bit wire-index"):
+        reject_unsupported_model(
+            parallelism, model_config_for(config, parsed), sinks_policy=SinksPolicy.NEUTRALIZED, wraps_experts=False
+        )
+
+
+def test_an_eval_batch_counts_one_microbatch_under_pipeline_parallelism():
+    config = EXAMPLES_ROOT / "sft/gptoss/gptoss-20b-multinode-pp2-ep8.yaml"
+    parsed, parallelism = build_parallelism_config(config)
+    training = training_arguments(parsed)
+    assert parallelism.pp_size == 2 and training.per_device_eval_batch_size == 8
+    assert eval_forward_rows(parsed, parallelism, script_trainer_classes(script_for(config))[0]) == 1
 
 
 def test_a_racy_ep_topology_is_still_rejected():

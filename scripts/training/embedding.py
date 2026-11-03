@@ -10,7 +10,7 @@ from typing import NamedTuple
 
 from peft import inject_adapter_in_model
 from sentence_transformers import SentenceTransformer
-from sentence_transformers.models import Normalize, Pooling
+from sentence_transformers.sentence_transformer.modules import Normalize, Pooling
 from sentence_transformers.util import load_file_path
 from torch import nn
 from transformers import AutoModel

@@ -255,12 +255,15 @@ def reject_in_place_conversion(input_dir: str, output_dir: str) -> None:
 
 
 def reject_sibling_adapter(input_dir: str) -> None:
-    """Refuse a shard merge with a PEFT adapter beside the shards: the aux copy carries ``adapter_config.json`` but not
-    the weights, so the merged directory would advertise an adapter it lacks."""
-    adapter_weights = [name for name in ADAPTER_WEIGHT_NAMES if os.path.isfile(os.path.join(input_dir, name))]
-    if adapter_weights:
+    """Refuse a shard merge with a PEFT adapter beside the shards, its config alone included: the aux copy carries
+    ``adapter_config.json`` but not the weights, so the merged directory would advertise an adapter it lacks and
+    ``from_pretrained`` would load it as one."""
+    adapter_files = [
+        name for name in (*ADAPTER_WEIGHT_NAMES, ADAPTER_CONFIG_FILE) if os.path.isfile(os.path.join(input_dir, name))
+    ]
+    if adapter_files:
         raise ValueError(
-            f"{input_dir} holds a PEFT adapter ({', '.join(adapter_weights)}) beside its shards. The "
+            f"{input_dir} holds a PEFT adapter ({', '.join(adapter_files)}) beside its shards. The "
             f"merge writes base weights only and copies {ADAPTER_CONFIG_FILE} across, so the merged "
             f"directory would claim an adapter whose weights are missing. Move the adapter out and "
             f"merge it separately (scripts/after_training/merge_peft_adapters.py against the merged "

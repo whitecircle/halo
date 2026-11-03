@@ -214,7 +214,10 @@ def test_non_block_divisible_axis_left_high_precision():
         os.makedirs(src)
         odd = torch.randn(64, 100, dtype=torch.bfloat16)
         save_file(
-            {"model.layers.0.mlp.gate_proj.weight": odd},
+            {
+                "model.layers.0.mlp.gate_proj.weight": odd,
+                "model.layers.0.mlp.down_proj.weight": torch.randn(64, 64, dtype=torch.bfloat16),
+            },
             os.path.join(src, "model.safetensors"),
             metadata={"format": "pt"},
         )
@@ -228,7 +231,30 @@ def test_non_block_divisible_axis_left_high_precision():
         assert torch.equal(saved["model.layers.0.mlp.gate_proj.weight"], odd)
         with open(os.path.join(out, "quantization_config.json")) as f:
             mani = json.load(f)
-        assert mani["quantized_weights"] == []
+        assert mani["quantized_weights"] == ["model.layers.0.mlp.down_proj.weight"]
+
+
+@pytest.mark.parametrize(
+    ("shapes", "scope"),
+    [
+        ({"model.layers.0.mlp.gate_proj.weight": (64, 64)}, {"include": "nomatch"}),
+        ({"model.layers.0.mlp.gate_proj.weight": (64, 64)}, {"apply_dense_mlp": False}),
+        ({"model.layers.0.mlp.gate_proj.weight": (64, 100)}, {}),
+    ],
+    ids=["include-matches-nothing", "dense-mlp-off", "no-block-divisible-axis"],
+)
+def test_an_export_that_scales_nothing_is_refused_before_any_write(tmp_path, shapes, scope):
+    """The source's weights under a ``block_scaled`` config, which both engines refuse, would pass for an export."""
+    src = tmp_path / "src"
+    src.mkdir()
+    tensors = {name: torch.randn(*shape, dtype=torch.bfloat16) for name, shape in shapes.items()}
+    save_file(tensors, src / "model.safetensors", metadata={"format": "pt"})
+    (src / "config.json").write_text(json.dumps({"model_type": "test"}))
+    out = tmp_path / "out"
+
+    with pytest.raises(ValueError, match="is block-scaled under this scope"):
+        lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8", **scope)
+    assert not out.exists()
 
 
 def test_multi_shard_checkpoint_quantized():
@@ -347,6 +373,7 @@ def test_an_expert_bank_under_an_undeclared_fused_name_is_refused_before_any_wri
             f"{prefix}.gate_proj": torch.randn(4, 64, 64, dtype=torch.bfloat16),
             f"{prefix}.up_proj": torch.randn(4, 64, 64, dtype=torch.bfloat16),
             f"{prefix}.down_proj": torch.randn(4, 64, 64, dtype=torch.bfloat16),
+            "model.language_model.layers.0.mlp.gate_proj.weight": torch.randn(64, 64, dtype=torch.bfloat16),
         },
         os.path.join(src, "model.safetensors"),
         metadata={"format": "pt"},
@@ -359,9 +386,11 @@ def test_an_expert_bank_under_an_undeclared_fused_name_is_refused_before_any_wri
     assert not out.exists(), "a refused conversion must not create its output directory"
 
     lowp_export.quantize_checkpoint(str(src), str(out), "mxfp8", apply_moe_experts=False)
-    assert set(load_file(os.path.join(out, "model.safetensors"))) == {
-        f"{prefix}.{name}" for name in ("gate_proj", "up_proj", "down_proj")
-    }, "with experts out of scope every bank is copied through unchanged"
+    saved = set(load_file(os.path.join(out, "model.safetensors")))
+    assert {f"{prefix}.{name}" for name in ("gate_proj", "up_proj", "down_proj")} <= saved, (
+        "with experts out of scope every bank is copied through unchanged"
+    )
+    assert "model.language_model.layers.0.mlp.gate_proj.weight_packed" in saved
 
 
 def test_a_moe_checkpoint_whose_experts_match_nothing_is_refused(tmp_path):

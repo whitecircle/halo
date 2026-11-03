@@ -9,7 +9,6 @@ from collections.abc import Iterable
 import torch
 from peft import PeftConfig, PeftModel
 from safetensors import safe_open
-from transformers import AutoTokenizer
 
 from halo.checkpoint.atomic import save_safetensors_file
 from halo.checkpoint.format import ADAPTER_SAFETENSORS_FILE, DEFAULT_MAX_SHARD_SIZE, SAFETENSORS_METADATA
@@ -27,7 +26,7 @@ from halo.checkpoint.tools.offline_export import (
     save_full_checkpoint,
 )
 from halo.model_loading.finalization import finalize_loaded_model
-from halo.model_loading.tokenizer_setup import load_processing_class
+from halo.model_loading.tokenizer_setup import load_processing_class, resolve_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +48,14 @@ def _load_verified(model_path, task, *, excuse_task_head: bool, text_only: bool 
     return model
 
 
-def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
-    """The adapter applied to its base, loaded through the class the adapter's keys address."""
+def _reject_adapter_task(task) -> None:
     if task not in ADAPTER_TASKS:
         raise ValueError(f"PEFT is only supported for tasks {sorted(ADAPTER_TASKS)}, not {task!r}")
+
+
+def _load_adapter_model(adapter_dir, task, load_kwargs) -> PeftModel:
+    """The adapter applied to its base, loaded through the class the adapter's keys address."""
+    _reject_adapter_task(task)
     peft_config = PeftConfig.from_pretrained(adapter_dir)
 
     def load_base_model(base_model_path, *, excuse_task_head: bool, text_only: bool = False):
@@ -135,9 +138,18 @@ def run_test_inference(model_path, task, is_peft=False, trust_remote_code=True) 
         logger.warning("Test inference not implemented for base model type — skipping the inference check")
         return
 
-    logger.info(f"Running test inference on model at {model_path}...")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=trust_remote_code)
+    # An adapter directory need not carry a tokenizer; its base does.
+    sources = (
+        (model_path, PeftConfig.from_pretrained(model_path).base_model_name_or_path) if is_peft else (model_path,)
+    )
+    processing_classes = (load_processing_class(source, trust_remote_code=trust_remote_code) for source in sources)
+    processing_class = next((loaded for loaded in processing_classes if loaded is not None), None)
+    if processing_class is None:
+        logger.warning(f"No tokenizer at {' or '.join(sources)} — skipping the inference check")
+        return
+    tokenizer = resolve_tokenizer(processing_class)
 
+    logger.info(f"Running test inference on model at {model_path}...")
     model = load_model(
         model_path,
         task,
@@ -238,6 +250,9 @@ def convert_to_bf16(
     trust_remote_code=True,
     max_shard_size=DEFAULT_MAX_SHARD_SIZE,
 ):
+    if is_peft:
+        _reject_adapter_task(task)
+
     logger.info(f"Loading model from {model_path}...")
 
     load_kwargs = {

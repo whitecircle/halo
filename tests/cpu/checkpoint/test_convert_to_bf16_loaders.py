@@ -5,9 +5,11 @@ fails loudly, and each load reaches ``finalize_loaded_model``."""
 from __future__ import annotations
 
 import argparse
+import json
 import types
 
 import pytest
+from torch import nn
 
 import halo.checkpoint.tools.bf16_conversion as convert_module
 from halo.checkpoint.tools import offline_export
@@ -15,6 +17,7 @@ from halo.checkpoint.tools.bf16_conversion import load_model
 from halo.checkpoint.tools.offline_export import ADAPTER_TASKS, TASK_MODEL_CLASSES
 from scripts.after_training import convert_to_bf16 as convert_script
 from scripts.after_training import merge_peft_adapters as merge_script
+from tests.common.tiny_models import word_level_tokenizer
 
 
 @pytest.fixture
@@ -48,6 +51,64 @@ def test_table_covers_exactly_the_cli_choices(monkeypatch):
 def test_the_merge_and_the_conversion_spell_one_head_flag(monkeypatch):
     """A command line carries from the conversion to the merge."""
     assert _task_choices(monkeypatch, merge_script.main) == set(ADAPTER_TASKS) < set(TASK_MODEL_CLASSES)
+
+
+def test_a_base_task_on_an_adapter_is_refused_before_any_write(tmp_path):
+    """Through the conversion itself, where an adapter is rewritten with no model load to reach the task gate."""
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="PEFT is only supported"):
+        convert_module.convert_to_bf16(str(tmp_path), str(out), "base", is_peft=True)
+    assert not out.exists()
+
+
+class _Generates(nn.Linear):
+    def __init__(self):
+        super().__init__(1, 1)
+        self.generated = False
+
+    def generate(self, *, input_ids, **kwargs):
+        self.generated = True
+        return input_ids
+
+
+@pytest.fixture
+def adapter_dir(tmp_path):
+    """A tokenizer-less adapter directory over a base holding one."""
+    base, adapter = tmp_path / "base", tmp_path / "adapter"
+    word_level_tokenizer(["Hello"]).save_pretrained(base)
+    (base / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    adapter.mkdir()
+    (adapter / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": str(base), "r": 1})
+    )
+    return adapter
+
+
+def test_check_inference_on_a_tokenizerless_adapter_takes_the_bases_tokenizer(monkeypatch, adapter_dir):
+    """The conversion is already written by then, and the check returns no verdict: it must not fail the run."""
+    model = _Generates()
+    monkeypatch.setattr(convert_module, "load_model", lambda *a, **k: model)
+
+    convert_module.run_test_inference(str(adapter_dir), "causal_lm", is_peft=True, trust_remote_code=False)
+
+    assert model.generated
+
+
+def test_check_inference_skips_with_no_tokenizer_anywhere(monkeypatch, caplog, adapter_dir, tmp_path):
+    base = tmp_path / "bare"
+    base.mkdir()
+    (base / "config.json").write_text(json.dumps({"model_type": "qwen3"}))
+    (adapter_dir / "adapter_config.json").write_text(
+        json.dumps({"peft_type": "LORA", "base_model_name_or_path": str(base), "r": 1})
+    )
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the model loads for a check with no tokenizer to feed it")
+
+    monkeypatch.setattr(convert_module, "load_model", refuse)
+    with caplog.at_level("WARNING"):
+        convert_module.run_test_inference(str(adapter_dir), "causal_lm", is_peft=True, trust_remote_code=False)
+    assert any("skipping the inference check" in rec.getMessage() for rec in caplog.records)
 
 
 def test_unknown_task_raises_instead_of_falling_back():

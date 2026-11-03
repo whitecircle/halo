@@ -1,4 +1,4 @@
-# Environmental GRPO — Gemma-4 26B-A4B LoRA (r=64, attention projections) on code_contests, SGLang backend, no EP, ZeRO-2, KL-free (IS bands as the trust region).
+# Environmental GRPO — Gemma-4 26B-A4B LoRA (r=64, attention projections) on Codeforces, SGLang backend, no EP, ZeRO-2, KL-free (IS bands as the trust region).
 # rollout_max_thinking_tokens is vLLM-only here. Adapters land on the language model only: the vision and audio towers share the projection names but wrap them in a `Gemma4ClippableLinear` PEFT cannot adapt, so those matches are excluded.
 # Serve with: 2 sglang-servers on GPUs 4-7, ports 30000/30001, --moe-runner-backend triton --tool-call-parser auto --reasoning-parser gemma4, SGLANG_CHAT_TEMPLATE=jinja-templates/gemma4/gemma4-reasoning-effort.jinja (the file chat_template: pins below)
 #   NCCL_CUMEM_ENABLE=1 in the server env, no SGLANG_ENABLE_R3 (routing replay is refused for Gemma 4).

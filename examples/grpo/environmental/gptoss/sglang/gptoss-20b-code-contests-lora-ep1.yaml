@@ -1,4 +1,4 @@
-# Environmental GRPO — gpt-oss-20b LoRA (r=64, all linears) on code_contests, SGLang backend, no EP, ZeRO-2, with R3 routing replay.
+# Environmental GRPO — gpt-oss-20b LoRA (r=64, all linears) on Codeforces, SGLang backend, no EP, ZeRO-2, with R3 routing replay.
 # Serve with: 2x TP=2 sglang-server on ports 30000/30001, --enable-return-routed-experts --moe-runner-backend triton
 #   --tool-call-parser auto --reasoning-parser gpt-oss --chat-template on the file below, NCCL_CUMEM_ENABLE=1 in the
 #   server env, --enable-torch-compile off (unsafe under R3).
@@ -6,7 +6,7 @@
 
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
-attn_implementation: flash_attention_4
+attn_implementation: flash_attention_4  # carries the live sinks; on Hopper, whose image has no FA4, pass --attn_implementation=eager
 reset_sinks: false
 # The engine must serve --chat-template on this same file (SGLANG_CHAT_TEMPLATE in the compose file):
 # the checkpoint's built-in template double-encodes tool-call arguments the harmony parser cannot read.

@@ -7,7 +7,7 @@
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
 # reset_sinks=false keeps pretrained sinks frozen to match vLLM; FA4 is the sink-carrying impl. See agent-docs/models/gpt-oss.md.
-attn_implementation: flash_attention_4
+attn_implementation: flash_attention_4  # carries the live sinks; on Hopper, whose image has no FA4, pass --attn_implementation=eager
 reset_sinks: false
 # Serve with --chat-template on this same file (VLLM_CHAT_TEMPLATE in the compose file): forced on the
 # trainer alone, the engine stays on the checkpoint's built-in and double-encodes tool-call arguments.
@@ -18,8 +18,8 @@ force_chat_template: true
 # --- Parallelism (4 train GPUs: EP=4 single dispatch group, DP=4) ---
 expert_parallel_size: 4            # ep_size == GPUs-in-the-job = one DeepEP group; EP ⊥ DP
 fsdp_reshard_after_forward: false  # ZeRO-2 for the non-expert base params; ZeRO-3 is rejected under EP
-ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only; elastic's 32-bit wire-index guard
-                                   # breaks at these tokens/rank
+ep_buffer_backend: legacy          # DeepEP V1 Buffer, intranode only: the long-context pick
+                                   # (agent-docs/infrastructure/deepep.md); these rows stay under the 32-bit wire index
 
 # --- LoRA (r=64, all linear layers: attention + MoE experts) ---
 use_peft: true

@@ -5,10 +5,12 @@ from __future__ import annotations
 
 import pytest
 import torch
+from transformers import Qwen3Config, ZayaConfig
 
 from halo.model_loading import dtype as dtype_mod
 from halo.model_loading import tokenizer_setup
 from halo.model_loading.dtype import DTYPE_BY_NAME
+from tests.common.tiny_models import word_level_tokenizer
 
 
 class _UnexpectedTokenizerError(RuntimeError):
@@ -57,6 +59,25 @@ def test_unexpected_tokenizer_error_propagates(monkeypatch):
 
     with pytest.raises(_UnexpectedTokenizerError):
         tokenizer_setup.load_processing_class("/model/with/broken/tokenizer")
+
+
+@pytest.mark.parametrize("config_cls", [Qwen3Config, ZayaConfig], ids=["qwen2-tokenizer", "gemma-tokenizer"])
+def test_a_directory_with_no_tokenizer_file_yields_none(tmp_path, caplog, config_cls):
+    """transformers builds the ``model_type``'s tokenizer class holding only its special tokens, which every tool would
+    then save as the checkpoint's tokenizer."""
+    config_cls().save_pretrained(tmp_path)
+
+    with caplog.at_level("WARNING"):
+        assert tokenizer_setup.load_processing_class(str(tmp_path)) is None
+    assert any("holds no tokenizer file" in rec.getMessage() for rec in caplog.records)
+
+
+def test_a_saved_tokenizer_of_only_special_tokens_is_kept(tmp_path):
+    """Negative control: it has files behind it, so it is the checkpoint's own."""
+    Qwen3Config().save_pretrained(tmp_path)
+    word_level_tokenizer().save_pretrained(tmp_path)
+
+    assert tokenizer_setup.load_processing_class(str(tmp_path)).eos_token == "<eos>"
 
 
 def test_tokenizer_fallback_still_returns_the_tokenizer(monkeypatch):

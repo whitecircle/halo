@@ -33,6 +33,8 @@ def filter_patterns_needing_multiple_tokens(
     patterns_to_add = []
     for pattern in patterns:
         tokens = tokenizer.encode(pattern, add_special_tokens=False)
+        if pattern and not tokens:
+            raise ValueError(f"The tokenizer encodes {pattern!r} to nothing, so it has no vocabulary to patch.")
         if len(tokens) > 1:
             patterns_to_add.append((pattern, len(tokens)))
     return patterns_to_add

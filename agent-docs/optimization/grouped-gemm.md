@@ -146,7 +146,7 @@ has its own kernel (`GluCombine.gptoss`, `halo/kernels/fused_glu.py`).
 # Multi-GPU FSDP, no EP distribution (--nproc_per_node=1 for a single GPU)
 torchrun --nproc_per_node=8 scripts/training/sft.py \
     examples/sft/qwen3_5/qwen3.5-35b-a3b-ultrachat-ep.yaml \
-    --expert_parallel_size=1 --use_grouped_gemm=true
+    --expert_parallel_size=1 --use_grouped_gemm=true --fp32_non_ep_params=false
 ```
 
 The EP layer keeps the packed-3D layout used at EP>1, so checkpoints stay shape-compatible across `ep_size`. Requires `torchrun`: an MoE with `use_grouped_gemm: true` under any `accelerate launch` is rejected at load (the EP layers need the mixin-managed FSDP2 path) — launch with torchrun or set `use_grouped_gemm: false`.

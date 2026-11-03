@@ -7,7 +7,7 @@
 # --- Model ---
 model_name_or_path: unsloth/gpt-oss-20b-BF16
 # reset_sinks=false keeps pretrained sinks frozen to match vLLM; FA4 is the sink-carrying impl. See agent-docs/models/gpt-oss.md.
-attn_implementation: flash_attention_4
+attn_implementation: flash_attention_4  # carries the live sinks; on Hopper, whose image has no FA4, pass --attn_implementation=eager
 reset_sinks: false
 # Serve with --chat-template on this same file (VLLM_CHAT_TEMPLATE in the compose file): forced on the
 # trainer alone, the engine stays on the checkpoint's built-in and double-encodes tool-call arguments.

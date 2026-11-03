@@ -119,7 +119,8 @@ vision placeholders expanded, `attention_mask`, `labels` (image tokens masked to
 Two combinations raise and point at the runtime VLM path: `--is_vlm` with `--tools_field` or
 `--interleaved_thinking` (the offline render would diverge from the runtime one), and a processor
 emitting a vision key outside this fixed schema on an image row (`mm_token_type_ids` and the like —
-the model needs it at forward).
+the model needs it at forward). The Qwen2.5-VL, Qwen3-VL, Qwen3.5 and Gemma 4 processors all emit it, so
+their image rows train through the runtime VLM path and `--is_vlm` bakes only their text rows.
 
 VLM sequences are never truncated, since cutting expanded placeholders while `pixel_values` keeps
 every patch desyncs text from vision. Over-length rows are dropped here instead — the runtime VLM
@@ -159,7 +160,7 @@ artifact would carry `is_vlm: true` over rows holding no pixels, which training 
 | `--assistant_message_template` | `None` | Template marking start of assistant response |
 | `--pack_sequences` | `False` | Pack multiple sequences (text SFT only; refused for a model with compressed-KV layers, such as DeepSeek-V4) |
 | `--packing_strategy` | `bfd` | TRL strategy: `bfd` (best-fit-decreasing, drops overflow), `bfd_split` (carries overflow into later examples) or `wrapped` (concatenate-and-chunk — emits no document boundaries, so a packed row attends across itself) |
-| `--is_vlm` | `False` | VLM mode (stores `pixel_values`, `image_grid_thw`) |
+| `--is_vlm` | `False` | VLM mode (stores `pixel_values`, `image_grid_thw`; refuses an image row whose processor emits another vision key) |
 | `--images_field` | `None` | (`--is_vlm`) column holding the row's image(s) for datasets that keep them outside the conversation; merged into the messages like the runtime path. An image column named by nothing is refused |
 | `--min_pixels` / `--max_pixels` | `None` | VLM image pixel bounds |
 | `--num_shards` | `1` | `1` writes an unsharded dataset that trains at any data-parallel size. Above `1` see [Sharded loading](#sharded-loading) |

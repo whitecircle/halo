@@ -392,6 +392,17 @@ def test_merge_ep_shards_refuses_a_sibling_adapter(tmp_path):
     assert not out.exists(), "a refused merge must not create its output directory"
 
 
+def test_merge_ep_shards_refuses_a_lone_adapter_config(tmp_path):
+    """The copy across would make ``from_pretrained`` read the merged base as an adapter."""
+    src = _write_ep_sharded_checkpoint(tmp_path / "ep")
+    with open(os.path.join(src, "adapter_config.json"), "w") as f:
+        json.dump({"peft_type": "LORA", "r": 8}, f)
+    out = tmp_path / "out"
+    with pytest.raises(ValueError, match="adapter_config.json"):
+        merge_ep_shards(str(src), str(out), verbose=False)
+    assert not out.exists(), "a refused merge must not create its output directory"
+
+
 def test_detect_model_type_reads_config_and_tolerates_absence(tmp_path):
     src = _write_gathered_checkpoint(tmp_path / "m", {"a": torch.zeros(2)}, model_type="glm4_moe_lite")
     assert detect_model_type(str(src)) == "glm4_moe_lite"
@@ -491,6 +502,41 @@ def test_patch_vocab_refuses_a_truncated_checkpoint(tmp_path, monkeypatch):
     with pytest.raises(RuntimeError, match="randomly initialized"):
         patch_vocab.main()
     assert not out.exists(), "a refused patch must not create its output directory"
+
+
+def test_patch_vocab_refuses_a_source_with_no_tokenizer_file(tmp_path, monkeypatch):
+    """transformers builds the family's tokenizer class with no vocabulary, so every pattern would read as already one
+    token and the run would exit 0 having added nothing."""
+    src, out = tmp_path / "src", tmp_path / "out"
+    Qwen3ForCausalLM(
+        Qwen3Config(
+            vocab_size=32,
+            hidden_size=16,
+            intermediate_size=32,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            num_key_value_heads=2,
+        )
+    ).save_pretrained(src)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["patch_vocab.py", "--model_id", str(src), "--output_dir", str(out), "--patterns", '["<tool_call>"]'],
+    )
+    with pytest.raises(ValueError, match="ships no tokenizer"):
+        patch_vocab.main()
+    assert not out.exists()
+
+
+def test_a_pattern_the_tokenizer_encodes_to_nothing_is_refused():
+    """Read as already one token, the pattern would be skipped and the run exit 0 having added nothing."""
+
+    class _EncodesNothing:
+        def encode(self, text, add_special_tokens=False):
+            return []
+
+    with pytest.raises(ValueError, match="encodes '<tool_call>' to nothing"):
+        vocab_patch.filter_patterns_needing_multiple_tokens(_EncodesNothing(), ["<tool_call>"])
 
 
 def test_patch_vocab_refuses_reset_sinks_on_a_family_that_has_none(tmp_path, monkeypatch):

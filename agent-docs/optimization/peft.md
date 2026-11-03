@@ -124,7 +124,7 @@ The effective-batch formula is unchanged by LoRA — see
 [SFT](../training-methods/sft.md#learning-rate-and-global-batch-size).
 
 Ready configs: `examples/sft/qwen3/qwen3-4b-ultrachat-lora.yaml` (and its `-qlora` counterpart, which adds
-`load_in_4bit: true`, `bnb_4bit_quant_type: nf4`, `use_bnb_nested_quant: true`).
+`load_in_4bit: true` and `use_bnb_nested_quant: true` over TRL's default `bnb_4bit_quant_type: nf4`).
 
 ## MoE models — expert targets and full-trained modules
 
@@ -214,7 +214,7 @@ lora_modules_to_save:           # full-trained (PEFT can't LoRA these)
 ```
 
 `examples/grpo/environmental/gptoss/vllm/gptoss-20b-code-contests-lora-ep4.yaml` is a full
-Environmental-GRPO version.
+Environmental-GRPO version, with the router left frozen.
 
 **Adapter dtype under FSDP:** `get_peft_model` upcasts adapters (and `modules_to_save` copies) to fp32, but
 FSDP2 requires a uniform dtype per shard group. `_cast_peft_params_to_compute_dtype` casts trainable fp32
@@ -384,8 +384,9 @@ the frozen base replicated per rank.
 
 Nothing wraps the model, so the FSDP2 sharding knobs cannot take effect: a non-default `use_hsdp`,
 `fsdp_reshard_after_forward`, `fsdp_reshard_after_backward` or `fsdp_defer_grad_sync` is rejected at trainer
-construction rather than silently ignored, naming the offending flags. QLoRA under CP takes the same gate. Under `accelerate launch`,
-the other supported QLoRA launcher, accelerate owns the wrap and those knobs only warn.
+construction rather than silently ignored, naming the offending flags. QLoRA under CP takes the same gate. Under `accelerate launch` with
+the DDP config (`multigpu_dp_config.yaml`), the other QLoRA launcher, accelerate owns the wrap and those knobs only warn; its FSDP2
+configs cannot flatten the 4-bit tensors.
 
 Pass a `BitsAndBytesConfig` through `load_distributed_model(..., quantization_config=bnb_config)`, or pass a
 pre-loaded quantized model plus `peft_config` to the trainer. For 8-bit optimizer states without a 4-bit

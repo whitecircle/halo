@@ -107,7 +107,8 @@ reasoning_price_cap: 0.28          # the most the price charges an episode: unde
 enable_prefetch: true       # one-step staleness corrected by the sampling-logprob IS ratio
 
 # --- Dataset ---
-# The held-out split ships in the pool — leave test_size unset.
+# The held-out split ships in the pool — leave test_size unset. Its build: --config_name in
+# agent-docs/training-methods/async-grpo/environments/tasks/code-contests/datasets.md.
 dataset:
 - your-org/code-contests-codeforces-verifiable-rl:r1500-2600
 
@@ -146,7 +147,7 @@ mask_truncated_completions: false  # `truncated` = the max_turns or output-budge
 per_device_train_batch_size: 1
 per_device_eval_batch_size: 1      # one eval trajectory per loss forward; eval_rollout_batch_size sizes the rollout round
 eval_rollout_batch_size: 36       # rows per rank per eval rollout round: 36 x 6 ranks = 216 requests in
-                                  # flight at once, so the 422-row split takes two rounds
+                                  # flight at once, so the band's test split takes one round
 gradient_accumulation_steps: 24 # dp 6 x 24 = 144 episodes/step (18 prompts x 8); the per-rank value must divide by num_generations
 num_train_epochs: 1
 learning_rate: 2.0e-07
@@ -164,7 +165,7 @@ output_dir: checkpoints/env-grpo-qwen3.6-35b-a3b-code-contests-full-ep1-stage1-c
 save_steps: 47
 save_total_limit: 5
 
-# --- Eval (the pool's held-out test split: 422 problems, pass@1) ---
+# --- Eval (the pool's held-out test split: 79 problems in this band, pass@1) ---
 eval_strategy: steps
 eval_steps: 47              # with every checkpoint: a peak between two coarse evals is a peak lost
 eval_on_start: true         # eval the starting checkpoint

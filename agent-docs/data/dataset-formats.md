@@ -143,7 +143,7 @@ For a JSON-string conversation column, the first-row fallback cannot see a mixed
 
 Every text renderer — SFT, preference prep (DPO/SMPO), Bradley-Terry reward prep, the GRPO generation-prompt renderer, generation eval, offline GRPO's templater and classification — refuses a conversation carrying an image part (`reject_image_content`) rather than expanding it into placeholder tokens with no pixels behind them, which would train vision placeholders as text in silence. The escape is an image column on the dataset, or offline `--is_vlm` preprocessing.
 
-Limitations: packing and padding-free training are **NOT supported** on the VLM path (images cannot be packed). Offline pre-processing uses `--is_vlm`, see [SFT pre-processing](dataset-preparation.md).
+Limitations: packing and padding-free training are **NOT supported** on the VLM path (images cannot be packed). Offline pre-processing uses `--is_vlm`, which the Qwen and Gemma 4 processors' image rows do not fit, so those train through this runtime path; see [SFT pre-processing](dataset-preparation.md).
 
 ## Preference (DPO/SMPO)
 

@@ -257,21 +257,43 @@ class _ExportTally:
     total_size: int = 0
 
 
+def _plan_selects(name: str, tensor: torch.Tensor, plan: _ExportPlan) -> bool:
+    return _should_quantize(
+        name,
+        tensor,
+        plan.include,
+        plan.exclude,
+        kept_blocks=plan.kept_blocks,
+        apply_dense_mlp=plan.apply_dense_mlp,
+        apply_moe_experts=plan.apply_moe_experts,
+    )
+
+
+def _reject_empty_export(plan: _ExportPlan) -> None:
+    """Refuse an export that block-scales nothing, whose config would still claim ``block_scaled``, which the engines
+    refuse. Headers only, ahead of the output directory."""
+    block = FORMAT_BLOCK_SIZE[plan.fmt]
+    for _shard, reader, name in iter_checkpoint_shard_entries(plan.input_dir):
+        header = torch.empty(reader.get_slice(name).get_shape(), device="meta")
+        if not _plan_selects(name, header, plan):
+            continue
+        axis = _contraction_axis(name, header, plan.fused_expert_axis, plan.contraction_axis, plan.input_dir)
+        if header.shape[axis] % block == 0:
+            return
+    raise ValueError(
+        f"No weight of {plan.input_dir} is block-scaled under this scope: --include {plan.include.pattern!r}, "
+        f"--exclude {plan.exclude.pattern!r}, dense MLP {plan.apply_dense_mlp}, MoE experts {plan.apply_moe_experts}, "
+        f"block size {block}. The output would be the input under a {plan.fmt} quantization_config. Widen the scope."
+    )
+
+
 def _export_shard(entries, plan: _ExportPlan, tally: _ExportTally, *, verify: bool) -> dict[str, torch.Tensor]:
     """One input shard's tensors as written: every weight the plan selects block-scaled, the rest unchanged."""
     block = FORMAT_BLOCK_SIZE[plan.fmt]
     out_tensors: dict[str, torch.Tensor] = {}
     for _shard, reader, name in entries:
         t = reader.get_tensor(name)
-        if not _should_quantize(
-            name,
-            t,
-            plan.include,
-            plan.exclude,
-            kept_blocks=plan.kept_blocks,
-            apply_dense_mlp=plan.apply_dense_mlp,
-            apply_moe_experts=plan.apply_moe_experts,
-        ):
+        if not _plan_selects(name, t, plan):
             out_tensors[name] = t
             tally.copied += 1
             continue
@@ -391,6 +413,7 @@ def quantize_checkpoint(
     plan = _ExportPlan(
         fmt, inc, exc, kept_blocks, apply_dense_mlp, apply_moe_experts, fused_expert_axis, contraction_axis, input_dir
     )
+    _reject_empty_export(plan)
     tally = _ExportTally()
     os.makedirs(output_dir, exist_ok=True)
     # Grouping the walk's entries by shard carries the input's shard layout into the output, one file per input file.

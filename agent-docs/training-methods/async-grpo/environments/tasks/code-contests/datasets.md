@@ -49,6 +49,7 @@ python scripts/environments/preparation/prepare_code_dataset.py \
 | `--drop_train_keys` | Removes listed ids from the train split after the hold-out is carved, so the test split stays the same: `scripts/environments/preparation/hardtests_train_exclusions.txt` lists the known defects of the HardTests extra-hard band |
 | `--holdout_per_band` | Carves a deterministic `test` split |
 | `--push_bands` | Publishes `full` plus one config per rating band (`medium` 1500-1999, `hard` 2000-2599, `extra-hard` 2600-3500) over a shared test split. A curriculum stage selects its pool this way (`your-org/code-contests-hardtests-rl:hard`) |
+| `--config_name` | Pushes one named config instead. Stage 1 of the curriculum builds `your-org/code-contests-codeforces-verifiable-rl:r1500-2600` from `--adapter codeforces --dataset open-r1/codeforces --config verifiable --min_rating 1500 --max_rating 2600`: 3,538 `train` and 79 `test` problems with no `--tests_table` |
 | `--verify_checkers` | On by default. Drops a problem whose checker rejects a test's own reference output, or accepts garbage. Needs a sandbox backend on the preparation host |
 | `--reject_constant_answers` | On by default. Drops a problem whose suite accepts one constant answer (`0`, `1`, `-1`, `YES`, `NO`, ...) on every test: a lax checker or a suite of identical answers pays its reward to a program that never reads the input |
 | `--tests_table` | Joins a compacted test corpus by problem id. A table may cover some splits only; one matching no row of any split exits before any split is filtered |

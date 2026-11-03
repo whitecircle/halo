@@ -154,7 +154,10 @@ class PreprocessingConfig:
     )
     is_vlm: bool = field(
         default=False,
-        metadata={"help": "Bake through the model's processor, storing pixel_values and image_grid_thw."},
+        metadata={
+            "help": "Bake through the model's processor, storing pixel_values and image_grid_thw. An image row whose "
+            "processor emits another vision key (mm_token_type_ids) is refused: train those through the runtime VLM path."
+        },
     )
     min_pixels: int | None = field(default=None, metadata={"help": "(is_vlm) Minimum pixels per image."})
     max_pixels: int | None = field(default=None, metadata={"help": "(is_vlm) Maximum pixels per image."})
