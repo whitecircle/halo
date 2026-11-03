@@ -9,9 +9,8 @@ from functools import partial
 import requests
 import torch
 
-from halo.weight_sync.chunking import describe_chunk, resolve_sync_device
+from halo.weight_sync.chunking import describe_chunk
 from halo.weight_sync.clients.base import (
-    CLEANUP_TIMEOUT_S,
     GROUP_FORMATION_TIMEOUT_S,
     HTTP_PROBE_TIMEOUT_S,
     RESCORE_TIMEOUT_S,
@@ -129,55 +128,43 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
         # Created once on the communicator's device; flushes are serialized.
         self._packed_streams: list[torch.cuda.Stream] | None = None
 
-    def _start_engine_update(self) -> None:
+    def _prepare_transport(self) -> None:
         self._require_communicator()
-        try:
-            self._quiesce()
-            self._open_update_session()
-        except Exception:
-            self._abandon_update_session()
-            self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
-            raise
 
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
         """``final`` is unused, as this engine closes with its own ``/finish_weight_update``."""
         names, dtype_names, shapes = describe_chunk(chunk)
 
-        server_call: AsyncCall | None = None
-        try:
-            # vLLM replies once it has received the chunk, so the RPC is bounded by the chunk's own deadline.
-            server_call = self._start_collective_rpc(
-                "/update_weights",
-                timeout=CHUNK_SYNC_TIMEOUT_S,
-                json={"update_info": {"names": names, "dtype_names": dtype_names, "shapes": shapes}},
+        # Everything that can refuse the chunk runs first, as the RPC holds the engine in its collective.
+        communicator = self._require_communicator()
+        device = communicator.device
+        if self._packed_streams is None and torch.device(device).type == "cuda":
+            with torch.cuda.device(device):
+                self._packed_streams = [torch.cuda.Stream() for _ in range(PACKED_NUM_BUFFERS)]
+        # A copy made on a pack stream would stay in that stream's pool, so the producer copies nothing.
+        misplaced = [name for name, param in chunk if param.device != device]
+        if misplaced:
+            raise RuntimeError(
+                f"Weight-sync snapshots {misplaced} are not on the sync device {device}: every snapshot is "
+                f"taken there once init_communicator ran."
             )
 
-            communicator = self._require_communicator()
-            device = communicator.device
-            if self._packed_streams is None and torch.device(device).type == "cuda":
-                with torch.cuda.device(device):
-                    self._packed_streams = [torch.cuda.Stream() for _ in range(PACKED_NUM_BUFFERS)]
-            # A copy made on a pack stream would stay in that stream's pool, so the producer copies nothing.
-            misplaced = [name for name, param in chunk if param.device != device]
-            if misplaced:
-                raise RuntimeError(
-                    f"Weight-sync snapshots {misplaced} are not on the sync device {device}: every snapshot is "
-                    f"taken there once init_communicator ran."
-                )
+        # vLLM replies once it has received the chunk, so the RPC is bounded by the chunk's own deadline.
+        server_call = self._start_collective_rpc(
+            "/update_weights",
+            timeout=CHUNK_SYNC_TIMEOUT_S,
+            json={"update_info": {"names": names, "dtype_names": dtype_names, "shapes": shapes}},
+        )
+        try:
             packed_broadcast_producer(iterator=iter(chunk), group=communicator, streams=self._packed_streams)
-
             server_call.wait(timeout=CHUNK_SYNC_TIMEOUT_S)
         except Exception as e:
             self._raise_if_server_failed(e, server_call)
             raise
         logger.debug(f"Streamed {len(chunk)} params to vLLM")
 
-    def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        try:
-            self._transmit_chunk(tail, final=True)
-            self._end_update_session()
-        finally:
-            self._abandon_update_session()
+    def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
+        self._transmit_chunk(tail, final=True)
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S
@@ -203,11 +190,6 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
             float(entry[str(tok)]["logprob"])
             for tok, entry in zip(completion_ids, entries[len(prompt_ids) :], strict=True)
         ]
-
-    def init_communicator(self, device: torch.device | str | int = 0) -> None:
-        # Recorded before the liveness probe that opens the engine's world-size read.
-        self._sync_device = resolve_sync_device(device)
-        super().init_communicator(device)
 
     def _check_server_version(self) -> None:
         body = self.request("GET", "/version", retry=False, timeout=HTTP_PROBE_TIMEOUT_S).json()
@@ -239,7 +221,7 @@ class VLLMWeightSyncClient(WeightSyncClientBase):
                 f"written model and has to be RESTARTED instead (its log names the last update)."
             )
         try:
-            model_id = self._served_model_cards()[0]["id"]
+            model_id = self.served_model_id()
         except Exception as e:
             logger.warning(f"Generation probe: could not resolve served model ({e}); skipping probe")
             return

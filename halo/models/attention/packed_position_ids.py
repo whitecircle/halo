@@ -5,14 +5,7 @@ from __future__ import annotations
 
 import functools
 import inspect
-import logging
 from abc import ABC, abstractmethod
-
-from transformers.models.mistral4 import modeling_mistral4 as m4
-
-from halo.runtime.ranks import is_global_main_process
-
-logger = logging.getLogger(__name__)
 
 _STASH_ATTR = "_halo_packed_position_ids"
 
@@ -105,10 +98,3 @@ def install_packed_position_ids_injection(modeling_module, owner_cls, stash_targ
     if not isinstance(registry, PositionIdsInjectingRegistry):
         modeling_module.ALL_ATTENTION_FUNCTIONS = PositionIdsInjectingRegistry(registry)
     return True
-
-
-def patch_mistral4_flash_packed_position_ids() -> None:
-    """Mistral4's attention forward takes ``position_ids`` for the attention scale and passes only ``**kwargs`` on."""
-    installed = install_packed_position_ids_injection(m4, m4.Mistral4Attention, lambda attention: (attention,))
-    if installed and is_global_main_process():
-        logger.info("Patched Mistral4 flash attention to receive position_ids (packed-document isolation)")

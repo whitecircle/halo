@@ -160,7 +160,7 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # On the caller's stream a synchronous broadcast would order the next copies and the trainer's work behind it.
         self._send_stream: torch.cuda.Stream | None = None
 
-    def _start_engine_update(self) -> None:
+    def _prepare_transport(self) -> None:
         if self._transport is None:
             raise RuntimeError("Call init_communicator() first")
         if self._aborted:
@@ -171,13 +171,6 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
         # A collective issued with another device current fails with a bare "invalid argument" mid-update.
         if self.sync_device is not None and self.sync_device.type == "cuda":
             torch.cuda.set_device(self.sync_device)
-        try:
-            self._quiesce()
-            self._open_update_session()
-        except Exception:
-            self._abandon_update_session()
-            self._lift_pause(CLEANUP_TIMEOUT_S, context="after a failed pause")
-            raise
 
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
         """The engine allocates every declared tensor before receiving any, so the chunk budget bounds it."""
@@ -242,17 +235,13 @@ class SGLangWeightSyncClient(WeightSyncClientBase):
                 raise drain_error from e
             raise
 
-    def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        try:
-            if tail:
-                self._transmit_chunk(tail, final=True)
-            else:
-                # With no chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
-                self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
-            self._release_arena()
-            self._end_update_session()
-        finally:
-            self._abandon_update_session()
+    def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
+        if tail:
+            self._transmit_chunk(tail, final=True)
+        else:
+            # With no chunk to ride on, the flush is requested directly, or the new weights serve a stale cache.
+            self.request("POST", "/flush_cache", retry=True, timeout=POST_TIMEOUT_S)
+        self._release_arena()
 
     def score_completion_logprobs(
         self, prompt_ids: list[int], completion_ids: list[int], timeout: float = RESCORE_TIMEOUT_S

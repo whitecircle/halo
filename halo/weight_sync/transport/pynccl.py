@@ -64,29 +64,28 @@ class UniqueIdStore:
 class PyNcclCommunicator:
     def __init__(self, store: UniqueIdStore, device: torch.device):
         world_size = store.world_size
-        # Before the disabled short-circuit, as callers read ``.device`` with the server paused.
         self.device = device
         # Set by abort(), so a null-handle communicator fails by name rather than "invalid argument".
         self.aborted = False
 
-        if vllm_pynccl_disabled() and world_size > 1:
+        if world_size < 2:
+            raise RuntimeError(
+                f"The vLLM engine reported no workers (group world size {world_size}), so a weight sync would reach "
+                f"nothing and the engine would keep serving the initial policy for the whole run."
+            )
+        if vllm_pynccl_disabled():
             raise RuntimeError(
                 "VLLM_DISABLE_PYNCCL is set in the trainer process, which would silently disable the "
                 "NCCL weight-sync broadcast — the vLLM generator would keep serving the initial policy "
                 "for the whole run. It belongs to the vLLM server only; do not pass the server's "
                 "--env-file to the trainer."
             )
-        if world_size == 1:
-            self.disabled = True
-            return
-
         try:
             self.nccl = NCCLLibrary()
         except Exception as e:
             # Disabling instead would block the server for the full timeout on a broadcast that never comes.
             raise ImportError(f"libnccl.so.2 unavailable — NCCL weight sync cannot run: {e}") from e
 
-        self.disabled = False
         unique_id = self.nccl.ncclGetUniqueId()
         logger.info("NCCL version: %s", self.nccl.ncclGetVersion())
         store.publish(unique_id)
@@ -111,7 +110,7 @@ class PyNcclCommunicator:
     def abort(self) -> None:
         """Kill in-flight NCCL kernels; unusable afterwards."""
         self.aborted = True
-        if self.disabled or not self.comm:
+        if not self.comm:
             return
         try:
             self.nccl.ncclCommAbort(self.comm)
@@ -120,8 +119,6 @@ class PyNcclCommunicator:
         self.comm = ncclComm_t()
 
     def broadcast(self, tensor: torch.Tensor) -> None:
-        if self.disabled:
-            return
         if self.aborted:
             raise RuntimeError(
                 "NCCL weight-sync communicator was aborted after a failed collective and cannot be "

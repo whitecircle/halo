@@ -110,7 +110,7 @@ def _master_address(
 ) -> str:
     """The address the engine's workers dial back to: ``advertised_host``, else ``host_env``, else loopback for a
     server on this machine, else this host's address on the route to the server."""
-    master_address = advertised_host or (env_str(host_env) if host_env else None)
+    master_address = advertised_host or env_str(host_env)
     if not master_address:
         # Same-host groups stay on loopback, as firewalls drop hairpin traffic on the external NIC.
         master_address = "127.0.0.1" if _is_local_address(server_host) else _route_source_ip(server_host)
@@ -121,7 +121,7 @@ def _master_address(
             f"NCCL weight-sync group address resolved to loopback ({master_address}): the address set is "
             f"loopback, or no route from this host reaches the server. The server's workers would dial "
             f"back to themselves and the group would never form. Set "
-            f"{host_env or 'the group host'} (or the per-server group_host) to the "
+            f"{host_env} (or the per-server group_host) to the "
             f"trainer's routable IP on the subnet the server can reach."
         )
     return master_address
@@ -130,7 +130,7 @@ def _master_address(
 def _bind_address(master_address: str, *, engine: str, server_host: str, host_env: str) -> str:
     """``master_address`` resolved once, since the unauthenticated store listens only where the engine dials.
     ``HALO_WEIGHT_SYNC_BIND_ALL`` widens it to every interface for a trainer behind NAT."""
-    host_knob = f"{host_env or 'the group host'} (or the per-server group_host)"
+    host_knob = f"{host_env} (or the per-server group_host)"
     try:
         bind_address = socket.gethostbyname(master_address)
     except OSError:

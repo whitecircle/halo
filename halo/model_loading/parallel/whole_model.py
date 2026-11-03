@@ -167,12 +167,14 @@ def _warm_then_join(*warmups: Callable[[], None]) -> None:
 
 
 def warm_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype) -> None:
-    """COLLECTIVE: pre-compile FA4 or FlexAttention kernels, joined so one rank's failed compile raises everywhere."""
+    """COLLECTIVE: pre-compile FA4 or FlexAttention kernels, joined. A failed FA4 warm-up only warns, and that rank
+    compiles at first use; a FlexAttention failure reaches the join and raises on every rank."""
     _warm_then_join(
         partial(warm_fa4_kernels, model, dtype=dtype), partial(warm_flex_sliding_kernels, model, dtype=dtype)
     )
 
 
 def warm_tree_attention_kernels(model: PreTrainedModel, *, dtype: torch.dtype, full_form: FullAttentionForm) -> None:
-    """COLLECTIVE: pre-compile the kernels tree attention adds, joined so a failed compile raises everywhere."""
+    """COLLECTIVE: pre-compile the kernels tree attention adds, joined. A failed warm-up only warns, and that rank
+    compiles at first use."""
     _warm_then_join(partial(warm_tree_kernels, model, dtype=dtype, full_form=full_form))

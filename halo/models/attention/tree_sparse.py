@@ -121,6 +121,14 @@ def _query_chunks(keys: torch.Tensor):
         yield slice(start, min(start + step, keys.shape[0]))
 
 
+def _chunk_scores(query, latent, rows, scale) -> tuple[torch.Tensor, torch.Tensor]:
+    """The chunk's selected latent rows and their masked fp32 scores, one setup for both directions, whose mismatch
+    would give wrong gradients."""
+    gathered = latent[rows.clamp_min(0)]
+    scores = (bmm_fp32(query, gathered.transpose(1, 2)) * scale).masked_fill((rows < 0)[:, None], float("-inf"))
+    return gathered, scores
+
+
 class _SparseLatentAttention(torch.autograd.Function):
     """Every query's softmax over its own selected latent rows. Scores and the softmax are fp32 and the two products
     run at the inputs' precision with fp32 results, so it is applied outside autocast. A query with no key gets a zero
@@ -131,10 +139,7 @@ class _SparseLatentAttention(torch.autograd.Function):
         out = torch.empty_like(query)
         lse = torch.empty(query.shape[:2], dtype=_wide(query.dtype), device=query.device)
         for chunk in _query_chunks(keys):
-            gathered = latent[keys[chunk].clamp_min(0)]
-            scores = (bmm_fp32(query[chunk], gathered.transpose(1, 2)) * scale).masked_fill(
-                (keys[chunk] < 0)[:, None], float("-inf")
-            )
+            gathered, scores = _chunk_scores(query[chunk], latent, keys[chunk], scale)
             lse[chunk] = torch.logsumexp(scores, dim=-1).nan_to_num(neginf=0.0)
             probs = torch.exp(scores - lse[chunk][..., None])
             out[chunk] = bmm_fp32(probs.to(latent.dtype), gathered).to(out.dtype)
@@ -149,10 +154,7 @@ class _SparseLatentAttention(torch.autograd.Function):
         d_latent = torch.zeros(latent.shape, dtype=_wide(latent.dtype), device=latent.device)
         for chunk in _query_chunks(keys):
             rows = keys[chunk]
-            gathered = latent[rows.clamp_min(0)]
-            scores = (bmm_fp32(query[chunk], gathered.transpose(1, 2)) * ctx.scale).masked_fill(
-                (rows < 0)[:, None], float("-inf")
-            )
+            gathered, scores = _chunk_scores(query[chunk], latent, rows, ctx.scale)
             probs = torch.exp(scores - lse[chunk][..., None])
             upstream = grad[chunk]
             delta = (upstream.to(lse.dtype) * out[chunk].to(lse.dtype)).sum(-1, keepdim=True)

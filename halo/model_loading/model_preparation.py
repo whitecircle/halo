@@ -27,7 +27,6 @@ from halo.models.attention.backend_setup import (
     patch_transformers_packed_sequence_probe,
 )
 from halo.models.attention.gpt_oss_sinks import SinksPolicy, apply_sinks_policy
-from halo.models.attention.packed_position_ids import patch_mistral4_flash_packed_position_ids
 from halo.models.attention.prefix_lm import apply_prefix_lm_causal_decoder
 from halo.models.attention.sdpa_flex_sliding import resolve_flex_sliding_attn_implementation
 from halo.models.attention.selection import (
@@ -37,6 +36,7 @@ from halo.models.attention.selection import (
     verify_live_sinks_carried,
 )
 from halo.models.config_access import drop_toolkit_stamps, model_type_matches
+from halo.models.mistral4 import patch_mistral4_flash_packed_position_ids
 from halo.models.qwen4_exp.forwards import apply_qwen4_exp_patches
 from halo.models.zaya import apply_zaya_patches
 from halo.runtime.ranks import is_global_main_process

@@ -205,13 +205,6 @@ def load_checkpoint_tensor(
         return name, fh.get_tensor(name)
 
 
-def _served_model_id(client: WeightSyncClientBase) -> str:
-    cards = client.request("GET", "/v1/models", retry=True, timeout=POST_TIMEOUT_S).json().get("data", [])
-    if not cards:
-        raise RuntimeError(f"{client.base_url}/v1/models lists no model")
-    return cards[0]["id"]
-
-
 def greedy_completion(client: WeightSyncClientBase, model_id: str) -> str:
     """Compared before and after the push: coarse enough for numeric jitter, fine enough to catch a wrong tensor."""
     resp = client.request(
@@ -252,7 +245,7 @@ def run_transport_check(
         group_host=group_host,
     )
     # The completion goes under the served name (vLLM rejects any other); --model_id names the checkpoint.
-    served = _served_model_id(client)
+    served = client.served_model_id()
     checkpoint = model_id or served
     param, tensor = load_checkpoint_tensor(checkpoint, param, revision=revision, device=str(torch_device))
     nbytes = tensor.nbytes

@@ -164,16 +164,16 @@ class WeightSyncClientBase(ABC):
         """Set the engine transport's fields to those of a client that formed nothing."""
 
     @abstractmethod
-    def _start_engine_update(self) -> None:
-        """Quiesce the engine and open its update, unwinding both if either fails: nothing is sent yet."""
+    def _prepare_transport(self) -> None:
+        """Raise on a transport no update can go over, before the engine is touched."""
 
     @abstractmethod
     def _broadcast_chunk(self, chunk: list[tuple[str, torch.Tensor]], final: bool) -> None:
         """Declare and broadcast one chunk, returning once the engine has it; ``final`` marks the last."""
 
     @abstractmethod
-    def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
-        """Send ``tail`` (possibly empty) as the final chunk and close the update; the resume follows."""
+    def _send_tail(self, tail: list[tuple[str, torch.Tensor]]) -> None:
+        """Send ``tail`` (possibly empty) as the final chunk; the session close follows."""
 
     @property
     def sync_device(self) -> torch.device | None:
@@ -231,7 +231,10 @@ class WeightSyncClientBase(ABC):
 
     def served_model_id(self) -> str:
         if self._served_model_id is None:
-            self._served_model_id = str(self._served_model_cards()[0]["id"])
+            cards = self._served_model_cards()
+            if not cards:
+                raise RuntimeError(f"{self.base_url}/v1/models lists no model")
+            self._served_model_id = str(cards[0]["id"])
         return self._served_model_id
 
     @abstractmethod
@@ -347,6 +350,8 @@ class WeightSyncClientBase(ABC):
         self._open_update()
         self._close_update(self._param_buffer)
         self.drain_param_buffer()  # only once the tail landed
+        # A later failure before the next open concerns an engine this sync finished with.
+        self._chunks_sent = 0
 
     def abort_weight_update(self):
         """Close an update the sync opened but cannot finish and drop the buffer; never raises. Once a chunk went
@@ -417,6 +422,17 @@ class WeightSyncClientBase(ABC):
         self._start_engine_update()
         self._update_open = True
 
+    def _start_engine_update(self) -> None:
+        """Quiesce the engine and open its update, unwinding both if either fails: nothing is sent yet."""
+        self._prepare_transport()
+        try:
+            self._quiesce()
+            self._open_update_session()
+        except Exception:
+            self._abandon_update_session()
+            self._lift_pause(CLEANUP_TIMEOUT_S, context="after a failed pause")
+            raise
+
     def _quiesce(self) -> None:
         """Pause the engine for an update; flagged first, since an engine pauses before its reply can be lost."""
         self._paused = True
@@ -474,9 +490,9 @@ class WeightSyncClientBase(ABC):
             raise
         self._chunks_sent += 1
 
-    def _raise_if_server_failed(self, error: Exception, server_call: AsyncCall | None, hint: str = "") -> None:
+    def _raise_if_server_failed(self, error: Exception, server_call: AsyncCall, hint: str = "") -> None:
         """Raise ``error`` naming the server's own failure, which sits on an unjoined thread, when it recorded one."""
-        server_error = server_call.join(_SERVER_ERROR_GRACE_S).error if server_call is not None else None
+        server_error = server_call.join(_SERVER_ERROR_GRACE_S).error
         if server_error is not None and server_error is not error:
             raise RuntimeError(
                 f"{self.BACKEND_NAME} weight sync to {self.base_url} failed "
@@ -518,3 +534,11 @@ class WeightSyncClientBase(ABC):
             self._lift_pause(CLEANUP_TIMEOUT_S, context="after sync")
         if snapshot_error is not None:
             raise snapshot_error
+
+    def _finish_engine_update(self, tail: list[tuple[str, torch.Tensor]]) -> None:
+        """Send ``tail`` and close the update; the resume follows."""
+        try:
+            self._send_tail(tail)
+            self._end_update_session()
+        finally:
+            self._abandon_update_session()

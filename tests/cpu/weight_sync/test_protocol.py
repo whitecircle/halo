@@ -87,7 +87,7 @@ def server():
 
 @pytest.fixture
 def client(server, monkeypatch):
-    monkeypatch.setattr(wsc, "CLEANUP_TIMEOUT_S", 5)
+    monkeypatch.setattr(client_base, "CLEANUP_TIMEOUT_S", 5)
     monkeypatch.setattr(wsc, "HTTP_PROBE_TIMEOUT_S", 5)
     monkeypatch.setattr(wsc, "CHUNK_SYNC_TIMEOUT_S", 10)
     handle = VLLMWeightSyncClient(base_url=server.url, connection_timeout=5.0)
@@ -748,9 +748,33 @@ def test_aborted_communicator_is_refused_by_name(server, client):
     assert server.count("POST /pause") == 0, "the server was paused for a sync that cannot broadcast"
 
 
+def test_a_communicator_aborted_mid_update_keeps_the_engine_out_of_the_next_broadcast(server, client, monkeypatch):
+    """The RPC enters the engine's collective, where it would wait on a broadcast that never comes."""
+    monkeypatch.setattr(wsc, "packed_broadcast_producer", _no_op_producer)
+    client.update_named_param("a", torch.zeros(4, dtype=torch.bfloat16))
+    client.flush_chunk()
+    assert server.count("POST /update_weights") == 1
+    client._transport.aborted = True
+    client.update_named_param("b", torch.zeros(4, dtype=torch.bfloat16))
+
+    with pytest.raises(RuntimeError, match="aborted"):
+        client.flush_chunk()
+
+    assert server.count("POST /update_weights") == 1
+
+
+def test_a_misplaced_snapshot_keeps_the_engine_out_of_the_broadcast(server, client):
+    client._transport.device = torch.device("meta")
+    client.update_named_param("w", torch.zeros(4, dtype=torch.bfloat16))
+
+    with pytest.raises(RuntimeError, match="not on the sync device"):
+        client.flush_chunk()
+
+    assert server.count("POST /update_weights") == 0
+
+
 def test_aborted_communicator_refuses_to_broadcast():
     comm = PyNcclCommunicator.__new__(PyNcclCommunicator)
-    comm.disabled = False
     comm.aborted = True
     comm.device = torch.device("cpu")
 
@@ -761,7 +785,6 @@ def test_aborted_communicator_refuses_to_broadcast():
 def test_a_tensor_off_the_communicators_device_is_refused():
     """NCCL reads the raw pointer on the communicator's device; a tensor elsewhere must fail by name."""
     comm = PyNcclCommunicator.__new__(PyNcclCommunicator)
-    comm.disabled = False
     comm.aborted = False
     comm.device = torch.device("cuda", 0)
 
@@ -769,17 +792,15 @@ def test_a_tensor_off_the_communicators_device_is_refused():
         comm.broadcast(torch.zeros(1))
 
 
-def test_disabled_communicator_still_exposes_its_device():
-    """The vLLM client reads ``.device`` to land each chunk, after the server is already paused."""
+def test_an_engine_with_no_workers_is_refused():
+    """The trainer alone in the group broadcasts to nobody, and the engine keeps serving the initial policy."""
     listener = RendezvousListener("127.0.0.1", 0)
     store = UniqueIdStore.create(host="127.0.0.1", listener=listener, world_size=1)
     try:
-        comm = PyNcclCommunicator(store, device=torch.device("cpu"))  # world_size 1 takes the disabled path
+        with pytest.raises(RuntimeError, match="reported no workers"):
+            PyNcclCommunicator(store, device=torch.device("cpu"))
     finally:
         store.close()
-
-    assert comm.disabled is True
-    assert comm.device == torch.device("cpu"), "a disabled communicator must still carry its device"
 
 
 def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
@@ -794,6 +815,12 @@ def test_score_completion_logprobs_returns_the_completion_slice_by_token_id():
         assert client.served_model_id() == "fake-model"
     finally:
         server.close()
+
+
+def test_a_server_listing_no_model_fails_by_name(client, monkeypatch):
+    monkeypatch.setattr(client, "_served_model_cards", list)
+    with pytest.raises(RuntimeError, match="lists no model"):
+        client.served_model_id()
 
 
 def test_sglang_score_completion_logprobs_reads_the_generate_prefill_slice():

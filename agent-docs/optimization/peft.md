@@ -360,8 +360,8 @@ The embedding trainer injects LoRA into its backbone in place, on data paralleli
 
 ## Quantized training (QLoRA)
 
-QLoRA combines LoRA with 4-bit/8-bit base quantization under DDP/FSDP (a MoE base also needs
-`use_grouped_gemm: false`), and under CP on a dense model. CP keeps the standard `from_pretrained` loader,
+QLoRA combines LoRA with 4-bit/8-bit base quantization under DDP/FSDP (a MoE base whose family has an EP layer
+class also needs `use_grouped_gemm: false`), and under CP on a dense model. CP keeps the standard `from_pretrained` loader,
 which preserves `Params4bit`. GPU rows train dense Qwen3-0.6B, and gpt-oss-20b with stock experts through a save and
 reload. AdamWBF16 optimizes only the bf16 adapter params; the frozen quantized base is skipped.
 

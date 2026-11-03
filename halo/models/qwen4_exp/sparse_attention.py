@@ -208,13 +208,16 @@ def _attend_tile(
     return output.reshape(heads, tile, dim)
 
 
-def _tiles(selection: QSASelection, device: torch.device):
+def _tiles(selection: QSASelection, blocks: torch.Tensor, device: torch.device):
+    """Each query tile's row, query span, K/V slice and mask, one setup for both directions."""
     for doc in selection.documents:
         for lo in range(doc.start, doc.stop, QUERY_TILE):
             hi = min(lo + QUERY_TILE, doc.stop)
             keys = doc.tile_keys(hi)
             if keys:
-                yield doc.row, lo, hi, doc.key_start, keys, doc.visible_keys(lo, hi, device)
+                visible = doc.visible_keys(lo, hi, device)
+                mask = _tile_mask(blocks[doc.row, lo:hi], visible, keys, selection.compress_ratio)
+                yield doc.row, lo, hi, slice(doc.key_start, doc.key_start + keys), mask
 
 
 class _TiledQSAttention(torch.autograd.Function):
@@ -226,9 +229,7 @@ class _TiledQSAttention(torch.autograd.Function):
         ctx.selection, ctx.scale = selection, scale
         output = torch.zeros_like(query)
         with torch.autocast(query.device.type, enabled=False):
-            for row, lo, hi, key_start, keys, visible in _tiles(selection, query.device):
-                mask = _tile_mask(blocks[row, lo:hi], visible, keys, selection.compress_ratio)
-                kv = slice(key_start, key_start + keys)
+            for row, lo, hi, kv, mask in _tiles(selection, blocks, query.device):
                 output[row, :, lo:hi] = _attend_tile(
                     query[row, :, lo:hi], key[row, :, kv], value[row, :, kv], mask, scale
                 )
@@ -244,9 +245,7 @@ class _TiledQSAttention(torch.autograd.Function):
         grad_query = torch.zeros_like(query) if needs[0] else None
         grad_key = torch.zeros_like(key, dtype=accumulate) if needs[1] else None
         grad_value = torch.zeros_like(value, dtype=accumulate) if needs[2] else None
-        for row, lo, hi, key_start, keys, visible in _tiles(selection, query.device):
-            mask = _tile_mask(blocks[row, lo:hi], visible, keys, selection.compress_ratio)
-            kv = slice(key_start, key_start + keys)
+        for row, lo, hi, kv, mask in _tiles(selection, blocks, query.device):
             inputs = [
                 tensor.detach().requires_grad_(need)
                 for tensor, need in zip((query[row, :, lo:hi], key[row, :, kv], value[row, :, kv]), needs, strict=True)

@@ -263,6 +263,33 @@ def test_a_server_that_failed_before_streaming_is_still_retried(monkeypatch):
     assert [name for name, _ in wire.sent] == ["w"], "the recovered flush did not deliver the params"
 
 
+def test_a_later_sync_that_fails_before_opening_is_still_retried(monkeypatch):
+    """A finished sync's chunks say nothing about the next one, which has not touched the engine."""
+    monkeypatch.setattr("halo.weight_sync.pool.WEIGHT_SYNC_CHUNK_BYTES", 4096)
+    wire = Wire()
+    pool, clients = _bare_pool(1, wires=[wire])
+    reconnects = []
+    monkeypatch.setattr(WeightSyncPool, "_reconnect", lambda self, index: reconnects.append(index))
+
+    def push_past_the_budget():
+        for index in range(10):
+            pool.update_named_param(f"w{index}", torch.zeros(128, dtype=torch.float32))
+
+    push_past_the_budget()
+    assert clients[0]._chunks_sent > 0, "the first sync never streamed a chunk — the test would be vacuous"
+    pool.finish_weight_update()
+
+    def sticky_cuda_error():
+        raise RuntimeError("CUDA error: an illegal memory access was encountered")
+
+    clients[0]._complete_snapshots = sticky_cuda_error
+    with pytest.raises(RuntimeError, match="reconnect retry failed"):
+        push_past_the_budget()
+
+    assert reconnects == [0], "an engine this sync never touched was reported as holding part of its weights"
+    assert wire.opened == 1, "the failure comes before the second sync opens the engine"
+
+
 def test_reconnect_retires_the_old_client_before_probing_the_replacement():
     """The old client owns the ``/resume`` for the pause its failed sync left; a replacement probed first times out."""
     order: list[str] = []

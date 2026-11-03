@@ -473,6 +473,7 @@ def test_qlora_passes_plain_data_parallelism_and_is_refused_under_the_expert_wra
 
 def _resolve_run_flag(config, pc, *, quantization_config=None) -> bool:
     """``wraps_experts`` as the run config resolves it, every refusal off ``config.json`` raised on the way."""
+    assert pc.needs_ep_layers, "premise: the run asks for EP layers"
     with (
         patch.object(
             model_loading, "resolve_model_source", lambda path, revision, **kwargs: ModelSource(path, revision, path)
@@ -495,24 +496,36 @@ def _resolve_run_flag(config, pc, *, quantization_config=None) -> bool:
     return wraps_experts
 
 
+@pytest.mark.parametrize("quantization_config", [None, _QUANTIZED], ids=["full", "qlora"])
 @pytest.mark.parametrize(
     "launch_env", [{}, _MULTI_GPU_ENV, _FSDP_ENV], ids=["torchrun", "accelerate", "accelerate-fsdp"]
 )
-def test_a_moe_with_no_ep_layer_takes_qlora_under_any_launcher(launch_env):
+def test_a_moe_with_no_ep_layer_takes_either_launcher_and_qlora(launch_env, quantization_config):
     """Its family has no EP layer to swap in, so the refusals of the expert wrappers do not apply to it."""
     with patch.dict(os.environ, _env(launch_env), clear=True):
-        assert not _resolve_run_flag(MixtralConfig(**TINY_MIXTRAL_CONFIG), _pc(), quantization_config=_QUANTIZED)
+        assert not _resolve_run_flag(
+            MixtralConfig(**TINY_MIXTRAL_CONFIG), _pc(use_grouped_gemm=True), quantization_config=quantization_config
+        )
 
 
-def test_a_moe_with_an_ep_layer_is_refused_qlora_and_accelerate_through_the_same_path():
+@pytest.mark.parametrize(
+    ("launch_env", "quantization_config", "refusal"),
+    [
+        (_MULTI_GPU_ENV, None, r"Grouped GEMM for MoE experts .* require 'torchrun'"),
+        (_FSDP_ENV, None, r"Grouped GEMM for MoE experts .* require 'torchrun'"),
+        ({}, _QUANTIZED, "grouped-GEMM MoE loaders"),
+    ],
+    ids=["accelerate", "accelerate-fsdp", "qlora"],
+)
+def test_a_moe_with_an_ep_layer_is_refused_qlora_and_accelerate_through_the_same_path(
+    launch_env, quantization_config, refusal
+):
     config = Qwen3MoeConfig(**TINY_QWEN3_MOE_CONFIG)
     with patch.dict(os.environ, _env({}), clear=True):
-        assert _resolve_run_flag(config, _pc())
-        with pytest.raises(ValueError, match="grouped-GEMM MoE loaders"):
-            _resolve_run_flag(config, _pc(), quantization_config=_QUANTIZED)
-    with patch.dict(os.environ, _env(_MULTI_GPU_ENV), clear=True):
-        with pytest.raises(ValueError, match=r"Grouped GEMM for MoE experts .* require 'torchrun'"):
-            _resolve_run_flag(config, _pc())
+        assert _resolve_run_flag(config, _pc(use_grouped_gemm=True))
+    with patch.dict(os.environ, _env(launch_env), clear=True):
+        with pytest.raises(ValueError, match=refusal):
+            _resolve_run_flag(config, _pc(use_grouped_gemm=True), quantization_config=quantization_config)
 
 
 @pytest.mark.parametrize(

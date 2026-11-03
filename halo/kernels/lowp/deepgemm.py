@@ -155,6 +155,8 @@ def _deepgemm_forward(x, w, offs, fmt, weight_cacheable):
             )
         else:
             deep_gemm.m_grouped_fp8_gemm_nt_contiguous(a_op, b_op, d, m_idx, recipe=None, recipe_a=None, recipe_b=None)
+    except torch.cuda.OutOfMemoryError:
+        raise
     except RuntimeError as exc:  # shape the kernel can't handle (e.g. narrow N) -> bf16 fallback
         _warn_fallback_once((fmt, N, K, E), f"m_grouped {fmt} GEMM on M={M} N={N} K={K} E={E}", exc)
         return None
